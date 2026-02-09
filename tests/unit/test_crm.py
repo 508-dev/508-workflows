@@ -154,7 +154,7 @@ class TestCRMCog:
         crm_cog.espo_api.request.return_value = contacts_response
 
         # Call the callback function to bypass app_commands decorator
-        await crm_cog.search_contacts.callback(crm_cog, mock_interaction, "john")
+        await crm_cog.search_members.callback(crm_cog, mock_interaction, "john")
 
         # Verify API calls - only one call needed now
         crm_cog.espo_api.request.assert_called_once()
@@ -166,6 +166,64 @@ class TestCRMCog:
         mock_interaction.followup.send.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_search_contacts_requires_query_or_skills(
+        self, crm_cog, mock_interaction, mock_member_role
+    ):
+        """Test contact search requires a query or skills."""
+        mock_interaction.user.roles = [mock_member_role]
+
+        await crm_cog.search_members.callback(crm_cog, mock_interaction, None, None)
+
+        mock_interaction.followup.send.assert_called_once_with(
+            "❌ Please provide a search term or skills to search by."
+        )
+        crm_cog.espo_api.request.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_search_contacts_skills_only(
+        self, crm_cog, mock_interaction, mock_member_role
+    ):
+        """Test contact search by skills only."""
+        mock_interaction.user.roles = [mock_member_role]
+        crm_cog.espo_api.request.return_value = {"list": []}
+
+        await crm_cog.search_members.callback(
+            crm_cog, mock_interaction, None, "python,  sql "
+        )
+
+        crm_cog.espo_api.request.assert_called_once()
+        call_args = crm_cog.espo_api.request.call_args
+        search_params = call_args[0][2]
+        where_filters = search_params["where"]
+
+        assert len(where_filters) == 1
+        assert where_filters[0]["type"] == "arrayAllOf"
+        assert where_filters[0]["attribute"] == "skills"
+        assert where_filters[0]["value"] == ["python", "sql"]
+
+    @pytest.mark.asyncio
+    async def test_search_contacts_query_and_skills(
+        self, crm_cog, mock_interaction, mock_member_role
+    ):
+        """Test contact search by query and skills."""
+        mock_interaction.user.roles = [mock_member_role]
+        crm_cog.espo_api.request.return_value = {"list": []}
+
+        await crm_cog.search_members.callback(
+            crm_cog, mock_interaction, "john", "python,sql"
+        )
+
+        crm_cog.espo_api.request.assert_called_once()
+        call_args = crm_cog.espo_api.request.call_args
+        search_params = call_args[0][2]
+        where_filters = search_params["where"]
+
+        assert where_filters[0]["type"] == "or"
+        assert where_filters[1]["type"] == "arrayAllOf"
+        assert where_filters[1]["attribute"] == "skills"
+        assert where_filters[1]["value"] == ["python", "sql"]
+
+    @pytest.mark.asyncio
     async def test_search_contacts_no_results(
         self, crm_cog, mock_interaction, mock_member_role
     ):
@@ -174,7 +232,7 @@ class TestCRMCog:
         crm_cog.espo_api.request.return_value = {"list": []}
 
         # Call the callback function to bypass app_commands decorator
-        await crm_cog.search_contacts.callback(crm_cog, mock_interaction, "nonexistent")
+        await crm_cog.search_members.callback(crm_cog, mock_interaction, "nonexistent")
 
         mock_interaction.followup.send.assert_called_once_with(
             "🔍 No contacts found for: `nonexistent`"

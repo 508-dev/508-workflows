@@ -360,44 +360,85 @@ class CRMCog(commands.Cog):
         return check_user_roles_with_hierarchy(interaction.user.roles, ["Member"])
 
     @app_commands.command(
-        name="crm-contacts", description="Search for contacts in the CRM"
+        name="search-members", description="Search for candidates / members in the CRM"
     )
     @app_commands.describe(
-        query="Search term (name, Discord username, email, or 508 email)"
+        query="Search term (name, Discord username, email, or 508 email)",
+        skills="Comma-separated skills (AND match)",
     )
     @require_role("Member")
-    async def search_contacts(
-        self, interaction: discord.Interaction, query: str
+    async def search_members(
+        self,
+        interaction: discord.Interaction,
+        query: str | None = None,
+        skills: str | None = None,
     ) -> None:
         """Search for contacts in the CRM."""
         try:
             await interaction.response.defer(ephemeral=True)
 
+            query_value = (query or "").strip()
+            skills_list = (
+                [skill.strip() for skill in skills.split(",") if skill.strip()]
+                if skills
+                else []
+            )
+
+            if not query_value and not skills_list:
+                await interaction.followup.send(
+                    "❌ Please provide a search term or skills to search by."
+                )
+                return
+
+            search_parts = []
+            if query_value:
+                search_parts.append(f"`{query_value}`")
+            if skills_list:
+                search_parts.append(f"skills: `{', '.join(skills_list)}`")
+            search_summary = ", ".join(search_parts)
+
             # Search contacts using EspoCRM API
-            search_params = {
-                "where": [
+            where_filters = []
+            if query_value:
+                where_filters.append(
                     {
                         "type": "or",
                         "value": [
-                            {"type": "contains", "attribute": "name", "value": query},
+                            {
+                                "type": "contains",
+                                "attribute": "name",
+                                "value": query_value,
+                            },
                             {
                                 "type": "contains",
                                 "attribute": "cDiscordUsername",
-                                "value": query,
+                                "value": query_value,
                             },
                             {
                                 "type": "contains",
                                 "attribute": "emailAddress",
-                                "value": query,
+                                "value": query_value,
                             },
                             {
                                 "type": "contains",
                                 "attribute": "c508Email",
-                                "value": query,
+                                "value": query_value,
                             },
                         ],
                     }
-                ],
+                )
+
+            if skills_list:
+                where_filters.append(
+                    {
+                        "type": "arrayAllOf",
+                        "attribute": "skills",
+                        "value": skills_list,
+                    }
+                )
+
+            search_params = {
+                "where": where_filters,
                 "maxSize": 10,
                 "select": "id,name,emailAddress,c508Email,cDiscordUsername,cDiscordUserID,phoneNumber,type,resumeIds,resumeNames,resumeTypes",
             }
@@ -406,15 +447,17 @@ class CRMCog(commands.Cog):
             contacts = response.get("list", [])
 
             if not contacts:
-                await interaction.followup.send(f"🔍 No contacts found for: `{query}`")
+                await interaction.followup.send(
+                    f"🔍 No contacts found for: {search_summary}"
+                )
                 return
 
-            logger.info(f"Found {len(contacts)} contacts for query: {query}")
+            logger.info(f"Found {len(contacts)} contacts for: {search_summary}")
 
             # Create embed with results
             embed = discord.Embed(
                 title="🔍 CRM Contact Search Results",
-                description=f"Found {len(contacts)} contact(s) for: `{query}`",
+                description=f"Found {len(contacts)} contact(s) for: {search_summary}",
                 color=0x0099FF,
             )
 
