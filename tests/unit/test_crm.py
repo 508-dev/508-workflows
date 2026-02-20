@@ -6,8 +6,8 @@ import pytest
 from unittest.mock import Mock, AsyncMock, patch
 import discord
 
-from bot.cogs.crm import CRMCog, ResumeButtonView, ResumeDownloadButton
-from bot.utils.espo_api_client import EspoAPIError
+from five08.discord_bot.cogs.crm import CRMCog, ResumeButtonView, ResumeDownloadButton
+from five08.clients.espo import EspoAPIError
 
 
 class TestCRMCog:
@@ -23,7 +23,7 @@ class TestCRMCog:
     @pytest.fixture
     def mock_espo_api(self):
         """Create a mock EspoAPI for testing."""
-        with patch("bot.cogs.crm.EspoAPI") as mock_api_class:
+        with patch("five08.discord_bot.cogs.crm.EspoAPI") as mock_api_class:
             mock_api = Mock()
             mock_api_class.return_value = mock_api
             yield mock_api

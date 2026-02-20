@@ -12,8 +12,11 @@ from typing import Optional
 import discord
 from discord.ext import commands
 
-from bot.config import settings
-from bot.utils.healthcheck import HealthcheckServer, start_healthcheck_server
+from five08.discord_bot.config import settings
+from five08.discord_bot.utils.healthcheck import (
+    HealthcheckServer,
+    start_healthcheck_server,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +52,7 @@ class Bot508(commands.Bot):
         cogs_dir = Path(__file__).parent / "cogs"
         for file in cogs_dir.glob("*.py"):
             if file.name != "__init__.py":
-                cog_name = f"bot.cogs.{file.stem}"
+                cog_name = f"five08.discord_bot.cogs.{file.stem}"
                 try:
                     await self.load_extension(cog_name)
                     logger.info(f"Loaded cog: {cog_name}")

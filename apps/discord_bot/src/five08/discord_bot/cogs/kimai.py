@@ -12,10 +12,13 @@ from discord.ext import commands
 from discord import app_commands
 import discord
 
-from bot.config import settings
-from bot.utils.kimai_api_client import KimaiAPI, KimaiAPIError
-from bot.utils.espo_api_client import EspoAPI, EspoAPIError
-from bot.utils.role_decorators import require_role, check_user_roles_with_hierarchy
+from five08.discord_bot.config import settings
+from five08.clients import kimai, espo
+
+from five08.discord_bot.utils.role_decorators import (
+    require_role,
+    check_user_roles_with_hierarchy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,9 +29,9 @@ class KimaiCog(commands.Cog, name="Kimai"):
     def __init__(self, bot: commands.Bot) -> None:
         """Initialize the Kimai cog."""
         self.bot = bot
-        self.api = KimaiAPI(settings.kimai_base_url, settings.kimai_api_token)
+        self.api = kimai.KimaiAPI(settings.kimai_base_url, settings.kimai_api_token)
         api_url = settings.espo_base_url.rstrip("/") + "/api/v1"
-        self.espo_api = EspoAPI(api_url, settings.espo_api_key)
+        self.espo_api = espo.EspoAPI(api_url, settings.espo_api_key)
         logger.info("Kimai cog initialized")
 
     @app_commands.command(
@@ -176,7 +179,7 @@ class KimaiCog(commands.Cog, name="Kimai"):
 
             await interaction.followup.send(embed=embed, ephemeral=True)
 
-        except KimaiAPIError as e:
+        except kimai.KimaiAPIError as e:
             logger.error(f"Kimai API error in project_hours command: {e}")
             await interaction.followup.send(
                 f"Failed to retrieve project hours: {str(e)}", ephemeral=True
@@ -273,12 +276,12 @@ class KimaiCog(commands.Cog, name="Kimai"):
 
             await interaction.followup.send(embed=embed, ephemeral=True)
 
-        except KimaiAPIError as e:
+        except kimai.KimaiAPIError as e:
             logger.error(f"Kimai API error in list_projects command: {e}")
             await interaction.followup.send(
                 f"Failed to retrieve projects: {str(e)}", ephemeral=True
             )
-        except EspoAPIError as e:
+        except espo.EspoAPIError as e:
             logger.error(f"CRM API error in list_projects command: {e}")
             await interaction.followup.send(
                 f"Failed to retrieve your CRM profile: {str(e)}", ephemeral=True
@@ -322,7 +325,7 @@ class KimaiCog(commands.Cog, name="Kimai"):
 
             await interaction.followup.send(embed=embed, ephemeral=True)
 
-        except KimaiAPIError as e:
+        except kimai.KimaiAPIError as e:
             logger.error(f"Kimai API error in status command: {e}")
             embed = discord.Embed(
                 title="Kimai API Status",
@@ -394,12 +397,12 @@ class KimaiCog(commands.Cog, name="Kimai"):
 
             return kimai_user
 
-        except EspoAPIError as e:
+        except espo.EspoAPIError as e:
             logger.error(
                 f"EspoCRM API error getting user from Discord ID {discord_user_id}: {e}"
             )
             return None
-        except KimaiAPIError as e:
+        except kimai.KimaiAPIError as e:
             logger.error(
                 f"Kimai API error getting user from Discord ID {discord_user_id}: {e}"
             )

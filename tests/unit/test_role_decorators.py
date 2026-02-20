@@ -5,7 +5,7 @@ Unit tests for role decorator functionality.
 import pytest
 from unittest.mock import Mock, AsyncMock
 
-from bot.utils.role_decorators import (
+from five08.discord_bot.utils.role_decorators import (
     require_role,
     require_roles,
     check_user_roles,

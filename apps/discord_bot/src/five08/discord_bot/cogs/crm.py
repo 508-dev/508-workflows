@@ -12,14 +12,17 @@ from discord.ext import commands
 from discord import app_commands
 import discord
 
-from bot.config import settings
-from bot.utils.espo_api_client import EspoAPI, EspoAPIError
-from bot.utils.role_decorators import (
+from five08.discord_bot.config import settings
+from five08.clients import espo
+from five08.discord_bot.utils.role_decorators import (
     require_role,
     check_user_roles_with_hierarchy,
 )
 
 logger = logging.getLogger(__name__)
+
+EspoAPI = espo.EspoAPI
+EspoAPIError = espo.EspoAPIError
 
 
 class ResumeButtonView(discord.ui.View):

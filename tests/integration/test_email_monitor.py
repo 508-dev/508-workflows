@@ -6,7 +6,7 @@ import pytest
 from unittest.mock import Mock, AsyncMock, patch
 import imaplib
 
-from bot.cogs.email_monitor import EmailMonitor
+from five08.discord_bot.cogs.email_monitor import EmailMonitor
 
 
 class TestEmailMonitorIntegration:
@@ -74,7 +74,7 @@ class TestEmailMonitorIntegration:
     @pytest.mark.asyncio
     async def test_setup_function(self, mock_bot):
         """Test the setup function adds the feature to the bot."""
-        from bot.cogs.email_monitor import setup
+        from five08.discord_bot.cogs.email_monitor import setup
 
         with patch.object(
             EmailMonitor, "__init__", lambda self, bot: setattr(self, "bot", bot)

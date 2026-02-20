@@ -75,15 +75,15 @@ jobs:
 
     - name: Run ruff linter
       run: |
-        uv run ruff check bot/ tests/
+        uv run ruff check apps/discord_bot/src/five08/ apps/worker/src/five08/ packages/shared/src/five08/ tests/
 
     - name: Run ruff formatter
       run: |
-        uv run ruff format --check bot/ tests/
+        uv run ruff format --check apps/discord_bot/src/five08/ apps/worker/src/five08/ packages/shared/src/five08/ tests/
 
     - name: Run mypy type checker
       run: |
-        uv run mypy bot/ --ignore-missing-imports
+        uv run mypy apps/discord_bot/src/five08/ apps/worker/src/five08/ packages/shared/src/five08/ --ignore-missing-imports
 
   security:
     runs-on: ubuntu-latest
@@ -105,7 +105,7 @@ jobs:
 
     - name: Run bandit security linter
       run: |
-        uv run bandit -r bot/ -f json -o bandit-report.json || true
+        uv run bandit -r apps/discord_bot/src/five08/ -r apps/worker/src/five08/ -r packages/shared/src/five08/ -f json -o bandit-report.json || true
 
     - name: Run safety check
       run: |

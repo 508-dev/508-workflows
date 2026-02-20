@@ -6,7 +6,7 @@ import pytest
 from unittest.mock import Mock, patch
 from datetime import datetime
 
-from bot.utils.kimai_api_client import KimaiAPI, KimaiAPIError
+from five08.clients.kimai import KimaiAPI, KimaiAPIError
 
 
 class TestKimaiAPI:

@@ -7,13 +7,12 @@ to work independently on different bot functions through the cogs system.
 
 import asyncio
 import logging
-from bot.bot import create_bot
-from bot.config import settings
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+from five08.discord_bot.bot import create_bot
+from five08.discord_bot.config import settings
+from five08.logging import configure_logging
+
+configure_logging(settings.log_level)
 
 logger = logging.getLogger(__name__)
 
@@ -30,5 +29,10 @@ async def main() -> None:
         await bot.close()
 
 
-if __name__ == "__main__":
+def run() -> None:
+    """Sync entrypoint for console script."""
     asyncio.run(main())
+
+
+if __name__ == "__main__":
+    run()

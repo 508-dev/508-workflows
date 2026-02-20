@@ -13,7 +13,7 @@ from textwrap import wrap
 from discord.ext import commands, tasks
 import discord
 
-from bot.config import settings
+from five08.discord_bot.config import settings
 
 logger = logging.getLogger(__name__)
 
