@@ -1,14 +1,27 @@
 [project]
-name = "discord-bot-one"
+name = "five08-monorepo"
 version = "0.1.0"
-description = "Discord bot for email monitoring"
+description = "508.dev monorepo for Discord bot and job processing."
 requires-python = ">=3.12"
 dependencies = [
-    "aiohttp>=3.13.1",
-    "discord.py~=2.6.0",
-    "pydantic~=2.10",
-    "pydantic-settings~=2.8",
-    "requests~=2.31",
+    "discord-bot-app",
+    "integrations-worker",
+    "five08",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+discord-bot-app = { workspace = true }
+integrations-worker = { workspace = true }
+five08 = { workspace = true }
+
+[tool.uv.workspace]
+members = [
+    "apps/discord_bot",
+    "apps/worker",
+    "packages/shared",
 ]
 
 [dependency-groups]
@@ -35,7 +48,7 @@ asyncio_mode = "auto"
 addopts = "--tb=short --strict-markers"
 
 [tool.coverage.run]
-source = ["bot"]
+source = ["five08"]
 omit = ["tests/*"]
 
 [tool.coverage.report]

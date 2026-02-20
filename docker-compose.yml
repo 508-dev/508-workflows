@@ -1,0 +1,64 @@
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  bot:
+    build:
+      context: .
+      dockerfile: apps/discord_bot/Dockerfile
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REDIS_QUEUE_NAME: ${REDIS_QUEUE_NAME:-jobs.default}
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  worker-api:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    command: ["uv", "run", "--package", "integrations-worker", "worker-api"]
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REDIS_QUEUE_NAME: ${REDIS_QUEUE_NAME:-jobs.default}
+      WEBHOOK_INGEST_HOST: 0.0.0.0
+      WEBHOOK_INGEST_PORT: ${WEBHOOK_INGEST_PORT:-8090}
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "${WEBHOOK_INGEST_PORT:-8090}:${WEBHOOK_INGEST_PORT:-8090}"
+
+  worker-consumer:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    command: ["uv", "run", "--package", "integrations-worker", "worker-consumer"]
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REDIS_QUEUE_NAME: ${REDIS_QUEUE_NAME:-jobs.default}
+      WORKER_QUEUE_NAMES: ${WORKER_QUEUE_NAMES:-jobs.default}
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  redis-data:

@@ -7,7 +7,7 @@ from unittest.mock import Mock, AsyncMock, patch
 from pathlib import Path
 import discord
 
-from bot.bot import Bot508, create_bot
+from five08.discord_bot.bot import Bot508, create_bot
 
 
 class TestBot508:
@@ -57,7 +57,9 @@ class TestBot508:
                 await bot.load_extensions()
 
                 # Should only load test_feature.py, not __init__.py
-                mock_load_ext.assert_called_once_with("bot.cogs.test_feature")
+                mock_load_ext.assert_called_once_with(
+                    "five08.discord_bot.cogs.test_feature"
+                )
 
     @pytest.mark.asyncio
     async def test_load_extensions_handles_errors(self, caplog):

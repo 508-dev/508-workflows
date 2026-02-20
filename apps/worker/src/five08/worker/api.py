@@ -1,0 +1,201 @@
+"""Webhook ingest API for enqueuing background jobs."""
+
+import logging
+import secrets
+
+from aiohttp import web
+from pydantic import ValidationError
+from rq import Queue
+from redis import Redis
+
+from five08.logging import configure_logging
+from five08.queue import enqueue_job, get_queue, get_redis_connection
+from five08.worker.config import settings
+from five08.worker.jobs import process_contact_skills_job, process_webhook_event
+from five08.worker.models import EspoCRMWebhookPayload
+
+logger = logging.getLogger(__name__)
+REDIS_CONN_KEY = web.AppKey("redis_conn", Redis)
+QUEUE_KEY = web.AppKey("queue", Queue)
+
+
+def _is_authorized(request: web.Request) -> bool:
+    """Validate optional webhook secret."""
+    if not settings.webhook_shared_secret:
+        return True
+
+    provided_secret = request.headers.get("X-Webhook-Secret", "")
+    return secrets.compare_digest(provided_secret, settings.webhook_shared_secret)
+
+
+async def health_handler(request: web.Request) -> web.Response:
+    """Simple health endpoint."""
+    redis_conn = request.app[REDIS_CONN_KEY]
+
+    try:
+        redis_ok = bool(redis_conn.ping())
+    except Exception:
+        redis_ok = False
+
+    return web.json_response(
+        {
+            "status": "healthy" if redis_ok else "degraded",
+            "redis_connected": redis_ok,
+            "queue_name": settings.redis_queue_name,
+        },
+        status=200 if redis_ok else 503,
+    )
+
+
+async def ingest_handler(request: web.Request) -> web.Response:
+    """Validate and enqueue incoming webhook payloads."""
+    if not _is_authorized(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+
+    try:
+        payload = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid_json"}, status=400)
+
+    if not isinstance(payload, dict):
+        return web.json_response({"error": "payload_must_be_object"}, status=400)
+
+    source = request.match_info.get("source", "default")
+    queue = request.app[QUEUE_KEY]
+
+    job = enqueue_job(
+        queue=queue,
+        fn=process_webhook_event,
+        args=(source, payload),
+        settings=settings,
+    )
+
+    logger.info("Enqueued webhook job %s from source=%s", job.id, source)
+    return web.json_response(
+        {
+            "status": "queued",
+            "job_id": job.id,
+            "queue": settings.redis_queue_name,
+            "source": source,
+        },
+        status=202,
+    )
+
+
+async def espocrm_webhook_handler(request: web.Request) -> web.Response:
+    """Validate EspoCRM webhook payload and enqueue per-contact jobs."""
+    if not _is_authorized(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+
+    try:
+        payload_data = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid_json"}, status=400)
+
+    if not isinstance(payload_data, list):
+        return web.json_response(
+            {"error": "payload_must_be_array_of_events"}, status=400
+        )
+
+    try:
+        payload = EspoCRMWebhookPayload.from_list(payload_data)
+    except ValidationError as exc:
+        return web.json_response(
+            {"error": "invalid_webhook_event", "detail": str(exc)}, status=400
+        )
+
+    queue = request.app[QUEUE_KEY]
+    jobs: list[dict[str, str]] = []
+    for event in payload.events:
+        job = enqueue_job(
+            queue=queue,
+            fn=process_contact_skills_job,
+            args=(event.id,),
+            settings=settings,
+        )
+        jobs.append({"contact_id": event.id, "job_id": job.id})
+
+    logger.info(
+        "Enqueued %s EspoCRM contact jobs for queue=%s",
+        len(jobs),
+        settings.redis_queue_name,
+    )
+    return web.json_response(
+        {
+            "status": "queued",
+            "source": "espocrm",
+            "jobs": jobs,
+            "events_processed": len(jobs),
+        },
+        status=202,
+    )
+
+
+async def process_contact_handler(request: web.Request) -> web.Response:
+    """Manually enqueue one contact for skills processing."""
+    if not _is_authorized(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+
+    contact_id = request.match_info.get("contact_id", "").strip()
+    if not contact_id:
+        return web.json_response({"error": "contact_id_required"}, status=400)
+
+    queue = request.app[QUEUE_KEY]
+    job = enqueue_job(
+        queue=queue,
+        fn=process_contact_skills_job,
+        args=(contact_id,),
+        settings=settings,
+    )
+    logger.info(
+        "Enqueued manual contact job job_id=%s contact_id=%s", job.id, contact_id
+    )
+    return web.json_response(
+        {
+            "status": "queued",
+            "source": "manual",
+            "contact_id": contact_id,
+            "job_id": job.id,
+        },
+        status=202,
+    )
+
+
+async def on_startup(app: web.Application) -> None:
+    """Initialize queue dependencies."""
+    redis_conn = get_redis_connection(settings)
+    app[REDIS_CONN_KEY] = redis_conn
+    app[QUEUE_KEY] = get_queue(settings, connection=redis_conn)
+
+
+async def on_cleanup(app: web.Application) -> None:
+    """Close Redis connection cleanly."""
+    redis_conn = app[REDIS_CONN_KEY]
+    redis_conn.close()
+
+
+def create_app() -> web.Application:
+    """Create configured aiohttp app."""
+    app = web.Application()
+    app.on_startup.append(on_startup)
+    app.on_cleanup.append(on_cleanup)
+    app.router.add_get("/", health_handler)
+    app.router.add_get("/health", health_handler)
+    app.router.add_post("/webhooks/espocrm", espocrm_webhook_handler)
+    app.router.add_post("/webhooks/{source}", ingest_handler)
+    app.router.add_post("/process-contact/{contact_id}", process_contact_handler)
+    return app
+
+
+def run() -> None:
+    """Entrypoint for worker API service."""
+    configure_logging(settings.log_level)
+    web.run_app(
+        create_app(),
+        host=settings.webhook_ingest_host,
+        port=settings.webhook_ingest_port,
+    )
+
+
+if __name__ == "__main__":
+    run()

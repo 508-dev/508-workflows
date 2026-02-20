@@ -11,7 +11,7 @@ from typing import Optional
 from aiohttp import web
 from discord.ext import commands
 
-from bot.config import settings
+from five08.discord_bot.config import settings
 
 logger = logging.getLogger(__name__)
 

@@ -6,8 +6,8 @@ import pytest
 from unittest.mock import Mock, AsyncMock, patch
 from freezegun import freeze_time
 
-from bot.cogs.kimai import KimaiCog
-from bot.utils.kimai_api_client import KimaiAPIError
+from five08.discord_bot.cogs.kimai import KimaiCog
+from five08.clients.kimai import KimaiAPIError
 
 
 class TestKimaiCog:
@@ -23,7 +23,7 @@ class TestKimaiCog:
     @pytest.fixture
     def mock_kimai_api(self):
         """Create a mock KimaiAPI for testing."""
-        with patch("bot.cogs.kimai.KimaiAPI") as mock_api_class:
+        with patch("five08.discord_bot.cogs.kimai.KimaiAPI") as mock_api_class:
             mock_api = Mock()
             mock_api_class.return_value = mock_api
             yield mock_api

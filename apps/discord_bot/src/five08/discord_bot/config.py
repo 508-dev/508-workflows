@@ -5,10 +5,10 @@ This module uses Pydantic settings to handle environment variables
 and configuration with type validation and default values.
 """
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from five08.settings import SharedSettings
 
 
-class Settings(BaseSettings):
+class Settings(SharedSettings):
     """
     Bot configuration settings with environment variable support.
 
@@ -38,8 +38,6 @@ class Settings(BaseSettings):
     # Kimai time tracking settings
     kimai_base_url: str
     kimai_api_token: str
-
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
 settings = Settings()  # type: ignore[call-arg]

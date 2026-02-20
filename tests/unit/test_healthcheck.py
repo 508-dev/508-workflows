@@ -6,7 +6,7 @@ import pytest
 from unittest.mock import Mock
 import json
 
-from bot.utils.healthcheck import HealthcheckServer
+from five08.discord_bot.utils.healthcheck import HealthcheckServer
 
 
 class TestHealthcheckServer:
@@ -40,7 +40,7 @@ class TestHealthcheckServer:
 
     def test_server_initialization(self, healthcheck_server, mock_bot):
         """Test healthcheck server initialization."""
-        from bot.config import settings
+        from five08.discord_bot.config import settings
 
         assert healthcheck_server.bot == mock_bot
         assert healthcheck_server.port == settings.healthcheck_port

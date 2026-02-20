@@ -1,0 +1,31 @@
+[project]
+name = "integrations-worker"
+version = "0.1.0"
+description = "Webhook ingest and background processing worker for 508.dev"
+requires-python = ">=3.12"
+dependencies = [
+    "aiohttp>=3.13.1",
+    "openai>=2.0.0",
+    "pdfminer.six>=20250506",
+    "pydantic~=2.10",
+    "pydantic-settings~=2.8",
+    "python-docx>=1.2.0",
+    "redis>=6.4.0",
+    "requests~=2.31",
+    "rq>=2.6.0",
+    "five08",
+]
+
+[tool.uv.sources]
+five08 = { workspace = true }
+
+[project.scripts]
+worker-api = "five08.worker.api:run"
+worker-consumer = "five08.worker.consumer:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/five08"]
