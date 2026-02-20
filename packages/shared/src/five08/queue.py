@@ -12,7 +12,11 @@ from five08.settings import SharedSettings
 
 def get_redis_connection(settings: SharedSettings) -> Redis:
     """Create a Redis connection from shared settings."""
-    return Redis.from_url(settings.redis_url)
+    return Redis.from_url(
+        settings.redis_url,
+        socket_connect_timeout=settings.redis_socket_connect_timeout,
+        socket_timeout=settings.redis_socket_timeout,
+    )
 
 
 def get_queue(settings: SharedSettings, connection: Redis | None = None) -> Queue:

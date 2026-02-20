@@ -20,6 +20,13 @@ class _FailingRedis:
         raise RuntimeError("redis unavailable")
 
 
+@pytest.fixture
+def auth_headers(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """Configure webhook secret and return matching auth headers."""
+    monkeypatch.setattr(api.settings, "webhook_shared_secret", "test-secret")
+    return {"X-Webhook-Secret": "test-secret"}
+
+
 @pytest.mark.asyncio
 async def test_health_handler_healthy() -> None:
     """Health endpoint should report healthy when Redis pings."""
@@ -49,12 +56,16 @@ async def test_health_handler_degraded() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ingest_handler_enqueues_job() -> None:
+async def test_ingest_handler_enqueues_job(auth_headers: dict[str, str]) -> None:
     """Ingest endpoint should enqueue payload and return job metadata."""
     app_obj = web.Application()
     app_obj[api.QUEUE_KEY] = Mock()
     request = make_mocked_request(
-        "POST", "/webhooks/github", app=app_obj, match_info={"source": "github"}
+        "POST",
+        "/webhooks/github",
+        app=app_obj,
+        match_info={"source": "github"},
+        headers=auth_headers,
     )
     request.json = AsyncMock(return_value={"id": "evt-1"})  # type: ignore[method-assign]
 
@@ -69,11 +80,15 @@ async def test_ingest_handler_enqueues_job() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ingest_handler_rejects_non_object_payload() -> None:
+async def test_ingest_handler_rejects_non_object_payload(
+    auth_headers: dict[str, str],
+) -> None:
     """Ingest endpoint should reject non-object JSON payloads."""
     app_obj = web.Application()
     app_obj[api.QUEUE_KEY] = Mock()
-    request = make_mocked_request("POST", "/webhooks/default", app=app_obj)
+    request = make_mocked_request(
+        "POST", "/webhooks/default", app=app_obj, headers=auth_headers
+    )
     request.json = AsyncMock(return_value=["not-an-object"])  # type: ignore[method-assign]
 
     response = await api.ingest_handler(request)
@@ -84,11 +99,15 @@ async def test_ingest_handler_rejects_non_object_payload() -> None:
 
 
 @pytest.mark.asyncio
-async def test_espocrm_webhook_handler_enqueues_contact_jobs() -> None:
+async def test_espocrm_webhook_handler_enqueues_contact_jobs(
+    auth_headers: dict[str, str],
+) -> None:
     """EspoCRM webhook should enqueue one job per event."""
     app_obj = web.Application()
     app_obj[api.QUEUE_KEY] = Mock()
-    request = make_mocked_request("POST", "/webhooks/espocrm", app=app_obj)
+    request = make_mocked_request(
+        "POST", "/webhooks/espocrm", app=app_obj, headers=auth_headers
+    )
     request.json = AsyncMock(return_value=[{"id": "c-1"}, {"id": "c-2"}])  # type: ignore[method-assign]
 
     with patch("five08.worker.api.enqueue_job") as mock_enqueue:
@@ -105,11 +124,15 @@ async def test_espocrm_webhook_handler_enqueues_contact_jobs() -> None:
 
 
 @pytest.mark.asyncio
-async def test_espocrm_webhook_handler_rejects_non_list_payload() -> None:
+async def test_espocrm_webhook_handler_rejects_non_list_payload(
+    auth_headers: dict[str, str],
+) -> None:
     """EspoCRM webhook should enforce array payload shape."""
     app_obj = web.Application()
     app_obj[api.QUEUE_KEY] = Mock()
-    request = make_mocked_request("POST", "/webhooks/espocrm", app=app_obj)
+    request = make_mocked_request(
+        "POST", "/webhooks/espocrm", app=app_obj, headers=auth_headers
+    )
     request.json = AsyncMock(return_value={"id": "c-1"})  # type: ignore[method-assign]
 
     response = await api.espocrm_webhook_handler(request)
@@ -120,7 +143,9 @@ async def test_espocrm_webhook_handler_rejects_non_list_payload() -> None:
 
 
 @pytest.mark.asyncio
-async def test_process_contact_handler_enqueues_single_contact() -> None:
+async def test_process_contact_handler_enqueues_single_contact(
+    auth_headers: dict[str, str],
+) -> None:
     """Manual contact endpoint should enqueue one contact job."""
     app_obj = web.Application()
     app_obj[api.QUEUE_KEY] = Mock()
@@ -129,6 +154,7 @@ async def test_process_contact_handler_enqueues_single_contact() -> None:
         "/process-contact/c-123",
         app=app_obj,
         match_info={"contact_id": "c-123"},
+        headers=auth_headers,
     )
 
     with patch("five08.worker.api.enqueue_job") as mock_enqueue:

@@ -8,9 +8,11 @@ class SharedSettings(BaseSettings):
 
     log_level: str = "INFO"
 
-    redis_url: str = "redis://redis:6379/0"
+    redis_url: str = "redis://redis:6379/0"  # Docker Compose default; set REDIS_URL when running outside Compose.
     redis_queue_name: str = "jobs.default"
     redis_key_prefix: str = "jobs"
+    redis_socket_connect_timeout: float | None = 5.0
+    redis_socket_timeout: float | None = 5.0
     job_timeout_seconds: int = 600
     job_result_ttl_seconds: int = 3600
 

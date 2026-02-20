@@ -78,9 +78,11 @@ docker compose up --build
 - `REDIS_URL` (default: `redis://redis:6379/0`)
 - `REDIS_QUEUE_NAME` (default: `jobs.default`)
 - `REDIS_KEY_PREFIX` (default: `jobs`)
+- `ESPO_BASE_URL` (required by both bot and worker)
+- `ESPO_API_KEY` (required by both bot and worker)
 - `JOB_TIMEOUT_SECONDS` (default: `600`)
 - `JOB_RESULT_TTL_SECONDS` (default: `3600`)
-- `WEBHOOK_SHARED_SECRET` (optional; validates `X-Webhook-Secret` header)
+- `WEBHOOK_SHARED_SECRET` (required; requests are rejected when unset)
 - `WEBHOOK_INGEST_HOST` (default: `0.0.0.0`)
 - `WEBHOOK_INGEST_PORT` (default: `8090`)
 - `LOG_LEVEL` (default: `INFO`)
@@ -93,8 +95,6 @@ docker compose up --build
 - `EMAIL_PASSWORD`
 - `IMAP_SERVER`
 - `SMTP_SERVER`
-- `ESPO_API_KEY`
-- `ESPO_BASE_URL`
 - `KIMAI_BASE_URL`
 - `KIMAI_API_TOKEN`
 - Optional: `CHECK_EMAIL_WAIT`, `DISCORD_SENDMSG_CHARACTER_LIMIT`, `HEALTHCHECK_PORT`

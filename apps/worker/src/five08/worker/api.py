@@ -1,5 +1,6 @@
 """Webhook ingest API for enqueuing background jobs."""
 
+import asyncio
 import logging
 import secrets
 
@@ -20,9 +21,12 @@ QUEUE_KEY = web.AppKey("queue", Queue)
 
 
 def _is_authorized(request: web.Request) -> bool:
-    """Validate optional webhook secret."""
+    """Validate webhook secret."""
     if not settings.webhook_shared_secret:
-        return True
+        logger.error(
+            "Rejecting webhook request: WEBHOOK_SHARED_SECRET is not configured"
+        )
+        return False
 
     provided_secret = request.headers.get("X-Webhook-Secret", "")
     return secrets.compare_digest(provided_secret, settings.webhook_shared_secret)
@@ -33,7 +37,7 @@ async def health_handler(request: web.Request) -> web.Response:
     redis_conn = request.app[REDIS_CONN_KEY]
 
     try:
-        redis_ok = bool(redis_conn.ping())
+        redis_ok = bool(await asyncio.to_thread(redis_conn.ping))
     except Exception:
         redis_ok = False
 
@@ -63,7 +67,8 @@ async def ingest_handler(request: web.Request) -> web.Response:
     source = request.match_info.get("source", "default")
     queue = request.app[QUEUE_KEY]
 
-    job = enqueue_job(
+    job = await asyncio.to_thread(
+        enqueue_job,
         queue=queue,
         fn=process_webhook_event,
         args=(source, payload),
@@ -107,7 +112,8 @@ async def espocrm_webhook_handler(request: web.Request) -> web.Response:
     queue = request.app[QUEUE_KEY]
     jobs: list[dict[str, str]] = []
     for event in payload.events:
-        job = enqueue_job(
+        job = await asyncio.to_thread(
+            enqueue_job,
             queue=queue,
             fn=process_contact_skills_job,
             args=(event.id,),
@@ -141,7 +147,8 @@ async def process_contact_handler(request: web.Request) -> web.Response:
         return web.json_response({"error": "contact_id_required"}, status=400)
 
     queue = request.app[QUEUE_KEY]
-    job = enqueue_job(
+    job = await asyncio.to_thread(
+        enqueue_job,
         queue=queue,
         fn=process_contact_skills_job,
         args=(contact_id,),

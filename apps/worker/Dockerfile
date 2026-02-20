@@ -11,5 +11,9 @@ COPY apps/worker/src apps/worker/src
 COPY packages/shared/src packages/shared/src
 
 RUN uv sync --frozen --no-dev --package integrations-worker
+RUN groupadd -r appgroup && useradd -r -g appgroup -d /app -s /usr/sbin/nologin appuser
+RUN chown -R appuser:appgroup /app
+
+USER appuser
 
 CMD ["uv", "run", "--package", "integrations-worker", "worker-api"]

@@ -328,7 +328,7 @@ class CRMCog(commands.Cog):
         self.bot = bot
         # Construct API URL from base URL
         api_url = settings.espo_base_url.rstrip("/") + "/api/v1"
-        self.espo_api = espo.EspoAPI(api_url, settings.espo_api_key)
+        self.espo_api = EspoAPI(api_url, settings.espo_api_key)
         # Store base URL for profile links
         self.base_url = settings.espo_base_url.rstrip("/")
 
@@ -352,7 +352,7 @@ class CRMCog(commands.Cog):
                 f"📄 Resume for **{contact_name}**:", file=discord_file
             )
 
-        except espo.EspoAPIError as e:
+        except EspoAPIError as e:
             logger.error(f"Failed to download resume {resume_id}: {e}")
             await interaction.followup.send(f"❌ Failed to download resume: {str(e)}")
 
@@ -535,7 +535,7 @@ class CRMCog(commands.Cog):
             else:
                 await interaction.followup.send(embed=embed)
 
-        except espo.EspoAPIError as e:
+        except EspoAPIError as e:
             logger.error(f"EspoCRM API error: {e}")
             await interaction.followup.send(f"❌ CRM API error: {str(e)}")
         except Exception as e:
@@ -566,7 +566,7 @@ class CRMCog(commands.Cog):
 
             await interaction.followup.send(embed=embed)
 
-        except espo.EspoAPIError as e:
+        except EspoAPIError as e:
             logger.error(f"EspoCRM API error: {e}")
             embed = discord.Embed(
                 title="❌ CRM Status",
@@ -663,7 +663,7 @@ class CRMCog(commands.Cog):
             # Use shared download method
             await self._download_and_send_resume(interaction, contact_name, resume_id)
 
-        except espo.EspoAPIError as e:
+        except EspoAPIError as e:
             logger.error(f"EspoCRM API error in get_resume: {e}")
             await interaction.followup.send(f"❌ CRM API error: {str(e)}")
         except Exception as e:
@@ -686,7 +686,7 @@ class CRMCog(commands.Cog):
                 response = self.espo_api.request("GET", f"Contact/{search_term}")
                 if response and response.get("id"):
                     return [response]
-            except espo.EspoAPIError:
+            except EspoAPIError:
                 pass  # If direct ID lookup fails, fall through to regular search
 
         # Determine if this is an email search vs name search
@@ -825,7 +825,7 @@ class CRMCog(commands.Cog):
                 )
                 return False
 
-        except espo.EspoAPIError as e:
+        except EspoAPIError as e:
             logger.error(f"EspoCRM API error in _perform_discord_linking: {e}")
             await interaction.followup.send(f"❌ CRM API error: {str(e)}")
             return False
@@ -911,7 +911,7 @@ class CRMCog(commands.Cog):
             contact = contacts[0]
             await self._perform_discord_linking(interaction, user, contact)
 
-        except espo.EspoAPIError as e:
+        except EspoAPIError as e:
             logger.error(f"EspoCRM API error in link_discord_user: {e}")
             await interaction.followup.send(f"❌ CRM API error: {str(e)}")
         except Exception as e:
@@ -961,7 +961,7 @@ class CRMCog(commands.Cog):
             # Send list of unlinked users
             await self._send_unlinked_users_list(interaction, unlinked_users)
 
-        except espo.EspoAPIError as e:
+        except EspoAPIError as e:
             logger.error(f"EspoCRM API error in unlinked_discord_users: {e}")
             await interaction.followup.send(f"❌ CRM API error: {str(e)}")
         except Exception as e:
@@ -1171,7 +1171,7 @@ class CRMCog(commands.Cog):
                     "❌ Failed to update contact in CRM. Please try again."
                 )
 
-        except espo.EspoAPIError as e:
+        except EspoAPIError as e:
             logger.error(f"EspoCRM API error in set_github_username: {e}")
             await interaction.followup.send(f"❌ CRM API error: {str(e)}")
         except Exception as e:
@@ -1204,13 +1204,13 @@ class CRMCog(commands.Cog):
                     ):
                         return True, resume_id
 
-                except espo.EspoAPIError:
+                except EspoAPIError:
                     # If we can't fetch attachment details, skip it
                     continue
 
             return False, None
 
-        except espo.EspoAPIError as e:
+        except EspoAPIError as e:
             logger.error(f"Failed to check existing resumes: {e}")
             return False, None
 
@@ -1238,7 +1238,7 @@ class CRMCog(commands.Cog):
 
             self.espo_api.request("PUT", f"Contact/{contact_id}", update_data)
             return True
-        except espo.EspoAPIError as e:
+        except EspoAPIError as e:
             logger.error(f"Failed to update contact resume: {e}")
             return False
 
@@ -1423,7 +1423,7 @@ class CRMCog(commands.Cog):
                         "⚠️ File uploaded but failed to link to contact. Please check CRM manually."
                     )
 
-            except espo.EspoAPIError as e:
+            except EspoAPIError as e:
                 logger.error(f"Failed to upload file to EspoCRM: {e}")
                 await interaction.followup.send(
                     f"❌ Failed to upload file to CRM: {str(e)}"

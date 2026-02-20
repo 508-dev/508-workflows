@@ -23,7 +23,7 @@ class TestKimaiCog:
     @pytest.fixture
     def mock_kimai_api(self):
         """Create a mock KimaiAPI for testing."""
-        with patch("five08.discord_bot.cogs.kimai.KimaiAPI") as mock_api_class:
+        with patch("five08.clients.kimai.KimaiAPI") as mock_api_class:
             mock_api = Mock()
             mock_api_class.return_value = mock_api
             yield mock_api
