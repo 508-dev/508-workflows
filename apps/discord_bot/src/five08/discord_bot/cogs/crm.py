@@ -8,6 +8,7 @@ It allows team members to quickly access CRM data without leaving Discord.
 import asyncio
 import io
 import logging
+import re
 from typing import Any
 
 import aiohttp
@@ -1543,6 +1544,132 @@ class CRMCog(commands.Cog):
 
         return deduplicated_contacts
 
+    def _extract_resume_contact_hints(
+        self, file_content: bytes
+    ) -> dict[str, list[str]]:
+        """Extract basic contact-identifying signals from resume bytes."""
+        text = file_content.decode("utf-8", errors="ignore")
+        if not text:
+            return {"emails": [], "github_usernames": []}
+
+        # Keep this lightweight; heuristics are only used for contact targeting.
+        snippet = text[:12000]
+        email_re = re.compile(
+            r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
+            flags=re.IGNORECASE,
+        )
+        github_re = re.compile(
+            r"(?:https?://)?(?:www\.)?github\.com/([A-Za-z0-9-]{1,39})",
+            flags=re.IGNORECASE,
+        )
+
+        email_matches: list[str] = []
+        for email in email_re.findall(snippet):
+            candidate = str(email).strip().lower()
+            if candidate and candidate not in email_matches:
+                email_matches.append(candidate)
+
+        github_matches: list[str] = []
+        for username in github_re.findall(snippet):
+            candidate = str(username).strip().lower()
+            if candidate and candidate not in github_matches:
+                github_matches.append(candidate)
+
+        return {"emails": email_matches, "github_usernames": github_matches}
+
+    def _extract_resume_name_hint(self, file_content: bytes, filename: str) -> str:
+        """Best-effort contact name extraction from resume text."""
+        text = file_content.decode("utf-8", errors="ignore")
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        for line in lines[:40]:
+            candidate = line.strip()
+            if not candidate:
+                continue
+            if len(candidate) < 2:
+                continue
+            if "@" in candidate or "http" in candidate.lower():
+                continue
+            if not any(char.isalpha() for char in candidate):
+                continue
+            # Prefer short, title-like lines at the top as candidate names.
+            if len(candidate.split()) >= 1 and len(candidate) <= 70:
+                return candidate
+
+        fallback = (
+            filename.rsplit(".", 1)[0].replace("_", " ").replace("-", " ").strip()
+        )
+        return fallback[:80] if fallback else "Unknown Contact"
+
+    def _build_resume_create_contact_payload(
+        self, file_content: bytes, filename: str
+    ) -> dict[str, str]:
+        """Build a minimal contact create payload from resume hints."""
+        hints = self._extract_resume_contact_hints(file_content)
+        name = self._extract_resume_name_hint(file_content, filename)
+
+        payload: dict[str, str] = {"name": name}
+        if hints["emails"]:
+            payload["emailAddress"] = hints["emails"][0]
+            payload["c508Email"] = hints["emails"][0]
+        if hints["github_usernames"]:
+            payload["cGitHubUsername"] = hints["github_usernames"][0]
+
+        return payload
+
+    async def _search_contacts_by_field(
+        self, *, field: str, value: str, max_size: int = 10
+    ) -> list[dict[str, Any]]:
+        """Search contacts using an exact field equals match."""
+        search_params = {
+            "where": [{"type": "equals", "attribute": field, "value": value}],
+            "maxSize": max_size,
+            "select": "id,name,emailAddress,c508Email,cDiscordUsername,cGitHubUsername",
+        }
+
+        response = self.espo_api.request("GET", "Contact", search_params)
+        contacts: list[dict[str, Any]] = response.get("list", [])
+
+        deduplicated_contacts: list[dict[str, Any]] = []
+        seen_ids = set()
+        for contact in contacts:
+            contact_id = contact.get("id")
+            if contact_id and contact_id not in seen_ids:
+                seen_ids.add(contact_id)
+                deduplicated_contacts.append(contact)
+
+        return deduplicated_contacts
+
+    async def _infer_contact_from_resume(
+        self, file_content: bytes
+    ) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
+        """Infer target contact from resume identifiers."""
+        hints = self._extract_resume_contact_hints(file_content)
+        for email in hints["emails"]:
+            contacts = await self._search_contact_for_linking(email)
+            if len(contacts) == 1:
+                return contacts[0], {"method": "email", "value": email}
+            if len(contacts) > 1:
+                return None, {
+                    "method": "email",
+                    "value": email,
+                    "reason": "multiple_matches",
+                }
+
+        for github_username in hints["github_usernames"]:
+            contacts = await self._search_contacts_by_field(
+                field="cGitHubUsername", value=github_username
+            )
+            if len(contacts) == 1:
+                return contacts[0], {"method": "github", "value": github_username}
+            if len(contacts) > 1:
+                return None, {
+                    "method": "github",
+                    "value": github_username,
+                    "reason": "multiple_matches",
+                }
+
+        return None, {"reason": "no_matching_contact"}
+
     async def _perform_discord_linking(
         self,
         interaction: discord.Interaction,
@@ -2005,7 +2132,8 @@ class CRMCog(commands.Cog):
                     await interaction.followup.send(
                         "❌ You must have Steering Committee role or higher to set GitHub usernames for other people."
                     )
-                    return
+                    if not target_contact:
+                        return
 
                 # Search for target contact
                 contacts = await self._search_contact_for_linking(search_term)
@@ -2023,7 +2151,8 @@ class CRMCog(commands.Cog):
                     await interaction.followup.send(
                         f"❌ No contact found for: `{search_term}`"
                     )
-                    return
+                    if not target_contact:
+                        return
                 elif len(contacts) > 1:
                     self._audit_command(
                         interaction=interaction,
@@ -2239,9 +2368,10 @@ class CRMCog(commands.Cog):
     )
     @app_commands.describe(
         file="Resume file to upload (PDF, DOC, DOCX, TXT)",
-        search_term="Email, name, or contact ID (optional - defaults to your linked profile)",
+        search_term="Email, name, or contact ID (Steering Committee+ only). Omit to infer from resume.",
         overwrite="Replace existing resumes instead of appending",
         link_user="Discord user to link to this CRM contact (optional, Steering Committee+ for others)",
+        create_if_not_found="Create a new contact from resume info if inference finds no match.",
     )
     async def upload_resume(
         self,
@@ -2250,6 +2380,7 @@ class CRMCog(commands.Cog):
         search_term: str | None = None,
         overwrite: bool = False,
         link_user: discord.Member | None = None,
+        create_if_not_found: bool = False,
     ) -> None:
         """Upload resume and run worker extraction to preview CRM updates."""
         try:
@@ -2311,15 +2442,12 @@ class CRMCog(commands.Cog):
                 )
                 return
 
-            requires_steering = bool(search_term) or (
-                link_user is not None and link_user.id != interaction.user.id
+            is_steering = hasattr(
+                interaction.user, "roles"
+            ) and check_user_roles_with_hierarchy(
+                interaction.user.roles, ["Steering Committee"]
             )
-            if requires_steering and (
-                not hasattr(interaction.user, "roles")
-                or not check_user_roles_with_hierarchy(
-                    interaction.user.roles, ["Steering Committee"]
-                )
-            ):
+            if search_term and not is_steering:
                 self._audit_command(
                     interaction=interaction,
                     action="crm.upload_resume",
@@ -2327,17 +2455,43 @@ class CRMCog(commands.Cog):
                     metadata={
                         "search_term": search_term,
                         "filename": file.filename,
-                        "target_scope": "other" if search_term else "self",
-                        "reason": "missing_required_role",
+                        "target_scope": "other",
+                        "reason": "missing_required_role_search",
                     },
                 )
                 await interaction.followup.send(
-                    "❌ You must have Steering Committee role or higher for this upload."
+                    "❌ You must have Steering Committee role or higher to upload a resume for another contact."
                 )
                 return
+            if (
+                link_user is not None
+                and link_user.id != interaction.user.id
+                and not is_steering
+            ):
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.upload_resume",
+                    result="denied",
+                    metadata={
+                        "filename": file.filename,
+                        "target_scope": "other",
+                        "reason": "missing_required_role_link_user",
+                    },
+                )
+                await interaction.followup.send(
+                    "❌ You must have Steering Committee role or higher to upload a resume for another Discord user."
+                )
+                return
+            if not is_steering:
+                link_user = None
+
+            # Read attachment once for Steering Committee resume-based inference.
+            file_content = await file.read()
 
             # Determine target contact
             target_contact = None
+            target_scope = "self"
+            inferred_contact_meta: dict[str, str] | None = None
 
             if search_term:
                 contacts = await self._search_contact_for_linking(search_term)
@@ -2376,6 +2530,130 @@ class CRMCog(commands.Cog):
                     return
 
                 target_contact = contacts[0]
+                target_scope = "other"
+            elif is_steering and link_user is not None:
+                # Uploading for linked user (Steering Committee+ path)
+                target_scope = "other"
+                target_contact = await self._find_contact_by_discord_id(
+                    str(link_user.id)
+                )
+                if not target_contact:
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.upload_resume",
+                        result="denied",
+                        metadata={
+                            "filename": file.filename,
+                            "target_scope": target_scope,
+                            "reason": "discord_not_linked",
+                        },
+                    )
+                    await interaction.followup.send(
+                        "❌ The provided Discord user is not linked to a CRM contact. "
+                        "Please link this user first."
+                    )
+                    return
+            elif is_steering:
+                # Uploading for contact inferred from resume content
+                (
+                    target_contact,
+                    inferred_contact_meta,
+                ) = await self._infer_contact_from_resume(file_content)
+                if not target_contact:
+                    inferred_method = (inferred_contact_meta or {}).get("method")
+                    inferred_value = (inferred_contact_meta or {}).get("value")
+                    inferred_reason = (inferred_contact_meta or {}).get(
+                        "reason", "resume_contact_not_found"
+                    )
+                    inference_metadata = {
+                        "filename": file.filename,
+                        "target_scope": "resume_inferred",
+                        "reason": inferred_reason,
+                    }
+                    if inferred_method:
+                        inference_metadata["inferred_method"] = inferred_method
+                    if inferred_value:
+                        inference_metadata["inferred_value"] = inferred_value
+
+                    if inferred_reason == "multiple_matches" and inferred_value:
+                        self._audit_command(
+                            interaction=interaction,
+                            action="crm.upload_resume",
+                            result="denied",
+                            metadata=inference_metadata,
+                        )
+                        await interaction.followup.send(
+                            f"⚠️ Multiple contacts match `{inferred_value}` from the resume. "
+                            "Please provide `search_term` or `link_user`."
+                        )
+                    elif inferred_reason == "no_matching_contact":
+                        if create_if_not_found:
+                            try:
+                                create_payload = (
+                                    self._build_resume_create_contact_payload(
+                                        file_content=file_content,
+                                        filename=file.filename,
+                                    )
+                                )
+                                created = self.espo_api.request(
+                                    "POST", "Contact", create_payload
+                                )
+                                target_contact = created
+                                target_scope = "created"
+                                if target_contact and target_contact.get("id"):
+                                    logger.info(
+                                        "Created new contact %s from resume for %s",
+                                        target_contact.get("id"),
+                                        interaction.user.name,
+                                    )
+                                else:
+                                    raise ValueError(
+                                        "Create contact returned no contact id."
+                                    )
+                            except (EspoAPIError, ValueError, TypeError) as exc:
+                                self._audit_command(
+                                    interaction=interaction,
+                                    action="crm.upload_resume",
+                                    result="error",
+                                    metadata={
+                                        "filename": file.filename,
+                                        "target_scope": "resume_inferred",
+                                        "reason": "contact_create_failed",
+                                        "error": str(exc),
+                                    },
+                                )
+                                await interaction.followup.send(
+                                    "⚠️ Could not create a contact from this resume. "
+                                    "Please provide `search_term` or `link_user`."
+                                )
+                                return
+                        else:
+                            self._audit_command(
+                                interaction=interaction,
+                                action="crm.upload_resume",
+                                result="denied",
+                                metadata=inference_metadata,
+                            )
+                            await interaction.followup.send(
+                                "⚠️ Could not find a unique contact from this resume. "
+                                "Please provide `search_term`, `link_user`, or set `create_if_not_found`."
+                            )
+                    else:
+                        self._audit_command(
+                            interaction=interaction,
+                            action="crm.upload_resume",
+                            result="denied",
+                            metadata=inference_metadata,
+                        )
+                        await interaction.followup.send(
+                            "⚠️ Resume-based contact inference failed. "
+                            "Please provide `search_term` or `link_user`."
+                        )
+                    if not target_contact:
+                        return
+
+                if target_scope != "created":
+                    target_scope = "resume"
             else:
                 # Uploading own resume - find contact by Discord user ID
                 target_contact = await self._find_contact_by_discord_id(
@@ -2414,9 +2692,6 @@ class CRMCog(commands.Cog):
                 )
                 await interaction.followup.send("❌ Contact ID not found.")
                 return
-
-            # Download file content from Discord
-            file_content = await file.read()
 
             # Upload file to EspoCRM
             try:
@@ -2457,7 +2732,7 @@ class CRMCog(commands.Cog):
                             "filename": file.filename,
                             "attachment_id": attachment_id,
                             "overwrite": overwrite,
-                            "target_scope": "other" if search_term else "self",
+                            "target_scope": target_scope,
                             "reason": "resume_link_update_failed",
                         },
                         resource_type="crm_contact",
@@ -2475,19 +2750,25 @@ class CRMCog(commands.Cog):
                     attachment_id,
                     interaction.user.name,
                 )
+                success_metadata = {
+                    "search_term": search_term,
+                    "filename": file.filename,
+                    "size_bytes": file.size,
+                    "overwrite": overwrite,
+                    "target_scope": target_scope,
+                    "attachment_id": attachment_id,
+                    "stage": "uploaded_and_linked",
+                }
+                if inferred_contact_meta:
+                    for key in ("method", "value"):
+                        value = inferred_contact_meta.get(key)
+                        if value:
+                            success_metadata[f"inferred_{key}"] = value
                 self._audit_command(
                     interaction=interaction,
                     action="crm.upload_resume",
                     result="success",
-                    metadata={
-                        "search_term": search_term,
-                        "filename": file.filename,
-                        "size_bytes": file.size,
-                        "overwrite": overwrite,
-                        "target_scope": "other" if search_term else "self",
-                        "attachment_id": attachment_id,
-                        "stage": "uploaded_and_linked",
-                    },
+                    metadata=success_metadata,
                     resource_type="crm_contact",
                     resource_id=str(contact_id),
                 )
