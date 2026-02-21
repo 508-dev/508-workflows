@@ -88,7 +88,10 @@ def _run_job(job_id: str) -> None:
 
     handler = _HANDLERS.get(job.type)
     if handler is None:
-        raise ValueError(f"Unknown job type: {job.type}")
+        error = f"Unknown job type: {job.type}"
+        logger.error("Marking job dead id=%s error=%s", job_id, error)
+        mark_job_dead(settings, job_id, attempts=job.attempts, last_error=error)
+        return
 
     mark_job_running(settings, job_id, worker_name=settings.worker_name)
 
