@@ -21,6 +21,9 @@ class WorkerSettings(SharedSettings):
     allowed_file_types: str = "pdf,doc,docx,txt"
     resume_keywords: str = "resume,cv,curriculum"
     max_attachments_per_contact: int = 3
+    crm_sync_enabled: bool = True
+    crm_sync_interval_seconds: int = 900
+    crm_sync_page_size: int = 200
 
     @property
     def allowed_file_extensions(self) -> set[str]:

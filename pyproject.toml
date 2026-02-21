@@ -62,3 +62,12 @@ exclude_lines = [
     "if 0:",
     "if __name__ == .__main__.:",
 ]
+
+[tool.mypy]
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = [
+    "apps/discord_bot/src",
+    "apps/worker/src",
+    "packages/shared/src",
+]

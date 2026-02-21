@@ -19,7 +19,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
     restart: unless-stopped
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_HOST_BIND:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -69,8 +69,6 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      postgres:
-        condition: service_healthy
 
   worker-api:
     build:
@@ -82,7 +80,10 @@ services:
     environment:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       REDIS_QUEUE_NAME: ${REDIS_QUEUE_NAME:-jobs.default}
-      POSTGRES_URL: ${POSTGRES_URL:-postgresql://postgres:postgres@postgres:5432/workflows}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-workflows}
+      POSTGRES_URL: ${POSTGRES_URL}
       JOB_MAX_ATTEMPTS: ${JOB_MAX_ATTEMPTS:-8}
       JOB_RETRY_BASE_SECONDS: ${JOB_RETRY_BASE_SECONDS:-5}
       JOB_RETRY_MAX_SECONDS: ${JOB_RETRY_MAX_SECONDS:-300}
@@ -98,6 +99,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     ports:
       - "${WEBHOOK_INGEST_PORT:-8090}:${WEBHOOK_INGEST_PORT:-8090}"
 
@@ -112,7 +115,10 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       REDIS_QUEUE_NAME: ${REDIS_QUEUE_NAME:-jobs.default}
       WORKER_QUEUE_NAMES: ${WORKER_QUEUE_NAMES:-jobs.default}
-      POSTGRES_URL: ${POSTGRES_URL:-postgresql://postgres:postgres@postgres:5432/workflows}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-workflows}
+      POSTGRES_URL: ${POSTGRES_URL}
       JOB_MAX_ATTEMPTS: ${JOB_MAX_ATTEMPTS:-8}
       JOB_RETRY_BASE_SECONDS: ${JOB_RETRY_BASE_SECONDS:-5}
       JOB_RETRY_MAX_SECONDS: ${JOB_RETRY_MAX_SECONDS:-300}
@@ -128,6 +134,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
 
 volumes:
   redis-data:

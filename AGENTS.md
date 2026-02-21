@@ -25,10 +25,16 @@ This repo contains multiple services:
 - `apps/worker`: webhook ingest API and queue consumer
 - `docker-compose.yml`: stack orchestration with Redis, Postgres, and MinIO
 
+4. Human audit logging
+- Human-triggered CRM actions from Discord should write to the worker audit ingest endpoint.
+- Audit logging must be best effort: command flows should never fail if audit writes fail.
+- Keep reusable audit-write logic outside individual cogs.
+
 ## Common Paths
 
 - Bot core: `apps/discord_bot/src/five08/discord_bot/bot.py`
 - Bot config: `apps/discord_bot/src/five08/discord_bot/config.py`
+- Bot audit helper: `apps/discord_bot/src/five08/discord_bot/utils/audit.py`
 - Worker API: `apps/worker/src/five08/worker/api.py`
 - Worker consumer: `apps/worker/src/five08/worker/consumer.py`
 - Shared settings: `packages/shared/src/five08/settings.py`
@@ -87,6 +93,7 @@ async def setup(bot: commands.Bot) -> None:
 - Add shared env/config in `packages/shared/src/five08/settings.py`.
 - Add service-specific settings in local service `config.py` by subclassing shared settings.
 - Keep secrets in env vars, not code.
+- For Discord CRM audit writes, use `AUDIT_API_BASE_URL` and shared `WEBHOOK_SHARED_SECRET`.
 
 ## Agent Guidelines
 

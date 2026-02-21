@@ -109,6 +109,13 @@ async def setup(bot: commands.Bot) -> None:
   - extract skills (LLM when configured, heuristic fallback otherwise)
   - update contact skills field in EspoCRM
 - Manual queueing is available via `POST /process-contact/{contact_id}`.
+- Human action audit ingest is available at `POST /audit/events`.
+
+## Discord CRM Audit Flow
+
+- CRM slash commands in `apps/discord_bot/src/five08/discord_bot/cogs/crm.py` emit best-effort audit events for human actions.
+- Audit writing is centralized in `apps/discord_bot/src/five08/discord_bot/utils/audit.py`.
+- Audit writes must never break command execution; failures are logged as warnings only.
 
 ## Environment Variables
 
@@ -116,6 +123,7 @@ Use `.env.example` as source of truth. Key categories:
 
 - Shared queue/runtime: `REDIS_URL`, `REDIS_QUEUE_NAME`, `POSTGRES_URL`, `JOB_MAX_ATTEMPTS`, `JOB_RETRY_BASE_SECONDS`, `JOB_RETRY_MAX_SECONDS`, `LOG_LEVEL`, webhook settings
 - Bot credentials/integrations: Discord, email, Espo, Kimai
+- Discord CRM audit writer: `AUDIT_API_BASE_URL`, `AUDIT_API_TIMEOUT_SECONDS` (plus shared `WEBHOOK_SHARED_SECRET`)
 - Worker controls: `WORKER_NAME`, `WORKER_QUEUE_NAMES`, `WORKER_BURST`
 - Worker CRM processing: `MAX_ATTACHMENTS_PER_CONTACT`, `MAX_FILE_SIZE_MB`, `ALLOWED_FILE_TYPES`, `RESUME_KEYWORDS`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`
 

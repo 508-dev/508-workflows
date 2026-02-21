@@ -14,6 +14,7 @@ import discord
 
 from five08.discord_bot.config import settings
 from five08.clients import espo
+from five08.discord_bot.utils.audit import DiscordAuditLogger
 from five08.discord_bot.utils.role_decorators import (
     require_role,
     check_user_roles_with_hierarchy,
@@ -73,6 +74,14 @@ class ResumeDownloadButton(discord.ui.Button[discord.ui.View]):
 
             # Check if user has Member role
             if not cog._check_member_role(interaction):
+                cog._audit_command(
+                    interaction=interaction,
+                    action="crm.resume_download_button",
+                    result="denied",
+                    metadata={"reason": "missing_member_role"},
+                    resource_type="discord_ui_action",
+                    resource_id=self.resume_id,
+                )
                 await interaction.response.send_message(
                     "❌ You must have the Member role to download resumes.",
                     ephemeral=True,
@@ -82,12 +91,29 @@ class ResumeDownloadButton(discord.ui.Button[discord.ui.View]):
             await interaction.response.defer(ephemeral=True)
 
             # Use shared download method
-            await cog._download_and_send_resume(
+            download_ok = await cog._download_and_send_resume(
                 interaction, self.contact_name, self.resume_id
+            )
+            cog._audit_command(
+                interaction=interaction,
+                action="crm.resume_download_button",
+                result="success" if download_ok else "error",
+                metadata={"contact_name": self.contact_name},
+                resource_type="crm_contact",
+                resource_id=self.resume_id,
             )
 
         except Exception as e:
             logger.error(f"Unexpected error in resume button callback: {e}")
+            if "cog" in locals() and cog:
+                cog._audit_command(
+                    interaction=interaction,
+                    action="crm.resume_download_button",
+                    result="error",
+                    metadata={"error": str(e)},
+                    resource_type="discord_ui_action",
+                    resource_id=self.resume_id,
+                )
             await interaction.followup.send(
                 "❌ An unexpected error occurred while downloading the resume."
             )
@@ -331,10 +357,35 @@ class CRMCog(commands.Cog):
         self.espo_api = EspoAPI(api_url, settings.espo_api_key)
         # Store base URL for profile links
         self.base_url = settings.espo_base_url.rstrip("/")
+        self.audit_logger = DiscordAuditLogger(
+            base_url=settings.audit_api_base_url,
+            shared_secret=settings.webhook_shared_secret,
+            timeout_seconds=settings.audit_api_timeout_seconds,
+        )
+
+    def _audit_command(
+        self,
+        *,
+        interaction: discord.Interaction,
+        action: str,
+        result: str,
+        metadata: dict[str, Any] | None = None,
+        resource_type: str | None = "discord_command",
+        resource_id: str | None = None,
+    ) -> None:
+        """Queue a best-effort audit write for CRM command activity."""
+        self.audit_logger.log_command(
+            interaction=interaction,
+            action=action,
+            result=result,
+            metadata=metadata,
+            resource_type=resource_type,
+            resource_id=resource_id,
+        )
 
     async def _download_and_send_resume(
         self, interaction: discord.Interaction, contact_name: str, resume_id: str
-    ) -> None:
+    ) -> bool:
         """Download and send a resume file as a Discord attachment."""
         try:
             # Download the resume file
@@ -351,10 +402,12 @@ class CRMCog(commands.Cog):
             await interaction.followup.send(
                 f"📄 Resume for **{contact_name}**:", file=discord_file
             )
+            return True
 
         except EspoAPIError as e:
             logger.error(f"Failed to download resume {resume_id}: {e}")
             await interaction.followup.send(f"❌ Failed to download resume: {str(e)}")
+            return False
 
     def _check_member_role(self, interaction: discord.Interaction) -> bool:
         """Check if user has Member role or higher for resume access."""
@@ -388,6 +441,12 @@ class CRMCog(commands.Cog):
             )
 
             if not query_value and not skills_list:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.search_members",
+                    result="denied",
+                    metadata={"reason": "missing_query_and_skills"},
+                )
                 await interaction.followup.send(
                     "❌ Please provide a search term or skills to search by."
                 )
@@ -450,6 +509,16 @@ class CRMCog(commands.Cog):
             contacts = response.get("list", [])
 
             if not contacts:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.search_members",
+                    result="success",
+                    metadata={
+                        "query": query_value or None,
+                        "skills": skills_list,
+                        "contacts_found": 0,
+                    },
+                )
                 await interaction.followup.send(
                     f"🔍 No contacts found for: {search_summary}"
                 )
@@ -535,11 +604,35 @@ class CRMCog(commands.Cog):
             else:
                 await interaction.followup.send(embed=embed)
 
+            self._audit_command(
+                interaction=interaction,
+                action="crm.search_members",
+                result="success",
+                metadata={
+                    "query": query_value or None,
+                    "skills": skills_list,
+                    "contacts_found": len(contacts),
+                    "resume_button_count": len(view.children),
+                },
+            )
+
         except EspoAPIError as e:
             logger.error(f"EspoCRM API error: {e}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.search_members",
+                result="error",
+                metadata={"error": str(e)},
+            )
             await interaction.followup.send(f"❌ CRM API error: {str(e)}")
         except Exception as e:
             logger.error(f"Unexpected error in CRM search: {e}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.search_members",
+                result="error",
+                metadata={"error": str(e)},
+            )
             await interaction.followup.send(
                 "❌ An unexpected error occurred while searching the CRM."
             )
@@ -565,9 +658,21 @@ class CRMCog(commands.Cog):
             embed.add_field(name="Base URL", value=settings.espo_base_url, inline=True)
 
             await interaction.followup.send(embed=embed)
+            self._audit_command(
+                interaction=interaction,
+                action="crm.status",
+                result="success",
+                metadata={"connected_as": user_name},
+            )
 
         except EspoAPIError as e:
             logger.error(f"EspoCRM API error: {e}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.status",
+                result="error",
+                metadata={"error": str(e)},
+            )
             embed = discord.Embed(
                 title="❌ CRM Status",
                 description=f"Failed to connect to EspoCRM: {str(e)}",
@@ -576,6 +681,12 @@ class CRMCog(commands.Cog):
             await interaction.followup.send(embed=embed)
         except Exception as e:
             logger.error(f"Unexpected error in CRM status: {e}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.status",
+                result="error",
+                metadata={"error": str(e)},
+            )
             embed = discord.Embed(
                 title="❌ CRM Status",
                 description="An unexpected error occurred while checking CRM status.",
@@ -636,6 +747,12 @@ class CRMCog(commands.Cog):
             contacts = response.get("list", [])
 
             if not contacts:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.get_resume",
+                    result="success",
+                    metadata={"query": query, "contact_found": False},
+                )
                 await interaction.followup.send(f"❌ No contact found for: `{query}`")
                 return
 
@@ -647,6 +764,16 @@ class CRMCog(commands.Cog):
             resume_names = contact.get("resumeNames", {})
 
             if not resume_ids or len(resume_ids) == 0:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.get_resume",
+                    result="success",
+                    metadata={
+                        "query": query,
+                        "contact_found": True,
+                        "has_resume": False,
+                    },
+                )
                 await interaction.followup.send(
                     f"❌ No resume found for {contact_name}"
                 )
@@ -661,13 +788,40 @@ class CRMCog(commands.Cog):
             )
 
             # Use shared download method
-            await self._download_and_send_resume(interaction, contact_name, resume_id)
+            download_ok = await self._download_and_send_resume(
+                interaction, contact_name, resume_id
+            )
+            self._audit_command(
+                interaction=interaction,
+                action="crm.get_resume",
+                result="success" if download_ok else "error",
+                metadata={
+                    "query": query,
+                    "contact_found": True,
+                    "has_resume": True,
+                    "download_ok": download_ok,
+                },
+                resource_type="crm_contact",
+                resource_id=str(contact.get("id", "")),
+            )
 
         except EspoAPIError as e:
             logger.error(f"EspoCRM API error in get_resume: {e}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.get_resume",
+                result="error",
+                metadata={"query": query, "error": str(e)},
+            )
             await interaction.followup.send(f"❌ CRM API error: {str(e)}")
         except Exception as e:
             logger.error(f"Unexpected error in get_resume: {e}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.get_resume",
+                result="error",
+                metadata={"query": query, "error": str(e)},
+            )
             await interaction.followup.send(
                 "❌ An unexpected error occurred while fetching the resume."
             )
@@ -818,8 +972,32 @@ class CRMCog(commands.Cog):
                     f"Discord user {user.name} (ID: {user.id}) linked to CRM contact "
                     f"{contact_name} (ID: {contact_id}) by {interaction.user.name}"
                 )
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.link_discord_user.execute",
+                    result="success",
+                    metadata={
+                        "linked_user_id": str(user.id),
+                        "linked_username": user.name,
+                        "contact_name": contact_name,
+                    },
+                    resource_type="crm_contact",
+                    resource_id=str(contact_id),
+                )
                 return True
             else:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.link_discord_user.execute",
+                    result="error",
+                    metadata={
+                        "linked_user_id": str(user.id),
+                        "contact_name": contact_name,
+                        "error": "crm_update_failed",
+                    },
+                    resource_type="crm_contact",
+                    resource_id=str(contact_id),
+                )
                 await interaction.followup.send(
                     "❌ Failed to update contact in CRM. Please try again."
                 )
@@ -827,10 +1005,22 @@ class CRMCog(commands.Cog):
 
         except EspoAPIError as e:
             logger.error(f"EspoCRM API error in _perform_discord_linking: {e}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.link_discord_user.execute",
+                result="error",
+                metadata={"linked_user_id": str(user.id), "error": str(e)},
+            )
             await interaction.followup.send(f"❌ CRM API error: {str(e)}")
             return False
         except Exception as e:
             logger.error(f"Unexpected error in _perform_discord_linking: {e}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.link_discord_user.execute",
+                result="error",
+                metadata={"linked_user_id": str(user.id), "error": str(e)},
+            )
             await interaction.followup.send(
                 "❌ An unexpected error occurred while linking the user."
             )
@@ -895,6 +1085,16 @@ class CRMCog(commands.Cog):
             contacts = await self._search_contact_for_linking(search_term)
 
             if not contacts:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.link_discord_user",
+                    result="success",
+                    metadata={
+                        "search_term": search_term,
+                        "linked_user_id": str(user.id),
+                        "contacts_found": 0,
+                    },
+                )
                 await interaction.followup.send(
                     f"❌ No contact found for: `{search_term}`"
                 )
@@ -902,6 +1102,17 @@ class CRMCog(commands.Cog):
 
             # Handle multiple results - show choices
             if len(contacts) > 1:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.link_discord_user",
+                    result="success",
+                    metadata={
+                        "search_term": search_term,
+                        "linked_user_id": str(user.id),
+                        "contacts_found": len(contacts),
+                        "requires_selection": True,
+                    },
+                )
                 await self._show_contact_choices(
                     interaction, user, search_term, contacts
                 )
@@ -909,13 +1120,46 @@ class CRMCog(commands.Cog):
 
             # Single result - proceed with linking
             contact = contacts[0]
+            self._audit_command(
+                interaction=interaction,
+                action="crm.link_discord_user",
+                result="success",
+                metadata={
+                    "search_term": search_term,
+                    "linked_user_id": str(user.id),
+                    "contacts_found": 1,
+                    "requires_selection": False,
+                },
+                resource_type="crm_contact",
+                resource_id=str(contact.get("id", "")),
+            )
             await self._perform_discord_linking(interaction, user, contact)
 
         except EspoAPIError as e:
             logger.error(f"EspoCRM API error in link_discord_user: {e}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.link_discord_user",
+                result="error",
+                metadata={
+                    "search_term": search_term,
+                    "linked_user_id": str(user.id),
+                    "error": str(e),
+                },
+            )
             await interaction.followup.send(f"❌ CRM API error: {str(e)}")
         except Exception as e:
             logger.error(f"Unexpected error in link_discord_user: {e}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.link_discord_user",
+                result="error",
+                metadata={
+                    "search_term": search_term,
+                    "linked_user_id": str(user.id),
+                    "error": str(e),
+                },
+            )
             await interaction.followup.send(
                 "❌ An unexpected error occurred while linking the Discord user."
             )
@@ -931,6 +1175,12 @@ class CRMCog(commands.Cog):
             await interaction.response.defer(ephemeral=True)
 
             if not interaction.guild:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.unlinked_discord_users",
+                    result="denied",
+                    metadata={"reason": "not_in_guild"},
+                )
                 await interaction.followup.send(
                     "❌ This command can only be used in a server."
                 )
@@ -953,6 +1203,12 @@ class CRMCog(commands.Cog):
                     unlinked_users.append(member)
 
             if not unlinked_users:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.unlinked_discord_users",
+                    result="success",
+                    metadata={"unlinked_count": 0},
+                )
                 await interaction.followup.send(
                     "✅ **All Members Linked**\nAll Discord users with Member role are linked in the CRM!"
                 )
@@ -960,12 +1216,30 @@ class CRMCog(commands.Cog):
 
             # Send list of unlinked users
             await self._send_unlinked_users_list(interaction, unlinked_users)
+            self._audit_command(
+                interaction=interaction,
+                action="crm.unlinked_discord_users",
+                result="success",
+                metadata={"unlinked_count": len(unlinked_users)},
+            )
 
         except EspoAPIError as e:
             logger.error(f"EspoCRM API error in unlinked_discord_users: {e}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.unlinked_discord_users",
+                result="error",
+                metadata={"error": str(e)},
+            )
             await interaction.followup.send(f"❌ CRM API error: {str(e)}")
         except Exception as e:
             logger.error(f"Unexpected error in unlinked_discord_users: {e}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.unlinked_discord_users",
+                result="error",
+                metadata={"error": str(e)},
+            )
             await interaction.followup.send(
                 "❌ An unexpected error occurred while checking unlinked users."
             )
@@ -1086,6 +1360,15 @@ class CRMCog(commands.Cog):
                 ) or not check_user_roles_with_hierarchy(
                     interaction.user.roles, ["Steering Committee"]
                 ):
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.set_github_username",
+                        result="denied",
+                        metadata={
+                            "search_term": search_term,
+                            "reason": "missing_required_role",
+                        },
+                    )
                     await interaction.followup.send(
                         "❌ You must have Steering Committee role or higher to set GitHub usernames for other people."
                     )
@@ -1094,11 +1377,32 @@ class CRMCog(commands.Cog):
                 # Search for target contact
                 contacts = await self._search_contact_for_linking(search_term)
                 if not contacts:
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.set_github_username",
+                        result="success",
+                        metadata={
+                            "search_term": search_term,
+                            "contact_found": False,
+                            "target_scope": "other",
+                        },
+                    )
                     await interaction.followup.send(
                         f"❌ No contact found for: `{search_term}`"
                     )
                     return
                 elif len(contacts) > 1:
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.set_github_username",
+                        result="success",
+                        metadata={
+                            "search_term": search_term,
+                            "contact_found": False,
+                            "target_scope": "other",
+                            "reason": "multiple_contacts",
+                        },
+                    )
                     await interaction.followup.send(
                         f"❌ Multiple contacts found for `{search_term}`. Please be more specific or use the contact ID."
                     )
@@ -1111,6 +1415,15 @@ class CRMCog(commands.Cog):
                     str(interaction.user.id)
                 )
                 if not target_contact:
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.set_github_username",
+                        result="denied",
+                        metadata={
+                            "target_scope": "self",
+                            "reason": "discord_not_linked",
+                        },
+                    )
                     await interaction.followup.send(
                         "❌ Your Discord account is not linked to a CRM contact. "
                         "Please ask a Steering Committee member to link your account first."
@@ -1121,6 +1434,15 @@ class CRMCog(commands.Cog):
             contact_name = target_contact.get("name", "Unknown")
 
             if not contact_id:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.set_github_username",
+                    result="error",
+                    metadata={
+                        "search_term": search_term,
+                        "error": "contact_id_missing",
+                    },
+                )
                 await interaction.followup.send("❌ Contact ID not found.")
                 return
 
@@ -1166,16 +1488,52 @@ class CRMCog(commands.Cog):
                     f"GitHub username set for {contact_name} (ID: {contact_id}) "
                     f"to @{clean_github_username} by {interaction.user.name}"
                 )
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.set_github_username",
+                    result="success",
+                    metadata={
+                        "search_term": search_term,
+                        "github_username": clean_github_username,
+                        "target_scope": "other" if search_term else "self",
+                    },
+                    resource_type="crm_contact",
+                    resource_id=str(contact_id),
+                )
             else:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.set_github_username",
+                    result="error",
+                    metadata={
+                        "search_term": search_term,
+                        "github_username": clean_github_username,
+                        "error": "crm_update_failed",
+                    },
+                    resource_type="crm_contact",
+                    resource_id=str(contact_id),
+                )
                 await interaction.followup.send(
                     "❌ Failed to update contact in CRM. Please try again."
                 )
 
         except EspoAPIError as e:
             logger.error(f"EspoCRM API error in set_github_username: {e}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.set_github_username",
+                result="error",
+                metadata={"search_term": search_term, "error": str(e)},
+            )
             await interaction.followup.send(f"❌ CRM API error: {str(e)}")
         except Exception as e:
             logger.error(f"Unexpected error in set_github_username: {e}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.set_github_username",
+                result="error",
+                metadata={"search_term": search_term, "error": str(e)},
+            )
             await interaction.followup.send(
                 "❌ An unexpected error occurred while setting the GitHub username."
             )
@@ -1275,6 +1633,15 @@ class CRMCog(commands.Cog):
             )
 
             if file_extension not in valid_extensions:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.upload_resume",
+                    result="denied",
+                    metadata={
+                        "filename": file.filename,
+                        "reason": "invalid_file_type",
+                    },
+                )
                 await interaction.followup.send(
                     f"❌ Invalid file type. Please upload a PDF, DOC, or DOCX file.\nYou uploaded: `{file.filename}`"
                 )
@@ -1283,6 +1650,16 @@ class CRMCog(commands.Cog):
             # Validate file size (10MB limit)
             max_size = 10 * 1024 * 1024  # 10MB in bytes
             if file.size > max_size:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.upload_resume",
+                    result="denied",
+                    metadata={
+                        "filename": file.filename,
+                        "size_bytes": file.size,
+                        "reason": "file_too_large",
+                    },
+                )
                 await interaction.followup.send(
                     f"❌ File too large. Maximum size is 10MB.\nYour file: {file.size / (1024 * 1024):.1f}MB"
                 )
@@ -1298,6 +1675,16 @@ class CRMCog(commands.Cog):
                 ) or not check_user_roles_with_hierarchy(
                     interaction.user.roles, ["Steering Committee"]
                 ):
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.upload_resume",
+                        result="denied",
+                        metadata={
+                            "search_term": search_term,
+                            "filename": file.filename,
+                            "reason": "missing_required_role",
+                        },
+                    )
                     await interaction.followup.send(
                         "❌ You must have Steering Committee role or higher to upload resumes for other people."
                     )
@@ -1306,11 +1693,34 @@ class CRMCog(commands.Cog):
                 # Search for target contact
                 contacts = await self._search_contact_for_linking(search_term)
                 if not contacts:
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.upload_resume",
+                        result="success",
+                        metadata={
+                            "search_term": search_term,
+                            "filename": file.filename,
+                            "contact_found": False,
+                            "target_scope": "other",
+                        },
+                    )
                     await interaction.followup.send(
                         f"❌ No contact found for: `{search_term}`"
                     )
                     return
                 elif len(contacts) > 1:
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.upload_resume",
+                        result="success",
+                        metadata={
+                            "search_term": search_term,
+                            "filename": file.filename,
+                            "contact_found": False,
+                            "target_scope": "other",
+                            "reason": "multiple_contacts",
+                        },
+                    )
                     await interaction.followup.send(
                         f"❌ Multiple contacts found for `{search_term}`. Please be more specific or use the contact ID."
                     )
@@ -1323,6 +1733,16 @@ class CRMCog(commands.Cog):
                     str(interaction.user.id)
                 )
                 if not target_contact:
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.upload_resume",
+                        result="denied",
+                        metadata={
+                            "filename": file.filename,
+                            "target_scope": "self",
+                            "reason": "discord_not_linked",
+                        },
+                    )
                     await interaction.followup.send(
                         "❌ Your Discord account is not linked to a CRM contact. "
                         "Please ask a Steering Committee member to link your account first."
@@ -1333,6 +1753,16 @@ class CRMCog(commands.Cog):
             contact_name = target_contact.get("name", "Unknown")
 
             if not contact_id:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.upload_resume",
+                    result="error",
+                    metadata={
+                        "search_term": search_term,
+                        "filename": file.filename,
+                        "error": "contact_id_missing",
+                    },
+                )
                 await interaction.followup.send("❌ Contact ID not found.")
                 return
 
@@ -1342,6 +1772,19 @@ class CRMCog(commands.Cog):
             )
 
             if has_duplicate:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.upload_resume",
+                    result="success",
+                    metadata={
+                        "search_term": search_term,
+                        "filename": file.filename,
+                        "target_scope": "other" if search_term else "self",
+                        "duplicate_found": True,
+                    },
+                    resource_type="crm_contact",
+                    resource_id=str(contact_id),
+                )
                 # Show confirmation dialog
                 embed = discord.Embed(
                     title="⚠️ Duplicate Resume Detected",
@@ -1385,6 +1828,18 @@ class CRMCog(commands.Cog):
 
                 attachment_id = attachment.get("id")
                 if not attachment_id:
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.upload_resume",
+                        result="error",
+                        metadata={
+                            "search_term": search_term,
+                            "filename": file.filename,
+                            "error": "attachment_id_missing",
+                        },
+                        resource_type="crm_contact",
+                        resource_id=str(contact_id),
+                    )
                     await interaction.followup.send("❌ Failed to upload file to CRM.")
                     return
 
@@ -1418,19 +1873,68 @@ class CRMCog(commands.Cog):
                         f"Resume uploaded for {contact_name} (ID: {contact_id}) "
                         f"by {interaction.user.name}: {file.filename}"
                     )
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.upload_resume",
+                        result="success",
+                        metadata={
+                            "search_term": search_term,
+                            "filename": file.filename,
+                            "size_bytes": file.size,
+                            "overwrite": overwrite,
+                            "target_scope": "other" if search_term else "self",
+                        },
+                        resource_type="crm_contact",
+                        resource_id=str(contact_id),
+                    )
                 else:
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.upload_resume",
+                        result="error",
+                        metadata={
+                            "search_term": search_term,
+                            "filename": file.filename,
+                            "overwrite": overwrite,
+                            "error": "resume_link_update_failed",
+                        },
+                        resource_type="crm_contact",
+                        resource_id=str(contact_id),
+                    )
                     await interaction.followup.send(
                         "⚠️ File uploaded but failed to link to contact. Please check CRM manually."
                     )
 
             except EspoAPIError as e:
                 logger.error(f"Failed to upload file to EspoCRM: {e}")
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.upload_resume",
+                    result="error",
+                    metadata={
+                        "search_term": search_term,
+                        "filename": file.filename,
+                        "error": str(e),
+                    },
+                    resource_type="crm_contact",
+                    resource_id=str(contact_id),
+                )
                 await interaction.followup.send(
                     f"❌ Failed to upload file to CRM: {str(e)}"
                 )
 
         except Exception as e:
             logger.error(f"Unexpected error in upload_resume: {e}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.upload_resume",
+                result="error",
+                metadata={
+                    "search_term": search_term,
+                    "filename": file.filename,
+                    "error": str(e),
+                },
+            )
             await interaction.followup.send(
                 "❌ An unexpected error occurred while uploading the resume."
             )
