@@ -84,8 +84,8 @@ def _extract_idempotency_key(value: object) -> str | None:
 
 
 def _resume_extract_model_name() -> str:
-    if settings.openai_api_key and settings.openai_model:
-        return settings.openai_model
+    if settings.openai_api_key:
+        return settings.resolved_resume_ai_model
     return "heuristic"
 
 

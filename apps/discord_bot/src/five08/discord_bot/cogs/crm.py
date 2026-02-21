@@ -17,6 +17,7 @@ from discord.ext import commands
 
 from five08.discord_bot.config import settings
 from five08.clients import espo
+from five08.skills import normalize_skill_list
 from five08.discord_bot.utils.audit import DiscordAuditLogger
 from five08.discord_bot.utils.role_decorators import (
     require_role,
@@ -398,6 +399,19 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             )
         except Exception as exc:
             logger.error("Failed to enqueue resume apply job: %s", exc)
+            self.crm_cog._audit_command(
+                interaction=interaction,
+                action="crm.upload_resume",
+                result="error",
+                metadata={
+                    "stage": "apply_enqueue",
+                    "error": str(exc),
+                    "proposed_updates_count": len(self.proposed_updates),
+                    "link_member_requested": bool(self.link_discord),
+                },
+                resource_type="crm_contact",
+                resource_id=self.contact_id,
+            )
             await interaction.followup.send(
                 "❌ Failed to enqueue CRM apply job. Please try again."
             )
@@ -410,6 +424,17 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         apply_result = await self.crm_cog._wait_for_worker_job_result(apply_job_id)
 
         if not apply_result:
+            self.crm_cog._audit_command(
+                interaction=interaction,
+                action="crm.upload_resume",
+                result="error",
+                metadata={
+                    "stage": "apply_timeout",
+                    "job_id": apply_job_id,
+                },
+                resource_type="crm_contact",
+                resource_id=self.contact_id,
+            )
             await interaction.followup.send(
                 "⚠️ Timed out waiting for apply job. Please check again shortly."
             )
@@ -417,6 +442,19 @@ class ResumeUpdateConfirmationView(discord.ui.View):
 
         status = str(apply_result.get("status", "unknown"))
         if status != "succeeded":
+            self.crm_cog._audit_command(
+                interaction=interaction,
+                action="crm.upload_resume",
+                result="error",
+                metadata={
+                    "stage": "apply_failed",
+                    "job_id": apply_job_id,
+                    "job_status": status,
+                    "last_error": str(apply_result.get("last_error", "")),
+                },
+                resource_type="crm_contact",
+                resource_id=self.contact_id,
+            )
             await interaction.followup.send(
                 f"❌ Apply job failed (status: {status}). "
                 f"Error: {apply_result.get('last_error') or 'Unknown error'}"
@@ -442,6 +480,20 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         )
         profile_url = f"{self.crm_cog.base_url}/#Contact/view/{self.contact_id}"
         embed.add_field(name="🔗 CRM Profile", value=f"[View in CRM]({profile_url})")
+        self.crm_cog._audit_command(
+            interaction=interaction,
+            action="crm.upload_resume",
+            result="success",
+            metadata={
+                "stage": "apply_succeeded",
+                "job_id": apply_job_id,
+                "updated_fields": updated_fields,
+                "proposed_updates_count": len(self.proposed_updates),
+                "link_member_requested": bool(self.link_discord),
+            },
+            resource_type="crm_contact",
+            resource_id=self.contact_id,
+        )
         await interaction.followup.send(embed=embed)
 
         for item in self.children:
@@ -462,6 +514,18 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         button: discord.ui.Button["ResumeUpdateConfirmationView"],
     ) -> None:
         """Cancel CRM updates after preview."""
+        self.crm_cog._audit_command(
+            interaction=interaction,
+            action="crm.upload_resume",
+            result="denied",
+            metadata={
+                "stage": "apply_cancelled",
+                "proposed_updates_count": len(self.proposed_updates),
+                "link_member_requested": bool(self.link_discord),
+            },
+            resource_type="crm_contact",
+            resource_id=self.contact_id,
+        )
         await interaction.response.send_message(
             "No CRM profile updates were applied.", ephemeral=True
         )
@@ -719,6 +783,19 @@ class CRMCog(commands.Cog):
             )
         except Exception as exc:
             logger.error("Failed to enqueue resume extract job: %s", exc)
+            self._audit_command(
+                interaction=interaction,
+                action="crm.upload_resume",
+                result="error",
+                metadata={
+                    "filename": filename,
+                    "attachment_id": attachment_id,
+                    "stage": "extract_enqueue",
+                    "error": str(exc),
+                },
+                resource_type="crm_contact",
+                resource_id=str(contact_id),
+            )
             await interaction.followup.send(
                 "⚠️ Resume uploaded, but extraction job could not be enqueued.",
                 ephemeral=True,
@@ -734,12 +811,39 @@ class CRMCog(commands.Cog):
             job = await self._wait_for_worker_job_result(job_id)
         except Exception as exc:
             logger.error("Worker polling failed for job_id=%s error=%s", job_id, exc)
+            self._audit_command(
+                interaction=interaction,
+                action="crm.upload_resume",
+                result="error",
+                metadata={
+                    "filename": filename,
+                    "attachment_id": attachment_id,
+                    "job_id": job_id,
+                    "stage": "extract_polling",
+                    "error": str(exc),
+                },
+                resource_type="crm_contact",
+                resource_id=str(contact_id),
+            )
             await interaction.followup.send(
                 "⚠️ Resume uploaded, but extraction polling failed.",
                 ephemeral=True,
             )
             return
         if not job:
+            self._audit_command(
+                interaction=interaction,
+                action="crm.upload_resume",
+                result="error",
+                metadata={
+                    "filename": filename,
+                    "attachment_id": attachment_id,
+                    "job_id": job_id,
+                    "stage": "extract_timeout",
+                },
+                resource_type="crm_contact",
+                resource_id=str(contact_id),
+            )
             await interaction.followup.send(
                 "⚠️ Timed out waiting for extraction result. Try again in a moment.",
                 ephemeral=True,
@@ -748,6 +852,21 @@ class CRMCog(commands.Cog):
 
         status = str(job.get("status", "unknown"))
         if status != "succeeded":
+            self._audit_command(
+                interaction=interaction,
+                action="crm.upload_resume",
+                result="error",
+                metadata={
+                    "filename": filename,
+                    "attachment_id": attachment_id,
+                    "job_id": job_id,
+                    "stage": "extract_failed",
+                    "job_status": status,
+                    "last_error": str(job.get("last_error", "")),
+                },
+                resource_type="crm_contact",
+                resource_id=str(contact_id),
+            )
             await interaction.followup.send(
                 f"❌ Extraction job failed (status: {status}). "
                 f"Error: {job.get('last_error') or 'Unknown error'}",
@@ -757,6 +876,19 @@ class CRMCog(commands.Cog):
 
         result = job.get("result")
         if not isinstance(result, dict):
+            self._audit_command(
+                interaction=interaction,
+                action="crm.upload_resume",
+                result="error",
+                metadata={
+                    "filename": filename,
+                    "attachment_id": attachment_id,
+                    "job_id": job_id,
+                    "stage": "extract_malformed_result",
+                },
+                resource_type="crm_contact",
+                resource_id=str(contact_id),
+            )
             await interaction.followup.send(
                 "❌ Extraction result was empty or malformed.",
                 ephemeral=True,
@@ -764,6 +896,20 @@ class CRMCog(commands.Cog):
             return
 
         if not result.get("success", False):
+            self._audit_command(
+                interaction=interaction,
+                action="crm.upload_resume",
+                result="error",
+                metadata={
+                    "filename": filename,
+                    "attachment_id": attachment_id,
+                    "job_id": job_id,
+                    "stage": "extract_unsuccessful",
+                    "error": str(result.get("error", "")),
+                },
+                resource_type="crm_contact",
+                resource_id=str(contact_id),
+            )
             await interaction.followup.send(
                 f"❌ Resume extraction failed: {result.get('error') or 'Unknown error'}",
                 ephemeral=True,
@@ -778,6 +924,19 @@ class CRMCog(commands.Cog):
         )
 
         if not proposed_updates and not link_member:
+            self._audit_command(
+                interaction=interaction,
+                action="crm.upload_resume",
+                result="success",
+                metadata={
+                    "filename": filename,
+                    "attachment_id": attachment_id,
+                    "job_id": job_id,
+                    "stage": "preview_no_changes",
+                },
+                resource_type="crm_contact",
+                resource_id=str(contact_id),
+            )
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
@@ -795,6 +954,21 @@ class CRMCog(commands.Cog):
             contact_name=contact_name,
             proposed_updates=proposed_updates,
             link_discord=link_discord_payload,
+        )
+        self._audit_command(
+            interaction=interaction,
+            action="crm.upload_resume",
+            result="success",
+            metadata={
+                "filename": filename,
+                "attachment_id": attachment_id,
+                "job_id": job_id,
+                "stage": "preview_ready",
+                "proposed_updates_count": len(proposed_updates),
+                "link_member_requested": bool(link_member),
+            },
+            resource_type="crm_contact",
+            resource_id=str(contact_id),
         )
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
@@ -849,11 +1023,12 @@ class CRMCog(commands.Cog):
             await interaction.response.defer(ephemeral=True)
 
             query_value = (query or "").strip()
-            skills_list = (
+            raw_skills_list = (
                 [skill.strip() for skill in skills.split(",") if skill.strip()]
                 if skills
                 else []
             )
+            skills_list = normalize_skill_list(raw_skills_list)
 
             if not query_value and not skills_list:
                 self._audit_command(
@@ -2038,6 +2213,15 @@ class CRMCog(commands.Cog):
             await interaction.response.defer(ephemeral=True)
 
             if not settings.api_shared_secret:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.upload_resume",
+                    result="error",
+                    metadata={
+                        "filename": file.filename,
+                        "reason": "api_shared_secret_missing",
+                    },
+                )
                 await interaction.followup.send(
                     "❌ API_SHARED_SECRET is not configured for worker API access."
                 )
@@ -2093,6 +2277,17 @@ class CRMCog(commands.Cog):
                     interaction.user.roles, ["Steering Committee"]
                 )
             ):
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.upload_resume",
+                    result="denied",
+                    metadata={
+                        "search_term": search_term,
+                        "filename": file.filename,
+                        "target_scope": "other" if search_term else "self",
+                        "reason": "missing_required_role",
+                    },
+                )
                 await interaction.followup.send(
                     "❌ You must have Steering Committee role or higher for this upload."
                 )
@@ -2107,7 +2302,7 @@ class CRMCog(commands.Cog):
                     self._audit_command(
                         interaction=interaction,
                         action="crm.upload_resume",
-                        result="success",
+                        result="denied",
                         metadata={
                             "search_term": search_term,
                             "filename": file.filename,
@@ -2123,7 +2318,7 @@ class CRMCog(commands.Cog):
                     self._audit_command(
                         interaction=interaction,
                         action="crm.upload_resume",
-                        result="success",
+                        result="denied",
                         metadata={
                             "search_term": search_term,
                             "filename": file.filename,
@@ -2210,6 +2405,21 @@ class CRMCog(commands.Cog):
                 if not await self._update_contact_resume(
                     contact_id, attachment_id, overwrite
                 ):
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.upload_resume",
+                        result="error",
+                        metadata={
+                            "search_term": search_term,
+                            "filename": file.filename,
+                            "attachment_id": attachment_id,
+                            "overwrite": overwrite,
+                            "target_scope": "other" if search_term else "self",
+                            "reason": "resume_link_update_failed",
+                        },
+                        resource_type="crm_contact",
+                        resource_id=str(contact_id),
+                    )
                     await interaction.followup.send(
                         "⚠️ File uploaded, but failed to link in contact resume field."
                     )
@@ -2221,6 +2431,22 @@ class CRMCog(commands.Cog):
                     contact_id,
                     attachment_id,
                     interaction.user.name,
+                )
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.upload_resume",
+                    result="success",
+                    metadata={
+                        "search_term": search_term,
+                        "filename": file.filename,
+                        "size_bytes": file.size,
+                        "overwrite": overwrite,
+                        "target_scope": "other" if search_term else "self",
+                        "attachment_id": attachment_id,
+                        "stage": "uploaded_and_linked",
+                    },
+                    resource_type="crm_contact",
+                    resource_id=str(contact_id),
                 )
                 await self._run_resume_extract_and_preview(
                     interaction=interaction,

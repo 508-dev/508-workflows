@@ -173,7 +173,8 @@ async def test_resume_extract_handler_enqueues_job(
     """Resume extract endpoint should enqueue extraction job."""
     monkeypatch.setattr(api.settings, "resume_extractor_version", "v7")
     monkeypatch.setattr(api.settings, "openai_api_key", "key")
-    monkeypatch.setattr(api.settings, "openai_model", "gpt-test")
+    monkeypatch.setattr(api.settings, "openai_base_url", None)
+    monkeypatch.setattr(api.settings, "resume_ai_model", "gpt-test")
 
     app_obj = web.Application()
     app_obj[api.QUEUE_KEY] = Mock()
@@ -270,9 +271,20 @@ def test_resume_extract_model_name_uses_heuristic_without_api_key(
 ) -> None:
     """Model identity should be heuristic when OpenAI key is absent."""
     monkeypatch.setattr(api.settings, "openai_api_key", None)
-    monkeypatch.setattr(api.settings, "openai_model", "gpt-test")
+    monkeypatch.setattr(api.settings, "resume_ai_model", "gpt-test")
 
     assert api._resume_extract_model_name() == "heuristic"
+
+
+def test_resume_extract_model_name_prefixes_openrouter_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenRouter base URL should map plain resume model to openai/<model>."""
+    monkeypatch.setattr(api.settings, "openai_api_key", "key")
+    monkeypatch.setattr(api.settings, "openai_base_url", "https://openrouter.ai/api/v1")
+    monkeypatch.setattr(api.settings, "resume_ai_model", "gpt-4o-mini")
+
+    assert api._resume_extract_model_name() == "openai/gpt-4o-mini"
 
 
 @pytest.mark.asyncio

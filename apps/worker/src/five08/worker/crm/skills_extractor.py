@@ -5,8 +5,9 @@ import logging
 import re
 from typing import Any
 
+from five08.skills import normalize_skill
 from five08.worker.config import settings
-from five08.worker.models import ExtractedSkills
+from five08.worker.models import ExtractedSkills, SkillAttributes
 
 logger = logging.getLogger(__name__)
 
@@ -22,10 +23,11 @@ COMMON_SKILLS = {
     "java",
     "go",
     "rust",
+    "node",
     "docker",
     "kubernetes",
-    "aws",
-    "gcp",
+    "amazon web services",
+    "google cloud",
     "azure",
     "postgresql",
     "mysql",
@@ -36,14 +38,25 @@ COMMON_SKILLS = {
     "fastapi",
     "git",
     "linux",
+    "product management",
+    "go to market",
+    "ab testing",
+    "search engine optimization",
+    "search engine marketing",
+    "customer relationship management",
+    "google analytics",
+    "product marketing",
+    "content marketing",
 }
+
+DEFAULT_SKILL_STRENGTH = 3
 
 
 class SkillsExtractor:
     """Extract skills with LLM when configured, fallback heuristics otherwise."""
 
     def __init__(self) -> None:
-        self.model = settings.openai_model
+        self.model = settings.resolved_resume_ai_model
         self.client: Any = None
 
         if settings.openai_api_key and OpenAIClient is not None:
@@ -65,8 +78,12 @@ class SkillsExtractor:
                     {
                         "role": "system",
                         "content": (
-                            "Extract professional and technical skills from resume text. "
-                            "Return only JSON."
+                            "You extract professional skills from resumes for a CRM. "
+                            "Focus on white-collar skills for product development orgs: "
+                            "engineering, product, data, design, growth, and marketing. "
+                            "Return JSON only, no prose. "
+                            "Normalize skills to concise canonical names, lowercase. "
+                            "Provide a strength from 1-5 for each skill, where 5 is strongest."
                         ),
                     },
                     {"role": "user", "content": prompt},
@@ -78,17 +95,12 @@ class SkillsExtractor:
             if not content:
                 raise ValueError("LLM returned empty content")
 
-            parsed = json.loads(content)
-            skills = parsed.get("skills", [])
+            parsed = self._parse_llm_json(content)
             confidence = float(parsed.get("confidence", 0.7))
-
-            if not isinstance(skills, list):
-                raise ValueError("skills must be a list")
-
-            normalized = [skill.strip() for skill in skills if str(skill).strip()]
-            return ExtractedSkills(
-                skills=sorted(set(normalized)),
-                confidence=max(0.0, min(1.0, confidence)),
+            return self._normalize_extracted_payload(
+                skills_value=parsed.get("skills", []),
+                skill_attrs_value=parsed.get("skill_attrs", {}),
+                confidence=confidence,
                 source=self.model,
             )
         except Exception as exc:
@@ -101,12 +113,18 @@ class SkillsExtractor:
         token_matches = re.findall(r"\b[a-z][a-z0-9+#\-.]{1,24}\b", lowered)
         detected: set[str] = set()
         for token in token_matches:
-            if token in COMMON_SKILLS:
-                detected.add(token)
+            canonical = self._normalize_skill_name(token)
+            if canonical in COMMON_SKILLS:
+                detected.add(canonical)
 
+        sorted_skills = sorted(detected)
         return ExtractedSkills(
-            skills=sorted(detected),
-            confidence=0.45 if detected else 0.2,
+            skills=sorted_skills,
+            skill_attrs={
+                skill: SkillAttributes(strength=DEFAULT_SKILL_STRENGTH)
+                for skill in sorted_skills
+            },
+            confidence=0.45 if sorted_skills else 0.2,
             source="heuristic",
         )
 
@@ -115,7 +133,84 @@ class SkillsExtractor:
         snippet = resume_text[:8000]
         return (
             "Analyze the resume and extract a concise skill list.\n"
+            "Use white-collar/product-development relevance only: engineering, product, "
+            "data, design, growth, and marketing.\n"
+            "Exclude personal traits and vague soft skills unless role-critical.\n"
             "Return JSON with this exact schema:\n"
-            '{"skills": ["skill1", "skill2"], "confidence": 0.8}\n\n'
+            '{"skills": ["skill1", "skill2"], '
+            '"skill_attrs": {"skill1": {"strength": 4}}, '
+            '"confidence": 0.8}\n'
+            "Rules:\n"
+            "- skills must be lowercase canonical names with minimal punctuation\n"
+            '- prefer forms like "nodejs", "ab testing", "go to market"\n'
+            "- skill_attrs keys must match skills\n"
+            "- strength is integer 1-5 (5 strongest)\n"
+            "- no extra keys\n\n"
             f"Resume:\n{snippet}"
         )
+
+    def _parse_llm_json(self, content: str) -> dict[str, Any]:
+        raw = content.strip()
+        if raw.startswith("```"):
+            lines = [line for line in raw.splitlines() if not line.startswith("```")]
+            raw = "\n".join(lines).strip()
+
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            raise ValueError("skills extraction output was not a JSON object")
+        return parsed
+
+    def _normalize_extracted_payload(
+        self,
+        *,
+        skills_value: Any,
+        skill_attrs_value: Any,
+        confidence: float,
+        source: str,
+    ) -> ExtractedSkills:
+        raw_skills = skills_value if isinstance(skills_value, list) else []
+        normalized_skills: list[str] = []
+        for skill in raw_skills:
+            canonical = self._normalize_skill_name(str(skill))
+            if canonical:
+                normalized_skills.append(canonical)
+
+        attrs_map: dict[str, SkillAttributes] = {}
+        if isinstance(skill_attrs_value, dict):
+            for raw_name, raw_attr in skill_attrs_value.items():
+                canonical = self._normalize_skill_name(str(raw_name))
+                if not canonical:
+                    continue
+                attrs_map[canonical] = SkillAttributes(
+                    strength=self._parse_strength(raw_attr)
+                )
+
+        # Ensure attrs exists for every skill and include attr-only entries in skill list.
+        deduped_skills = sorted(set(normalized_skills) | set(attrs_map.keys()))
+        for skill in deduped_skills:
+            if skill not in attrs_map:
+                attrs_map[skill] = SkillAttributes(strength=DEFAULT_SKILL_STRENGTH)
+
+        return ExtractedSkills(
+            skills=deduped_skills,
+            skill_attrs=attrs_map,
+            confidence=max(0.0, min(1.0, confidence)),
+            source=source,
+        )
+
+    def _parse_strength(self, value: Any) -> int:
+        raw: Any = value
+        if isinstance(value, dict):
+            raw = value.get("strength")
+        try:
+            numeric = int(float(raw))
+        except Exception:
+            numeric = DEFAULT_SKILL_STRENGTH
+        return max(1, min(5, numeric))
+
+    def _normalize_skill_name(self, value: str) -> str:
+        return normalize_skill(value)
+
+    def canonicalize_skill(self, value: str) -> str:
+        """Public helper for consistent skill normalization across processors."""
+        return self._normalize_skill_name(value)

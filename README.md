@@ -159,7 +159,8 @@ Use `.env.example` as the source of truth for defaults.
 - `Optional`: `RESUME_KEYWORDS` (default: `resume,cv,curriculum`)
 - `Optional`: `OPENAI_API_KEY` (if unset, heuristic extraction is used)
 - `Optional`: `OPENAI_BASE_URL` (set `https://openrouter.ai/api/v1` for OpenRouter)
-- `Optional`: `OPENAI_MODEL` (default: `gpt-4o-mini`)
+- `Optional`: `RESUME_AI_MODEL` (default: `gpt-4o-mini`; use plain names like `gpt-4o-mini`, OpenRouter gets auto-prefixed to `openai/<model>`)
+- `Optional`: `OPENAI_MODEL` (default: `gpt-4o-mini`; fallback/legacy model setting)
 - `Optional`: `RESUME_EXTRACTOR_VERSION` (default: `v1`; used in resume processing idempotency/ledger keys)
 
 ### Discord Bot Core

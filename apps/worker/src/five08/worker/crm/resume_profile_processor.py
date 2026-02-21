@@ -20,6 +20,7 @@ from five08.worker.models import (
     ResumeExtractionResult,
     ResumeFieldChange,
     ResumeSkipReason,
+    SkillAttributes,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,7 +52,7 @@ class ResumeProfileExtractor:
     """Extract candidate profile fields from resume text."""
 
     def __init__(self) -> None:
-        self.model = settings.openai_model
+        self.model = settings.resolved_resume_ai_model
         self.client: Any = None
 
         if settings.openai_api_key and OpenAIClient is not None:
@@ -72,7 +73,9 @@ class ResumeProfileExtractor:
                     {
                         "role": "system",
                         "content": (
-                            "Extract contact fields from resume text. Return JSON only."
+                            "You extract candidate contact fields from resumes for a CRM. "
+                            "Return JSON only with no commentary. Be conservative: when unsure, use null. "
+                            "Prefer candidate-owned contact info and ignore references or company contact details."
                         ),
                     },
                     {
@@ -143,11 +146,18 @@ class ResumeProfileExtractor:
     def _build_prompt(self, resume_text: str) -> str:
         snippet = resume_text[:12000]
         return (
-            "Extract contact fields from this resume.\\n"
-            "Return JSON with exact keys:\\n"
+            "Extract candidate contact fields from this resume.\\n"
+            "Return JSON with exact keys and no extras:\\n"
             '{"email": string|null, "github_username": string|null, '
             '"linkedin_url": string|null, "phone": string|null, '
-            '"confidence": number}\\n\\n'
+            '"confidence": number}\\n'
+            "Rules:\\n"
+            "- prefer explicit values from header/contact sections\\n"
+            "- for github_username return username only (no URL, no @)\\n"
+            "- for linkedin_url return full linkedin profile URL when available\\n"
+            "- for phone return digits with optional leading +\\n"
+            "- use null for unknown/ambiguous fields\\n"
+            "- confidence is 0-1 for overall extraction reliability\\n\\n"
             f"Resume:\\n{snippet}"
         )
 
@@ -251,12 +261,19 @@ class ResumeProfileProcessor:
             extracted_skills_result = self.skills_extractor.extract_skills(text)
             extracted_skills = extracted_skills_result.skills
             existing_skills = self._parse_existing_skills(contact.get("skills"))
+            existing_skill_attrs = self._parse_skill_attrs(contact.get("cSkillAttrs"))
             existing_lower = {item.casefold() for item in existing_skills}
             new_skills = [
                 skill
                 for skill in extracted_skills
                 if skill.casefold() not in existing_lower
             ]
+            merged_skills = existing_skills + new_skills
+            merged_skill_attrs = self._merge_skill_attrs(
+                existing_attrs=existing_skill_attrs,
+                extracted_attrs=extracted_skills_result.skill_attrs,
+                merged_skills=merged_skills,
+            )
 
             proposed_updates: dict[str, str] = {}
             proposed_changes: list[ResumeFieldChange] = []
@@ -301,7 +318,6 @@ class ResumeProfileProcessor:
                 skipped=skipped,
             )
             if new_skills:
-                merged_skills = existing_skills + new_skills
                 proposed_updates["skills"] = ", ".join(merged_skills)
                 proposed_changes.append(
                     ResumeFieldChange(
@@ -310,6 +326,24 @@ class ResumeProfileProcessor:
                         current=", ".join(existing_skills) if existing_skills else None,
                         proposed=", ".join(merged_skills),
                         reason=f"Added {len(new_skills)} skills from resume extraction",
+                    )
+                )
+
+            if merged_skill_attrs and merged_skill_attrs != existing_skill_attrs:
+                proposed_updates["cSkillAttrs"] = self._serialize_skill_attrs(
+                    merged_skill_attrs
+                )
+                proposed_changes.append(
+                    ResumeFieldChange(
+                        field="cSkillAttrs",
+                        label="Skill Attributes",
+                        current=(
+                            f"{len(existing_skill_attrs)} skills rated"
+                            if existing_skill_attrs
+                            else None
+                        ),
+                        proposed=f"{len(merged_skill_attrs)} skills rated (strength 1-5)",
+                        reason="Updated structured skill strengths from resume extraction",
                     )
                 )
 
@@ -384,8 +418,9 @@ class ResumeProfileProcessor:
                 settings.crm_linkedin_field,
                 "phoneNumber",
                 "skills",
+                "cSkillAttrs",
             }
-            sanitized_updates: dict[str, str] = {
+            sanitized_updates: dict[str, Any] = {
                 field: value
                 for field, value in updates.items()
                 if field in allowed_fields and value
@@ -394,6 +429,16 @@ class ResumeProfileProcessor:
             email_value = sanitized_updates.get("emailAddress")
             if email_value and email_value.lower().endswith("@508.dev"):
                 sanitized_updates.pop("emailAddress")
+
+            if "cSkillAttrs" in sanitized_updates:
+                parsed_attrs = self._parse_skill_attrs(sanitized_updates["cSkillAttrs"])
+                # Be forgiving: if value is malformed, overwrite with an empty object.
+                if parsed_attrs:
+                    sanitized_updates["cSkillAttrs"] = json.loads(
+                        self._serialize_skill_attrs(parsed_attrs)
+                    )
+                else:
+                    sanitized_updates["cSkillAttrs"] = {}
 
             link_applied = False
             if link_discord:
@@ -478,12 +523,90 @@ class ResumeProfileProcessor:
     def _parse_existing_skills(self, value: Any) -> list[str]:
         if value is None:
             return []
-        if isinstance(value, list):
-            normalized = [str(item).strip() for item in value if str(item).strip()]
-            return normalized
 
-        parsed = [item.strip() for item in str(value).split(",")]
-        return [item for item in parsed if item]
+        if isinstance(value, list):
+            raw_skills = [str(item).strip() for item in value if str(item).strip()]
+        else:
+            raw_skills = [
+                item.strip() for item in str(value).split(",") if item.strip()
+            ]
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for skill in raw_skills:
+            canonical = self.skills_extractor.canonicalize_skill(skill)
+            if not canonical:
+                continue
+            key = canonical.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(canonical)
+        return normalized
+
+    def _parse_skill_attrs(self, value: Any) -> dict[str, int]:
+        if value is None:
+            return {}
+
+        candidate = value
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return {}
+            try:
+                candidate = json.loads(raw)
+            except Exception:
+                return {}
+
+        if not isinstance(candidate, dict):
+            return {}
+
+        parsed: dict[str, int] = {}
+        for raw_skill, raw_payload in candidate.items():
+            skill = self.skills_extractor.canonicalize_skill(str(raw_skill)).casefold()
+            if not skill:
+                continue
+
+            strength_value = raw_payload
+            if isinstance(raw_payload, dict):
+                strength_value = raw_payload.get("strength")
+
+            try:
+                strength = int(float(strength_value))
+            except Exception:
+                strength = 0
+            parsed[skill] = max(1, min(5, strength)) if strength else 0
+
+        return {skill: strength for skill, strength in parsed.items() if strength > 0}
+
+    def _merge_skill_attrs(
+        self,
+        *,
+        existing_attrs: dict[str, int],
+        extracted_attrs: dict[str, SkillAttributes],
+        merged_skills: list[str],
+    ) -> dict[str, int]:
+        merged: dict[str, int] = dict(existing_attrs)
+
+        for skill in merged_skills:
+            key = str(skill).strip().casefold()
+            if key and key not in merged:
+                merged[key] = 3
+
+        for skill, attrs in extracted_attrs.items():
+            key = str(skill).strip().casefold()
+            if key:
+                merged[key] = max(1, min(5, int(attrs.strength)))
+
+        return merged
+
+    def _serialize_skill_attrs(self, attrs: dict[str, int]) -> str:
+        payload = {
+            skill: {"strength": max(1, min(5, int(strength)))}
+            for skill, strength in sorted(attrs.items())
+            if skill
+        }
+        return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
     def _mark_resume_processed(self, contact_id: str) -> None:
         """Best-effort update for extraction completion tracking."""
@@ -499,8 +622,8 @@ class ResumeProfileProcessor:
 
     def _configured_model_name(self) -> str:
         """Model identity used for idempotency/ledger keys."""
-        if settings.openai_api_key and settings.openai_model:
-            return settings.openai_model
+        if settings.openai_api_key:
+            return settings.resolved_resume_ai_model
         return "heuristic"
 
     def _record_processing_run(

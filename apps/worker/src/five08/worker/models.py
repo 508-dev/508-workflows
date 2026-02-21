@@ -41,8 +41,15 @@ class ExtractedSkills(BaseModel):
     """Skills extraction response."""
 
     skills: list[str]
+    skill_attrs: dict[str, "SkillAttributes"] = Field(default_factory=dict)
     confidence: float = Field(..., ge=0.0, le=1.0)
     source: str
+
+
+class SkillAttributes(BaseModel):
+    """Structured per-skill metadata for CRM persistence."""
+
+    strength: int = Field(..., ge=1, le=5)
 
 
 class SkillsExtractionResult(BaseModel):
