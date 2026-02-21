@@ -11,6 +11,7 @@ from redis import Redis
 from five08.logging import configure_logging
 from five08.queue import (
     EnqueuedJob,
+    QueueClient,
     enqueue_job,
     get_redis_connection,
     is_postgres_healthy,
@@ -23,7 +24,7 @@ from five08.worker.models import EspoCRMWebhookPayload
 
 logger = logging.getLogger(__name__)
 REDIS_CONN_KEY = web.AppKey("redis_conn", Redis)
-QUEUE_KEY = web.AppKey("queue", object)
+QUEUE_KEY = web.AppKey("queue", QueueClient)
 
 
 def _is_authorized(request: web.Request) -> bool:
