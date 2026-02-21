@@ -10,7 +10,6 @@ dependencies = [
     "pydantic-settings~=2.8",
     "redis>=6.4.0",
     "requests~=2.31",
-    "rq>=2.6.0",
     "five08",
 ]
 
