@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from logging.config import fileConfig
 
 from alembic import context
@@ -12,7 +13,11 @@ from five08.settings import normalize_sqlalchemy_postgres_url
 
 config = context.config
 
-if config.config_file_name is not None:
+if (
+    config.config_file_name is not None
+    and Path(config.config_file_name).is_file()
+    and config.config_file_name.endswith(".ini")
+):
     fileConfig(config.config_file_name)
 
 

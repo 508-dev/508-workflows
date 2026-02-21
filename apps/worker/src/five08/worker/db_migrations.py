@@ -11,7 +11,7 @@ from five08.logging import configure_logging
 from five08.settings import normalize_sqlalchemy_postgres_url
 from five08.worker.config import settings
 
-_ALEMBIC_CFG_PATH = Path(__file__).resolve().parent / "alembic.ini"
+_ALEMBIC_CFG_PATH = Path(__file__).resolve().parents[3] / "pyproject.toml"
 
 
 def _sqlalchemy_postgres_url() -> str:
@@ -22,6 +22,6 @@ def _sqlalchemy_postgres_url() -> str:
 def run_job_migrations() -> None:
     """Run Alembic migrations to ensure the jobs table exists and is current."""
     configure_logging(settings.log_level)
-    cfg = Config(str(_ALEMBIC_CFG_PATH))
+    cfg = Config(toml_file=str(_ALEMBIC_CFG_PATH))
     cfg.set_main_option("sqlalchemy.url", _sqlalchemy_postgres_url())
     command.upgrade(cfg, "head")
