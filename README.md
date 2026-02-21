@@ -178,6 +178,10 @@ Use `.env.example` as the source of truth for defaults.
 - `Required`: `EMAIL_PASSWORD`
 - `Required`: `IMAP_SERVER`
 - `Required`: `SMTP_SERVER`
+- `Optional`: `EMAIL_RESUME_INTAKE_ENABLED` (default: `true`; enables mailbox resume processing loop)
+- `Optional`: `EMAIL_RESUME_ALLOWED_EXTENSIONS` (default: `pdf,doc,docx`)
+- `Optional`: `EMAIL_RESUME_MAX_FILE_SIZE_MB` (default: `10`)
+- `Optional`: `EMAIL_REQUIRE_SENDER_AUTH_HEADERS` (default: `true`; requires SPF/DKIM/DMARC pass headers)
 
 ### Discord CRM Audit Logging (Best Effort)
 

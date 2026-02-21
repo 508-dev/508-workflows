@@ -30,6 +30,10 @@ class Settings(SharedSettings):
     email_password: str
     imap_server: str
     smtp_server: str
+    email_resume_intake_enabled: bool = True
+    email_resume_allowed_extensions: str = "pdf,doc,docx"
+    email_resume_max_file_size_mb: int = 10
+    email_require_sender_auth_headers: bool = True
 
     # CRM/EspoCRM settings
     espo_api_key: str
