@@ -17,6 +17,7 @@ class WorkerSettings(SharedSettings):
     openai_api_key: str | None = None
     openai_base_url: str | None = None
     openai_model: str = "gpt-4o-mini"
+    resume_extractor_version: str = "v1"
 
     max_file_size_mb: int = 10
     allowed_file_types: str = "pdf,doc,docx,txt"

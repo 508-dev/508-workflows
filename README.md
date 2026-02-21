@@ -145,6 +145,7 @@ docker compose up --build
 - `OPENAI_API_KEY` (optional; if unset, heuristic extraction is used)
 - `OPENAI_BASE_URL` (optional; set `https://openrouter.ai/api/v1` for OpenRouter)
 - `OPENAI_MODEL` (default: `gpt-4o-mini`)
+- `RESUME_EXTRACTOR_VERSION` (default: `v1`; used in resume processing idempotency/ledger keys)
 
 ## Commands
 

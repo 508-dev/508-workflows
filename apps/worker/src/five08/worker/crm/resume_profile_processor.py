@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from five08.clients.espo import EspoAPI, EspoAPIError
+from five08.queue import get_postgres_connection
 from five08.worker.config import settings
 from five08.worker.crm.document_processor import DocumentProcessor
 from five08.worker.crm.skills_extractor import SkillsExtractor
@@ -238,11 +239,15 @@ class ResumeProfileProcessor:
         filename: str,
     ) -> ResumeExtractionResult:
         """Build preview proposal from an uploaded resume attachment."""
+        content_hash: str | None = None
+        model_name = self._configured_model_name()
         try:
             contact = self.crm.get_contact(contact_id)
             content = self.crm.download_attachment(attachment_id)
+            content_hash = self.document_processor.get_content_hash(content)
             text = self.document_processor.extract_text(content, filename)
             extracted = self.extractor.extract(text)
+            model_name = extracted.source
             extracted_skills_result = self.skills_extractor.extract_skills(text)
             extracted_skills = extracted_skills_result.skills
             existing_skills = self._parse_existing_skills(contact.get("skills"))
@@ -310,6 +315,13 @@ class ResumeProfileProcessor:
 
             # Track extraction completion before user confirmation/apply step.
             self._mark_resume_processed(contact_id)
+            self._record_processing_run(
+                contact_id=contact_id,
+                attachment_id=attachment_id,
+                content_hash=content_hash,
+                model_name=model_name,
+                status="succeeded",
+            )
 
             return ResumeExtractionResult(
                 contact_id=contact_id,
@@ -328,6 +340,14 @@ class ResumeProfileProcessor:
                 contact_id,
                 attachment_id,
                 exc,
+            )
+            self._record_processing_run(
+                contact_id=contact_id,
+                attachment_id=attachment_id,
+                content_hash=content_hash,
+                model_name=model_name,
+                status="failed",
+                last_error=str(exc),
             )
             return ResumeExtractionResult(
                 contact_id=contact_id,
@@ -469,12 +489,73 @@ class ResumeProfileProcessor:
         """Best-effort update for extraction completion tracking."""
         processed_at = datetime.now(tz=timezone.utc).isoformat()
         try:
-            self.crm.update_contact(
-                contact_id, {"cResumeLastProcessed": processed_at}
-            )
+            self.crm.update_contact(contact_id, {"cResumeLastProcessed": processed_at})
         except Exception as exc:
             logger.warning(
                 "Failed to update cResumeLastProcessed contact_id=%s error=%s",
                 contact_id,
+                exc,
+            )
+
+    def _configured_model_name(self) -> str:
+        """Model identity used for idempotency/ledger keys."""
+        if settings.openai_api_key and settings.openai_model:
+            return settings.openai_model
+        return "heuristic"
+
+    def _record_processing_run(
+        self,
+        *,
+        contact_id: str,
+        attachment_id: str,
+        content_hash: str | None,
+        model_name: str,
+        status: str,
+        last_error: str | None = None,
+    ) -> None:
+        """Persist one processing result keyed by contact+attachment+version+model."""
+        query = """
+            INSERT INTO resume_processing_runs (
+                contact_id,
+                attachment_id,
+                content_hash,
+                extractor_version,
+                model_name,
+                status,
+                last_error,
+                processed_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (contact_id, attachment_id, extractor_version, model_name)
+            DO UPDATE SET
+                content_hash = EXCLUDED.content_hash,
+                status = EXCLUDED.status,
+                last_error = EXCLUDED.last_error,
+                processed_at = NOW();
+        """
+        try:
+            with get_postgres_connection(settings) as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        query,
+                        (
+                            contact_id,
+                            attachment_id,
+                            content_hash,
+                            settings.resume_extractor_version,
+                            model_name,
+                            status,
+                            last_error,
+                        ),
+                    )
+        except Exception as exc:
+            logger.warning(
+                "Failed to persist resume processing run contact_id=%s attachment_id=%s "
+                "version=%s model=%s status=%s error=%s",
+                contact_id,
+                attachment_id,
+                settings.resume_extractor_version,
+                model_name,
+                status,
                 exc,
             )

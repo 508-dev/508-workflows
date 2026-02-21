@@ -171,9 +171,14 @@ async def test_process_contact_handler_enqueues_single_contact(
 
 @pytest.mark.asyncio
 async def test_resume_extract_handler_enqueues_job(
+    monkeypatch: pytest.MonkeyPatch,
     auth_headers: dict[str, str],
 ) -> None:
     """Resume extract endpoint should enqueue extraction job."""
+    monkeypatch.setattr(api.settings, "resume_extractor_version", "v7")
+    monkeypatch.setattr(api.settings, "openai_api_key", "key")
+    monkeypatch.setattr(api.settings, "openai_model", "gpt-test")
+
     app_obj = web.Application()
     app_obj[api.QUEUE_KEY] = Mock()
     request = make_mocked_request(
@@ -196,6 +201,8 @@ async def test_resume_extract_handler_enqueues_job(
     assert payload["job_id"] == "job-extract"
     assert payload["contact_id"] == "c-1"
     assert payload["attachment_id"] == "a-1"
+    call_kwargs = mock_enqueue.call_args.kwargs
+    assert call_kwargs["idempotency_key"] == "resume-extract:c-1:a-1:v7:gpt-test"
 
 
 @pytest.mark.asyncio
@@ -260,3 +267,13 @@ async def test_job_status_handler_returns_result(
     assert payload["job_id"] == "job-123"
     assert payload["status"] == "succeeded"
     assert payload["result"] == {"success": True}
+
+
+def test_resume_extract_model_name_uses_heuristic_without_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Model identity should be heuristic when OpenAI key is absent."""
+    monkeypatch.setattr(api.settings, "openai_api_key", None)
+    monkeypatch.setattr(api.settings, "openai_model", "gpt-test")
+
+    assert api._resume_extract_model_name() == "heuristic"

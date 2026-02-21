@@ -13,6 +13,7 @@ def test_extract_profile_proposal_filters_508_email() -> None:
     processor.extractor = Mock()
     processor.skills_extractor = Mock()
     processor.document_processor = Mock()
+    processor._record_processing_run = Mock()
 
     processor.crm.get_contact.return_value = {
         "emailAddress": "member@example.com",
@@ -22,6 +23,7 @@ def test_extract_profile_proposal_filters_508_email() -> None:
     }
     processor.crm.download_attachment.return_value = b"resume-bytes"
     processor.document_processor.extract_text.return_value = "resume text"
+    processor.document_processor.get_content_hash.return_value = "hash-1"
     processor.extractor.extract.return_value = ResumeExtractedProfile(
         email="new@508.dev",
         github_username="new-gh",
@@ -54,6 +56,11 @@ def test_extract_profile_proposal_filters_508_email() -> None:
     update_contact_payload = processor.crm.update_contact.call_args.args[1]
     assert "cResumeLastProcessed" in update_contact_payload
     assert isinstance(update_contact_payload["cResumeLastProcessed"], str)
+    processor._record_processing_run.assert_called_once()
+    record_kwargs = processor._record_processing_run.call_args.kwargs
+    assert record_kwargs["status"] == "succeeded"
+    assert record_kwargs["contact_id"] == "contact-1"
+    assert record_kwargs["attachment_id"] == "att-1"
 
 
 def test_apply_profile_updates_adds_discord_and_filters_email() -> None:
@@ -81,3 +88,32 @@ def test_apply_profile_updates_adds_discord_and_filters_email() -> None:
     assert update_payload["skills"] == "Python, FastAPI"
     assert update_payload["cDiscordUserID"] == "123"
     assert update_payload["cDiscordUsername"] == "member#0001 (ID: 123)"
+
+
+def test_extract_profile_proposal_records_failed_run() -> None:
+    """Failed extraction should still be written to the processing ledger."""
+    processor = ResumeProfileProcessor()
+    processor.crm = Mock()
+    processor.extractor = Mock()
+    processor.skills_extractor = Mock()
+    processor.document_processor = Mock()
+    processor._record_processing_run = Mock()
+
+    processor.crm.get_contact.return_value = {"emailAddress": "member@example.com"}
+    processor.crm.download_attachment.return_value = b"resume-bytes"
+    processor.document_processor.get_content_hash.return_value = "hash-2"
+    processor.document_processor.extract_text.side_effect = ValueError("parse failed")
+
+    result = processor.extract_profile_proposal(
+        contact_id="contact-2",
+        attachment_id="att-2",
+        filename="broken.pdf",
+    )
+
+    assert result.success is False
+    processor._record_processing_run.assert_called_once()
+    record_kwargs = processor._record_processing_run.call_args.kwargs
+    assert record_kwargs["status"] == "failed"
+    assert record_kwargs["contact_id"] == "contact-2"
+    assert record_kwargs["attachment_id"] == "att-2"
+    assert record_kwargs["content_hash"] == "hash-2"

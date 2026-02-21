@@ -67,6 +67,12 @@ def _extract_idempotency_key(value: object) -> str | None:
     return None
 
 
+def _resume_extract_model_name() -> str:
+    if settings.openai_api_key and settings.openai_model:
+        return settings.openai_model
+    return "heuristic"
+
+
 async def health_handler(request: web.Request) -> web.Response:
     """Simple health endpoint."""
     redis_conn = request.app[REDIS_CONN_KEY]
@@ -229,13 +235,18 @@ async def resume_extract_handler(request: web.Request) -> web.Response:
         )
 
     queue = request.app[QUEUE_KEY]
+    model_name = _resume_extract_model_name()
+    idempotency_key = (
+        f"resume-extract:{payload.contact_id}:{payload.attachment_id}:"
+        f"{settings.resume_extractor_version}:{model_name}"
+    )
     job = await asyncio.to_thread(
         enqueue_job,
         queue=queue,
         fn=extract_resume_profile_job,
         args=(payload.contact_id, payload.attachment_id, payload.filename),
         settings=settings,
-        idempotency_key=f"resume-extract:{payload.contact_id}:{payload.attachment_id}",
+        idempotency_key=idempotency_key,
     )
     logger.info(
         "Enqueued resume extract job contact_id=%s attachment_id=%s job_id=%s created=%s",

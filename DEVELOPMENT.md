@@ -117,7 +117,7 @@ Use `.env.example` as source of truth. Key categories:
 - Shared queue/runtime: `REDIS_URL`, `REDIS_QUEUE_NAME`, `POSTGRES_URL`, `JOB_MAX_ATTEMPTS`, `JOB_RETRY_BASE_SECONDS`, `JOB_RETRY_MAX_SECONDS`, `LOG_LEVEL`, webhook settings
 - Bot credentials/integrations: Discord, email, Espo, Kimai
 - Worker controls: `WORKER_NAME`, `WORKER_QUEUE_NAMES`, `WORKER_BURST`
-- Worker CRM processing: `MAX_ATTACHMENTS_PER_CONTACT`, `MAX_FILE_SIZE_MB`, `ALLOWED_FILE_TYPES`, `RESUME_KEYWORDS`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`
+- Worker CRM processing: `MAX_ATTACHMENTS_PER_CONTACT`, `MAX_FILE_SIZE_MB`, `ALLOWED_FILE_TYPES`, `RESUME_KEYWORDS`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`, `RESUME_EXTRACTOR_VERSION`
 - Resume upload UX wiring: `WORKER_API_BASE_URL` on bot, `CRM_LINKEDIN_FIELD` on worker.
 
 ## CI Notes
