@@ -23,8 +23,8 @@ class _FailingRedis:
 @pytest.fixture
 def auth_headers(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     """Configure webhook secret and return matching auth headers."""
-    monkeypatch.setattr(api.settings, "webhook_shared_secret", "test-secret")
-    return {"X-Webhook-Secret": "test-secret"}
+    monkeypatch.setattr(api.settings, "api_shared_secret", "test-secret")
+    return {"X-API-Secret": "test-secret"}
 
 
 @pytest.mark.asyncio
@@ -167,3 +167,96 @@ async def test_process_contact_handler_enqueues_single_contact(
     assert response.status == 202
     assert payload["contact_id"] == "c-123"
     assert payload["job_id"] == "job-123"
+
+
+@pytest.mark.asyncio
+async def test_resume_extract_handler_enqueues_job(
+    auth_headers: dict[str, str],
+) -> None:
+    """Resume extract endpoint should enqueue extraction job."""
+    app_obj = web.Application()
+    app_obj[api.QUEUE_KEY] = Mock()
+    request = make_mocked_request(
+        "POST", "/jobs/resume-extract", app=app_obj, headers=auth_headers
+    )
+    request.json = AsyncMock(
+        return_value={
+            "contact_id": "c-1",
+            "attachment_id": "a-1",
+            "filename": "resume.pdf",
+        }
+    )  # type: ignore[method-assign]
+
+    with patch("five08.worker.api.enqueue_job") as mock_enqueue:
+        mock_enqueue.return_value = Mock(id="job-extract", created=True)
+        response = await api.resume_extract_handler(request)
+
+    payload = json.loads(response.text)
+    assert response.status == 202
+    assert payload["job_id"] == "job-extract"
+    assert payload["contact_id"] == "c-1"
+    assert payload["attachment_id"] == "a-1"
+
+
+@pytest.mark.asyncio
+async def test_resume_apply_handler_enqueues_job(
+    auth_headers: dict[str, str],
+) -> None:
+    """Resume apply endpoint should enqueue apply job."""
+    app_obj = web.Application()
+    app_obj[api.QUEUE_KEY] = Mock()
+    request = make_mocked_request(
+        "POST", "/jobs/resume-apply", app=app_obj, headers=auth_headers
+    )
+    request.json = AsyncMock(
+        return_value={
+            "contact_id": "c-1",
+            "updates": {"emailAddress": "dev@example.com"},
+            "link_discord": {"user_id": "123", "username": "dev#1111"},
+        }
+    )  # type: ignore[method-assign]
+
+    with patch("five08.worker.api.enqueue_job") as mock_enqueue:
+        mock_enqueue.return_value = Mock(id="job-apply", created=True)
+        response = await api.resume_apply_handler(request)
+
+    payload = json.loads(response.text)
+    assert response.status == 202
+    assert payload["job_id"] == "job-apply"
+    assert payload["contact_id"] == "c-1"
+
+
+@pytest.mark.asyncio
+async def test_job_status_handler_returns_result(
+    auth_headers: dict[str, str],
+) -> None:
+    """Job status endpoint should expose persisted result payload."""
+    app_obj = web.Application()
+    request = make_mocked_request(
+        "GET",
+        "/jobs/job-123",
+        app=app_obj,
+        headers=auth_headers,
+        match_info={"job_id": "job-123"},
+    )
+
+    mock_status = Mock()
+    mock_status.value = "succeeded"
+    mock_job = Mock(
+        id="job-123",
+        type="extract_resume_profile_job",
+        status=mock_status,
+        attempts=1,
+        max_attempts=8,
+        last_error=None,
+        payload={"result": {"success": True}},
+    )
+
+    with patch("five08.worker.api.get_job", return_value=mock_job):
+        response = await api.job_status_handler(request)
+
+    payload = json.loads(response.text)
+    assert response.status == 200
+    assert payload["job_id"] == "job-123"
+    assert payload["status"] == "succeeded"
+    assert payload["result"] == {"success": True}

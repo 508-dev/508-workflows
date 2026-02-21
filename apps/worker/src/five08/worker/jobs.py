@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from five08.worker.crm.processor import ContactSkillsProcessor
+from five08.worker.crm.resume_profile_processor import ResumeProfileProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -28,3 +29,39 @@ def process_webhook_event(source: str, payload: dict[str, Any]) -> dict[str, Any
         "received_at": received_at,
         "payload_keys": sorted(payload.keys()),
     }
+
+
+def extract_resume_profile_job(
+    contact_id: str,
+    attachment_id: str,
+    filename: str,
+) -> dict[str, Any]:
+    """Extract profile updates from an uploaded resume attachment."""
+    logger.info(
+        "Processing resume extract job contact_id=%s attachment_id=%s",
+        contact_id,
+        attachment_id,
+    )
+    processor = ResumeProfileProcessor()
+    result = processor.extract_profile_proposal(
+        contact_id=contact_id,
+        attachment_id=attachment_id,
+        filename=filename,
+    )
+    return result.model_dump()
+
+
+def apply_resume_profile_job(
+    contact_id: str,
+    updates: dict[str, str],
+    link_discord: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Apply confirmed CRM profile updates after bot-side confirmation."""
+    logger.info("Processing resume apply job contact_id=%s", contact_id)
+    processor = ResumeProfileProcessor()
+    result = processor.apply_profile_updates(
+        contact_id=contact_id,
+        updates=updates,
+        link_discord=link_discord,
+    )
+    return result.model_dump()

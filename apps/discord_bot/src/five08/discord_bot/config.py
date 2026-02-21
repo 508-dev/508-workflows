@@ -34,6 +34,7 @@ class Settings(SharedSettings):
     # CRM/EspoCRM settings
     espo_api_key: str
     espo_base_url: str
+    worker_api_base_url: str = "http://worker-api:8090"
 
     # Kimai time tracking settings
     kimai_base_url: str

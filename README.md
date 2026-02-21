@@ -45,6 +45,9 @@ Migrations:
 ### Worker API Endpoints
 
 - `GET /health`: Redis/Postgres/worker health check.
+- `GET /jobs/{job_id}`: Fetch queued job status/result payload.
+- `POST /jobs/resume-extract`: Enqueue resume profile extraction.
+- `POST /jobs/resume-apply`: Enqueue confirmed CRM field apply.
 - `POST /webhooks/{source}`: Generic webhook enqueue endpoint.
 - `POST /webhooks/espocrm`: EspoCRM webhook endpoint (expects array payload).
 - `POST /process-contact/{contact_id}`: Manually enqueue one contact skills job.
@@ -96,7 +99,7 @@ docker compose up --build
 - `ESPO_API_KEY` (required by both bot and worker)
 - `JOB_TIMEOUT_SECONDS` (default: `600`)
 - `JOB_RESULT_TTL_SECONDS` (default: `3600`)
-- `WEBHOOK_SHARED_SECRET` (required; requests are rejected when unset)
+- `API_SHARED_SECRET` (required; requests are rejected when unset)
 - `POSTGRES_URL` (default: `postgresql://postgres:postgres@postgres:5432/workflows`)
 - `POSTGRES_DB` (default: `workflows`)
 - `POSTGRES_USER` (default: `postgres`)
@@ -120,6 +123,7 @@ docker compose up --build
 
 - `DISCORD_BOT_TOKEN`
 - `CHANNEL_ID`
+- `WORKER_API_BASE_URL` (default: `http://worker-api:8090`)
 - `EMAIL_USERNAME`
 - `EMAIL_PASSWORD`
 - `IMAP_SERVER`
@@ -137,8 +141,9 @@ docker compose up --build
 - `MAX_FILE_SIZE_MB` (default: `10`)
 - `ALLOWED_FILE_TYPES` (default: `pdf,doc,docx,txt`)
 - `RESUME_KEYWORDS` (default: `resume,cv,curriculum`)
+- `CRM_LINKEDIN_FIELD` (default: `cLinkedInUrl`)
 - `OPENAI_API_KEY` (optional; if unset, heuristic extraction is used)
-- `OPENAI_BASE_URL` (optional)
+- `OPENAI_BASE_URL` (optional; set `https://openrouter.ai/api/v1` for OpenRouter)
 - `OPENAI_MODEL` (default: `gpt-4o-mini`)
 
 ## Commands

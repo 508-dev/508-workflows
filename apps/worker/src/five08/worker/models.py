@@ -53,3 +53,57 @@ class SkillsExtractionResult(BaseModel):
     updated_skills: list[str]
     success: bool
     error: str | None = None
+
+
+class ResumeExtractedProfile(BaseModel):
+    """Normalized profile fields extracted from resume text."""
+
+    email: str | None = None
+    github_username: str | None = None
+    linkedin_url: str | None = None
+    phone: str | None = None
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    source: str
+
+
+class ResumeFieldChange(BaseModel):
+    """Single proposed CRM field update."""
+
+    field: str
+    label: str
+    current: str | None = None
+    proposed: str
+    reason: str
+
+
+class ResumeSkipReason(BaseModel):
+    """Field extraction skip explanation for preview UX."""
+
+    field: str
+    value: str
+    reason: str
+
+
+class ResumeExtractionResult(BaseModel):
+    """Worker output used by bot preview/confirmation flow."""
+
+    contact_id: str
+    attachment_id: str
+    proposed_updates: dict[str, str]
+    proposed_changes: list[ResumeFieldChange]
+    skipped: list[ResumeSkipReason]
+    extracted_profile: ResumeExtractedProfile
+    extracted_skills: list[str] = Field(default_factory=list)
+    new_skills: list[str] = Field(default_factory=list)
+    success: bool
+    error: str | None = None
+
+
+class ResumeApplyResult(BaseModel):
+    """CRM apply-phase result."""
+
+    contact_id: str
+    updated_fields: list[str]
+    link_discord_applied: bool = False
+    success: bool
+    error: str | None = None

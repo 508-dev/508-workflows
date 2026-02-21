@@ -21,7 +21,12 @@ from five08.queue import (
 )
 from five08.queue import parse_queue_names
 from five08.worker.config import settings
-from five08.worker.jobs import process_contact_skills_job, process_webhook_event
+from five08.worker.jobs import (
+    apply_resume_profile_job,
+    extract_resume_profile_job,
+    process_contact_skills_job,
+    process_webhook_event,
+)
 
 from five08.logging import configure_logging
 
@@ -37,6 +42,8 @@ _QUEUE_NAME = _QUEUE_NAMES[0] if _QUEUE_NAMES else settings.redis_queue_name
 _HANDLERS: dict[str, Any] = {
     process_webhook_event.__name__: process_webhook_event,
     process_contact_skills_job.__name__: process_contact_skills_job,
+    extract_resume_profile_job.__name__: extract_resume_profile_job,
+    apply_resume_profile_job.__name__: apply_resume_profile_job,
 }
 
 
@@ -97,8 +104,13 @@ def _run_job(job_id: str) -> None:
 
     try:
         args, kwargs = _extract_call_args(job)
-        handler(*args, **kwargs)
-        mark_job_succeeded(settings, job_id)
+        result = handler(*args, **kwargs)
+        mark_job_succeeded(
+            settings,
+            job_id,
+            result=result,
+            base_payload=job.payload,
+        )
         logger.info("Completed job_id=%s type=%s", job_id, job.type)
     except Exception as exc:
         next_attempt = job.attempts + 1

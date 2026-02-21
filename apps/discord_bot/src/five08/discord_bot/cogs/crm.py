@@ -5,12 +5,15 @@ This cog provides commands for interacting with EspoCRM through Discord slash co
 It allows team members to quickly access CRM data without leaving Discord.
 """
 
-import logging
+import asyncio
 import io
+import logging
 from typing import Any
-from discord.ext import commands
-from discord import app_commands
+
+import aiohttp
 import discord
+from discord import app_commands
+from discord.ext import commands
 
 from five08.discord_bot.config import settings
 from five08.clients import espo
@@ -321,6 +324,133 @@ class ResumeConfirmationView(discord.ui.View):
             pass
 
 
+class ResumeUpdateConfirmationView(discord.ui.View):
+    """Confirm extracted profile updates before writing to CRM."""
+
+    def __init__(
+        self,
+        *,
+        crm_cog: "CRMCog",
+        requester_id: int,
+        contact_id: str,
+        contact_name: str,
+        proposed_updates: dict[str, str],
+        link_discord: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(timeout=300)
+        self.crm_cog = crm_cog
+        self.requester_id = requester_id
+        self.contact_id = contact_id
+        self.contact_name = contact_name
+        self.proposed_updates = proposed_updates
+        self.link_discord = link_discord
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Allow only the original requester to confirm/cancel."""
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "❌ Only the command requester can confirm these updates.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm Updates", style=discord.ButtonStyle.primary)
+    async def confirm_updates(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button["ResumeUpdateConfirmationView"],
+    ) -> None:
+        """Apply confirmed updates through the worker."""
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            apply_job_id = await self.crm_cog._enqueue_resume_apply_job(
+                contact_id=self.contact_id,
+                updates=self.proposed_updates,
+                link_discord=self.link_discord,
+            )
+        except Exception as exc:
+            logger.error("Failed to enqueue resume apply job: %s", exc)
+            await interaction.followup.send(
+                "❌ Failed to enqueue CRM apply job. Please try again."
+            )
+            return
+
+        await interaction.followup.send(
+            "🛠️ Applying confirmed updates to CRM...",
+            ephemeral=True,
+        )
+        apply_result = await self.crm_cog._wait_for_worker_job_result(apply_job_id)
+
+        if not apply_result:
+            await interaction.followup.send(
+                "⚠️ Timed out waiting for apply job. Please check again shortly."
+            )
+            return
+
+        status = str(apply_result.get("status", "unknown"))
+        if status != "succeeded":
+            await interaction.followup.send(
+                f"❌ Apply job failed (status: {status}). "
+                f"Error: {apply_result.get('last_error') or 'Unknown error'}"
+            )
+            return
+
+        result = apply_result.get("result")
+        updated_fields: list[str] = []
+        if isinstance(result, dict):
+            raw_fields = result.get("updated_fields")
+            if isinstance(raw_fields, list):
+                updated_fields = [str(field) for field in raw_fields]
+
+        embed = discord.Embed(
+            title="✅ CRM Updated",
+            description=f"Applied updates for **{self.contact_name}**.",
+            color=0x00FF00,
+        )
+        embed.add_field(
+            name="Updated Fields",
+            value=", ".join(updated_fields) if updated_fields else "No field changes",
+            inline=False,
+        )
+        profile_url = f"{self.crm_cog.base_url}/#Contact/view/{self.contact_id}"
+        embed.add_field(name="🔗 CRM Profile", value=f"[View in CRM]({profile_url})")
+        await interaction.followup.send(embed=embed)
+
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+        if interaction.message:
+            try:
+                await interaction.message.edit(view=self)
+            except discord.NotFound:
+                pass
+            except discord.HTTPException as exc:
+                logger.warning("Failed to update confirmation view: %s", exc)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_updates(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button["ResumeUpdateConfirmationView"],
+    ) -> None:
+        """Cancel CRM updates after preview."""
+        await interaction.response.send_message(
+            "No CRM profile updates were applied.", ephemeral=True
+        )
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+        if interaction.message:
+            try:
+                await interaction.message.edit(view=self)
+            except discord.NotFound:
+                pass
+            except discord.HTTPException as exc:
+                logger.warning("Failed to update confirmation view: %s", exc)
+
+
 class CRMCog(commands.Cog):
     """CRM integration cog for EspoCRM operations."""
 
@@ -331,6 +461,291 @@ class CRMCog(commands.Cog):
         self.espo_api = EspoAPI(api_url, settings.espo_api_key)
         # Store base URL for profile links
         self.base_url = settings.espo_base_url.rstrip("/")
+
+    def _worker_headers(self) -> dict[str, str]:
+        """Build auth headers for internal worker API calls."""
+        if not settings.api_shared_secret:
+            raise ValueError("API_SHARED_SECRET is required for worker API requests.")
+        return {
+            "X-API-Secret": settings.api_shared_secret,
+            "Content-Type": "application/json",
+        }
+
+    def _worker_url(self, path: str) -> str:
+        return f"{settings.worker_api_base_url.rstrip('/')}{path}"
+
+    async def _enqueue_resume_extract_job(
+        self, *, contact_id: str, attachment_id: str, filename: str
+    ) -> str:
+        payload = {
+            "contact_id": contact_id,
+            "attachment_id": attachment_id,
+            "filename": filename,
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                self._worker_url("/jobs/resume-extract"),
+                headers=self._worker_headers(),
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                data = await response.json()
+                if response.status != 202:
+                    raise ValueError(f"Worker extract enqueue failed: {data}")
+                job_id = data.get("job_id")
+                if not isinstance(job_id, str) or not job_id:
+                    raise ValueError("Missing worker extract job_id in response.")
+                return job_id
+
+    async def _enqueue_resume_apply_job(
+        self,
+        *,
+        contact_id: str,
+        updates: dict[str, str],
+        link_discord: dict[str, str] | None = None,
+    ) -> str:
+        payload = {
+            "contact_id": contact_id,
+            "updates": updates,
+            "link_discord": link_discord,
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                self._worker_url("/jobs/resume-apply"),
+                headers=self._worker_headers(),
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                data = await response.json()
+                if response.status != 202:
+                    raise ValueError(f"Worker apply enqueue failed: {data}")
+                job_id = data.get("job_id")
+                if not isinstance(job_id, str) or not job_id:
+                    raise ValueError("Missing worker apply job_id in response.")
+                return job_id
+
+    async def _get_worker_job_status(self, job_id: str) -> dict[str, Any]:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                self._worker_url(f"/jobs/{job_id}"),
+                headers=self._worker_headers(),
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                data = await response.json()
+                if response.status != 200:
+                    raise ValueError(f"Worker job status failed: {data}")
+                if not isinstance(data, dict):
+                    raise ValueError("Worker job status response must be an object.")
+                return data
+
+    async def _wait_for_worker_job_result(
+        self, job_id: str, *, timeout_seconds: int = 180, poll_seconds: float = 2.0
+    ) -> dict[str, Any] | None:
+        """Poll worker job status until terminal or timeout."""
+        terminal = {"succeeded", "dead", "canceled"}
+        max_attempts = max(1, int(timeout_seconds / poll_seconds))
+
+        for _ in range(max_attempts):
+            job = await self._get_worker_job_status(job_id)
+            status = str(job.get("status", ""))
+            if status in terminal:
+                return job
+            await asyncio.sleep(poll_seconds)
+
+        return None
+
+    def _build_resume_preview_embed(
+        self,
+        *,
+        contact_id: str,
+        contact_name: str,
+        result: dict[str, Any],
+        link_member: discord.Member | None,
+    ) -> tuple[discord.Embed, dict[str, str]]:
+        """Render worker extraction result as a Discord preview embed."""
+        proposed_updates_raw = result.get("proposed_updates")
+        proposed_updates: dict[str, str] = {}
+        if isinstance(proposed_updates_raw, dict):
+            proposed_updates = {
+                str(field): str(value)
+                for field, value in proposed_updates_raw.items()
+                if value is not None and str(value).strip()
+            }
+
+        changes = result.get("proposed_changes")
+        new_skills = result.get("new_skills")
+        skipped = result.get("skipped")
+        extracted_profile = result.get("extracted_profile")
+
+        embed = discord.Embed(
+            title="🧾 Resume Parsed",
+            description=f"Review extracted updates for **{contact_name}**.",
+            color=0x0099FF,
+        )
+
+        if isinstance(changes, list) and changes:
+            lines: list[str] = []
+            for change in changes[:8]:
+                if not isinstance(change, dict):
+                    continue
+                label = str(change.get("label", change.get("field", "Field")))
+                current = str(change.get("current", "None"))
+                proposed = str(change.get("proposed", ""))
+                lines.append(f"**{label}**: `{current}` → `{proposed}`")
+            embed.add_field(
+                name="Proposed Changes",
+                value="\n".join(lines) if lines else "No changes",
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="Proposed Changes",
+                value="No CRM field updates were extracted.",
+                inline=False,
+            )
+
+        if isinstance(new_skills, list) and new_skills:
+            formatted_skills = ", ".join(str(skill) for skill in new_skills[:25])
+            embed.add_field(
+                name="New Skills",
+                value=formatted_skills,
+                inline=False,
+            )
+
+        if isinstance(skipped, list) and skipped:
+            skip_lines: list[str] = []
+            for item in skipped[:4]:
+                if not isinstance(item, dict):
+                    continue
+                field = str(item.get("field", "field"))
+                reason = str(item.get("reason", "Skipped"))
+                value = str(item.get("value", ""))
+                skip_lines.append(f"`{field}`: `{value}` ({reason})")
+            if skip_lines:
+                embed.add_field(
+                    name="Skipped",
+                    value="\n".join(skip_lines),
+                    inline=False,
+                )
+
+        if isinstance(extracted_profile, dict):
+            confidence = extracted_profile.get("confidence")
+            source = extracted_profile.get("source")
+            if confidence is not None or source:
+                embed.add_field(
+                    name="Extraction",
+                    value=f"Source: `{source or 'unknown'}` | Confidence: `{confidence}`",
+                    inline=False,
+                )
+
+        if link_member:
+            embed.add_field(
+                name="Discord Link",
+                value=f"Will link contact to {link_member.mention}",
+                inline=False,
+            )
+
+        profile_url = f"{self.base_url}/#Contact/view/{contact_id}"
+        embed.add_field(name="🔗 CRM Profile", value=f"[View in CRM]({profile_url})")
+        return embed, proposed_updates
+
+    async def _run_resume_extract_and_preview(
+        self,
+        *,
+        interaction: discord.Interaction,
+        contact_id: str,
+        contact_name: str,
+        attachment_id: str,
+        filename: str,
+        link_member: discord.Member | None,
+    ) -> None:
+        """Kick off worker extraction and show confirmation preview."""
+        try:
+            job_id = await self._enqueue_resume_extract_job(
+                contact_id=contact_id,
+                attachment_id=attachment_id,
+                filename=filename,
+            )
+        except Exception as exc:
+            logger.error("Failed to enqueue resume extract job: %s", exc)
+            await interaction.followup.send(
+                "⚠️ Resume uploaded, but extraction job could not be enqueued.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            "📥 Resume uploaded. Extracting profile fields now...",
+            ephemeral=True,
+        )
+
+        try:
+            job = await self._wait_for_worker_job_result(job_id)
+        except Exception as exc:
+            logger.error("Worker polling failed for job_id=%s error=%s", job_id, exc)
+            await interaction.followup.send(
+                "⚠️ Resume uploaded, but extraction polling failed.",
+                ephemeral=True,
+            )
+            return
+        if not job:
+            await interaction.followup.send(
+                "⚠️ Timed out waiting for extraction result. Try again in a moment.",
+                ephemeral=True,
+            )
+            return
+
+        status = str(job.get("status", "unknown"))
+        if status != "succeeded":
+            await interaction.followup.send(
+                f"❌ Extraction job failed (status: {status}). "
+                f"Error: {job.get('last_error') or 'Unknown error'}",
+                ephemeral=True,
+            )
+            return
+
+        result = job.get("result")
+        if not isinstance(result, dict):
+            await interaction.followup.send(
+                "❌ Extraction result was empty or malformed.",
+                ephemeral=True,
+            )
+            return
+
+        if not result.get("success", False):
+            await interaction.followup.send(
+                f"❌ Resume extraction failed: {result.get('error') or 'Unknown error'}",
+                ephemeral=True,
+            )
+            return
+
+        embed, proposed_updates = self._build_resume_preview_embed(
+            contact_id=contact_id,
+            contact_name=contact_name,
+            result=result,
+            link_member=link_member,
+        )
+
+        if not proposed_updates and not link_member:
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        link_discord_payload: dict[str, str] | None = None
+        if link_member:
+            link_discord_payload = {
+                "user_id": str(link_member.id),
+                "username": str(link_member),
+            }
+
+        view = ResumeUpdateConfirmationView(
+            crm_cog=self,
+            requester_id=interaction.user.id,
+            contact_id=contact_id,
+            contact_name=contact_name,
+            proposed_updates=proposed_updates,
+            link_discord=link_discord_payload,
+        )
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     async def _download_and_send_resume(
         self, interaction: discord.Interaction, contact_name: str, resume_id: str
@@ -1244,12 +1659,13 @@ class CRMCog(commands.Cog):
 
     @app_commands.command(
         name="upload-resume",
-        description="Upload a resume file to CRM (your own or for someone else if Steering Committee+)",
+        description="Upload resume, extract profile fields, and preview CRM updates",
     )
     @app_commands.describe(
-        file="Resume file to upload (PDF, DOC, DOCX)",
-        search_term="Email, name, or contact ID to find contact (optional - if not provided, uploads to your own profile)",
-        overwrite="Whether to replace all existing resumes instead of adding (default: False)",
+        file="Resume file to upload (PDF, DOC, DOCX, TXT)",
+        search_term="Email, name, or contact ID (optional - defaults to your linked profile)",
+        overwrite="Replace existing resumes instead of appending",
+        link_user="Discord user to link to this CRM contact (optional, Steering Committee+ for others)",
     )
     async def upload_resume(
         self,
@@ -1257,17 +1673,20 @@ class CRMCog(commands.Cog):
         file: discord.Attachment,
         search_term: str | None = None,
         overwrite: bool = False,
+        link_user: discord.Member | None = None,
     ) -> None:
-        """Upload a resume file to the CRM.
-
-        By default, new resumes are added alongside existing ones.
-        Use overwrite=True to replace all existing resumes with this one.
-        """
+        """Upload resume and run worker extraction to preview CRM updates."""
         try:
             await interaction.response.defer(ephemeral=True)
 
+            if not settings.api_shared_secret:
+                await interaction.followup.send(
+                    "❌ API_SHARED_SECRET is not configured for worker API access."
+                )
+                return
+
             # Validate file type
-            valid_extensions = {".pdf", ".doc", ".docx"}
+            valid_extensions = {".pdf", ".doc", ".docx", ".txt"}
             file_extension = (
                 "." + file.filename.split(".")[-1].lower()
                 if "." in file.filename
@@ -1276,7 +1695,7 @@ class CRMCog(commands.Cog):
 
             if file_extension not in valid_extensions:
                 await interaction.followup.send(
-                    f"❌ Invalid file type. Please upload a PDF, DOC, or DOCX file.\nYou uploaded: `{file.filename}`"
+                    f"❌ Invalid file type. Please upload a PDF, DOC, DOCX, or TXT file.\nYou uploaded: `{file.filename}`"
                 )
                 return
 
@@ -1288,22 +1707,24 @@ class CRMCog(commands.Cog):
                 )
                 return
 
+            requires_steering = bool(search_term) or (
+                link_user is not None and link_user.id != interaction.user.id
+            )
+            if requires_steering and (
+                not hasattr(interaction.user, "roles")
+                or not check_user_roles_with_hierarchy(
+                    interaction.user.roles, ["Steering Committee"]
+                )
+            ):
+                await interaction.followup.send(
+                    "❌ You must have Steering Committee role or higher for this upload."
+                )
+                return
+
             # Determine target contact
             target_contact = None
 
             if search_term:
-                # Uploading for someone else - requires Steering Committee+ role
-                if not hasattr(
-                    interaction.user, "roles"
-                ) or not check_user_roles_with_hierarchy(
-                    interaction.user.roles, ["Steering Committee"]
-                ):
-                    await interaction.followup.send(
-                        "❌ You must have Steering Committee role or higher to upload resumes for other people."
-                    )
-                    return
-
-                # Search for target contact
                 contacts = await self._search_contact_for_linking(search_term)
                 if not contacts:
                     await interaction.followup.send(
@@ -1336,40 +1757,6 @@ class CRMCog(commands.Cog):
                 await interaction.followup.send("❌ Contact ID not found.")
                 return
 
-            # Check for existing resume with same name and size
-            has_duplicate, existing_resume_id = await self._check_existing_resume(
-                contact_id, file.filename, file.size
-            )
-
-            if has_duplicate:
-                # Show confirmation dialog
-                embed = discord.Embed(
-                    title="⚠️ Duplicate Resume Detected",
-                    description=f"A resume with the same name and file size already exists for **{contact_name}**.",
-                    color=0xFFA500,
-                )
-                embed.add_field(name="📄 File", value=file.filename, inline=True)
-                embed.add_field(
-                    name="📁 Size", value=f"{file.size / 1024:.1f} KB", inline=True
-                )
-                embed.add_field(
-                    name="❓ Question",
-                    value="Do you want to upload this resume anyway? This will add it as a new resume without replacing the existing one.",
-                    inline=False,
-                )
-
-                view = ResumeConfirmationView(
-                    self,
-                    interaction,
-                    file,
-                    contact_id,
-                    contact_name,
-                    existing_resume_id or "",
-                    overwrite,
-                )
-                await interaction.followup.send(embed=embed, view=view)
-                return
-
             # Download file content from Discord
             file_content = await file.read()
 
@@ -1388,40 +1775,29 @@ class CRMCog(commands.Cog):
                     await interaction.followup.send("❌ Failed to upload file to CRM.")
                     return
 
-                # Update contact's resume field
-                if await self._update_contact_resume(
+                if not await self._update_contact_resume(
                     contact_id, attachment_id, overwrite
                 ):
-                    # Create success embed
-                    embed = discord.Embed(
-                        title="✅ Resume Uploaded Successfully",
-                        description="Resume has been uploaded and linked to the contact.",
-                        color=0x00FF00,
-                    )
-                    embed.add_field(name="👤 Contact", value=contact_name, inline=True)
-                    embed.add_field(name="📄 File", value=file.filename, inline=True)
-                    embed.add_field(
-                        name="📁 Size", value=f"{file.size / 1024:.1f} KB", inline=True
-                    )
-
-                    # Add CRM link
-                    profile_url = f"{self.base_url}/#Contact/view/{contact_id}"
-                    embed.add_field(
-                        name="🔗 CRM Profile",
-                        value=f"[View in CRM]({profile_url})",
-                        inline=False,
-                    )
-
-                    await interaction.followup.send(embed=embed)
-
-                    logger.info(
-                        f"Resume uploaded for {contact_name} (ID: {contact_id}) "
-                        f"by {interaction.user.name}: {file.filename}"
-                    )
-                else:
                     await interaction.followup.send(
-                        "⚠️ File uploaded but failed to link to contact. Please check CRM manually."
+                        "⚠️ File uploaded, but failed to link in contact resume field."
                     )
+                    return
+
+                logger.info(
+                    "Resume uploaded for %s (contact_id=%s, attachment_id=%s) by %s",
+                    contact_name,
+                    contact_id,
+                    attachment_id,
+                    interaction.user.name,
+                )
+                await self._run_resume_extract_and_preview(
+                    interaction=interaction,
+                    contact_id=contact_id,
+                    contact_name=contact_name,
+                    attachment_id=attachment_id,
+                    filename=file.filename,
+                    link_member=link_user,
+                )
 
             except EspoAPIError as e:
                 logger.error(f"Failed to upload file to EspoCRM: {e}")

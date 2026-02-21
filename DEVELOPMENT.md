@@ -118,6 +118,7 @@ Use `.env.example` as source of truth. Key categories:
 - Bot credentials/integrations: Discord, email, Espo, Kimai
 - Worker controls: `WORKER_NAME`, `WORKER_QUEUE_NAMES`, `WORKER_BURST`
 - Worker CRM processing: `MAX_ATTACHMENTS_PER_CONTACT`, `MAX_FILE_SIZE_MB`, `ALLOWED_FILE_TYPES`, `RESUME_KEYWORDS`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`
+- Resume upload UX wiring: `WORKER_API_BASE_URL` on bot, `CRM_LINKEDIN_FIELD` on worker.
 
 ## CI Notes
 

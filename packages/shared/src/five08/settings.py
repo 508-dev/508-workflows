@@ -1,5 +1,6 @@
 """Shared configuration settings across services."""
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -33,7 +34,10 @@ class SharedSettings(BaseSettings):
 
     webhook_ingest_host: str = "0.0.0.0"
     webhook_ingest_port: int = 8090
-    webhook_shared_secret: str | None = None
+    api_shared_secret: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("API_SHARED_SECRET", "WEBHOOK_SHARED_SECRET"),
+    )
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
