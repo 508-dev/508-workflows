@@ -35,6 +35,8 @@ class Settings(SharedSettings):
     espo_api_key: str
     espo_base_url: str
     worker_api_base_url: str = "http://worker-api:8090"
+    audit_api_base_url: str | None = None
+    audit_api_timeout_seconds: float = 2.0
 
     # Kimai time tracking settings
     kimai_base_url: str

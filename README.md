@@ -41,6 +41,8 @@ Migrations:
 - Job states: `queued`, `running`, `succeeded`, `failed`, `dead`, `canceled`.
 - Idempotency key is unique and optional.
 - Attempts are stored with `run_after`/retry state so delivery failures are never lost.
+- Human audit events are persisted in `audit_events`.
+- CRM identity cache is persisted in `people`.
 
 ### Worker API Endpoints
 
@@ -50,7 +52,10 @@ Migrations:
 - `POST /jobs/resume-apply`: Enqueue confirmed CRM field apply.
 - `POST /webhooks/{source}`: Generic webhook enqueue endpoint.
 - `POST /webhooks/espocrm`: EspoCRM webhook endpoint (expects array payload).
+- `POST /webhooks/espocrm/people-sync`: EspoCRM contact-change webhook for people cache sync.
 - `POST /process-contact/{contact_id}`: Manually enqueue one contact skills job.
+- `POST /sync/people`: Manually enqueue a full CRM->people cache sync.
+- `POST /audit/events`: Persist one human audit event (`discord` or `admin_dashboard`).
 
 ## Local Development
 
@@ -90,62 +95,97 @@ docker compose up --build
 
 ## Environment Variables
 
-### Shared (bot + worker)
+Use `.env.example` as the source of truth for defaults.
 
-- `REDIS_URL` (default: `redis://redis:6379/0`)
-- `REDIS_QUEUE_NAME` (default: `jobs.default`)
-- `REDIS_KEY_PREFIX` (default: `jobs`)
-- `ESPO_BASE_URL` (required by both bot and worker)
-- `ESPO_API_KEY` (required by both bot and worker)
-- `JOB_TIMEOUT_SECONDS` (default: `600`)
-- `JOB_RESULT_TTL_SECONDS` (default: `3600`)
-- `API_SHARED_SECRET` (required; requests are rejected when unset)
-- `POSTGRES_URL` (default: `postgresql://postgres:postgres@postgres:5432/workflows`)
-- `POSTGRES_DB` (default: `workflows`)
-- `POSTGRES_USER` (default: `postgres`)
-- `POSTGRES_PASSWORD` (default: `postgres`)
-- `JOB_MAX_ATTEMPTS` (default: `8`)
-- `JOB_RETRY_BASE_SECONDS` (default: `5`)
-- `JOB_RETRY_MAX_SECONDS` (default: `300`)
-- `WEBHOOK_INGEST_HOST` (default: `0.0.0.0`)
-- `WEBHOOK_INGEST_PORT` (default: `8090`)
-- `LOG_LEVEL` (default: `INFO`)
-- `MINIO_ENDPOINT` (default: `http://minio:9000`)
-- `MINIO_INTERNAL_BUCKET` (default: `internal-transfers`)
-- `MINIO_ROOT_USER` (default: `internal`)
-- `MINIO_ROOT_PASSWORD`
-- `MINIO_HOST_BIND` (default: `127.0.0.1`; set to `0.0.0.0` to expose MinIO)
-- `MINIO_API_PORT` (default: `9000`)
-- `MINIO_CONSOLE_PORT` (default: `9001`)
-- `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` (compatibility aliases; use `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` by default for internal transfers)
+### Core Runtime (Bot + Worker)
 
-### Discord Bot
+- `Required`: `ESPO_BASE_URL`, `ESPO_API_KEY`
+- `Optional`: `LOG_LEVEL` (default: `INFO`)
+- `Optional`: `RUNTIME_ENV` (default: `local`; non-local values require explicit `POSTGRES_URL` and `MINIO_ROOT_PASSWORD`)
 
-- `DISCORD_BOT_TOKEN`
-- `CHANNEL_ID`
-- `WORKER_API_BASE_URL` (default: `http://worker-api:8090`)
-- `EMAIL_USERNAME`
-- `EMAIL_PASSWORD`
-- `IMAP_SERVER`
-- `SMTP_SERVER`
-- `KIMAI_BASE_URL`
-- `KIMAI_API_TOKEN`
-- Optional: `CHECK_EMAIL_WAIT`, `DISCORD_SENDMSG_CHARACTER_LIMIT`, `HEALTHCHECK_PORT`
+### Queue + Job Runtime
+
+- `Optional`: `REDIS_URL` (default: `redis://redis:6379/0`)
+- `Optional`: `REDIS_QUEUE_NAME` (default: `jobs.default`)
+- `Optional`: `REDIS_KEY_PREFIX` (default: `jobs`)
+- `Optional`: `JOB_TIMEOUT_SECONDS` (default: `600`)
+- `Optional`: `JOB_RESULT_TTL_SECONDS` (default: `3600`)
+- `Optional`: `JOB_MAX_ATTEMPTS` (default: `8`)
+- `Optional`: `JOB_RETRY_BASE_SECONDS` (default: `5`)
+- `Optional`: `JOB_RETRY_MAX_SECONDS` (default: `300`)
+
+### Postgres + Compose Exposure
+
+- `Optional`: `POSTGRES_URL` (default: `postgresql://postgres@postgres:5432/workflows`)
+- `Optional` (Compose DB container): `POSTGRES_DB` (default: `workflows`)
+- `Optional` (Compose DB container): `POSTGRES_USER` (default: `postgres`)
+- `Optional` (Compose DB container): `POSTGRES_PASSWORD` (default: `postgres`)
+- `Optional` (Compose host bind): `POSTGRES_HOST_BIND` (default: `127.0.0.1`)
+- `Optional` (Compose host port): `POSTGRES_PORT` (default: `5432`)
+
+### MinIO + Internal Transfers
+
+- `Required` in non-local environments: `MINIO_ROOT_PASSWORD`
+- `Optional`: `MINIO_ENDPOINT` (default: `http://minio:9000`)
+- `Optional`: `MINIO_INTERNAL_BUCKET` (default: `internal-transfers`)
+- `Optional`: `MINIO_ROOT_USER` (default: `internal`)
+- `Optional`: `MINIO_HOST_BIND` (default: `127.0.0.1`; set `0.0.0.0` to expose externally)
+- `Optional`: `MINIO_API_PORT` (default: `9000`)
+- `Optional`: `MINIO_CONSOLE_PORT` (default: `9001`)
+- Note: `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` are `SharedSettings` alias properties (`minio_access_key`, `minio_secret_key`) and are not env-loaded fields.
+- Note: use `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` as the actual env vars.
+
+### Worker API Ingest
+
+- `Required` for protected endpoints: `API_SHARED_SECRET` (ingest requests are rejected when unset)
+- `Optional`: `WEBHOOK_INGEST_HOST` (default: `0.0.0.0`)
+- `Optional`: `WEBHOOK_INGEST_PORT` (default: `8090`)
 
 ### Worker Consumer
 
-- `WORKER_NAME` (default: `integrations-worker`)
-- `WORKER_QUEUE_NAMES` (default: `jobs.default`, comma-separated)
-- `WORKER_BURST` (default: `false`)
-- `MAX_ATTACHMENTS_PER_CONTACT` (default: `3`)
-- `MAX_FILE_SIZE_MB` (default: `10`)
-- `ALLOWED_FILE_TYPES` (default: `pdf,doc,docx,txt`)
-- `RESUME_KEYWORDS` (default: `resume,cv,curriculum`)
-- `CRM_LINKEDIN_FIELD` (default: `cLinkedInUrl`)
-- `OPENAI_API_KEY` (optional; if unset, heuristic extraction is used)
-- `OPENAI_BASE_URL` (optional; set `https://openrouter.ai/api/v1` for OpenRouter)
-- `OPENAI_MODEL` (default: `gpt-4o-mini`)
-- `RESUME_EXTRACTOR_VERSION` (default: `v1`; used in resume processing idempotency/ledger keys)
+- `Optional`: `WORKER_NAME` (default: `integrations-worker`)
+- `Optional`: `WORKER_QUEUE_NAMES` (default: `jobs.default`, comma-separated)
+- `Optional`: `WORKER_BURST` (default: `false`)
+
+### Worker CRM Sync + Skills Extraction
+
+- `Optional`: `CRM_SYNC_ENABLED` (default: `true`)
+- `Optional`: `CRM_SYNC_INTERVAL_SECONDS` (default: `900`)
+- `Optional`: `CRM_SYNC_PAGE_SIZE` (default: `200`)
+- `Optional`: `CRM_LINKEDIN_FIELD` (default: `cLinkedInUrl`)
+- `Optional`: `MAX_ATTACHMENTS_PER_CONTACT` (default: `3`)
+- `Optional`: `MAX_FILE_SIZE_MB` (default: `10`)
+- `Optional`: `ALLOWED_FILE_TYPES` (default: `pdf,doc,docx,txt`)
+- `Optional`: `RESUME_KEYWORDS` (default: `resume,cv,curriculum`)
+- `Optional`: `OPENAI_API_KEY` (if unset, heuristic extraction is used)
+- `Optional`: `OPENAI_BASE_URL` (set `https://openrouter.ai/api/v1` for OpenRouter)
+- `Optional`: `OPENAI_MODEL` (default: `gpt-4o-mini`)
+- `Optional`: `RESUME_EXTRACTOR_VERSION` (default: `v1`; used in resume processing idempotency/ledger keys)
+
+### Discord Bot Core
+
+- `Required`: `DISCORD_BOT_TOKEN`
+- `Required`: `CHANNEL_ID`
+- `Optional`: `WORKER_API_BASE_URL` (default: `http://worker-api:8090`)
+- `Optional`: `HEALTHCHECK_PORT` (default: `3000`)
+- `Optional`: `DISCORD_SENDMSG_CHARACTER_LIMIT` (default: `2000`)
+- `Optional`: `CHECK_EMAIL_WAIT` (default: `2`)
+
+### Discord Email Monitoring
+
+- `Required`: `EMAIL_USERNAME`
+- `Required`: `EMAIL_PASSWORD`
+- `Required`: `IMAP_SERVER`
+- `Required`: `SMTP_SERVER`
+
+### Discord CRM Audit Logging (Best Effort)
+
+- `Optional`: `AUDIT_API_BASE_URL` (when set with `API_SHARED_SECRET`, CRM commands emit best-effort audit events)
+- `Optional`: `AUDIT_API_TIMEOUT_SECONDS` (default: `2.0`)
+
+### Kimai (Legacy/Deprecating)
+
+- `Currently required by config model`: `KIMAI_BASE_URL`, `KIMAI_API_TOKEN`
 
 ## Commands
 

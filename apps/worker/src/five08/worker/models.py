@@ -1,5 +1,7 @@
 """Typed models for worker webhook and skills processing flows."""
 
+from datetime import datetime
+from typing import Literal
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -107,3 +109,19 @@ class ResumeApplyResult(BaseModel):
     link_discord_applied: bool = False
     success: bool
     error: str | None = None
+
+
+class AuditEventPayload(BaseModel):
+    """Inbound payload for creating a human audit event."""
+
+    source: Literal["discord", "admin_dashboard"]
+    action: str = Field(..., min_length=1)
+    result: Literal["success", "denied", "error"] = "success"
+    actor_provider: Literal["discord", "admin_sso"]
+    actor_subject: str = Field(..., min_length=1)
+    resource_type: str | None = None
+    resource_id: str | None = None
+    actor_display_name: str | None = None
+    correlation_id: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    occurred_at: datetime | None = None

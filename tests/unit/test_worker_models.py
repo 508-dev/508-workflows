@@ -1,6 +1,6 @@
 """Unit tests for worker models."""
 
-from five08.worker.models import EspoCRMWebhookPayload
+from five08.worker.models import AuditEventPayload, EspoCRMWebhookPayload
 
 
 def test_espocrm_webhook_payload_from_list() -> None:
@@ -11,3 +11,15 @@ def test_espocrm_webhook_payload_from_list() -> None:
     assert len(payload.events) == 2
     assert payload.events[0].id == "contact-1"
     assert payload.events[0].name == "Jane"
+
+
+def test_audit_event_payload_defaults_metadata() -> None:
+    """Audit payload should default metadata to an empty object."""
+    payload = AuditEventPayload(
+        source="discord",
+        action="crm.search",
+        result="success",
+        actor_provider="discord",
+        actor_subject="12345",
+    )
+    assert payload.metadata == {}
