@@ -47,6 +47,9 @@ Migrations:
 ### Worker API Endpoints
 
 - `GET /health`: Redis/Postgres/worker health check.
+- `GET /jobs/{job_id}`: Fetch queued job status/result payload.
+- `POST /jobs/resume-extract`: Enqueue resume profile extraction.
+- `POST /jobs/resume-apply`: Enqueue confirmed CRM field apply.
 - `POST /webhooks/{source}`: Generic webhook enqueue endpoint.
 - `POST /webhooks/espocrm`: EspoCRM webhook endpoint (expects array payload).
 - `POST /webhooks/espocrm/people-sync`: EspoCRM contact-change webhook for people cache sync.
@@ -134,7 +137,7 @@ Use `.env.example` as the source of truth for defaults.
 
 ### Worker API Ingest
 
-- `Required` for protected endpoints: `WEBHOOK_SHARED_SECRET` (ingest requests are rejected when unset)
+- `Required` for protected endpoints: `API_SHARED_SECRET` (ingest requests are rejected when unset)
 - `Optional`: `WEBHOOK_INGEST_HOST` (default: `0.0.0.0`)
 - `Optional`: `WEBHOOK_INGEST_PORT` (default: `8090`)
 
@@ -149,18 +152,22 @@ Use `.env.example` as the source of truth for defaults.
 - `Optional`: `CRM_SYNC_ENABLED` (default: `true`)
 - `Optional`: `CRM_SYNC_INTERVAL_SECONDS` (default: `900`)
 - `Optional`: `CRM_SYNC_PAGE_SIZE` (default: `200`)
+- `Optional`: `CRM_LINKEDIN_FIELD` (default: `cLinkedInUrl`)
 - `Optional`: `MAX_ATTACHMENTS_PER_CONTACT` (default: `3`)
 - `Optional`: `MAX_FILE_SIZE_MB` (default: `10`)
 - `Optional`: `ALLOWED_FILE_TYPES` (default: `pdf,doc,docx,txt`)
 - `Optional`: `RESUME_KEYWORDS` (default: `resume,cv,curriculum`)
 - `Optional`: `OPENAI_API_KEY` (if unset, heuristic extraction is used)
-- `Optional`: `OPENAI_BASE_URL`
-- `Optional`: `OPENAI_MODEL` (default: `gpt-4o-mini`)
+- `Optional`: `OPENAI_BASE_URL` (set `https://openrouter.ai/api/v1` for OpenRouter)
+- `Optional`: `RESUME_AI_MODEL` (default: `gpt-4o-mini`; use plain names like `gpt-4o-mini`, OpenRouter gets auto-prefixed to `openai/<model>`)
+- `Optional`: `OPENAI_MODEL` (default: `gpt-4o-mini`; fallback/legacy model setting)
+- `Optional`: `RESUME_EXTRACTOR_VERSION` (default: `v1`; used in resume processing idempotency/ledger keys)
 
 ### Discord Bot Core
 
 - `Required`: `DISCORD_BOT_TOKEN`
 - `Required`: `CHANNEL_ID`
+- `Optional`: `WORKER_API_BASE_URL` (default: `http://worker-api:8090`)
 - `Optional`: `HEALTHCHECK_PORT` (default: `3000`)
 - `Optional`: `DISCORD_SENDMSG_CHARACTER_LIMIT` (default: `2000`)
 - `Optional`: `CHECK_EMAIL_WAIT` (default: `2`)
@@ -174,7 +181,7 @@ Use `.env.example` as the source of truth for defaults.
 
 ### Discord CRM Audit Logging (Best Effort)
 
-- `Optional`: `AUDIT_API_BASE_URL` (when set with `WEBHOOK_SHARED_SECRET`, CRM commands emit best-effort audit events)
+- `Optional`: `AUDIT_API_BASE_URL` (when set with `API_SHARED_SECRET`, CRM commands emit best-effort audit events)
 - `Optional`: `AUDIT_API_TIMEOUT_SECONDS` (default: `2.0`)
 
 ### Kimai (Legacy/Deprecating)

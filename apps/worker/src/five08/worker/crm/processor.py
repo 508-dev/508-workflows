@@ -187,8 +187,19 @@ class ContactSkillsProcessor:
     def _parse_existing_skills(self, skills_text: str | None) -> list[str]:
         if not skills_text:
             return []
-        parsed = [skill.strip() for skill in skills_text.split(",")]
-        return [skill for skill in parsed if skill]
+        parsed = [skill.strip() for skill in skills_text.split(",") if skill.strip()]
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for skill in parsed:
+            canonical = self.skills_extractor.canonicalize_skill(skill)
+            if not canonical:
+                continue
+            key = canonical.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(canonical)
+        return normalized
 
     def _filter_resume_attachments(
         self, attachments: list[dict[str, Any]]

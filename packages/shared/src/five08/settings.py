@@ -35,7 +35,7 @@ class SharedSettings(BaseSettings):
 
     webhook_ingest_host: str = "0.0.0.0"
     webhook_ingest_port: int = 8090
-    webhook_shared_secret: str | None = None
+    api_shared_secret: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

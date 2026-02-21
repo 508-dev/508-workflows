@@ -209,6 +209,7 @@ def _mark_job(
     *,
     status: JobStatus | None = None,
     attempts: int | None = None,
+    payload: Any = _UNSET,
     locked_at: Any = _UNSET,
     locked_by: Any = _UNSET,
     run_after: Any = _UNSET,
@@ -223,6 +224,9 @@ def _mark_job(
     if attempts is not None:
         updates.append("attempts = %s")
         params.append(attempts)
+    if payload is not _UNSET:
+        updates.append("payload = %s")
+        params.append(Jsonb(payload))
     if locked_at is not _UNSET:
         updates.append("locked_at = %s")
         params.append(locked_at)
@@ -266,12 +270,25 @@ def mark_job_running(
     )
 
 
-def mark_job_succeeded(settings: SharedSettings, job_id: str) -> None:
+def mark_job_succeeded(
+    settings: SharedSettings,
+    job_id: str,
+    *,
+    result: Any | None = None,
+    base_payload: dict[str, Any] | None = None,
+) -> None:
     """Mark successful completion."""
+    payload: Any = _UNSET
+    if result is not None:
+        merged_payload = dict(base_payload or {})
+        merged_payload["result"] = result
+        payload = merged_payload
+
     _mark_job(
         settings,
         job_id,
         status=JobStatus.SUCCEEDED,
+        payload=payload,
         locked_at=None,
         locked_by=None,
         run_after=None,

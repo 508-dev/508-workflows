@@ -66,7 +66,7 @@ class DiscordAuditLogger:
 
         url = f"{self.base_url}/audit/events"
         headers = {
-            "X-Webhook-Secret": self.shared_secret,
+            "X-API-Secret": self.shared_secret,
             "Content-Type": "application/json",
         }
 
