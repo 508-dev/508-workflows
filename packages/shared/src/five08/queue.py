@@ -111,7 +111,7 @@ _UNSET = object()
 def _as_record(row: dict[str, Any]) -> JobRecord:
     """Build a typed job record from a DB row."""
     return JobRecord(
-        id=row["id"],
+        id=str(row["id"]),
         type=row["type"],
         status=_parse_status(row["status"]),
         payload=row["payload"] or {},
@@ -171,7 +171,7 @@ def create_job_record(
             )
             row = cursor.fetchone()
             if row is not None:
-                return row["id"], True
+                return str(row["id"]), True
 
             if idempotency_key is None:
                 raise RuntimeError("Unable to create job row without idempotency key.")
@@ -189,7 +189,7 @@ def create_job_record(
     if existing is None:
         raise RuntimeError("Unable to load existing job for duplicate idempotency key.")
 
-    return existing["id"], False
+    return str(existing["id"]), False
 
 
 def get_job(settings: SharedSettings, job_id: str) -> JobRecord | None:
