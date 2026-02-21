@@ -104,7 +104,7 @@ async def test_ingest_handler_rejects_non_object_payload(
 async def test_espocrm_webhook_handler_enqueues_contact_jobs(
     auth_headers: dict[str, str],
 ) -> None:
-    """EspoCRM webhook should accept events and enqueue in background."""
+    """EspoCRM webhook should enqueue before responding."""
     app_obj = web.Application()
     app_obj[api.QUEUE_KEY] = Mock()
     request = make_mocked_request(
@@ -118,7 +118,7 @@ async def test_espocrm_webhook_handler_enqueues_contact_jobs(
     payload = json.loads(response.text)
     assert response.status == 202
     assert payload["events_received"] == 2
-    assert payload["enqueued_async"] is True
+    assert payload["events_enqueued"] == 2
 
 
 @pytest.mark.asyncio
@@ -190,7 +190,7 @@ async def test_sync_people_handler_enqueues_full_sync(
 async def test_espocrm_people_sync_webhook_handler_enqueues_contact_jobs(
     auth_headers: dict[str, str],
 ) -> None:
-    """People sync webhook should accept events and enqueue in background."""
+    """People sync webhook should enqueue before responding."""
     app_obj = web.Application()
     app_obj[api.QUEUE_KEY] = Mock()
     request = make_mocked_request(
@@ -210,7 +210,56 @@ async def test_espocrm_people_sync_webhook_handler_enqueues_contact_jobs(
     payload = json.loads(response.text)
     assert response.status == 202
     assert payload["events_received"] == 2
-    assert payload["enqueued_async"] is True
+    assert payload["events_enqueued"] == 2
+
+
+@pytest.mark.asyncio
+async def test_espocrm_webhook_handler_returns_503_on_enqueue_failure(
+    auth_headers: dict[str, str],
+) -> None:
+    """EspoCRM webhook should fail when enqueue persistence fails."""
+    app_obj = web.Application()
+    app_obj[api.QUEUE_KEY] = Mock()
+    request = make_mocked_request(
+        "POST", "/webhooks/espocrm", app=app_obj, headers=auth_headers
+    )
+    request.json = AsyncMock(return_value=[{"id": "c-1"}])  # type: ignore[method-assign]
+
+    with patch(
+        "five08.worker.api._enqueue_espocrm_batch",
+        new=AsyncMock(side_effect=RuntimeError("boom")),
+    ):
+        response = await api.espocrm_webhook_handler(request)
+
+    payload = json.loads(response.text)
+    assert response.status == 503
+    assert payload["error"] == "enqueue_failed"
+
+
+@pytest.mark.asyncio
+async def test_espocrm_people_sync_webhook_handler_returns_503_on_enqueue_failure(
+    auth_headers: dict[str, str],
+) -> None:
+    """People sync webhook should fail when enqueue persistence fails."""
+    app_obj = web.Application()
+    app_obj[api.QUEUE_KEY] = Mock()
+    request = make_mocked_request(
+        "POST",
+        "/webhooks/espocrm/people-sync",
+        app=app_obj,
+        headers=auth_headers,
+    )
+    request.json = AsyncMock(return_value=[{"id": "c-1"}])  # type: ignore[method-assign]
+
+    with patch(
+        "five08.worker.api._enqueue_espocrm_people_sync_batch",
+        new=AsyncMock(side_effect=RuntimeError("boom")),
+    ):
+        response = await api.espocrm_people_sync_webhook_handler(request)
+
+    payload = json.loads(response.text)
+    assert response.status == 503
+    assert payload["error"] == "enqueue_failed"
 
 
 @pytest.mark.asyncio

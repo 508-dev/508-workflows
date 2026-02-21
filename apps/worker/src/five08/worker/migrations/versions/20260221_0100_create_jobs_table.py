@@ -14,7 +14,6 @@ depends_on = None
 
 def upgrade() -> None:
     """Create the job persistence table and supporting indexes."""
-    op.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
     op.create_table(
         "jobs",
         sa.Column(
@@ -22,7 +21,6 @@ def upgrade() -> None:
             postgresql.UUID(as_uuid=True),
             nullable=False,
             primary_key=True,
-            server_default=sa.text("gen_random_uuid()"),
         ),
         sa.Column("type", sa.Text(), nullable=False),
         sa.Column("status", sa.Text(), nullable=False),

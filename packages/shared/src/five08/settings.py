@@ -1,7 +1,5 @@
 """Shared configuration settings across services."""
 
-import os
-
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -43,14 +41,14 @@ class SharedSettings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_required_secrets(self) -> "SharedSettings":
-        """Require explicit secret env vars in non-local runtime environments."""
+        """Require non-empty runtime secrets in non-local runtime environments."""
         env = self.runtime_env.strip().lower()
         if env in {"local", "dev", "development", "test"}:
             return self
 
-        if not os.getenv("POSTGRES_URL"):
+        if not self.postgres_url.strip():
             raise ValueError("POSTGRES_URL must be set when RUNTIME_ENV is non-local.")
-        if not os.getenv("MINIO_ROOT_PASSWORD"):
+        if not self.minio_root_password.strip():
             raise ValueError(
                 "MINIO_ROOT_PASSWORD must be set when RUNTIME_ENV is non-local."
             )

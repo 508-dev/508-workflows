@@ -101,13 +101,6 @@ async def _crm_sync_scheduler(app: web.Application) -> None:
         await asyncio.sleep(interval_seconds)
 
 
-def _log_background_task_result(task: asyncio.Task[None], *, name: str) -> None:
-    with contextlib.suppress(asyncio.CancelledError):
-        exc = task.exception()
-        if exc is not None:
-            logger.exception("Background task failed name=%s error=%s", name, exc)
-
-
 def _check_postgres_connection(connection: Connection) -> bool:
     try:
         with connection.cursor() as cursor:
@@ -258,13 +251,18 @@ async def espocrm_webhook_handler(request: web.Request) -> web.Response:
     event_ids = [event.id for event in payload.events]
     deduped_event_ids = list(dict.fromkeys(event_ids))
     queue = request.app[QUEUE_KEY]
-    task = asyncio.create_task(_enqueue_espocrm_batch(queue, deduped_event_ids))
-    task.add_done_callback(
-        lambda task: _log_background_task_result(task, name="espocrm-batch-enqueue")
-    )
+    try:
+        await _enqueue_espocrm_batch(queue, deduped_event_ids)
+    except Exception:
+        logger.exception(
+            "Failed enqueueing EspoCRM webhook events count=%s queue=%s",
+            len(deduped_event_ids),
+            settings.redis_queue_name,
+        )
+        return web.json_response({"error": "enqueue_failed"}, status=503)
 
     logger.info(
-        "Accepted %s EspoCRM webhook events for async enqueue queue=%s",
+        "Enqueued %s EspoCRM webhook events queue=%s",
         len(deduped_event_ids),
         settings.redis_queue_name,
     )
@@ -273,7 +271,7 @@ async def espocrm_webhook_handler(request: web.Request) -> web.Response:
             "status": "queued",
             "source": "espocrm",
             "events_received": len(deduped_event_ids),
-            "enqueued_async": True,
+            "events_enqueued": len(deduped_event_ids),
         },
         status=202,
     )
@@ -360,21 +358,24 @@ async def espocrm_people_sync_webhook_handler(request: web.Request) -> web.Respo
     deduped_event_ids = list(dict.fromkeys(event_ids))
     queue = request.app[QUEUE_KEY]
     bucket = datetime.now(tz=timezone.utc).strftime("%Y%m%d%H%M")
-    task = asyncio.create_task(
-        _enqueue_espocrm_people_sync_batch(queue, deduped_event_ids, bucket=bucket)
-    )
-    task.add_done_callback(
-        lambda task: _log_background_task_result(
-            task, name="espocrm-people-sync-batch-enqueue"
+    try:
+        await _enqueue_espocrm_people_sync_batch(
+            queue, deduped_event_ids, bucket=bucket
         )
-    )
+    except Exception:
+        logger.exception(
+            "Failed enqueueing EspoCRM people-sync events count=%s queue=%s",
+            len(deduped_event_ids),
+            settings.redis_queue_name,
+        )
+        return web.json_response({"error": "enqueue_failed"}, status=503)
 
     return web.json_response(
         {
             "status": "queued",
             "source": "espocrm_people_sync",
             "events_received": len(deduped_event_ids),
-            "enqueued_async": True,
+            "events_enqueued": len(deduped_event_ids),
         },
         status=202,
     )
