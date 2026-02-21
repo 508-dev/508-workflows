@@ -8,18 +8,11 @@ repos:
       # Run the formatter on changed files only
       - id: ruff-format
 
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.14.0
+  - repo: local
     hooks:
       - id: mypy
-        args: [--strict]
+        name: mypy
+        entry: ./scripts/mypy.sh
+        language: system
+        pass_filenames: false
         files: ^(apps/discord_bot/src/five08/|apps/worker/src/five08/|packages/shared/src/five08/)
-        additional_dependencies:
-          - aiohttp>=3.13.1
-          - discord.py~=2.6.0
-          - pydantic~=2.10
-          - pydantic-settings~=2.8
-          - redis>=6.4.0
-          - requests~=2.31
-          - rq>=2.6.0
-          - types-requests>=2.32.4.20250913
