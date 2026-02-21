@@ -50,6 +50,10 @@ def test_extract_profile_proposal_filters_508_email() -> None:
     assert result.proposed_updates["skills"] == "Python, FastAPI"
     assert result.new_skills == ["Python", "FastAPI"]
     assert any(item.field == "emailAddress" for item in result.skipped)
+    processor.crm.update_contact.assert_called_once()
+    update_contact_payload = processor.crm.update_contact.call_args.args[1]
+    assert "cResumeLastProcessed" in update_contact_payload
+    assert isinstance(update_contact_payload["cResumeLastProcessed"], str)
 
 
 def test_apply_profile_updates_adds_discord_and_filters_email() -> None:

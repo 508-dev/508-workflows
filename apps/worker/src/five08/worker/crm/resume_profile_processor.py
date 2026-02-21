@@ -6,6 +6,7 @@ import json
 import logging
 import re
 from collections.abc import Callable
+from datetime import datetime, timezone
 from typing import Any
 
 from five08.clients.espo import EspoAPI, EspoAPIError
@@ -307,6 +308,9 @@ class ResumeProfileProcessor:
                     )
                 )
 
+            # Track extraction completion before user confirmation/apply step.
+            self._mark_resume_processed(contact_id)
+
             return ResumeExtractionResult(
                 contact_id=contact_id,
                 attachment_id=attachment_id,
@@ -460,3 +464,17 @@ class ResumeProfileProcessor:
 
         parsed = [item.strip() for item in str(value).split(",")]
         return [item for item in parsed if item]
+
+    def _mark_resume_processed(self, contact_id: str) -> None:
+        """Best-effort update for extraction completion tracking."""
+        processed_at = datetime.now(tz=timezone.utc).isoformat()
+        try:
+            self.crm.update_contact(
+                contact_id, {"cResumeLastProcessed": processed_at}
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to update cResumeLastProcessed contact_id=%s error=%s",
+                contact_id,
+                exc,
+            )
