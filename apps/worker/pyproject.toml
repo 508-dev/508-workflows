@@ -7,7 +7,7 @@ dependencies = [
     "aiohttp>=3.13.1",
     "openai>=2.0.0",
     "alembic>=1.14.1",
-    "dramatiq[redis]>=1.17.0",
+    "dramatiq[redis]==2.0.1",
     "pdfminer.six>=20250506",
     "pydantic~=2.10",
     "pydantic-settings~=2.8",

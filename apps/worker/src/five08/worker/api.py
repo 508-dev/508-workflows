@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import secrets
+from datetime import datetime, timezone
 
 from aiohttp import web
 from pydantic import ValidationError
@@ -119,7 +120,7 @@ async def espocrm_webhook_handler(request: web.Request) -> web.Response:
 
     try:
         payload = EspoCRMWebhookPayload.from_list(payload_data)
-    except ValidationError as exc:
+    except (ValidationError, TypeError) as exc:
         return web.json_response(
             {"error": "invalid_webhook_event", "detail": str(exc)}, status=400
         )
@@ -163,13 +164,14 @@ async def process_contact_handler(request: web.Request) -> web.Response:
         return web.json_response({"error": "contact_id_required"}, status=400)
 
     queue = request.app[QUEUE_KEY]
+    manual_nonce = datetime.now(tz=timezone.utc).isoformat()
     job = await asyncio.to_thread(
         enqueue_job,
         queue=queue,
         fn=process_contact_skills_job,
         args=(contact_id,),
         settings=settings,
-        idempotency_key=f"manual:{contact_id}",
+        idempotency_key=f"manual:{contact_id}:{manual_nonce}",
     )
     logger.info(
         "Enqueued manual contact job job_id=%s contact_id=%s created=%s",

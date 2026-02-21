@@ -18,9 +18,9 @@ class EspoCRMWebhookPayload(BaseModel):
     events: list[WebhookEvent] = Field(..., description="List of webhook events")
 
     @classmethod
-    def from_list(cls, data: list[dict[str, Any]]) -> "EspoCRMWebhookPayload":
+    def from_list(cls, data: list[Any]) -> "EspoCRMWebhookPayload":
         """Build payload model from raw webhook list."""
-        events = [WebhookEvent(**event) for event in data]
+        events = [WebhookEvent.model_validate(event) for event in data]
         return cls(events=events)
 
 

@@ -98,9 +98,8 @@ class SkillsExtractor:
     def _extract_skills_heuristic(self, resume_text: str) -> ExtractedSkills:
         """Simple keyword and token-based extraction fallback."""
         lowered = resume_text.lower()
-        detected = {skill for skill in COMMON_SKILLS if skill in lowered}
-
         token_matches = re.findall(r"\b[a-z][a-z0-9+#\-.]{2,24}\b", lowered)
+        detected: set[str] = set()
         for token in token_matches:
             if token in COMMON_SKILLS:
                 detected.add(token)

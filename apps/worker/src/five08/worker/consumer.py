@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 def run() -> None:
     """Start Dramatiq worker and consume configured queues."""
+    import dramatiq
     from dramatiq import Worker
 
     import five08.worker.actors  # noqa: F401
@@ -21,13 +22,16 @@ def run() -> None:
     if not queue_names:
         queue_names = parse_queue_names(settings.redis_queue_name)
     queue_set = set(queue_names)
+    broker = dramatiq.get_broker()
 
-    worker = Worker(queues=queue_set)
+    worker = Worker(broker, queues=queue_set)
     logger.info(
         "Starting worker name=%s queues=%s", settings.worker_name, sorted(queue_set)
     )
     if settings.worker_burst:
-        logger.info("Worker burst mode enabled")
+        logger.warning(
+            "WORKER_BURST is set but Dramatiq worker burst mode is unsupported"
+        )
     worker.start()
     worker.join()
 

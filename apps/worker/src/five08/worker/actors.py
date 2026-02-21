@@ -86,10 +86,11 @@ def _run_job(job_id: str) -> None:
         )
         return
 
-    mark_job_running(settings, job_id, worker_name=settings.worker_name)
     handler = _HANDLERS.get(job.type)
     if handler is None:
         raise ValueError(f"Unknown job type: {job.type}")
+
+    mark_job_running(settings, job_id, worker_name=settings.worker_name)
 
     try:
         args, kwargs = _extract_call_args(job)

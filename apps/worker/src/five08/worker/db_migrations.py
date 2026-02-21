@@ -8,6 +8,7 @@ from alembic import command
 from alembic.config import Config
 
 from five08.logging import configure_logging
+from five08.settings import normalize_sqlalchemy_postgres_url
 from five08.worker.config import settings
 
 _ALEMBIC_CFG_PATH = Path(__file__).resolve().parent / "alembic.ini"
@@ -15,11 +16,7 @@ _ALEMBIC_CFG_PATH = Path(__file__).resolve().parent / "alembic.ini"
 
 def _sqlalchemy_postgres_url() -> str:
     """Return a SQLAlchemy-compatible URL from the configured Postgres URL."""
-    if settings.postgres_url.startswith("postgresql://"):
-        return settings.postgres_url.replace(
-            "postgresql://", "postgresql+psycopg://", 1
-        )
-    return settings.postgres_url
+    return normalize_sqlalchemy_postgres_url(settings.postgres_url)
 
 
 def run_job_migrations() -> None:

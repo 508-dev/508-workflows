@@ -8,6 +8,8 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import create_engine, pool
 
+from five08.settings import normalize_sqlalchemy_postgres_url
+
 config = context.config
 
 if config.config_file_name is not None:
@@ -19,9 +21,7 @@ def _get_url() -> str:
     url = config.get_main_option("sqlalchemy.url") or os.getenv("POSTGRES_URL")
     if not url:
         raise RuntimeError("POSTGRES_URL is required for worker job migrations.")
-    if url.startswith("postgresql://"):
-        return url.replace("postgresql://", "postgresql+psycopg://", 1)
-    return url
+    return normalize_sqlalchemy_postgres_url(url)
 
 
 target_metadata = None

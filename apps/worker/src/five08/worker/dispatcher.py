@@ -17,6 +17,11 @@ class DramatiqQueueClient:
             execute_job.send(job_id)
             return
 
+        if run_at.tzinfo is None:
+            run_at = run_at.replace(tzinfo=timezone.utc)
+        else:
+            run_at = run_at.astimezone(timezone.utc)
+
         delay = run_at - datetime.now(tz=timezone.utc)
         if delay <= timedelta(0):
             execute_job.send(job_id)

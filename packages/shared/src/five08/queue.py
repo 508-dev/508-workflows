@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -11,9 +12,12 @@ from uuid import uuid4
 
 from psycopg import Connection, connect
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 from redis import Redis
 
 from five08.settings import SharedSettings
+
+logger = logging.getLogger(__name__)
 
 
 class JobStatus(StrEnum):
@@ -97,6 +101,7 @@ def _parse_status(value: str) -> JobStatus:
     try:
         return JobStatus(value)
     except ValueError:
+        logger.warning("Unknown job status from DB: %s", value)
         return JobStatus.FAILED
 
 
@@ -157,7 +162,7 @@ def create_job_record(
                     job_id,
                     job_type,
                     JobStatus.QUEUED,
-                    payload,
+                    Jsonb(payload),
                     idempotency_key,
                     0,
                     max_attempts,

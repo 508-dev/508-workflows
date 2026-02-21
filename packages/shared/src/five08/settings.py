@@ -3,6 +3,13 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def normalize_sqlalchemy_postgres_url(url: str) -> str:
+    """Normalize psycopg DSN for SQLAlchemy usage."""
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+psycopg://", 1)
+    return url
+
+
 class SharedSettings(BaseSettings):
     """Base settings shared by all services in the monorepo."""
 
