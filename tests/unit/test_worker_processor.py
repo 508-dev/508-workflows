@@ -25,8 +25,8 @@ def test_process_contact_skills_merges_and_updates() -> None:
         confidence=0.9,
         source="heuristic",
     )
-    processor.skills_extractor.canonicalize_skill.side_effect = (
-        lambda value: str(value).strip().lower()
+    processor.skills_extractor.canonicalize_skill.side_effect = lambda value: (
+        str(value).strip().lower()
     )
     processor.espocrm_client.update_contact_skills.return_value = True
 
