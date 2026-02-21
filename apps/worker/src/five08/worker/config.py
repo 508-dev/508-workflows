@@ -39,6 +39,28 @@ class WorkerSettings(SharedSettings):
     email_resume_allowed_extensions: str = "pdf,doc,docx"
     email_resume_max_file_size_mb: int = 10
     email_require_sender_auth_headers: bool = True
+    oidc_issuer_url: str = ""
+    oidc_client_id: str = ""
+    oidc_client_secret: str = ""
+    oidc_scope: str = "openid profile email groups"
+    oidc_groups_claim: str = "groups"
+    oidc_admin_groups: str = "Admin,Owner,Steering Committee"
+    oidc_callback_path: str = "/auth/callback"
+    oidc_redirect_base_url: str | None = None
+    oidc_http_timeout_seconds: float = 8.0
+    oidc_jwks_cache_seconds: int = 300
+    auth_state_ttl_seconds: int = 600
+    auth_session_ttl_seconds: int = 28800
+    auth_session_cookie_name: str = "five08_session"
+    auth_cookie_secure: bool = False
+    auth_cookie_samesite: str = "lax"
+    dashboard_default_path: str = "/dashboard"
+    dashboard_public_base_url: str | None = None
+    discord_bot_token: str | None = None
+    discord_admin_guild_id: str | None = None
+    discord_admin_roles: str = "Admin,Owner,Steering Committee"
+    discord_api_timeout_seconds: float = 8.0
+    discord_link_ttl_seconds: int = 600
 
     @model_validator(mode="after")
     def validate_email_resume_intake_settings(self) -> "WorkerSettings":
@@ -58,6 +80,15 @@ class WorkerSettings(SharedSettings):
             raise ValueError(
                 "IMAP_SERVER must be set when EMAIL_RESUME_INTAKE_ENABLED=true"
             )
+        return self
+
+    @model_validator(mode="after")
+    def validate_auth_cookie_samesite(self) -> "WorkerSettings":
+        """Normalize and validate cookie SameSite policy."""
+        normalized = self.auth_cookie_samesite.strip().lower()
+        if normalized not in {"lax", "strict", "none"}:
+            raise ValueError("AUTH_COOKIE_SAMESITE must be one of: lax, strict, none")
+        self.auth_cookie_samesite = normalized
         return self
 
     @property
@@ -96,6 +127,18 @@ class WorkerSettings(SharedSettings):
         if host.endswith("openrouter.ai"):
             return f"openai/{candidate}"
         return candidate
+
+    @property
+    def oidc_admin_group_names(self) -> set[str]:
+        """Lower-cased configured OIDC admin group names."""
+        values = [item.strip() for item in self.oidc_admin_groups.split(",")]
+        return {value.casefold() for value in values if value}
+
+    @property
+    def discord_admin_role_names(self) -> set[str]:
+        """Lower-cased configured Discord admin role names."""
+        values = [item.strip() for item in self.discord_admin_roles.split(",")]
+        return {value.casefold() for value in values if value}
 
 
 settings = WorkerSettings()  # type: ignore[call-arg]

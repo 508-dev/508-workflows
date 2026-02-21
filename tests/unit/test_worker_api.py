@@ -1,11 +1,8 @@
-"""Unit tests for worker ingest API."""
-
-import json
-from unittest.mock import AsyncMock, Mock, patch
+"""Unit tests for worker dashboard/ingest API."""
 
 import pytest
-from aiohttp import web
-from aiohttp.test_utils import make_mocked_request
+from fastapi.testclient import TestClient
+from unittest.mock import AsyncMock, Mock, patch
 
 from five08.worker import api
 
@@ -20,6 +17,40 @@ class _FailingRedis:
         raise RuntimeError("redis unavailable")
 
 
+class _FakeAuthStore:
+    def __init__(self) -> None:
+        self.saved_links: dict[str, object] = {}
+
+    async def save_discord_link(
+        self,
+        *,
+        token: str,
+        payload: object,
+        ttl_seconds: int,
+    ) -> None:
+        self.saved_links[token] = payload
+
+    async def get_discord_link(self, token: str) -> object | None:
+        return self.saved_links.get(token)
+
+    async def delete_discord_link(self, token: str) -> None:
+        self.saved_links.pop(token, None)
+
+    async def get_session(self, session_id: str) -> object | None:
+        return None
+
+    async def delete_session(self, session_id: str) -> None:
+        return None
+
+    async def save_oidc_state(
+        self, *, state: str, payload: object, ttl_seconds: int
+    ) -> None:
+        return None
+
+    async def pop_oidc_state(self, state: str) -> object | None:
+        return None
+
+
 @pytest.fixture
 def auth_headers(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     """Configure API secret and return matching auth headers."""
@@ -27,147 +58,128 @@ def auth_headers(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     return {"X-API-Secret": "test-secret"}
 
 
-@pytest.mark.asyncio
-async def test_health_handler_healthy() -> None:
+@pytest.fixture
+def app() -> api.FastAPI:
+    app_obj = api.create_app(run_lifespan=False)
+    app_obj.state.queue = Mock()
+    app_obj.state.redis_conn = _HealthyRedis()
+    return app_obj
+
+
+@pytest.fixture
+def client(app: api.FastAPI) -> TestClient:
+    return TestClient(app)
+
+
+def test_health_handler_healthy(client: TestClient) -> None:
     """Health endpoint should report healthy when Redis pings."""
-    app_obj = web.Application()
-    app_obj[api.REDIS_CONN_KEY] = _HealthyRedis()
-    request = make_mocked_request("GET", "/health", app=app_obj)
-
     with patch("five08.worker.api.is_postgres_healthy", return_value=True):
-        response = await api.health_handler(request)
-    payload = json.loads(response.text)
+        response = client.get("/health")
 
-    assert response.status == 200
+    payload = response.json()
+    assert response.status_code == 200
     assert payload["status"] == "healthy"
 
 
-@pytest.mark.asyncio
-async def test_health_handler_degraded() -> None:
+def test_health_handler_degraded(app: api.FastAPI) -> None:
     """Health endpoint should report degraded when Redis fails."""
-    app_obj = web.Application()
-    app_obj[api.REDIS_CONN_KEY] = _FailingRedis()
-    request = make_mocked_request("GET", "/health", app=app_obj)
-
+    app.state.redis_conn = _FailingRedis()
+    client = TestClient(app)
     with patch("five08.worker.api.is_postgres_healthy", return_value=True):
-        response = await api.health_handler(request)
-    payload = json.loads(response.text)
+        response = client.get("/health")
 
-    assert response.status == 503
+    payload = response.json()
+    assert response.status_code == 503
     assert payload["status"] == "degraded"
 
 
-@pytest.mark.asyncio
-async def test_ingest_handler_enqueues_job(auth_headers: dict[str, str]) -> None:
+def test_ingest_handler_enqueues_job(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
     """Ingest endpoint should enqueue payload and return job metadata."""
-    app_obj = web.Application()
-    app_obj[api.QUEUE_KEY] = Mock()
-    request = make_mocked_request(
-        "POST",
-        "/webhooks/github",
-        app=app_obj,
-        match_info={"source": "github"},
-        headers=auth_headers,
-    )
-    request.json = AsyncMock(return_value={"id": "evt-1"})  # type: ignore[method-assign]
-
     with patch("five08.worker.api.enqueue_job") as mock_enqueue:
         mock_enqueue.return_value = Mock(id="job-123")
-        response = await api.ingest_handler(request)
+        response = client.post(
+            "/webhooks/github",
+            json={"id": "evt-1"},
+            headers=auth_headers,
+        )
 
-    payload = json.loads(response.text)
-    assert response.status == 202
+    payload = response.json()
+    assert response.status_code == 202
     assert payload["job_id"] == "job-123"
     assert payload["source"] == "github"
 
 
-@pytest.mark.asyncio
-async def test_ingest_handler_rejects_non_object_payload(
+def test_ingest_handler_rejects_non_object_payload(
+    client: TestClient,
     auth_headers: dict[str, str],
 ) -> None:
     """Ingest endpoint should reject non-object JSON payloads."""
-    app_obj = web.Application()
-    app_obj[api.QUEUE_KEY] = Mock()
-    request = make_mocked_request(
-        "POST", "/webhooks/default", app=app_obj, headers=auth_headers
+    response = client.post(
+        "/webhooks/default",
+        json=["not-an-object"],
+        headers=auth_headers,
     )
-    request.json = AsyncMock(return_value=["not-an-object"])  # type: ignore[method-assign]
 
-    response = await api.ingest_handler(request)
-    payload = json.loads(response.text)
-
-    assert response.status == 400
+    payload = response.json()
+    assert response.status_code == 400
     assert payload["error"] == "payload_must_be_object"
 
 
-@pytest.mark.asyncio
-async def test_espocrm_webhook_handler_enqueues_contact_jobs(
+def test_espocrm_webhook_handler_enqueues_contact_jobs(
+    client: TestClient,
     auth_headers: dict[str, str],
 ) -> None:
     """EspoCRM webhook should enqueue before responding."""
-    app_obj = web.Application()
-    app_obj[api.QUEUE_KEY] = Mock()
-    request = make_mocked_request(
-        "POST", "/webhooks/espocrm", app=app_obj, headers=auth_headers
-    )
-    request.json = AsyncMock(return_value=[{"id": "c-1"}, {"id": "c-2"}])  # type: ignore[method-assign]
-
     with patch("five08.worker.api._enqueue_espocrm_batch", new_callable=AsyncMock):
-        response = await api.espocrm_webhook_handler(request)
+        response = client.post(
+            "/webhooks/espocrm",
+            json=[{"id": "c-1"}, {"id": "c-2"}],
+            headers=auth_headers,
+        )
 
-    payload = json.loads(response.text)
-    assert response.status == 202
+    payload = response.json()
+    assert response.status_code == 202
     assert payload["events_received"] == 2
     assert payload["events_enqueued"] == 2
 
 
-@pytest.mark.asyncio
-async def test_espocrm_webhook_handler_rejects_non_list_payload(
+def test_espocrm_webhook_handler_rejects_non_list_payload(
+    client: TestClient,
     auth_headers: dict[str, str],
 ) -> None:
     """EspoCRM webhook should enforce array payload shape."""
-    app_obj = web.Application()
-    app_obj[api.QUEUE_KEY] = Mock()
-    request = make_mocked_request(
-        "POST", "/webhooks/espocrm", app=app_obj, headers=auth_headers
-    )
-    request.json = AsyncMock(return_value={"id": "c-1"})  # type: ignore[method-assign]
-
-    response = await api.espocrm_webhook_handler(request)
-    payload = json.loads(response.text)
-
-    assert response.status == 400
-    assert payload["error"] == "payload_must_be_array_of_events"
-
-
-@pytest.mark.asyncio
-async def test_process_contact_handler_enqueues_single_contact(
-    auth_headers: dict[str, str],
-) -> None:
-    """Manual contact endpoint should enqueue one contact job."""
-    app_obj = web.Application()
-    app_obj[api.QUEUE_KEY] = Mock()
-    request = make_mocked_request(
-        "POST",
-        "/process-contact/c-123",
-        app=app_obj,
-        match_info={"contact_id": "c-123"},
+    response = client.post(
+        "/webhooks/espocrm",
+        json={"id": "c-1"},
         headers=auth_headers,
     )
 
+    payload = response.json()
+    assert response.status_code == 400
+    assert payload["error"] == "payload_must_be_array_of_events"
+
+
+def test_process_contact_handler_enqueues_single_contact(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Manual contact endpoint should enqueue one contact job."""
     with patch("five08.worker.api.enqueue_job") as mock_enqueue:
         mock_enqueue.return_value = Mock(id="job-123")
-        response = await api.process_contact_handler(request)
+        response = client.post("/process-contact/c-123", headers=auth_headers)
 
-    payload = json.loads(response.text)
-    assert response.status == 202
+    payload = response.json()
+    assert response.status_code == 202
     assert payload["contact_id"] == "c-123"
     assert payload["job_id"] == "job-123"
 
 
-@pytest.mark.asyncio
-async def test_resume_extract_handler_enqueues_job(
+def test_resume_extract_handler_enqueues_job(
     monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
     auth_headers: dict[str, str],
 ) -> None:
     """Resume extract endpoint should enqueue extraction job."""
@@ -176,25 +188,20 @@ async def test_resume_extract_handler_enqueues_job(
     monkeypatch.setattr(api.settings, "openai_base_url", None)
     monkeypatch.setattr(api.settings, "resume_ai_model", "gpt-test")
 
-    app_obj = web.Application()
-    app_obj[api.QUEUE_KEY] = Mock()
-    request = make_mocked_request(
-        "POST", "/jobs/resume-extract", app=app_obj, headers=auth_headers
-    )
-    request.json = AsyncMock(
-        return_value={
-            "contact_id": "c-1",
-            "attachment_id": "a-1",
-            "filename": "resume.pdf",
-        }
-    )  # type: ignore[method-assign]
-
     with patch("five08.worker.api.enqueue_job") as mock_enqueue:
         mock_enqueue.return_value = Mock(id="job-extract", created=True)
-        response = await api.resume_extract_handler(request)
+        response = client.post(
+            "/jobs/resume-extract",
+            json={
+                "contact_id": "c-1",
+                "attachment_id": "a-1",
+                "filename": "resume.pdf",
+            },
+            headers=auth_headers,
+        )
 
-    payload = json.loads(response.text)
-    assert response.status == 202
+    payload = response.json()
+    assert response.status_code == 202
     assert payload["job_id"] == "job-extract"
     assert payload["contact_id"] == "c-1"
     assert payload["attachment_id"] == "a-1"
@@ -202,48 +209,34 @@ async def test_resume_extract_handler_enqueues_job(
     assert call_kwargs["idempotency_key"] == "resume-extract:c-1:a-1:v7:gpt-test"
 
 
-@pytest.mark.asyncio
-async def test_resume_apply_handler_enqueues_job(
+def test_resume_apply_handler_enqueues_job(
+    client: TestClient,
     auth_headers: dict[str, str],
 ) -> None:
     """Resume apply endpoint should enqueue apply job."""
-    app_obj = web.Application()
-    app_obj[api.QUEUE_KEY] = Mock()
-    request = make_mocked_request(
-        "POST", "/jobs/resume-apply", app=app_obj, headers=auth_headers
-    )
-    request.json = AsyncMock(
-        return_value={
-            "contact_id": "c-1",
-            "updates": {"emailAddress": "dev@example.com"},
-            "link_discord": {"user_id": "123", "username": "dev#1111"},
-        }
-    )  # type: ignore[method-assign]
-
     with patch("five08.worker.api.enqueue_job") as mock_enqueue:
         mock_enqueue.return_value = Mock(id="job-apply", created=True)
-        response = await api.resume_apply_handler(request)
+        response = client.post(
+            "/jobs/resume-apply",
+            json={
+                "contact_id": "c-1",
+                "updates": {"emailAddress": "dev@example.com"},
+                "link_discord": {"user_id": "123", "username": "dev#1111"},
+            },
+            headers=auth_headers,
+        )
 
-    payload = json.loads(response.text)
-    assert response.status == 202
+    payload = response.json()
+    assert response.status_code == 202
     assert payload["job_id"] == "job-apply"
     assert payload["contact_id"] == "c-1"
 
 
-@pytest.mark.asyncio
-async def test_job_status_handler_returns_result(
+def test_job_status_handler_returns_result(
+    client: TestClient,
     auth_headers: dict[str, str],
 ) -> None:
     """Job status endpoint should expose persisted result payload."""
-    app_obj = web.Application()
-    request = make_mocked_request(
-        "GET",
-        "/jobs/job-123",
-        app=app_obj,
-        headers=auth_headers,
-        match_info={"job_id": "job-123"},
-    )
-
     mock_status = Mock()
     mock_status.value = "succeeded"
     mock_job = Mock(
@@ -257,10 +250,10 @@ async def test_job_status_handler_returns_result(
     )
 
     with patch("five08.worker.api.get_job", return_value=mock_job):
-        response = await api.job_status_handler(request)
+        response = client.get("/jobs/job-123", headers=auth_headers)
 
-    payload = json.loads(response.text)
-    assert response.status == 200
+    payload = response.json()
+    assert response.status_code == 200
     assert payload["job_id"] == "job-123"
     assert payload["status"] == "succeeded"
     assert payload["result"] == {"success": True}
@@ -287,134 +280,299 @@ def test_resume_extract_model_name_prefixes_openrouter_model(
     assert api._resume_extract_model_name() == "openai/gpt-4o-mini"
 
 
-@pytest.mark.asyncio
-async def test_sync_people_handler_enqueues_full_sync(
+def test_sync_people_handler_enqueues_full_sync(
+    client: TestClient,
     auth_headers: dict[str, str],
 ) -> None:
     """Manual people-sync endpoint should enqueue one full sync job."""
-    app_obj = web.Application()
-    app_obj[api.QUEUE_KEY] = Mock()
-    request = make_mocked_request(
-        "POST", "/sync/people", app=app_obj, headers=auth_headers
-    )
-
     with patch(
         "five08.worker.api._enqueue_full_crm_sync_job", new_callable=AsyncMock
     ) as mock_enqueue:
         mock_enqueue.return_value = Mock(id="job-sync", created=True)
-        response = await api.sync_people_handler(request)
+        response = client.post("/sync/people", headers=auth_headers)
 
-    payload = json.loads(response.text)
-    assert response.status == 202
+    payload = response.json()
+    assert response.status_code == 202
     assert payload["job_id"] == "job-sync"
     assert payload["created"] is True
 
 
-@pytest.mark.asyncio
-async def test_espocrm_people_sync_webhook_handler_enqueues_contact_jobs(
+def test_espocrm_people_sync_webhook_handler_enqueues_contact_jobs(
+    client: TestClient,
     auth_headers: dict[str, str],
 ) -> None:
     """People sync webhook should enqueue before responding."""
-    app_obj = web.Application()
-    app_obj[api.QUEUE_KEY] = Mock()
-    request = make_mocked_request(
-        "POST",
-        "/webhooks/espocrm/people-sync",
-        app=app_obj,
-        headers=auth_headers,
-    )
-    request.json = AsyncMock(return_value=[{"id": "c-1"}, {"id": "c-2"}])  # type: ignore[method-assign]
-
     with patch(
         "five08.worker.api._enqueue_espocrm_people_sync_batch",
         new_callable=AsyncMock,
     ):
-        response = await api.espocrm_people_sync_webhook_handler(request)
+        response = client.post(
+            "/webhooks/espocrm/people-sync",
+            json=[{"id": "c-1"}, {"id": "c-2"}],
+            headers=auth_headers,
+        )
 
-    payload = json.loads(response.text)
-    assert response.status == 202
+    payload = response.json()
+    assert response.status_code == 202
     assert payload["events_received"] == 2
     assert payload["events_enqueued"] == 2
 
 
-@pytest.mark.asyncio
-async def test_espocrm_webhook_handler_returns_503_on_enqueue_failure(
+def test_espocrm_webhook_handler_returns_503_on_enqueue_failure(
+    client: TestClient,
     auth_headers: dict[str, str],
 ) -> None:
     """EspoCRM webhook should fail when enqueue persistence fails."""
-    app_obj = web.Application()
-    app_obj[api.QUEUE_KEY] = Mock()
-    request = make_mocked_request(
-        "POST", "/webhooks/espocrm", app=app_obj, headers=auth_headers
-    )
-    request.json = AsyncMock(return_value=[{"id": "c-1"}])  # type: ignore[method-assign]
-
     with patch(
         "five08.worker.api._enqueue_espocrm_batch",
         new=AsyncMock(side_effect=RuntimeError("boom")),
     ):
-        response = await api.espocrm_webhook_handler(request)
+        response = client.post(
+            "/webhooks/espocrm",
+            json=[{"id": "c-1"}],
+            headers=auth_headers,
+        )
 
-    payload = json.loads(response.text)
-    assert response.status == 503
+    payload = response.json()
+    assert response.status_code == 503
     assert payload["error"] == "enqueue_failed"
 
 
-@pytest.mark.asyncio
-async def test_espocrm_people_sync_webhook_handler_returns_503_on_enqueue_failure(
+def test_espocrm_people_sync_webhook_handler_returns_503_on_enqueue_failure(
+    client: TestClient,
     auth_headers: dict[str, str],
 ) -> None:
     """People sync webhook should fail when enqueue persistence fails."""
-    app_obj = web.Application()
-    app_obj[api.QUEUE_KEY] = Mock()
-    request = make_mocked_request(
-        "POST",
-        "/webhooks/espocrm/people-sync",
-        app=app_obj,
-        headers=auth_headers,
-    )
-    request.json = AsyncMock(return_value=[{"id": "c-1"}])  # type: ignore[method-assign]
-
     with patch(
         "five08.worker.api._enqueue_espocrm_people_sync_batch",
         new=AsyncMock(side_effect=RuntimeError("boom")),
     ):
-        response = await api.espocrm_people_sync_webhook_handler(request)
+        response = client.post(
+            "/webhooks/espocrm/people-sync",
+            json=[{"id": "c-1"}],
+            headers=auth_headers,
+        )
 
-    payload = json.loads(response.text)
-    assert response.status == 503
+    payload = response.json()
+    assert response.status_code == 503
     assert payload["error"] == "enqueue_failed"
 
 
-@pytest.mark.asyncio
-async def test_audit_event_handler_persists_human_event(
+def test_audit_event_handler_persists_human_event(
+    client: TestClient,
     auth_headers: dict[str, str],
 ) -> None:
     """Audit events endpoint should persist one validated event."""
-    app_obj = web.Application()
-    request = make_mocked_request(
-        "POST",
-        "/audit/events",
-        app=app_obj,
-        headers=auth_headers,
+    with patch("five08.worker.api.insert_audit_event") as mock_insert:
+        mock_insert.return_value = Mock(id="evt-1", person_id="person-1")
+        response = client.post(
+            "/audit/events",
+            json={
+                "source": "discord",
+                "action": "crm.search",
+                "result": "success",
+                "actor_provider": "discord",
+                "actor_subject": "12345",
+                "actor_display_name": "johnny",
+                "metadata": {"query": "python"},
+            },
+            headers=auth_headers,
+        )
+
+    payload = response.json()
+    assert response.status_code == 201
+    assert payload["event_id"] == "evt-1"
+    assert payload["person_id"] == "person-1"
+
+
+def test_auth_login_returns_503_when_store_not_ready(client: TestClient) -> None:
+    response = client.get("/auth/login")
+    assert response.status_code == 503
+    assert response.json()["error"] == "auth_not_ready"
+
+
+def test_auth_me_requires_session(client: TestClient) -> None:
+    response = client.get("/auth/me")
+    assert response.status_code == 401
+    assert response.json()["error"] == "unauthorized"
+
+
+def test_auth_discord_link_create_forbidden_for_non_admin(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    fake_store = _FakeAuthStore()
+    fake_verifier = Mock()
+    fake_verifier.is_admin_discord_user = AsyncMock(return_value=False)
+
+    with (
+        patch("five08.worker.api._auth_store_from_app", return_value=fake_store),
+        patch(
+            "five08.worker.api._discord_admin_verifier_from_app",
+            return_value=fake_verifier,
+        ),
+        patch("five08.worker.api._http_client_from_app", return_value=Mock()),
+    ):
+        response = client.post(
+            "/auth/discord/links",
+            json={"discord_user_id": "123456"},
+            headers=auth_headers,
+        )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "discord_user_not_admin"
+
+
+def test_auth_discord_link_create_returns_url_for_admin(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    monkeypatch.setattr(
+        api.settings, "dashboard_public_base_url", "https://dash.508.dev"
     )
-    request.json = AsyncMock(  # type: ignore[method-assign]
+    fake_store = _FakeAuthStore()
+    fake_verifier = Mock()
+    fake_verifier.is_admin_discord_user = AsyncMock(return_value=True)
+
+    with (
+        patch("five08.worker.api._auth_store_from_app", return_value=fake_store),
+        patch(
+            "five08.worker.api._discord_admin_verifier_from_app",
+            return_value=fake_verifier,
+        ),
+        patch("five08.worker.api._http_client_from_app", return_value=Mock()),
+    ):
+        response = client.post(
+            "/auth/discord/links",
+            json={"discord_user_id": "123456", "next_path": "/jobs/abc"},
+            headers=auth_headers,
+        )
+
+    payload = response.json()
+    assert response.status_code == 201
+    assert payload["status"] == "created"
+    assert payload["link_url"].startswith("https://dash.508.dev/auth/discord/link/")
+
+
+def test_auth_callback_success_writes_login_audit(client: TestClient) -> None:
+    store = Mock()
+    store.pop_oidc_state = AsyncMock(
+        return_value=api.PendingOIDCState(
+            nonce="nonce-1",
+            code_verifier="verifier-1",
+            next_path="/dashboard",
+            discord_link_token=None,
+        )
+    )
+    store.save_session = AsyncMock()
+
+    oidc = Mock()
+    oidc.configured = True
+    oidc.exchange_code = AsyncMock(return_value={"id_token": "id-token-1"})
+    oidc.validate_id_token = AsyncMock(
         return_value={
-            "source": "discord",
-            "action": "crm.search",
-            "result": "success",
-            "actor_provider": "discord",
-            "actor_subject": "12345",
-            "actor_display_name": "johnny",
-            "metadata": {"query": "python"},
+            "sub": "authentik-user-1",
+            "email": "Admin@508.dev",
+            "name": "Admin User",
+            "groups": ["Admin"],
+            "exp": 4_102_444_800,
         }
     )
 
-    with patch("five08.worker.api.insert_audit_event") as mock_insert:
-        mock_insert.return_value = Mock(id="evt-1", person_id="person-1")
-        response = await api.audit_event_handler(request)
+    with (
+        patch("five08.worker.api._auth_store_from_app", return_value=store),
+        patch("five08.worker.api._oidc_client_from_app", return_value=oidc),
+        patch("five08.worker.api._http_client_from_app", return_value=Mock()),
+        patch("five08.worker.api.insert_audit_event") as mock_insert,
+    ):
+        response = client.get(
+            "/auth/callback?code=code-1&state=state-1",
+            follow_redirects=False,
+        )
 
-    payload = json.loads(response.text)
-    assert response.status == 201
-    assert payload["event_id"] == "evt-1"
-    assert payload["person_id"] == "person-1"
+    assert response.status_code == 302
+    audit_payload = mock_insert.call_args.args[1]
+    assert audit_payload.action == "auth.login"
+    assert audit_payload.result == api.AuditResult.SUCCESS
+    assert audit_payload.source == api.AuditSource.ADMIN_DASHBOARD
+    assert audit_payload.actor_provider == api.ActorProvider.ADMIN_SSO
+    assert audit_payload.actor_subject == "admin@508.dev"
+
+
+def test_auth_callback_denied_writes_login_audit(client: TestClient) -> None:
+    store = Mock()
+    store.pop_oidc_state = AsyncMock(
+        return_value=api.PendingOIDCState(
+            nonce="nonce-1",
+            code_verifier="verifier-1",
+            next_path="/dashboard",
+            discord_link_token="link-1",
+        )
+    )
+    store.get_discord_link = AsyncMock(
+        return_value=api.DiscordLinkGrant(
+            discord_user_id="123456789",
+            next_path="/dashboard",
+        )
+    )
+
+    oidc = Mock()
+    oidc.configured = True
+    oidc.exchange_code = AsyncMock(return_value={"id_token": "id-token-1"})
+    oidc.validate_id_token = AsyncMock(
+        return_value={
+            "sub": "authentik-user-2",
+            "email": "member@508.dev",
+            "name": "Member User",
+            "groups": ["Member"],
+            "exp": 4_102_444_800,
+        }
+    )
+
+    with (
+        patch("five08.worker.api._auth_store_from_app", return_value=store),
+        patch("five08.worker.api._oidc_client_from_app", return_value=oidc),
+        patch("five08.worker.api._http_client_from_app", return_value=Mock()),
+        patch("five08.worker.api.insert_audit_event") as mock_insert,
+    ):
+        response = client.get(
+            "/auth/callback?code=code-1&state=state-1",
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "admin_group_required"
+    audit_payload = mock_insert.call_args.args[1]
+    assert audit_payload.action == "auth.login"
+    assert audit_payload.result == api.AuditResult.DENIED
+    assert audit_payload.actor_subject == "member@508.dev"
+
+
+def test_auth_logout_writes_logout_audit(client: TestClient) -> None:
+    store = Mock()
+    store.delete_session = AsyncMock()
+    session = api.AuthSession(
+        subject="authentik-user-3",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+
+    with (
+        patch(
+            "five08.worker.api._current_session", return_value=("session-1", session)
+        ),
+        patch("five08.worker.api._auth_store_from_app", return_value=store),
+        patch("five08.worker.api.insert_audit_event") as mock_insert,
+    ):
+        response = client.post("/auth/logout")
+
+    assert response.status_code == 200
+    audit_payload = mock_insert.call_args.args[1]
+    assert audit_payload.action == "auth.logout"
+    assert audit_payload.result == api.AuditResult.SUCCESS
+    assert audit_payload.actor_subject == "admin@508.dev"

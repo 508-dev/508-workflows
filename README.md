@@ -24,7 +24,7 @@ This repository follows a service-oriented monorepo layout:
 ## Services
 
 - `bot`: Discord gateway process.
-- `worker-api`: lightweight HTTP ingest service that validates and enqueues jobs.
+- `worker-api`: FastAPI dashboard + ingest service that validates and enqueues jobs.
 - `worker-consumer`: Dramatiq worker that executes jobs from Redis queue.
 - `redis`: queue transport between API and worker.
 - `postgres`: job state persistence, retries, idempotency.
@@ -56,6 +56,13 @@ Migrations:
 - `POST /process-contact/{contact_id}`: Manually enqueue one contact skills job.
 - `POST /sync/people`: Manually enqueue a full CRM->people cache sync.
 - `POST /audit/events`: Persist one human audit event (`discord` or `admin_dashboard`).
+- `GET /auth/login`: Start OIDC Auth Code + PKCE login flow.
+- `GET /auth/callback`: Complete OIDC callback and set HttpOnly session cookie.
+- `GET /auth/me`: Return active session identity.
+- `POST /auth/logout`: Clear active session cookie + server session.
+- `POST /auth/discord/links`: Create one-time dashboard deep link from Discord command context.
+- `GET /auth/discord/link/{token}`: Resolve Discord deep link into authenticated dashboard redirect.
+- Auth flows emit best-effort human audit events (`auth.login`, `auth.logout`) under source `admin_dashboard`.
 
 ## Local Development
 
@@ -140,6 +147,32 @@ Use `.env.example` as the source of truth for defaults.
 - `Required` for protected endpoints: `API_SHARED_SECRET` (ingest requests are rejected when unset)
 - `Optional`: `WEBHOOK_INGEST_HOST` (default: `0.0.0.0`)
 - `Optional`: `WEBHOOK_INGEST_PORT` (default: `8090`)
+
+### Worker API OIDC Session Auth
+
+- `Optional` (required when enabling OIDC login): `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`
+- `Optional`: `OIDC_SCOPE` (default: `openid profile email groups`)
+- `Optional`: `OIDC_GROUPS_CLAIM` (default: `groups`)
+- `Optional`: `OIDC_ADMIN_GROUPS` (default: `Admin,Owner,Steering Committee`)
+- `Optional`: `OIDC_CALLBACK_PATH` (default: `/auth/callback`)
+- `Optional`: `OIDC_REDIRECT_BASE_URL` (default: infer from request base URL)
+- `Optional`: `OIDC_HTTP_TIMEOUT_SECONDS` (default: `8.0`)
+- `Optional`: `OIDC_JWKS_CACHE_SECONDS` (default: `300`)
+- `Optional`: `AUTH_STATE_TTL_SECONDS` (default: `600`)
+- `Optional`: `AUTH_SESSION_TTL_SECONDS` (default: `28800`)
+- `Optional`: `AUTH_SESSION_COOKIE_NAME` (default: `five08_session`)
+- `Optional`: `AUTH_COOKIE_SECURE` (default: `false`)
+- `Optional`: `AUTH_COOKIE_SAMESITE` (default: `lax`)
+- `Optional`: `DASHBOARD_DEFAULT_PATH` (default: `/dashboard`)
+- `Optional`: `DASHBOARD_PUBLIC_BASE_URL` (base URL for generated deep links)
+
+### Discord Admin Deep-Link Validation
+
+- `Optional`: `DISCORD_ADMIN_GUILD_ID` (required for Discord API fallback role checks)
+- `Optional`: `DISCORD_ADMIN_ROLES` (default: `Admin,Owner,Steering Committee`)
+- `Optional`: `DISCORD_API_TIMEOUT_SECONDS` (default: `8.0`)
+- `Optional`: `DISCORD_LINK_TTL_SECONDS` (default: `600`)
+- `Optional`: `DISCORD_BOT_TOKEN` (needed only for fallback Discord API checks; DB role check remains primary)
 
 ### Worker Consumer
 
