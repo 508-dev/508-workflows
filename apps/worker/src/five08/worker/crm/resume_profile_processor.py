@@ -146,19 +146,19 @@ class ResumeProfileExtractor:
     def _build_prompt(self, resume_text: str) -> str:
         snippet = resume_text[:12000]
         return (
-            "Extract candidate contact fields from this resume.\\n"
-            "Return JSON with exact keys and no extras:\\n"
+            "Extract candidate contact fields from this resume.\n"
+            "Return JSON with exact keys and no extras:\n"
             '{"email": string|null, "github_username": string|null, '
             '"linkedin_url": string|null, "phone": string|null, '
-            '"confidence": number}\\n'
-            "Rules:\\n"
-            "- prefer explicit values from header/contact sections\\n"
-            "- for github_username return username only (no URL, no @)\\n"
-            "- for linkedin_url return full linkedin profile URL when available\\n"
-            "- for phone return digits with optional leading +\\n"
-            "- use null for unknown/ambiguous fields\\n"
-            "- confidence is 0-1 for overall extraction reliability\\n\\n"
-            f"Resume:\\n{snippet}"
+            '"confidence": number}\n'
+            "Rules:\n"
+            "- prefer explicit values from header/contact sections\n"
+            "- for github_username return username only (no URL, no @)\n"
+            "- for linkedin_url return full linkedin profile URL when available\n"
+            "- for phone return digits with optional leading +\n"
+            "- use null for unknown/ambiguous fields\n"
+            "- confidence is 0-1 for overall extraction reliability\n\n"
+            f"Resume:\n{snippet}"
         )
 
     def _parse_json(self, content: str) -> dict[str, Any]:

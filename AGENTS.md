@@ -93,7 +93,7 @@ async def setup(bot: commands.Bot) -> None:
 - Add shared env/config in `packages/shared/src/five08/settings.py`.
 - Add service-specific settings in local service `config.py` by subclassing shared settings.
 - Keep secrets in env vars, not code.
-- For Discord CRM audit writes, use `AUDIT_API_BASE_URL` and shared `WEBHOOK_SHARED_SECRET`.
+- For Discord CRM audit writes, use `AUDIT_API_BASE_URL` and shared `API_SHARED_SECRET`.
 
 ## Agent Guidelines
 

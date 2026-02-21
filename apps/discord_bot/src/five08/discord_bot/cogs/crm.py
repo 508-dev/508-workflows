@@ -389,7 +389,24 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         button: discord.ui.Button["ResumeUpdateConfirmationView"],
     ) -> None:
         """Apply confirmed updates through the worker."""
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        def _audit_apply_event(result: str, metadata: dict[str, Any]) -> None:
+            try:
+                self.crm_cog._audit_command(
+                    interaction=interaction,
+                    action="crm.upload_resume.apply",
+                    result=result,
+                    metadata=metadata,
+                    resource_type="crm_contact",
+                    resource_id=self.contact_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to write resume apply audit event for contact_id=%s: %s",
+                    self.contact_id,
+                    exc,
+                )
 
         try:
             apply_job_id = await self.crm_cog._enqueue_resume_apply_job(
@@ -399,21 +416,21 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             )
         except Exception as exc:
             logger.error("Failed to enqueue resume apply job: %s", exc)
-            self.crm_cog._audit_command(
-                interaction=interaction,
-                action="crm.upload_resume",
-                result="error",
-                metadata={
+            _audit_apply_event(
+                "error",
+                {
+                    "contact_id": self.contact_id,
                     "stage": "apply_enqueue",
                     "error": str(exc),
+                    "updated_fields": [],
                     "proposed_updates_count": len(self.proposed_updates),
                     "link_member_requested": bool(self.link_discord),
+                    "link_discord_applied": None,
                 },
-                resource_type="crm_contact",
-                resource_id=self.contact_id,
             )
             await interaction.followup.send(
-                "❌ Failed to enqueue CRM apply job. Please try again."
+                "❌ Failed to enqueue CRM apply job. Please try again.",
+                ephemeral=True,
             )
             return
 
@@ -421,52 +438,80 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             "🛠️ Applying confirmed updates to CRM...",
             ephemeral=True,
         )
-        apply_result = await self.crm_cog._wait_for_worker_job_result(apply_job_id)
-
-        if not apply_result:
-            self.crm_cog._audit_command(
-                interaction=interaction,
-                action="crm.upload_resume",
-                result="error",
-                metadata={
-                    "stage": "apply_timeout",
+        try:
+            apply_result = await self.crm_cog._wait_for_worker_job_result(apply_job_id)
+        except Exception as exc:
+            logger.error(
+                "Worker polling failed for apply_job_id=%s contact_id=%s error=%s",
+                apply_job_id,
+                self.contact_id,
+                exc,
+            )
+            _audit_apply_event(
+                "error",
+                {
+                    "contact_id": self.contact_id,
+                    "stage": "apply_polling_failed",
                     "job_id": apply_job_id,
+                    "error": str(exc),
+                    "updated_fields": [],
+                    "link_discord_applied": None,
                 },
-                resource_type="crm_contact",
-                resource_id=self.contact_id,
             )
             await interaction.followup.send(
-                "⚠️ Timed out waiting for apply job. Please check again shortly."
+                "⚠️ Resume apply polling failed. Please retry or check CRM manually.",
+                ephemeral=True,
+            )
+            return
+
+        if not apply_result:
+            _audit_apply_event(
+                "error",
+                {
+                    "contact_id": self.contact_id,
+                    "stage": "apply_timeout",
+                    "job_id": apply_job_id,
+                    "updated_fields": [],
+                    "link_discord_applied": None,
+                },
+            )
+            await interaction.followup.send(
+                "⚠️ Timed out waiting for apply job. Please check again shortly.",
+                ephemeral=True,
             )
             return
 
         status = str(apply_result.get("status", "unknown"))
-        if status != "succeeded":
-            self.crm_cog._audit_command(
-                interaction=interaction,
-                action="crm.upload_resume",
-                result="error",
-                metadata={
-                    "stage": "apply_failed",
-                    "job_id": apply_job_id,
-                    "job_status": status,
-                    "last_error": str(apply_result.get("last_error", "")),
-                },
-                resource_type="crm_contact",
-                resource_id=self.contact_id,
-            )
-            await interaction.followup.send(
-                f"❌ Apply job failed (status: {status}). "
-                f"Error: {apply_result.get('last_error') or 'Unknown error'}"
-            )
-            return
-
         result = apply_result.get("result")
         updated_fields: list[str] = []
+        link_discord_applied: bool | None = None
         if isinstance(result, dict):
             raw_fields = result.get("updated_fields")
             if isinstance(raw_fields, list):
                 updated_fields = [str(field) for field in raw_fields]
+            raw_link_applied = result.get("link_discord_applied")
+            if isinstance(raw_link_applied, bool):
+                link_discord_applied = raw_link_applied
+
+        if status != "succeeded":
+            _audit_apply_event(
+                "error",
+                {
+                    "contact_id": self.contact_id,
+                    "stage": "apply_failed",
+                    "job_id": apply_job_id,
+                    "job_status": status,
+                    "last_error": str(apply_result.get("last_error", "")),
+                    "updated_fields": updated_fields,
+                    "link_discord_applied": link_discord_applied,
+                },
+            )
+            await interaction.followup.send(
+                f"❌ Apply job failed (status: {status}). "
+                f"Error: {apply_result.get('last_error') or 'Unknown error'}",
+                ephemeral=True,
+            )
+            return
 
         embed = discord.Embed(
             title="✅ CRM Updated",
@@ -480,21 +525,19 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         )
         profile_url = f"{self.crm_cog.base_url}/#Contact/view/{self.contact_id}"
         embed.add_field(name="🔗 CRM Profile", value=f"[View in CRM]({profile_url})")
-        self.crm_cog._audit_command(
-            interaction=interaction,
-            action="crm.upload_resume",
-            result="success",
-            metadata={
+        _audit_apply_event(
+            "success",
+            {
+                "contact_id": self.contact_id,
                 "stage": "apply_succeeded",
                 "job_id": apply_job_id,
                 "updated_fields": updated_fields,
                 "proposed_updates_count": len(self.proposed_updates),
                 "link_member_requested": bool(self.link_discord),
+                "link_discord_applied": link_discord_applied,
             },
-            resource_type="crm_contact",
-            resource_id=self.contact_id,
         )
-        await interaction.followup.send(embed=embed)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
         for item in self.children:
             if isinstance(item, discord.ui.Button):
