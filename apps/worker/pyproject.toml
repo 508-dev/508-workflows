@@ -27,7 +27,7 @@ worker-consumer = "five08.worker.consumer:run"
 
 [tool.alembic]
 script_location = "src/five08/worker/migrations"
-prepend_sys_path = "src"
+prepend_sys_path = ["src"]
 file_template = "%%(rev)s_%%(slug)s"
 
 [build-system]
