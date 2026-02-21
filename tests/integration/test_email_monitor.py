@@ -40,11 +40,7 @@ class TestEmailMonitorIntegration:
             "imaplib.IMAP4_SSL", side_effect=imaplib.IMAP4.error("Connection failed")
         ):
             # Should not raise an exception
-            try:
-                await email_monitor.task_poll_inbox()
-            except Exception as e:
-                # If an exception is raised, it should be an IMAP error (expected)
-                assert isinstance(e, (imaplib.IMAP4.error, Exception))
+            await email_monitor.task_poll_inbox()
 
     @pytest.mark.asyncio
     async def test_poll_inbox_handles_email_parsing_errors(

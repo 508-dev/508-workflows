@@ -16,7 +16,7 @@ This repository follows a service-oriented monorepo layout:
 ├── packages/
 │   └── shared/
 │       └── src/five08/      # Shared settings, queue helpers, shared clients
-├── docker-compose.yml      # Bot + worker-api + worker-consumer + Redis
+├── docker-compose.yml      # bot + worker-api + worker-consumer + redis + postgres + minio
 ├── tests/                  # Unit and integration tests
 └── pyproject.toml          # uv workspace root
 ```
@@ -25,12 +25,26 @@ This repository follows a service-oriented monorepo layout:
 
 - `bot`: Discord gateway process.
 - `worker-api`: lightweight HTTP ingest service that validates and enqueues jobs.
-- `worker-consumer`: RQ worker that executes queued jobs.
-- `redis`: queue backend for both bot and worker services.
+- `worker-consumer`: Dramatiq worker that executes jobs from Redis queue.
+- `redis`: queue transport between API and worker.
+- `postgres`: job state persistence, retries, idempotency.
+- `minio`: internal S3-compatible storage transport.
+
+Migrations:
+
+- `apps/worker/src/five08/worker/migrations` (Alembic)
+- `worker-api` runs `run_job_migrations()` during startup to keep DB schema current.
+
+### Job model
+
+- Jobs are persisted in Postgres table `jobs`.
+- Job states: `queued`, `running`, `succeeded`, `failed`, `dead`, `canceled`.
+- Idempotency key is unique and optional.
+- Attempts are stored with `run_after`/retry state so delivery failures are never lost.
 
 ### Worker API Endpoints
 
-- `GET /health`: Redis/worker health check.
+- `GET /health`: Redis/Postgres/worker health check.
 - `POST /webhooks/{source}`: Generic webhook enqueue endpoint.
 - `POST /webhooks/espocrm`: EspoCRM webhook endpoint (expects array payload).
 - `POST /process-contact/{contact_id}`: Manually enqueue one contact skills job.
@@ -83,9 +97,24 @@ docker compose up --build
 - `JOB_TIMEOUT_SECONDS` (default: `600`)
 - `JOB_RESULT_TTL_SECONDS` (default: `3600`)
 - `WEBHOOK_SHARED_SECRET` (required; requests are rejected when unset)
+- `POSTGRES_URL` (default: `postgresql://postgres:postgres@postgres:5432/workflows`)
+- `POSTGRES_DB` (default: `workflows`)
+- `POSTGRES_USER` (default: `postgres`)
+- `POSTGRES_PASSWORD` (default: `postgres`)
+- `JOB_MAX_ATTEMPTS` (default: `8`)
+- `JOB_RETRY_BASE_SECONDS` (default: `5`)
+- `JOB_RETRY_MAX_SECONDS` (default: `300`)
 - `WEBHOOK_INGEST_HOST` (default: `0.0.0.0`)
 - `WEBHOOK_INGEST_PORT` (default: `8090`)
 - `LOG_LEVEL` (default: `INFO`)
+- `MINIO_ENDPOINT` (default: `http://minio:9000`)
+- `MINIO_INTERNAL_BUCKET` (default: `internal-transfers`)
+- `MINIO_ROOT_USER` (default: `internal`)
+- `MINIO_ROOT_PASSWORD`
+- `MINIO_HOST_BIND` (default: `127.0.0.1`; set to `0.0.0.0` to expose MinIO)
+- `MINIO_API_PORT` (default: `9000`)
+- `MINIO_CONSOLE_PORT` (default: `9001`)
+- `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` (compatibility aliases; use `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` by default for internal transfers)
 
 ### Discord Bot
 
@@ -128,8 +157,11 @@ docker compose up --build
 ./scripts/mypy.sh
 ```
 
-## Deployment (Coolify)
+## Deployment
 
-Deploy as a single Compose application in Coolify using `docker-compose.yml`.
+Deploy as a single Compose application.
+
+MinIO is used as the internal transfer mechanism so file handoffs stay inside the stack.
+External object storage adapters can be added later for multi-cloud or vendor-specific routing.
 
 This keeps one stack and one shared env set while still allowing independent service scaling/restarts (`bot`, `worker-api`, `worker-consumer`).

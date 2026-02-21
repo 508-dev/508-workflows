@@ -1,4 +1,4 @@
-"""Job functions executed by RQ worker consumers."""
+"""Domain job functions executed by worker actors."""
 
 import logging
 from datetime import datetime, timezone

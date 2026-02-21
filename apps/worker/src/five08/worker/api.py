@@ -3,21 +3,29 @@
 import asyncio
 import logging
 import secrets
+from datetime import datetime, timezone
 
 from aiohttp import web
 from pydantic import ValidationError
-from rq import Queue
 from redis import Redis
 
 from five08.logging import configure_logging
-from five08.queue import enqueue_job, get_queue, get_redis_connection
+from five08.queue import (
+    EnqueuedJob,
+    QueueClient,
+    enqueue_job,
+    get_redis_connection,
+    is_postgres_healthy,
+)
 from five08.worker.config import settings
+from five08.worker.db_migrations import run_job_migrations
+from five08.worker.dispatcher import build_queue_client
 from five08.worker.jobs import process_contact_skills_job, process_webhook_event
 from five08.worker.models import EspoCRMWebhookPayload
 
 logger = logging.getLogger(__name__)
 REDIS_CONN_KEY = web.AppKey("redis_conn", Redis)
-QUEUE_KEY = web.AppKey("queue", Queue)
+QUEUE_KEY = web.AppKey("queue", QueueClient)
 
 
 def _is_authorized(request: web.Request) -> bool:
@@ -32,6 +40,12 @@ def _is_authorized(request: web.Request) -> bool:
     return secrets.compare_digest(provided_secret, settings.webhook_shared_secret)
 
 
+def _extract_idempotency_key(value: object) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
 async def health_handler(request: web.Request) -> web.Response:
     """Simple health endpoint."""
     redis_conn = request.app[REDIS_CONN_KEY]
@@ -40,14 +54,16 @@ async def health_handler(request: web.Request) -> web.Response:
         redis_ok = bool(await asyncio.to_thread(redis_conn.ping))
     except Exception:
         redis_ok = False
+    postgres_ok = await asyncio.to_thread(is_postgres_healthy, settings)
 
     return web.json_response(
         {
-            "status": "healthy" if redis_ok else "degraded",
+            "status": "healthy" if redis_ok and postgres_ok else "degraded",
             "redis_connected": redis_ok,
+            "postgres_connected": postgres_ok,
             "queue_name": settings.redis_queue_name,
         },
-        status=200 if redis_ok else 503,
+        status=200 if redis_ok and postgres_ok else 503,
     )
 
 
@@ -66,13 +82,13 @@ async def ingest_handler(request: web.Request) -> web.Response:
 
     source = request.match_info.get("source", "default")
     queue = request.app[QUEUE_KEY]
-
-    job = await asyncio.to_thread(
+    job: EnqueuedJob = await asyncio.to_thread(
         enqueue_job,
         queue=queue,
         fn=process_webhook_event,
         args=(source, payload),
         settings=settings,
+        idempotency_key=_extract_idempotency_key(payload.get("id")),
     )
 
     logger.info("Enqueued webhook job %s from source=%s", job.id, source)
@@ -104,7 +120,7 @@ async def espocrm_webhook_handler(request: web.Request) -> web.Response:
 
     try:
         payload = EspoCRMWebhookPayload.from_list(payload_data)
-    except ValidationError as exc:
+    except (ValidationError, TypeError) as exc:
         return web.json_response(
             {"error": "invalid_webhook_event", "detail": str(exc)}, status=400
         )
@@ -118,6 +134,7 @@ async def espocrm_webhook_handler(request: web.Request) -> web.Response:
             fn=process_contact_skills_job,
             args=(event.id,),
             settings=settings,
+            idempotency_key=f"espocrm:{event.id}",
         )
         jobs.append({"contact_id": event.id, "job_id": job.id})
 
@@ -138,7 +155,7 @@ async def espocrm_webhook_handler(request: web.Request) -> web.Response:
 
 
 async def process_contact_handler(request: web.Request) -> web.Response:
-    """Manually enqueue one contact for skills processing."""
+    """Manual enqueue for one contact."""
     if not _is_authorized(request):
         return web.json_response({"error": "unauthorized"}, status=401)
 
@@ -147,15 +164,20 @@ async def process_contact_handler(request: web.Request) -> web.Response:
         return web.json_response({"error": "contact_id_required"}, status=400)
 
     queue = request.app[QUEUE_KEY]
+    manual_nonce = datetime.now(tz=timezone.utc).isoformat()
     job = await asyncio.to_thread(
         enqueue_job,
         queue=queue,
         fn=process_contact_skills_job,
         args=(contact_id,),
         settings=settings,
+        idempotency_key=f"manual:{contact_id}:{manual_nonce}",
     )
     logger.info(
-        "Enqueued manual contact job job_id=%s contact_id=%s", job.id, contact_id
+        "Enqueued manual contact job job_id=%s contact_id=%s created=%s",
+        job.id,
+        contact_id,
+        job.created,
     )
     return web.json_response(
         {
@@ -170,9 +192,10 @@ async def process_contact_handler(request: web.Request) -> web.Response:
 
 async def on_startup(app: web.Application) -> None:
     """Initialize queue dependencies."""
+    await asyncio.to_thread(run_job_migrations)
     redis_conn = get_redis_connection(settings)
     app[REDIS_CONN_KEY] = redis_conn
-    app[QUEUE_KEY] = get_queue(settings, connection=redis_conn)
+    app[QUEUE_KEY] = build_queue_client()
 
 
 async def on_cleanup(app: web.Application) -> None:

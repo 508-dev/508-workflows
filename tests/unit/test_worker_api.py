@@ -34,7 +34,8 @@ async def test_health_handler_healthy() -> None:
     app_obj[api.REDIS_CONN_KEY] = _HealthyRedis()
     request = make_mocked_request("GET", "/health", app=app_obj)
 
-    response = await api.health_handler(request)
+    with patch("five08.worker.api.is_postgres_healthy", return_value=True):
+        response = await api.health_handler(request)
     payload = json.loads(response.text)
 
     assert response.status == 200
@@ -48,7 +49,8 @@ async def test_health_handler_degraded() -> None:
     app_obj[api.REDIS_CONN_KEY] = _FailingRedis()
     request = make_mocked_request("GET", "/health", app=app_obj)
 
-    response = await api.health_handler(request)
+    with patch("five08.worker.api.is_postgres_healthy", return_value=True):
+        response = await api.health_handler(request)
     payload = json.loads(response.text)
 
     assert response.status == 503

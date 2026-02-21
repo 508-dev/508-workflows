@@ -83,7 +83,7 @@ jobs:
 
     - name: Run mypy type checker
       run: |
-        uv run mypy apps/discord_bot/src/five08/ apps/worker/src/five08/ packages/shared/src/five08/ --ignore-missing-imports
+        uv run mypy apps/discord_bot/src/five08/ apps/worker/src/five08/ packages/shared/src/five08/ --ignore-missing-imports --explicit-package-bases
 
   security:
     runs-on: ubuntu-latest

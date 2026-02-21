@@ -174,7 +174,13 @@ class ContactSkillsProcessor:
                     exc,
                 )
 
-        unique_skills = sorted(set(all_skills))
+        deduped_skills: dict[str, str] = {}
+        for skill in all_skills:
+            key = skill.casefold()
+            if key not in deduped_skills:
+                deduped_skills[key] = skill
+
+        unique_skills = sorted(deduped_skills.values())
         avg_confidence = confidence_sum / processed_count if processed_count else 0.0
         return unique_skills, avg_confidence
 

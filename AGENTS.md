@@ -23,7 +23,7 @@ This repo contains multiple services:
 3. Service separation
 - `apps/discord_bot`: Discord gateway and bot commands/cogs
 - `apps/worker`: webhook ingest API and queue consumer
-- `docker-compose.yml`: stack orchestration with Redis
+- `docker-compose.yml`: stack orchestration with Redis, Postgres, and MinIO
 
 ## Common Paths
 
@@ -73,8 +73,14 @@ async def setup(bot: commands.Bot) -> None:
 
 ## Worker Pattern
 
-- Keep ingest endpoints fast: validate input, enqueue, return 202.
-- Run long processing in worker consumer job functions from shared package.
+- Keep ingest endpoints fast: validate input, persist jobs, enqueue, return 202.
+- Run long processing in worker consumer jobs (Dramatiq actors), with Postgres as source-of-truth job state and Redis as delivery transport.
+- Internal file movement is routed through MinIO (`internal-transfers`) inside the stack; this is explicitly the internal transfer path, with external object store adapters kept separate for future needs.
+- Worker schema is managed with Alembic migrations in `apps/worker/src/five08/worker/migrations` and applied at worker-api startup.
+
+## Data Model Note
+
+- Shared job state is persisted in Postgres table `jobs` with job type, status (`queued`, `running`, `succeeded`, `failed`, `dead`, `canceled`), payload, idempotency key, attempt counters, scheduling, and lock metadata.
 
 ## Configuration Rules
 

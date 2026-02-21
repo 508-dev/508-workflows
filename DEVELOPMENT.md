@@ -30,6 +30,8 @@ uv sync
 cp .env.example .env
 ```
 
+The worker API process runs Alembic migrations on startup (`apps/worker/src/five08/worker/db_migrations.py`) so the `jobs` table is created or upgraded before requests are accepted.
+
 3. Run services:
 
 ```bash
@@ -45,7 +47,7 @@ uv run --package integrations-worker worker-consumer
 
 ## Docker Compose Workflow
 
-Start full stack (bot + worker-api + worker-consumer + redis):
+Start full stack (bot + worker-api + worker-consumer + redis + postgres + minio):
 
 ```bash
 docker compose up --build
@@ -89,7 +91,13 @@ async def setup(bot: commands.Bot) -> None:
 
 1. Add job function in `apps/worker/src/five08/worker/jobs.py`.
 2. Enqueue from `apps/worker/src/five08/worker/api.py` (or from bot code if needed).
-3. Ensure queue name and Redis settings are configured in `.env`.
+3. Ensure job type/queue settings and Postgres settings are configured in `.env`.
+
+### Job architecture
+
+- API layer persists jobs first in Postgres with idempotency keys.
+- Queue layer uses Dramatiq actors over Redis for delivery.
+- MinIO is the current internal transfer mechanism (bucket: `internal-transfers`) and is intended only for stack-internal file movement; external S3 integrations are separate.
 
 ## Worker CRM Flow
 
@@ -106,7 +114,7 @@ async def setup(bot: commands.Bot) -> None:
 
 Use `.env.example` as source of truth. Key categories:
 
-- Shared queue/runtime: `REDIS_URL`, `REDIS_QUEUE_NAME`, `LOG_LEVEL`, webhook settings
+- Shared queue/runtime: `REDIS_URL`, `REDIS_QUEUE_NAME`, `POSTGRES_URL`, `JOB_MAX_ATTEMPTS`, `JOB_RETRY_BASE_SECONDS`, `JOB_RETRY_MAX_SECONDS`, `LOG_LEVEL`, webhook settings
 - Bot credentials/integrations: Discord, email, Espo, Kimai
 - Worker controls: `WORKER_NAME`, `WORKER_QUEUE_NAMES`, `WORKER_BURST`
 - Worker CRM processing: `MAX_ATTACHMENTS_PER_CONTACT`, `MAX_FILE_SIZE_MB`, `ALLOWED_FILE_TYPES`, `RESUME_KEYWORDS`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`
