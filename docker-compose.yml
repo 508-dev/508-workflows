@@ -112,13 +112,12 @@ services:
     build:
       context: .
       dockerfile: apps/worker/Dockerfile
-    command: [
-      "uv", "run", "--package", "integrations-worker",
-      "dramatiq", "five08.worker.actors",
-      "--processes", "${WORKER_PROCESSES:-1}",
-      "--threads", "${WORKER_THREADS:-8}",
-      "-Q", "${WORKER_QUEUE_NAMES:-jobs.default}"
-    ]
+    command: >-
+      uv run --package integrations-worker
+      dramatiq five08.worker.actors
+      --processes ${WORKER_PROCESSES:-1}
+      --threads ${WORKER_THREADS:-8}
+      -Q ${WORKER_QUEUE_NAMES:-jobs.default}
     env_file:
       - .env
     environment:

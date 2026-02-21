@@ -31,12 +31,13 @@ def run() -> None:
     worker: Worker | None = None
     stop_requested = threading.Event()
 
+    configure_logging(settings.log_level)
+
     if not _safe_import_actors():
         raise RuntimeError("Worker startup aborted due to actor import failure.")
 
-    configure_logging(settings.log_level)
-
     def _handle_shutdown_signal(signal_number: int, _frame: object) -> None:
+        """Set stop flag when receiving shutdown or reload signals."""
         logger.info(
             "Received shutdown signal=%s for worker=%s",
             signal_number,
@@ -81,13 +82,12 @@ def run() -> None:
         )
         raise
     finally:
-        if worker is None:
-            return
-        try:
-            logger.info("Stopping worker name=%s", settings.worker_name)
-            worker.stop(timeout=settings.job_timeout_seconds * 1000)
-        except Exception:
-            logger.exception("Worker stop failed name=%s", settings.worker_name)
+        if worker is not None:
+            try:
+                logger.info("Stopping worker name=%s", settings.worker_name)
+                worker.stop(timeout=settings.job_timeout_seconds * 1000)
+            except Exception:
+                logger.exception("Worker stop failed name=%s", settings.worker_name)
 
 
 if __name__ == "__main__":
