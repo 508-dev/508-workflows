@@ -74,11 +74,11 @@ services:
       redis:
         condition: service_healthy
 
-  worker-api:
+  backend-api:
     build:
       context: .
       dockerfile: apps/worker/Dockerfile
-    command: ["uv", "run", "--package", "integrations-worker", "worker-api"]
+    command: ["uv", "run", "--package", "integrations-worker", "backend-api"]
     env_file:
       - .env
     environment:
@@ -137,7 +137,7 @@ services:
       MINIO_INTERNAL_BUCKET: ${MINIO_INTERNAL_BUCKET:-internal-transfers}
     restart: unless-stopped
     depends_on:
-      worker-api:
+      backend-api:
         condition: service_started
       redis:
         condition: service_healthy

@@ -11,12 +11,12 @@ This repository follows a service-oriented monorepo layout:
 ├── apps/
 │   ├── discord_bot/        # Discord gateway process
 │   │   └── src/five08/discord_bot/
-│   └── worker/             # Webhook ingest API + async queue worker
-│       └── src/five08/worker/
+│   └── worker/             # Backend API + async queue worker
+│       └── src/five08/{backend,worker}/
 ├── packages/
 │   └── shared/
 │       └── src/five08/      # Shared settings, queue helpers, shared clients
-├── docker-compose.yml      # bot + worker-api + worker-consumer + redis + postgres + minio
+├── docker-compose.yml      # bot + backend-api + worker-consumer + redis + postgres + minio
 ├── tests/                  # Unit and integration tests
 └── pyproject.toml          # uv workspace root
 ```
@@ -24,7 +24,7 @@ This repository follows a service-oriented monorepo layout:
 ## Services
 
 - `bot`: Discord gateway process.
-- `worker-api`: lightweight HTTP ingest service that validates and enqueues jobs.
+- `backend-api`: FastAPI dashboard + ingest service that validates and enqueues jobs.
 - `worker-consumer`: Dramatiq worker that executes jobs from Redis queue.
 - `redis`: queue transport between API and worker.
 - `postgres`: job state persistence, retries, idempotency.
@@ -33,7 +33,7 @@ This repository follows a service-oriented monorepo layout:
 Migrations:
 
 - `apps/worker/src/five08/worker/migrations` (Alembic)
-- `worker-api` runs `run_job_migrations()` during startup to keep DB schema current.
+- `backend-api` runs `run_job_migrations()` during startup to keep DB schema current.
 
 ### Job model
 
@@ -44,7 +44,7 @@ Migrations:
 - Human audit events are persisted in `audit_events`.
 - CRM identity cache is persisted in `people`.
 
-### Worker API Endpoints
+### Backend API Endpoints
 
 - `GET /health`: Redis/Postgres/worker health check.
 - `GET /jobs/{job_id}`: Fetch queued job status/result payload.
@@ -56,6 +56,13 @@ Migrations:
 - `POST /process-contact/{contact_id}`: Manually enqueue one contact skills job.
 - `POST /sync/people`: Manually enqueue a full CRM->people cache sync.
 - `POST /audit/events`: Persist one human audit event (`discord` or `admin_dashboard`).
+- `GET /auth/login`: Start OIDC Auth Code + PKCE login flow.
+- `GET /auth/callback`: Complete OIDC callback and set HttpOnly session cookie.
+- `GET /auth/me`: Return active session identity.
+- `POST /auth/logout`: Clear active session cookie + server session.
+- `POST /auth/discord/links`: Create one-time dashboard deep link from Discord command context.
+- `GET /auth/discord/link/{token}`: Resolve Discord deep link into authenticated dashboard redirect.
+- Auth flows emit best-effort human audit events (`auth.login`, `auth.logout`) under source `admin_dashboard`.
 
 ## Local Development
 
@@ -81,7 +88,7 @@ Run directly with uv:
 uv run --package discord-bot-app discord-bot
 
 # Worker ingest API
-uv run --package integrations-worker worker-api
+uv run --package integrations-worker backend-api
 
 # Worker queue consumer
 uv run --package integrations-worker worker-consumer
@@ -135,11 +142,37 @@ Use `.env.example` as the source of truth for defaults.
 - Note: `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` are `SharedSettings` alias properties (`minio_access_key`, `minio_secret_key`) and are not env-loaded fields.
 - Note: use `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` as the actual env vars.
 
-### Worker API Ingest
+### Backend API Ingest
 
 - `Required` for protected endpoints: `API_SHARED_SECRET` (ingest requests are rejected when unset)
 - `Optional`: `WEBHOOK_INGEST_HOST` (default: `0.0.0.0`)
 - `Optional`: `WEBHOOK_INGEST_PORT` (default: `8090`)
+
+### Backend API OIDC Session Auth
+
+- `Optional` (required when enabling OIDC login): `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`
+- `Optional`: `OIDC_SCOPE` (default: `openid profile email groups`)
+- `Optional`: `OIDC_GROUPS_CLAIM` (default: `groups`)
+- `Optional`: `OIDC_ADMIN_GROUPS` (default: `Admin,Owner,Steering Committee`)
+- `Optional`: `OIDC_CALLBACK_PATH` (default: `/auth/callback`)
+- `Optional`: `OIDC_REDIRECT_BASE_URL` (default: infer from request base URL)
+- `Optional`: `OIDC_HTTP_TIMEOUT_SECONDS` (default: `8.0`)
+- `Optional`: `OIDC_JWKS_CACHE_SECONDS` (default: `300`)
+- `Optional`: `AUTH_STATE_TTL_SECONDS` (default: `600`)
+- `Optional`: `AUTH_SESSION_TTL_SECONDS` (default: `28800`)
+- `Optional`: `AUTH_SESSION_COOKIE_NAME` (default: `five08_session`)
+- `Optional`: `AUTH_COOKIE_SECURE` (default: `false`)
+- `Optional`: `AUTH_COOKIE_SAMESITE` (default: `lax`)
+- `Optional`: `DASHBOARD_DEFAULT_PATH` (default: `/dashboard`)
+- `Optional`: `DASHBOARD_PUBLIC_BASE_URL` (base URL for generated deep links)
+
+### Discord Admin Deep-Link Validation
+
+- `Optional`: `DISCORD_ADMIN_GUILD_ID` (required for Discord API fallback role checks)
+- `Optional`: `DISCORD_ADMIN_ROLES` (default: `Admin,Owner,Steering Committee`)
+- `Optional`: `DISCORD_API_TIMEOUT_SECONDS` (default: `8.0`)
+- `Optional`: `DISCORD_LINK_TTL_SECONDS` (default: `600`)
+- `Optional`: `DISCORD_BOT_TOKEN` (needed only for fallback Discord API checks; DB role check remains primary)
 
 ### Worker Consumer
 
@@ -173,7 +206,7 @@ Use `.env.example` as the source of truth for defaults.
 
 - `Required`: `DISCORD_BOT_TOKEN`
 - `Required`: `CHANNEL_ID`
-- `Optional`: `WORKER_API_BASE_URL` (default: `http://worker-api:8090`)
+- `Optional`: `BACKEND_API_BASE_URL` (default: `http://backend-api:8090`)
 - `Optional`: `HEALTHCHECK_PORT` (default: `3000`)
 - `Optional`: `DISCORD_SENDMSG_CHARACTER_LIMIT` (default: `2000`)
 
@@ -209,4 +242,4 @@ Deploy as a single Compose application.
 MinIO is used as the internal transfer mechanism so file handoffs stay inside the stack.
 External object storage adapters can be added later for multi-cloud or vendor-specific routing.
 
-This keeps one stack and one shared env set while still allowing independent service scaling/restarts (`bot`, `worker-api`, `worker-consumer`).
+This keeps one stack and one shared env set while still allowing independent service scaling/restarts (`bot`, `backend-api`, `worker-consumer`).

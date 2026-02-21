@@ -17,4 +17,4 @@ RUN chown -R appuser:appgroup /app
 
 USER appuser
 
-CMD ["uv", "run", "--package", "integrations-worker", "worker-api"]
+CMD ["uv", "run", "--package", "integrations-worker", "backend-api"]
