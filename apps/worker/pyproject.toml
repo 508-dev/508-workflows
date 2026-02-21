@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.13.1",
     "openai>=2.0.0",
-    "alembic>=1.14.1",
+    "alembic==1.18.4",
     "dramatiq[redis]==2.0.1",
     "pdfminer.six>=20250506",
     "pydantic~=2.10",
@@ -24,6 +24,11 @@ five08 = { workspace = true }
 [project.scripts]
 worker-api = "five08.worker.api:run"
 worker-consumer = "five08.worker.consumer:run"
+
+[tool.alembic]
+script_location = "src/five08/worker/migrations"
+prepend_sys_path = ["src"]
+file_template = "%%(rev)s_%%(slug)s"
 
 [build-system]
 requires = ["hatchling"]

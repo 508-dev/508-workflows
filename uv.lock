@@ -866,7 +866,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.13.1" },
-    { name = "alembic", specifier = ">=1.14.1" },
+    { name = "alembic", specifier = "==1.18.4" },
     { name = "dramatiq", extras = ["redis"], specifier = "==2.0.1" },
     { name = "five08", editable = "packages/shared" },
     { name = "openai", specifier = ">=2.0.0" },
