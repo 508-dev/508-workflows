@@ -45,7 +45,7 @@ class DiscordAuditLogger:
         if not self.enabled:
             return
 
-        event_payload = self._build_payload(
+        event_payload = self._build_discord_payload(
             interaction=interaction,
             action=action,
             result=result,
@@ -54,6 +54,44 @@ class DiscordAuditLogger:
             resource_id=resource_id,
         )
 
+        self._queue_event(event_payload)
+
+    def log_admin_sso_action(
+        self,
+        *,
+        action: str,
+        result: str,
+        actor_email: str,
+        actor_display_name: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        resource_type: str | None = None,
+        resource_id: str | None = None,
+        correlation_id: str | None = None,
+    ) -> None:
+        """Queue best-effort audit write for non-Discord human actions."""
+        if not self.enabled:
+            return
+
+        normalized_email = actor_email.strip().lower()
+        if not normalized_email:
+            return
+
+        event_payload = {
+            "source": "admin_dashboard",
+            "action": action,
+            "result": result,
+            "actor_provider": "admin_sso",
+            "actor_subject": normalized_email,
+            "actor_display_name": actor_display_name,
+            "resource_type": resource_type,
+            "resource_id": resource_id,
+            "correlation_id": correlation_id,
+            "metadata": metadata or {},
+        }
+
+        self._queue_event(event_payload)
+
+    def _queue_event(self, event_payload: dict[str, Any]) -> None:
         task = asyncio.create_task(self._post_event(event_payload))
         task.add_done_callback(self._on_task_done)
 
@@ -97,7 +135,7 @@ class DiscordAuditLogger:
         except Exception as exc:  # pragma: no cover - defensive fallback
             logger.warning("Unexpected audit task failure: %s", exc)
 
-    def _build_payload(
+    def _build_discord_payload(
         self,
         *,
         interaction: discord.Interaction,

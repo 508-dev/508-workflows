@@ -33,6 +33,7 @@ from five08.queue import (
 from five08.worker.config import settings
 from five08.worker.db_migrations import run_job_migrations
 from five08.worker.dispatcher import build_queue_client
+from five08.worker.mailbox_resume_ingest import ResumeMailboxProcessor
 from five08.worker.jobs import (
     apply_resume_profile_job,
     extract_resume_profile_job,
@@ -47,6 +48,7 @@ logger = logging.getLogger(__name__)
 REDIS_CONN_KEY = web.AppKey("redis_conn", Redis)
 QUEUE_KEY = web.AppKey("queue", QueueClient)
 CRM_SYNC_TASK_KEY = web.AppKey("crm_sync_task", asyncio.Task)
+EMAIL_RESUME_TASK_KEY = web.AppKey("email_resume_task", asyncio.Task)
 POSTGRES_CONN_KEY = web.AppKey("postgres_conn", Connection)
 POSTGRES_CONN_LOCK_KEY = web.AppKey("postgres_conn_lock", asyncio.Lock)
 
@@ -122,6 +124,22 @@ async def _crm_sync_scheduler(app: web.Application) -> None:
             await _enqueue_full_crm_sync_job(queue, reason="scheduler")
         except Exception:
             logger.exception("Failed scheduling CRM full-sync job")
+        await asyncio.sleep(interval_seconds)
+
+
+async def _email_resume_scheduler() -> None:
+    """Run periodic mailbox polling for resume ingestion."""
+    poller = ResumeMailboxProcessor(settings)
+    interval_seconds = max(1, settings.check_email_wait) * 60
+    while True:
+        try:
+            processed_count = await asyncio.to_thread(poller.poll_inbox)
+            logger.debug(
+                "Completed mailbox resume poll processed_attachments=%s",
+                processed_count,
+            )
+        except Exception:
+            logger.exception("Failed mailbox resume poll iteration")
         await asyncio.sleep(interval_seconds)
 
 
@@ -594,6 +612,10 @@ async def on_startup(app: web.Application) -> None:
         app[CRM_SYNC_TASK_KEY] = asyncio.create_task(_crm_sync_scheduler(app))
     else:
         logger.info("CRM sync scheduler disabled by config")
+    if settings.email_resume_intake_enabled:
+        app[EMAIL_RESUME_TASK_KEY] = asyncio.create_task(_email_resume_scheduler())
+    else:
+        logger.info("Mailbox resume intake scheduler disabled by config")
 
 
 async def on_cleanup(app: web.Application) -> None:
@@ -604,6 +626,11 @@ async def on_cleanup(app: web.Application) -> None:
         await asyncio.to_thread(app[POSTGRES_CONN_KEY].close)
     if CRM_SYNC_TASK_KEY in app:
         task = app[CRM_SYNC_TASK_KEY]
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    if EMAIL_RESUME_TASK_KEY in app:
+        task = app[EMAIL_RESUME_TASK_KEY]
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task

@@ -40,7 +40,7 @@ def test_send_event_sync_logs_warning_on_request_error() -> None:
         shared_secret="secret",
         timeout_seconds=1.0,
     )
-    payload = logger._build_payload(
+    payload = logger._build_discord_payload(
         interaction=_mock_interaction(),
         action="crm.search_members",
         result="success",
@@ -55,3 +55,30 @@ def test_send_event_sync_logs_warning_on_request_error() -> None:
             logger._send_event_sync(payload)
 
     mock_warning.assert_called_once()
+
+
+def test_log_admin_sso_action_normalizes_actor_email() -> None:
+    """Admin SSO audit should normalize actor email and queue the event."""
+    logger = DiscordAuditLogger(
+        base_url="http://worker-api:8090",
+        shared_secret="secret",
+        timeout_seconds=1.0,
+    )
+
+    with patch.object(logger, "_queue_event") as mock_queue:
+        logger.log_admin_sso_action(
+            action="crm.resume_mailbox_ingest",
+            result="success",
+            actor_email=" Admin@Example.COM ",
+            actor_display_name="Admin User",
+            metadata={"processed_attachments": 1},
+            resource_type="mailbox_message",
+            resource_id="<msg-id>",
+            correlation_id="<msg-id>",
+        )
+
+    mock_queue.assert_called_once()
+    payload = mock_queue.call_args.args[0]
+    assert payload["source"] == "admin_dashboard"
+    assert payload["actor_provider"] == "admin_sso"
+    assert payload["actor_subject"] == "admin@example.com"

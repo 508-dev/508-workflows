@@ -23,13 +23,8 @@ class Settings(SharedSettings):
     # Healthcheck Configuration
     healthcheck_port: int = 3000
 
-    # Email Monitoring Configuration
+    # Core channel configuration
     channel_id: int
-    check_email_wait: int = 2
-    email_username: str
-    email_password: str
-    imap_server: str
-    smtp_server: str
 
     # CRM/EspoCRM settings
     espo_api_key: str

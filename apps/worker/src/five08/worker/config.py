@@ -2,6 +2,8 @@
 
 from urllib.parse import urlparse
 
+from pydantic import model_validator
+
 from five08.settings import SharedSettings
 
 
@@ -29,6 +31,34 @@ class WorkerSettings(SharedSettings):
     crm_sync_enabled: bool = True
     crm_sync_interval_seconds: int = 900
     crm_sync_page_size: int = 200
+    email_resume_intake_enabled: bool = False
+    check_email_wait: int = 2
+    email_username: str | None = None
+    email_password: str | None = None
+    imap_server: str | None = None
+    email_resume_allowed_extensions: str = "pdf,doc,docx"
+    email_resume_max_file_size_mb: int = 10
+    email_require_sender_auth_headers: bool = True
+
+    @model_validator(mode="after")
+    def validate_email_resume_intake_settings(self) -> "WorkerSettings":
+        """Require mailbox settings when worker-side email intake is enabled."""
+        if not self.email_resume_intake_enabled:
+            return self
+
+        if not (self.email_username or "").strip():
+            raise ValueError(
+                "EMAIL_USERNAME must be set when EMAIL_RESUME_INTAKE_ENABLED=true"
+            )
+        if not (self.email_password or "").strip():
+            raise ValueError(
+                "EMAIL_PASSWORD must be set when EMAIL_RESUME_INTAKE_ENABLED=true"
+            )
+        if not (self.imap_server or "").strip():
+            raise ValueError(
+                "IMAP_SERVER must be set when EMAIL_RESUME_INTAKE_ENABLED=true"
+            )
+        return self
 
     @property
     def allowed_file_extensions(self) -> set[str]:
