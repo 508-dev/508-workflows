@@ -1,4 +1,4 @@
-"""OIDC/session and Discord-admin authorization helpers for worker API."""
+"""OIDC/session and Discord-admin authorization helpers for backend API."""
 
 from __future__ import annotations
 

@@ -36,7 +36,7 @@ def test_audit_logger_disabled_without_config() -> None:
 def test_send_event_sync_logs_warning_on_request_error() -> None:
     """Request exceptions should be logged as warnings and not raised."""
     logger = DiscordAuditLogger(
-        base_url="http://worker-api:8090",
+        base_url="http://backend-api:8090",
         shared_secret="secret",
         timeout_seconds=1.0,
     )
@@ -60,7 +60,7 @@ def test_send_event_sync_logs_warning_on_request_error() -> None:
 def test_log_admin_sso_action_normalizes_actor_email() -> None:
     """Admin SSO audit should normalize actor email and queue the event."""
     logger = DiscordAuditLogger(
-        base_url="http://worker-api:8090",
+        base_url="http://backend-api:8090",
         shared_secret="secret",
         timeout_seconds=1.0,
     )

@@ -12,7 +12,8 @@ This guide covers setup and workflows for the 508.dev monorepo (`discord bot + w
 
 ```text
 apps/discord_bot/src/five08/discord_bot/  # Discord bot package
-apps/worker/src/five08/worker/            # Worker package
+apps/worker/src/five08/backend/           # Backend API package
+apps/worker/src/five08/worker/            # Worker consumer package
 packages/shared/src/five08/     # Shared package
 ```
 
@@ -30,7 +31,7 @@ uv sync
 cp .env.example .env
 ```
 
-The worker API process runs Alembic migrations on startup (`apps/worker/src/five08/worker/db_migrations.py`) so the `jobs` table is created or upgraded before requests are accepted.
+The backend API process runs Alembic migrations on startup (`apps/worker/src/five08/worker/db_migrations.py`) so the `jobs` table is created or upgraded before requests are accepted.
 
 3. Run services:
 
@@ -39,7 +40,7 @@ The worker API process runs Alembic migrations on startup (`apps/worker/src/five
 uv run --package discord-bot-app discord-bot
 
 # webhook ingest API
-uv run --package integrations-worker worker-api
+uv run --package integrations-worker backend-api
 
 # job consumer
 uv run --package integrations-worker worker-consumer
@@ -47,7 +48,7 @@ uv run --package integrations-worker worker-consumer
 
 ## Docker Compose Workflow
 
-Start full stack (bot + worker-api + worker-consumer + redis + postgres + minio):
+Start full stack (bot + backend-api + worker-consumer + redis + postgres + minio):
 
 ```bash
 docker compose up --build
@@ -90,7 +91,7 @@ async def setup(bot: commands.Bot) -> None:
 ## Adding Worker Jobs
 
 1. Add job function in `apps/worker/src/five08/worker/jobs.py`.
-2. Enqueue from `apps/worker/src/five08/worker/api.py` (or from bot code if needed).
+2. Enqueue from `apps/worker/src/five08/backend/api.py` (or from bot code if needed).
 3. Ensure job type/queue settings and Postgres settings are configured in `.env`.
 
 ### Job architecture
@@ -126,7 +127,7 @@ Use `.env.example` as source of truth. Key categories:
 - Discord CRM audit writer: `AUDIT_API_BASE_URL`, `AUDIT_API_TIMEOUT_SECONDS` (plus shared `API_SHARED_SECRET`)
 - Worker controls: `WORKER_NAME`, `WORKER_QUEUE_NAMES`, `WORKER_BURST`
 - Worker CRM processing: `MAX_ATTACHMENTS_PER_CONTACT`, `MAX_FILE_SIZE_MB`, `ALLOWED_FILE_TYPES`, `RESUME_KEYWORDS`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`, `RESUME_EXTRACTOR_VERSION`
-- Resume upload UX wiring: `WORKER_API_BASE_URL` on bot, `CRM_LINKEDIN_FIELD` on worker.
+- Resume upload UX wiring: `BACKEND_API_BASE_URL` on bot, `CRM_LINKEDIN_FIELD` on worker.
 
 ## CI Notes
 

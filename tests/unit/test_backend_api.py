@@ -1,10 +1,10 @@
-"""Unit tests for worker dashboard/ingest API."""
+"""Unit tests for backend dashboard/ingest API."""
 
 import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import AsyncMock, Mock, patch
 
-from five08.worker import api
+from five08.backend import api
 
 
 class _HealthyRedis:
@@ -73,7 +73,7 @@ def client(app: api.FastAPI) -> TestClient:
 
 def test_health_handler_healthy(client: TestClient) -> None:
     """Health endpoint should report healthy when Redis pings."""
-    with patch("five08.worker.api.is_postgres_healthy", return_value=True):
+    with patch("five08.backend.api.is_postgres_healthy", return_value=True):
         response = client.get("/health")
 
     payload = response.json()
@@ -85,7 +85,7 @@ def test_health_handler_degraded(app: api.FastAPI) -> None:
     """Health endpoint should report degraded when Redis fails."""
     app.state.redis_conn = _FailingRedis()
     client = TestClient(app)
-    with patch("five08.worker.api.is_postgres_healthy", return_value=True):
+    with patch("five08.backend.api.is_postgres_healthy", return_value=True):
         response = client.get("/health")
 
     payload = response.json()
@@ -98,7 +98,7 @@ def test_ingest_handler_enqueues_job(
     auth_headers: dict[str, str],
 ) -> None:
     """Ingest endpoint should enqueue payload and return job metadata."""
-    with patch("five08.worker.api.enqueue_job") as mock_enqueue:
+    with patch("five08.backend.api.enqueue_job") as mock_enqueue:
         mock_enqueue.return_value = Mock(id="job-123")
         response = client.post(
             "/webhooks/github",
@@ -133,7 +133,7 @@ def test_espocrm_webhook_handler_enqueues_contact_jobs(
     auth_headers: dict[str, str],
 ) -> None:
     """EspoCRM webhook should enqueue before responding."""
-    with patch("five08.worker.api._enqueue_espocrm_batch", new_callable=AsyncMock):
+    with patch("five08.backend.api._enqueue_espocrm_batch", new_callable=AsyncMock):
         response = client.post(
             "/webhooks/espocrm",
             json=[{"id": "c-1"}, {"id": "c-2"}],
@@ -167,7 +167,7 @@ def test_process_contact_handler_enqueues_single_contact(
     auth_headers: dict[str, str],
 ) -> None:
     """Manual contact endpoint should enqueue one contact job."""
-    with patch("five08.worker.api.enqueue_job") as mock_enqueue:
+    with patch("five08.backend.api.enqueue_job") as mock_enqueue:
         mock_enqueue.return_value = Mock(id="job-123")
         response = client.post("/process-contact/c-123", headers=auth_headers)
 
@@ -188,7 +188,7 @@ def test_resume_extract_handler_enqueues_job(
     monkeypatch.setattr(api.settings, "openai_base_url", None)
     monkeypatch.setattr(api.settings, "resume_ai_model", "gpt-test")
 
-    with patch("five08.worker.api.enqueue_job") as mock_enqueue:
+    with patch("five08.backend.api.enqueue_job") as mock_enqueue:
         mock_enqueue.return_value = Mock(id="job-extract", created=True)
         response = client.post(
             "/jobs/resume-extract",
@@ -214,7 +214,7 @@ def test_resume_apply_handler_enqueues_job(
     auth_headers: dict[str, str],
 ) -> None:
     """Resume apply endpoint should enqueue apply job."""
-    with patch("five08.worker.api.enqueue_job") as mock_enqueue:
+    with patch("five08.backend.api.enqueue_job") as mock_enqueue:
         mock_enqueue.return_value = Mock(id="job-apply", created=True)
         response = client.post(
             "/jobs/resume-apply",
@@ -249,7 +249,7 @@ def test_job_status_handler_returns_result(
         payload={"result": {"success": True}},
     )
 
-    with patch("five08.worker.api.get_job", return_value=mock_job):
+    with patch("five08.backend.api.get_job", return_value=mock_job):
         response = client.get("/jobs/job-123", headers=auth_headers)
 
     payload = response.json()
@@ -286,7 +286,7 @@ def test_sync_people_handler_enqueues_full_sync(
 ) -> None:
     """Manual people-sync endpoint should enqueue one full sync job."""
     with patch(
-        "five08.worker.api._enqueue_full_crm_sync_job", new_callable=AsyncMock
+        "five08.backend.api._enqueue_full_crm_sync_job", new_callable=AsyncMock
     ) as mock_enqueue:
         mock_enqueue.return_value = Mock(id="job-sync", created=True)
         response = client.post("/sync/people", headers=auth_headers)
@@ -303,7 +303,7 @@ def test_espocrm_people_sync_webhook_handler_enqueues_contact_jobs(
 ) -> None:
     """People sync webhook should enqueue before responding."""
     with patch(
-        "five08.worker.api._enqueue_espocrm_people_sync_batch",
+        "five08.backend.api._enqueue_espocrm_people_sync_batch",
         new_callable=AsyncMock,
     ):
         response = client.post(
@@ -324,7 +324,7 @@ def test_espocrm_webhook_handler_returns_503_on_enqueue_failure(
 ) -> None:
     """EspoCRM webhook should fail when enqueue persistence fails."""
     with patch(
-        "five08.worker.api._enqueue_espocrm_batch",
+        "five08.backend.api._enqueue_espocrm_batch",
         new=AsyncMock(side_effect=RuntimeError("boom")),
     ):
         response = client.post(
@@ -344,7 +344,7 @@ def test_espocrm_people_sync_webhook_handler_returns_503_on_enqueue_failure(
 ) -> None:
     """People sync webhook should fail when enqueue persistence fails."""
     with patch(
-        "five08.worker.api._enqueue_espocrm_people_sync_batch",
+        "five08.backend.api._enqueue_espocrm_people_sync_batch",
         new=AsyncMock(side_effect=RuntimeError("boom")),
     ):
         response = client.post(
@@ -363,7 +363,7 @@ def test_audit_event_handler_persists_human_event(
     auth_headers: dict[str, str],
 ) -> None:
     """Audit events endpoint should persist one validated event."""
-    with patch("five08.worker.api.insert_audit_event") as mock_insert:
+    with patch("five08.backend.api.insert_audit_event") as mock_insert:
         mock_insert.return_value = Mock(id="evt-1", person_id="person-1")
         response = client.post(
             "/audit/events",
@@ -406,12 +406,12 @@ def test_auth_discord_link_create_forbidden_for_non_admin(
     fake_verifier.is_admin_discord_user = AsyncMock(return_value=False)
 
     with (
-        patch("five08.worker.api._auth_store_from_app", return_value=fake_store),
+        patch("five08.backend.api._auth_store_from_app", return_value=fake_store),
         patch(
-            "five08.worker.api._discord_admin_verifier_from_app",
+            "five08.backend.api._discord_admin_verifier_from_app",
             return_value=fake_verifier,
         ),
-        patch("five08.worker.api._http_client_from_app", return_value=Mock()),
+        patch("five08.backend.api._http_client_from_app", return_value=Mock()),
     ):
         response = client.post(
             "/auth/discord/links",
@@ -436,12 +436,12 @@ def test_auth_discord_link_create_returns_url_for_admin(
     fake_verifier.is_admin_discord_user = AsyncMock(return_value=True)
 
     with (
-        patch("five08.worker.api._auth_store_from_app", return_value=fake_store),
+        patch("five08.backend.api._auth_store_from_app", return_value=fake_store),
         patch(
-            "five08.worker.api._discord_admin_verifier_from_app",
+            "five08.backend.api._discord_admin_verifier_from_app",
             return_value=fake_verifier,
         ),
-        patch("five08.worker.api._http_client_from_app", return_value=Mock()),
+        patch("five08.backend.api._http_client_from_app", return_value=Mock()),
     ):
         response = client.post(
             "/auth/discord/links",
@@ -481,10 +481,10 @@ def test_auth_callback_success_writes_login_audit(client: TestClient) -> None:
     )
 
     with (
-        patch("five08.worker.api._auth_store_from_app", return_value=store),
-        patch("five08.worker.api._oidc_client_from_app", return_value=oidc),
-        patch("five08.worker.api._http_client_from_app", return_value=Mock()),
-        patch("five08.worker.api.insert_audit_event") as mock_insert,
+        patch("five08.backend.api._auth_store_from_app", return_value=store),
+        patch("five08.backend.api._oidc_client_from_app", return_value=oidc),
+        patch("five08.backend.api._http_client_from_app", return_value=Mock()),
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
     ):
         response = client.get(
             "/auth/callback?code=code-1&state=state-1",
@@ -531,10 +531,10 @@ def test_auth_callback_denied_writes_login_audit(client: TestClient) -> None:
     )
 
     with (
-        patch("five08.worker.api._auth_store_from_app", return_value=store),
-        patch("five08.worker.api._oidc_client_from_app", return_value=oidc),
-        patch("five08.worker.api._http_client_from_app", return_value=Mock()),
-        patch("five08.worker.api.insert_audit_event") as mock_insert,
+        patch("five08.backend.api._auth_store_from_app", return_value=store),
+        patch("five08.backend.api._oidc_client_from_app", return_value=oidc),
+        patch("five08.backend.api._http_client_from_app", return_value=Mock()),
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
     ):
         response = client.get(
             "/auth/callback?code=code-1&state=state-1",
@@ -564,10 +564,10 @@ def test_auth_logout_writes_logout_audit(client: TestClient) -> None:
 
     with (
         patch(
-            "five08.worker.api._current_session", return_value=("session-1", session)
+            "five08.backend.api._current_session", return_value=("session-1", session)
         ),
-        patch("five08.worker.api._auth_store_from_app", return_value=store),
-        patch("five08.worker.api.insert_audit_event") as mock_insert,
+        patch("five08.backend.api._auth_store_from_app", return_value=store),
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
     ):
         response = client.post("/auth/logout")
 

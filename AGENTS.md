@@ -35,7 +35,7 @@ This repo contains multiple services:
 - Bot core: `apps/discord_bot/src/five08/discord_bot/bot.py`
 - Bot config: `apps/discord_bot/src/five08/discord_bot/config.py`
 - Bot audit helper: `apps/discord_bot/src/five08/discord_bot/utils/audit.py`
-- Worker API: `apps/worker/src/five08/worker/api.py`
+- Backend API: `apps/worker/src/five08/backend/api.py`
 - Worker consumer: `apps/worker/src/five08/worker/consumer.py`
 - Shared settings: `packages/shared/src/five08/settings.py`
 - Shared queue helpers: `packages/shared/src/five08/queue.py`
@@ -54,7 +54,7 @@ Run services directly:
 
 ```bash
 uv run --package discord-bot-app discord-bot
-uv run --package integrations-worker worker-api
+uv run --package integrations-worker backend-api
 uv run --package integrations-worker worker-consumer
 ```
 
@@ -82,7 +82,7 @@ async def setup(bot: commands.Bot) -> None:
 - Keep ingest endpoints fast: validate input, persist jobs, enqueue, return 202.
 - Run long processing in worker consumer jobs (Dramatiq actors), with Postgres as source-of-truth job state and Redis as delivery transport.
 - Internal file movement is routed through MinIO (`internal-transfers`) inside the stack; this is explicitly the internal transfer path, with external object store adapters kept separate for future needs.
-- Worker schema is managed with Alembic migrations in `apps/worker/src/five08/worker/migrations` and applied at worker-api startup.
+- Worker schema is managed with Alembic migrations in `apps/worker/src/five08/worker/migrations` and applied at backend-api startup.
 
 ## Data Model Note
 

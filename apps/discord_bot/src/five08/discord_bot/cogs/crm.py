@@ -440,7 +440,7 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             ephemeral=True,
         )
         try:
-            apply_result = await self.crm_cog._wait_for_worker_job_result(apply_job_id)
+            apply_result = await self.crm_cog._wait_for_backend_job_result(apply_job_id)
         except Exception as exc:
             logger.error(
                 "Worker polling failed for apply_job_id=%s contact_id=%s error=%s",
@@ -747,17 +747,17 @@ class CRMCog(commands.Cog):
             resource_id=resource_id,
         )
 
-    def _worker_headers(self) -> dict[str, str]:
-        """Build auth headers for internal worker API calls."""
+    def _backend_headers(self) -> dict[str, str]:
+        """Build auth headers for internal backend API calls."""
         if not settings.api_shared_secret:
-            raise ValueError("API_SHARED_SECRET is required for worker API requests.")
+            raise ValueError("API_SHARED_SECRET is required for backend API requests.")
         return {
             "X-API-Secret": settings.api_shared_secret,
             "Content-Type": "application/json",
         }
 
-    def _worker_url(self, path: str) -> str:
-        return f"{settings.worker_api_base_url.rstrip('/')}{path}"
+    def _backend_url(self, path: str) -> str:
+        return f"{settings.backend_api_base_url.rstrip('/')}{path}"
 
     async def _enqueue_resume_extract_job(
         self, *, contact_id: str, attachment_id: str, filename: str
@@ -769,17 +769,17 @@ class CRMCog(commands.Cog):
         }
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                self._worker_url("/jobs/resume-extract"),
-                headers=self._worker_headers(),
+                self._backend_url("/jobs/resume-extract"),
+                headers=self._backend_headers(),
                 json=payload,
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as response:
                 data = await response.json()
                 if response.status != 202:
-                    raise ValueError(f"Worker extract enqueue failed: {data}")
+                    raise ValueError(f"Backend extract enqueue failed: {data}")
                 job_id = data.get("job_id")
                 if not isinstance(job_id, str) or not job_id:
-                    raise ValueError("Missing worker extract job_id in response.")
+                    raise ValueError("Missing backend extract job_id in response.")
                 return job_id
 
     async def _enqueue_resume_apply_job(
@@ -796,42 +796,42 @@ class CRMCog(commands.Cog):
         }
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                self._worker_url("/jobs/resume-apply"),
-                headers=self._worker_headers(),
+                self._backend_url("/jobs/resume-apply"),
+                headers=self._backend_headers(),
                 json=payload,
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as response:
                 data = await response.json()
                 if response.status != 202:
-                    raise ValueError(f"Worker apply enqueue failed: {data}")
+                    raise ValueError(f"Backend apply enqueue failed: {data}")
                 job_id = data.get("job_id")
                 if not isinstance(job_id, str) or not job_id:
-                    raise ValueError("Missing worker apply job_id in response.")
+                    raise ValueError("Missing backend apply job_id in response.")
                 return job_id
 
-    async def _get_worker_job_status(self, job_id: str) -> dict[str, Any]:
+    async def _get_backend_job_status(self, job_id: str) -> dict[str, Any]:
         async with aiohttp.ClientSession() as session:
             async with session.get(
-                self._worker_url(f"/jobs/{job_id}"),
-                headers=self._worker_headers(),
+                self._backend_url(f"/jobs/{job_id}"),
+                headers=self._backend_headers(),
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as response:
                 data = await response.json()
                 if response.status != 200:
-                    raise ValueError(f"Worker job status failed: {data}")
+                    raise ValueError(f"Backend job status failed: {data}")
                 if not isinstance(data, dict):
-                    raise ValueError("Worker job status response must be an object.")
+                    raise ValueError("Backend job status response must be an object.")
                 return data
 
-    async def _wait_for_worker_job_result(
+    async def _wait_for_backend_job_result(
         self, job_id: str, *, timeout_seconds: int = 180, poll_seconds: float = 2.0
     ) -> dict[str, Any] | None:
-        """Poll worker job status until terminal or timeout."""
+        """Poll backend job status until terminal or timeout."""
         terminal = {"succeeded", "dead", "canceled"}
         max_attempts = max(1, int(timeout_seconds / poll_seconds))
 
         for _ in range(max_attempts):
-            job = await self._get_worker_job_status(job_id)
+            job = await self._get_backend_job_status(job_id)
             status = str(job.get("status", ""))
             if status in terminal:
                 return job
@@ -847,7 +847,7 @@ class CRMCog(commands.Cog):
         result: dict[str, Any],
         link_member: discord.Member | None,
     ) -> tuple[discord.Embed, dict[str, str]]:
-        """Render worker extraction result as a Discord preview embed."""
+        """Render backend extraction result as a Discord preview embed."""
         proposed_updates_raw = result.get("proposed_updates")
         proposed_updates: dict[str, str] = {}
         if isinstance(proposed_updates_raw, dict):
@@ -978,7 +978,7 @@ class CRMCog(commands.Cog):
         )
 
         try:
-            job = await self._wait_for_worker_job_result(job_id)
+            job = await self._wait_for_backend_job_result(job_id)
         except Exception as exc:
             logger.error("Worker polling failed for job_id=%s error=%s", job_id, exc)
             self._audit_command(
@@ -2669,7 +2669,7 @@ class CRMCog(commands.Cog):
         overwrite: bool = False,
         link_user: discord.Member | None = None,
     ) -> None:
-        """Upload resume and run worker extraction to preview CRM updates."""
+        """Upload resume and run backend extraction to preview CRM updates."""
         try:
             await interaction.response.defer(ephemeral=True)
 
@@ -2684,7 +2684,7 @@ class CRMCog(commands.Cog):
                     },
                 )
                 await interaction.followup.send(
-                    "❌ API_SHARED_SECRET is not configured for worker API access."
+                    "❌ API_SHARED_SECRET is not configured for backend API access."
                 )
                 return
 

@@ -37,7 +37,7 @@ from five08.queue import (
     get_redis_connection,
     is_postgres_healthy,
 )
-from five08.worker.auth import (
+from five08.backend.auth import (
     AuthSession,
     DiscordAdminVerifier,
     DiscordLinkGrant,
@@ -1207,7 +1207,7 @@ async def _lifespan(app: FastAPI) -> Any:
 def create_app(*, run_lifespan: bool = True) -> FastAPI:
     """Create configured FastAPI app."""
     app = FastAPI(
-        title="508 Worker API",
+        title="508 Backend API",
         version="0.1.0",
         lifespan=_lifespan if run_lifespan else None,
     )
@@ -1262,7 +1262,7 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
 
 
 def run() -> None:
-    """Entrypoint for worker API service."""
+    """Entrypoint for backend API service."""
     configure_logging(settings.log_level)
     uvicorn.run(
         create_app(),

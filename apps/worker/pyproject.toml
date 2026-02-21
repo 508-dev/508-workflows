@@ -26,7 +26,7 @@ dependencies = [
 five08 = { workspace = true }
 
 [project.scripts]
-worker-api = "five08.worker.api:run"
+backend-api = "five08.backend.api:run"
 worker-consumer = "five08.worker.consumer:run"
 
 [tool.alembic]

@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class DiscordAuditLogger:
-    """Write human audit events to the worker API without breaking commands."""
+    """Write human audit events to the backend API without breaking commands."""
 
     def __init__(
         self,
