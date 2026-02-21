@@ -287,7 +287,12 @@ def mark_job_retry(
     run_after: datetime,
     last_error: str,
 ) -> None:
-    """Keep record of a failed retryable attempt."""
+    """Record a retryable failure using `_mark_job` with `JobStatus.FAILED`.
+
+    This marks a non-terminal failure state while attempts are still below the
+    max-attempts threshold. Callers should use this for retry scheduling paths;
+    terminal failures should use `mark_job_dead`, which writes `JobStatus.DEAD`.
+    """
     _mark_job(
         settings,
         job_id,

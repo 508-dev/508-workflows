@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from five08.worker.crm.people_sync import PeopleSyncProcessor
 from five08.worker.crm.processor import ContactSkillsProcessor
 
 logger = logging.getLogger(__name__)
@@ -28,3 +29,19 @@ def process_webhook_event(source: str, payload: dict[str, Any]) -> dict[str, Any
         "received_at": received_at,
         "payload_keys": sorted(payload.keys()),
     }
+
+
+def sync_people_from_crm_job() -> dict[str, Any]:
+    """Sync a full contacts page-set from CRM into the local people cache."""
+    logger.info("Processing CRM people full-sync job")
+    processor = PeopleSyncProcessor()
+    result = processor.sync_all_contacts()
+    return result
+
+
+def sync_person_from_crm_job(contact_id: str) -> dict[str, Any]:
+    """Sync one CRM contact into the local people cache."""
+    logger.info("Processing CRM people sync job contact_id=%s", contact_id)
+    processor = PeopleSyncProcessor()
+    result = processor.sync_contact(contact_id)
+    return result

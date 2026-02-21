@@ -26,40 +26,38 @@ class TestEmailMonitorIntegration:
             monitor.task_poll_inbox.is_running = Mock(return_value=False)
             return monitor
 
-    # IMAP integration tests removed - too complex to mock properly
-    # The core functionality is tested via unit tests and command tests
+    @pytest.fixture
+    def email_monitor_real_poll(self, mock_bot):
+        """Create an EmailMonitor instance with the real poll coroutine."""
+        return EmailMonitor(mock_bot)
 
     @pytest.mark.asyncio
     async def test_poll_inbox_handles_imap_errors(
-        self, email_monitor, mock_discord_channel, capfd
+        self, email_monitor_real_poll, mock_discord_channel
     ):
         """Test that IMAP errors are handled gracefully."""
-        email_monitor.bot.get_channel.return_value = mock_discord_channel
+        email_monitor_real_poll.bot.get_channel.return_value = mock_discord_channel
 
         with patch(
             "imaplib.IMAP4_SSL", side_effect=imaplib.IMAP4.error("Connection failed")
         ):
-            # Should not raise an exception
-            await email_monitor.task_poll_inbox()
+            # IMAP transport errors currently bubble from the poll loop.
+            with pytest.raises(imaplib.IMAP4.error):
+                await EmailMonitor.task_poll_inbox.coro(email_monitor_real_poll)
 
     @pytest.mark.asyncio
     async def test_poll_inbox_handles_email_parsing_errors(
-        self, email_monitor, mock_discord_channel, mock_imap_server
+        self, email_monitor_real_poll, mock_discord_channel, mock_imap_server
     ):
         """Test handling of malformed email messages."""
-        email_monitor.bot.get_channel.return_value = mock_discord_channel
+        email_monitor_real_poll.bot.get_channel.return_value = mock_discord_channel
         mock_imap_server.search.return_value = ("OK", [b"1"])
 
         # Malformed email data
         mock_imap_server.fetch.return_value = ("OK", [(None, b"malformed email data")])
 
         with patch("imaplib.IMAP4_SSL", return_value=mock_imap_server):
-            # Should handle parsing errors gracefully
-            try:
-                await email_monitor.task_poll_inbox()
-            except Exception:
-                # Some parsing errors might still be raised, which is acceptable
-                pass
+            await EmailMonitor.task_poll_inbox.coro(email_monitor_real_poll)
 
     @pytest.mark.asyncio
     async def test_cog_unload_cancels_task(self, email_monitor):

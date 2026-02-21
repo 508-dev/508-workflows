@@ -34,6 +34,8 @@ class Settings(SharedSettings):
     # CRM/EspoCRM settings
     espo_api_key: str
     espo_base_url: str
+    audit_api_base_url: str | None = None
+    audit_api_timeout_seconds: float = 2.0
 
     # Kimai time tracking settings
     kimai_base_url: str

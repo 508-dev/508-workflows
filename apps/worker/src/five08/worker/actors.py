@@ -21,7 +21,12 @@ from five08.queue import (
 )
 from five08.queue import parse_queue_names
 from five08.worker.config import settings
-from five08.worker.jobs import process_contact_skills_job, process_webhook_event
+from five08.worker.jobs import (
+    process_contact_skills_job,
+    process_webhook_event,
+    sync_people_from_crm_job,
+    sync_person_from_crm_job,
+)
 
 from five08.logging import configure_logging
 
@@ -37,6 +42,8 @@ _QUEUE_NAME = _QUEUE_NAMES[0] if _QUEUE_NAMES else settings.redis_queue_name
 _HANDLERS: dict[str, Any] = {
     process_webhook_event.__name__: process_webhook_event,
     process_contact_skills_job.__name__: process_contact_skills_job,
+    sync_people_from_crm_job.__name__: sync_people_from_crm_job,
+    sync_person_from_crm_job.__name__: sync_person_from_crm_job,
 }
 
 

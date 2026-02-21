@@ -2,7 +2,7 @@
 
 from unittest.mock import Mock, patch
 
-from five08.queue import enqueue_job
+from five08.queue import JobStatus, _parse_status, enqueue_job
 from five08.settings import SharedSettings
 
 
@@ -19,3 +19,16 @@ def test_enqueue_job_persists_and_dispatches_to_queue_client() -> None:
     queue.enqueue.assert_called_once_with("job-1", run_at=None)
     assert result.id == "job-1"
     assert result.created is True
+
+
+def test_parse_status_handles_unknown_values() -> None:
+    """Unknown DB status should fallback to FAILED and emit a warning."""
+    assert _parse_status("queued") == JobStatus.QUEUED
+
+    with patch("five08.queue.logger.warning") as mock_warning:
+        result = _parse_status("unexpected-status")
+
+    assert result == JobStatus.FAILED
+    mock_warning.assert_called_once_with(
+        "Unknown job status from DB: %s", "unexpected-status"
+    )

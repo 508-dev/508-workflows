@@ -106,11 +106,11 @@ class ContactSkillsProcessor:
                 source="document_analysis",
             )
 
-            existing_lower = {item.lower() for item in existing_skills}
+            existing_lower = {item.casefold() for item in existing_skills}
             new_skills = [
                 skill
                 for skill in extracted.skills
-                if skill.lower() not in existing_lower
+                if skill.casefold() not in existing_lower
             ]
             updated_skills = existing_skills + new_skills
 
