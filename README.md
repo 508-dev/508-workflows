@@ -152,6 +152,7 @@ Use `.env.example` as the source of truth for defaults.
 - `Optional`: `CRM_SYNC_ENABLED` (default: `true`)
 - `Optional`: `CRM_SYNC_INTERVAL_SECONDS` (default: `900`)
 - `Optional`: `CRM_SYNC_PAGE_SIZE` (default: `200`)
+- `Optional`: `CHECK_EMAIL_WAIT` (default: `2`; minutes between mailbox polls)
 - `Optional`: `CRM_LINKEDIN_FIELD` (default: `cLinkedInUrl`)
 - `Optional`: `MAX_ATTACHMENTS_PER_CONTACT` (default: `3`)
 - `Optional`: `MAX_FILE_SIZE_MB` (default: `10`)
@@ -162,6 +163,11 @@ Use `.env.example` as the source of truth for defaults.
 - `Optional`: `RESUME_AI_MODEL` (default: `gpt-4o-mini`; use plain names like `gpt-4o-mini`, OpenRouter gets auto-prefixed to `openai/<model>`)
 - `Optional`: `OPENAI_MODEL` (default: `gpt-4o-mini`; fallback/legacy model setting)
 - `Optional`: `RESUME_EXTRACTOR_VERSION` (default: `v1`; used in resume processing idempotency/ledger keys)
+- `Optional`: `EMAIL_RESUME_INTAKE_ENABLED` (default: `false`; enables worker-side mailbox resume processing loop)
+- `Optional`: `EMAIL_RESUME_ALLOWED_EXTENSIONS` (default: `pdf,doc,docx`)
+- `Optional`: `EMAIL_RESUME_MAX_FILE_SIZE_MB` (default: `10`)
+- `Optional`: `EMAIL_REQUIRE_SENDER_AUTH_HEADERS` (default: `true`; requires SPF/DKIM/DMARC pass headers)
+- `Required when EMAIL_RESUME_INTAKE_ENABLED=true`: `EMAIL_USERNAME`, `EMAIL_PASSWORD`, `IMAP_SERVER`
 
 ### Discord Bot Core
 
@@ -170,18 +176,6 @@ Use `.env.example` as the source of truth for defaults.
 - `Optional`: `WORKER_API_BASE_URL` (default: `http://worker-api:8090`)
 - `Optional`: `HEALTHCHECK_PORT` (default: `3000`)
 - `Optional`: `DISCORD_SENDMSG_CHARACTER_LIMIT` (default: `2000`)
-- `Optional`: `CHECK_EMAIL_WAIT` (default: `2`)
-
-### Discord Email Monitoring
-
-- `Required`: `EMAIL_USERNAME`
-- `Required`: `EMAIL_PASSWORD`
-- `Required`: `IMAP_SERVER`
-- `Required`: `SMTP_SERVER`
-- `Optional`: `EMAIL_RESUME_INTAKE_ENABLED` (default: `true`; enables mailbox resume processing loop)
-- `Optional`: `EMAIL_RESUME_ALLOWED_EXTENSIONS` (default: `pdf,doc,docx`)
-- `Optional`: `EMAIL_RESUME_MAX_FILE_SIZE_MB` (default: `10`)
-- `Optional`: `EMAIL_REQUIRE_SENDER_AUTH_HEADERS` (default: `true`; requires SPF/DKIM/DMARC pass headers)
 
 ### Discord CRM Audit Logging (Best Effort)
 

@@ -1,8 +1,10 @@
-"""Mailbox-based resume intake helpers for automated CRM updates."""
+"""Worker-side IMAP resume ingestion pipeline."""
 
 from __future__ import annotations
 
-import asyncio
+import contextlib
+import email
+import imaplib
 import logging
 from dataclasses import dataclass
 from email.message import Message
@@ -10,22 +12,26 @@ from email.utils import parseaddr
 from typing import Any
 from uuid import uuid4
 
-import aiohttp
-
+from five08.audit import (
+    ActorProvider,
+    AuditEventInput,
+    AuditResult,
+    AuditSource,
+    insert_audit_event,
+)
 from five08.clients.espo import EspoAPI, EspoAPIError
-from five08.discord_bot.config import Settings
-from five08.discord_bot.utils.audit import DiscordAuditLogger
 from five08.queue import get_postgres_connection
+from five08.worker.config import WorkerSettings
+from five08.worker.crm.resume_profile_processor import ResumeProfileProcessor
 
 logger = logging.getLogger(__name__)
-
 
 PRIVILEGED_ROLE_NAMES = {"admin", "steering committee", "owner"}
 
 
 @dataclass(frozen=True)
 class ResumeAttachment:
-    """One resume-like email attachment."""
+    """One resume-like email attachment payload."""
 
     filename: str
     content: bytes
@@ -33,7 +39,7 @@ class ResumeAttachment:
 
 @dataclass(frozen=True)
 class ResumeMailboxResult:
-    """Result metadata for one processed mailbox message."""
+    """Result metadata for one mailbox message."""
 
     sender_email: str | None
     sender_name: str | None
@@ -42,20 +48,89 @@ class ResumeMailboxResult:
 
 
 class ResumeMailboxProcessor:
-    """Process inbound mailbox messages into CRM resume extraction/apply flow."""
+    """Poll mailbox and apply resume extraction updates to candidate contacts."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: WorkerSettings) -> None:
         self.settings = settings
         api_url = settings.espo_base_url.rstrip("/") + "/api/v1"
         self.espo_api = EspoAPI(api_url, settings.espo_api_key)
-        self.audit_logger = DiscordAuditLogger(
-            base_url=settings.audit_api_base_url,
-            shared_secret=settings.api_shared_secret,
-            timeout_seconds=settings.audit_api_timeout_seconds,
+        self.resume_processor = ResumeProfileProcessor()
+
+    def poll_inbox(self) -> int:
+        """Process one IMAP poll cycle and return successfully processed attachment count."""
+        email_username = (self.settings.email_username or "").strip()
+        email_password = (self.settings.email_password or "").strip()
+        imap_server = (self.settings.imap_server or "").strip()
+
+        if not email_username or not email_password or not imap_server:
+            logger.warning(
+                "Skipping mailbox poll because mailbox settings are incomplete"
+            )
+            return 0
+
+        processed_total = 0
+        mail = imaplib.IMAP4_SSL(imap_server)
+        try:
+            mail.login(email_username, email_password)
+            mail.select("INBOX")
+            retcode, message_batches = mail.search(None, "(UNSEEN)")
+            if retcode != "OK" or not message_batches or not message_batches[0]:
+                logger.debug("Mailbox poll complete, no unseen messages")
+                return 0
+
+            for raw_num in message_batches[0].split():
+                num = raw_num.decode()
+                typ, data = mail.fetch(num, "(RFC822)")
+                if typ != "OK":
+                    logger.warning(
+                        "Skipping mailbox message %s due to fetch status=%s", num, typ
+                    )
+                    continue
+
+                try:
+                    result = self._process_fetched_message(data)
+                except Exception as exc:
+                    logger.exception(
+                        "Failed processing mailbox message num=%s error=%s", num, exc
+                    )
+                    result = ResumeMailboxResult(
+                        sender_email=None,
+                        sender_name=None,
+                        processed_attachments=0,
+                        skipped_reason="message_processing_error",
+                    )
+
+                processed_total += result.processed_attachments
+                mail.store(num, "+FLAGS", "\\Seen")
+
+            return processed_total
+        finally:
+            with contextlib.suppress(Exception):
+                mail.close()
+            with contextlib.suppress(Exception):
+                mail.logout()
+
+    def _process_fetched_message(self, data: list[Any]) -> ResumeMailboxResult:
+        for response_part in data:
+            if not isinstance(response_part, tuple):
+                continue
+
+            raw_payload = response_part[1]
+            if not isinstance(raw_payload, (bytes, bytearray)):
+                continue
+
+            message = email.message_from_bytes(bytes(raw_payload))
+            return self.process_message(message)
+
+        return ResumeMailboxResult(
+            sender_email=None,
+            sender_name=None,
+            processed_attachments=0,
+            skipped_reason="message_payload_missing",
         )
 
-    async def process_message(self, message: Message) -> ResumeMailboxResult:
-        """Process one email message and trigger resume extraction/apply jobs."""
+    def process_message(self, message: Message) -> ResumeMailboxResult:
+        """Process one email message and apply candidate CRM updates."""
         sender_name, sender_email = self._sender_identity(message)
         correlation_id = self._mailbox_correlation_id(message)
 
@@ -92,11 +167,7 @@ class ResumeMailboxProcessor:
                 )
             )
 
-        sender_is_authorized = await asyncio.to_thread(
-            self._sender_is_authorized,
-            sender_email,
-        )
-        if not sender_is_authorized:
+        if not self._sender_is_authorized(sender_email):
             return finalize(
                 ResumeMailboxResult(
                     sender_email=sender_email,
@@ -117,7 +188,7 @@ class ResumeMailboxProcessor:
                 )
             )
 
-        staging_contact = await asyncio.to_thread(self._find_or_create_staging_contact)
+        staging_contact = self._find_or_create_staging_contact()
         staging_contact_id = str(staging_contact.get("id", "")).strip()
         if not staging_contact_id:
             return finalize(
@@ -133,7 +204,7 @@ class ResumeMailboxProcessor:
         for attachment in attachments:
             if len(attachment.content) > self._max_attachment_size_bytes:
                 logger.warning(
-                    "Skipping oversized resume attachment filename=%s size_bytes=%s sender=%s",
+                    "Skipping oversized resume attachment filename=%s size=%s sender=%s",
                     attachment.filename,
                     len(attachment.content),
                     sender_email,
@@ -141,7 +212,7 @@ class ResumeMailboxProcessor:
                 continue
 
             try:
-                ok = await self._process_attachment(
+                ok = self._process_attachment(
                     staging_contact_id=staging_contact_id,
                     attachment=attachment,
                 )
@@ -188,7 +259,7 @@ class ResumeMailboxProcessor:
         return sender_name, sender_email
 
     def _has_authenticated_sender(self, message: Message) -> bool:
-        """Require pass results from SPF/DKIM/DMARC headers to reduce spoof risk."""
+        """Require pass SPF/DKIM/DMARC headers to reduce spoofed sender risk."""
         auth_results = str(message.get("Authentication-Results", "")).lower()
         received_spf = str(message.get("Received-SPF", "")).lower()
 
@@ -201,8 +272,7 @@ class ResumeMailboxProcessor:
         in_people_db = self._sender_has_privileged_role_in_people_db(sender_email)
         if not in_people_db:
             return False
-        in_crm = self._sender_has_privileged_role_in_crm(sender_email)
-        return in_crm
+        return self._sender_has_privileged_role_in_crm(sender_email)
 
     def _sender_has_privileged_role_in_people_db(self, sender_email: str) -> bool:
         query = """
@@ -245,7 +315,7 @@ class ResumeMailboxProcessor:
 
         return {value.casefold() for value in parsed if value}
 
-    def _find_contact_by_email(self, sender_email: str) -> dict[str, Any] | None:
+    def _find_contact_by_email(self, email_address: str) -> dict[str, Any] | None:
         search_params = {
             "where": [
                 {
@@ -254,12 +324,12 @@ class ResumeMailboxProcessor:
                         {
                             "type": "equals",
                             "attribute": "emailAddress",
-                            "value": sender_email,
+                            "value": email_address,
                         },
                         {
                             "type": "equals",
                             "attribute": "c508Email",
-                            "value": sender_email,
+                            "value": email_address,
                         },
                     ],
                 }
@@ -273,7 +343,7 @@ class ResumeMailboxProcessor:
         except EspoAPIError as exc:
             logger.warning(
                 "CRM contact lookup by email failed email=%s error=%s",
-                sender_email,
+                email_address,
                 exc,
             )
             return None
@@ -290,7 +360,6 @@ class ResumeMailboxProcessor:
         email_address: str,
         display_name: str | None,
     ) -> dict[str, Any]:
-        """Create a fallback contact when no existing CRM record can be resolved."""
         local_part = email_address.split("@", 1)[0]
         fallback_name = local_part.replace(".", " ").replace("_", " ").strip().title()
         payload: dict[str, Any] = {
@@ -304,7 +373,6 @@ class ResumeMailboxProcessor:
         return self.espo_api.request("POST", "Contact", payload)
 
     def _find_or_create_staging_contact(self) -> dict[str, Any]:
-        """Resolve a stable non-sender contact used only for initial extraction."""
         staging_email = self._normalize_email(self.settings.email_username)
         if not staging_email:
             raise ValueError("EMAIL_USERNAME is required for staging contact lookup")
@@ -313,10 +381,7 @@ class ResumeMailboxProcessor:
         if existing is not None:
             return existing
 
-        return self._create_contact_for_email(
-            staging_email,
-            "Resume Intake Staging",
-        )
+        return self._create_contact_for_email(staging_email, "Resume Intake Staging")
 
     def _extract_resume_attachments(self, message: Message) -> list[ResumeAttachment]:
         attachments: list[ResumeAttachment] = []
@@ -341,134 +406,81 @@ class ResumeMailboxProcessor:
 
         return attachments
 
-    async def _process_attachment(
+    def _process_attachment(
         self,
         *,
         staging_contact_id: str,
         attachment: ResumeAttachment,
     ) -> bool:
-        staging_attachment_id = await asyncio.to_thread(
-            self._upload_contact_resume,
-            staging_contact_id,
-            attachment,
+        staging_attachment_id = self._upload_contact_resume(
+            staging_contact_id, attachment
         )
         if not staging_attachment_id:
             return False
 
-        staging_extract_job_id = await self._enqueue_resume_extract_job(
+        staging_extract = self.resume_processor.extract_profile_proposal(
             contact_id=staging_contact_id,
             attachment_id=staging_attachment_id,
             filename=attachment.filename,
         )
-        staging_extract_job = await self._wait_for_worker_job_result(
-            staging_extract_job_id
-        )
-        if staging_extract_job is None:
-            return False
-
-        staging_status = str(staging_extract_job.get("status", ""))
-        if staging_status != "succeeded":
-            return False
-
-        staging_extract_result = staging_extract_job.get("result")
-        if not isinstance(staging_extract_result, dict):
-            return False
-
-        if not bool(staging_extract_result.get("success", False)):
+        if not staging_extract.success:
             return False
 
         candidate_email = self._candidate_email_from_extract_result(
-            staging_extract_result
+            {
+                "extracted_profile": staging_extract.extracted_profile.model_dump(),
+                "proposed_updates": staging_extract.proposed_updates,
+            }
         )
         if not candidate_email:
             logger.info(
-                "Skipping resume attachment filename=%s due to missing candidate email in extraction",
+                "Skipping resume attachment filename=%s due to missing candidate email",
                 attachment.filename,
             )
             return False
 
-        candidate_contact = await asyncio.to_thread(
-            self._find_contact_by_email,
-            candidate_email,
-        )
+        candidate_contact = self._find_contact_by_email(candidate_email)
         if candidate_contact is None:
-            candidate_contact = await asyncio.to_thread(
-                self._create_contact_for_email,
-                candidate_email,
-                None,
-            )
+            candidate_contact = self._create_contact_for_email(candidate_email, None)
 
         candidate_contact_id = str(candidate_contact.get("id", "")).strip()
         if not candidate_contact_id:
             return False
 
-        candidate_attachment_id = await asyncio.to_thread(
-            self._upload_contact_resume,
+        candidate_attachment_id = self._upload_contact_resume(
             candidate_contact_id,
             attachment,
         )
         if not candidate_attachment_id:
             return False
 
-        candidate_link_ok = await asyncio.to_thread(
-            self._append_contact_resume,
-            candidate_contact_id,
-            candidate_attachment_id,
-        )
-        if not candidate_link_ok:
+        if not self._append_contact_resume(
+            candidate_contact_id, candidate_attachment_id
+        ):
             return False
 
-        candidate_extract_job_id = await self._enqueue_resume_extract_job(
+        candidate_extract = self.resume_processor.extract_profile_proposal(
             contact_id=candidate_contact_id,
             attachment_id=candidate_attachment_id,
             filename=attachment.filename,
         )
-        candidate_extract_job = await self._wait_for_worker_job_result(
-            candidate_extract_job_id
-        )
-        if candidate_extract_job is None:
+        if not candidate_extract.success:
             return False
-
-        candidate_status = str(candidate_extract_job.get("status", ""))
-        if candidate_status != "succeeded":
-            return False
-
-        candidate_extract_result = candidate_extract_job.get("result")
-        if not isinstance(candidate_extract_result, dict):
-            return False
-
-        if not bool(candidate_extract_result.get("success", False)):
-            return False
-
-        proposed_updates_raw = candidate_extract_result.get("proposed_updates")
-        if not isinstance(proposed_updates_raw, dict) or not proposed_updates_raw:
-            return True
 
         proposed_updates = {
             str(field): str(value)
-            for field, value in proposed_updates_raw.items()
+            for field, value in candidate_extract.proposed_updates.items()
             if value is not None and str(value).strip()
         }
         if not proposed_updates:
             return True
 
-        apply_job_id = await self._enqueue_resume_apply_job(
+        apply_result = self.resume_processor.apply_profile_updates(
             contact_id=candidate_contact_id,
             updates=proposed_updates,
+            link_discord=None,
         )
-        apply_job = await self._wait_for_worker_job_result(apply_job_id)
-        if apply_job is None:
-            return False
-
-        apply_status = str(apply_job.get("status", ""))
-        if apply_status != "succeeded":
-            return False
-
-        apply_result = apply_job.get("result")
-        if not isinstance(apply_result, dict):
-            return False
-
-        return bool(apply_result.get("success", False))
+        return bool(apply_result.success)
 
     def _candidate_email_from_extract_result(
         self, extract_result: dict[str, Any]
@@ -543,93 +555,6 @@ class ResumeMailboxProcessor:
             )
             return False
 
-    async def _enqueue_resume_extract_job(
-        self,
-        *,
-        contact_id: str,
-        attachment_id: str,
-        filename: str,
-    ) -> str:
-        payload = {
-            "contact_id": contact_id,
-            "attachment_id": attachment_id,
-            "filename": filename,
-        }
-        return await self._enqueue_worker_job("/jobs/resume-extract", payload)
-
-    async def _enqueue_resume_apply_job(
-        self,
-        *,
-        contact_id: str,
-        updates: dict[str, str],
-    ) -> str:
-        payload = {
-            "contact_id": contact_id,
-            "updates": updates,
-            "link_discord": None,
-        }
-        return await self._enqueue_worker_job("/jobs/resume-apply", payload)
-
-    async def _enqueue_worker_job(self, path: str, payload: dict[str, Any]) -> str:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                self._worker_url(path),
-                headers=self._worker_headers(),
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                data = await response.json()
-                if response.status != 202:
-                    raise ValueError(f"Worker enqueue failed path={path}: {data}")
-                job_id = data.get("job_id")
-                if not isinstance(job_id, str) or not job_id.strip():
-                    raise ValueError("Missing worker job_id in response")
-                return job_id
-
-    def _worker_headers(self) -> dict[str, str]:
-        if not self.settings.api_shared_secret:
-            raise ValueError("API_SHARED_SECRET is required for worker API requests")
-        return {
-            "X-API-Secret": self.settings.api_shared_secret,
-            "Content-Type": "application/json",
-        }
-
-    def _worker_url(self, path: str) -> str:
-        return f"{self.settings.worker_api_base_url.rstrip('/')}{path}"
-
-    async def _wait_for_worker_job_result(
-        self,
-        job_id: str,
-        *,
-        timeout_seconds: int = 180,
-        poll_seconds: float = 2.0,
-    ) -> dict[str, Any] | None:
-        terminal = {"succeeded", "dead", "canceled"}
-        max_attempts = max(1, int(timeout_seconds / poll_seconds))
-
-        for _ in range(max_attempts):
-            job = await self._get_worker_job_status(job_id)
-            status = str(job.get("status", ""))
-            if status in terminal:
-                return job
-            await asyncio.sleep(poll_seconds)
-
-        return None
-
-    async def _get_worker_job_status(self, job_id: str) -> dict[str, Any]:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                self._worker_url(f"/jobs/{job_id}"),
-                headers=self._worker_headers(),
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                data = await response.json()
-                if response.status != 200:
-                    raise ValueError(f"Worker job status failed: {data}")
-                if not isinstance(data, dict):
-                    raise ValueError("Worker job status response must be an object")
-                return data
-
     def _file_extension(self, filename: str) -> str:
         if "." not in filename:
             return ""
@@ -659,14 +584,14 @@ class ResumeMailboxProcessor:
         if not sender_email:
             return
 
-        audit_result = "error"
+        audit_result = AuditResult.ERROR
         if result.skipped_reason in {
             "sender_not_authorized",
             "sender_authentication_failed",
         }:
-            audit_result = "denied"
+            audit_result = AuditResult.DENIED
         elif result.skipped_reason in {None, "no_resume_attachments"}:
-            audit_result = "success"
+            audit_result = AuditResult.SUCCESS
 
         metadata = {
             "subject": str(message.get("Subject", "")).strip() or None,
@@ -675,13 +600,26 @@ class ResumeMailboxProcessor:
             "skipped_reason": result.skipped_reason,
         }
 
-        self.audit_logger.log_admin_sso_action(
-            action="crm.resume_mailbox_ingest",
-            result=audit_result,
-            actor_email=sender_email,
-            actor_display_name=sender_name,
-            metadata=metadata,
-            resource_type="mailbox_message",
-            resource_id=correlation_id,
-            correlation_id=correlation_id,
-        )
+        try:
+            insert_audit_event(
+                self.settings,
+                AuditEventInput(
+                    source=AuditSource.ADMIN_DASHBOARD,
+                    action="crm.resume_mailbox_ingest",
+                    result=audit_result,
+                    actor_provider=ActorProvider.ADMIN_SSO,
+                    actor_subject=sender_email,
+                    actor_display_name=sender_name,
+                    resource_type="mailbox_message",
+                    resource_id=correlation_id,
+                    correlation_id=correlation_id,
+                    metadata=metadata,
+                ),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed writing mailbox audit event correlation_id=%s sender=%s error=%s",
+                correlation_id,
+                sender_email,
+                exc,
+            )
