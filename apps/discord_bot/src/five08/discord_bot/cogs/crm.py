@@ -7,6 +7,7 @@ It allows team members to quickly access CRM data without leaving Discord.
 
 import asyncio
 import io
+import json
 import logging
 import re
 from typing import Any
@@ -1174,6 +1175,79 @@ class CRMCog(commands.Cog):
             return False
         return check_user_roles_with_hierarchy(interaction.user.roles, ["Member"])
 
+    def _parse_contact_skill_attrs(self, value: Any) -> dict[str, int]:
+        """Parse skill attributes from a contact record into normalized strengths."""
+        if value is None:
+            return {}
+
+        candidate = value
+        if isinstance(candidate, str):
+            raw_value = candidate.strip()
+            if not raw_value:
+                return {}
+            try:
+                candidate = json.loads(raw_value)
+            except (TypeError, ValueError) as exc:
+                logger.warning("Failed to parse cSkillAttrs JSON payload: %s", exc)
+                return {}
+
+        if not isinstance(candidate, dict):
+            return {}
+
+        parsed: dict[str, int] = {}
+        for raw_skill, payload in candidate.items():
+            normalized_skill = self._normalize_skill(str(raw_skill))
+            if not normalized_skill:
+                continue
+
+            if not isinstance(payload, dict):
+                continue
+
+            raw_strength = payload.get("strength")
+            if raw_strength is None:
+                continue
+            try:
+                strength = int(float(raw_strength))
+            except (TypeError, ValueError):
+                continue
+
+            if not 1 <= strength <= 5:
+                continue
+
+            parsed[normalized_skill.casefold()] = strength
+
+        return parsed
+
+    def _normalize_skill(self, value: str) -> str:
+        """Normalize one skill name from source data."""
+        normalized = normalize_skill_list([value])
+        return normalized[0] if normalized else ""
+
+    def _format_requested_skills(
+        self, requested_skills: list[str], contact: dict[str, Any]
+    ) -> str:
+        """Format requested skills with strength values from contact attributes."""
+        if not requested_skills:
+            return ""
+
+        skill_attrs = self._parse_contact_skill_attrs(contact.get("cSkillAttrs"))
+        if not skill_attrs:
+            return ", ".join(requested_skills)
+
+        rendered: list[str] = []
+        for skill in requested_skills:
+            normalized_skill = self._normalize_skill(skill)
+            if not normalized_skill:
+                continue
+
+            strength = skill_attrs.get(normalized_skill.casefold())
+            if strength is None:
+                rendered.append(skill)
+            else:
+                rendered.append(f"{skill} ({strength})")
+
+        return ", ".join(rendered)
+
     @app_commands.command(
         name="search-members", description="Search for candidates / members in the CRM"
     )
@@ -1262,7 +1336,7 @@ class CRMCog(commands.Cog):
             search_params = {
                 "where": where_filters,
                 "maxSize": 10,
-                "select": "id,name,emailAddress,c508Email,cDiscordUsername,cDiscordUserID,phoneNumber,type,resumeIds,resumeNames,resumeTypes",
+                "select": "id,name,emailAddress,c508Email,cDiscordUsername,cDiscordUserID,phoneNumber,type,resumeIds,resumeNames,resumeTypes,skills,cSkillAttrs",
             }
 
             response = self.espo_api.request("GET", "Contact", search_params)
@@ -1335,6 +1409,11 @@ class CRMCog(commands.Cog):
                     contact_info += (
                         f"\n🏢 508 Email: {email_508}\n💬 Discord: {discord_display}"
                     )
+
+                if skills_list:
+                    contact_skills = self._format_requested_skills(skills_list, contact)
+                    if contact_skills:
+                        contact_info += f"\n🧠 Skills: {contact_skills}"
 
                 # Add clickable CRM link at the top of contact info
                 if contact_id:

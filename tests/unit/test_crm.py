@@ -195,11 +195,14 @@ class TestCRMCog:
         call_args = crm_cog.espo_api.request.call_args
         search_params = call_args[0][2]
         where_filters = search_params["where"]
+        select_fields = search_params["select"].split(",")
 
         assert len(where_filters) == 1
         assert where_filters[0]["type"] == "arrayAllOf"
         assert where_filters[0]["attribute"] == "skills"
         assert where_filters[0]["value"] == ["python", "sql"]
+        assert "skills" in select_fields
+        assert "cSkillAttrs" in select_fields
 
     @pytest.mark.asyncio
     async def test_search_contacts_query_and_skills(
@@ -222,6 +225,67 @@ class TestCRMCog:
         assert where_filters[1]["type"] == "arrayAllOf"
         assert where_filters[1]["attribute"] == "skills"
         assert where_filters[1]["value"] == ["python", "sql"]
+
+    @pytest.mark.asyncio
+    async def test_search_contacts_shows_skill_strengths(
+        self, crm_cog, mock_interaction, mock_member_role
+    ):
+        """Test contact search displays requested skills with strengths."""
+        mock_interaction.user.roles = [mock_member_role]
+        crm_cog.espo_api.request.return_value = {
+            "list": [
+                {
+                    "id": "contact123",
+                    "name": "John Doe",
+                    "emailAddress": "john@example.com",
+                    "type": "Member",
+                    "c508Email": "john@508.dev",
+                    "cDiscordUsername": "johndoe",
+                    "cSkillAttrs": {
+                        "python": {"strength": 5},
+                        "sql": {"strength": "4"},
+                        "aws": {"strength": "6"},
+                        "gcp": "1",
+                    },
+                }
+            ]
+        }
+
+        await crm_cog.search_members.callback(
+            crm_cog, mock_interaction, None, "python,sql,aws"
+        )
+
+        mock_interaction.followup.send.assert_called_once()
+        embed = mock_interaction.followup.send.call_args.kwargs["embed"]
+        field_value = embed.fields[0].value
+        assert "🧠 Skills: python (5), sql (4), amazon web services" in field_value
+
+    @pytest.mark.asyncio
+    async def test_search_contacts_ignores_broken_skill_attrs(
+        self, crm_cog, mock_interaction, mock_member_role
+    ):
+        """Test contact search ignores malformed cSkillAttrs payloads."""
+        mock_interaction.user.roles = [mock_member_role]
+        crm_cog.espo_api.request.return_value = {
+            "list": [
+                {
+                    "id": "contact123",
+                    "name": "John Doe",
+                    "emailAddress": "john@example.com",
+                    "type": "Member",
+                    "cSkillAttrs": "not-json",
+                }
+            ]
+        }
+
+        await crm_cog.search_members.callback(
+            crm_cog, mock_interaction, None, "python,sql"
+        )
+
+        mock_interaction.followup.send.assert_called_once()
+        embed = mock_interaction.followup.send.call_args.kwargs["embed"]
+        field_value = embed.fields[0].value
+        assert "🧠 Skills: python, sql" in field_value
 
     @pytest.mark.asyncio
     async def test_search_contacts_no_results(
