@@ -226,6 +226,107 @@ class TestCRMCog:
         assert where_filters[1]["attribute"] == "skills"
         assert where_filters[1]["value"] == ["python", "sql"]
 
+    def test_parse_contact_skill_attrs_recovers_python_literal(self, crm_cog):
+        """Malformed JSON-like skill attrs should recover via literal parsing."""
+        parsed = crm_cog._parse_contact_skill_attrs(
+            "{'python': {'strength': 4}, 'go': {'strength': 3},}"
+        )
+        assert parsed == {"python": 4, "go": 3}
+
+    @pytest.mark.asyncio
+    async def test_view_skills_self_uses_structured_attrs(
+        self, crm_cog, mock_interaction, mock_member_role
+    ):
+        """No search term should resolve self and display structured skill strengths."""
+        mock_interaction.user.roles = [mock_member_role]
+        mock_interaction.user.id = 123456789
+
+        crm_cog.espo_api.request.side_effect = [
+            {"list": [{"id": "contact123", "name": "John Doe"}]},
+            {
+                "id": "contact123",
+                "name": "John Doe",
+                "cSkillAttrs": '{"python":{"strength":4},"go":{"strength":5}}',
+                "skills": ["python", "go"],
+            },
+        ]
+
+        await crm_cog.view_skills.callback(crm_cog, mock_interaction, None)
+
+        assert crm_cog.espo_api.request.call_count == 2
+        mock_interaction.followup.send.assert_called_once()
+        call_args = mock_interaction.followup.send.call_args
+        embed = call_args[1]["embed"]
+        assert embed.title == "🛠️ CRM Skills"
+        assert "Skills for **John Doe**" in embed.description
+        assert "`go` (5/5)" in embed.fields[0].value
+        assert "`python` (4/5)" in embed.fields[0].value
+
+    @pytest.mark.asyncio
+    async def test_view_skills_falls_back_to_skills_when_attrs_unrecoverable(
+        self, crm_cog, mock_interaction, mock_member_role
+    ):
+        """If attrs cannot be recovered, command should display skills multi-enum."""
+        mock_interaction.user.roles = [mock_member_role]
+        mock_interaction.user.id = 123456789
+
+        crm_cog.espo_api.request.side_effect = [
+            {"list": [{"id": "contact123", "name": "John Doe"}]},
+            {
+                "id": "contact123",
+                "name": "John Doe",
+                "cSkillAttrs": "{broken-json",
+                "skills": ["Python", " SQL "],
+            },
+        ]
+
+        await crm_cog.view_skills.callback(crm_cog, mock_interaction, None)
+
+        mock_interaction.followup.send.assert_called_once()
+        call_args = mock_interaction.followup.send.call_args
+        embed = call_args[1]["embed"]
+        assert "`python`" in embed.fields[0].value
+        assert "`sql`" in embed.fields[0].value
+        assert "/5" not in embed.fields[0].value
+
+    @pytest.mark.asyncio
+    async def test_view_skills_multiple_contacts_requires_refine(
+        self, crm_cog, mock_interaction, mock_member_role
+    ):
+        """Search term with multiple matches should ask caller to refine."""
+        mock_interaction.user.roles = [mock_member_role]
+
+        with patch.object(crm_cog, "_search_contacts_for_view_skills") as mock_search:
+            mock_search.return_value = [
+                {"id": "contact1", "name": "John Doe"},
+                {"id": "contact2", "name": "John Smith"},
+            ]
+
+            await crm_cog.view_skills.callback(crm_cog, mock_interaction, "john")
+
+        crm_cog.espo_api.request.assert_not_called()
+        mock_interaction.followup.send.assert_called_once()
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert "Multiple contacts found" in message
+        assert "John Doe" in message
+        assert "John Smith" in message
+
+    @pytest.mark.asyncio
+    async def test_view_skills_self_not_linked(
+        self, crm_cog, mock_interaction, mock_member_role
+    ):
+        """No search term should error when requester is not linked to CRM."""
+        mock_interaction.user.roles = [mock_member_role]
+        mock_interaction.user.id = 123456789
+        crm_cog.espo_api.request.return_value = {"list": []}
+
+        await crm_cog.view_skills.callback(crm_cog, mock_interaction, None)
+
+        crm_cog.espo_api.request.assert_called_once()
+        mock_interaction.followup.send.assert_called_once()
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert "Discord account is not linked to a CRM contact" in message
+
     @pytest.mark.asyncio
     async def test_search_contacts_shows_skill_strengths(
         self, crm_cog, mock_interaction, mock_member_role
