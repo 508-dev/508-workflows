@@ -6,6 +6,7 @@ It allows team members to quickly access CRM data without leaving Discord.
 """
 
 import asyncio
+import ast
 import io
 import json
 import logging
@@ -1281,11 +1282,10 @@ class CRMCog(commands.Cog):
             raw_value = candidate.strip()
             if not raw_value:
                 return {}
-            try:
-                candidate = json.loads(raw_value)
-            except (TypeError, ValueError) as exc:
-                logger.warning("Failed to parse cSkillAttrs JSON payload: %s", exc)
+            parsed_payload = self._parse_json_object_with_recovery(raw_value)
+            if parsed_payload is None:
                 return {}
+            candidate = parsed_payload
 
         if not isinstance(candidate, dict):
             return {}
@@ -2850,6 +2850,295 @@ class CRMCog(commands.Cog):
         response = self.espo_api.request("GET", "Contact", search_params)
         contacts = response.get("list", [])
         return contacts[0] if contacts else None
+
+    def _extract_discord_id_from_mention(self, value: str) -> str | None:
+        """Extract Discord user ID from @mention syntax."""
+        match = re.fullmatch(r"<@!?(\d+)>", value.strip())
+        if not match:
+            return None
+        return match.group(1)
+
+    def _parse_json_object_with_recovery(self, raw: str) -> dict[str, Any] | None:
+        """Parse JSON object with lightweight recovery for common malformed payloads."""
+
+        def _load_json_object(candidate: str) -> dict[str, Any] | None:
+            try:
+                parsed = json.loads(candidate)
+            except Exception:
+                return None
+            if isinstance(parsed, dict):
+                return parsed
+            return None
+
+        text = raw.strip()
+        if not text:
+            return None
+
+        attempts: list[str] = []
+        attempts.append(text)
+
+        # Keep only the outer object if prefix/suffix noise exists.
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            attempts.append(text[start : end + 1])
+
+        normalized_quotes = (
+            text.replace("“", '"').replace("”", '"').replace("’", "'").replace("‘", "'")
+        )
+        attempts.append(normalized_quotes)
+
+        attempts_with_trimmed_commas = [
+            re.sub(r",\s*([}\]])", r"\1", candidate) for candidate in attempts
+        ]
+        attempts.extend(attempts_with_trimmed_commas)
+
+        for candidate in attempts:
+            parsed = _load_json_object(candidate)
+            if parsed is not None:
+                return parsed
+
+        for candidate in attempts:
+            try:
+                parsed = ast.literal_eval(candidate)
+            except Exception:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+
+        return None
+
+    def _extract_contact_skills_for_view(
+        self, contact: dict[str, Any]
+    ) -> tuple[list[tuple[str, int | None]], str]:
+        """Return display skills with source priority: structured attrs then multi-enum."""
+        parsed_attrs = self._parse_contact_skill_attrs(contact.get("cSkillAttrs"))
+        if parsed_attrs:
+            ordered = sorted(
+                parsed_attrs.items(),
+                key=lambda item: (-item[1], item[0].casefold()),
+            )
+            return [(skill, strength) for skill, strength in ordered], "cSkillAttrs"
+
+        raw_skills = contact.get("skills")
+        if isinstance(raw_skills, list):
+            skills = normalize_skill_list(
+                [str(item) for item in raw_skills if str(item).strip()]
+            )
+        else:
+            skills = normalize_skill_list(
+                [
+                    item.strip()
+                    for item in str(raw_skills or "").split(",")
+                    if item.strip()
+                ]
+            )
+        return [(skill, None) for skill in skills], "skills"
+
+    async def _search_contacts_for_view_skills(
+        self, search_term: str
+    ) -> list[dict[str, Any]]:
+        """Resolve search term for view-skills lookup."""
+        mention_user_id = self._extract_discord_id_from_mention(search_term)
+        if mention_user_id:
+            by_discord_id = await self._find_contact_by_discord_id(mention_user_id)
+            return [by_discord_id] if by_discord_id else []
+
+        contacts = await self._search_contact_for_linking(search_term)
+        if contacts:
+            return contacts
+
+        # `john` fallback -> `john@508.dev`
+        if (
+            "@" not in search_term
+            and " " not in search_term
+            and not self._is_hex_string(search_term)
+        ):
+            fallback_term = f"{search_term}@508.dev"
+            contacts = await self._search_contact_for_linking(fallback_term)
+        return contacts
+
+    @app_commands.command(
+        name="view-skills",
+        description="View CRM skills for yourself or a specific member",
+    )
+    @app_commands.describe(
+        search_term="Optional: @mention, email, 508 username, name, or contact ID",
+    )
+    @require_role("Member")
+    async def view_skills(
+        self, interaction: discord.Interaction, search_term: str | None = None
+    ) -> None:
+        """View structured skills (with strengths) or fallback multi-enum skills."""
+        try:
+            await interaction.response.defer(ephemeral=True)
+
+            query = (search_term or "").strip()
+            target_scope = "other" if query else "self"
+
+            target_contact: dict[str, Any] | None = None
+            if not query:
+                target_contact = await self._find_contact_by_discord_id(
+                    str(interaction.user.id)
+                )
+                if not target_contact:
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.view_skills",
+                        result="denied",
+                        metadata={
+                            "target_scope": "self",
+                            "reason": "discord_not_linked",
+                        },
+                    )
+                    await interaction.followup.send(
+                        "❌ Your Discord account is not linked to a CRM contact. "
+                        "Please ask a Steering Committee member to link your account first."
+                    )
+                    return
+            else:
+                contacts = await self._search_contacts_for_view_skills(query)
+                if not contacts:
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.view_skills",
+                        result="success",
+                        metadata={
+                            "search_term": query,
+                            "target_scope": target_scope,
+                            "contacts_found": 0,
+                        },
+                    )
+                    await interaction.followup.send(
+                        f"❌ No contact found for: `{query}`"
+                    )
+                    return
+
+                if len(contacts) > 1:
+                    lines: list[str] = []
+                    for contact in contacts[:5]:
+                        name = str(contact.get("name", "Unknown"))
+                        contact_id = str(contact.get("id", ""))
+                        lines.append(f"- **{name}** (`{contact_id}`)")
+                    suffix = (
+                        f"\n...and {len(contacts) - 5} more."
+                        if len(contacts) > 5
+                        else ""
+                    )
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.view_skills",
+                        result="success",
+                        metadata={
+                            "search_term": query,
+                            "target_scope": target_scope,
+                            "contacts_found": len(contacts),
+                            "requires_selection": True,
+                        },
+                    )
+                    await interaction.followup.send(
+                        "⚠️ Multiple contacts found. Please refine your search:\n"
+                        + "\n".join(lines)
+                        + suffix
+                    )
+                    return
+
+                target_contact = contacts[0]
+
+            assert target_contact is not None
+            contact_id = str(target_contact.get("id") or "").strip()
+            if not contact_id:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.view_skills",
+                    result="error",
+                    metadata={
+                        "search_term": query or None,
+                        "error": "missing_contact_id",
+                    },
+                )
+                await interaction.followup.send("❌ Contact ID not found.")
+                return
+
+            full_contact = self.espo_api.request("GET", f"Contact/{contact_id}")
+            contact_name = str(
+                full_contact.get("name") or target_contact.get("name") or "Unknown"
+            )
+            skills, source = self._extract_contact_skills_for_view(full_contact)
+
+            if not skills:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.view_skills",
+                    result="success",
+                    metadata={
+                        "search_term": query or None,
+                        "target_scope": target_scope,
+                        "skills_count": 0,
+                        "source": source,
+                    },
+                    resource_type="crm_contact",
+                    resource_id=contact_id,
+                )
+                await interaction.followup.send(
+                    f"ℹ️ No skills found for **{contact_name}**."
+                )
+                return
+
+            embed = discord.Embed(
+                title="🛠️ CRM Skills",
+                description=f"Skills for **{contact_name}**",
+                color=0x0099FF,
+            )
+            skill_lines: list[str] = []
+            for skill, strength in skills[:25]:
+                if strength is None:
+                    skill_lines.append(f"- `{skill}`")
+                else:
+                    skill_lines.append(f"- `{skill}` ({strength}/5)")
+            if len(skills) > 25:
+                skill_lines.append(f"...and {len(skills) - 25} more.")
+            embed.add_field(name="Skills", value="\n".join(skill_lines), inline=False)
+            embed.add_field(
+                name="🔗 CRM Profile",
+                value=f"[View in CRM]({self.base_url}/#Contact/view/{contact_id})",
+                inline=False,
+            )
+
+            await interaction.followup.send(embed=embed)
+            self._audit_command(
+                interaction=interaction,
+                action="crm.view_skills",
+                result="success",
+                metadata={
+                    "search_term": query or None,
+                    "target_scope": target_scope,
+                    "skills_count": len(skills),
+                    "source": source,
+                },
+                resource_type="crm_contact",
+                resource_id=contact_id,
+            )
+        except EspoAPIError as e:
+            logger.error(f"EspoCRM API error in view_skills: {e}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.view_skills",
+                result="error",
+                metadata={"search_term": search_term, "error": str(e)},
+            )
+            await interaction.followup.send(f"❌ CRM API error: {str(e)}")
+        except Exception as e:
+            logger.error(f"Unexpected error in view_skills: {e}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.view_skills",
+                result="error",
+                metadata={"search_term": search_term, "error": str(e)},
+            )
+            await interaction.followup.send(
+                "❌ An unexpected error occurred while fetching skills."
+            )
 
     @app_commands.command(
         name="set-github-username",
