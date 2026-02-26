@@ -46,10 +46,12 @@ class TestMarkIdVerifiedCommand:
         interaction.response.defer = AsyncMock()
         interaction.followup.send = AsyncMock()
         interaction.guild = None
+        admin_role = Mock()
+        admin_role.name = "Admin"
         interaction.user = Mock()
         interaction.user.name = "admin_user"
         interaction.user.id = 123
-        interaction.user.roles = [Mock(name="Admin")]
+        interaction.user.roles = [admin_role]
         return interaction
 
     @pytest.fixture
