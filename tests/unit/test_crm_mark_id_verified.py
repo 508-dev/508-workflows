@@ -49,6 +49,7 @@ class TestMarkIdVerifiedCommand:
         interaction.user = Mock()
         interaction.user.name = "admin_user"
         interaction.user.id = 123
+        interaction.user.roles = [Mock(name="Admin")]
         return interaction
 
     @pytest.fixture
