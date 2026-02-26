@@ -9,6 +9,7 @@ import asyncio
 import io
 import json
 import logging
+from datetime import date, datetime
 import re
 from typing import Any
 
@@ -27,6 +28,10 @@ from five08.discord_bot.utils.role_decorators import (
 )
 
 logger = logging.getLogger(__name__)
+
+ID_VERIFIED_FIELD = "cIdVerified"
+ID_VERIFIED_AT_FIELD = "cIdVerifiedAt"
+ID_VERIFIED_BY_FIELD = "cIdVerifiedBy"
 
 EspoAPI = espo.EspoAPI
 EspoAPIError = espo.EspoAPIError
@@ -221,6 +226,97 @@ class ContactSelectionButton(discord.ui.Button[ContactSelectionView]):
             await interaction.followup.send(
                 "❌ An error occurred while linking the contact."
             )
+
+
+class MarkIdVerifiedSelectionButton(discord.ui.Button["MarkIdVerifiedSelectionView"]):
+    """Button for selecting a contact to mark ID verification on."""
+
+    def __init__(
+        self,
+        contact: dict[str, Any],
+        verified_by: str | None,
+        verified_at: str,
+        requester_id: int,
+    ) -> None:
+        contact_name = contact.get("name", "Unknown")
+        label = contact_name[:80] if len(contact_name) > 80 else contact_name
+        super().__init__(style=discord.ButtonStyle.success, label=label, emoji="✅")
+        self.contact = contact
+        self.verified_by = verified_by
+        self.verified_at = verified_at
+        self.requester_id = requester_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        """Handle contact selection and perform the ID verification."""
+        try:
+            if not self.view:
+                await interaction.response.send_message("❌ View not found.")
+                return
+            if interaction.user.id != self.requester_id:
+                await interaction.response.send_message(
+                    "❌ Only the command requester can confirm this action.",
+                    ephemeral=True,
+                )
+                return
+
+            await interaction.response.defer(ephemeral=True)
+            await self.view.crm_cog._mark_id_verified_for_contact(
+                interaction=interaction,
+                contact=self.contact,
+                verified_by=self.verified_by,
+                verified_at=self.verified_at,
+            )
+
+            for item in self.view.children:
+                if isinstance(item, discord.ui.Button):
+                    item.disabled = True
+
+            if interaction.message:
+                try:
+                    await interaction.message.edit(view=self.view)
+                except discord.NotFound:
+                    pass
+                except discord.HTTPException as exc:
+                    logger.warning(
+                        f"Failed to update ID verification selection view: {exc}"
+                    )
+        except Exception as exc:
+            logger.error(f"Error in ID verified selection callback: {exc}")
+            await interaction.followup.send(
+                "❌ An error occurred while marking ID verification."
+            )
+
+
+class MarkIdVerifiedSelectionView(discord.ui.View):
+    """View containing contact selection buttons for ID verification."""
+
+    def __init__(
+        self,
+        crm_cog: "CRMCog",
+        requester_id: int,
+        verified_by: str | None,
+        verified_at: str,
+    ) -> None:
+        super().__init__(timeout=300)  # 5 minute timeout
+        self.crm_cog = crm_cog
+        self.requester_id = requester_id
+        self.verified_by = verified_by
+        self.verified_at = verified_at
+
+    def add_contact_button(
+        self,
+        contact: dict[str, Any],
+    ) -> None:
+        """Add a contact selection button."""
+        if len(self.children) >= 5:
+            return
+        button = MarkIdVerifiedSelectionButton(
+            contact=contact,
+            verified_by=self.verified_by,
+            verified_at=self.verified_at,
+            requester_id=self.requester_id,
+        )
+        self.add_item(button)
 
 
 class ResumeConfirmationView(discord.ui.View):
@@ -2055,6 +2151,441 @@ class CRMCog(commands.Cog):
         )
 
         await interaction.followup.send(embed=embed, view=view)
+
+    def _normalize_508_username(self, value: str | None) -> str | None:
+        """Normalize a 508 username candidate."""
+        if not value:
+            return None
+
+        normalized = value.strip()
+        if not normalized:
+            return None
+
+        normalized = normalized.lstrip("@").strip()
+        normalized = " ".join(normalized.split())
+        if not normalized:
+            return None
+
+        if "@" in normalized:
+            username, _, domain = normalized.partition("@")
+            if not username:
+                return None
+            if domain.lower() in {"", "508", "508.dev"}:
+                return username.lower()
+            return username.lower()
+
+        return normalized.lower()
+
+    async def _resolve_verified_by(
+        self, interaction: discord.Interaction, verified_by: str
+    ) -> str | None:
+        """Resolve verifier.
+
+        If a value is provided:
+            - If it looks like a Discord mention, try to resolve from CRM using the
+              linked Discord user ID.
+            - Otherwise normalize directly as a 508 username.
+
+        If no value is provided, resolve the invoker from CRM first by Discord ID, then by
+        Discord username.
+        """
+        if verified_by.strip():
+            match = re.match(r"^<@!?(\d+)>$", verified_by.strip())
+            if match and interaction.guild:
+                member = interaction.guild.get_member(int(match.group(1)))
+                if member:
+                    contact = await self._find_contact_by_discord_id(str(member.id))
+                    if contact:
+                        candidate = self._normalize_508_username(
+                            contact.get("c508Email") or ""
+                        )
+                        if candidate:
+                            return candidate
+                    return self._normalize_508_username(member.name)
+
+            return self._normalize_508_username(verified_by)
+
+        return await self._resolve_verified_by_from_interaction_user(interaction)
+
+    async def _resolve_verified_by_from_interaction_user(
+        self, interaction: discord.Interaction
+    ) -> str | None:
+        """Resolve verifier using the invoking Discord user."""
+        user = interaction.user
+        if not user:
+            return None
+
+        if getattr(user, "id", None):
+            contact = await self._find_contact_by_discord_id(str(user.id))
+            if contact:
+                candidate = self._normalize_508_username(contact.get("c508Email") or "")
+                if candidate:
+                    return candidate
+
+        discord_username = self._normalize_508_username(str(user.name))
+        if discord_username:
+            contact = await self._find_contact_by_discord_username(discord_username)
+            if contact:
+                candidate = self._normalize_508_username(contact.get("c508Email") or "")
+                if candidate:
+                    return candidate
+            return discord_username
+
+        return None
+
+    async def _find_contact_by_discord_username(
+        self, discord_username: str
+    ) -> dict[str, Any] | None:
+        """Find a contact by Discord username."""
+        search_params = {
+            "where": [
+                {
+                    "type": "equals",
+                    "attribute": "cDiscordUsername",
+                    "value": discord_username,
+                }
+            ],
+            "maxSize": 1,
+            "select": "id,name,emailAddress,c508Email,cDiscordUsername,cDiscordUserID",
+        }
+
+        response = self.espo_api.request("GET", "Contact", search_params)
+        contacts = response.get("list", [])
+        return contacts[0] if contacts else None
+
+    async def _parse_verified_at(self, raw_verified_at: str | None) -> str:
+        """Parse an ID verification date or default to today."""
+        if not raw_verified_at or not raw_verified_at.strip():
+            return date.today().isoformat()
+
+        value = raw_verified_at.strip()
+        normalized = " ".join(value.replace(",", " ").split())
+
+        for fmt in (
+            "%B %d %Y",
+            "%b %d %Y",
+            "%d %B %Y",
+            "%d %b %Y",
+        ):
+            try:
+                return datetime.strptime(normalized, fmt).date().isoformat()
+            except ValueError:
+                continue
+
+        normalized_numeric = re.sub(r"[./\s]+", "-", value)
+        for fmt in (
+            "%Y-%m-%d",
+            "%d-%m-%Y",
+            "%d-%m-%y",
+            "%m-%d-%Y",
+            "%m-%d-%y",
+        ):
+            try:
+                return datetime.strptime(normalized_numeric, fmt).date().isoformat()
+            except ValueError:
+                continue
+
+        raise ValueError(f"Invalid verified_at format: '{raw_verified_at}'.")
+
+    async def _search_contacts_for_mark_id_verification(
+        self, search_term: str
+    ) -> list[dict[str, Any]]:
+        """Search for contacts for ID verification."""
+        contacts = await self._search_contact_for_linking(search_term)
+        if contacts:
+            return contacts
+
+        if "@" not in search_term and " " not in search_term:
+            contacts = await self._search_contact_for_linking(
+                f"{search_term.strip()}@508.dev"
+            )
+            if contacts:
+                return contacts
+
+        return contacts
+
+    async def _mark_id_verified_for_contact(
+        self,
+        interaction: discord.Interaction,
+        contact: dict[str, Any],
+        verified_by: str | None,
+        verified_at: str,
+    ) -> bool:
+        """Persist ID verification metadata to CRM."""
+        contact_id = contact.get("id")
+        contact_name = contact.get("name", "Unknown")
+
+        if not contact_id:
+            self._audit_command(
+                interaction=interaction,
+                action="crm.mark_id_verified",
+                result="error",
+                metadata={
+                    "verified_by": verified_by,
+                    "verified_at": verified_at,
+                    "error": "contact_id_missing",
+                },
+            )
+            await interaction.followup.send("❌ Contact ID not found.")
+            return False
+
+        payload = {ID_VERIFIED_FIELD: True, ID_VERIFIED_AT_FIELD: verified_at}
+        if verified_by:
+            payload[ID_VERIFIED_BY_FIELD] = verified_by
+
+        try:
+            update_response = self.espo_api.request(
+                "PUT", f"Contact/{contact_id}", payload
+            )
+            if update_response:
+                embed = discord.Embed(
+                    title="✅ ID Verified",
+                    description=f"Marked **{contact_name}** as ID verified.",
+                    color=0x00FF00,
+                )
+                embed.add_field(name="📅 Verified at", value=verified_at, inline=True)
+                if verified_by:
+                    embed.add_field(
+                        name="✅ Verified by", value=verified_by, inline=True
+                    )
+                profile_url = f"{self.base_url}/#Contact/view/{contact_id}"
+                embed.add_field(
+                    name="🔗 CRM Profile",
+                    value=f"[View in CRM]({profile_url})",
+                    inline=True,
+                )
+                await interaction.followup.send(embed=embed)
+
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.mark_id_verified",
+                    result="success",
+                    metadata={
+                        "contact_id": str(contact_id),
+                        "verified_by": verified_by,
+                        "verified_at": verified_at,
+                    },
+                    resource_type="crm_contact",
+                    resource_id=str(contact_id),
+                )
+                return True
+
+            self._audit_command(
+                interaction=interaction,
+                action="crm.mark_id_verified",
+                result="error",
+                metadata={
+                    "contact_id": str(contact_id),
+                    "verified_by": verified_by,
+                    "verified_at": verified_at,
+                    "error": "crm_update_failed",
+                },
+                resource_type="crm_contact",
+                resource_id=str(contact_id),
+            )
+            await interaction.followup.send(
+                "❌ Failed to update contact in CRM. Please try again."
+            )
+            return False
+
+        except EspoAPIError as exc:
+            logger.error(f"Failed to update contact ID verification: {exc}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.mark_id_verified",
+                result="error",
+                metadata={
+                    "contact_id": str(contact_id),
+                    "verified_by": verified_by,
+                    "verified_at": verified_at,
+                    "error": str(exc),
+                },
+                resource_type="crm_contact",
+                resource_id=str(contact_id),
+            )
+            await interaction.followup.send(f"❌ CRM API error: {str(exc)}")
+            return False
+        except Exception as exc:
+            logger.error(f"Unexpected error marking ID verification: {exc}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.mark_id_verified",
+                result="error",
+                metadata={
+                    "contact_id": str(contact_id),
+                    "verified_by": verified_by,
+                    "verified_at": verified_at,
+                    "error": str(exc),
+                },
+                resource_type="crm_contact",
+                resource_id=str(contact_id),
+            )
+            await interaction.followup.send(
+                "❌ An unexpected error occurred while marking ID verification."
+            )
+            return False
+
+    async def _show_mark_id_verified_contact_choices(
+        self,
+        interaction: discord.Interaction,
+        search_term: str,
+        contacts: list[dict[str, Any]],
+        verified_by: str | None,
+        verified_at: str,
+    ) -> None:
+        """Show contact choices when multiple candidates are found."""
+        embed = discord.Embed(
+            title="🔍 Multiple Contacts Found",
+            description=(
+                f"Found {len(contacts)} contacts for `{search_term}`. "
+                "Select the correct person to mark as ID verified."
+            ),
+            color=0xFFA500,
+        )
+
+        view = MarkIdVerifiedSelectionView(
+            crm_cog=self,
+            requester_id=interaction.user.id,
+            verified_by=verified_by,
+            verified_at=verified_at,
+        )
+
+        for i, contact in enumerate(contacts[:5], 1):
+            name = contact.get("name", "Unknown")
+            email = contact.get("emailAddress", "No email")
+            email_508 = contact.get("c508Email", "No 508 email")
+            contact_id = contact.get("id", "")
+            contact_info = (
+                f"📧 {email}\n🏢 508 Email: {email_508}\n🆔 ID: `{contact_id}`"
+            )
+            embed.add_field(name=f"{i}. {name}", value=contact_info, inline=True)
+            view.add_contact_button(contact)
+
+        embed.add_field(
+            name="💡 Tip",
+            value="Select the contact button to continue, or rerun with a more specific term.",
+            inline=False,
+        )
+
+        await interaction.followup.send(embed=embed, view=view)
+
+    @app_commands.command(
+        name="mark-id-verified",
+        description="Mark a contact as ID verified (Admin only).",
+    )
+    @app_commands.describe(
+        search_term="Email, 508 username, or name.",
+        verified_by=(
+            "Verifier 508 username or @Discord mention. "
+            "Defaults to the command invoker if not provided."
+        ),
+        verified_at=(
+            "Date verified (e.g. YYYY-MM-DD, DD/MM/YYYY, March 5, 2026). "
+            "Defaults to today."
+        ),
+    )
+    @require_role("Admin")
+    async def mark_id_verified(
+        self,
+        interaction: discord.Interaction,
+        search_term: str,
+        verified_by: str | None = None,
+        verified_at: str | None = None,
+    ) -> None:
+        """Mark a contact as ID verified."""
+        try:
+            await interaction.response.defer(ephemeral=True)
+
+            resolved_verified_by = await self._resolve_verified_by(
+                interaction, verified_by or ""
+            )
+            if verified_by is None and not resolved_verified_by:
+                resolved_verified_by = self._normalize_508_username(
+                    str(interaction.user.name)
+                )
+            resolved_verified_at = await self._parse_verified_at(verified_at)
+
+            contacts = await self._search_contacts_for_mark_id_verification(search_term)
+
+            if not contacts:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.mark_id_verified",
+                    result="success",
+                    metadata={
+                        "search_term": search_term,
+                        "verified_by": resolved_verified_by,
+                        "verified_at": resolved_verified_at,
+                        "contacts_found": 0,
+                    },
+                )
+                await interaction.followup.send(
+                    f"❌ No contact found for: `{search_term}`"
+                )
+                return
+
+            if len(contacts) > 1:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.mark_id_verified",
+                    result="success",
+                    metadata={
+                        "search_term": search_term,
+                        "verified_by": resolved_verified_by,
+                        "verified_at": resolved_verified_at,
+                        "contacts_found": len(contacts),
+                        "requires_selection": True,
+                    },
+                )
+                await self._show_mark_id_verified_contact_choices(
+                    interaction=interaction,
+                    search_term=search_term,
+                    contacts=contacts,
+                    verified_by=resolved_verified_by,
+                    verified_at=resolved_verified_at,
+                )
+                return
+
+            target_contact = contacts[0]
+            self._audit_command(
+                interaction=interaction,
+                action="crm.mark_id_verified",
+                result="success",
+                metadata={
+                    "search_term": search_term,
+                    "verified_by": resolved_verified_by,
+                    "verified_at": resolved_verified_at,
+                    "contacts_found": 1,
+                },
+                resource_type="crm_contact",
+                resource_id=str(target_contact.get("id")),
+            )
+            await self._mark_id_verified_for_contact(
+                interaction=interaction,
+                contact=target_contact,
+                verified_by=resolved_verified_by,
+                verified_at=resolved_verified_at,
+            )
+        except ValueError as exc:
+            logger.error(f"Invalid verified_at value: {exc}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.mark_id_verified",
+                result="denied",
+                metadata={"verified_at": verified_at, "reason": str(exc)},
+            )
+            await interaction.followup.send(f"❌ {exc}")
+        except Exception as exc:
+            logger.error(f"Unexpected error in mark_id_verified: {exc}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.mark_id_verified",
+                result="error",
+                metadata={"search_term": search_term, "error": str(exc)},
+            )
+            await interaction.followup.send(
+                "❌ An unexpected error occurred while marking ID verification."
+            )
 
     @app_commands.command(
         name="link-discord-user",
