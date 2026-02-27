@@ -836,14 +836,17 @@ class CRMCog(commands.Cog):
         resource_id: str | None = None,
     ) -> None:
         """Queue a best-effort audit write for CRM command activity."""
-        self.audit_logger.log_command(
-            interaction=interaction,
-            action=action,
-            result=result,
-            metadata=metadata,
-            resource_type=resource_type,
-            resource_id=resource_id,
-        )
+        try:
+            self.audit_logger.log_command(
+                interaction=interaction,
+                action=action,
+                result=result,
+                metadata=metadata,
+                resource_type=resource_type,
+                resource_id=resource_id,
+            )
+        except Exception as exc:
+            logger.warning("Audit write failed for action=%s: %s", action, exc)
 
     def _backend_headers(self) -> dict[str, str]:
         """Build auth headers for internal backend API calls."""
