@@ -118,6 +118,25 @@ class ResumeApplyResult(BaseModel):
     error: str | None = None
 
 
+class DocusealSubmitter(BaseModel):
+    """Single submitter entry from a Docuseal webhook payload."""
+
+    id: int
+    email: str
+    status: str
+    completed_at: str | None = None
+    name: str | None = None
+    external_id: str | None = None
+
+
+class DocusealWebhookPayload(BaseModel):
+    """Docuseal form.completed webhook payload."""
+
+    event_type: str
+    timestamp: str
+    data: DocusealSubmitter
+
+
 class AuditEventPayload(BaseModel):
     """Inbound payload for creating a human audit event."""
 
