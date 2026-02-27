@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from five08.worker.crm.intake_form_processor import IntakeFormProcessor
 from five08.worker.crm.people_sync import PeopleSyncProcessor
 from five08.worker.crm.processor import ContactSkillsProcessor
 from five08.worker.crm.resume_profile_processor import ResumeProfileProcessor
@@ -66,6 +67,31 @@ def apply_resume_profile_job(
         link_discord=link_discord,
     )
     return result.model_dump()
+
+
+def process_intake_form_job(
+    email: str,
+    first_name: str,
+    last_name: str,
+    phone: str | None = None,
+    discord_username: str | None = None,
+    linkedin_url: str | None = None,
+    github_username: str | None = None,
+    submitted_at: str | None = None,
+) -> dict[str, Any]:
+    """Process a Google Forms member intake submission against CRM."""
+    logger.info("Processing intake form job email=%s", email)
+    processor = IntakeFormProcessor()
+    return processor.process_intake(
+        email=email,
+        first_name=first_name,
+        last_name=last_name,
+        phone=phone,
+        discord_username=discord_username,
+        linkedin_url=linkedin_url,
+        github_username=github_username,
+        submitted_at=submitted_at,
+    )
 
 
 def sync_people_from_crm_job() -> dict[str, Any]:

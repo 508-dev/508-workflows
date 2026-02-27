@@ -576,3 +576,78 @@ def test_auth_logout_writes_logout_audit(client: TestClient) -> None:
     assert audit_payload.action == "auth.logout"
     assert audit_payload.result == api.AuditResult.SUCCESS
     assert audit_payload.actor_subject == "admin@508.dev"
+
+
+# --- Google Forms intake webhook ---
+
+
+def test_google_forms_intake_rejects_unauthorized(client: TestClient) -> None:
+    """Google Forms webhook should reject requests without auth."""
+    response = client.post("/webhooks/google-forms", json={"email": "a@b.com"})
+    assert response.status_code == 401
+
+
+def test_google_forms_intake_enqueues_job(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Google Forms webhook should enqueue intake job and return 202."""
+    with patch("five08.backend.api.enqueue_job") as mock_enqueue:
+        mock_enqueue.return_value = Mock(id="job-intake-1")
+        response = client.post(
+            "/webhooks/google-forms",
+            json={
+                "email": "member@example.com",
+                "first_name": "Jane",
+                "last_name": "Doe",
+                "phone": "+15551234567",
+                "discord_username": "janedoe",
+                "submission_id": "sub-42",
+            },
+            headers=auth_headers,
+        )
+
+    payload = response.json()
+    assert response.status_code == 202
+    assert payload["status"] == "queued"
+    assert payload["source"] == "google_forms"
+    assert payload["job_id"] == "job-intake-1"
+    assert payload["email"] == "member@example.com"
+
+    call_kwargs = mock_enqueue.call_args.kwargs
+    assert call_kwargs["idempotency_key"] == "intake:member@example.com:sub-42"
+    assert call_kwargs["args"][0] == "member@example.com"
+    assert call_kwargs["args"][1] == "Jane"
+
+
+def test_google_forms_intake_rejects_invalid_payload(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Google Forms webhook should return 400 for invalid payloads."""
+    response = client.post(
+        "/webhooks/google-forms",
+        json={"not_a_valid": "payload"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_payload"
+
+
+def test_google_forms_intake_returns_503_on_enqueue_failure(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Google Forms webhook should return 503 when enqueue fails."""
+    with patch("five08.backend.api.enqueue_job", side_effect=RuntimeError("boom")):
+        response = client.post(
+            "/webhooks/google-forms",
+            json={
+                "email": "fail@example.com",
+                "first_name": "Test",
+                "last_name": "User",
+            },
+            headers=auth_headers,
+        )
+    assert response.status_code == 503
+    assert response.json()["error"] == "enqueue_failed"
