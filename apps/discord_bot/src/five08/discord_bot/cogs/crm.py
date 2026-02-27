@@ -2995,6 +2995,49 @@ class CRMCog(commands.Cog):
             contacts = await self._search_contact_for_linking(fallback_term)
         return contacts
 
+    async def _search_contacts_for_mutation(
+        self, search_term: str
+    ) -> list[dict[str, Any]]:
+        """Resolve contacts for write operations; never auto-select ambiguous names.
+
+        Unlike _search_contact_for_linking (which limits name queries with spaces
+        to maxSize=1), this always fetches up to 10 results so that ambiguous
+        matches surface to the caller rather than silently picking one contact.
+        """
+        mention_user_id = self._extract_discord_id_from_mention(search_term)
+        if mention_user_id:
+            by_discord_id = await self._find_contact_by_discord_id(mention_user_id)
+            return [by_discord_id] if by_discord_id else []
+
+        if self._is_hex_string(search_term):
+            return await self._search_contact_for_linking(search_term)
+
+        is_email = "@" in search_term
+        if is_email:
+            return await self._search_contact_for_linking(search_term)
+
+        # Name search — always request multiple results for write safety
+        response = self.espo_api.request(
+            "GET",
+            "Contact",
+            {
+                "where": [
+                    {"type": "contains", "attribute": "name", "value": search_term}
+                ],
+                "maxSize": 10,
+                "select": "id,name,emailAddress,c508Email,cDiscordUsername",
+            },
+        )
+        contacts: list[dict[str, Any]] = response.get("list", [])
+        seen: set[str] = set()
+        deduped: list[dict[str, Any]] = []
+        for c in contacts:
+            cid = str(c.get("id") or "")
+            if cid and cid not in seen:
+                seen.add(cid)
+                deduped.append(c)
+        return deduped
+
     @app_commands.command(
         name="view-skills",
         description="View CRM skills for yourself or a specific member",
@@ -3234,7 +3277,7 @@ class CRMCog(commands.Cog):
                     )
                     return
 
-                contacts = await self._search_contact_for_linking(query)
+                contacts = await self._search_contacts_for_mutation(query)
                 if not contacts:
                     self._audit_command(
                         interaction=interaction,

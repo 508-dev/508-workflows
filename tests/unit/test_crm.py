@@ -1530,6 +1530,25 @@ class TestCRMCog:
     # /update-skills tests
     # ------------------------------------------------------------------
 
+    @pytest.mark.asyncio
+    async def test_search_contacts_for_mutation_returns_all_name_matches(
+        self, crm_cog
+    ):
+        """Name search always returns multiple results instead of auto-selecting."""
+        crm_cog.espo_api.request.return_value = {
+            "list": [
+                {"id": "c1", "name": "John Doe"},
+                {"id": "c2", "name": "John Smith"},
+            ]
+        }
+
+        contacts = await crm_cog._search_contacts_for_mutation("John Doe")
+
+        assert len(contacts) == 2
+        # Verify maxSize=10 was used (not 1)
+        call_args = crm_cog.espo_api.request.call_args
+        assert call_args[0][2]["maxSize"] == 10
+
     def test_update_skills_parses_valid_input(self, crm_cog):
         """Valid comma-separated skill:strength pairs are parsed correctly."""
         result = crm_cog._parse_skills_input("python:5, react:4, go:3")
