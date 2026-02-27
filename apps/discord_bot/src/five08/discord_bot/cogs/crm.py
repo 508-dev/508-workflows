@@ -836,14 +836,17 @@ class CRMCog(commands.Cog):
         resource_id: str | None = None,
     ) -> None:
         """Queue a best-effort audit write for CRM command activity."""
-        self.audit_logger.log_command(
-            interaction=interaction,
-            action=action,
-            result=result,
-            metadata=metadata,
-            resource_type=resource_type,
-            resource_id=resource_id,
-        )
+        try:
+            self.audit_logger.log_command(
+                interaction=interaction,
+                action=action,
+                result=result,
+                metadata=metadata,
+                resource_type=resource_type,
+                resource_id=resource_id,
+            )
+        except Exception as exc:
+            logger.warning("Audit write failed for action=%s: %s", action, exc)
 
     def _backend_headers(self) -> dict[str, str]:
         """Build auth headers for internal backend API calls."""
@@ -1318,6 +1321,43 @@ class CRMCog(commands.Cog):
         """Normalize one skill name from source data."""
         normalized = normalize_skill_list([value])
         return normalized[0] if normalized else ""
+
+    def _parse_skills_input(self, raw: str) -> dict[str, int]:
+        """Parse 'python:5, react:4' into {normalized_skill: strength}.
+
+        Raises ValueError with a user-friendly message on bad input.
+        """
+        if not raw or not raw.strip():
+            raise ValueError("Skills input cannot be empty.")
+
+        parsed: dict[str, int] = {}
+        for token in raw.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            if ":" not in token:
+                raise ValueError(
+                    f"Invalid format `{token}`, expected `skill:strength` (e.g. `python:5`)."
+                )
+            skill_raw, strength_raw = token.rsplit(":", 1)
+            skill_name = self._normalize_skill(skill_raw.strip())
+            if not skill_name:
+                raise ValueError(f"Empty skill name in `{token}`.")
+            try:
+                strength = int(strength_raw.strip())
+            except ValueError:
+                raise ValueError(
+                    f"Invalid strength `{strength_raw.strip()}` for skill `{skill_name}`. Must be an integer 1-5."
+                ) from None
+            if not 1 <= strength <= 5:
+                raise ValueError(
+                    f"Strength `{strength}` for skill `{skill_name}` is out of range. Must be 1-5."
+                )
+            parsed[skill_name] = strength
+
+        if not parsed:
+            raise ValueError("No valid skills found in input.")
+        return parsed
 
     def _format_requested_skills(
         self, requested_skills: list[str], contact: dict[str, Any]
@@ -2958,6 +2998,49 @@ class CRMCog(commands.Cog):
             contacts = await self._search_contact_for_linking(fallback_term)
         return contacts
 
+    async def _search_contacts_for_mutation(
+        self, search_term: str
+    ) -> list[dict[str, Any]]:
+        """Resolve contacts for write operations; never auto-select ambiguous names.
+
+        Unlike _search_contact_for_linking (which limits name queries with spaces
+        to maxSize=1), this always fetches up to 10 results so that ambiguous
+        matches surface to the caller rather than silently picking one contact.
+        """
+        mention_user_id = self._extract_discord_id_from_mention(search_term)
+        if mention_user_id:
+            by_discord_id = await self._find_contact_by_discord_id(mention_user_id)
+            return [by_discord_id] if by_discord_id else []
+
+        if self._is_hex_string(search_term):
+            return await self._search_contact_for_linking(search_term)
+
+        is_email = "@" in search_term
+        if is_email:
+            return await self._search_contact_for_linking(search_term)
+
+        # Name search — always request multiple results for write safety
+        response = self.espo_api.request(
+            "GET",
+            "Contact",
+            {
+                "where": [
+                    {"type": "contains", "attribute": "name", "value": search_term}
+                ],
+                "maxSize": 10,
+                "select": "id,name,emailAddress,c508Email,cDiscordUsername",
+            },
+        )
+        contacts: list[dict[str, Any]] = response.get("list", [])
+        seen: set[str] = set()
+        deduped: list[dict[str, Any]] = []
+        for c in contacts:
+            cid = str(c.get("id") or "")
+            if cid and cid not in seen:
+                seen.add(cid)
+                deduped.append(c)
+        return deduped
+
     @app_commands.command(
         name="view-skills",
         description="View CRM skills for yourself or a specific member",
@@ -3138,6 +3221,222 @@ class CRMCog(commands.Cog):
             )
             await interaction.followup.send(
                 "❌ An unexpected error occurred while fetching skills."
+            )
+
+    @app_commands.command(
+        name="update-skills",
+        description="Update CRM skills for yourself or another member (Steering Committee+ for others)",
+    )
+    @app_commands.describe(
+        skills='Comma-separated skill:strength pairs, e.g. "python:5, react:4, go:3"',
+        search_term="Optional: @mention, email, 508 username, name, or contact ID",
+    )
+    @require_role("Member")
+    async def update_skills(
+        self,
+        interaction: discord.Interaction,
+        skills: str,
+        search_term: str | None = None,
+    ) -> None:
+        """Update structured skills (with strengths 1-5) on a CRM contact."""
+        try:
+            await interaction.response.defer(ephemeral=True)
+
+            # Parse and validate input
+            try:
+                new_skills = self._parse_skills_input(skills)
+            except ValueError as exc:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.update_skills",
+                    result="error",
+                    metadata={"raw_input": skills, "error": str(exc)},
+                )
+                await interaction.followup.send(f"❌ {exc}")
+                return
+
+            query = (search_term or "").strip()
+            target_scope = "other" if query else "self"
+
+            # Resolve target contact
+            target_contact: dict[str, Any] | None = None
+            if query:
+                if not hasattr(
+                    interaction.user, "roles"
+                ) or not check_user_roles_with_hierarchy(
+                    interaction.user.roles, ["Steering Committee"]
+                ):
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.update_skills",
+                        result="denied",
+                        metadata={
+                            "search_term": query,
+                            "reason": "missing_required_role",
+                        },
+                    )
+                    await interaction.followup.send(
+                        "❌ You must have Steering Committee role or higher to update skills for other people."
+                    )
+                    return
+
+                contacts = await self._search_contacts_for_mutation(query)
+                if not contacts:
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.update_skills",
+                        result="success",
+                        metadata={
+                            "search_term": query,
+                            "target_scope": target_scope,
+                            "contacts_found": 0,
+                        },
+                    )
+                    await interaction.followup.send(
+                        f"❌ No contact found for: `{query}`"
+                    )
+                    return
+
+                if len(contacts) > 1:
+                    lines: list[str] = []
+                    for c in contacts[:5]:
+                        name = str(c.get("name", "Unknown"))
+                        cid = str(c.get("id", ""))
+                        lines.append(f"- **{name}** (`{cid}`)")
+                    suffix = (
+                        f"\n...and {len(contacts) - 5} more."
+                        if len(contacts) > 5
+                        else ""
+                    )
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.update_skills",
+                        result="success",
+                        metadata={
+                            "search_term": query,
+                            "target_scope": target_scope,
+                            "contacts_found": len(contacts),
+                            "requires_selection": True,
+                        },
+                    )
+                    await interaction.followup.send(
+                        "⚠️ Multiple contacts found. Please refine your search:\n"
+                        + "\n".join(lines)
+                        + suffix
+                    )
+                    return
+
+                target_contact = contacts[0]
+            else:
+                target_contact = await self._find_contact_by_discord_id(
+                    str(interaction.user.id)
+                )
+                if not target_contact:
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.update_skills",
+                        result="denied",
+                        metadata={
+                            "target_scope": "self",
+                            "reason": "discord_not_linked",
+                        },
+                    )
+                    await interaction.followup.send(
+                        "❌ Your Discord account is not linked to a CRM contact. "
+                        "Please ask a Steering Committee member to link your account first."
+                    )
+                    return
+
+            contact_id = str(target_contact.get("id") or "").strip()
+            contact_name = str(target_contact.get("name") or "Unknown")
+            if not contact_id:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.update_skills",
+                    result="error",
+                    metadata={"error": "missing_contact_id"},
+                )
+                await interaction.followup.send("❌ Contact ID not found.")
+                return
+
+            # Fetch current skills and merge
+            full_contact = self.espo_api.request("GET", f"Contact/{contact_id}")
+            existing = self._parse_contact_skill_attrs(
+                full_contact.get("cSkillAttrs")
+            )
+            merged = {**existing, **new_skills}
+
+            # Build CRM-format payload {skill: {"strength": N}}
+            attrs_payload = {
+                skill: {"strength": strength}
+                for skill, strength in sorted(merged.items())
+            }
+
+            self.espo_api.request(
+                "PUT",
+                f"Contact/{contact_id}",
+                {"cSkillAttrs": json.dumps(attrs_payload)},
+            )
+
+            embed = discord.Embed(
+                title="✅ Skills Updated",
+                description=f"Skills for **{contact_name}** have been updated.",
+                color=0x00FF00,
+            )
+            updated_lines: list[str] = []
+            for skill, strength in sorted(
+                merged.items(), key=lambda item: (-item[1], item[0].casefold())
+            ):
+                marker = " *" if skill in new_skills else ""
+                updated_lines.append(f"- `{skill}` ({strength}/5){marker}")
+            if len(updated_lines) > 25:
+                updated_lines = updated_lines[:25]
+                updated_lines.append(f"...and {len(merged) - 25} more.")
+            skills_value = "\n".join(updated_lines)
+            if len(skills_value) > 1024:
+                skills_value = skills_value[:1021] + "..."
+            embed.add_field(
+                name="Skills", value=skills_value, inline=False
+            )
+            embed.add_field(
+                name="🔗 CRM Profile",
+                value=f"[View in CRM]({self.base_url}/#Contact/view/{contact_id})",
+                inline=False,
+            )
+
+            await interaction.followup.send(embed=embed)
+            self._audit_command(
+                interaction=interaction,
+                action="crm.update_skills",
+                result="success",
+                metadata={
+                    "search_term": query or None,
+                    "target_scope": target_scope,
+                    "skills_updated": list(new_skills.keys()),
+                    "skills_count": len(merged),
+                },
+                resource_type="crm_contact",
+                resource_id=contact_id,
+            )
+        except EspoAPIError as e:
+            logger.error(f"EspoCRM API error in update_skills: {e}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.update_skills",
+                result="error",
+                metadata={"search_term": search_term, "error": str(e)},
+            )
+            await interaction.followup.send(f"❌ CRM API error: {str(e)}")
+        except Exception as e:
+            logger.error(f"Unexpected error in update_skills: {e}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.update_skills",
+                result="error",
+                metadata={"search_term": search_term, "error": str(e)},
+            )
+            await interaction.followup.send(
+                "❌ An unexpected error occurred while updating skills."
             )
 
     @app_commands.command(

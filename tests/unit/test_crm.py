@@ -2,6 +2,8 @@
 Unit tests for CRM cog functionality.
 """
 
+import json
+
 import pytest
 from unittest.mock import Mock, AsyncMock, patch
 import discord
@@ -1523,6 +1525,283 @@ class TestCRMCog:
 
         assert has_duplicate is False
         assert resume_id is None
+
+    # ------------------------------------------------------------------
+    # /update-skills tests
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_search_contacts_for_mutation_returns_all_name_matches(
+        self, crm_cog
+    ):
+        """Name search always returns multiple results instead of auto-selecting."""
+        crm_cog.espo_api.request.return_value = {
+            "list": [
+                {"id": "c1", "name": "John Doe"},
+                {"id": "c2", "name": "John Smith"},
+            ]
+        }
+
+        contacts = await crm_cog._search_contacts_for_mutation("John Doe")
+
+        assert len(contacts) == 2
+        # Verify maxSize=10 was used (not 1)
+        call_args = crm_cog.espo_api.request.call_args
+        assert call_args[0][2]["maxSize"] == 10
+
+    def test_update_skills_parses_valid_input(self, crm_cog):
+        """Valid comma-separated skill:strength pairs are parsed correctly."""
+        result = crm_cog._parse_skills_input("python:5, react:4, go:3")
+        assert result == {"python": 5, "react": 4, "go": 3}
+
+    def test_update_skills_rejects_invalid_strength(self, crm_cog):
+        """Strength outside 1-5 raises ValueError."""
+        with pytest.raises(ValueError, match="out of range"):
+            crm_cog._parse_skills_input("python:6")
+        with pytest.raises(ValueError, match="out of range"):
+            crm_cog._parse_skills_input("python:0")
+
+    def test_update_skills_rejects_malformed_input(self, crm_cog):
+        """Missing colon or empty skill raises ValueError."""
+        with pytest.raises(ValueError, match=r"expected `skill:strength`"):
+            crm_cog._parse_skills_input("python")
+        with pytest.raises(ValueError, match="Empty skill name"):
+            crm_cog._parse_skills_input(":5")
+
+    def test_update_skills_normalizes_skill_names(self, crm_cog):
+        """Skill aliases and punctuation are normalized."""
+        result = crm_cog._parse_skills_input("Node.JS:4, js:5")
+        assert "node" in result
+        assert "javascript" in result
+
+    @pytest.mark.asyncio
+    async def test_update_skills_self_success(
+        self, crm_cog, mock_interaction, mock_member_role
+    ):
+        """No search_term updates the invoker's own skills."""
+        mock_interaction.user.roles = [mock_member_role]
+        mock_interaction.user.id = 123456789
+
+        crm_cog.espo_api.request.side_effect = [
+            # _find_contact_by_discord_id
+            {"list": [{"id": "c1", "name": "Jane Doe"}]},
+            # GET full contact
+            {"id": "c1", "name": "Jane Doe", "cSkillAttrs": '{"sql":{"strength":3}}'},
+            # PUT update
+            {"id": "c1"},
+        ]
+
+        await crm_cog.update_skills.callback(
+            crm_cog, mock_interaction, "python:5, react:4", None
+        )
+
+        # Verify PUT was called with merged skills
+        put_call = crm_cog.espo_api.request.call_args_list[2]
+        assert put_call[0][0] == "PUT"
+        assert put_call[0][1] == "Contact/c1"
+        written_attrs = json.loads(put_call[0][2]["cSkillAttrs"])
+        assert written_attrs["python"]["strength"] == 5
+        assert written_attrs["react"]["strength"] == 4
+        assert written_attrs["sql"]["strength"] == 3  # preserved
+
+        mock_interaction.followup.send.assert_called_once()
+        embed = mock_interaction.followup.send.call_args[1]["embed"]
+        assert embed.title == "✅ Skills Updated"
+        skills_field = embed.fields[0].value
+        assert "`python` (5/5) *" in skills_field
+        assert "`react` (4/5) *" in skills_field
+        assert "`sql` (3/5)" in skills_field
+        assert "`sql` (3/5) *" not in skills_field  # existing skill has no marker
+
+    @pytest.mark.asyncio
+    async def test_update_skills_self_not_linked(
+        self, crm_cog, mock_interaction, mock_member_role
+    ):
+        """Discord account not linked returns error message."""
+        mock_interaction.user.roles = [mock_member_role]
+        mock_interaction.user.id = 999
+
+        crm_cog.espo_api.request.return_value = {"list": []}
+
+        await crm_cog.update_skills.callback(
+            crm_cog, mock_interaction, "python:5", None
+        )
+
+        msg = mock_interaction.followup.send.call_args[0][0]
+        assert "not linked" in msg
+
+    @pytest.mark.asyncio
+    async def test_update_skills_other_requires_steering_committee(
+        self, crm_cog, mock_interaction, mock_member_role
+    ):
+        """Member role cannot update another user's skills."""
+        mock_interaction.user.roles = [mock_member_role]
+
+        await crm_cog.update_skills.callback(
+            crm_cog, mock_interaction, "python:5", "john@508.dev"
+        )
+
+        crm_cog.espo_api.request.assert_not_called()
+        msg = mock_interaction.followup.send.call_args[0][0]
+        assert "Steering Committee role or higher" in msg
+
+    @pytest.mark.asyncio
+    async def test_update_skills_other_with_permission(
+        self, crm_cog, mock_interaction
+    ):
+        """Steering Committee+ can update another user's skills."""
+        sc_role = Mock()
+        sc_role.name = "Steering Committee"
+        mock_interaction.user.roles = [sc_role]
+
+        crm_cog.espo_api.request.side_effect = [
+            # _search_contact_for_linking
+            {
+                "list": [
+                    {
+                        "id": "c2",
+                        "name": "John Doe",
+                        "emailAddress": "john@508.dev",
+                    }
+                ]
+            },
+            # GET full contact
+            {"id": "c2", "name": "John Doe", "cSkillAttrs": None},
+            # PUT update
+            {"id": "c2"},
+        ]
+
+        await crm_cog.update_skills.callback(
+            crm_cog, mock_interaction, "go:3", "john@508.dev"
+        )
+
+        assert crm_cog.espo_api.request.call_count == 3
+        embed = mock_interaction.followup.send.call_args[1]["embed"]
+        assert embed.title == "✅ Skills Updated"
+        assert "`go` (3/5) *" in embed.fields[0].value
+
+    @pytest.mark.asyncio
+    async def test_update_skills_other_not_found(
+        self, crm_cog, mock_interaction
+    ):
+        """Search returning no contacts shows error."""
+        sc_role = Mock()
+        sc_role.name = "Steering Committee"
+        mock_interaction.user.roles = [sc_role]
+
+        crm_cog.espo_api.request.return_value = {"list": []}
+
+        await crm_cog.update_skills.callback(
+            crm_cog, mock_interaction, "python:5", "nobody@508.dev"
+        )
+
+        msg = mock_interaction.followup.send.call_args[0][0]
+        assert "No contact found" in msg
+
+    @pytest.mark.asyncio
+    async def test_update_skills_other_multiple_contacts(
+        self, crm_cog, mock_interaction
+    ):
+        """Multiple contacts found shows refinement message."""
+        sc_role = Mock()
+        sc_role.name = "Steering Committee"
+        mock_interaction.user.roles = [sc_role]
+
+        crm_cog.espo_api.request.return_value = {
+            "list": [
+                {"id": "c1", "name": "John A"},
+                {"id": "c2", "name": "John B"},
+            ]
+        }
+
+        await crm_cog.update_skills.callback(
+            crm_cog, mock_interaction, "python:5", "john"
+        )
+
+        msg = mock_interaction.followup.send.call_args[0][0]
+        assert "Multiple contacts found" in msg
+
+    @pytest.mark.asyncio
+    async def test_update_skills_merges_with_existing(
+        self, crm_cog, mock_interaction, mock_member_role
+    ):
+        """Existing skills are preserved, overlapping updated, new added."""
+        mock_interaction.user.roles = [mock_member_role]
+        mock_interaction.user.id = 111
+
+        crm_cog.espo_api.request.side_effect = [
+            {"list": [{"id": "c1", "name": "Alice"}]},
+            {
+                "id": "c1",
+                "name": "Alice",
+                "cSkillAttrs": '{"python":{"strength":2},"sql":{"strength":4}}',
+            },
+            {"id": "c1"},
+        ]
+
+        await crm_cog.update_skills.callback(
+            crm_cog, mock_interaction, "python:5, react:3", None
+        )
+
+        put_call = crm_cog.espo_api.request.call_args_list[2]
+        written = json.loads(put_call[0][2]["cSkillAttrs"])
+        assert written["python"]["strength"] == 5   # updated
+        assert written["sql"]["strength"] == 4       # preserved
+        assert written["react"]["strength"] == 3     # added
+
+    @pytest.mark.asyncio
+    async def test_update_skills_empty_existing_attrs(
+        self, crm_cog, mock_interaction, mock_member_role
+    ):
+        """Works when contact has no prior cSkillAttrs."""
+        mock_interaction.user.roles = [mock_member_role]
+        mock_interaction.user.id = 222
+
+        crm_cog.espo_api.request.side_effect = [
+            {"list": [{"id": "c1", "name": "Bob"}]},
+            {"id": "c1", "name": "Bob", "cSkillAttrs": None},
+            {"id": "c1"},
+        ]
+
+        await crm_cog.update_skills.callback(
+            crm_cog, mock_interaction, "go:4", None
+        )
+
+        put_call = crm_cog.espo_api.request.call_args_list[2]
+        written = json.loads(put_call[0][2]["cSkillAttrs"])
+        assert written == {"go": {"strength": 4}}
+
+    @pytest.mark.asyncio
+    async def test_update_skills_api_error(
+        self, crm_cog, mock_interaction, mock_member_role
+    ):
+        """EspoAPIError is handled gracefully."""
+        mock_interaction.user.roles = [mock_member_role]
+        mock_interaction.user.id = 333
+
+        crm_cog.espo_api.request.side_effect = EspoAPIError("Connection failed")
+
+        await crm_cog.update_skills.callback(
+            crm_cog, mock_interaction, "python:5", None
+        )
+
+        msg = mock_interaction.followup.send.call_args[0][0]
+        assert "CRM API error" in msg
+
+    @pytest.mark.asyncio
+    async def test_update_skills_invalid_input_returns_error(
+        self, crm_cog, mock_interaction, mock_member_role
+    ):
+        """Malformed skills input returns user-friendly error."""
+        mock_interaction.user.roles = [mock_member_role]
+
+        await crm_cog.update_skills.callback(
+            crm_cog, mock_interaction, "python", None
+        )
+
+        crm_cog.espo_api.request.assert_not_called()
+        msg = mock_interaction.followup.send.call_args[0][0]
+        assert "expected `skill:strength`" in msg
 
 
 class TestResumeButtonView:
