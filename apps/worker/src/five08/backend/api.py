@@ -58,12 +58,17 @@ from five08.worker.jobs import (
     apply_resume_profile_job,
     extract_resume_profile_job,
     process_contact_skills_job,
+    process_intake_form_job,
     process_webhook_event,
     sync_people_from_crm_job,
     sync_person_from_crm_job,
 )
 from five08.worker.mailbox_resume_ingest import ResumeMailboxProcessor
-from five08.worker.models import AuditEventPayload, EspoCRMWebhookPayload
+from five08.worker.models import (
+    AuditEventPayload,
+    EspoCRMWebhookPayload,
+    GoogleFormsIntakePayload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -680,6 +685,61 @@ async def espocrm_people_sync_webhook_handler(request: Request) -> JSONResponse:
     )
 
 
+async def google_forms_intake_webhook_handler(request: Request) -> JSONResponse:
+    """Validate a Google Forms intake submission and enqueue a processing job."""
+    if not _is_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    try:
+        payload_data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+
+    try:
+        payload = GoogleFormsIntakePayload.model_validate(payload_data)
+    except (ValidationError, TypeError) as exc:
+        return JSONResponse(
+            {"error": "invalid_payload", "detail": str(exc)},
+            status_code=400,
+        )
+
+    queue = request.app.state.queue
+    idempotency_key = f"intake:{payload.email}:{payload.submission_id or ''}"
+    try:
+        job = await asyncio.to_thread(
+            enqueue_job,
+            queue=queue,
+            fn=process_intake_form_job,
+            args=(
+                payload.email,
+                payload.first_name,
+                payload.last_name,
+                payload.phone,
+                payload.discord_username,
+                payload.linkedin_url,
+                payload.github_username,
+                payload.submitted_at,
+            ),
+            settings=settings,
+            idempotency_key=idempotency_key,
+        )
+    except Exception:
+        logger.exception(
+            "Failed enqueueing intake form job email=%s", payload.email
+        )
+        return JSONResponse({"error": "enqueue_failed"}, status_code=503)
+
+    return JSONResponse(
+        {
+            "status": "queued",
+            "source": "google_forms",
+            "job_id": job.id,
+            "email": payload.email,
+        },
+        status_code=202,
+    )
+
+
 async def audit_event_handler(request: Request) -> JSONResponse:
     """Persist one human audit event."""
     if not _is_authorized(request):
@@ -1226,6 +1286,11 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
     app.add_api_route(
         "/webhooks/espocrm/people-sync",
         espocrm_people_sync_webhook_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/webhooks/google-forms",
+        google_forms_intake_webhook_handler,
         methods=["POST"],
     )
     app.add_api_route("/webhooks/{source}", ingest_handler, methods=["POST"])

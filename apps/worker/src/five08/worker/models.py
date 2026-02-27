@@ -118,6 +118,20 @@ class ResumeApplyResult(BaseModel):
     error: str | None = None
 
 
+class GoogleFormsIntakePayload(BaseModel):
+    """Google Forms member intake webhook payload (sent via Apps Script)."""
+
+    email: str
+    first_name: str
+    last_name: str
+    phone: str | None = None
+    discord_username: str | None = None
+    linkedin_url: str | None = None
+    github_username: str | None = None
+    submission_id: str | None = None
+    submitted_at: str | None = None
+
+
 class AuditEventPayload(BaseModel):
     """Inbound payload for creating a human audit event."""
 
