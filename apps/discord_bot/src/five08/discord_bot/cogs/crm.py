@@ -3389,8 +3389,11 @@ class CRMCog(commands.Cog):
             if len(updated_lines) > 25:
                 updated_lines = updated_lines[:25]
                 updated_lines.append(f"...and {len(merged) - 25} more.")
+            skills_value = "\n".join(updated_lines)
+            if len(skills_value) > 1024:
+                skills_value = skills_value[:1021] + "..."
             embed.add_field(
-                name="Skills", value="\n".join(updated_lines), inline=False
+                name="Skills", value=skills_value, inline=False
             )
             embed.add_field(
                 name="🔗 CRM Profile",
