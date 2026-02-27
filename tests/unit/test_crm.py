@@ -1607,6 +1607,11 @@ class TestCRMCog:
         mock_interaction.followup.send.assert_called_once()
         embed = mock_interaction.followup.send.call_args[1]["embed"]
         assert embed.title == "✅ Skills Updated"
+        skills_field = embed.fields[0].value
+        assert "`python` (5/5) *" in skills_field
+        assert "`react` (4/5) *" in skills_field
+        assert "`sql` (3/5)" in skills_field
+        assert "`sql` (3/5) *" not in skills_field  # existing skill has no marker
 
     @pytest.mark.asyncio
     async def test_update_skills_self_not_linked(
@@ -1673,7 +1678,7 @@ class TestCRMCog:
         assert crm_cog.espo_api.request.call_count == 3
         embed = mock_interaction.followup.send.call_args[1]["embed"]
         assert embed.title == "✅ Skills Updated"
-        assert "`go` (3/5)" in embed.fields[0].value
+        assert "`go` (3/5) *" in embed.fields[0].value
 
     @pytest.mark.asyncio
     async def test_update_skills_other_not_found(
