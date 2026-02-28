@@ -576,3 +576,208 @@ def test_auth_logout_writes_logout_audit(client: TestClient) -> None:
     assert audit_payload.action == "auth.logout"
     assert audit_payload.result == api.AuditResult.SUCCESS
     assert audit_payload.actor_subject == "admin@508.dev"
+
+
+# -- Docuseal webhook tests --------------------------------------------------
+
+_DOCUSEAL_PAYLOAD = {
+    "event_type": "form.completed",
+    "timestamp": "2026-02-25T12:00:00Z",
+    "data": {
+        "id": 42,
+        "submission_id": 4200,
+        "email": "member@508.dev",
+        "status": "completed",
+        "completed_at": "2026-02-25T12:00:00Z",
+        "name": "Jane Doe",
+        "template": {"id": 68},
+    },
+}
+
+
+def test_docuseal_webhook_rejects_unauthorized(client: TestClient) -> None:
+    """Docuseal webhook should reject requests without valid auth."""
+    response = client.post("/webhooks/docuseal", json=_DOCUSEAL_PAYLOAD)
+    assert response.status_code == 401
+    assert response.json()["error"] == "unauthorized"
+
+
+def test_docuseal_webhook_enqueues_agreement_job(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Valid form.completed payload should enqueue agreement job."""
+    with patch("five08.backend.api.enqueue_job") as mock_enqueue:
+        mock_enqueue.return_value = Mock(id="job-ds-1")
+        response = client.post(
+            "/webhooks/docuseal",
+            json=_DOCUSEAL_PAYLOAD,
+            headers=auth_headers,
+        )
+
+    payload = response.json()
+    assert response.status_code == 202
+    assert payload["status"] == "queued"
+    assert payload["source"] == "docuseal"
+    assert payload["job_id"] == "job-ds-1"
+    assert payload["email"] == "member@508.dev"
+    assert payload["submission_id"] == 42
+
+    call_kwargs = mock_enqueue.call_args.kwargs
+    assert call_kwargs["idempotency_key"] == "docuseal-agreement:42"
+
+
+def test_docuseal_webhook_rejects_invalid_payload(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Malformed payload should return 400."""
+    response = client.post(
+        "/webhooks/docuseal",
+        json={"bad": "data"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_payload"
+
+
+@pytest.mark.parametrize("email", ["", "  "])
+def test_docuseal_webhook_rejects_blank_email(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    email: str,
+) -> None:
+    """Blank submitter email should be rejected."""
+    payload = {
+        **_DOCUSEAL_PAYLOAD,
+        "data": {**_DOCUSEAL_PAYLOAD["data"], "email": email},
+    }
+    response = client.post(
+        "/webhooks/docuseal",
+        json=payload,
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_payload"
+
+
+@pytest.mark.parametrize("timestamp", ["", "   "])
+def test_docuseal_webhook_rejects_blank_timestamp(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    timestamp: str,
+) -> None:
+    """Blank submitter completion time should be rejected."""
+    payload = {
+        **_DOCUSEAL_PAYLOAD,
+        "timestamp": timestamp,
+        "data": {**_DOCUSEAL_PAYLOAD["data"], "completed_at": ""},
+    }
+    response = client.post(
+        "/webhooks/docuseal",
+        json=payload,
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_payload"
+
+
+def test_docuseal_webhook_ignores_unmatched_template(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Webhooks for non-target templates should be ignored when template filter is set."""
+    monkeypatch.setattr(
+        api.settings,
+        "docuseal_member_agreement_template_id",
+        100,
+    )
+    payload = {
+        **_DOCUSEAL_PAYLOAD,
+        "data": {
+            **_DOCUSEAL_PAYLOAD["data"],
+            "template": {"id": 101},
+        },
+    }
+    response = client.post(
+        "/webhooks/docuseal",
+        json=payload,
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ignored"
+    assert response.json()["reason"] == "template_mismatch"
+
+
+def test_docuseal_webhook_processes_matching_template(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Matching template webhooks should still enqueue agreement jobs."""
+    monkeypatch.setattr(
+        api.settings,
+        "docuseal_member_agreement_template_id",
+        68,
+    )
+    with patch("five08.backend.api.enqueue_job") as mock_enqueue:
+        mock_enqueue.return_value = Mock(id="job-ds-2")
+        response = client.post(
+            "/webhooks/docuseal",
+            json=_DOCUSEAL_PAYLOAD,
+            headers=auth_headers,
+        )
+
+    payload = response.json()
+    assert response.status_code == 202
+    assert payload["status"] == "queued"
+    assert payload["source"] == "docuseal"
+    assert payload["job_id"] == "job-ds-2"
+    assert payload["email"] == "member@508.dev"
+    assert payload["submission_id"] == 42
+
+
+def test_docuseal_webhook_ignores_non_completed_event(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Non form.completed events should be acknowledged but ignored."""
+    payload = {
+        "event_type": "form.viewed",
+        "timestamp": "2026-02-25T12:00:00Z",
+        "data": {
+            "id": 42,
+            "email": "member@508.dev",
+            "status": "pending",
+        },
+    }
+    response = client.post(
+        "/webhooks/docuseal",
+        json=payload,
+        headers=auth_headers,
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "ignored"
+
+
+def test_docuseal_webhook_returns_503_on_enqueue_failure(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Enqueue failure should return 503."""
+    with patch(
+        "five08.backend.api.enqueue_job",
+        side_effect=RuntimeError("queue down"),
+    ):
+        response = client.post(
+            "/webhooks/docuseal",
+            json=_DOCUSEAL_PAYLOAD,
+            headers=auth_headers,
+        )
+
+    assert response.status_code == 503
+    assert response.json()["error"] == "enqueue_failed"

@@ -25,6 +25,7 @@ from five08.worker.jobs import (
     apply_resume_profile_job,
     extract_resume_profile_job,
     process_contact_skills_job,
+    process_docuseal_agreement_job,
     process_webhook_event,
     sync_people_from_crm_job,
     sync_person_from_crm_job,
@@ -48,6 +49,7 @@ _HANDLERS: dict[str, Any] = {
     apply_resume_profile_job.__name__: apply_resume_profile_job,
     sync_people_from_crm_job.__name__: sync_people_from_crm_job,
     sync_person_from_crm_job.__name__: sync_person_from_crm_job,
+    process_docuseal_agreement_job.__name__: process_docuseal_agreement_job,
 }
 
 
