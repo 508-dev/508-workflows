@@ -741,6 +741,35 @@ def test_docuseal_webhook_processes_matching_template(
     assert payload["submission_id"] == 42
 
 
+def test_docuseal_webhook_processes_without_template_filter(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When no template filter is configured, template-less payloads still enqueue."""
+    monkeypatch.setattr(api.settings, "docuseal_member_agreement_template_id", None)
+    payload = {
+        **_DOCUSEAL_PAYLOAD,
+        "data": {
+            **_DOCUSEAL_PAYLOAD["data"],
+            "template": None,
+        },
+    }
+    with patch("five08.backend.api.enqueue_job") as mock_enqueue:
+        mock_enqueue.return_value = Mock(id="job-ds-3")
+        response = client.post(
+            "/webhooks/docuseal",
+            json=payload,
+            headers=auth_headers,
+        )
+
+    payload = response.json()
+    assert response.status_code == 202
+    assert payload["status"] == "queued"
+    assert payload["source"] == "docuseal"
+    assert payload["job_id"] == "job-ds-3"
+
+
 def test_docuseal_webhook_ignores_non_completed_event(
     client: TestClient,
     auth_headers: dict[str, str],
