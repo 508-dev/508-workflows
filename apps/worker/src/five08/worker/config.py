@@ -2,7 +2,7 @@
 
 from urllib.parse import urlparse
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 
 from five08.settings import SharedSettings
 
@@ -23,6 +23,7 @@ class WorkerSettings(SharedSettings):
     openai_model: str = "gpt-4o-mini"
     resume_ai_model: str = "gpt-4o-mini"
     resume_extractor_version: str = "v1"
+    docuseal_member_agreement_template_id: int | None = None
 
     max_file_size_mb: int = 10
     allowed_file_types: str = "pdf,doc,docx,txt"
@@ -90,6 +91,23 @@ class WorkerSettings(SharedSettings):
             raise ValueError("AUTH_COOKIE_SAMESITE must be one of: lax, strict, none")
         self.auth_cookie_samesite = normalized
         return self
+
+    @field_validator("docuseal_member_agreement_template_id", mode="before")
+    @classmethod
+    def _normalize_docuseal_member_agreement_template_id(
+        cls,
+        value: object,
+    ) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip()
+            if not normalized:
+                return None
+            return int(normalized)
+        raise TypeError("DOCUSEAL_MEMBER_AGREEMENT_TEMPLATE_ID must be an integer")
 
     @property
     def allowed_file_extensions(self) -> set[str]:
