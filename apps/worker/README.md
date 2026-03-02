@@ -31,6 +31,7 @@ Usage:
 uv run --package integrations-worker jobsctl --help
 uv run --package integrations-worker jobsctl status <job_id>
 uv run --package integrations-worker jobsctl rerun <job_id>
+uv run --package integrations-worker jobsctl recent --minutes 60
 ```
 
 Examples:
@@ -41,6 +42,8 @@ uv run --package integrations-worker jobsctl status job-123
 
 ```bash
 uv run --package integrations-worker jobsctl rerun job-123
+uv run --package integrations-worker jobsctl recent --minutes 60
+uv run --package integrations-worker jobsctl recent --minutes 120 --limit 20
 ```
 
 If needed, pass overrides explicitly:
@@ -72,6 +75,7 @@ curl -X POST "http://localhost:8090/jobs/<job_id>/rerun" \
 
 - `GET /health`: Redis/Postgres/worker health check.
 - `GET /jobs/{job_id}`: Fetch queued job status/result payload.
+- `GET /jobs?minutes=<n>&limit=<n>`: Fetch recent job metadata for jobs created in the last `<minutes>`.
 - `POST /jobs/{job_id}/rerun`: Enqueue a duplicate rerun of an existing job id.
 - `POST /jobs/resume-extract`: Enqueue resume profile extraction.
 - `POST /jobs/resume-apply`: Enqueue confirmed CRM field apply.
@@ -124,6 +128,38 @@ Example success response (`202`):
   "type": "process_docuseal_agreement_job",
   "created": true
 }
+```
+
+### `GET /jobs?minutes=<minutes>&limit=<limit>`
+
+Return recent jobs created in a rolling time window.
+
+- Query params:
+  - `minutes` (integer, default: `60`, minimum: `1`): look back window size.
+  - `limit` (integer, default: `100`, minimum: `1`, maximum: `1000`): number of rows to return.
+
+Example:
+
+```bash
+curl -X GET "http://localhost:8090/jobs?minutes=120&limit=50" \
+  -H "X-API-Secret: $API_SHARED_SECRET"
+```
+
+Example response:
+
+```json
+[
+  {
+    "job_id": "job-123",
+    "type": "process_webhook_event_job",
+    "status": "succeeded",
+    "attempts": 1,
+    "max_attempts": 8,
+    "last_error": null,
+    "created_at": "2026-02-26T12:00:00+00:00",
+    "updated_at": "2026-02-26T12:00:00+00:00"
+  }
+]
 ```
 
 ### `POST /jobs/resume-extract`

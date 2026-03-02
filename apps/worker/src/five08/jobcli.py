@@ -25,6 +25,18 @@ def _default_api_secret() -> str | None:
     return os.getenv(API_SECRET_ENV_VAR)
 
 
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("value must be an integer") from exc
+
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be greater than 0")
+
+    return parsed
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Construct top-level CLI parser for job operations."""
     parser = argparse.ArgumentParser(
@@ -58,6 +70,24 @@ def _build_parser() -> argparse.ArgumentParser:
     rerun_parser.add_argument("job_id", help="Existing job id to duplicate.")
     rerun_parser.set_defaults(handler=_handle_rerun)
 
+    recent_parser = subparsers.add_parser(
+        "recent",
+        help="List recently created jobs.",
+    )
+    recent_parser.add_argument(
+        "--minutes",
+        default=60,
+        type=_positive_int,
+        help="How far back to query in minutes (default: 60).",
+    )
+    recent_parser.add_argument(
+        "--limit",
+        default=100,
+        type=_positive_int,
+        help="Maximum number of jobs to return (default: 100).",
+    )
+    recent_parser.set_defaults(handler=_handle_recent)
+
     return parser
 
 
@@ -69,7 +99,7 @@ def _build_headers(secret: str | None) -> dict[str, str]:
     return {"X-API-Secret": secret}
 
 
-def _parse_response(response: httpx.Response) -> dict[str, Any]:
+def _parse_response(response: httpx.Response) -> Any:
     """Parse response JSON payload or raise a clear HTTP error."""
     try:
         payload = response.json()
@@ -94,7 +124,8 @@ def _request_json(
     path: str,
     secret: str | None,
     payload: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+    params: dict[str, Any] | None = None,
+) -> Any:
     """Execute a JSON request against the backend API."""
     headers = _build_headers(secret)
     url = f"{api_url.rstrip('/')}/{path.lstrip('/')}"
@@ -105,6 +136,7 @@ def _request_json(
                 url=url,
                 headers=headers,
                 json=payload,
+                params=params,
                 timeout=DEFAULT_TIMEOUT_SECONDS,
             )
         except httpx.RequestError as exc:
@@ -115,11 +147,30 @@ def _request_json(
                 method=method,
                 url=url,
                 headers=headers,
+                params=params,
                 timeout=DEFAULT_TIMEOUT_SECONDS,
             )
         except httpx.RequestError as exc:
             raise RuntimeError(f"Failed to contact API: {exc}") from exc
     return _parse_response(response)
+
+
+def _handle_recent(args: argparse.Namespace) -> int:
+    """Handle jobsctl recent."""
+    try:
+        payload = _request_json(
+            method="GET",
+            api_url=args.api_url,
+            path="/jobs",
+            secret=args.secret,
+            params={"minutes": args.minutes, "limit": args.limit},
+        )
+    except Exception as exc:  # broad catch keeps UX predictable
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
 
 
 def _handle_status(args: argparse.Namespace) -> int:

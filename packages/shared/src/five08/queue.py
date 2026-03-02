@@ -203,6 +203,29 @@ def get_job(settings: SharedSettings, job_id: str) -> JobRecord | None:
             return _as_record(row)
 
 
+def list_jobs(
+    settings: SharedSettings,
+    *,
+    created_after: datetime,
+    limit: int,
+) -> list[JobRecord]:
+    """Load recent jobs created after the given UTC datetime."""
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                SELECT *
+                FROM jobs
+                WHERE created_at >= %s
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                (created_after, limit),
+            )
+            rows = cursor.fetchall()
+            return [_as_record(row) for row in rows]
+
+
 def _mark_job(
     settings: SharedSettings,
     job_id: str,
