@@ -23,7 +23,7 @@ This document captures Discord bot behavior, permissions, and slash command usag
   - Prerequisites: `MIGADU_API_USER` and `MIGADU_API_KEY` must be configured (configured in env; command will fail if missing).
   - Required role: Admin
   - Args:
-    - `backup_email` (required): Backup email (e.g. `alice`, `alice@`, `alice@gmail.com`, `alice@508.dev`).
+    - `backup_email` (required): Full backup email (e.g. `alice@gmail.com`; `@508.dev` emails are not accepted).
 
 - `/mark-id-verified`
   - Description: Mark a contact as ID verified.

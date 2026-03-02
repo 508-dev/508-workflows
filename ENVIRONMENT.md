@@ -126,6 +126,11 @@ Use `.env.example` as the source of defaults.
 - `Optional`: `HEALTHCHECK_PORT` (default: `3000`)
 - `Optional`: `DISCORD_SENDMSG_CHARACTER_LIMIT` (default: `2000`)
 
+## Migadu Mailbox Automation
+
+- `Required for /create-mailbox`: `MIGADU_API_USER`, `MIGADU_API_KEY`
+- `Optional`: `MIGADU_MAILBOX_DOMAIN` (default: `508.dev`)
+
 ## Discord CRM Audit Logging (Best Effort)
 
 - `Optional`: `AUDIT_API_BASE_URL` (when set with `API_SHARED_SECRET`, CRM commands emit best-effort audit events)

@@ -1065,45 +1065,25 @@ class CRMCog(commands.Cog):
             - mailbox_email: the generated 508 mailbox address to create
             - local_part: mailbox local-part for Migadu API
         """
-        normalized = backup_email.strip().lower().lstrip("@")
+        normalized = backup_email.strip().lower()
         if not normalized:
-            raise ValueError("Please provide a backup email or 508 username.")
+            raise ValueError("Please provide a full backup email address.")
         if " " in normalized:
             raise ValueError("Backup email cannot include spaces.")
+        if normalized.count("@") != 1:
+            raise ValueError("Backup email must be a full email address.")
 
         domain = self._migadu_mailbox_domain()
-
-        if "@" not in normalized:
-            local_part = normalized
-            return (
-                f"{local_part}@{domain}",
-                f"{local_part}@{domain}",
-                local_part,
-            )
-
-        if normalized.endswith("@"):
-            local_part = normalized[:-1].strip()
-            if not local_part:
-                raise ValueError("Backup email is missing a local part.")
-            return (
-                f"{local_part}@{domain}",
-                f"{local_part}@{domain}",
-                local_part,
-            )
-
-        if normalized.count("@") != 1:
-            raise ValueError("Backup email must be in a valid email format.")
-
         local_part, provided_domain = normalized.split("@", 1)
         if not local_part:
             raise ValueError("Backup email is missing a local part.")
         if not provided_domain:
             raise ValueError("Backup email is missing a domain.")
+        if provided_domain in {"508", "508.dev"}:
+            raise ValueError("Backup email cannot be an @508.dev email.")
 
         normalized_domain = provided_domain.strip().lower()
         mailbox_email = f"{local_part}@{domain}"
-        if normalized_domain in {"508", "508.dev"}:
-            return mailbox_email, mailbox_email, local_part
         return f"{local_part}@{normalized_domain}", mailbox_email, local_part
 
     def _backend_url(self, path: str) -> str:
@@ -1887,8 +1867,8 @@ class CRMCog(commands.Cog):
     )
     @app_commands.describe(
         backup_email=(
-            "Backup email for the contact (e.g. john, john@, or john@gmail.com). "
-            "`@508.dev` is also accepted."
+            "Full backup email for the contact (e.g. john@gmail.com). "
+            "`@508.dev` is not allowed."
         )
     )
     @require_role("Admin")
