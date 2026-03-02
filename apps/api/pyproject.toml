@@ -1,23 +1,27 @@
 [project]
-name = "discord_bot"
+name = "api"
 version = "0.1.0"
-description = "Discord gateway service for 508.dev"
+description = "Webhook ingest and dashboard API for 508.dev"
 requires-python = ">=3.12"
 dependencies = [
-    "aiohttp>=3.13.1",
-    "discord.py~=2.6.0",
+    "fastapi>=0.116.1",
+    "httpx>=0.28.1",
+    "PyJWT[crypto]>=2.10.1",
+    "uvicorn>=0.35.0",
+    "psycopg[binary]>=3.2.5",
+    "redis>=6.4.0",
     "pydantic~=2.10",
     "pydantic-settings~=2.8",
-    "redis>=6.4.0",
-    "requests~=2.31",
     "five08",
+    "worker",
 ]
 
 [tool.uv.sources]
 five08 = { workspace = true }
+worker = { workspace = true }
 
 [project.scripts]
-discord-bot = "five08.discord_bot.main:run"
+backend-api = "five08.backend.api:run"
 
 [build-system]
 requires = ["hatchling"]

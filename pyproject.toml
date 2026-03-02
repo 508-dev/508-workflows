@@ -4,8 +4,9 @@ version = "0.1.0"
 description = "508.dev monorepo for Discord bot and job processing."
 requires-python = ">=3.12"
 dependencies = [
-    "discord-bot-app",
-    "integrations-worker",
+    "discord_bot",
+    "api",
+    "worker",
     "five08",
 ]
 
@@ -13,13 +14,15 @@ dependencies = [
 package = false
 
 [tool.uv.sources]
-discord-bot-app = { workspace = true }
-integrations-worker = { workspace = true }
+discord_bot = { workspace = true }
+api = { workspace = true }
+worker = { workspace = true }
 five08 = { workspace = true }
 
 [tool.uv.workspace]
 members = [
     "apps/discord_bot",
+    "apps/api",
     "apps/worker",
     "packages/shared",
 ]
@@ -68,6 +71,7 @@ namespace_packages = true
 explicit_package_bases = true
 mypy_path = [
     "apps/discord_bot/src",
+    "apps/api/src",
     "apps/worker/src",
     "packages/shared/src",
 ]

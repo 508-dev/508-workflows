@@ -11,8 +11,10 @@ This repository follows a service-oriented monorepo layout:
 ├── apps/
 │   ├── discord_bot/        # Discord gateway process
 │   │   └── src/five08/discord_bot/
-│   └── worker/             # Backend API + async queue worker
-│       └── src/five08/{backend,worker}/
+│   ├── api/                # Backend API + dashboard service
+│   │   └── src/five08/backend/
+│   └── worker/             # Async queue worker
+│       └── src/five08/worker/
 ├── packages/
 │   └── shared/
 │       └── src/five08/      # Shared settings, queue helpers, shared clients
@@ -33,7 +35,7 @@ This repository follows a service-oriented monorepo layout:
 Migrations:
 
 - `apps/worker/src/five08/worker/migrations` (Alembic)
-- `backend-api` runs `run_job_migrations()` during startup to keep DB schema current.
+- `api` runs `run_job_migrations()` during startup to keep DB schema current.
 
 ### Job model
 
@@ -46,7 +48,7 @@ Migrations:
 
 ### Backend API Endpoints
 
-See the worker service docs: [`apps/worker/README.md#backend-api-endpoints`](./apps/worker/README.md#backend-api-endpoints).
+See the API service docs: [`apps/api/README.md#backend-api-endpoints`](./apps/api/README.md#backend-api-endpoints).
 CLI request examples are documented at [`apps/worker/README.md#cli-usage`](./apps/worker/README.md#cli-usage).
 
 ## Local Development
@@ -70,18 +72,18 @@ Run directly with uv:
 
 ```bash
 # Discord bot
-uv run --package discord-bot-app discord-bot
+uv run --package discord_bot discord-bot
 
-# Worker ingest API
-uv run --package integrations-worker backend-api
+# API ingest service
+uv run --package api backend-api
 
 # Worker queue consumer
-uv run --package integrations-worker worker-consumer
+uv run --package worker worker-consumer
 
 # Jobs CLI
-uv run --package integrations-worker jobsctl --help
+uv run --package worker jobsctl --help
 # recent jobs (past hour by default):
-uv run --package integrations-worker jobsctl recent
+uv run --package worker jobsctl recent
 ```
 
 Or run the full stack with Docker Compose:
@@ -166,7 +168,7 @@ Use `.env.example` as the source of truth for defaults.
 
 ### Worker Consumer
 
-- `Optional`: `WORKER_NAME` (default: `integrations-worker`)
+- `Optional`: `WORKER_NAME` (default: `worker`)
 - `Optional`: `WORKER_QUEUE_NAMES` (default: `jobs.default`, comma-separated)
 - `Optional`: `WORKER_BURST` (default: `false`)
 

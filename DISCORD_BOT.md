@@ -5,7 +5,7 @@ This document captures Discord bot behavior, permissions, and slash command usag
 ## Overview
 
 - Bot package: `apps/discord_bot`
-- Main entrypoint: `discord-bot` (`uv run --package discord-bot-app discord-bot`)
+- Main entrypoint: `discord-bot` (`uv run --package discord_bot discord-bot`)
 - Core command cogs: `apps/discord_bot/src/five08/discord_bot/cogs/`
 - Bot settings: `apps/discord_bot/src/five08/discord_bot/config.py`
 
