@@ -235,6 +235,19 @@ Use `.env.example` as the source of truth for defaults.
 ./scripts/mypy.sh
 ```
 
+## Discord Slash Commands
+
+- `/mark-id-verified`
+  - **Arguments**
+    - `search_term` (required): Email, 508 username, or name.
+    - `verified_by` (required): Verifier 508 username or Discord mention.
+    - `id_type` (required): Type of ID used for verification (example values: `passport`, `driver's license`).
+    - `verified_at` (optional): Date verified (e.g. `YYYY-MM-DD`, `DD/MM/YYYY`, `March 5, 2026`), defaults to today.
+  - This command writes:
+    - `cIdVerifiedAt` from `verified_at`
+    - `cIdVerifiedBy` from `verified_by`
+    - `cVerifiedIdType` from `id_type`
+
 ## Deployment
 
 Deploy as a single Compose application.
