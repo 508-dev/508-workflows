@@ -326,6 +326,85 @@ class MarkIdVerifiedSelectionView(discord.ui.View):
         self.add_item(button)
 
 
+class MarkIdVerifiedOverwriteConfirmationView(discord.ui.View):
+    """View for confirming overwrite of existing ID verification values."""
+
+    def __init__(
+        self,
+        crm_cog: "CRMCog",
+        interaction: discord.Interaction,
+        contact: dict[str, Any],
+        verified_by: str,
+        verified_at: str,
+        id_type: str | None,
+    ) -> None:
+        super().__init__(timeout=300)  # 5 minute timeout
+        self.crm_cog = crm_cog
+        self.original_interaction = interaction
+        self.contact = contact
+        self.verified_by = verified_by
+        self.verified_at = verified_at
+        self.id_type = id_type
+        self.requester_id = interaction.user.id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Allow only the original requester to confirm/cancel."""
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "❌ Only the command requester can confirm this action.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Overwrite", style=discord.ButtonStyle.danger, emoji="⚠️")
+    async def confirm_overwrite(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button["MarkIdVerifiedOverwriteConfirmationView"],
+    ) -> None:
+        """Overwrite existing verification metadata and continue."""
+        await interaction.response.defer(ephemeral=True)
+        await self.crm_cog._mark_id_verified_for_contact(
+            interaction=interaction,
+            contact=self.contact,
+            verified_by=self.verified_by,
+            verified_at=self.verified_at,
+            id_type=self.id_type,
+            allow_overwrite=True,
+        )
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+
+        if interaction.message:
+            try:
+                await interaction.message.edit(view=self)
+            except discord.NotFound:
+                pass
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
+    async def cancel_overwrite(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button["MarkIdVerifiedOverwriteConfirmationView"],
+    ) -> None:
+        """Cancel overwrite and leave contact unchanged."""
+        await interaction.response.send_message(
+            "✅ ID verification overwrite cancelled. No changes were made.",
+            ephemeral=True,
+        )
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+
+        if interaction.message:
+            try:
+                await interaction.message.edit(view=self)
+            except discord.NotFound:
+                pass
+
+
 class ResumeConfirmationView(discord.ui.View):
     """View for confirming resume upload when duplicate is detected."""
 
@@ -2317,6 +2396,7 @@ class CRMCog(commands.Cog):
         verified_by: str,
         verified_at: str,
         id_type: str | None,
+        allow_overwrite: bool = False,
     ) -> bool:
         """Persist ID verification metadata to CRM."""
         contact_id = contact.get("id")
@@ -2334,6 +2414,87 @@ class CRMCog(commands.Cog):
                 },
             )
             await interaction.followup.send("❌ Contact ID not found.")
+            return False
+
+        try:
+            current_contact = self.espo_api.request("GET", f"Contact/{contact_id}")
+        except EspoAPIError as exc:
+            logger.error(
+                f"Failed to fetch contact before marking ID verification: {exc}"
+            )
+            self._audit_command(
+                interaction=interaction,
+                action="crm.mark_id_verified",
+                result="error",
+                metadata={
+                    "contact_id": str(contact_id),
+                    "verified_by": verified_by,
+                    "verified_at": verified_at,
+                    "error": "contact_lookup_failed",
+                },
+                resource_type="crm_contact",
+                resource_id=str(contact_id),
+            )
+            await interaction.followup.send(
+                "❌ Failed to load current verification data from CRM."
+            )
+            return False
+
+        existing_verified_by = str(
+            current_contact.get(ID_VERIFIED_BY_FIELD, "") or ""
+        ).strip()
+        existing_verified_at = str(
+            current_contact.get(ID_VERIFIED_AT_FIELD, "") or ""
+        ).strip()
+        normalized_verified_by = verified_by.strip()
+        normalized_verified_at = verified_at.strip()
+
+        verified_by_conflict = (
+            bool(existing_verified_by)
+            and existing_verified_by != normalized_verified_by
+        )
+        verified_at_conflict = (
+            bool(existing_verified_at)
+            and existing_verified_at != normalized_verified_at
+        )
+        needs_confirmation = verified_by_conflict or verified_at_conflict
+
+        if needs_confirmation and not allow_overwrite:
+            self._audit_command(
+                interaction=interaction,
+                action="crm.mark_id_verified",
+                result="denied",
+                metadata={
+                    "contact_id": str(contact_id),
+                    "contact_name": contact_name,
+                    "verified_by": verified_by,
+                    "verified_at": verified_at,
+                    "existing_verified_by": existing_verified_by,
+                    "existing_verified_at": existing_verified_at,
+                    "reason": "overwrite_confirmation_needed",
+                },
+                resource_type="crm_contact",
+                resource_id=str(contact_id),
+            )
+            confirm_view = MarkIdVerifiedOverwriteConfirmationView(
+                crm_cog=self,
+                interaction=interaction,
+                contact=current_contact,
+                verified_by=normalized_verified_by,
+                verified_at=normalized_verified_at,
+                id_type=id_type,
+            )
+            await interaction.followup.send(
+                (
+                    "⚠️ This contact is already ID verified.\n"
+                    f"- Current verifier: {existing_verified_by}\n"
+                    f"- Current date: {existing_verified_at}\n"
+                    f"- New verifier: {normalized_verified_by}\n"
+                    f"- New date: {normalized_verified_at}\n\n"
+                    "Select **Overwrite** only if you want to replace existing values."
+                ),
+                view=confirm_view,
+            )
             return False
 
         payload = {
