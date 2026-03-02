@@ -123,7 +123,7 @@ services:
     environment:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       REDIS_QUEUE_NAME: ${REDIS_QUEUE_NAME:-jobs.default}
-      WORKER_API_BASE_URL: ${WORKER_API_BASE_URL:-http://backend-api:8090}
+      WORKER_API_BASE_URL: ${WORKER_API_BASE_URL:-}
       WORKER_QUEUE_NAMES: ${WORKER_QUEUE_NAMES:-jobs.default}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
