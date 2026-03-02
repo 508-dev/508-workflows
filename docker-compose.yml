@@ -77,8 +77,8 @@ services:
   backend-api:
     build:
       context: .
-      dockerfile: apps/worker/Dockerfile
-    command: ["uv", "run", "--package", "integrations-worker", "backend-api"]
+      dockerfile: apps/api/Dockerfile
+    command: ["uv", "run", "--package", "api", "backend-api"]
     env_file:
       - .env
     environment:
@@ -113,7 +113,7 @@ services:
       context: .
       dockerfile: apps/worker/Dockerfile
     command: >-
-      uv run --package integrations-worker
+      uv run --package worker
       dramatiq five08.worker.actors
       --processes ${WORKER_PROCESSES:-1}
       --threads ${WORKER_THREADS:-8}

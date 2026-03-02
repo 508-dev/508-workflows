@@ -678,6 +678,36 @@ class ResumeUpdateConfirmationView(discord.ui.View):
                 link_discord_applied = raw_link_applied
 
         if status != "succeeded":
+            result_error = str(apply_result.get("last_error", ""))
+            result_success = None
+            if isinstance(result, dict):
+                result_success = result.get("success")
+
+            if result_success is False:
+                error_message = str(
+                    result.get("error") if isinstance(result, dict) else ""
+                )
+                if not error_message:
+                    error_message = result_error or "Unknown error"
+                _audit_apply_event(
+                    "error",
+                    {
+                        "contact_id": self.contact_id,
+                        "stage": "apply_failed",
+                        "job_id": apply_job_id,
+                        "job_status": status,
+                        "last_error": result_error,
+                        "apply_error": error_message,
+                        "updated_fields": updated_fields,
+                        "link_discord_applied": link_discord_applied,
+                    },
+                )
+                await interaction.followup.send(
+                    f"❌ Apply job failed (status: {status}). Error: {error_message}",
+                    ephemeral=True,
+                )
+                return
+
             _audit_apply_event(
                 "error",
                 {
@@ -693,6 +723,51 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             await interaction.followup.send(
                 f"❌ Apply job failed (status: {status}). "
                 f"Error: {apply_result.get('last_error') or 'Unknown error'}",
+                ephemeral=True,
+            )
+            return
+
+        if isinstance(result, dict) and result.get("success") is False:
+            error_message = str(result.get("error") or "")
+            if not error_message:
+                error_message = str(apply_result.get("last_error", "Unknown error"))
+            _audit_apply_event(
+                "error",
+                {
+                    "contact_id": self.contact_id,
+                    "stage": "apply_failed",
+                    "job_id": apply_job_id,
+                    "job_status": status,
+                    "updated_fields": updated_fields,
+                    "link_discord_applied": link_discord_applied,
+                },
+            )
+            await interaction.followup.send(
+                "❌ Apply completed but returned a failed result. "
+                f"Error: {error_message}",
+                ephemeral=True,
+            )
+            return
+
+        if (
+            isinstance(result, dict)
+            and result.get("success") is True
+            and not updated_fields
+        ):
+            _audit_apply_event(
+                "error",
+                {
+                    "contact_id": self.contact_id,
+                    "stage": "apply_no_updates",
+                    "job_id": apply_job_id,
+                    "job_status": status,
+                    "updated_fields": updated_fields,
+                    "link_discord_applied": link_discord_applied,
+                },
+            )
+            await interaction.followup.send(
+                "❌ Apply reported success but no fields were updated. "
+                "Please verify your permissions or contact field mapping and try again.",
                 ephemeral=True,
             )
             return
@@ -930,6 +1005,7 @@ class CRMCog(commands.Cog):
             shared_secret=settings.api_shared_secret,
             timeout_seconds=settings.audit_api_timeout_seconds,
             discord_logs_webhook_url=settings.discord_logs_webhook_url,
+            discord_logs_webhook_wait=settings.discord_logs_webhook_wait,
         )
 
     def _audit_command(

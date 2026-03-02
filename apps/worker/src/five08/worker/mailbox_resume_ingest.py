@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import email
 import imaplib
@@ -47,6 +48,15 @@ class ResumeMailboxResult:
     skipped_reason: str | None = None
 
 
+@dataclass(frozen=True)
+class MailboxMessagePayload:
+    """Raw mailbox message payload prepared for deferred processing."""
+
+    message_num: str
+    message_id: str | None
+    raw_message_b64: str
+
+
 class ResumeMailboxProcessor:
     """Poll mailbox and apply resume extraction updates to candidate contacts."""
 
@@ -69,7 +79,7 @@ class ResumeMailboxProcessor:
             return 0
 
         processed_total = 0
-        mail = imaplib.IMAP4_SSL(imap_server)
+        mail = imaplib.IMAP4_SSL(imap_server, timeout=self._imap_timeout)
         try:
             mail.login(email_username, email_password)
             mail.select("INBOX")
@@ -101,7 +111,8 @@ class ResumeMailboxProcessor:
                     )
 
                 processed_total += result.processed_attachments
-                mail.store(num, "+FLAGS", "\\Seen")
+                if result.processed_attachments > 0 or result.skipped_reason is None:
+                    mail.store(num, "+FLAGS", "\\Seen")
 
             return processed_total
         finally:
@@ -110,7 +121,80 @@ class ResumeMailboxProcessor:
             with contextlib.suppress(Exception):
                 mail.logout()
 
+    def poll_unprocessed_messages(self) -> list[MailboxMessagePayload]:
+        """Fetch unseen mailbox messages and return raw payloads for background workers."""
+        email_username = (self.settings.email_username or "").strip()
+        email_password = (self.settings.email_password or "").strip()
+        imap_server = (self.settings.imap_server or "").strip()
+
+        if not email_username or not email_password or not imap_server:
+            logger.warning(
+                "Skipping mailbox metadata poll because mailbox settings are incomplete"
+            )
+            return []
+
+        messages: list[MailboxMessagePayload] = []
+        mail = imaplib.IMAP4_SSL(imap_server, timeout=self._imap_timeout)
+        try:
+            mail.login(email_username, email_password)
+            mail.select("INBOX")
+            retcode, message_batches = mail.search(None, "(UNSEEN)")
+            if retcode != "OK" or not message_batches or not message_batches[0]:
+                logger.debug("Mailbox metadata poll complete, no unseen messages")
+                return []
+
+            for raw_num in message_batches[0].split():
+                num = raw_num.decode()
+                typ, data = mail.fetch(num, "(RFC822)")
+                if typ != "OK":
+                    logger.warning(
+                        "Skipping mailbox message %s due to fetch status=%s", num, typ
+                    )
+                    continue
+
+                raw_payload = self._extract_message_payload(data)
+                if not raw_payload:
+                    logger.warning(
+                        "Skipping mailbox message %s due to missing RFC822 payload",
+                        num,
+                    )
+                    continue
+
+                message = email.message_from_bytes(raw_payload)
+                message_id = str(message.get("Message-ID", "")).strip() or None
+                messages.append(
+                    MailboxMessagePayload(
+                        message_num=num,
+                        message_id=message_id,
+                        raw_message_b64=base64.b64encode(raw_payload).decode("ascii"),
+                    )
+                )
+
+            return messages
+        finally:
+            with contextlib.suppress(Exception):
+                mail.close()
+            with contextlib.suppress(Exception):
+                mail.logout()
+
     def _process_fetched_message(self, data: list[Any]) -> ResumeMailboxResult:
+        raw_payload = self._extract_message_payload(data)
+        if raw_payload is None:
+            return ResumeMailboxResult(
+                sender_email=None,
+                sender_name=None,
+                processed_attachments=0,
+                skipped_reason="message_payload_missing",
+            )
+
+        message = email.message_from_bytes(raw_payload)
+        return self.process_message(message)
+
+    @property
+    def _imap_timeout(self) -> float:
+        return max(1.0, float(self.settings.imap_timeout_seconds))
+
+    def _extract_message_payload(self, data: list[Any]) -> bytes | None:
         for response_part in data:
             if not isinstance(response_part, tuple):
                 continue
@@ -119,15 +203,9 @@ class ResumeMailboxProcessor:
             if not isinstance(raw_payload, (bytes, bytearray)):
                 continue
 
-            message = email.message_from_bytes(bytes(raw_payload))
-            return self.process_message(message)
+            return bytes(raw_payload)
 
-        return ResumeMailboxResult(
-            sender_email=None,
-            sender_name=None,
-            processed_attachments=0,
-            skipped_reason="message_payload_missing",
-        )
+        return None
 
     def process_message(self, message: Message) -> ResumeMailboxResult:
         """Process one email message and apply candidate CRM updates."""
@@ -269,9 +347,8 @@ class ResumeMailboxProcessor:
         return dmarc_pass or (dkim_pass and spf_pass)
 
     def _sender_is_authorized(self, sender_email: str) -> bool:
-        in_people_db = self._sender_has_privileged_role_in_people_db(sender_email)
-        if not in_people_db:
-            return False
+        if self._sender_has_privileged_role_in_people_db(sender_email):
+            return True
         return self._sender_has_privileged_role_in_crm(sender_email)
 
     def _sender_has_privileged_role_in_people_db(self, sender_email: str) -> bool:

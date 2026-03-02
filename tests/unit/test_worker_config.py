@@ -18,6 +18,43 @@ def test_email_intake_requires_mailbox_credentials() -> None:
         )
 
 
+def test_email_intake_requires_mailbox_username() -> None:
+    with pytest.raises(ValidationError, match="EMAIL_USERNAME must be set"):
+        WorkerSettings(
+            espo_base_url="https://crm.test.com",
+            espo_api_key="test-key",
+            email_resume_intake_enabled=True,
+            email_username=" ",
+            email_password="password",
+            imap_server="imap.test.com",
+        )
+
+
+def test_email_intake_requires_imap_server() -> None:
+    with pytest.raises(ValidationError, match="IMAP_SERVER must be set"):
+        WorkerSettings(
+            espo_base_url="https://crm.test.com",
+            espo_api_key="test-key",
+            email_resume_intake_enabled=True,
+            email_username="workflows@508.dev",
+            email_password="password",
+            imap_server=" ",
+        )
+
+
+def test_email_intake_disabled_bypasses_validation() -> None:
+    settings = WorkerSettings(
+        espo_base_url="https://crm.test.com",
+        espo_api_key="test-key",
+        email_resume_intake_enabled=False,
+        email_username=" ",
+        email_password=" ",
+        imap_server=" ",
+    )
+
+    assert settings.email_resume_intake_enabled is False
+
+
 def test_email_intake_validation_passes_with_required_fields() -> None:
     settings = WorkerSettings(
         espo_base_url="https://crm.test.com",

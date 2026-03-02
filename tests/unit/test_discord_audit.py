@@ -33,6 +33,46 @@ def test_audit_logger_disabled_without_config() -> None:
     assert logger.enabled is False
 
 
+def test_log_admin_sso_action_disabled_logger_does_not_queue() -> None:
+    logger = DiscordAuditLogger(base_url=None, shared_secret=None, timeout_seconds=1.0)
+
+    with patch.object(logger, "_queue_event") as mock_queue:
+        logger.log_admin_sso_action(
+            action="crm.resume_mailbox_ingest",
+            result="success",
+            actor_email="admin@example.com",
+            actor_display_name="Admin",
+            metadata={"processed_attachments": 1},
+            resource_type="mailbox_message",
+            resource_id="<msg-id>",
+            correlation_id="<msg-id>",
+        )
+
+    mock_queue.assert_not_called()
+
+
+def test_log_admin_sso_action_skips_blank_actor_email() -> None:
+    logger = DiscordAuditLogger(
+        base_url="http://backend-api:8090",
+        shared_secret="secret",
+        timeout_seconds=1.0,
+    )
+
+    with patch.object(logger, "_queue_event") as mock_queue:
+        logger.log_admin_sso_action(
+            action="crm.resume_mailbox_ingest",
+            result="success",
+            actor_email="   ",
+            actor_display_name="Admin",
+            metadata={"processed_attachments": 1},
+            resource_type="mailbox_message",
+            resource_id="<msg-id>",
+            correlation_id="<msg-id>",
+        )
+
+    mock_queue.assert_not_called()
+
+
 def test_send_event_sync_logs_warning_on_request_error() -> None:
     """Request exceptions should be logged as warnings and not raised."""
     logger = DiscordAuditLogger(

@@ -32,6 +32,7 @@ from five08.logging import configure_observability
 from five08.queue import (
     EnqueuedJob,
     QueueClient,
+    JobStatus,
     list_jobs,
     enqueue_job,
     get_job,
@@ -61,6 +62,7 @@ from five08.worker.jobs import (
     apply_resume_profile_job,
     extract_resume_profile_job,
     process_contact_skills_job,
+    process_mailbox_message_job,
     process_docuseal_agreement_job,
     process_webhook_event,
     sync_people_from_crm_job,
@@ -107,6 +109,7 @@ _JOB_FUNCTIONS: dict[str, Any] = {
     apply_resume_profile_job.__name__: apply_resume_profile_job,
     sync_people_from_crm_job.__name__: sync_people_from_crm_job,
     sync_person_from_crm_job.__name__: sync_person_from_crm_job,
+    process_mailbox_message_job.__name__: process_mailbox_message_job,
     process_docuseal_agreement_job.__name__: process_docuseal_agreement_job,
 }
 
@@ -201,13 +204,30 @@ async def _crm_sync_scheduler(app: FastAPI) -> None:
 async def _email_resume_scheduler() -> None:
     """Run periodic mailbox polling for resume ingestion."""
     poller = ResumeMailboxProcessor(settings)
+    queue = build_queue_client()
     interval_seconds = max(1, settings.check_email_wait) * 60
     while True:
         try:
-            processed_count = await asyncio.to_thread(poller.poll_inbox)
+            messages = await asyncio.to_thread(poller.poll_unprocessed_messages)
+            enqueued = 0
+            for message in messages:
+                idempotency_key = (
+                    message.message_id if message.message_id else message.message_num
+                )
+                job = await asyncio.to_thread(
+                    enqueue_job,
+                    queue=queue,
+                    fn=process_mailbox_message_job,
+                    args=(message.raw_message_b64,),
+                    settings=settings,
+                    idempotency_key=f"mailbox-inbox:{idempotency_key}",
+                )
+                if job.created:
+                    enqueued += 1
             logger.debug(
-                "Completed mailbox resume poll processed_attachments=%s",
-                processed_count,
+                "Completed mailbox resume poll discovered_messages=%s queued_jobs=%s",
+                len(messages),
+                enqueued,
             )
         except Exception:
             logger.exception("Failed mailbox resume poll iteration")
@@ -665,17 +685,31 @@ async def jobs_handler(
     request: Request,
     minutes: int = Query(default=60, ge=1),
     limit: int = Query(default=100, ge=1, le=1000),
+    status: str | None = Query(default=None),
+    job_type: str | None = Query(default=None, alias="type"),
 ) -> JSONResponse:
     """Return jobs created within the last N minutes."""
     if not _is_authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=minutes)
+    job_status: JobStatus | None = None
+    if status is not None:
+        try:
+            job_status = JobStatus(status)
+        except ValueError:
+            return JSONResponse(
+                {"error": "invalid_status", "status": status},
+                status_code=400,
+            )
+
     recent_jobs = await asyncio.to_thread(
         list_jobs,
         settings,
         created_after=cutoff,
         limit=limit,
+        status=job_status,
+        job_type=job_type,
     )
 
     payload = [

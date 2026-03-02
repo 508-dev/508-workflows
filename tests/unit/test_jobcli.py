@@ -131,6 +131,10 @@ def test_jobsctl_recent_calls_jobs_endpoint(
                 "90",
                 "--limit",
                 "25",
+                "--status",
+                "succeeded",
+                "--type",
+                "sync_people_from_crm_job",
             ]
         )
 
@@ -139,7 +143,12 @@ def test_jobsctl_recent_calls_jobs_endpoint(
     called = mock_request.call_args.kwargs
     assert called["method"] == "GET"
     assert called["url"] == "http://localhost:8090/jobs"
-    assert called["params"] == {"minutes": 90, "limit": 25}
+    assert called["params"] == {
+        "minutes": 90,
+        "limit": 25,
+        "status": "succeeded",
+        "type": "sync_people_from_crm_job",
+    }
     assert called["headers"] == {"X-API-Secret": "test-secret"}
 
 

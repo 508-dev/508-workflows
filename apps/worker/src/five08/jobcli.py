@@ -10,9 +10,12 @@ from typing import Any
 
 import httpx
 
+from five08.queue import JobStatus
+
 DEFAULT_API_URL = "http://localhost:8090"
 DEFAULT_TIMEOUT_SECONDS = 10.0
 API_SECRET_ENV_VAR = "API_SHARED_SECRET"
+JOB_STATUSES = [status.value for status in JobStatus]
 
 
 def _default_api_url() -> str:
@@ -86,6 +89,16 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_positive_int,
         help="Maximum number of jobs to return (default: 100).",
     )
+    recent_parser.add_argument(
+        "--status",
+        choices=JOB_STATUSES,
+        help="Filter by job status.",
+    )
+    recent_parser.add_argument(
+        "--type",
+        dest="job_type",
+        help="Filter by job type.",
+    )
     recent_parser.set_defaults(handler=_handle_recent)
 
     return parser
@@ -157,13 +170,19 @@ def _request_json(
 
 def _handle_recent(args: argparse.Namespace) -> int:
     """Handle jobsctl recent."""
+    params: dict[str, Any] = {"minutes": args.minutes, "limit": args.limit}
+    if args.status is not None:
+        params["status"] = args.status
+    if args.job_type is not None:
+        params["type"] = args.job_type
+
     try:
         payload = _request_json(
             method="GET",
             api_url=args.api_url,
             path="/jobs",
             secret=args.secret,
-            params={"minutes": args.minutes, "limit": args.limit},
+            params=params,
         )
     except Exception as exc:  # broad catch keeps UX predictable
         print(f"Error: {exc}", file=sys.stderr)
