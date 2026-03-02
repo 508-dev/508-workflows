@@ -80,6 +80,8 @@ uv run --package integrations-worker worker-consumer
 
 # Jobs CLI
 uv run --package integrations-worker jobsctl --help
+# recent jobs (past hour by default):
+uv run --package integrations-worker jobsctl recent
 ```
 
 Or run the full stack with Docker Compose:
