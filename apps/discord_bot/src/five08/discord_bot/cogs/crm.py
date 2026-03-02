@@ -1598,6 +1598,10 @@ class CRMCog(commands.Cog):
 
             merged_attrs[key] = requested_strength
 
+        for existing_skill in merged_skills:
+            key = existing_skill.casefold()
+            merged_attrs.setdefault(key, 3)
+
         return ", ".join(merged_skills), self._serialize_skill_attrs(merged_attrs)
 
     def _format_requested_skills(
