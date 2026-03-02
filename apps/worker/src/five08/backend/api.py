@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -72,6 +73,7 @@ from five08.worker.models import (
 )
 
 logger = logging.getLogger(__name__)
+_ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
 
 class ResumeExtractRequest(BaseModel):
@@ -97,6 +99,17 @@ class DiscordLinkCreateRequest(BaseModel):
     next_path: str | None = None
 
 
+_JOB_FUNCTIONS: dict[str, Any] = {
+    process_webhook_event.__name__: process_webhook_event,
+    process_contact_skills_job.__name__: process_contact_skills_job,
+    extract_resume_profile_job.__name__: extract_resume_profile_job,
+    apply_resume_profile_job.__name__: apply_resume_profile_job,
+    sync_people_from_crm_job.__name__: sync_people_from_crm_job,
+    sync_person_from_crm_job.__name__: sync_person_from_crm_job,
+    process_docuseal_agreement_job.__name__: process_docuseal_agreement_job,
+}
+
+
 def _is_authorized(request: Request) -> bool:
     """Validate shared API secret."""
     if not settings.api_shared_secret:
@@ -110,6 +123,21 @@ def _is_authorized(request: Request) -> bool:
         return True
 
     return False
+
+
+def _encode_ulid_base32(value: int, length: int) -> str:
+    encoded = ["0"] * length
+    for index in range(length - 1, -1, -1):
+        encoded[index] = _ULID_ALPHABET[value & 0x1F]
+        value >>= 5
+    return "".join(encoded)
+
+
+def _generate_ulid() -> str:
+    """Generate a sortable ULID string without external dependencies."""
+    timestamp_ms = int(time.time() * 1000)
+    random_value = int.from_bytes(os.urandom(10), "big")
+    return f"{_encode_ulid_base32(timestamp_ms, 10)}{_encode_ulid_base32(random_value, 16)}"
 
 
 def _extract_idempotency_key(value: object) -> str | None:
@@ -629,6 +657,69 @@ async def job_status_handler(request: Request, job_id: str) -> JSONResponse:
             "last_error": job.last_error,
             "result": result,
         }
+    )
+
+
+async def rerun_job_handler(request: Request, job_id: str) -> JSONResponse:
+    """Create and enqueue a new job using a prior job's original call payload."""
+    if not _is_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    normalized_job_id = job_id.strip()
+    if not normalized_job_id:
+        return JSONResponse({"error": "job_id_required"}, status_code=400)
+
+    source_job = await asyncio.to_thread(get_job, settings, normalized_job_id)
+    if source_job is None:
+        return JSONResponse({"error": "job_not_found"}, status_code=404)
+
+    fn = _JOB_FUNCTIONS.get(source_job.type)
+    if fn is None:
+        return JSONResponse(
+            {
+                "error": "unsupported_job_type",
+                "job_type": source_job.type,
+            },
+            status_code=400,
+        )
+
+    raw_payload = source_job.payload if isinstance(source_job.payload, dict) else {}
+    raw_args = raw_payload.get("args", [])
+    raw_kwargs = raw_payload.get("kwargs", {})
+    if not isinstance(raw_args, list) or not isinstance(raw_kwargs, dict):
+        return JSONResponse({"error": "invalid_job_payload"}, status_code=400)
+
+    queue = request.app.state.queue
+    rerun_idempotency_key = f"manual-rerun:{source_job.id}:{_generate_ulid()}"
+
+    try:
+        rerun_job: EnqueuedJob = await asyncio.to_thread(
+            enqueue_job,
+            queue=queue,
+            fn=fn,
+            args=tuple(raw_args),
+            kwargs=raw_kwargs,
+            settings=settings,
+            idempotency_key=rerun_idempotency_key,
+            max_attempts=source_job.max_attempts,
+        )
+    except Exception:
+        logger.exception(
+            "Failed rerunning job source_job_id=%s type=%s",
+            source_job.id,
+            source_job.type,
+        )
+        return JSONResponse({"error": "enqueue_failed"}, status_code=503)
+
+    return JSONResponse(
+        {
+            "status": "queued",
+            "source_job_id": source_job.id,
+            "job_id": rerun_job.id,
+            "type": source_job.type,
+            "created": rerun_job.created,
+        },
+        status_code=202,
     )
 
 
@@ -1360,6 +1451,7 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
     app.add_api_route("/health", health_handler, methods=["GET"])
 
     app.add_api_route("/jobs/{job_id}", job_status_handler, methods=["GET"])
+    app.add_api_route("/jobs/{job_id}/rerun", rerun_job_handler, methods=["POST"])
     app.add_api_route("/jobs/resume-extract", resume_extract_handler, methods=["POST"])
     app.add_api_route("/jobs/resume-apply", resume_apply_handler, methods=["POST"])
 
