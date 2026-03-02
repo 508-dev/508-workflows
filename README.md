@@ -225,7 +225,7 @@ Use `.env.example` as the source of truth for defaults.
 ./scripts/mypy.sh
 ```
 
-For Discord bot docs, see [`Discord Bot`](./DISCORD_BOT.md).
+For Discord bot docs, see [`Discord Bot`](./apps/discord_bot/README.md).
 
 For local development helper commands, see [`DEVELOPMENT.md`](./DEVELOPMENT.md).
 
