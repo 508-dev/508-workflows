@@ -683,9 +683,14 @@ async def rerun_job_handler(request: Request, job_id: str) -> JSONResponse:
             status_code=400,
         )
 
-    raw_payload = source_job.payload if isinstance(source_job.payload, dict) else {}
-    raw_args = raw_payload.get("args", [])
-    raw_kwargs = raw_payload.get("kwargs", {})
+    raw_payload = source_job.payload
+    if not isinstance(raw_payload, dict):
+        return JSONResponse({"error": "invalid_job_payload"}, status_code=400)
+    if "args" not in raw_payload or "kwargs" not in raw_payload:
+        return JSONResponse({"error": "invalid_job_payload"}, status_code=400)
+
+    raw_args = raw_payload["args"]
+    raw_kwargs = raw_payload["kwargs"]
     if not isinstance(raw_args, list) or not isinstance(raw_kwargs, dict):
         return JSONResponse({"error": "invalid_job_payload"}, status_code=400)
 
