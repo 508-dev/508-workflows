@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 import secrets
 import time
@@ -71,6 +72,11 @@ from five08.worker.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _masked_email(email: str) -> str:
+    """Return a deterministic masked value for logging and responses."""
+    return hashlib.sha256(email.encode("utf-8")).hexdigest()[:12]
 
 
 class ResumeExtractRequest(BaseModel):
@@ -716,6 +722,9 @@ async def docuseal_webhook_handler(request: Request) -> JSONResponse:
         )
 
     submitter = payload.data
+    submission_id = (
+        submitter.submission_id if submitter.submission_id is not None else submitter.id
+    )
 
     template_filter_id = settings.docuseal_member_agreement_template_id
     if template_filter_id is not None:
@@ -726,13 +735,13 @@ async def docuseal_webhook_handler(request: Request) -> JSONResponse:
                 " expected=%s submission_id=%s",
                 template_id,
                 template_filter_id,
-                submitter.id,
+                submission_id,
             )
             return JSONResponse(
                 {
                     "status": "ignored",
                     "reason": "template_mismatch",
-                    "submission_id": submitter.id,
+                    "submission_id": submission_id,
                 },
                 status_code=200,
             )
@@ -753,36 +762,38 @@ async def docuseal_webhook_handler(request: Request) -> JSONResponse:
     if not email:
         return JSONResponse({"error": "invalid_payload"}, status_code=400)
 
+    masked_email = _masked_email(email)
+
     queue = request.app.state.queue
     try:
         job: EnqueuedJob = await asyncio.to_thread(
             enqueue_job,
             queue=queue,
             fn=process_docuseal_agreement_job,
-            args=(email, completed_at, submitter.id),
+            args=(email, completed_at, submission_id),
             settings=settings,
-            idempotency_key=f"docuseal-agreement:{submitter.id}",
+            idempotency_key=f"docuseal-agreement:{submission_id}",
         )
     except Exception:
         logger.exception(
-            "Failed enqueueing Docuseal agreement job email=%s submission_id=%s",
-            email,
-            submitter.id,
+            "Failed enqueueing Docuseal agreement job masked_email=%s submission_id=%s",
+            masked_email,
+            submission_id,
         )
         return JSONResponse({"error": "enqueue_failed"}, status_code=503)
 
     logger.info(
-        "Enqueued Docuseal agreement job job_id=%s email=%s",
+        "Enqueued Docuseal agreement job job_id=%s masked_email=%s",
         job.id,
-        email,
+        masked_email,
     )
     return JSONResponse(
         {
             "status": "queued",
             "source": "docuseal",
             "job_id": job.id,
-            "email": email,
-            "submission_id": submitter.id,
+            "masked_email": masked_email,
+            "submission_id": submission_id,
         },
         status_code=202,
     )

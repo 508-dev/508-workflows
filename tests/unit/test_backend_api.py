@@ -1,6 +1,7 @@
 """Unit tests for backend dashboard/ingest API."""
 
 import pytest
+import hashlib
 from fastapi.testclient import TestClient
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -595,6 +596,10 @@ _DOCUSEAL_PAYLOAD = {
 }
 
 
+def _expected_masked_email(email: str) -> str:
+    return hashlib.sha256(email.encode("utf-8")).hexdigest()[:12]
+
+
 def test_docuseal_webhook_rejects_unauthorized(client: TestClient) -> None:
     """Docuseal webhook should reject requests without valid auth."""
     response = client.post("/webhooks/docuseal", json=_DOCUSEAL_PAYLOAD)
@@ -620,11 +625,11 @@ def test_docuseal_webhook_enqueues_agreement_job(
     assert payload["status"] == "queued"
     assert payload["source"] == "docuseal"
     assert payload["job_id"] == "job-ds-1"
-    assert payload["email"] == "member@508.dev"
-    assert payload["submission_id"] == 42
+    assert payload["masked_email"] == _expected_masked_email("member@508.dev")
+    assert payload["submission_id"] == 4200
 
     call_kwargs = mock_enqueue.call_args.kwargs
-    assert call_kwargs["idempotency_key"] == "docuseal-agreement:42"
+    assert call_kwargs["idempotency_key"] == "docuseal-agreement:4200"
 
 
 def test_docuseal_webhook_rejects_invalid_payload(
@@ -737,8 +742,9 @@ def test_docuseal_webhook_processes_matching_template(
     assert payload["status"] == "queued"
     assert payload["source"] == "docuseal"
     assert payload["job_id"] == "job-ds-2"
-    assert payload["email"] == "member@508.dev"
-    assert payload["submission_id"] == 42
+    assert payload["masked_email"] == _expected_masked_email("member@508.dev")
+    assert payload["submission_id"] == 4200
+    assert mock_enqueue.call_args.kwargs["idempotency_key"] == "docuseal-agreement:4200"
 
 
 def test_docuseal_webhook_processes_without_template_filter(
@@ -768,6 +774,40 @@ def test_docuseal_webhook_processes_without_template_filter(
     assert payload["status"] == "queued"
     assert payload["source"] == "docuseal"
     assert payload["job_id"] == "job-ds-3"
+
+
+def test_docuseal_webhook_uses_submitter_id_when_submission_id_missing(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Webhooks without submission_id should fallback to submitter id for idempotency."""
+    payload = {
+        **_DOCUSEAL_PAYLOAD,
+        "data": {
+            "id": 42,
+            "email": "member@508.dev",
+            "status": "completed",
+            "completed_at": "2026-02-25T12:00:00Z",
+        },
+    }
+    with patch("five08.backend.api.enqueue_job") as mock_enqueue:
+        mock_enqueue.return_value = Mock(id="job-ds-4")
+        response = client.post(
+            "/webhooks/docuseal",
+            json=payload,
+            headers=auth_headers,
+        )
+
+    payload = response.json()
+    assert response.status_code == 202
+    assert payload["status"] == "queued"
+    assert payload["source"] == "docuseal"
+    assert payload["job_id"] == "job-ds-4"
+    assert payload["masked_email"] == _expected_masked_email("member@508.dev")
+    assert payload["submission_id"] == 42
+
+    call_kwargs = mock_enqueue.call_args.kwargs
+    assert call_kwargs["idempotency_key"] == "docuseal-agreement:42"
 
 
 def test_docuseal_webhook_ignores_non_completed_event(
