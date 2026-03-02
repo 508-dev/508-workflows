@@ -727,24 +727,33 @@ async def docuseal_webhook_handler(request: Request) -> JSONResponse:
     )
 
     template_filter_id = settings.docuseal_member_agreement_template_id
-    if template_filter_id is not None:
-        template_id = submitter.template.id if submitter.template else None
-        if template_id != template_filter_id:
-            logger.info(
-                "Ignoring Docuseal agreement webhook for unmatched template_id=%s"
-                " expected=%s submission_id=%s",
-                template_id,
-                template_filter_id,
-                submission_id,
-            )
-            return JSONResponse(
-                {
-                    "status": "ignored",
-                    "reason": "template_mismatch",
-                    "submission_id": submission_id,
-                },
-                status_code=200,
-            )
+    if template_filter_id is None:
+        logger.info("Ignoring Docuseal agreement webhook: template filter is unset")
+        return JSONResponse(
+            {
+                "status": "ignored",
+                "reason": "template_filter_not_configured",
+            },
+            status_code=200,
+        )
+
+    template_id = submitter.template.id if submitter.template else None
+    if template_id != template_filter_id:
+        logger.info(
+            "Ignoring Docuseal agreement webhook for unmatched template_id=%s"
+            " expected=%s submission_id=%s",
+            template_id,
+            template_filter_id,
+            submission_id,
+        )
+        return JSONResponse(
+            {
+                "status": "ignored",
+                "reason": "template_mismatch",
+                "submission_id": submission_id,
+            },
+            status_code=200,
+        )
 
     email = (submitter.email or "").strip()
 

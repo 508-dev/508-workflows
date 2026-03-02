@@ -1,7 +1,7 @@
 """Unit tests for backend dashboard/ingest API."""
 
-import pytest
 import hashlib
+import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -610,8 +610,14 @@ def test_docuseal_webhook_rejects_unauthorized(client: TestClient) -> None:
 def test_docuseal_webhook_enqueues_agreement_job(
     client: TestClient,
     auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Valid form.completed payload should enqueue agreement job."""
+    monkeypatch.setattr(
+        api.settings,
+        "docuseal_member_agreement_template_id",
+        68,
+    )
     with patch("five08.backend.api.enqueue_job") as mock_enqueue:
         mock_enqueue.return_value = Mock(id="job-ds-1")
         response = client.post(
@@ -630,6 +636,37 @@ def test_docuseal_webhook_enqueues_agreement_job(
 
     call_kwargs = mock_enqueue.call_args.kwargs
     assert call_kwargs["idempotency_key"] == "docuseal-agreement:4200"
+
+
+def test_docuseal_webhook_ignored_when_template_filter_unset(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Docuseal webhook should be ignored when template filter is unset."""
+    monkeypatch.setattr(
+        api.settings,
+        "docuseal_member_agreement_template_id",
+        None,
+    )
+    with (
+        patch("five08.backend.api.enqueue_job") as mock_enqueue,
+        patch("five08.backend.api.logger.info") as mock_info,
+    ):
+        response = client.post(
+            "/webhooks/docuseal",
+            json=_DOCUSEAL_PAYLOAD,
+            headers=auth_headers,
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["status"] == "ignored"
+    assert payload["reason"] == "template_filter_not_configured"
+    mock_enqueue.assert_not_called()
+    assert mock_info.call_args.args[0].startswith(
+        "Ignoring Docuseal agreement webhook: template filter is unset"
+    )
 
 
 def test_docuseal_webhook_rejects_invalid_payload(
@@ -747,13 +784,12 @@ def test_docuseal_webhook_processes_matching_template(
     assert mock_enqueue.call_args.kwargs["idempotency_key"] == "docuseal-agreement:4200"
 
 
-def test_docuseal_webhook_processes_without_template_filter(
+def test_docuseal_webhook_ignores_when_template_id_missing(
     client: TestClient,
     auth_headers: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When no template filter is configured, template-less payloads still enqueue."""
-    monkeypatch.setattr(api.settings, "docuseal_member_agreement_template_id", None)
+    """Template-less payloads should be ignored when filter is configured."""
     payload = {
         **_DOCUSEAL_PAYLOAD,
         "data": {
@@ -761,8 +797,12 @@ def test_docuseal_webhook_processes_without_template_filter(
             "template": None,
         },
     }
+    monkeypatch.setattr(
+        api.settings,
+        "docuseal_member_agreement_template_id",
+        68,
+    )
     with patch("five08.backend.api.enqueue_job") as mock_enqueue:
-        mock_enqueue.return_value = Mock(id="job-ds-3")
         response = client.post(
             "/webhooks/docuseal",
             json=payload,
@@ -770,17 +810,23 @@ def test_docuseal_webhook_processes_without_template_filter(
         )
 
     payload = response.json()
-    assert response.status_code == 202
-    assert payload["status"] == "queued"
-    assert payload["source"] == "docuseal"
-    assert payload["job_id"] == "job-ds-3"
+    assert response.status_code == 200
+    assert payload["status"] == "ignored"
+    assert payload["reason"] == "template_mismatch"
+    mock_enqueue.assert_not_called()
 
 
 def test_docuseal_webhook_uses_submitter_id_when_submission_id_missing(
     client: TestClient,
     auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Webhooks without submission_id should fallback to submitter id for idempotency."""
+    monkeypatch.setattr(
+        api.settings,
+        "docuseal_member_agreement_template_id",
+        68,
+    )
     payload = {
         **_DOCUSEAL_PAYLOAD,
         "data": {
@@ -788,6 +834,7 @@ def test_docuseal_webhook_uses_submitter_id_when_submission_id_missing(
             "email": "member@508.dev",
             "status": "completed",
             "completed_at": "2026-02-25T12:00:00Z",
+            "template": {"id": 68},
         },
     }
     with patch("five08.backend.api.enqueue_job") as mock_enqueue:
@@ -836,8 +883,14 @@ def test_docuseal_webhook_ignores_non_completed_event(
 def test_docuseal_webhook_returns_503_on_enqueue_failure(
     client: TestClient,
     auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Enqueue failure should return 503."""
+    monkeypatch.setattr(
+        api.settings,
+        "docuseal_member_agreement_template_id",
+        68,
+    )
     with patch(
         "five08.backend.api.enqueue_job",
         side_effect=RuntimeError("queue down"),
