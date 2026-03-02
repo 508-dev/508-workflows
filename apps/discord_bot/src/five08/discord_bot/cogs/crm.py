@@ -34,6 +34,17 @@ ID_VERIFIED_AT_FIELD = "cIdVerifiedAt"
 ID_VERIFIED_BY_FIELD = "cIdVerifiedBy"
 ID_VERIFIED_TYPE_FIELD = "cVerifiedIdType"
 MIGADU_API_BASE_URL = "https://api.migadu.com/v1"
+ONBOARDING_STATUS_FIELD_CANDIDATES = (
+    "cOnboardingState",
+    "cOnboardingStatus",
+    "cOnboarding",
+)
+ONBOARDER_FIELD_CANDIDATES = (
+    "cOnboarder",
+    "cOnboardingCoordinator",
+)
+EXCLUDED_ONBOARDING_STATES = frozenset({"onboarded", "waitlist", "rejected"})
+ONBOARDING_QUEUE_MAX_SIZE = 200
 
 EspoAPI = espo.EspoAPI
 EspoAPIError = espo.EspoAPIError
@@ -1169,6 +1180,98 @@ class CRMCog(commands.Cog):
 
         return None
 
+    def _resolve_field_name(
+        self, contact: dict[str, Any], *, candidates: tuple[str, ...]
+    ) -> str | None:
+        """Return the first matching field name that exists on a contact."""
+        for field_name in candidates:
+            if field_name in contact:
+                return field_name
+        return None
+
+    def _normalize_onboarding_state(self, value: Any) -> str:
+        """Normalize onboarding state for comparisons."""
+        if value is None:
+            return ""
+        return str(value).strip().lower()
+
+    async def _resolve_onboarder_username(
+        self, interaction: discord.Interaction, raw_onboarder: str
+    ) -> str | None:
+        """Resolve onboarder input into a normalized 508 username."""
+        candidate = (raw_onboarder or "").strip()
+        if not candidate:
+            return None
+
+        mention_match = re.fullmatch(r"<@!?(?P<user_id>\d+)>", candidate)
+        if mention_match:
+            discord_id = mention_match.group("user_id")
+            try:
+                contact = await self._find_contact_by_discord_id(discord_id)
+            except ValueError:
+                contact = None
+
+            if contact:
+                linked_username = self._normalize_508_username(
+                    contact.get("c508Email") or ""
+                )
+                if linked_username:
+                    return linked_username
+            return None
+
+        return self._normalize_508_username(candidate)
+
+    def _format_contact_card(
+        self,
+        contact: dict[str, Any],
+        interaction: discord.Interaction | None = None,
+        *,
+        additional_fields: list[tuple[str, str]] | None = None,
+    ) -> str:
+        """Build a reusable contact card text with optional additional lines."""
+        email = contact.get("emailAddress", "No email")
+        contact_type = contact.get("type", "Unknown")
+        email_508 = contact.get("c508Email", "None")
+        discord_username = contact.get("cDiscordUsername") or "No Discord"
+        discord_user_id = contact.get("cDiscordUserID")
+        contact_id = contact.get("id", "")
+
+        clean_discord_username = discord_username
+        if discord_username and " (ID: " in discord_username:
+            clean_discord_username = discord_username.split(" (ID: ")[0]
+
+        discord_display = clean_discord_username
+        if (
+            discord_user_id
+            and discord_user_id != "No Discord"
+            and interaction
+            and interaction.guild
+        ):
+            try:
+                member = interaction.guild.get_member(int(discord_user_id))
+                if member:
+                    discord_display = f"{member.mention} ({clean_discord_username})"
+            except (ValueError, AttributeError):
+                pass
+
+        contact_info = f"📧 {email}\n🏷️ Type: {contact_type}"
+        if contact_type in ["Candidate / Member", "Member"]:
+            contact_info += (
+                f"\n🏢 508 Email: {email_508}\n💬 Discord: {discord_display}"
+            )
+
+        if additional_fields:
+            for label, value in additional_fields:
+                normalized_value = str(value).strip() if value is not None else ""
+                if normalized_value:
+                    contact_info += f"\n{label}: {normalized_value}"
+
+        if contact_id:
+            profile_url = f"{self.base_url}/#Contact/view/{contact_id}"
+            contact_info = f"🔗 [View in CRM]({profile_url})\n{contact_info}"
+
+        return contact_info
+
     def _build_resume_preview_embed(
         self,
         *,
@@ -1802,53 +1905,18 @@ class CRMCog(commands.Cog):
 
             for i, contact in enumerate(contacts):
                 name = contact.get("name", "Unknown")
-                email = contact.get("emailAddress", "No email")
-                contact_type = contact.get("type", "Unknown")
-                email_508 = contact.get("c508Email", "None")
-                discord_username = contact.get("cDiscordUsername") or "No Discord"
-                discord_user_id = contact.get("cDiscordUserID")
-                contact_id = contact.get("id", "")
-
-                # Create Discord display with @mention if user ID exists
-                # Remove "(ID: ...)" from stored username for cleaner display
-                clean_discord_username = discord_username
-                if discord_username and " (ID: " in discord_username:
-                    clean_discord_username = discord_username.split(" (ID: ")[0]
-
-                discord_display = clean_discord_username
-                if (
-                    discord_user_id
-                    and discord_user_id != "No Discord"
-                    and interaction.guild
-                ):
-                    try:
-                        # Try to get the Discord member for @mention
-                        member = interaction.guild.get_member(int(discord_user_id))
-                        if member:
-                            discord_display = (
-                                f"{member.mention} ({clean_discord_username})"
-                            )
-                    except (ValueError, AttributeError):
-                        # If user ID is invalid or guild is None, just use username
-                        pass
-
-                contact_info = f"📧 {email}\n🏷️ Type: {contact_type}"
-
-                # Only show 508 email and Discord for Candidates/Members
-                if contact_type in ["Candidate / Member", "Member"]:
-                    contact_info += (
-                        f"\n🏢 508 Email: {email_508}\n💬 Discord: {discord_display}"
-                    )
+                additional_fields: list[tuple[str, str]] = []
 
                 if skills_list:
                     contact_skills = self._format_requested_skills(skills_list, contact)
                     if contact_skills:
-                        contact_info += f"\n🧠 Skills: {contact_skills}"
+                        additional_fields.append(("🧠 Skills", contact_skills))
 
-                # Add clickable CRM link at the top of contact info
-                if contact_id:
-                    profile_url = f"{self.base_url}/#Contact/view/{contact_id}"
-                    contact_info = f"🔗 [View in CRM]({profile_url})\n{contact_info}"
+                contact_info = self._format_contact_card(
+                    contact,
+                    interaction=interaction,
+                    additional_fields=additional_fields,
+                )
 
                 embed.add_field(name=f"👤 {name}", value=contact_info, inline=True)
 
@@ -1904,6 +1972,301 @@ class CRMCog(commands.Cog):
             )
             await interaction.followup.send(
                 "❌ An unexpected error occurred while searching the CRM."
+            )
+
+    @app_commands.command(
+        name="assign-onboarder",
+        description="Assign an onboarder to a CRM contact (Steering Committee+ only)",
+    )
+    @app_commands.describe(
+        contact="Contact ID, 508 email, or name",
+        onboarder="Onboarder 508 username or a Discord mention (mapped automatically)",
+    )
+    @require_role("Steering Committee")
+    async def assign_onboarder(
+        self, interaction: discord.Interaction, contact: str, onboarder: str
+    ) -> None:
+        """Assign an onboarder and set onboarding state to selected if still pending."""
+        try:
+            await interaction.response.defer(ephemeral=True)
+
+            onboarder_username = await self._resolve_onboarder_username(
+                interaction, onboarder
+            )
+            if not onboarder_username:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.assign_onboarder",
+                    result="denied",
+                    metadata={"contact": contact, "onboarder": onboarder},
+                )
+                await interaction.followup.send(
+                    "❌ Could not resolve a valid 508 onboarder username. "
+                    "Use a 508 username directly or a linked Discord mention."
+                )
+                return
+
+            contacts = await self._search_contact_for_linking(contact)
+            if not contacts:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.assign_onboarder",
+                    result="denied",
+                    metadata={"contact": contact, "onboarder": onboarder_username},
+                )
+                await interaction.followup.send(f"❌ No contact found for: `{contact}`")
+                return
+
+            if len(contacts) > 1:
+                embed = discord.Embed(
+                    title="⚠️ Multiple Contacts Found",
+                    description=(
+                        f"Found {len(contacts)} contacts for `{contact}`. "
+                        "Please rerun with a more specific search term or an exact contact ID."
+                    ),
+                    color=0xFFA500,
+                )
+                for i, contact_record in enumerate(contacts[:5], 1):
+                    contact_name = contact_record.get("name", "Unknown")
+                    contact_info = self._format_contact_card(
+                        contact_record,
+                        interaction=interaction,
+                        additional_fields=[
+                            ("🆔 ID", str(contact_record.get("id", ""))),
+                        ],
+                    )
+                    embed.add_field(
+                        name=f"{i}. {contact_name}",
+                        value=contact_info,
+                        inline=False,
+                    )
+                await interaction.followup.send(embed=embed)
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.assign_onboarder",
+                    result="denied",
+                    metadata={
+                        "contact": contact,
+                        "onboarder": onboarder_username,
+                        "contacts_found": len(contacts),
+                    },
+                )
+                return
+
+            target_contact = contacts[0]
+            contact_id = target_contact.get("id")
+            if not contact_id:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.assign_onboarder",
+                    result="error",
+                    metadata={"contact": contact, "onboarder": onboarder_username},
+                )
+                await interaction.followup.send("❌ Selected contact is missing an ID.")
+                return
+
+            full_contact = self.espo_api.request("GET", f"Contact/{contact_id}")
+            onboarder_field = self._resolve_field_name(
+                full_contact, candidates=ONBOARDER_FIELD_CANDIDATES
+            )
+            if not onboarder_field:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.assign_onboarder",
+                    result="denied",
+                    metadata={
+                        "contact_id": str(contact_id),
+                        "onboarder": onboarder_username,
+                        "reason": "missing_onboarder_field",
+                    },
+                    resource_type="crm_contact",
+                    resource_id=str(contact_id),
+                )
+                await interaction.followup.send(
+                    "❌ Could not locate a known onboarder field for this CRM contact."
+                )
+                return
+
+            state_field = self._resolve_field_name(
+                full_contact, candidates=ONBOARDING_STATUS_FIELD_CANDIDATES
+            )
+            current_state = self._normalize_onboarding_state(
+                full_contact.get(state_field) if state_field else None
+            )
+
+            update_payload: dict[str, str] = {onboarder_field: onboarder_username}
+            state_updated = False
+            if state_field and current_state == "pending":
+                update_payload[state_field] = "selected"
+                state_updated = True
+
+            self.espo_api.request("PUT", f"Contact/{contact_id}", update_payload)
+
+            contact_name = full_contact.get("name", "Unknown")
+            status_line = (
+                "onboarding state set to `selected`"
+                if state_updated
+                else "onboarding state left unchanged"
+            )
+            await interaction.followup.send(
+                f"✅ Assigned **{onboarder_username}** as onboarder for "
+                f"**{contact_name}** (`{contact_id}`); {status_line}."
+            )
+            self._audit_command(
+                interaction=interaction,
+                action="crm.assign_onboarder",
+                result="success",
+                metadata={
+                    "contact_id": str(contact_id),
+                    "contact_name": contact_name,
+                    "onboarder": onboarder_username,
+                    "state_field": state_field,
+                    "state_updated": state_updated,
+                    "previous_state": current_state or None,
+                },
+                resource_type="crm_contact",
+                resource_id=str(contact_id),
+            )
+
+        except EspoAPIError as e:
+            logger.error(f"EspoCRM API error in assign_onboarder: {e}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.assign_onboarder",
+                result="error",
+                metadata={"contact": contact, "onboarder": onboarder, "error": str(e)},
+            )
+            await interaction.followup.send(f"❌ CRM API error: {str(e)}")
+        except Exception as e:
+            logger.error(f"Unexpected error in assign_onboarder: {e}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.assign_onboarder",
+                result="error",
+                metadata={"contact": contact, "onboarder": onboarder, "error": str(e)},
+            )
+            await interaction.followup.send(
+                "❌ An unexpected error occurred while assigning the onboarder."
+            )
+
+    @app_commands.command(
+        name="view-onboarding-queue",
+        description="View contacts in onboarding queue (Steering Committee+ only)",
+    )
+    @require_role("Steering Committee")
+    async def view_onboarding_queue(self, interaction: discord.Interaction) -> None:
+        """Show contacts in onboarding queue (excluding onboarded, waitlist, rejected)."""
+        try:
+            await interaction.response.defer(ephemeral=True)
+
+            response = self.espo_api.request(
+                "GET",
+                "Contact",
+                {
+                    "maxSize": ONBOARDING_QUEUE_MAX_SIZE,
+                },
+            )
+            contacts = response.get("list", [])
+
+            queue_entries: list[tuple[dict[str, Any], str]] = []
+            for contact_record in contacts:
+                state_field = self._resolve_field_name(
+                    contact_record, candidates=ONBOARDING_STATUS_FIELD_CANDIDATES
+                )
+                status = (
+                    self._normalize_onboarding_state(contact_record.get(state_field))
+                    if state_field
+                    else ""
+                )
+                if status in EXCLUDED_ONBOARDING_STATES:
+                    continue
+                queue_entries.append((contact_record, status))
+
+            if not queue_entries:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.view_onboarding_queue",
+                    result="success",
+                    metadata={"count": 0},
+                )
+                await interaction.followup.send(
+                    "✅ No contacts found in onboarding queue."
+                )
+                return
+
+            queue_entries.sort(
+                key=lambda item: (item[1] or "unknown", str(item[0].get("name", "")))
+            )
+
+            embed = discord.Embed(
+                title="📋 Onboarding Queue",
+                description=(
+                    "Contacts currently outside `onboarded`, `waitlist`, and `rejected` states."
+                ),
+                color=0x0099FF,
+            )
+
+            for contact_record, status in queue_entries[:25]:
+                contact_id = contact_record.get("id", "")
+                onboarder_field = self._resolve_field_name(
+                    contact_record, candidates=ONBOARDER_FIELD_CANDIDATES
+                )
+                onboarder_value = (
+                    str(contact_record.get(onboarder_field, "")).strip()
+                    if onboarder_field
+                    else ""
+                )
+
+                additional_fields: list[tuple[str, str]] = [
+                    ("📌 Onboarding Status", status or "Unknown"),
+                    ("🆔 ID", str(contact_id)),
+                ]
+                if onboarder_value:
+                    additional_fields.append(("🧑‍💼 Onboarder", onboarder_value))
+
+                contact_info = self._format_contact_card(
+                    contact_record,
+                    interaction=interaction,
+                    additional_fields=additional_fields,
+                )
+                embed.add_field(
+                    name=f"👤 {contact_record.get('name', 'Unknown')}",
+                    value=contact_info,
+                    inline=False,
+                )
+
+            if len(queue_entries) > 25:
+                embed.set_footer(
+                    text=f"Showing 25 of {len(queue_entries)} matching contacts."
+                )
+
+            self._audit_command(
+                interaction=interaction,
+                action="crm.view_onboarding_queue",
+                result="success",
+                metadata={"count": len(queue_entries)},
+            )
+            await interaction.followup.send(embed=embed)
+
+        except EspoAPIError as e:
+            logger.error(f"EspoCRM API error in view_onboarding_queue: {e}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.view_onboarding_queue",
+                result="error",
+                metadata={"error": str(e)},
+            )
+            await interaction.followup.send(f"❌ CRM API error: {str(e)}")
+        except Exception as e:
+            logger.error(f"Unexpected error in view_onboarding_queue: {e}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.view_onboarding_queue",
+                result="error",
+                metadata={"error": str(e)},
+            )
+            await interaction.followup.send(
+                "❌ An unexpected error occurred while loading onboarding queue."
             )
 
     @app_commands.command(

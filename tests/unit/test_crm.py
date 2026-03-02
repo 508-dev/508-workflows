@@ -240,6 +240,326 @@ class TestCRMCog:
         assert parsed == {"python": 4, "go": 3}
 
     @pytest.mark.asyncio
+    async def test_format_contact_card_supports_additional_fields(self, crm_cog):
+        """Contact cards should include optional extra lines when provided."""
+        contact = {
+            "id": "contact123",
+            "name": "John Doe",
+            "emailAddress": "john@example.com",
+            "type": "Member",
+            "c508Email": "john@508.dev",
+            "cDiscordUsername": "johndoe#1234",
+        }
+
+        formatted = crm_cog._format_contact_card(
+            contact,
+            interaction=None,
+            additional_fields=[
+                ("📌 Onboarding Status", "pending"),
+                ("🧑‍💼 Onboarder", "mentor"),
+                ("⚪ Optional", ""),
+            ],
+        )
+
+        assert "📌 Onboarding Status: pending" in formatted
+        assert "🧑‍💼 Onboarder: mentor" in formatted
+        assert "⚪ Optional" not in formatted
+        assert "🔗 [View in CRM]" in formatted
+        assert "🏢 508 Email: john@508.dev" in formatted
+
+    @pytest.mark.asyncio
+    async def test_resolve_onboarder_username_normalizes_direct_username(self, crm_cog):
+        """Direct 508 username values should normalize to lowercase without domain."""
+        resolved = await crm_cog._resolve_onboarder_username(
+            interaction=Mock(), raw_onboarder="John@508.dev"
+        )
+
+        assert resolved == "john"
+
+    @pytest.mark.asyncio
+    async def test_resolve_onboarder_username_maps_discord_mention(self, crm_cog):
+        """Discord mentions should resolve to linked contact 508 usernames."""
+        with patch.object(
+            crm_cog,
+            "_find_contact_by_discord_id",
+            new=AsyncMock(return_value={"c508Email": "Mentor@508.dev"}),
+        ):
+            resolved = await crm_cog._resolve_onboarder_username(
+                interaction=Mock(), raw_onboarder="<@987654321>"
+            )
+
+        assert resolved == "mentor"
+
+    @pytest.mark.asyncio
+    async def test_resolve_onboarder_username_returns_none_for_unlinked_mention(
+        self, crm_cog
+    ):
+        """Unlinked mention values should fail resolution."""
+        with patch.object(
+            crm_cog,
+            "_find_contact_by_discord_id",
+            new=AsyncMock(return_value=None),
+        ):
+            resolved = await crm_cog._resolve_onboarder_username(
+                interaction=Mock(), raw_onboarder="<@987654321>"
+            )
+
+        assert resolved is None
+
+    @pytest.mark.asyncio
+    async def test_assign_onboarder_success_updates_pending_state(
+        self, crm_cog, mock_interaction
+    ):
+        """Assigning onboarder should set pending state to selected."""
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+
+        with patch.object(
+            crm_cog,
+            "_search_contact_for_linking",
+            new=AsyncMock(return_value=[{"id": "contact123", "name": "John Doe"}]),
+        ):
+            crm_cog.espo_api.request.side_effect = [
+                {
+                    "id": "contact123",
+                    "name": "John Doe",
+                    "cOnboarder": "none",
+                    "cOnboardingState": "pending",
+                },
+                {"id": "contact123"},
+            ]
+
+            await crm_cog.assign_onboarder.callback(
+                crm_cog, mock_interaction, "john", "jane"
+            )
+
+        request_calls = crm_cog.espo_api.request.call_args_list
+        assert request_calls[0].args == ("GET", "Contact/contact123")
+        assert request_calls[1].args == (
+            "PUT",
+            "Contact/contact123",
+            {"cOnboarder": "jane", "cOnboardingState": "selected"},
+        )
+
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert "onboarding state set to `selected`" in message
+        assert "Assigned **jane** as onboarder" in message
+
+    @pytest.mark.asyncio
+    async def test_assign_onboarder_success_keeps_state_when_not_pending(
+        self, crm_cog, mock_interaction
+    ):
+        """Assigning onboarder should preserve existing non-pending onboarding state."""
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+
+        with patch.object(
+            crm_cog,
+            "_search_contact_for_linking",
+            new=AsyncMock(return_value=[{"id": "contact123", "name": "John Doe"}]),
+        ):
+            crm_cog.espo_api.request.side_effect = [
+                {
+                    "id": "contact123",
+                    "name": "John Doe",
+                    "cOnboardingCoordinator": "old",
+                    "cOnboardingStatus": "onboarded",
+                },
+                {"id": "contact123"},
+            ]
+
+            await crm_cog.assign_onboarder.callback(
+                crm_cog, mock_interaction, "john", "jane"
+            )
+
+        payload = crm_cog.espo_api.request.call_args_list[1][0][2]
+        assert payload == {"cOnboardingCoordinator": "jane"}
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert "onboarding state left unchanged" in message
+
+    @pytest.mark.asyncio
+    async def test_assign_onboarder_multiple_matches_returns_prompt(
+        self, crm_cog, mock_interaction
+    ):
+        """Multiple matches should return a guided selection embed instead of updating."""
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+
+        with patch.object(
+            crm_cog,
+            "_search_contact_for_linking",
+            new=AsyncMock(
+                return_value=[
+                    {"id": "contact123", "name": "John Doe"},
+                    {"id": "contact456", "name": "John Smith"},
+                ]
+            ),
+        ):
+            await crm_cog.assign_onboarder.callback(
+                crm_cog, mock_interaction, "john", "jane"
+            )
+
+        crm_cog.espo_api.request.assert_not_called()
+        embed = mock_interaction.followup.send.call_args[1]["embed"]
+        assert embed.title == "⚠️ Multiple Contacts Found"
+        assert len(embed.fields) == 2
+
+    @pytest.mark.asyncio
+    async def test_assign_onboarder_missing_contact(self, crm_cog, mock_interaction):
+        """No matching contact should return a not-found message."""
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+
+        with patch.object(
+            crm_cog,
+            "_search_contact_for_linking",
+            new=AsyncMock(return_value=[]),
+        ):
+            await crm_cog.assign_onboarder.callback(
+                crm_cog, mock_interaction, "missing", "jane"
+            )
+
+        crm_cog.espo_api.request.assert_not_called()
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert "❌ No contact found for: `missing`" in message
+
+    @pytest.mark.asyncio
+    async def test_assign_onboarder_invalid_onboarder_reference(
+        self, crm_cog, mock_interaction
+    ):
+        """Unresolvable onboarder references should fail fast with validation message."""
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+
+        with patch.object(
+            crm_cog,
+            "_find_contact_by_discord_id",
+            new=AsyncMock(side_effect=ValueError("not found")),
+        ):
+            await crm_cog.assign_onboarder.callback(
+                crm_cog, mock_interaction, "john", "<@987654321>"
+            )
+
+        crm_cog.espo_api.request.assert_not_called()
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert "Could not resolve a valid 508 onboarder username." in message
+
+    @pytest.mark.asyncio
+    async def test_assign_onboarder_handles_espo_api_error(
+        self, crm_cog, mock_interaction
+    ):
+        """Espo API errors should be surfaced in assign-onboarder flow."""
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+
+        with patch.object(
+            crm_cog,
+            "_search_contact_for_linking",
+            new=AsyncMock(return_value=[{"id": "contact123", "name": "John Doe"}]),
+        ):
+            crm_cog.espo_api.request.side_effect = EspoAPIError("CRM unavailable")
+            await crm_cog.assign_onboarder.callback(
+                crm_cog, mock_interaction, "john", "jane"
+            )
+
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert "❌ CRM API error: CRM unavailable" in message
+
+    @pytest.mark.asyncio
+    async def test_view_onboarding_queue_lists_open_entries(
+        self, crm_cog, mock_interaction
+    ):
+        """Onboarding queue should filter out completed/waitlist/rejected states."""
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+
+        crm_cog.espo_api.request.return_value = {
+            "list": [
+                {
+                    "id": "c1",
+                    "name": "Alice",
+                    "cOnboardingState": "pending",
+                    "cOnboarder": "mentorA",
+                    "type": "Member",
+                },
+                {"id": "c2", "name": "Bob", "cOnboardingStatus": "onboarded"},
+                {"id": "c3", "name": "Cara", "cOnboarding": "waitlist"},
+                {"id": "c4", "name": "Drew", "cOnboarding": "rejected"},
+                {
+                    "id": "c5",
+                    "name": "Eli",
+                    "cOnboardingStatus": "",
+                    "type": "Candidate / Member",
+                },
+            ]
+        }
+
+        await crm_cog.view_onboarding_queue.callback(crm_cog, mock_interaction)
+
+        crm_cog.espo_api.request.assert_called_once_with(
+            "GET", "Contact", {"maxSize": 200}
+        )
+
+        embed = mock_interaction.followup.send.call_args[1]["embed"]
+        names = [field.name for field in embed.fields]
+        values = [field.value for field in embed.fields]
+        assert any("Alice" in n for n in names)
+        assert any("Eli" in n for n in names)
+        assert not any("Bob" in n for n in names)
+        assert not any("Cara" in n for n in names)
+        assert not any("Drew" in n for n in names)
+        assert any("📌 Onboarding Status: pending" in value for value in values)
+        assert any("📌 Onboarding Status: Unknown" in value for value in values)
+        assert any("🧑‍💼 Onboarder: mentorA" in value for value in values)
+
+    @pytest.mark.asyncio
+    async def test_view_onboarding_queue_empty_when_only_excluded(
+        self, crm_cog, mock_interaction
+    ):
+        """Queue should return friendly message when only excluded states exist."""
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+
+        crm_cog.espo_api.request.return_value = {
+            "list": [
+                {"id": "c1", "name": "Bob", "cOnboardingState": "onboarded"},
+                {"id": "c2", "name": "Cara", "cOnboardingState": "waitlist"},
+                {"id": "c3", "name": "Drew", "cOnboarding": "rejected"},
+            ]
+        }
+
+        await crm_cog.view_onboarding_queue.callback(crm_cog, mock_interaction)
+
+        crm_cog.espo_api.request.assert_called_once_with(
+            "GET", "Contact", {"maxSize": 200}
+        )
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert "✅ No contacts found in onboarding queue." in message
+
+    @pytest.mark.asyncio
+    async def test_view_onboarding_queue_handles_api_error(
+        self, crm_cog, mock_interaction
+    ):
+        """Onboarding queue should report CRM API errors clearly."""
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+        crm_cog.espo_api.request.side_effect = EspoAPIError("Queue service down")
+
+        await crm_cog.view_onboarding_queue.callback(crm_cog, mock_interaction)
+
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert "❌ CRM API error: Queue service down" in message
+
+    @pytest.mark.asyncio
     async def test_view_skills_self_uses_structured_attrs(
         self, crm_cog, mock_interaction, mock_member_role
     ):
