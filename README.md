@@ -235,7 +235,7 @@ Use `.env.example` as the source of truth for defaults.
 ./scripts/mypy.sh
 ```
 
-For Discord slash command details, see [`Discord Slash Commands`](DISCORD_SLASH_COMMANDS.md).
+For Discord bot docs, see [`Discord Bot`](DISCORD_BOT.md).
 
 ## Deployment
 
