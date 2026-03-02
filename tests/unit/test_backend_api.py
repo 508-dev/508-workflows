@@ -596,6 +596,19 @@ _DOCUSEAL_PAYLOAD = {
 }
 
 
+_GOOGLE_FORMS_INTAKE_PAYLOAD = {
+    "email": "member@example.com",
+    "first_name": "Jane",
+    "last_name": "Doe",
+    "phone": "+15551234567",
+    "discord_username": "janedoe",
+    "linkedin_url": "https://linkedin.com/in/member",
+    "github_username": "janedoe-github",
+    "submission_id": "sub-42",
+    "submitted_at": "2026-02-25T12:00:00Z",
+}
+
+
 def test_docuseal_webhook_rejects_unauthorized(client: TestClient) -> None:
     """Docuseal webhook should reject requests without valid auth."""
     response = client.post("/webhooks/docuseal", json=_DOCUSEAL_PAYLOAD)
@@ -931,12 +944,10 @@ def test_google_forms_intake_enqueues_job(
         response = client.post(
             "/webhooks/google-forms",
             json={
-                "email": "member@example.com",
-                "first_name": "Jane",
-                "last_name": "Doe",
-                "phone": "+15551234567",
-                "discord_username": "janedoe",
-                "submission_id": "sub-42",
+                **_GOOGLE_FORMS_INTAKE_PAYLOAD,
+                "email": "  member@example.com  ",
+                "first_name": "  Jane  ",
+                "last_name": "  Doe  ",
             },
             headers=auth_headers,
         )
@@ -952,6 +963,94 @@ def test_google_forms_intake_enqueues_job(
     assert call_kwargs["idempotency_key"] == "intake:member@example.com:sub-42"
     assert call_kwargs["args"][0] == "member@example.com"
     assert call_kwargs["args"][1] == "Jane"
+    assert call_kwargs["args"][2] == "Doe"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("email", ""),
+        ("first_name", ""),
+        ("last_name", ""),
+        ("email", "   "),
+        ("first_name", "   "),
+        ("last_name", "   "),
+    ],
+)
+def test_google_forms_intake_rejects_blank_required_fields(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    field: str,
+    value: str,
+) -> None:
+    """Blank required fields should be rejected after normalization."""
+    payload = dict(_GOOGLE_FORMS_INTAKE_PAYLOAD)
+    payload[field] = value
+
+    response = client.post(
+        "/webhooks/google-forms",
+        json=payload,
+        headers=auth_headers,
+    )
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_payload"
+
+
+def test_google_forms_intake_idempotency_uses_submission_payload_fingerprint_when_submission_id_missing(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Repeated payloads without submission_id should share a stable idempotency key."""
+    payload = {
+        "email": "  member@example.com  ",
+        "first_name": " Jane ",
+        "last_name": " Doe ",
+        "phone": " +15551234567 ",
+        "submission_id": None,
+        "submitted_at": None,
+    }
+    expected_idempotency_key = api._google_forms_intake_idempotency_key(
+        email="member@example.com",
+        submission_id=None,
+        submitted_at=None,
+        payload={
+            "email": "member@example.com",
+            "first_name": "Jane",
+            "last_name": "Doe",
+            "phone": "+15551234567",
+            "discord_username": None,
+            "linkedin_url": None,
+            "github_username": None,
+            "submission_id": None,
+            "submitted_at": None,
+        },
+    )
+
+    with patch("five08.backend.api.enqueue_job") as mock_enqueue:
+        mock_enqueue.return_value = Mock(id="job-intake-1")
+        response_one = client.post(
+            "/webhooks/google-forms",
+            json=payload,
+            headers=auth_headers,
+        )
+        response_two = client.post(
+            "/webhooks/google-forms",
+            json=payload,
+            headers=auth_headers,
+        )
+
+    assert response_one.status_code == 202
+    assert response_one.json()["job_id"] == "job-intake-1"
+    assert response_two.status_code == 202
+    assert response_two.json()["job_id"] == "job-intake-1"
+
+    call_kwargs_one = mock_enqueue.call_args_list[0].kwargs
+    call_kwargs_two = mock_enqueue.call_args_list[1].kwargs
+    assert call_kwargs_one["idempotency_key"] == expected_idempotency_key
+    assert call_kwargs_two["idempotency_key"] == expected_idempotency_key
+    assert call_kwargs_one["args"][0] == "member@example.com"
+    assert call_kwargs_one["args"][1] == "Jane"
+    assert call_kwargs_one["args"][2] == "Doe"
 
 
 def test_google_forms_intake_rejects_invalid_payload(

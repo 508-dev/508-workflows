@@ -97,7 +97,7 @@ def process_intake_form_job(
     submitted_at: str | None = None,
 ) -> dict[str, Any]:
     """Process a Google Forms member intake submission against CRM."""
-    logger.info("Processing intake form job email=%s", email)
+    logger.info("Processing intake form job masked_email=%s", mask_email(email))
     processor = IntakeFormProcessor()
     return processor.process_intake(
         email=email,

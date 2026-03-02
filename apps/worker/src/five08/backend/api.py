@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 import secrets
 import time
+import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Literal, cast
@@ -130,6 +132,33 @@ def _crm_sync_idempotency_key(*, now: datetime) -> str:
     interval_seconds = max(1, settings.crm_sync_interval_seconds)
     bucket = int(now.timestamp()) // interval_seconds
     return f"crm-sync:{bucket}"
+
+
+def _normalize_google_forms_input(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _google_forms_intake_idempotency_key(
+    *,
+    email: str,
+    submission_id: str | None,
+    submitted_at: str | None,
+    payload: dict[str, Any],
+) -> str:
+    token = _normalize_google_forms_input(submission_id) or ""
+    if not token:
+        token = _normalize_google_forms_input(submitted_at) or ""
+    if not token:
+        normalized_payload = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        token = hashlib.sha256(normalized_payload.encode("utf-8")).hexdigest()
+    return f"intake:{email}:{token}"
 
 
 async def _enqueue_full_crm_sync_job(queue: QueueClient, *, reason: str) -> EnqueuedJob:
@@ -828,28 +857,61 @@ async def google_forms_intake_webhook_handler(request: Request) -> JSONResponse:
             status_code=400,
         )
 
+    email = (payload.email or "").strip().lower()
+    first_name = (payload.first_name or "").strip()
+    last_name = (payload.last_name or "").strip()
+    if not email or not first_name or not last_name:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    phone = _normalize_google_forms_input(payload.phone)
+    discord_username = _normalize_google_forms_input(payload.discord_username)
+    linkedin_url = _normalize_google_forms_input(payload.linkedin_url)
+    github_username = _normalize_google_forms_input(payload.github_username)
+    submission_id = _normalize_google_forms_input(payload.submission_id)
+    submitted_at = _normalize_google_forms_input(payload.submitted_at)
+
+    normalized_payload = {
+        "email": email,
+        "first_name": first_name,
+        "last_name": last_name,
+        "phone": phone,
+        "discord_username": discord_username,
+        "linkedin_url": linkedin_url,
+        "github_username": github_username,
+        "submission_id": submission_id,
+        "submitted_at": submitted_at,
+    }
+    idempotency_key = _google_forms_intake_idempotency_key(
+        email=email,
+        submission_id=submission_id,
+        submitted_at=submitted_at,
+        payload=normalized_payload,
+    )
+
     queue = request.app.state.queue
-    idempotency_key = f"intake:{payload.email}:{payload.submission_id or ''}"
     try:
         job = await asyncio.to_thread(
             enqueue_job,
             queue=queue,
             fn=process_intake_form_job,
             args=(
-                payload.email,
-                payload.first_name,
-                payload.last_name,
-                payload.phone,
-                payload.discord_username,
-                payload.linkedin_url,
-                payload.github_username,
-                payload.submitted_at,
+                email,
+                first_name,
+                last_name,
+                phone,
+                discord_username,
+                linkedin_url,
+                github_username,
+                submitted_at,
             ),
             settings=settings,
             idempotency_key=idempotency_key,
         )
     except Exception:
-        logger.exception("Failed enqueueing intake form job email=%s", payload.email)
+        logger.exception(
+            "Failed enqueueing intake form job masked_email=%s",
+            mask_email(email),
+        )
         return JSONResponse({"error": "enqueue_failed"}, status_code=503)
 
     return JSONResponse(
@@ -857,7 +919,7 @@ async def google_forms_intake_webhook_handler(request: Request) -> JSONResponse:
             "status": "queued",
             "source": "google_forms",
             "job_id": job.id,
-            "email": payload.email,
+            "email": email,
         },
         status_code=202,
     )
