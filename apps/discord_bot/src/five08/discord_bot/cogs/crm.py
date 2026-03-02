@@ -237,7 +237,7 @@ class MarkIdVerifiedSelectionButton(discord.ui.Button["MarkIdVerifiedSelectionVi
         contact: dict[str, Any],
         verified_by: str,
         verified_at: str,
-        id_type: str,
+        id_type: str | None,
         requester_id: int,
     ) -> None:
         contact_name = contact.get("name", "Unknown")
@@ -300,7 +300,7 @@ class MarkIdVerifiedSelectionView(discord.ui.View):
         requester_id: int,
         verified_by: str,
         verified_at: str,
-        id_type: str,
+        id_type: str | None,
     ) -> None:
         super().__init__(timeout=300)  # 5 minute timeout
         self.crm_cog = crm_cog
@@ -2316,7 +2316,7 @@ class CRMCog(commands.Cog):
         contact: dict[str, Any],
         verified_by: str,
         verified_at: str,
-        id_type: str,
+        id_type: str | None,
     ) -> bool:
         """Persist ID verification metadata to CRM."""
         contact_id = contact.get("id")
@@ -2339,8 +2339,9 @@ class CRMCog(commands.Cog):
         payload = {
             ID_VERIFIED_AT_FIELD: verified_at,
             ID_VERIFIED_BY_FIELD: verified_by,
-            ID_VERIFIED_TYPE_FIELD: id_type,
         }
+        if id_type:
+            payload[ID_VERIFIED_TYPE_FIELD] = id_type
 
         try:
             update_response = self.espo_api.request(
@@ -2354,7 +2355,8 @@ class CRMCog(commands.Cog):
                 )
                 embed.add_field(name="📅 Verified at", value=verified_at, inline=True)
                 embed.add_field(name="✅ Verified by", value=verified_by, inline=True)
-                embed.add_field(name="🆔 ID type", value=id_type, inline=True)
+                if id_type:
+                    embed.add_field(name="🆔 ID type", value=id_type, inline=True)
                 profile_url = f"{self.base_url}/#Contact/view/{contact_id}"
                 embed.add_field(
                     name="🔗 CRM Profile",
@@ -2439,7 +2441,7 @@ class CRMCog(commands.Cog):
         contacts: list[dict[str, Any]],
         verified_by: str,
         verified_at: str,
-        id_type: str,
+        id_type: str | None,
     ) -> None:
         """Show contact choices when multiple candidates are found."""
         embed = discord.Embed(
@@ -2497,7 +2499,7 @@ class CRMCog(commands.Cog):
         interaction: discord.Interaction,
         search_term: str,
         verified_by: str,
-        id_type: str,
+        id_type: str | None = None,
         verified_at: str | None = None,
     ) -> None:
         """Mark a contact as ID verified and record verifier, ID type, and date."""
@@ -2524,6 +2526,16 @@ class CRMCog(commands.Cog):
                     "❌ Unable to resolve verifier from `verified_by`."
                 )
                 return
+
+            if id_type is not None and verified_at is None:
+                try:
+                    await self._parse_verified_at(id_type)
+                except ValueError:
+                    pass
+                else:
+                    verified_at = id_type
+                    id_type = None
+
             resolved_verified_at = await self._parse_verified_at(verified_at)
 
             contacts = await self._search_contacts_for_mark_id_verification(search_term)
