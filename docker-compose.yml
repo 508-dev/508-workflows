@@ -60,7 +60,7 @@ services:
         condition: service_healthy
     restart: "no"
 
-  bot:
+  discord_bot:
     build:
       context: .
       dockerfile: apps/discord_bot/Dockerfile
@@ -74,7 +74,7 @@ services:
       redis:
         condition: service_healthy
 
-  backend-api:
+  api:
     build:
       context: .
       dockerfile: apps/api/Dockerfile
@@ -108,7 +108,7 @@ services:
     ports:
       - "${WEBHOOK_INGEST_PORT:-8090}:${WEBHOOK_INGEST_PORT:-8090}"
 
-  worker-consumer:
+  worker:
     build:
       context: .
       dockerfile: apps/worker/Dockerfile
@@ -137,7 +137,7 @@ services:
       MINIO_INTERNAL_BUCKET: ${MINIO_INTERNAL_BUCKET:-internal-transfers}
     restart: unless-stopped
     depends_on:
-      backend-api:
+      api:
         condition: service_started
       redis:
         condition: service_healthy

@@ -48,7 +48,7 @@ uv run --package worker worker-consumer
 
 ## Docker Compose Workflow
 
-Start full stack (bot + backend-api + worker-consumer + redis + postgres + minio):
+Start full stack (discord_bot + api + worker + redis + postgres + minio):
 
 ```bash
 docker compose up --build

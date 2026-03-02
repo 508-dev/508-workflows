@@ -122,7 +122,7 @@ Use `.env.example` as the source of defaults.
 
 ## Discord Bot Core
 
-- `Optional`: `BACKEND_API_BASE_URL` (default: `http://backend-api:8090`)
+- `Optional`: `BACKEND_API_BASE_URL` (default: `http://api:8090`)
 - `Optional`: `HEALTHCHECK_PORT` (default: `3000`)
 - `Optional`: `DISCORD_SENDMSG_CHARACTER_LIMIT` (default: `2000`)
 

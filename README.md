@@ -18,16 +18,16 @@ This repository follows a service-oriented monorepo layout:
 ├── packages/
 │   └── shared/
 │       └── src/five08/      # Shared settings, queue helpers, shared clients
-├── docker-compose.yml      # bot + backend-api + worker-consumer + redis + postgres + minio
+├── docker-compose.yml      # discord_bot + api + worker + redis + postgres + minio
 ├── tests/                  # Unit and integration tests
 └── pyproject.toml          # uv workspace root
 ```
 
 ## Services
 
-- `bot`: Discord gateway process.
-- `backend-api`: FastAPI dashboard + ingest service that validates and enqueues jobs.
-- `worker-consumer`: Dramatiq worker that executes jobs from Redis queue.
+- `discord_bot`: Discord gateway process.
+- `api`: FastAPI dashboard + ingest service that validates and enqueues jobs.
+- `worker`: Dramatiq worker that executes jobs from Redis queue.
 - `redis`: queue transport between API and worker.
 - `postgres`: job state persistence, retries, idempotency.
 - `minio`: internal S3-compatible storage transport.
@@ -198,7 +198,7 @@ Use `.env.example` as the source of truth for defaults.
 
 - `Required`: `DISCORD_BOT_TOKEN`
 - `Required`: `CHANNEL_ID`
-- `Optional`: `BACKEND_API_BASE_URL` (default: `http://backend-api:8090`)
+- `Optional`: `BACKEND_API_BASE_URL` (default: `http://api:8090`)
 - `Optional`: `HEALTHCHECK_PORT` (default: `3000`)
 - `Optional`: `DISCORD_SENDMSG_CHARACTER_LIMIT` (default: `2000`)
 
@@ -241,4 +241,4 @@ Deploy as a single Compose application.
 MinIO is used as the internal transfer mechanism so file handoffs stay inside the stack.
 External object storage adapters can be added later for multi-cloud or vendor-specific routing.
 
-This keeps one stack and one shared env set while still allowing independent service scaling/restarts (`bot`, `backend-api`, `worker-consumer`).
+This keeps one stack and one shared env set while still allowing independent service scaling/restarts (`discord_bot`, `api`, `worker`).
