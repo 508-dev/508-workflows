@@ -1,5 +1,7 @@
 """Unit tests for backend dashboard/ingest API."""
 
+import re
+from datetime import datetime, timezone
 import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import AsyncMock, Mock, patch
@@ -258,6 +260,207 @@ def test_job_status_handler_returns_result(
     assert payload["job_id"] == "job-123"
     assert payload["status"] == "succeeded"
     assert payload["result"] == {"success": True}
+
+
+def test_jobs_handler_returns_recent_jobs(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Jobs list endpoint should return created jobs sorted by API-reported query order."""
+    mock_job = Mock(
+        id="job-2",
+        type="sync_people_from_crm_job",
+        status=Mock(value="queued"),
+        attempts=1,
+        max_attempts=8,
+        last_error=None,
+        created_at=datetime(2026, 2, 26, 12, 0, 0, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 2, 26, 12, 1, 0, tzinfo=timezone.utc),
+    )
+    mock_job2 = Mock(
+        id="job-1",
+        type="extract_resume_profile_job",
+        status=Mock(value="succeeded"),
+        attempts=2,
+        max_attempts=8,
+        last_error="boom",
+        created_at=datetime(2026, 2, 26, 13, 0, 0, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 2, 26, 13, 5, 0, tzinfo=timezone.utc),
+    )
+
+    with patch(
+        "five08.backend.api.list_jobs",
+        return_value=[mock_job2, mock_job],
+    ) as mock_list_jobs:
+        response = client.get(
+            "/jobs?minutes=15&limit=2&status=queued&type=sync_people_from_crm_job",
+            headers=auth_headers,
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload == [
+        {
+            "job_id": "job-1",
+            "type": "extract_resume_profile_job",
+            "status": "succeeded",
+            "attempts": 2,
+            "max_attempts": 8,
+            "last_error": "boom",
+            "created_at": "2026-02-26T13:00:00+00:00",
+            "updated_at": "2026-02-26T13:05:00+00:00",
+        },
+        {
+            "job_id": "job-2",
+            "type": "sync_people_from_crm_job",
+            "status": "queued",
+            "attempts": 1,
+            "max_attempts": 8,
+            "last_error": None,
+            "created_at": "2026-02-26T12:00:00+00:00",
+            "updated_at": "2026-02-26T12:01:00+00:00",
+        },
+    ]
+
+    mock_list_jobs.assert_called_once()
+    called_kwargs = mock_list_jobs.call_args.kwargs
+    assert called_kwargs["status"].value == "queued"
+    assert called_kwargs["job_type"] == "sync_people_from_crm_job"
+    assert called_kwargs["limit"] == 2
+    assert called_kwargs["created_after"].tzinfo == timezone.utc
+
+
+def test_jobs_handler_rejects_invalid_status(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Jobs list endpoint should reject unknown status filters."""
+    response = client.get("/jobs?minutes=15&status=not-a-status", headers=auth_headers)
+
+    payload = response.json()
+    assert response.status_code == 400
+    assert payload["error"] == "invalid_status"
+    assert payload["status"] == "not-a-status"
+
+
+def test_rerun_job_handler_enqueues_new_job(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Rerun endpoint should enqueue a fresh job from existing call payload."""
+    source_job = Mock(
+        id="job-old-1",
+        type="process_docuseal_agreement_job",
+        max_attempts=8,
+        payload={
+            "args": ["member@508.dev", "2026-02-25 12:00:00", 55],
+            "kwargs": {},
+            "result": {"success": False},
+        },
+    )
+
+    with (
+        patch("five08.backend.api.get_job", return_value=source_job),
+        patch("five08.backend.api.enqueue_job") as mock_enqueue,
+    ):
+        mock_enqueue.return_value = Mock(id="job-new-1", created=True)
+        response = client.post("/jobs/job-old-1/rerun", headers=auth_headers)
+
+    payload = response.json()
+    assert response.status_code == 202
+    assert payload["status"] == "queued"
+    assert payload["source_job_id"] == "job-old-1"
+    assert payload["job_id"] == "job-new-1"
+    assert payload["type"] == "process_docuseal_agreement_job"
+    assert payload["created"] is True
+
+    call_kwargs = mock_enqueue.call_args.kwargs
+    assert call_kwargs["fn"] is api.process_docuseal_agreement_job
+    assert call_kwargs["args"] == (
+        "member@508.dev",
+        "2026-02-25 12:00:00",
+        55,
+    )
+    assert call_kwargs["kwargs"] == {}
+    assert call_kwargs["max_attempts"] == 8
+    prefix = "manual-rerun:job-old-1:"
+    assert call_kwargs["idempotency_key"].startswith(prefix)
+    suffix = call_kwargs["idempotency_key"][len(prefix) :]
+    assert re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{26}", suffix)
+
+
+def test_rerun_job_handler_returns_not_found(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Rerun endpoint should 404 when source job does not exist."""
+    with patch("five08.backend.api.get_job", return_value=None):
+        response = client.post("/jobs/missing/rerun", headers=auth_headers)
+
+    payload = response.json()
+    assert response.status_code == 404
+    assert payload["error"] == "job_not_found"
+
+
+def test_rerun_job_handler_rejects_unknown_job_type(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Rerun endpoint should reject unknown persisted job types."""
+    source_job = Mock(
+        id="job-old-2",
+        type="some_unknown_type",
+        max_attempts=8,
+        payload={"args": [], "kwargs": {}},
+    )
+    with patch("five08.backend.api.get_job", return_value=source_job):
+        response = client.post("/jobs/job-old-2/rerun", headers=auth_headers)
+
+    payload = response.json()
+    assert response.status_code == 400
+    assert payload["error"] == "unsupported_job_type"
+    assert payload["job_type"] == "some_unknown_type"
+
+
+def test_rerun_job_handler_rejects_invalid_payload_shape(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Rerun endpoint should reject source jobs with malformed call payload."""
+    source_job = Mock(
+        id="job-old-3",
+        type="sync_people_from_crm_job",
+        max_attempts=8,
+        payload={"args": "not-a-list", "kwargs": {}},
+    )
+    with patch("five08.backend.api.get_job", return_value=source_job):
+        response = client.post("/jobs/job-old-3/rerun", headers=auth_headers)
+
+    payload = response.json()
+    assert response.status_code == 400
+    assert payload["error"] == "invalid_job_payload"
+
+
+def test_rerun_job_handler_returns_503_on_enqueue_failure(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Rerun endpoint should fail with 503 when enqueueing fails."""
+    source_job = Mock(
+        id="job-old-4",
+        type="sync_people_from_crm_job",
+        max_attempts=8,
+        payload={"args": [], "kwargs": {}},
+    )
+    with (
+        patch("five08.backend.api.get_job", return_value=source_job),
+        patch("five08.backend.api.enqueue_job", side_effect=RuntimeError("boom")),
+    ):
+        response = client.post("/jobs/job-old-4/rerun", headers=auth_headers)
+
+    payload = response.json()
+    assert response.status_code == 503
+    assert payload["error"] == "enqueue_failed"
 
 
 def test_resume_extract_model_name_uses_heuristic_without_api_key(
@@ -644,7 +847,46 @@ def test_docuseal_webhook_enqueues_agreement_job(
     assert payload["submission_id"] == 4200
 
     call_kwargs = mock_enqueue.call_args.kwargs
+    assert call_kwargs["args"] == ("member@508.dev", "2026-02-25 12:00:00", 4200)
+    assert call_kwargs["args"][1] == "2026-02-25 12:00:00"
     assert call_kwargs["idempotency_key"] == "docuseal-agreement:4200"
+
+
+def test_docuseal_webhook_converts_completed_at_to_utc_payload_contract(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Docuseal timestamps should be serialized as UTC string contract payload args."""
+    monkeypatch.setattr(
+        api.settings,
+        "docuseal_member_agreement_template_id",
+        68,
+    )
+    payload = {
+        **_DOCUSEAL_PAYLOAD,
+        "data": {
+            **_DOCUSEAL_PAYLOAD["data"],
+            "completed_at": "2026-03-02T10:02:30.572+02:00",
+        },
+        "timestamp": "2026-03-02T10:02:30.572+02:00",
+    }
+    with patch("five08.backend.api.enqueue_job") as mock_enqueue:
+        mock_enqueue.return_value = Mock(id="job-ds-utc")
+        response = client.post(
+            "/webhooks/docuseal",
+            json=payload,
+            headers=auth_headers,
+        )
+
+    payload = response.json()
+    assert response.status_code == 202
+    assert payload["status"] == "queued"
+    assert payload["job_id"] == "job-ds-utc"
+    assert payload["submission_id"] == 4200
+
+    call_kwargs = mock_enqueue.call_args.kwargs
+    assert call_kwargs["args"][1] == "2026-03-02 08:02:30"
 
 
 def test_docuseal_webhook_ignored_when_template_filter_unset(

@@ -6,11 +6,12 @@ import asyncio
 import contextlib
 import hashlib
 import logging
+import os
 import secrets
 import time
 import json
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, cast
 from urllib.parse import urlencode
 from uuid import uuid4
@@ -29,10 +30,12 @@ from five08.audit import (
     AuditSource,
     insert_audit_event,
 )
-from five08.logging import configure_logging
+from five08.logging import configure_observability
 from five08.queue import (
     EnqueuedJob,
     QueueClient,
+    JobStatus,
+    list_jobs,
     enqueue_job,
     get_job,
     get_postgres_connection,
@@ -61,6 +64,7 @@ from five08.worker.jobs import (
     apply_resume_profile_job,
     extract_resume_profile_job,
     process_contact_skills_job,
+    process_mailbox_message_job,
     process_docuseal_agreement_job,
     process_intake_form_job,
     process_webhook_event,
@@ -76,6 +80,7 @@ from five08.worker.models import (
 )
 
 logger = logging.getLogger(__name__)
+_ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
 
 class ResumeExtractRequest(BaseModel):
@@ -101,6 +106,18 @@ class DiscordLinkCreateRequest(BaseModel):
     next_path: str | None = None
 
 
+_JOB_FUNCTIONS: dict[str, Any] = {
+    process_webhook_event.__name__: process_webhook_event,
+    process_contact_skills_job.__name__: process_contact_skills_job,
+    extract_resume_profile_job.__name__: extract_resume_profile_job,
+    apply_resume_profile_job.__name__: apply_resume_profile_job,
+    sync_people_from_crm_job.__name__: sync_people_from_crm_job,
+    sync_person_from_crm_job.__name__: sync_person_from_crm_job,
+    process_mailbox_message_job.__name__: process_mailbox_message_job,
+    process_docuseal_agreement_job.__name__: process_docuseal_agreement_job,
+}
+
+
 def _is_authorized(request: Request) -> bool:
     """Validate shared API secret."""
     if not settings.api_shared_secret:
@@ -116,6 +133,21 @@ def _is_authorized(request: Request) -> bool:
     return False
 
 
+def _encode_ulid_base32(value: int, length: int) -> str:
+    encoded = ["0"] * length
+    for index in range(length - 1, -1, -1):
+        encoded[index] = _ULID_ALPHABET[value & 0x1F]
+        value >>= 5
+    return "".join(encoded)
+
+
+def _generate_ulid() -> str:
+    """Generate a sortable ULID string without external dependencies."""
+    timestamp_ms = int(time.time() * 1000)
+    random_value = int.from_bytes(os.urandom(10), "big")
+    return f"{_encode_ulid_base32(timestamp_ms, 10)}{_encode_ulid_base32(random_value, 16)}"
+
+
 def _extract_idempotency_key(value: object) -> str | None:
     if isinstance(value, str) and value.strip():
         return value.strip()
@@ -126,6 +158,15 @@ def _resume_extract_model_name() -> str:
     if settings.openai_api_key:
         return settings.resolved_resume_ai_model
     return "heuristic"
+
+
+def _coerce_docuseal_completed_at_to_utc(value: str) -> str:
+    """Normalize Docuseal completion timestamps for queue/job payload contract."""
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    utc_value = parsed.astimezone(timezone.utc)
+    return utc_value.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _crm_sync_idempotency_key(*, now: datetime) -> str:
@@ -208,13 +249,30 @@ async def _crm_sync_scheduler(app: FastAPI) -> None:
 async def _email_resume_scheduler() -> None:
     """Run periodic mailbox polling for resume ingestion."""
     poller = ResumeMailboxProcessor(settings)
+    queue = build_queue_client()
     interval_seconds = max(1, settings.check_email_wait) * 60
     while True:
         try:
-            processed_count = await asyncio.to_thread(poller.poll_inbox)
+            messages = await asyncio.to_thread(poller.poll_unprocessed_messages)
+            enqueued = 0
+            for message in messages:
+                idempotency_key = (
+                    message.message_id if message.message_id else message.message_num
+                )
+                job = await asyncio.to_thread(
+                    enqueue_job,
+                    queue=queue,
+                    fn=process_mailbox_message_job,
+                    args=(message.raw_message_b64,),
+                    settings=settings,
+                    idempotency_key=f"mailbox-inbox:{idempotency_key}",
+                )
+                if job.created:
+                    enqueued += 1
             logger.debug(
-                "Completed mailbox resume poll processed_attachments=%s",
-                processed_count,
+                "Completed mailbox resume poll discovered_messages=%s queued_jobs=%s",
+                len(messages),
+                enqueued,
             )
         except Exception:
             logger.exception("Failed mailbox resume poll iteration")
@@ -668,6 +726,121 @@ async def job_status_handler(request: Request, job_id: str) -> JSONResponse:
     )
 
 
+async def jobs_handler(
+    request: Request,
+    minutes: int = Query(default=60, ge=1),
+    limit: int = Query(default=100, ge=1, le=1000),
+    status: str | None = Query(default=None),
+    job_type: str | None = Query(default=None, alias="type"),
+) -> JSONResponse:
+    """Return jobs created within the last N minutes."""
+    if not _is_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=minutes)
+    job_status: JobStatus | None = None
+    if status is not None:
+        try:
+            job_status = JobStatus(status)
+        except ValueError:
+            return JSONResponse(
+                {"error": "invalid_status", "status": status},
+                status_code=400,
+            )
+
+    recent_jobs = await asyncio.to_thread(
+        list_jobs,
+        settings,
+        created_after=cutoff,
+        limit=limit,
+        status=job_status,
+        job_type=job_type,
+    )
+
+    payload = [
+        {
+            "job_id": job.id,
+            "type": job.type,
+            "status": job.status.value,
+            "attempts": job.attempts,
+            "max_attempts": job.max_attempts,
+            "last_error": job.last_error,
+            "created_at": job.created_at.isoformat(),
+            "updated_at": job.updated_at.isoformat(),
+        }
+        for job in recent_jobs
+    ]
+    return JSONResponse(payload)
+
+
+async def rerun_job_handler(request: Request, job_id: str) -> JSONResponse:
+    """Create and enqueue a new job using a prior job's original call payload."""
+    if not _is_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    normalized_job_id = job_id.strip()
+    if not normalized_job_id:
+        return JSONResponse({"error": "job_id_required"}, status_code=400)
+
+    source_job = await asyncio.to_thread(get_job, settings, normalized_job_id)
+    if source_job is None:
+        return JSONResponse({"error": "job_not_found"}, status_code=404)
+
+    fn = _JOB_FUNCTIONS.get(source_job.type)
+    if fn is None:
+        return JSONResponse(
+            {
+                "error": "unsupported_job_type",
+                "job_type": source_job.type,
+            },
+            status_code=400,
+        )
+
+    raw_payload = source_job.payload
+    if not isinstance(raw_payload, dict):
+        return JSONResponse({"error": "invalid_job_payload"}, status_code=400)
+    if "args" not in raw_payload or "kwargs" not in raw_payload:
+        return JSONResponse({"error": "invalid_job_payload"}, status_code=400)
+
+    raw_args = raw_payload["args"]
+    raw_kwargs = raw_payload["kwargs"]
+    if not isinstance(raw_args, list) or not isinstance(raw_kwargs, dict):
+        return JSONResponse({"error": "invalid_job_payload"}, status_code=400)
+
+    queue = request.app.state.queue
+    rerun_idempotency_key = f"manual-rerun:{source_job.id}:{_generate_ulid()}"
+
+    try:
+        rerun_job: EnqueuedJob = await asyncio.to_thread(
+            enqueue_job,
+            queue=queue,
+            fn=fn,
+            args=tuple(raw_args),
+            kwargs=raw_kwargs,
+            settings=settings,
+            idempotency_key=rerun_idempotency_key,
+            max_attempts=source_job.max_attempts,
+        )
+    except Exception:
+        logger.exception(
+            "Failed rerunning job source_job_id=%s type=%s",
+            source_job.id,
+            source_job.type,
+        )
+        return JSONResponse({"error": "enqueue_failed"}, status_code=503)
+
+    return JSONResponse(
+        {
+            "status": "queued",
+            "source_job_id": source_job.id,
+            "job_id": rerun_job.id,
+            "type": source_job.type,
+            "created": rerun_job.created,
+        },
+        status_code=202,
+    )
+
+
 async def sync_people_handler(request: Request) -> JSONResponse:
     """Manual enqueue for a full CRM->people cache sync."""
     if not _is_authorized(request):
@@ -737,7 +910,11 @@ async def espocrm_people_sync_webhook_handler(request: Request) -> JSONResponse:
 
 
 async def docuseal_webhook_handler(request: Request) -> JSONResponse:
-    """Process a Docuseal form.completed webhook and enqueue agreement job."""
+    """Process a Docuseal form.completed webhook and enqueue agreement job.
+
+    Job payload contract for the queue is:
+    completed_at = "YYYY-MM-DD HH:mm:ss" in UTC.
+    """
     if not _is_authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
@@ -809,7 +986,7 @@ async def docuseal_webhook_handler(request: Request) -> JSONResponse:
         return JSONResponse({"error": "invalid_payload"}, status_code=400)
 
     try:
-        datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+        completed_at = _coerce_docuseal_completed_at_to_utc(completed_at)
     except ValueError:
         return JSONResponse({"error": "invalid_payload"}, status_code=400)
 
@@ -1459,7 +1636,9 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
     app.add_api_route("/", health_handler, methods=["GET"])
     app.add_api_route("/health", health_handler, methods=["GET"])
 
+    app.add_api_route("/jobs", jobs_handler, methods=["GET"])
     app.add_api_route("/jobs/{job_id}", job_status_handler, methods=["GET"])
+    app.add_api_route("/jobs/{job_id}/rerun", rerun_job_handler, methods=["POST"])
     app.add_api_route("/jobs/resume-extract", resume_extract_handler, methods=["POST"])
     app.add_api_route("/jobs/resume-apply", resume_apply_handler, methods=["POST"])
 
@@ -1514,7 +1693,11 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
 
 def run() -> None:
     """Entrypoint for backend API service."""
-    configure_logging(settings.log_level)
+    configure_observability(
+        settings=settings,
+        service_name="backend-api",
+        include_fastapi=True,
+    )
     uvicorn.run(
         create_app(),
         host=settings.webhook_ingest_host,

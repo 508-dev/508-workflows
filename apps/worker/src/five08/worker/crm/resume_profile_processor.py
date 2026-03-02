@@ -440,6 +440,14 @@ class ResumeProfileProcessor:
                 else:
                     sanitized_updates["cSkillAttrs"] = {}
 
+            if not sanitized_updates:
+                return ResumeApplyResult(
+                    contact_id=contact_id,
+                    updated_fields=[],
+                    success=False,
+                    error="No valid profile fields provided",
+                )
+
             link_applied = False
             if link_discord:
                 discord_user_id = str(link_discord.get("user_id", "")).strip()
@@ -451,14 +459,86 @@ class ResumeProfileProcessor:
                     )
                     link_applied = True
 
-            if sanitized_updates:
+            pre_update_contact: dict[str, Any] | None = None
+            try:
+                pre_update_contact = self.crm.get_contact(contact_id)
+            except Exception as exc:
+                logger.debug(
+                    "Failed to read pre-update contact for verification contact_id=%s: %s",
+                    contact_id,
+                    exc,
+                )
+
+            try:
                 self.crm.update_contact(contact_id, sanitized_updates)
+                verified_fields = self._verify_updated_fields(
+                    contact_id=contact_id,
+                    baseline_contact=pre_update_contact,
+                    candidate_fields=list(sanitized_updates.keys()),
+                )
+                if verified_fields is None:
+                    verified_fields = sorted(sanitized_updates.keys())
+                return ResumeApplyResult(
+                    contact_id=contact_id,
+                    updated_fields=verified_fields,
+                    link_discord_applied=link_applied,
+                    success=bool(verified_fields),
+                    error=None if verified_fields else "No fields were updated",
+                )
+            except EspoAPIError as batch_error:
+                logger.warning(
+                    "Resume profile batch update failed for contact_id=%s; applying fields individually. error=%s",
+                    contact_id,
+                    batch_error,
+                )
+
+            updated_fields: list[str] = []
+            batch_errors: list[str] = []
+            for field, value in sanitized_updates.items():
+                try:
+                    self.crm.update_contact(contact_id, {field: value})
+                    updated_fields.append(field)
+                except EspoAPIError as field_error:
+                    batch_errors.append(f"{field}: {field_error}")
+                except Exception as field_error:
+                    batch_errors.append(f"{field}: {field_error}")
+
+            if updated_fields:
+                verified_fields = self._verify_updated_fields(
+                    contact_id=contact_id,
+                    baseline_contact=pre_update_contact,
+                    candidate_fields=updated_fields,
+                )
+                if verified_fields is not None:
+                    updated_fields = verified_fields
+
+            if len(updated_fields) == len(sanitized_updates):
+                return ResumeApplyResult(
+                    contact_id=contact_id,
+                    updated_fields=sorted(updated_fields),
+                    link_discord_applied=link_applied,
+                    success=True,
+                )
+
+            if updated_fields:
+                return ResumeApplyResult(
+                    contact_id=contact_id,
+                    updated_fields=sorted(updated_fields),
+                    link_discord_applied=link_applied,
+                    success=False,
+                    error="; ".join(batch_errors)
+                    if batch_errors
+                    else "Some fields did not persist after update",
+                )
 
             return ResumeApplyResult(
                 contact_id=contact_id,
                 updated_fields=sorted(sanitized_updates.keys()),
                 link_discord_applied=link_applied,
-                success=True,
+                success=False,
+                error="; ".join(batch_errors)
+                if batch_errors
+                else "No fields were updated",
             )
         except EspoAPIError as exc:
             logger.error("EspoCRM apply failed contact_id=%s error=%s", contact_id, exc)
@@ -478,6 +558,54 @@ class ResumeProfileProcessor:
                 success=False,
                 error=str(exc),
             )
+
+    @staticmethod
+    def _normalize_compare_value(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, (dict, list)):
+            try:
+                return json.dumps(value, sort_keys=True, separators=(",", ":"))
+            except Exception:
+                return str(value)
+        if isinstance(value, bool):
+            return str(value).lower()
+        return str(value).strip()
+
+    def _verify_updated_fields(
+        self,
+        *,
+        contact_id: str,
+        baseline_contact: dict[str, Any] | None,
+        candidate_fields: list[str],
+    ) -> list[str] | None:
+        if baseline_contact is None:
+            return None
+
+        baseline: dict[str, str] = {}
+        for field in candidate_fields:
+            baseline[field] = self._normalize_compare_value(
+                baseline_contact.get(field, "")
+            )
+
+        try:
+            after_contact = self.crm.get_contact(contact_id)
+        except Exception as exc:
+            logger.debug(
+                "Failed to read post-update contact for verification contact_id=%s: %s",
+                contact_id,
+                exc,
+            )
+            return None
+        if not isinstance(after_contact, dict):
+            return None
+
+        changed_fields: list[str] = []
+        for field in candidate_fields:
+            after_value = self._normalize_compare_value(after_contact.get(field, ""))
+            if after_value != baseline.get(field, ""):
+                changed_fields.append(field)
+        return changed_fields
 
     def _collect_change(
         self,

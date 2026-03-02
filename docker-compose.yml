@@ -60,7 +60,7 @@ services:
         condition: service_healthy
     restart: "no"
 
-  bot:
+  discord_bot:
     build:
       context: .
       dockerfile: apps/discord_bot/Dockerfile
@@ -74,11 +74,11 @@ services:
       redis:
         condition: service_healthy
 
-  backend-api:
+  api:
     build:
       context: .
-      dockerfile: apps/worker/Dockerfile
-    command: ["uv", "run", "--package", "integrations-worker", "backend-api"]
+      dockerfile: apps/api/Dockerfile
+    command: ["uv", "run", "--package", "api", "backend-api"]
     env_file:
       - .env
     environment:
@@ -108,12 +108,12 @@ services:
     ports:
       - "${WEBHOOK_INGEST_PORT:-8090}:${WEBHOOK_INGEST_PORT:-8090}"
 
-  worker-consumer:
+  worker:
     build:
       context: .
       dockerfile: apps/worker/Dockerfile
     command: >-
-      uv run --package integrations-worker
+      uv run --package worker
       dramatiq five08.worker.actors
       --processes ${WORKER_PROCESSES:-1}
       --threads ${WORKER_THREADS:-8}
@@ -123,6 +123,7 @@ services:
     environment:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       REDIS_QUEUE_NAME: ${REDIS_QUEUE_NAME:-jobs.default}
+      WORKER_API_BASE_URL: ${WORKER_API_BASE_URL:-}
       WORKER_QUEUE_NAMES: ${WORKER_QUEUE_NAMES:-jobs.default}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
@@ -137,7 +138,7 @@ services:
       MINIO_INTERNAL_BUCKET: ${MINIO_INTERNAL_BUCKET:-internal-transfers}
     restart: unless-stopped
     depends_on:
-      backend-api:
+      api:
         condition: service_started
       redis:
         condition: service_healthy

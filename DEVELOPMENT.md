@@ -1,6 +1,6 @@
 # Development Guide
 
-This guide covers setup and workflows for the 508.dev monorepo (`discord bot + worker + shared package`).
+This guide covers setup and workflows for the 508.dev monorepo (`discord bot + api + worker + shared package`).
 
 ## Prerequisites
 
@@ -12,7 +12,7 @@ This guide covers setup and workflows for the 508.dev monorepo (`discord bot + w
 
 ```text
 apps/discord_bot/src/five08/discord_bot/  # Discord bot package
-apps/worker/src/five08/backend/           # Backend API package
+apps/api/src/five08/backend/              # Backend API package
 apps/worker/src/five08/worker/            # Worker consumer package
 packages/shared/src/five08/     # Shared package
 ```
@@ -37,18 +37,18 @@ The backend API process runs Alembic migrations on startup (`apps/worker/src/fiv
 
 ```bash
 # bot
-uv run --package discord-bot-app discord-bot
+uv run --package discord_bot discord-bot
 
 # webhook ingest API
-uv run --package integrations-worker backend-api
+uv run --package api backend-api
 
 # job consumer
-uv run --package integrations-worker worker-consumer
+uv run --package worker worker-consumer
 ```
 
 ## Docker Compose Workflow
 
-Start full stack (bot + backend-api + worker-consumer + redis + postgres + minio):
+Start full stack (discord_bot + api + worker + redis + postgres + minio):
 
 ```bash
 docker compose up --build
@@ -91,7 +91,7 @@ async def setup(bot: commands.Bot) -> None:
 ## Adding Worker Jobs
 
 1. Add job function in `apps/worker/src/five08/worker/jobs.py`.
-2. Enqueue from `apps/worker/src/five08/backend/api.py` (or from bot code if needed).
+2. Enqueue from `apps/api/src/five08/backend/api.py` (or from bot code if needed).
 3. Ensure job type/queue settings and Postgres settings are configured in `.env`.
 
 ### Job architecture

@@ -32,6 +32,8 @@ logger = logging.getLogger(__name__)
 
 ID_VERIFIED_AT_FIELD = "cIdVerifiedAt"
 ID_VERIFIED_BY_FIELD = "cIdVerifiedBy"
+ID_VERIFIED_TYPE_FIELD = "cVerifiedIdType"
+MIGADU_API_BASE_URL = "https://api.migadu.com/v1"
 
 EspoAPI = espo.EspoAPI
 EspoAPIError = espo.EspoAPIError
@@ -236,6 +238,7 @@ class MarkIdVerifiedSelectionButton(discord.ui.Button["MarkIdVerifiedSelectionVi
         contact: dict[str, Any],
         verified_by: str,
         verified_at: str,
+        id_type: str | None,
         requester_id: int,
     ) -> None:
         contact_name = contact.get("name", "Unknown")
@@ -244,6 +247,7 @@ class MarkIdVerifiedSelectionButton(discord.ui.Button["MarkIdVerifiedSelectionVi
         self.contact = contact
         self.verified_by = verified_by
         self.verified_at = verified_at
+        self.id_type = id_type
         self.requester_id = requester_id
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -265,6 +269,7 @@ class MarkIdVerifiedSelectionButton(discord.ui.Button["MarkIdVerifiedSelectionVi
                 contact=self.contact,
                 verified_by=self.verified_by,
                 verified_at=self.verified_at,
+                id_type=self.id_type,
             )
 
             for item in self.view.children:
@@ -296,12 +301,14 @@ class MarkIdVerifiedSelectionView(discord.ui.View):
         requester_id: int,
         verified_by: str,
         verified_at: str,
+        id_type: str | None,
     ) -> None:
         super().__init__(timeout=300)  # 5 minute timeout
         self.crm_cog = crm_cog
         self.requester_id = requester_id
         self.verified_by = verified_by
         self.verified_at = verified_at
+        self.id_type = id_type
 
     def add_contact_button(
         self,
@@ -314,9 +321,89 @@ class MarkIdVerifiedSelectionView(discord.ui.View):
             contact=contact,
             verified_by=self.verified_by,
             verified_at=self.verified_at,
+            id_type=self.id_type,
             requester_id=self.requester_id,
         )
         self.add_item(button)
+
+
+class MarkIdVerifiedOverwriteConfirmationView(discord.ui.View):
+    """View for confirming overwrite of existing ID verification values."""
+
+    def __init__(
+        self,
+        crm_cog: "CRMCog",
+        interaction: discord.Interaction,
+        contact: dict[str, Any],
+        verified_by: str,
+        verified_at: str,
+        id_type: str | None,
+    ) -> None:
+        super().__init__(timeout=300)  # 5 minute timeout
+        self.crm_cog = crm_cog
+        self.original_interaction = interaction
+        self.contact = contact
+        self.verified_by = verified_by
+        self.verified_at = verified_at
+        self.id_type = id_type
+        self.requester_id = interaction.user.id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Allow only the original requester to confirm/cancel."""
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "❌ Only the command requester can confirm this action.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Overwrite", style=discord.ButtonStyle.danger, emoji="⚠️")
+    async def confirm_overwrite(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button["MarkIdVerifiedOverwriteConfirmationView"],
+    ) -> None:
+        """Overwrite existing verification metadata and continue."""
+        await interaction.response.defer(ephemeral=True)
+        await self.crm_cog._mark_id_verified_for_contact(
+            interaction=interaction,
+            contact=self.contact,
+            verified_by=self.verified_by,
+            verified_at=self.verified_at,
+            id_type=self.id_type,
+            allow_overwrite=True,
+        )
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+
+        if interaction.message:
+            try:
+                await interaction.message.edit(view=self)
+            except discord.NotFound:
+                pass
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
+    async def cancel_overwrite(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button["MarkIdVerifiedOverwriteConfirmationView"],
+    ) -> None:
+        """Cancel overwrite and leave contact unchanged."""
+        await interaction.response.send_message(
+            "✅ ID verification overwrite cancelled. No changes were made.",
+            ephemeral=True,
+        )
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+
+        if interaction.message:
+            try:
+                await interaction.message.edit(view=self)
+            except discord.NotFound:
+                pass
 
 
 class ResumeConfirmationView(discord.ui.View):
@@ -592,6 +679,36 @@ class ResumeUpdateConfirmationView(discord.ui.View):
                 link_discord_applied = raw_link_applied
 
         if status != "succeeded":
+            result_error = str(apply_result.get("last_error", ""))
+            result_success = None
+            if isinstance(result, dict):
+                result_success = result.get("success")
+
+            if result_success is False:
+                error_message = str(
+                    result.get("error") if isinstance(result, dict) else ""
+                )
+                if not error_message:
+                    error_message = result_error or "Unknown error"
+                _audit_apply_event(
+                    "error",
+                    {
+                        "contact_id": self.contact_id,
+                        "stage": "apply_failed",
+                        "job_id": apply_job_id,
+                        "job_status": status,
+                        "last_error": result_error,
+                        "apply_error": error_message,
+                        "updated_fields": updated_fields,
+                        "link_discord_applied": link_discord_applied,
+                    },
+                )
+                await interaction.followup.send(
+                    f"❌ Apply job failed (status: {status}). Error: {error_message}",
+                    ephemeral=True,
+                )
+                return
+
             _audit_apply_event(
                 "error",
                 {
@@ -607,6 +724,51 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             await interaction.followup.send(
                 f"❌ Apply job failed (status: {status}). "
                 f"Error: {apply_result.get('last_error') or 'Unknown error'}",
+                ephemeral=True,
+            )
+            return
+
+        if isinstance(result, dict) and result.get("success") is False:
+            error_message = str(result.get("error") or "")
+            if not error_message:
+                error_message = str(apply_result.get("last_error", "Unknown error"))
+            _audit_apply_event(
+                "error",
+                {
+                    "contact_id": self.contact_id,
+                    "stage": "apply_failed",
+                    "job_id": apply_job_id,
+                    "job_status": status,
+                    "updated_fields": updated_fields,
+                    "link_discord_applied": link_discord_applied,
+                },
+            )
+            await interaction.followup.send(
+                "❌ Apply completed but returned a failed result. "
+                f"Error: {error_message}",
+                ephemeral=True,
+            )
+            return
+
+        if (
+            isinstance(result, dict)
+            and result.get("success") is True
+            and not updated_fields
+        ):
+            _audit_apply_event(
+                "error",
+                {
+                    "contact_id": self.contact_id,
+                    "stage": "apply_no_updates",
+                    "job_id": apply_job_id,
+                    "job_status": status,
+                    "updated_fields": updated_fields,
+                    "link_discord_applied": link_discord_applied,
+                },
+            )
+            await interaction.followup.send(
+                "❌ Apply reported success but no fields were updated. "
+                "Please verify your permissions or contact field mapping and try again.",
                 ephemeral=True,
             )
             return
@@ -695,8 +857,10 @@ class ResumeCreateContactView(discord.ui.View):
         search_term: str | None,
         overwrite: bool,
         link_user: discord.Member | None,
-        inferred_contact_meta: dict[str, str] | None,
+        inferred_contact_meta: dict[str, Any] | None,
         target_scope: str,
+        create_payload_override: dict[str, str] | None = None,
+        created_target_scope: str = "created",
     ) -> None:
         super().__init__(timeout=180)
         self.crm_cog = crm_cog
@@ -709,6 +873,8 @@ class ResumeCreateContactView(discord.ui.View):
         self.link_user = link_user
         self.inferred_contact_meta = inferred_contact_meta
         self.target_scope = target_scope
+        self.create_payload_override = create_payload_override
+        self.created_target_scope = created_target_scope
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.original_interaction.user.id:
@@ -743,10 +909,14 @@ class ResumeCreateContactView(discord.ui.View):
     ) -> None:
         """Create the inferred contact and continue resume upload."""
         await interaction.response.defer(ephemeral=True)
+        create_payload: dict[str, str] | None = None
         try:
-            create_payload = self.crm_cog._build_resume_create_contact_payload(
-                file_content=self.file_content
-            )
+            if self.create_payload_override:
+                create_payload = dict(self.create_payload_override)
+            else:
+                create_payload = self.crm_cog._build_resume_create_contact_payload(
+                    file_content=self.file_content
+                )
             target_contact = self.crm_cog.espo_api.request(
                 "POST", "Contact", create_payload
             )
@@ -769,23 +939,36 @@ class ResumeCreateContactView(discord.ui.View):
                 filename=self.filename,
                 file_size=self.file_size,
                 contact=target_contact,
-                target_scope="created",
+                target_scope=self.created_target_scope,
                 search_term=self.search_term,
                 overwrite=self.overwrite,
                 link_user=self.link_user,
                 inferred_contact_meta=self.inferred_contact_meta,
             )
-        except (EspoAPIError, ValueError, TypeError) as exc:
+        except Exception as exc:
+            status_code = getattr(self.crm_cog.espo_api, "status_code", None)
+            logger.exception(
+                "Failed to create contact from resume filename=%s target_scope=%s inferred_meta=%s status_code=%s payload=%s",
+                self.filename,
+                self.target_scope,
+                self.inferred_contact_meta,
+                status_code,
+                create_payload,
+            )
+            audit_metadata: dict[str, Any] = {
+                "filename": self.filename,
+                "target_scope": self.target_scope,
+                "reason": "contact_create_failed",
+                "error": str(exc),
+                "status_code": status_code,
+            }
+            if create_payload:
+                audit_metadata["create_payload_keys"] = sorted(create_payload.keys())
             self.crm_cog._audit_command(
                 interaction=interaction,
                 action="crm.upload_resume",
                 result="error",
-                metadata={
-                    "filename": self.filename,
-                    "target_scope": self.target_scope,
-                    "reason": "contact_create_failed",
-                    "error": str(exc),
-                },
+                metadata=audit_metadata,
             )
             await interaction.followup.send(
                 "⚠️ Could not create a contact from this resume. "
@@ -822,6 +1005,8 @@ class CRMCog(commands.Cog):
             base_url=settings.audit_api_base_url,
             shared_secret=settings.api_shared_secret,
             timeout_seconds=settings.audit_api_timeout_seconds,
+            discord_logs_webhook_url=settings.discord_logs_webhook_url,
+            discord_logs_webhook_wait=settings.discord_logs_webhook_wait,
         )
 
     def _audit_command(
@@ -852,6 +1037,54 @@ class CRMCog(commands.Cog):
             "X-API-Secret": settings.api_shared_secret,
             "Content-Type": "application/json",
         }
+
+    def _migadu_credentials(self) -> tuple[str, str]:
+        """Return Migadu username and API token from configured settings."""
+        username = (settings.migadu_api_user or "").strip()
+        if not username:
+            raise ValueError("MIGADU_API_USER is required to create Migadu mailboxes.")
+
+        raw_key = (settings.migadu_api_key or "").strip()
+        if not raw_key:
+            raise ValueError("MIGADU_API_KEY is required to create Migadu mailboxes.")
+        return username, raw_key
+
+    def _migadu_mailbox_domain(self) -> str:
+        """Resolve the mailbox domain configured for new 508 addresses."""
+        domain = (
+            (settings.migadu_mailbox_domain or "508.dev").strip().lower().lstrip(".")
+        )
+        if not domain:
+            domain = "508.dev"
+        return domain
+
+    def _normalize_mailbox_request(self, backup_email: str) -> tuple[str, str, str]:
+        """
+        Normalize user input and derive both:
+            - backup_email: the value to match against existing CRM email fields
+            - mailbox_email: the generated 508 mailbox address to create
+            - local_part: mailbox local-part for Migadu API
+        """
+        normalized = backup_email.strip().lower()
+        if not normalized:
+            raise ValueError("Please provide a full backup email address.")
+        if " " in normalized:
+            raise ValueError("Backup email cannot include spaces.")
+        if normalized.count("@") != 1:
+            raise ValueError("Backup email must be a full email address.")
+
+        domain = self._migadu_mailbox_domain()
+        local_part, provided_domain = normalized.split("@", 1)
+        if not local_part:
+            raise ValueError("Backup email is missing a local part.")
+        if not provided_domain:
+            raise ValueError("Backup email is missing a domain.")
+        if provided_domain in {"508", "508.dev"}:
+            raise ValueError("Backup email cannot be an @508.dev email.")
+
+        normalized_domain = provided_domain.strip().lower()
+        mailbox_email = f"{local_part}@{domain}"
+        return f"{local_part}@{normalized_domain}", mailbox_email, local_part
 
     def _backend_url(self, path: str) -> str:
         return f"{settings.backend_api_base_url.rstrip('/')}{path}"
@@ -1318,6 +1551,108 @@ class CRMCog(commands.Cog):
         normalized = normalize_skill_list([value])
         return normalized[0] if normalized else ""
 
+    def _parse_skill_updates(
+        self, skills: str
+    ) -> tuple[list[str], dict[str, int], list[str]]:
+        """Parse comma-separated skills with optional `skill:level` syntax."""
+        parsed_skills: list[str] = []
+        requested_strengths: dict[str, int] = {}
+        invalid_entries: list[str] = []
+        seen: set[str] = set()
+
+        for raw_token in skills.replace(";", ",").split(","):
+            token = raw_token.strip()
+            if not token:
+                continue
+
+            token_skill = token
+            strength_value: int | None = None
+            if ":" in token:
+                token_skill, raw_strength = token.rsplit(":", 1)
+                token_skill = token_skill.strip()
+                raw_strength = raw_strength.strip()
+
+                if not token_skill or not raw_strength:
+                    invalid_entries.append(token)
+                    continue
+
+                try:
+                    parsed_strength = int(float(raw_strength))
+                except (TypeError, ValueError):
+                    invalid_entries.append(token)
+                    continue
+
+                if not 1 <= parsed_strength <= 5:
+                    invalid_entries.append(token)
+                    continue
+
+                strength_value = parsed_strength
+
+            normalized_skill = self._normalize_skill(token_skill)
+            if not normalized_skill:
+                invalid_entries.append(token)
+                continue
+
+            key = normalized_skill.casefold()
+            if key in seen:
+                if strength_value is not None:
+                    requested_strengths[key] = strength_value
+                continue
+
+            seen.add(key)
+            parsed_skills.append(normalized_skill)
+            if strength_value is not None:
+                requested_strengths[key] = strength_value
+
+        return parsed_skills, requested_strengths, invalid_entries
+
+    def _serialize_skill_attrs(self, attrs: dict[str, int]) -> str:
+        """Serialize normalized skill strengths in the CRM-compatible format."""
+        payload = {
+            skill.casefold(): {"strength": max(1, min(5, int(strength)))}
+            for skill, strength in attrs.items()
+            if skill
+        }
+        return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+    def _merge_skill_update_payload(
+        self,
+        contact: dict[str, Any],
+        requested_skills: list[str],
+        requested_strengths: dict[str, int],
+    ) -> tuple[str, str]:
+        """Merge requested skills with existing contact skills and attributes."""
+        raw_skills = contact.get("skills", "")
+        if isinstance(raw_skills, list):
+            raw_skill_values = [str(item) for item in raw_skills if str(item).strip()]
+        else:
+            raw_skill_values = [
+                item.strip() for item in str(raw_skills).split(",") if item.strip()
+            ]
+
+        existing_skills = normalize_skill_list(raw_skill_values)
+        existing_skill_keys = {skill.casefold() for skill in existing_skills}
+        merged_skills = list(existing_skills)
+        merged_attrs = self._parse_contact_skill_attrs(contact.get("cSkillAttrs"))
+
+        for requested_skill in requested_skills:
+            key = requested_skill.casefold()
+            if key not in existing_skill_keys:
+                merged_skills.append(requested_skill)
+                existing_skill_keys.add(key)
+
+            requested_strength = requested_strengths.get(key)
+            if requested_strength is None:
+                requested_strength = merged_attrs.get(key, 3)
+
+            merged_attrs[key] = requested_strength
+
+        for existing_skill in merged_skills:
+            key = existing_skill.casefold()
+            merged_attrs.setdefault(key, 3)
+
+        return ", ".join(merged_skills), self._serialize_skill_attrs(merged_attrs)
+
     def _format_requested_skills(
         self, requested_skills: list[str], contact: dict[str, Any]
     ) -> str:
@@ -1629,6 +1964,171 @@ class CRMCog(commands.Cog):
             await interaction.followup.send(embed=embed)
 
     @app_commands.command(
+        name="create-mailbox",
+        description="Create a Migadu mailbox for a contact and sync 508 email (Admin only).",
+    )
+    @app_commands.describe(
+        backup_email=(
+            "Full backup email for the contact (e.g. john@gmail.com). "
+            "`@508.dev` is not allowed."
+        )
+    )
+    @require_role("Admin")
+    async def create_mailbox(
+        self, interaction: discord.Interaction, backup_email: str
+    ) -> None:
+        """Create a 508 mailbox and update the CRM contact."""
+        try:
+            await interaction.response.defer(ephemeral=True)
+
+            backup_lookup, mailbox_email, local_part = self._normalize_mailbox_request(
+                backup_email
+            )
+            matches = await self._search_contacts_for_mailbox_command(
+                backup_email=backup_lookup, mailbox_email=mailbox_email
+            )
+
+            if not matches:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.create_mailbox",
+                    result="denied",
+                    metadata={
+                        "backup_email": backup_email,
+                        "reason": "contact_not_found",
+                    },
+                )
+                await interaction.followup.send(
+                    "❌ No contact found for the provided backup email."
+                )
+                return
+
+            if len(matches) > 1:
+                match_lines = []
+                for contact in matches[:5]:
+                    match_lines.append(
+                        f"{contact.get('name', 'Unknown')} — "
+                        f"{contact.get('emailAddress', 'No email')} "
+                        f"(c508: {contact.get('c508Email', 'No 508 email')})"
+                    )
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.create_mailbox",
+                    result="denied",
+                    metadata={
+                        "backup_email": backup_lookup,
+                        "mailbox_email": mailbox_email,
+                        "reason": "multiple_contacts",
+                    },
+                )
+                await interaction.followup.send(
+                    "⚠️ Multiple contacts match this value:\n" + "\n".join(match_lines)
+                )
+                return
+
+            contact = matches[0]
+            contact_id = contact.get("id")
+            contact_name = contact.get("name", "Unknown")
+            if not contact_id:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.create_mailbox",
+                    result="error",
+                    metadata={
+                        "backup_email": backup_lookup,
+                        "reason": "contact_missing_id",
+                    },
+                )
+                await interaction.followup.send(
+                    "❌ Contact is missing an ID; cannot create mailbox."
+                )
+                return
+
+            mailbox = await self._create_migadu_mailbox(
+                local_part=local_part,
+                backup_email=backup_lookup,
+            )
+
+            update_data = {"c508Email": mailbox_email}
+            update_response = self.espo_api.request(
+                "PUT", f"Contact/{contact_id}", update_data
+            )
+            if not update_response:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.create_mailbox",
+                    result="error",
+                    metadata={
+                        "backup_email": backup_lookup,
+                        "mailbox_email": mailbox_email,
+                        "contact_id": str(contact_id),
+                    },
+                )
+                await interaction.followup.send(
+                    "⚠️ Mailbox was created, but CRM contact could not be updated. "
+                    "Please set `c508Email` manually."
+                )
+                return
+
+            created_address = mailbox.get("address")
+            embed = discord.Embed(
+                title="✅ Mailbox Created",
+                color=0x00FF00,
+            )
+            embed.add_field(name="Contact", value=contact_name, inline=False)
+            embed.add_field(
+                name="Mailbox", value=created_address or mailbox_email, inline=True
+            )
+            embed.add_field(name="Backup", value=backup_lookup, inline=True)
+            profile_url = f"{self.base_url}/#Contact/view/{contact_id}"
+            embed.add_field(name="CRM", value=f"[View]({profile_url})", inline=True)
+            await interaction.followup.send(embed=embed)
+
+            self._audit_command(
+                interaction=interaction,
+                action="crm.create_mailbox",
+                result="success",
+                metadata={
+                    "backup_email": backup_lookup,
+                    "mailbox_email": mailbox_email,
+                    "contact_id": str(contact_id),
+                    "contact_name": contact_name,
+                },
+                resource_type="crm_contact",
+                resource_id=str(contact_id),
+            )
+
+        except ValueError as e:
+            logger.error(f"Invalid request in create_mailbox: {e}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.create_mailbox",
+                result="denied",
+                metadata={"error": str(e), "backup_email": backup_email},
+            )
+            await interaction.followup.send(f"⚠️ {e}")
+        except EspoAPIError as e:
+            logger.error(f"CRM error in create_mailbox: {e}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.create_mailbox",
+                result="error",
+                metadata={"error": str(e), "backup_email": backup_email},
+            )
+            await interaction.followup.send(f"❌ CRM API error: {str(e)}")
+        except Exception as e:
+            logger.error(f"Unexpected error in create_mailbox: {e}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.create_mailbox",
+                result="error",
+                metadata={"error": str(e), "backup_email": backup_email},
+            )
+            await interaction.followup.send(
+                "❌ An unexpected error occurred while creating the mailbox."
+            )
+
+    @app_commands.command(
         name="get-resume", description="Download and send a contact's resume"
     )
     @app_commands.describe(
@@ -1844,6 +2344,83 @@ class CRMCog(commands.Cog):
 
         return deduplicated_contacts
 
+    async def _search_contacts_for_mailbox_command(
+        self, *, backup_email: str, mailbox_email: str
+    ) -> list[dict[str, Any]]:
+        """Search contacts for a backup email and prospective 508 mailbox address."""
+        values = {backup_email, mailbox_email}
+        where_values = []
+        for value in values:
+            if not value:
+                continue
+            where_values.extend(
+                [
+                    {"type": "equals", "attribute": "emailAddress", "value": value},
+                    {"type": "equals", "attribute": "c508Email", "value": value},
+                ]
+            )
+
+        if not where_values:
+            return []
+
+        search_params = {
+            "where": [{"type": "or", "value": where_values}],
+            "maxSize": 10,
+            "select": "id,name,emailAddress,c508Email,cDiscordUsername",
+        }
+
+        response = self.espo_api.request("GET", "Contact", search_params)
+        contacts: list[dict[str, Any]] = response.get("list", [])
+
+        # Deduplicate contacts by ID to avoid showing duplicates
+        deduplicated_contacts = []
+        seen_ids = set()
+        for contact in contacts:
+            contact_id = contact.get("id")
+            if contact_id and contact_id not in seen_ids:
+                seen_ids.add(contact_id)
+                deduplicated_contacts.append(contact)
+
+        return deduplicated_contacts
+
+    async def _create_migadu_mailbox(
+        self, *, local_part: str, backup_email: str
+    ) -> dict[str, Any]:
+        """Create a mailbox in Migadu for the given local-part."""
+        username, token = self._migadu_credentials()
+        base_url = MIGADU_API_BASE_URL.rstrip("/")
+        domain = self._migadu_mailbox_domain()
+
+        payload = {
+            "local_part": local_part,
+            "name": local_part,
+            "password_method": "invitation",
+            "password_recovery_email": backup_email,
+            "forwarding_to": backup_email,
+        }
+
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(
+                    f"{base_url}/domains/{domain}/mailboxes",
+                    auth=aiohttp.BasicAuth(login=username, password=token),
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status not in {200, 201}:
+                        body = await response.text()
+                        raise ValueError(
+                            f"Migadu mailbox creation failed: status={response.status}, body={body}"
+                        )
+                    data = await response.json()
+                    if not isinstance(data, dict):
+                        raise ValueError(
+                            "Migadu response payload must be a JSON object."
+                        )
+                    return data
+            except aiohttp.ClientError as exc:
+                raise ValueError(f"Migadu API request failed: {exc}") from exc
+
     def _extract_resume_contact_hints(
         self, file_content: bytes
     ) -> dict[str, list[str]]:
@@ -1891,6 +2468,22 @@ class CRMCog(commands.Cog):
             "linkedin_urls": linkedin_matches,
         }
 
+    def _format_inferred_attempts(self, attempts: list[dict[str, Any]] | None) -> str:
+        if not attempts:
+            return ""
+
+        formatted: list[str] = []
+        for attempt in attempts:
+            if not isinstance(attempt, dict):
+                continue
+            method = str(attempt.get("method", "")).strip()
+            value = str(attempt.get("value", "")).strip()
+            if not method or not value:
+                continue
+            formatted.append(f"{method}: `{value}`")
+
+        return ", ".join(formatted)
+
     def _extract_resume_name_hint(self, file_content: bytes) -> str:
         """Best-effort contact name extraction from resume text."""
         text = file_content.decode("utf-8", errors="ignore")
@@ -1917,16 +2510,53 @@ class CRMCog(commands.Cog):
         """Build a minimal contact create payload from resume hints."""
         hints = self._extract_resume_contact_hints(file_content)
         name = self._extract_resume_name_hint(file_content)
+        contact_name = name if name != "Unknown Contact" else "Resume Candidate"
 
-        payload: dict[str, str] = {"name": name}
+        payload: dict[str, str] = {"name": contact_name}
         if hints["emails"]:
-            payload["emailAddress"] = hints["emails"][0]
-            payload["c508Email"] = hints["emails"][0]
+            primary_email = hints["emails"][0]
+            if primary_email.endswith("@508.dev"):
+                payload["c508Email"] = primary_email
+            else:
+                payload["emailAddress"] = primary_email
         if hints["github_usernames"]:
             payload["cGitHubUsername"] = hints["github_usernames"][0]
         if hints["linkedin_urls"]:
             payload["cLinkedInUrl"] = hints["linkedin_urls"][0]
 
+        return payload
+
+    def _discord_display_name(self, user: discord.Member) -> str:
+        """Format Discord username for CRM fields."""
+        if hasattr(user, "discriminator") and user.discriminator != "0":
+            return f"{user.name}#{user.discriminator}"
+        return str(user.name)
+
+    def _discord_link_fields(self, user: discord.Member) -> dict[str, str]:
+        """Build CRM fields used to persist Discord linkage."""
+        return {
+            "cDiscordUsername": self._discord_display_name(user),
+            "cDiscordUserID": str(user.id),
+        }
+
+    def _fallback_contact_name_for_discord_user(self, user: discord.Member) -> str:
+        display_name = str(getattr(user, "display_name", "")).strip()
+        if display_name:
+            return display_name
+        username = str(getattr(user, "name", "")).strip()
+        if username:
+            return username
+        return f"Discord User {user.id}"
+
+    def _build_contact_payload_for_link_user(
+        self, *, user: discord.Member, file_content: bytes
+    ) -> dict[str, str]:
+        """Build contact payload from resume hints plus explicit Discord linkage."""
+        payload = self._build_resume_create_contact_payload(file_content=file_content)
+        parsed_name = str(payload.get("name", "")).strip()
+        if not parsed_name or parsed_name == "Resume Candidate":
+            payload["name"] = self._fallback_contact_name_for_discord_user(user)
+        payload.update(self._discord_link_fields(user))
         return payload
 
     async def _search_contacts_by_field(
@@ -1954,47 +2584,66 @@ class CRMCog(commands.Cog):
 
     async def _infer_contact_from_resume(
         self, file_content: bytes
-    ) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         """Infer target contact from resume identifiers."""
         hints = self._extract_resume_contact_hints(file_content)
+        attempts: list[dict[str, Any]] = []
         for email in hints["emails"]:
+            attempts.append({"method": "email", "value": email})
             contacts = await self._search_contact_for_linking(email)
             if len(contacts) == 1:
-                return contacts[0], {"method": "email", "value": email}
+                return contacts[0], {
+                    "method": "email",
+                    "value": email,
+                    "attempts": attempts,
+                }
             if len(contacts) > 1:
                 return None, {
                     "method": "email",
                     "value": email,
                     "reason": "multiple_matches",
+                    "attempts": attempts,
                 }
 
         for github_username in hints["github_usernames"]:
+            attempts.append({"method": "github", "value": github_username})
             contacts = await self._search_contacts_by_field(
                 field="cGitHubUsername", value=github_username
             )
             if len(contacts) == 1:
-                return contacts[0], {"method": "github", "value": github_username}
+                return contacts[0], {
+                    "method": "github",
+                    "value": github_username,
+                    "attempts": attempts,
+                }
             if len(contacts) > 1:
                 return None, {
                     "method": "github",
                     "value": github_username,
                     "reason": "multiple_matches",
+                    "attempts": attempts,
                 }
 
         for linkedin_url in hints["linkedin_urls"]:
+            attempts.append({"method": "linkedin", "value": linkedin_url})
             contacts = await self._search_contacts_by_field(
                 field="cLinkedInUrl", value=linkedin_url
             )
             if len(contacts) == 1:
-                return contacts[0], {"method": "linkedin", "value": linkedin_url}
+                return contacts[0], {
+                    "method": "linkedin",
+                    "value": linkedin_url,
+                    "attempts": attempts,
+                }
             if len(contacts) > 1:
                 return None, {
                     "method": "linkedin",
                     "value": linkedin_url,
                     "reason": "multiple_matches",
+                    "attempts": attempts,
                 }
 
-        return None, {"reason": "no_matching_contact"}
+        return None, {"reason": "no_matching_contact", "attempts": attempts}
 
     async def _perform_discord_linking(
         self,
@@ -2008,16 +2657,10 @@ class CRMCog(commands.Cog):
             contact_name = contact.get("name", "Unknown")
 
             # Prepare the Discord username for storage (without ID) and display
-            if hasattr(user, "discriminator") and user.discriminator != "0":
-                discord_display = f"{user.name}#{user.discriminator}"
-            else:
-                discord_display = f"{user.name}"
+            discord_display = self._discord_display_name(user)
 
             # Update the contact's Discord username and user ID
-            update_data = {
-                "cDiscordUsername": discord_display,
-                "cDiscordUserID": str(user.id),
-            }
+            update_data = self._discord_link_fields(user)
 
             update_response = self.espo_api.request(
                 "PUT", f"Contact/{contact_id}", update_data
@@ -2309,6 +2952,8 @@ class CRMCog(commands.Cog):
         contact: dict[str, Any],
         verified_by: str,
         verified_at: str,
+        id_type: str | None,
+        allow_overwrite: bool = False,
     ) -> bool:
         """Persist ID verification metadata to CRM."""
         contact_id = contact.get("id")
@@ -2328,10 +2973,93 @@ class CRMCog(commands.Cog):
             await interaction.followup.send("❌ Contact ID not found.")
             return False
 
+        try:
+            current_contact = self.espo_api.request("GET", f"Contact/{contact_id}")
+        except EspoAPIError as exc:
+            logger.error(
+                f"Failed to fetch contact before marking ID verification: {exc}"
+            )
+            self._audit_command(
+                interaction=interaction,
+                action="crm.mark_id_verified",
+                result="error",
+                metadata={
+                    "contact_id": str(contact_id),
+                    "verified_by": verified_by,
+                    "verified_at": verified_at,
+                    "error": "contact_lookup_failed",
+                },
+                resource_type="crm_contact",
+                resource_id=str(contact_id),
+            )
+            await interaction.followup.send(
+                "❌ Failed to load current verification data from CRM."
+            )
+            return False
+
+        existing_verified_by = str(
+            current_contact.get(ID_VERIFIED_BY_FIELD, "") or ""
+        ).strip()
+        existing_verified_at = str(
+            current_contact.get(ID_VERIFIED_AT_FIELD, "") or ""
+        ).strip()
+        normalized_verified_by = verified_by.strip()
+        normalized_verified_at = verified_at.strip()
+
+        verified_by_conflict = (
+            bool(existing_verified_by)
+            and existing_verified_by != normalized_verified_by
+        )
+        verified_at_conflict = (
+            bool(existing_verified_at)
+            and existing_verified_at != normalized_verified_at
+        )
+        needs_confirmation = verified_by_conflict or verified_at_conflict
+
+        if needs_confirmation and not allow_overwrite:
+            self._audit_command(
+                interaction=interaction,
+                action="crm.mark_id_verified",
+                result="denied",
+                metadata={
+                    "contact_id": str(contact_id),
+                    "contact_name": contact_name,
+                    "verified_by": verified_by,
+                    "verified_at": verified_at,
+                    "existing_verified_by": existing_verified_by,
+                    "existing_verified_at": existing_verified_at,
+                    "reason": "overwrite_confirmation_needed",
+                },
+                resource_type="crm_contact",
+                resource_id=str(contact_id),
+            )
+            confirm_view = MarkIdVerifiedOverwriteConfirmationView(
+                crm_cog=self,
+                interaction=interaction,
+                contact=current_contact,
+                verified_by=normalized_verified_by,
+                verified_at=normalized_verified_at,
+                id_type=id_type,
+            )
+            await interaction.followup.send(
+                (
+                    "⚠️ This contact is already ID verified.\n"
+                    f"- Current verifier: {existing_verified_by}\n"
+                    f"- Current date: {existing_verified_at}\n"
+                    f"- New verifier: {normalized_verified_by}\n"
+                    f"- New date: {normalized_verified_at}\n\n"
+                    "Select **Overwrite** only if you want to replace existing values."
+                ),
+                view=confirm_view,
+            )
+            return False
+
         payload = {
             ID_VERIFIED_AT_FIELD: verified_at,
             ID_VERIFIED_BY_FIELD: verified_by,
         }
+        if id_type:
+            payload[ID_VERIFIED_TYPE_FIELD] = id_type
 
         try:
             update_response = self.espo_api.request(
@@ -2345,6 +3073,8 @@ class CRMCog(commands.Cog):
                 )
                 embed.add_field(name="📅 Verified at", value=verified_at, inline=True)
                 embed.add_field(name="✅ Verified by", value=verified_by, inline=True)
+                if id_type:
+                    embed.add_field(name="🆔 ID type", value=id_type, inline=True)
                 profile_url = f"{self.base_url}/#Contact/view/{contact_id}"
                 embed.add_field(
                     name="🔗 CRM Profile",
@@ -2429,6 +3159,7 @@ class CRMCog(commands.Cog):
         contacts: list[dict[str, Any]],
         verified_by: str,
         verified_at: str,
+        id_type: str | None,
     ) -> None:
         """Show contact choices when multiple candidates are found."""
         embed = discord.Embed(
@@ -2445,6 +3176,7 @@ class CRMCog(commands.Cog):
             requester_id=interaction.user.id,
             verified_by=verified_by,
             verified_at=verified_at,
+            id_type=id_type,
         )
 
         for i, contact in enumerate(contacts[:5], 1):
@@ -2473,6 +3205,7 @@ class CRMCog(commands.Cog):
     @app_commands.describe(
         search_term="Email, 508 username, or name.",
         verified_by="Verifier 508 username or @Discord mention.",
+        id_type="Type of ID used for verification (e.g. passport, driver's license).",
         verified_at=(
             "Date verified (e.g. YYYY-MM-DD, DD/MM/YYYY, March 5, 2026). "
             "Defaults to today."
@@ -2484,9 +3217,10 @@ class CRMCog(commands.Cog):
         interaction: discord.Interaction,
         search_term: str,
         verified_by: str,
+        id_type: str | None = None,
         verified_at: str | None = None,
     ) -> None:
-        """Mark a contact as ID verified."""
+        """Mark a contact as ID verified and record verifier, ID type, and date."""
         try:
             await interaction.response.defer(ephemeral=True)
 
@@ -2502,6 +3236,7 @@ class CRMCog(commands.Cog):
                         "search_term": search_term,
                         "verified_by": verified_by,
                         "verified_at": verified_at,
+                        "id_type": id_type,
                         "reason": "verified_by_not_resolved",
                     },
                 )
@@ -2509,6 +3244,16 @@ class CRMCog(commands.Cog):
                     "❌ Unable to resolve verifier from `verified_by`."
                 )
                 return
+
+            if id_type is not None and verified_at is None:
+                try:
+                    await self._parse_verified_at(id_type)
+                except ValueError:
+                    pass
+                else:
+                    verified_at = id_type
+                    id_type = None
+
             resolved_verified_at = await self._parse_verified_at(verified_at)
 
             contacts = await self._search_contacts_for_mark_id_verification(search_term)
@@ -2522,6 +3267,7 @@ class CRMCog(commands.Cog):
                         "search_term": search_term,
                         "verified_by": resolved_verified_by,
                         "verified_at": resolved_verified_at,
+                        "id_type": id_type,
                         "contacts_found": 0,
                     },
                 )
@@ -2539,6 +3285,7 @@ class CRMCog(commands.Cog):
                         "search_term": search_term,
                         "verified_by": resolved_verified_by,
                         "verified_at": resolved_verified_at,
+                        "id_type": id_type,
                         "contacts_found": len(contacts),
                         "requires_selection": True,
                     },
@@ -2549,6 +3296,7 @@ class CRMCog(commands.Cog):
                     contacts=contacts,
                     verified_by=resolved_verified_by,
                     verified_at=resolved_verified_at,
+                    id_type=id_type,
                 )
                 return
 
@@ -2561,6 +3309,7 @@ class CRMCog(commands.Cog):
                     "search_term": search_term,
                     "verified_by": resolved_verified_by,
                     "verified_at": resolved_verified_at,
+                    "id_type": id_type,
                     "contacts_found": 1,
                 },
                 resource_type="crm_contact",
@@ -2571,6 +3320,7 @@ class CRMCog(commands.Cog):
                 contact=target_contact,
                 verified_by=resolved_verified_by,
                 verified_at=resolved_verified_at,
+                id_type=id_type,
             )
         except ValueError as exc:
             logger.error(f"Invalid verified_at value: {exc}")
@@ -3147,57 +3897,132 @@ class CRMCog(commands.Cog):
             )
 
     @app_commands.command(
-        name="set-github-username",
-        description="Set GitHub username for a CRM contact (your own or someone else if Steering Committee+)",
+        name="update-contact",
+        description="Update CRM contact fields (github, linkedin, skills, rate range, and resume)",
     )
     @app_commands.describe(
-        github_username="GitHub username to set",
-        search_term="Email, name, or contact ID to find contact (optional - if not provided, sets your own GitHub username)",
+        github="GitHub username to set",
+        linkedin="LinkedIn profile URL to set",
+        skills="Comma-separated skills; supports `skill:4` for strength",
+        rate_range="Rate range text to set",
+        resume="Resume file to upload and analyze",
+        overwrite="Replace existing resumes instead of appending",
+        search_term="Email, name, or contact ID (optional). Omit to update your own contact.",
     )
-    async def set_github_username(
+    async def update_contact(
         self,
         interaction: discord.Interaction,
-        github_username: str,
+        github: str | None = None,
+        linkedin: str | None = None,
+        skills: str | None = None,
+        rate_range: str | None = None,
+        resume: discord.Attachment | None = None,
+        overwrite: bool = False,
         search_term: str | None = None,
     ) -> None:
-        """Set GitHub username for a CRM contact."""
+        """Update CRM contact fields for yourself or another contact."""
         try:
             await interaction.response.defer(ephemeral=True)
 
-            # Clean the GitHub username (remove @ if present)
-            clean_github_username = github_username.lstrip("@")
+            has_updates = any(
+                bool(value) for value in (github, linkedin, skills, rate_range)
+            )
+            if not has_updates and resume is None:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.update_contact",
+                    result="denied",
+                    metadata={"reason": "no_update_fields"},
+                )
+                await interaction.followup.send(
+                    "❌ Provide at least one of `github`, `linkedin`, `skills`, `rate_range`, or `resume`."
+                )
+                return
 
-            # Determine target contact
-            target_contact = None
-
-            if search_term:
-                # Setting for someone else - requires Steering Committee+ role
-                if not hasattr(
-                    interaction.user, "roles"
-                ) or not check_user_roles_with_hierarchy(
-                    interaction.user.roles, ["Steering Committee"]
-                ):
+            if resume is not None:
+                if not settings.api_shared_secret:
                     self._audit_command(
                         interaction=interaction,
-                        action="crm.set_github_username",
-                        result="denied",
+                        action="crm.update_contact",
+                        result="error",
                         metadata={
-                            "search_term": search_term,
-                            "reason": "missing_required_role",
+                            "filename": resume.filename,
+                            "reason": "api_shared_secret_missing",
                         },
                     )
                     await interaction.followup.send(
-                        "❌ You must have Steering Committee role or higher to set GitHub usernames for other people."
+                        "❌ API_SHARED_SECRET is not configured for backend API access."
                     )
-                    if not target_contact:
-                        return
+                    return
 
-                # Search for target contact
+                valid_extensions = {".pdf", ".doc", ".docx", ".txt"}
+                file_extension = (
+                    "." + resume.filename.split(".")[-1].lower()
+                    if "." in resume.filename
+                    else ""
+                )
+                if file_extension not in valid_extensions:
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.update_contact",
+                        result="denied",
+                        metadata={
+                            "filename": resume.filename,
+                            "reason": "invalid_file_type",
+                        },
+                    )
+                    await interaction.followup.send(
+                        f"❌ Invalid file type. Upload a PDF, DOC, DOCX, or TXT file.\n"
+                        f"You uploaded: `{resume.filename}`"
+                    )
+                    return
+
+                max_size = 10 * 1024 * 1024
+                if resume.size > max_size:
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.update_contact",
+                        result="denied",
+                        metadata={
+                            "filename": resume.filename,
+                            "size_bytes": resume.size,
+                            "reason": "file_too_large",
+                        },
+                    )
+                    await interaction.followup.send(
+                        f"❌ File too large. Maximum size is 10MB.\nYour file: {resume.size / (1024 * 1024):.1f}MB"
+                    )
+                    return
+
+            is_steering = hasattr(
+                interaction.user, "roles"
+            ) and check_user_roles_with_hierarchy(
+                interaction.user.roles, ["Steering Committee"]
+            )
+            if search_term and not is_steering:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.update_contact",
+                    result="denied",
+                    metadata={
+                        "search_term": search_term,
+                        "reason": "missing_required_role",
+                    },
+                )
+                await interaction.followup.send(
+                    "❌ You must have Steering Committee role or higher to update another contact."
+                )
+                return
+
+            target_contact = None
+            target_scope = "self"
+
+            if search_term:
                 contacts = await self._search_contact_for_linking(search_term)
                 if not contacts:
                     self._audit_command(
                         interaction=interaction,
-                        action="crm.set_github_username",
+                        action="crm.update_contact",
                         result="success",
                         metadata={
                             "search_term": search_term,
@@ -3208,12 +4033,12 @@ class CRMCog(commands.Cog):
                     await interaction.followup.send(
                         f"❌ No contact found for: `{search_term}`"
                     )
-                    if not target_contact:
-                        return
-                elif len(contacts) > 1:
+                    return
+
+                if len(contacts) > 1:
                     self._audit_command(
                         interaction=interaction,
-                        action="crm.set_github_username",
+                        action="crm.update_contact",
                         result="success",
                         metadata={
                             "search_term": search_term,
@@ -3228,15 +4053,15 @@ class CRMCog(commands.Cog):
                     return
 
                 target_contact = contacts[0]
+                target_scope = "other"
             else:
-                # Setting own GitHub username - find contact by Discord user ID
                 target_contact = await self._find_contact_by_discord_id(
                     str(interaction.user.id)
                 )
                 if not target_contact:
                     self._audit_command(
                         interaction=interaction,
-                        action="crm.set_github_username",
+                        action="crm.update_contact",
                         result="denied",
                         metadata={
                             "target_scope": "self",
@@ -3249,13 +4074,12 @@ class CRMCog(commands.Cog):
                     )
                     return
 
+            assert target_contact is not None
             contact_id = target_contact.get("id")
-            contact_name = target_contact.get("name", "Unknown")
-
             if not contact_id:
                 self._audit_command(
                     interaction=interaction,
-                    action="crm.set_github_username",
+                    action="crm.update_contact",
                     result="error",
                     metadata={
                         "search_term": search_term,
@@ -3265,96 +4089,194 @@ class CRMCog(commands.Cog):
                 await interaction.followup.send("❌ Contact ID not found.")
                 return
 
-            # Update the contact's GitHub username
-            update_data = {"cGitHubUsername": clean_github_username}
+            contact_name = target_contact.get("name", "Unknown")
+            update_data: dict[str, str] = {}
+            requested_updates: list[str] = []
 
-            update_response = self.espo_api.request(
-                "PUT", f"Contact/{contact_id}", update_data
-            )
+            if github is not None:
+                clean_github_username = github.strip().lstrip("@")
+                if clean_github_username:
+                    update_data["cGitHubUsername"] = clean_github_username
+                    requested_updates.append("github")
 
-            if update_response:
-                # Create success embed
-                embed = discord.Embed(
-                    title="✅ GitHub Username Set",
-                    description="Successfully updated GitHub username in CRM contact",
-                    color=0x00FF00,
+            if linkedin is not None:
+                clean_linkedin = linkedin.strip()
+                if clean_linkedin:
+                    update_data["cLinkedInUrl"] = clean_linkedin
+                    requested_updates.append("linkedin")
+
+            if rate_range is not None:
+                clean_rate_range = rate_range.strip()
+                if clean_rate_range:
+                    update_data["rateRange"] = clean_rate_range
+                    requested_updates.append("rate_range")
+
+            if skills is not None:
+                parsed_skills, requested_strengths, invalid_skills = (
+                    self._parse_skill_updates(skills)
                 )
-                embed.add_field(
-                    name="👤 Contact", value=f"{contact_name}", inline=False
+                if invalid_skills:
+                    invalid_message = ", ".join(f"`{item}`" for item in invalid_skills)
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.update_contact",
+                        result="denied",
+                        metadata={
+                            "search_term": search_term,
+                            "invalid_skills": invalid_skills,
+                            "reason": "invalid_skill_format",
+                        },
+                    )
+                    await interaction.followup.send(
+                        f"❌ Invalid skill entries: {invalid_message}. "
+                        "Use `skill` or `skill:1-5` (e.g. `go`, `python:4`)."
+                    )
+                    return
+
+                if parsed_skills:
+                    merged_skills, merged_attrs = self._merge_skill_update_payload(
+                        target_contact, parsed_skills, requested_strengths
+                    )
+                    update_data["skills"] = merged_skills
+                    update_data["cSkillAttrs"] = merged_attrs
+                    requested_updates.append("skills")
+
+            if not update_data and resume is None:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.update_contact",
+                    result="denied",
+                    metadata={
+                        "search_term": search_term,
+                        "reason": "no_effective_updates",
+                    },
                 )
-                embed.add_field(
-                    name="📧 Email",
-                    value=f"{target_contact.get('c508Email') or target_contact.get('emailAddress', 'N/A')}",
-                    inline=True,
+                await interaction.followup.send(
+                    "❌ No valid updatable fields were provided."
                 )
-                embed.add_field(
-                    name="🐙 GitHub Username",
-                    value=f"@{clean_github_username}",
-                    inline=True,
+                return
+
+            if update_data:
+                update_response = self.espo_api.request(
+                    "PUT", f"Contact/{contact_id}", update_data
                 )
-                # Add CRM link
-                if contact_id:
+
+                if update_response:
+                    embed = discord.Embed(
+                        title="✅ Contact Updated",
+                        description="Successfully updated CRM contact fields.",
+                        color=0x00FF00,
+                    )
+                    embed.add_field(
+                        name="👤 Contact", value=f"{contact_name}", inline=False
+                    )
+                    embed.add_field(
+                        name="📧 Email",
+                        value=f"{target_contact.get('c508Email') or target_contact.get('emailAddress', 'N/A')}",
+                        inline=True,
+                    )
+                    if "github" in requested_updates:
+                        embed.add_field(
+                            name="🐙 GitHub",
+                            value=f"@{update_data['cGitHubUsername']}",
+                            inline=True,
+                        )
+                    if "linkedin" in requested_updates:
+                        embed.add_field(
+                            name="🔗 LinkedIn",
+                            value=update_data["cLinkedInUrl"],
+                            inline=True,
+                        )
+                    if "skills" in requested_updates:
+                        embed.add_field(
+                            name="🧠 Skills", value=update_data["skills"], inline=False
+                        )
+                    if "rate_range" in requested_updates:
+                        embed.add_field(
+                            name="💵 Rate Range",
+                            value=update_data["rateRange"],
+                            inline=True,
+                        )
+                    embed.add_field(
+                        name="🔎 Updated Fields",
+                        value=", ".join(requested_updates),
+                        inline=False,
+                    )
                     profile_url = f"{self.base_url}/#Contact/view/{contact_id}"
                     embed.add_field(
                         name="🔗 CRM Profile",
                         value=f"[View in CRM]({profile_url})",
                         inline=True,
                     )
+                    await interaction.followup.send(embed=embed)
 
-                await interaction.followup.send(embed=embed)
+                    logger.info(
+                        f"Contact updated for {contact_name} (ID: {contact_id}) fields={requested_updates} by {interaction.user.name}"
+                    )
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.update_contact",
+                        result="success",
+                        metadata={
+                            "search_term": search_term,
+                            "target_scope": target_scope,
+                            "updated_fields": requested_updates,
+                            "has_resume": resume is not None,
+                        },
+                        resource_type="crm_contact",
+                        resource_id=str(contact_id),
+                    )
+                else:
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.update_contact",
+                        result="error",
+                        metadata={
+                            "search_term": search_term,
+                            "error": "crm_update_failed",
+                        },
+                        resource_type="crm_contact",
+                        resource_id=str(contact_id),
+                    )
+                    await interaction.followup.send(
+                        "❌ Failed to update contact in CRM. Please try again."
+                    )
+                    return
 
-                logger.info(
-                    f"GitHub username set for {contact_name} (ID: {contact_id}) "
-                    f"to @{clean_github_username} by {interaction.user.name}"
-                )
-                self._audit_command(
+            if resume is not None:
+                file_content = await resume.read()
+                await self._upload_resume_attachment_to_contact(
                     interaction=interaction,
-                    action="crm.set_github_username",
-                    result="success",
-                    metadata={
-                        "search_term": search_term,
-                        "github_username": clean_github_username,
-                        "target_scope": "other" if search_term else "self",
-                    },
-                    resource_type="crm_contact",
-                    resource_id=str(contact_id),
-                )
-            else:
-                self._audit_command(
-                    interaction=interaction,
-                    action="crm.set_github_username",
-                    result="error",
-                    metadata={
-                        "search_term": search_term,
-                        "github_username": clean_github_username,
-                        "error": "crm_update_failed",
-                    },
-                    resource_type="crm_contact",
-                    resource_id=str(contact_id),
-                )
-                await interaction.followup.send(
-                    "❌ Failed to update contact in CRM. Please try again."
+                    file_content=file_content,
+                    filename=resume.filename,
+                    file_size=resume.size,
+                    contact=target_contact,
+                    target_scope=target_scope,
+                    search_term=search_term,
+                    overwrite=overwrite,
+                    link_user=None,
+                    inferred_contact_meta=None,
                 )
 
         except EspoAPIError as e:
-            logger.error(f"EspoCRM API error in set_github_username: {e}")
+            logger.error(f"EspoCRM API error in update_contact: {e}")
             self._audit_command(
                 interaction=interaction,
-                action="crm.set_github_username",
+                action="crm.update_contact",
                 result="error",
                 metadata={"search_term": search_term, "error": str(e)},
             )
             await interaction.followup.send(f"❌ CRM API error: {str(e)}")
         except Exception as e:
-            logger.error(f"Unexpected error in set_github_username: {e}")
+            logger.error(f"Unexpected error in update_contact: {e}")
             self._audit_command(
                 interaction=interaction,
-                action="crm.set_github_username",
+                action="crm.update_contact",
                 result="error",
                 metadata={"search_term": search_term, "error": str(e)},
             )
             await interaction.followup.send(
-                "❌ An unexpected error occurred while setting the GitHub username."
+                "❌ An unexpected error occurred while updating the contact."
             )
 
     async def _check_existing_resume(
@@ -3431,7 +4353,7 @@ class CRMCog(commands.Cog):
         search_term: str | None,
         overwrite: bool,
         link_user: discord.Member | None,
-        inferred_contact_meta: dict[str, str] | None,
+        inferred_contact_meta: dict[str, Any] | None,
     ) -> None:
         """Upload attachment and launch the worker preview for a given contact."""
         contact_id = contact.get("id")
@@ -3683,7 +4605,7 @@ class CRMCog(commands.Cog):
             # Determine target contact
             target_contact = None
             target_scope = "self"
-            inferred_contact_meta: dict[str, str] | None = None
+            inferred_contact_meta: dict[str, Any] | None = None
 
             if search_term:
                 contacts = await self._search_contact_for_linking(search_term)
@@ -3730,6 +4652,10 @@ class CRMCog(commands.Cog):
                     str(link_user.id)
                 )
                 if not target_contact:
+                    create_payload = self._build_contact_payload_for_link_user(
+                        user=link_user,
+                        file_content=file_content,
+                    )
                     self._audit_command(
                         interaction=interaction,
                         action="crm.upload_resume",
@@ -3738,11 +4664,32 @@ class CRMCog(commands.Cog):
                             "filename": file.filename,
                             "target_scope": target_scope,
                             "reason": "discord_not_linked",
+                            "stage": "create_contact_prompt_shown",
+                            "link_user_id": str(link_user.id),
                         },
                     )
+                    view = ResumeCreateContactView(
+                        crm_cog=self,
+                        interaction=interaction,
+                        file_content=file_content,
+                        filename=file.filename,
+                        file_size=file.size,
+                        search_term=search_term,
+                        overwrite=overwrite,
+                        link_user=link_user,
+                        inferred_contact_meta={
+                            "reason": "discord_not_linked",
+                            "link_user_id": str(link_user.id),
+                        },
+                        target_scope=target_scope,
+                        create_payload_override=create_payload,
+                        created_target_scope="other_autocreated",
+                    )
                     await interaction.followup.send(
-                        "❌ The provided Discord user is not linked to a CRM contact. "
-                        "Please link this user first."
+                        "⚠️ The provided Discord user is not linked to a CRM contact. "
+                        "Would you like to create a new contact for this Discord user "
+                        "from the resume details?",
+                        view=view,
                     )
                     return
             elif is_steering:
@@ -3757,6 +4704,7 @@ class CRMCog(commands.Cog):
                     inferred_reason = (inferred_contact_meta or {}).get(
                         "reason", "resume_contact_not_found"
                     )
+                    inferred_attempts = (inferred_contact_meta or {}).get("attempts")
                     inference_metadata = {
                         "filename": file.filename,
                         "target_scope": "resume_inferred",
@@ -3766,6 +4714,19 @@ class CRMCog(commands.Cog):
                         inference_metadata["inferred_method"] = inferred_method
                     if inferred_value:
                         inference_metadata["inferred_value"] = inferred_value
+                    if inferred_attempts is not None:
+                        inference_metadata["inferred_attempts"] = inferred_attempts
+
+                    attempts_message = self._format_inferred_attempts(
+                        inferred_attempts
+                        if isinstance(inferred_attempts, list)
+                        else None
+                    )
+                    inferred_attempts_text = (
+                        f"\nTried contact lookups: {attempts_message}"
+                        if attempts_message
+                        else ""
+                    )
 
                     if inferred_reason == "multiple_matches" and inferred_value:
                         self._audit_command(
@@ -3799,7 +4760,8 @@ class CRMCog(commands.Cog):
                         )
                         await interaction.followup.send(
                             "⚠️ Could not find a unique contact from this resume. "
-                            "Would you like to create a new contact from the parsed details?",
+                            "Would you like to create a new contact from the parsed details?"
+                            + inferred_attempts_text,
                             view=view,
                         )
                     else:

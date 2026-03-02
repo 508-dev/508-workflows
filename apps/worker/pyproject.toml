@@ -1,17 +1,14 @@
 [project]
-name = "integrations-worker"
+name = "worker"
 version = "0.1.0"
 description = "Webhook ingest and background processing worker for 508.dev"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi>=0.116.1",
-    "httpx>=0.28.1",
-    "PyJWT[crypto]>=2.10.1",
-    "uvicorn>=0.35.0",
-    "openai>=2.0.0",
     "alembic==1.18.4",
     # Pin intentionally for reproducible broker behavior across worker/api images.
     "dramatiq[redis]==2.0.1",
+    "httpx>=0.28.1",
+    "openai>=2.0.0",
     "pdfminer.six>=20250506",
     "pydantic~=2.10",
     "pydantic-settings~=2.8",
@@ -26,8 +23,8 @@ dependencies = [
 five08 = { workspace = true }
 
 [project.scripts]
-backend-api = "five08.backend.api:run"
 worker-consumer = "five08.worker.consumer:run"
+jobsctl = "five08.jobcli:run"
 
 [tool.alembic]
 script_location = "src/five08/worker/migrations"

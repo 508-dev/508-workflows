@@ -23,15 +23,15 @@ class Settings(SharedSettings):
     # Healthcheck Configuration
     healthcheck_port: int = 3000
 
-    # Core channel configuration
-    channel_id: int
-
     # CRM/EspoCRM settings
     espo_api_key: str
     espo_base_url: str
-    backend_api_base_url: str = "http://backend-api:8090"
+    backend_api_base_url: str = "http://api:8090"
     audit_api_base_url: str | None = None
     audit_api_timeout_seconds: float = 2.0
+    migadu_api_user: str | None = None
+    migadu_api_key: str | None = None
+    migadu_mailbox_domain: str = "508.dev"
 
     # Kimai time tracking settings
     kimai_base_url: str

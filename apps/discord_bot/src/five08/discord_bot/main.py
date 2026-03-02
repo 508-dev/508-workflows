@@ -10,9 +10,12 @@ import logging
 
 from five08.discord_bot.bot import create_bot
 from five08.discord_bot.config import settings
-from five08.logging import configure_logging
+from five08.logging import configure_observability
 
-configure_logging(settings.log_level)
+configure_observability(
+    settings=settings,
+    service_name="discord-bot",
+)
 
 logger = logging.getLogger(__name__)
 

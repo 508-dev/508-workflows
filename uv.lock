@@ -8,10 +8,11 @@ resolution-markers = [
 
 [manifest]
 members = [
-    "discord-bot-app",
+    "api",
+    "discord-bot",
     "five08",
     "five08-monorepo",
-    "integrations-worker",
+    "worker",
 ]
 
 [[package]]
@@ -165,6 +166,37 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/c6/78/7d432127c41b50bccba979505f272c16cbcadcc33645d5fa3a738110ae75/anyio-4.11.0.tar.gz", hash = "sha256:82a8d0b81e318cc5ce71a5f1f8b5c4e63619620b63141ef8c995fa0db95a57c4", size = 219094 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/15/b3/9b1a8074496371342ec1e796a96f99c82c945a339cd81a8e73de28b4cf9e/anyio-4.11.0-py3-none-any.whl", hash = "sha256:0287e96f4d26d4149305414d4e3bc32f0dcd0862365a4bddea19d7a1ec38c4fc", size = 109097 },
+]
+
+[[package]]
+name = "api"
+version = "0.1.0"
+source = { editable = "apps/api" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "five08" },
+    { name = "httpx" },
+    { name = "psycopg", extra = ["binary"] },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "pyjwt", extra = ["crypto"] },
+    { name = "redis" },
+    { name = "uvicorn" },
+    { name = "worker" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.116.1" },
+    { name = "five08", editable = "packages/shared" },
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.2.5" },
+    { name = "pydantic", specifier = "~=2.10" },
+    { name = "pydantic-settings", specifier = "~=2.8" },
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.10.1" },
+    { name = "redis", specifier = ">=6.4.0" },
+    { name = "uvicorn", specifier = ">=0.35.0" },
+    { name = "worker", editable = "apps/worker" },
 ]
 
 [[package]]
@@ -513,7 +545,7 @@ wheels = [
 ]
 
 [[package]]
-name = "discord-bot-app"
+name = "discord-bot"
 version = "0.1.0"
 source = { editable = "apps/discord_bot" }
 dependencies = [
@@ -616,6 +648,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "redis" },
+    { name = "sentry-sdk" },
 ]
 
 [package.metadata]
@@ -624,6 +657,7 @@ requires-dist = [
     { name = "pydantic", specifier = "~=2.10" },
     { name = "pydantic-settings", specifier = "~=2.8" },
     { name = "redis", specifier = ">=6.4.0" },
+    { name = "sentry-sdk", specifier = ">=2.30.0" },
 ]
 
 [[package]]
@@ -631,9 +665,10 @@ name = "five08-monorepo"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "discord-bot-app" },
+    { name = "api" },
+    { name = "discord-bot" },
     { name = "five08" },
-    { name = "integrations-worker" },
+    { name = "worker" },
 ]
 
 [package.dev-dependencies]
@@ -653,9 +688,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "discord-bot-app", editable = "apps/discord_bot" },
+    { name = "api", editable = "apps/api" },
+    { name = "discord-bot", editable = "apps/discord_bot" },
     { name = "five08", editable = "packages/shared" },
-    { name = "integrations-worker", editable = "apps/worker" },
+    { name = "worker", editable = "apps/worker" },
 ]
 
 [package.metadata.requires-dev]
@@ -879,47 +915,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/72/34/14ca021ce8e5dfedc35312d08ba8bf51fdd999c576889fc2c24cb97f4f10/iniconfig-2.3.0.tar.gz", hash = "sha256:c76315c77db068650d49c5b56314774a7804df16fee4402c1f19d6d15d8c4730", size = 20503 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/cb/b1/3846dd7f199d53cb17f49cba7e651e9ce294d8497c8c150530ed11865bb8/iniconfig-2.3.0-py3-none-any.whl", hash = "sha256:f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12", size = 7484 },
-]
-
-[[package]]
-name = "integrations-worker"
-version = "0.1.0"
-source = { editable = "apps/worker" }
-dependencies = [
-    { name = "alembic" },
-    { name = "dramatiq", extra = ["redis"] },
-    { name = "fastapi" },
-    { name = "five08" },
-    { name = "httpx" },
-    { name = "openai" },
-    { name = "pdfminer-six" },
-    { name = "psycopg", extra = ["binary"] },
-    { name = "pydantic" },
-    { name = "pydantic-settings" },
-    { name = "pyjwt", extra = ["crypto"] },
-    { name = "python-docx" },
-    { name = "redis" },
-    { name = "requests" },
-    { name = "uvicorn" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "alembic", specifier = "==1.18.4" },
-    { name = "dramatiq", extras = ["redis"], specifier = "==2.0.1" },
-    { name = "fastapi", specifier = ">=0.116.1" },
-    { name = "five08", editable = "packages/shared" },
-    { name = "httpx", specifier = ">=0.28.1" },
-    { name = "openai", specifier = ">=2.0.0" },
-    { name = "pdfminer-six", specifier = ">=20250506" },
-    { name = "psycopg", extras = ["binary"], specifier = ">=3.2.5" },
-    { name = "pydantic", specifier = "~=2.10" },
-    { name = "pydantic-settings", specifier = "~=2.8" },
-    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.10.1" },
-    { name = "python-docx", specifier = ">=1.2.0" },
-    { name = "redis", specifier = ">=6.4.0" },
-    { name = "requests", specifier = "~=2.31" },
-    { name = "uvicorn", specifier = ">=0.35.0" },
 ]
 
 [[package]]
@@ -1824,6 +1819,19 @@ wheels = [
 ]
 
 [[package]]
+name = "sentry-sdk"
+version = "2.54.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "certifi" },
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c8/e9/2e3a46c304e7fa21eaa70612f60354e32699c7102eb961f67448e222ad7c/sentry_sdk-2.54.0.tar.gz", hash = "sha256:2620c2575128d009b11b20f7feb81e4e4e8ae08ec1d36cbc845705060b45cc1b", size = 413813 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/53/39/be412cc86bc6247b8f69e9383d7950711bd86f8d0a4a4b0fe8fad685bc21/sentry_sdk-2.54.0-py2.py3-none-any.whl", hash = "sha256:fd74e0e281dcda63afff095d23ebcd6e97006102cdc8e78a29f19ecdf796a0de", size = 439198 },
+]
+
+[[package]]
 name = "six"
 version = "1.17.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2080,6 +2088,41 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/4f/55/2af26693fd15165c4ff7857e38330e1b61ab8c37d15dc79118cdba115b7a/watchfiles-1.1.1-cp314-cp314t-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:8c91ed27800188c2ae96d16e3149f199d62f86c7af5f5f4d2c61a3ed8cd3666c", size = 455072 },
     { url = "https://files.pythonhosted.org/packages/66/1d/d0d200b10c9311ec25d2273f8aad8c3ef7cc7ea11808022501811208a750/watchfiles-1.1.1-cp314-cp314t-musllinux_1_1_aarch64.whl", hash = "sha256:311ff15a0bae3714ffb603e6ba6dbfba4065ab60865d15a6ec544133bdb21099", size = 629104 },
     { url = "https://files.pythonhosted.org/packages/e3/bd/fa9bb053192491b3867ba07d2343d9f2252e00811567d30ae8d0f78136fe/watchfiles-1.1.1-cp314-cp314t-musllinux_1_1_x86_64.whl", hash = "sha256:a916a2932da8f8ab582f242c065f5c81bed3462849ca79ee357dd9551b0e9b01", size = 622112 },
+]
+
+[[package]]
+name = "worker"
+version = "0.1.0"
+source = { editable = "apps/worker" }
+dependencies = [
+    { name = "alembic" },
+    { name = "dramatiq", extra = ["redis"] },
+    { name = "five08" },
+    { name = "httpx" },
+    { name = "openai" },
+    { name = "pdfminer-six" },
+    { name = "psycopg", extra = ["binary"] },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "python-docx" },
+    { name = "redis" },
+    { name = "requests" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "alembic", specifier = "==1.18.4" },
+    { name = "dramatiq", extras = ["redis"], specifier = "==2.0.1" },
+    { name = "five08", editable = "packages/shared" },
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "openai", specifier = ">=2.0.0" },
+    { name = "pdfminer-six", specifier = ">=20250506" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.2.5" },
+    { name = "pydantic", specifier = "~=2.10" },
+    { name = "pydantic-settings", specifier = "~=2.8" },
+    { name = "python-docx", specifier = ">=1.2.0" },
+    { name = "redis", specifier = ">=6.4.0" },
+    { name = "requests", specifier = "~=2.31" },
 ]
 
 [[package]]

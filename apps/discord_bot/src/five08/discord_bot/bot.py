@@ -7,12 +7,13 @@ Discord events, and provides the factory function for bot creation.
 
 import logging
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 import discord
 from discord.ext import commands
 
 from five08.discord_bot.config import settings
+from five08.discord_webhook import DiscordWebhookLogger
 from five08.discord_bot.utils.healthcheck import (
     HealthcheckServer,
     start_healthcheck_server,
@@ -71,11 +72,23 @@ class Bot508(commands.Bot):
     async def on_ready(self) -> None:
         """Handle bot ready event."""
         logger.info(f"Hello {self.user} ready for 508.dev!")
-        channel = self.get_channel(settings.channel_id)
-        if channel and isinstance(channel, discord.abc.Messageable):
-            await channel.send(
-                f"🤖 508.dev Bot activated at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-            )
+        message = (
+            "🤖 508.dev Bot activated at "
+            f"{datetime.now(tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
+        )
+        if settings.discord_logs_webhook_url:
+            DiscordWebhookLogger(
+                webhook_url=settings.discord_logs_webhook_url,
+                timeout_seconds=2.0,
+                wait_for_response=settings.discord_logs_webhook_wait,
+            ).send(content=message)
+            return
+
+        for guild in self.guilds:
+            default_channel = guild.system_channel
+            if default_channel and isinstance(default_channel, discord.abc.Messageable):
+                await default_channel.send(message)
+                return
 
     async def close(self) -> None:
         """Clean shutdown of bot and healthcheck server."""
