@@ -9,6 +9,8 @@ from typing import Any
 import discord
 import requests
 
+from five08.discord_webhook import DiscordWebhookLogger
+
 logger = logging.getLogger(__name__)
 
 
@@ -21,15 +23,25 @@ class DiscordAuditLogger:
         base_url: str | None,
         shared_secret: str | None,
         timeout_seconds: float,
+        discord_logs_webhook_url: str | None = None,
     ) -> None:
         self.base_url = (base_url or "").strip().rstrip("/")
         self.shared_secret = (shared_secret or "").strip()
         self.timeout_seconds = timeout_seconds
+        self.webhook_logger = DiscordWebhookLogger(
+            webhook_url=discord_logs_webhook_url,
+            timeout_seconds=timeout_seconds,
+        )
 
     @property
     def enabled(self) -> bool:
         """Return whether audit writes are configured and enabled."""
         return bool(self.base_url and self.shared_secret)
+
+    @property
+    def webhook_enabled(self) -> bool:
+        """Return whether Discord channel logging is configured."""
+        return self.webhook_logger.enabled
 
     def log_command(
         self,
@@ -42,7 +54,7 @@ class DiscordAuditLogger:
         resource_id: str | None = None,
     ) -> None:
         """Queue a best-effort audit write in the background."""
-        if not self.enabled:
+        if not (self.enabled or self.webhook_enabled):
             return
 
         event_payload = self._build_discord_payload(
@@ -69,7 +81,7 @@ class DiscordAuditLogger:
         correlation_id: str | None = None,
     ) -> None:
         """Queue best-effort audit write for non-Discord human actions."""
-        if not self.enabled:
+        if not (self.enabled or self.webhook_enabled):
             return
 
         normalized_email = actor_email.strip().lower()
@@ -99,14 +111,20 @@ class DiscordAuditLogger:
         await asyncio.to_thread(self._send_event_sync, event_payload)
 
     def _send_event_sync(self, event_payload: dict[str, Any]) -> None:
+        if self.enabled:
+            self._send_audit_event_sync(event_payload)
+        if self.webhook_enabled:
+            self._send_webhook_event(event_payload)
+
+    def _send_audit_event_sync(self, event_payload: dict[str, Any]) -> None:
         if not self.enabled:
             return
 
-        url = f"{self.base_url}/audit/events"
         headers = {
             "X-API-Secret": self.shared_secret,
             "Content-Type": "application/json",
         }
+        url = f"{self.base_url}/audit/events"
 
         try:
             response = requests.post(
@@ -128,6 +146,55 @@ class DiscordAuditLogger:
                 event_payload.get("action"),
                 exc,
             )
+
+    def _send_webhook_event(self, event_payload: dict[str, Any]) -> None:
+        if not self.webhook_enabled:
+            return
+        self.webhook_logger.send(content=self._build_webhook_message(event_payload))
+
+    @staticmethod
+    def _result_emoji(result: str) -> str:
+        normalized = result.strip().lower()
+        if normalized in {"success", "ok", "created", "queued"}:
+            return "✅"
+        if normalized in {"error", "failed", "failure", "denied"}:
+            return "❌"
+        return "ℹ️"
+
+    @staticmethod
+    def _shorten(text: str, max_length: int = 180) -> str:
+        if len(text) <= max_length:
+            return text
+        return f"{text[: max_length - 3]}..."
+
+    def _build_webhook_message(self, event_payload: dict[str, Any]) -> str:
+        source = str(event_payload.get("source") or "unknown")
+        action = str(event_payload.get("action") or "unknown")
+        result = str(event_payload.get("result") or "unknown")
+        actor = (
+            str(event_payload.get("actor_display_name"))
+            if event_payload.get("actor_display_name")
+            else str(event_payload.get("actor_subject"))
+        )
+        metadata = (
+            event_payload.get("metadata")
+            if isinstance(event_payload.get("metadata"), dict)
+            else {}
+        )
+
+        command = metadata.get("command") if isinstance(metadata, dict) else None
+        resource = (
+            f"{event_payload.get('resource_type')}:{event_payload.get('resource_id')}"
+            if event_payload.get("resource_type")
+            else None
+        )
+        target = command or resource or "resource unknown"
+        error = metadata.get("error") if isinstance(metadata, dict) else None
+        suffix = f" | error={self._shorten(str(error))}" if error else ""
+        return (
+            f"{self._result_emoji(result)} {source} {action} · {target}"
+            f" · actor={actor} · result={result}{suffix}"
+        )
 
     def _on_task_done(self, task: asyncio.Task[None]) -> None:
         try:
