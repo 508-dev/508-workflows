@@ -1502,6 +1502,108 @@ class CRMCog(commands.Cog):
         normalized = normalize_skill_list([value])
         return normalized[0] if normalized else ""
 
+    def _parse_skill_updates(
+        self, skills: str
+    ) -> tuple[list[str], dict[str, int], list[str]]:
+        """Parse comma-separated skills with optional `skill:level` syntax."""
+        parsed_skills: list[str] = []
+        requested_strengths: dict[str, int] = {}
+        invalid_entries: list[str] = []
+        seen: set[str] = set()
+
+        for raw_token in skills.replace(";", ",").split(","):
+            token = raw_token.strip()
+            if not token:
+                continue
+
+            token_skill = token
+            strength_value: int | None = None
+            if ":" in token:
+                token_skill, raw_strength = token.rsplit(":", 1)
+                token_skill = token_skill.strip()
+                raw_strength = raw_strength.strip()
+
+                if not token_skill or not raw_strength:
+                    invalid_entries.append(token)
+                    continue
+
+                try:
+                    parsed_strength = int(float(raw_strength))
+                except (TypeError, ValueError):
+                    invalid_entries.append(token)
+                    continue
+
+                if not 1 <= parsed_strength <= 5:
+                    invalid_entries.append(token)
+                    continue
+
+                strength_value = parsed_strength
+
+            normalized_skill = self._normalize_skill(token_skill)
+            if not normalized_skill:
+                invalid_entries.append(token)
+                continue
+
+            key = normalized_skill.casefold()
+            if key in seen:
+                if strength_value is not None:
+                    requested_strengths[key] = strength_value
+                continue
+
+            seen.add(key)
+            parsed_skills.append(normalized_skill)
+            if strength_value is not None:
+                requested_strengths[key] = strength_value
+
+        return parsed_skills, requested_strengths, invalid_entries
+
+    def _serialize_skill_attrs(self, attrs: dict[str, int]) -> str:
+        """Serialize normalized skill strengths in the CRM-compatible format."""
+        payload = {
+            skill.casefold(): {"strength": max(1, min(5, int(strength)))}
+            for skill, strength in attrs.items()
+            if skill
+        }
+        return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+    def _merge_skill_update_payload(
+        self,
+        contact: dict[str, Any],
+        requested_skills: list[str],
+        requested_strengths: dict[str, int],
+    ) -> tuple[str, str]:
+        """Merge requested skills with existing contact skills and attributes."""
+        raw_skills = contact.get("skills", "")
+        if isinstance(raw_skills, list):
+            raw_skill_values = [str(item) for item in raw_skills if str(item).strip()]
+        else:
+            raw_skill_values = [
+                item.strip() for item in str(raw_skills).split(",") if item.strip()
+            ]
+
+        existing_skills = normalize_skill_list(raw_skill_values)
+        existing_skill_keys = {skill.casefold() for skill in existing_skills}
+        merged_skills = list(existing_skills)
+        merged_attrs = self._parse_contact_skill_attrs(contact.get("cSkillAttrs"))
+
+        for requested_skill in requested_skills:
+            key = requested_skill.casefold()
+            if key not in existing_skill_keys:
+                merged_skills.append(requested_skill)
+                existing_skill_keys.add(key)
+
+            requested_strength = requested_strengths.get(key)
+            if requested_strength is None:
+                requested_strength = merged_attrs.get(key, 3)
+
+            merged_attrs[key] = requested_strength
+
+        for existing_skill in merged_skills:
+            key = existing_skill.casefold()
+            merged_attrs.setdefault(key, 3)
+
+        return ", ".join(merged_skills), self._serialize_skill_attrs(merged_attrs)
+
     def _format_requested_skills(
         self, requested_skills: list[str], contact: dict[str, Any]
     ) -> str:
@@ -3469,57 +3571,132 @@ class CRMCog(commands.Cog):
             )
 
     @app_commands.command(
-        name="set-github-username",
-        description="Set GitHub username for a CRM contact (your own or someone else if Steering Committee+)",
+        name="update-contact",
+        description="Update CRM contact fields (github, linkedin, skills, rate range, and resume)",
     )
     @app_commands.describe(
-        github_username="GitHub username to set",
-        search_term="Email, name, or contact ID to find contact (optional - if not provided, sets your own GitHub username)",
+        github="GitHub username to set",
+        linkedin="LinkedIn profile URL to set",
+        skills="Comma-separated skills; supports `skill:4` for strength",
+        rate_range="Rate range text to set",
+        resume="Resume file to upload and analyze",
+        overwrite="Replace existing resumes instead of appending",
+        search_term="Email, name, or contact ID (optional). Omit to update your own contact.",
     )
-    async def set_github_username(
+    async def update_contact(
         self,
         interaction: discord.Interaction,
-        github_username: str,
+        github: str | None = None,
+        linkedin: str | None = None,
+        skills: str | None = None,
+        rate_range: str | None = None,
+        resume: discord.Attachment | None = None,
+        overwrite: bool = False,
         search_term: str | None = None,
     ) -> None:
-        """Set GitHub username for a CRM contact."""
+        """Update CRM contact fields for yourself or another contact."""
         try:
             await interaction.response.defer(ephemeral=True)
 
-            # Clean the GitHub username (remove @ if present)
-            clean_github_username = github_username.lstrip("@")
+            has_updates = any(
+                bool(value) for value in (github, linkedin, skills, rate_range)
+            )
+            if not has_updates and resume is None:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.update_contact",
+                    result="denied",
+                    metadata={"reason": "no_update_fields"},
+                )
+                await interaction.followup.send(
+                    "❌ Provide at least one of `github`, `linkedin`, `skills`, `rate_range`, or `resume`."
+                )
+                return
 
-            # Determine target contact
-            target_contact = None
-
-            if search_term:
-                # Setting for someone else - requires Steering Committee+ role
-                if not hasattr(
-                    interaction.user, "roles"
-                ) or not check_user_roles_with_hierarchy(
-                    interaction.user.roles, ["Steering Committee"]
-                ):
+            if resume is not None:
+                if not settings.api_shared_secret:
                     self._audit_command(
                         interaction=interaction,
-                        action="crm.set_github_username",
-                        result="denied",
+                        action="crm.update_contact",
+                        result="error",
                         metadata={
-                            "search_term": search_term,
-                            "reason": "missing_required_role",
+                            "filename": resume.filename,
+                            "reason": "api_shared_secret_missing",
                         },
                     )
                     await interaction.followup.send(
-                        "❌ You must have Steering Committee role or higher to set GitHub usernames for other people."
+                        "❌ API_SHARED_SECRET is not configured for backend API access."
                     )
-                    if not target_contact:
-                        return
+                    return
 
-                # Search for target contact
+                valid_extensions = {".pdf", ".doc", ".docx", ".txt"}
+                file_extension = (
+                    "." + resume.filename.split(".")[-1].lower()
+                    if "." in resume.filename
+                    else ""
+                )
+                if file_extension not in valid_extensions:
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.update_contact",
+                        result="denied",
+                        metadata={
+                            "filename": resume.filename,
+                            "reason": "invalid_file_type",
+                        },
+                    )
+                    await interaction.followup.send(
+                        f"❌ Invalid file type. Upload a PDF, DOC, DOCX, or TXT file.\n"
+                        f"You uploaded: `{resume.filename}`"
+                    )
+                    return
+
+                max_size = 10 * 1024 * 1024
+                if resume.size > max_size:
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.update_contact",
+                        result="denied",
+                        metadata={
+                            "filename": resume.filename,
+                            "size_bytes": resume.size,
+                            "reason": "file_too_large",
+                        },
+                    )
+                    await interaction.followup.send(
+                        f"❌ File too large. Maximum size is 10MB.\nYour file: {resume.size / (1024 * 1024):.1f}MB"
+                    )
+                    return
+
+            is_steering = hasattr(
+                interaction.user, "roles"
+            ) and check_user_roles_with_hierarchy(
+                interaction.user.roles, ["Steering Committee"]
+            )
+            if search_term and not is_steering:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.update_contact",
+                    result="denied",
+                    metadata={
+                        "search_term": search_term,
+                        "reason": "missing_required_role",
+                    },
+                )
+                await interaction.followup.send(
+                    "❌ You must have Steering Committee role or higher to update another contact."
+                )
+                return
+
+            target_contact = None
+            target_scope = "self"
+
+            if search_term:
                 contacts = await self._search_contact_for_linking(search_term)
                 if not contacts:
                     self._audit_command(
                         interaction=interaction,
-                        action="crm.set_github_username",
+                        action="crm.update_contact",
                         result="success",
                         metadata={
                             "search_term": search_term,
@@ -3530,12 +3707,12 @@ class CRMCog(commands.Cog):
                     await interaction.followup.send(
                         f"❌ No contact found for: `{search_term}`"
                     )
-                    if not target_contact:
-                        return
-                elif len(contacts) > 1:
+                    return
+
+                if len(contacts) > 1:
                     self._audit_command(
                         interaction=interaction,
-                        action="crm.set_github_username",
+                        action="crm.update_contact",
                         result="success",
                         metadata={
                             "search_term": search_term,
@@ -3550,15 +3727,15 @@ class CRMCog(commands.Cog):
                     return
 
                 target_contact = contacts[0]
+                target_scope = "other"
             else:
-                # Setting own GitHub username - find contact by Discord user ID
                 target_contact = await self._find_contact_by_discord_id(
                     str(interaction.user.id)
                 )
                 if not target_contact:
                     self._audit_command(
                         interaction=interaction,
-                        action="crm.set_github_username",
+                        action="crm.update_contact",
                         result="denied",
                         metadata={
                             "target_scope": "self",
@@ -3571,13 +3748,12 @@ class CRMCog(commands.Cog):
                     )
                     return
 
+            assert target_contact is not None
             contact_id = target_contact.get("id")
-            contact_name = target_contact.get("name", "Unknown")
-
             if not contact_id:
                 self._audit_command(
                     interaction=interaction,
-                    action="crm.set_github_username",
+                    action="crm.update_contact",
                     result="error",
                     metadata={
                         "search_term": search_term,
@@ -3587,96 +3763,194 @@ class CRMCog(commands.Cog):
                 await interaction.followup.send("❌ Contact ID not found.")
                 return
 
-            # Update the contact's GitHub username
-            update_data = {"cGitHubUsername": clean_github_username}
+            contact_name = target_contact.get("name", "Unknown")
+            update_data: dict[str, str] = {}
+            requested_updates: list[str] = []
 
-            update_response = self.espo_api.request(
-                "PUT", f"Contact/{contact_id}", update_data
-            )
+            if github is not None:
+                clean_github_username = github.strip().lstrip("@")
+                if clean_github_username:
+                    update_data["cGitHubUsername"] = clean_github_username
+                    requested_updates.append("github")
 
-            if update_response:
-                # Create success embed
-                embed = discord.Embed(
-                    title="✅ GitHub Username Set",
-                    description="Successfully updated GitHub username in CRM contact",
-                    color=0x00FF00,
+            if linkedin is not None:
+                clean_linkedin = linkedin.strip()
+                if clean_linkedin:
+                    update_data["cLinkedInUrl"] = clean_linkedin
+                    requested_updates.append("linkedin")
+
+            if rate_range is not None:
+                clean_rate_range = rate_range.strip()
+                if clean_rate_range:
+                    update_data["rateRange"] = clean_rate_range
+                    requested_updates.append("rate_range")
+
+            if skills is not None:
+                parsed_skills, requested_strengths, invalid_skills = (
+                    self._parse_skill_updates(skills)
                 )
-                embed.add_field(
-                    name="👤 Contact", value=f"{contact_name}", inline=False
+                if invalid_skills:
+                    invalid_message = ", ".join(f"`{item}`" for item in invalid_skills)
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.update_contact",
+                        result="denied",
+                        metadata={
+                            "search_term": search_term,
+                            "invalid_skills": invalid_skills,
+                            "reason": "invalid_skill_format",
+                        },
+                    )
+                    await interaction.followup.send(
+                        f"❌ Invalid skill entries: {invalid_message}. "
+                        "Use `skill` or `skill:1-5` (e.g. `go`, `python:4`)."
+                    )
+                    return
+
+                if parsed_skills:
+                    merged_skills, merged_attrs = self._merge_skill_update_payload(
+                        target_contact, parsed_skills, requested_strengths
+                    )
+                    update_data["skills"] = merged_skills
+                    update_data["cSkillAttrs"] = merged_attrs
+                    requested_updates.append("skills")
+
+            if not update_data and resume is None:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.update_contact",
+                    result="denied",
+                    metadata={
+                        "search_term": search_term,
+                        "reason": "no_effective_updates",
+                    },
                 )
-                embed.add_field(
-                    name="📧 Email",
-                    value=f"{target_contact.get('c508Email') or target_contact.get('emailAddress', 'N/A')}",
-                    inline=True,
+                await interaction.followup.send(
+                    "❌ No valid updatable fields were provided."
                 )
-                embed.add_field(
-                    name="🐙 GitHub Username",
-                    value=f"@{clean_github_username}",
-                    inline=True,
+                return
+
+            if update_data:
+                update_response = self.espo_api.request(
+                    "PUT", f"Contact/{contact_id}", update_data
                 )
-                # Add CRM link
-                if contact_id:
+
+                if update_response:
+                    embed = discord.Embed(
+                        title="✅ Contact Updated",
+                        description="Successfully updated CRM contact fields.",
+                        color=0x00FF00,
+                    )
+                    embed.add_field(
+                        name="👤 Contact", value=f"{contact_name}", inline=False
+                    )
+                    embed.add_field(
+                        name="📧 Email",
+                        value=f"{target_contact.get('c508Email') or target_contact.get('emailAddress', 'N/A')}",
+                        inline=True,
+                    )
+                    if "github" in requested_updates:
+                        embed.add_field(
+                            name="🐙 GitHub",
+                            value=f"@{update_data['cGitHubUsername']}",
+                            inline=True,
+                        )
+                    if "linkedin" in requested_updates:
+                        embed.add_field(
+                            name="🔗 LinkedIn",
+                            value=update_data["cLinkedInUrl"],
+                            inline=True,
+                        )
+                    if "skills" in requested_updates:
+                        embed.add_field(
+                            name="🧠 Skills", value=update_data["skills"], inline=False
+                        )
+                    if "rate_range" in requested_updates:
+                        embed.add_field(
+                            name="💵 Rate Range",
+                            value=update_data["rateRange"],
+                            inline=True,
+                        )
+                    embed.add_field(
+                        name="🔎 Updated Fields",
+                        value=", ".join(requested_updates),
+                        inline=False,
+                    )
                     profile_url = f"{self.base_url}/#Contact/view/{contact_id}"
                     embed.add_field(
                         name="🔗 CRM Profile",
                         value=f"[View in CRM]({profile_url})",
                         inline=True,
                     )
+                    await interaction.followup.send(embed=embed)
 
-                await interaction.followup.send(embed=embed)
+                    logger.info(
+                        f"Contact updated for {contact_name} (ID: {contact_id}) fields={requested_updates} by {interaction.user.name}"
+                    )
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.update_contact",
+                        result="success",
+                        metadata={
+                            "search_term": search_term,
+                            "target_scope": target_scope,
+                            "updated_fields": requested_updates,
+                            "has_resume": resume is not None,
+                        },
+                        resource_type="crm_contact",
+                        resource_id=str(contact_id),
+                    )
+                else:
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.update_contact",
+                        result="error",
+                        metadata={
+                            "search_term": search_term,
+                            "error": "crm_update_failed",
+                        },
+                        resource_type="crm_contact",
+                        resource_id=str(contact_id),
+                    )
+                    await interaction.followup.send(
+                        "❌ Failed to update contact in CRM. Please try again."
+                    )
+                    return
 
-                logger.info(
-                    f"GitHub username set for {contact_name} (ID: {contact_id}) "
-                    f"to @{clean_github_username} by {interaction.user.name}"
-                )
-                self._audit_command(
+            if resume is not None:
+                file_content = await resume.read()
+                await self._upload_resume_attachment_to_contact(
                     interaction=interaction,
-                    action="crm.set_github_username",
-                    result="success",
-                    metadata={
-                        "search_term": search_term,
-                        "github_username": clean_github_username,
-                        "target_scope": "other" if search_term else "self",
-                    },
-                    resource_type="crm_contact",
-                    resource_id=str(contact_id),
-                )
-            else:
-                self._audit_command(
-                    interaction=interaction,
-                    action="crm.set_github_username",
-                    result="error",
-                    metadata={
-                        "search_term": search_term,
-                        "github_username": clean_github_username,
-                        "error": "crm_update_failed",
-                    },
-                    resource_type="crm_contact",
-                    resource_id=str(contact_id),
-                )
-                await interaction.followup.send(
-                    "❌ Failed to update contact in CRM. Please try again."
+                    file_content=file_content,
+                    filename=resume.filename,
+                    file_size=resume.size,
+                    contact=target_contact,
+                    target_scope=target_scope,
+                    search_term=search_term,
+                    overwrite=overwrite,
+                    link_user=None,
+                    inferred_contact_meta=None,
                 )
 
         except EspoAPIError as e:
-            logger.error(f"EspoCRM API error in set_github_username: {e}")
+            logger.error(f"EspoCRM API error in update_contact: {e}")
             self._audit_command(
                 interaction=interaction,
-                action="crm.set_github_username",
+                action="crm.update_contact",
                 result="error",
                 metadata={"search_term": search_term, "error": str(e)},
             )
             await interaction.followup.send(f"❌ CRM API error: {str(e)}")
         except Exception as e:
-            logger.error(f"Unexpected error in set_github_username: {e}")
+            logger.error(f"Unexpected error in update_contact: {e}")
             self._audit_command(
                 interaction=interaction,
-                action="crm.set_github_username",
+                action="crm.update_contact",
                 result="error",
                 metadata={"search_term": search_term, "error": str(e)},
             )
             await interaction.followup.send(
-                "❌ An unexpected error occurred while setting the GitHub username."
+                "❌ An unexpected error occurred while updating the contact."
             )
 
     async def _check_existing_resume(
