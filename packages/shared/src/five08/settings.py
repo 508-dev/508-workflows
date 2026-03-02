@@ -14,8 +14,17 @@ def normalize_sqlalchemy_postgres_url(url: str) -> str:
 class SharedSettings(BaseSettings):
     """Base settings shared by all services in the monorepo."""
 
-    runtime_env: str = "local"
+    environment: str = "local"
     log_level: str = "INFO"
+
+    sentry_dsn: str | None = None
+    sentry_environment: str | None = None
+    sentry_release: str | None = None
+    sentry_sample_rate: float = 1.0
+    sentry_traces_sample_rate: float = 0.0
+    sentry_profiles_sample_rate: float = 0.0
+    sentry_send_default_pii: bool = False
+    sentry_debug: bool = False
 
     redis_url: str = "redis://redis:6379/0"  # Docker Compose default; set REDIS_URL when running outside Compose.
     redis_queue_name: str = "jobs.default"
@@ -42,17 +51,36 @@ class SharedSettings(BaseSettings):
     @model_validator(mode="after")
     def validate_required_secrets(self) -> "SharedSettings":
         """Require non-empty runtime secrets in non-local runtime environments."""
-        env = self.runtime_env.strip().lower()
+        env = self.environment.strip().lower()
         if env in {"local", "dev", "development", "test"}:
             return self
 
         if not self.postgres_url.strip():
-            raise ValueError("POSTGRES_URL must be set when RUNTIME_ENV is non-local.")
+            raise ValueError("POSTGRES_URL must be set when ENVIRONMENT is non-local.")
         if not self.minio_root_password.strip():
             raise ValueError(
-                "MINIO_ROOT_PASSWORD must be set when RUNTIME_ENV is non-local."
+                "MINIO_ROOT_PASSWORD must be set when ENVIRONMENT is non-local."
             )
         return self
+
+    @model_validator(mode="after")
+    def validate_sentry_rates(self) -> "SharedSettings":
+        """Validate optional Sentry sampling rates."""
+        if not 0.0 <= self.sentry_sample_rate <= 1.0:
+            raise ValueError("SENTRY_SAMPLE_RATE must be between 0.0 and 1.0")
+        if not 0.0 <= self.sentry_traces_sample_rate <= 1.0:
+            raise ValueError("SENTRY_TRACES_SAMPLE_RATE must be between 0.0 and 1.0")
+        if not 0.0 <= self.sentry_profiles_sample_rate <= 1.0:
+            raise ValueError("SENTRY_PROFILES_SAMPLE_RATE must be between 0.0 and 1.0")
+        return self
+
+    @property
+    def sentry_environment_name(self) -> str:
+        """Sentry environment falls back to ENVIRONMENT."""
+        configured = (self.sentry_environment or "").strip()
+        if configured:
+            return configured
+        return self.environment
 
     @property
     def minio_access_key(self) -> str:

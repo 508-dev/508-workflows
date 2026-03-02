@@ -46,8 +46,8 @@ Migrations:
 
 ### Backend API Endpoints
 
-See the worker service docs: [`apps/worker/README.md#backend-api-endpoints`](apps/worker/README.md#backend-api-endpoints).
-CLI request examples are documented at [`apps/worker/README.md#cli-usage`](apps/worker/README.md#cli-usage).
+See the worker service docs: [`apps/worker/README.md#backend-api-endpoints`](./apps/worker/README.md#backend-api-endpoints).
+CLI request examples are documented at [`apps/worker/README.md#cli-usage`](./apps/worker/README.md#cli-usage).
 
 ## Local Development
 
@@ -225,7 +225,10 @@ Use `.env.example` as the source of truth for defaults.
 ./scripts/mypy.sh
 ```
 
-For Discord bot docs, see [`Discord Bot`](DISCORD_BOT.md).
+For Discord bot docs, see [`Discord Bot`](./DISCORD_BOT.md).
+
+For local development helper commands, see [`DEVELOPMENT.md`](./DEVELOPMENT.md).
+
 
 ## Deployment
 
