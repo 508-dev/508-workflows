@@ -1,67 +1,17 @@
-# Worker Service
+# API Service
 
-## Overview
+## Auth
 
-- Package: `apps/worker`
-- Entrypoint: `uv run --package worker worker-consumer`
-- CLI: `uv run --package worker jobsctl`
+- Protected ingest/job endpoints require `API_SHARED_SECRET` to be configured on the API.
+- Send the secret in header `X-API-Secret`.
+- Header name is exactly `X-API-Secret` (not `X-API-Secret-Key`).
+- `GET /health` and most OIDC session routes (`/auth/login`, `/auth/callback`, `/auth/me`, `/auth/logout`) do not use `X-API-Secret`.
+- `POST /auth/discord/links` does use `X-API-Secret` because it is called by trusted backend/bot components.
 
-## Jobs CLI
-
-The `jobsctl` utility can inspect and rerun jobs by id.
-
-Defaults:
-
-- Base URL: `http://localhost:8090` (or `$WORKER_API_BASE_URL`)
-- API secret: `$API_SHARED_SECRET` (sent as `X-API-Secret`)
-- Timeout: `10.0` seconds
-
-Usage:
-
-```bash
-uv run --package worker jobsctl --help
-uv run --package worker jobsctl status <job_id>
-uv run --package worker jobsctl rerun <job_id>
-uv run --package worker jobsctl recent --minutes 60
-uv run --package worker jobsctl recent --minutes 60 --status queued
-uv run --package worker jobsctl recent --minutes 120 --type process_webhook_event_job
-```
-
-Examples:
-
-```bash
-uv run --package worker jobsctl status job-123
-```
-
-```bash
-uv run --package worker jobsctl rerun job-123
-uv run --package worker jobsctl recent --minutes 60
-uv run --package worker jobsctl recent --minutes 120 --limit 20
-uv run --package worker jobsctl recent --minutes 120 --status succeeded --type sync_people_from_crm_job
-```
-
-If needed, pass overrides explicitly:
-
-```bash
-uv run --package worker jobsctl \
-  --api-url http://localhost:8090 \
-  --secret "$API_SHARED_SECRET" \
-  rerun job-123
-```
-
-You can still use `curl` directly:
-
-- Get job status:
+Example:
 
 ```bash
 curl -X GET "http://localhost:8090/jobs/<job_id>" \
-  -H "X-API-Secret: $API_SHARED_SECRET"
-```
-
-- Rerun a job:
-
-```bash
-curl -X POST "http://localhost:8090/jobs/<job_id>/rerun" \
   -H "X-API-Secret: $API_SHARED_SECRET"
 ```
 
@@ -69,8 +19,6 @@ curl -X POST "http://localhost:8090/jobs/<job_id>/rerun" \
 
 - `GET /health`: Redis/Postgres/worker health check.
 - `GET /jobs/{job_id}`: Fetch queued job status/result payload.
-- `GET /jobs?minutes=<n>&limit=<n>[&status=<status>][&type=<job_type>]`:
-  Fetch recent job metadata for jobs created in the last `<minutes>`, optionally filtered by status and/or type.
 - `POST /jobs/{job_id}/rerun`: Enqueue a duplicate rerun of an existing job id.
 - `POST /jobs/resume-extract`: Enqueue resume profile extraction.
 - `POST /jobs/resume-apply`: Enqueue confirmed CRM field apply.
@@ -123,40 +71,6 @@ Example success response (`202`):
   "type": "process_docuseal_agreement_job",
   "created": true
 }
-```
-
-### `GET /jobs?minutes=<minutes>&limit=<limit>[&status=<status>][&type=<job_type>]`
-
-Return recent jobs created in a rolling time window.
-
-- Query params:
-  - `minutes` (integer, default: `60`, minimum: `1`): look back window size.
-  - `limit` (integer, default: `100`, minimum: `1`, maximum: `1000`): number of rows to return.
-  - `status` (optional string): filter jobs by persisted status (`queued`, `running`, `succeeded`, `failed`, `dead`, `canceled`).
-  - `type` (optional string): filter jobs by type/function name.
-
-Example:
-
-```bash
-curl -X GET "http://localhost:8090/jobs?minutes=120&limit=50&status=succeeded" \
-  -H "X-API-Secret: $API_SHARED_SECRET"
-```
-
-Example response:
-
-```json
-[
-  {
-    "job_id": "job-123",
-    "type": "process_webhook_event_job",
-    "status": "succeeded",
-    "attempts": 1,
-    "max_attempts": 8,
-    "last_error": null,
-    "created_at": "2026-02-26T12:00:00+00:00",
-    "updated_at": "2026-02-26T12:00:00+00:00"
-  }
-]
 ```
 
 ### `POST /jobs/resume-extract`
@@ -237,5 +151,3 @@ EspoCRM contact-change webhook for people cache sync.
 
 - JSON body:
   - Array of event objects, each with at least `id` (string).
-=======
->>>>>>> origin/main
