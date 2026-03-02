@@ -87,28 +87,13 @@ def process_docuseal_agreement_job(
 
 
 def process_intake_form_job(
-    email: str,
-    first_name: str,
-    last_name: str,
-    phone: str | None = None,
-    discord_username: str | None = None,
-    linkedin_url: str | None = None,
-    github_username: str | None = None,
-    submitted_at: str | None = None,
+    payload: dict[str, Any],
 ) -> dict[str, Any]:
     """Process a Google Forms member intake submission against CRM."""
+    email = str(payload.get("email", ""))
     logger.info("Processing intake form job masked_email=%s", mask_email(email))
     processor = IntakeFormProcessor()
-    return processor.process_intake(
-        email=email,
-        first_name=first_name,
-        last_name=last_name,
-        phone=phone,
-        discord_username=discord_username,
-        linkedin_url=linkedin_url,
-        github_username=github_username,
-        submitted_at=submitted_at,
-    )
+    return processor.process_intake(payload=payload)
 
 
 def sync_people_from_crm_job() -> dict[str, Any]:

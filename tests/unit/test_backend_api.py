@@ -939,18 +939,20 @@ def test_google_forms_intake_enqueues_job(
     auth_headers: dict[str, str],
 ) -> None:
     """Google Forms webhook should enqueue intake job and return 202."""
-    with patch("five08.backend.api.enqueue_job") as mock_enqueue:
-        mock_enqueue.return_value = Mock(id="job-intake-1")
-        response = client.post(
-            "/webhooks/google-forms",
-            json={
-                **_GOOGLE_FORMS_INTAKE_PAYLOAD,
-                "email": "  member@example.com  ",
-                "first_name": "  Jane  ",
-                "last_name": "  Doe  ",
-            },
-            headers=auth_headers,
-        )
+    with patch.object(api.settings, "google_forms_allowed_form_ids", "form-1,form-2"):
+        with patch("five08.backend.api.enqueue_job") as mock_enqueue:
+            mock_enqueue.return_value = Mock(id="job-intake-1")
+            response = client.post(
+                "/webhooks/google-forms",
+                json={
+                    **_GOOGLE_FORMS_INTAKE_PAYLOAD,
+                    "email": "  member@example.com  ",
+                    "first_name": "  Jane  ",
+                    "last_name": "  Doe  ",
+                    "form_id": "form-1",
+                },
+                headers=auth_headers,
+            )
 
     payload = response.json()
     assert response.status_code == 202
@@ -961,9 +963,26 @@ def test_google_forms_intake_enqueues_job(
 
     call_kwargs = mock_enqueue.call_args.kwargs
     assert call_kwargs["idempotency_key"] == "intake:member@example.com:sub-42"
-    assert call_kwargs["args"][0] == "member@example.com"
-    assert call_kwargs["args"][1] == "Jane"
-    assert call_kwargs["args"][2] == "Doe"
+    assert call_kwargs["args"][0]["email"] == "member@example.com"
+    assert call_kwargs["args"][0]["first_name"] == "Jane"
+    assert call_kwargs["args"][0]["last_name"] == "Doe"
+
+
+def test_google_forms_intake_rejects_unapproved_form_id(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Unapproved Google Forms IDs should be rejected."""
+    with patch.object(api.settings, "google_forms_allowed_form_ids", "form-1,form-2"):
+        with patch("five08.backend.api.enqueue_job"):
+            response = client.post(
+                "/webhooks/google-forms",
+                json={**_GOOGLE_FORMS_INTAKE_PAYLOAD, "form_id": "legacy-form"},
+                headers=auth_headers,
+            )
+
+    assert response.status_code == 403
+    assert response.json()["error"] == "invalid_form_id"
 
 
 @pytest.mark.parametrize(
@@ -1008,36 +1027,31 @@ def test_google_forms_intake_idempotency_uses_submission_payload_fingerprint_whe
         "phone": " +15551234567 ",
         "submission_id": None,
         "submitted_at": None,
+        "form_id": "form-1",
     }
+    normalized_payload = api.GoogleFormsIntakePayload.model_validate(
+        payload
+    ).model_dump(exclude_none=True)
     expected_idempotency_key = api._google_forms_intake_idempotency_key(
         email="member@example.com",
         submission_id=None,
         submitted_at=None,
-        payload={
-            "email": "member@example.com",
-            "first_name": "Jane",
-            "last_name": "Doe",
-            "phone": "+15551234567",
-            "discord_username": None,
-            "linkedin_url": None,
-            "github_username": None,
-            "submission_id": None,
-            "submitted_at": None,
-        },
+        payload=normalized_payload,
     )
 
-    with patch("five08.backend.api.enqueue_job") as mock_enqueue:
-        mock_enqueue.return_value = Mock(id="job-intake-1")
-        response_one = client.post(
-            "/webhooks/google-forms",
-            json=payload,
-            headers=auth_headers,
-        )
-        response_two = client.post(
-            "/webhooks/google-forms",
-            json=payload,
-            headers=auth_headers,
-        )
+    with patch.object(api.settings, "google_forms_allowed_form_ids", "form-1,form-2"):
+        with patch("five08.backend.api.enqueue_job") as mock_enqueue:
+            mock_enqueue.return_value = Mock(id="job-intake-1")
+            response_one = client.post(
+                "/webhooks/google-forms",
+                json=payload,
+                headers=auth_headers,
+            )
+            response_two = client.post(
+                "/webhooks/google-forms",
+                json=payload,
+                headers=auth_headers,
+            )
 
     assert response_one.status_code == 202
     assert response_one.json()["job_id"] == "job-intake-1"
@@ -1048,9 +1062,9 @@ def test_google_forms_intake_idempotency_uses_submission_payload_fingerprint_whe
     call_kwargs_two = mock_enqueue.call_args_list[1].kwargs
     assert call_kwargs_one["idempotency_key"] == expected_idempotency_key
     assert call_kwargs_two["idempotency_key"] == expected_idempotency_key
-    assert call_kwargs_one["args"][0] == "member@example.com"
-    assert call_kwargs_one["args"][1] == "Jane"
-    assert call_kwargs_one["args"][2] == "Doe"
+    assert call_kwargs_one["args"][0]["email"] == "member@example.com"
+    assert call_kwargs_one["args"][0]["first_name"] == "Jane"
+    assert call_kwargs_one["args"][0]["last_name"] == "Doe"
 
 
 def test_google_forms_intake_rejects_invalid_payload(

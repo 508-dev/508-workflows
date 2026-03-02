@@ -161,6 +161,20 @@ def _google_forms_intake_idempotency_key(
     return f"intake:{email}:{token}"
 
 
+def _validate_google_forms_submission(
+    payload: GoogleFormsIntakePayload,
+) -> JSONResponse | None:
+    allowed_form_ids = settings.google_forms_allowed_form_ids_set
+    if not allowed_form_ids:
+        return None
+
+    form_id = (payload.form_id or "").strip()
+    if form_id and form_id in allowed_form_ids:
+        return None
+
+    return JSONResponse({"error": "invalid_form_id"}, status_code=403)
+
+
 async def _enqueue_full_crm_sync_job(queue: QueueClient, *, reason: str) -> EnqueuedJob:
     now = datetime.now(tz=timezone.utc)
     job: EnqueuedJob = await asyncio.to_thread(
@@ -857,34 +871,19 @@ async def google_forms_intake_webhook_handler(request: Request) -> JSONResponse:
             status_code=400,
         )
 
+    form_validation_error = _validate_google_forms_submission(payload)
+    if form_validation_error is not None:
+        return form_validation_error
+
     email = (payload.email or "").strip().lower()
-    first_name = (payload.first_name or "").strip()
-    last_name = (payload.last_name or "").strip()
-    if not email or not first_name or not last_name:
+    if not email or not payload.first_name or not payload.last_name:
         return JSONResponse({"error": "invalid_payload"}, status_code=400)
 
-    phone = _normalize_google_forms_input(payload.phone)
-    discord_username = _normalize_google_forms_input(payload.discord_username)
-    linkedin_url = _normalize_google_forms_input(payload.linkedin_url)
-    github_username = _normalize_google_forms_input(payload.github_username)
-    submission_id = _normalize_google_forms_input(payload.submission_id)
-    submitted_at = _normalize_google_forms_input(payload.submitted_at)
-
-    normalized_payload = {
-        "email": email,
-        "first_name": first_name,
-        "last_name": last_name,
-        "phone": phone,
-        "discord_username": discord_username,
-        "linkedin_url": linkedin_url,
-        "github_username": github_username,
-        "submission_id": submission_id,
-        "submitted_at": submitted_at,
-    }
+    normalized_payload = payload.model_dump(exclude_none=True)
     idempotency_key = _google_forms_intake_idempotency_key(
         email=email,
-        submission_id=submission_id,
-        submitted_at=submitted_at,
+        submission_id=payload.submission_id,
+        submitted_at=payload.submitted_at,
         payload=normalized_payload,
     )
 
@@ -894,16 +893,7 @@ async def google_forms_intake_webhook_handler(request: Request) -> JSONResponse:
             enqueue_job,
             queue=queue,
             fn=process_intake_form_job,
-            args=(
-                email,
-                first_name,
-                last_name,
-                phone,
-                discord_username,
-                linkedin_url,
-                github_username,
-                submitted_at,
-            ),
+            args=(normalized_payload,),
             settings=settings,
             idempotency_key=idempotency_key,
         )

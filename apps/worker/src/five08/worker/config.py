@@ -18,6 +18,7 @@ class WorkerSettings(SharedSettings):
     espo_api_key: str
     crm_linkedin_field: str = "cLinkedInUrl"
     crm_intake_completed_field: str = ""
+    google_forms_allowed_form_ids: str = ""
 
     openai_api_key: str | None = None
     openai_base_url: str | None = None
@@ -63,6 +64,15 @@ class WorkerSettings(SharedSettings):
     discord_admin_roles: str = "Admin,Owner,Steering Committee"
     discord_api_timeout_seconds: float = 8.0
     discord_link_ttl_seconds: int = 600
+
+    @property
+    def google_forms_allowed_form_ids_set(self) -> set[str]:
+        """Allowed Google Forms IDs used by intake webhook validation."""
+        return {
+            form_id.strip()
+            for form_id in self.google_forms_allowed_form_ids.split(",")
+            if form_id.strip()
+        }
 
     @model_validator(mode="after")
     def validate_email_resume_intake_settings(self) -> "WorkerSettings":
