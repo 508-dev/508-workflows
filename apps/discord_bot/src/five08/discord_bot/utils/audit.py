@@ -24,6 +24,7 @@ class DiscordAuditLogger:
         shared_secret: str | None,
         timeout_seconds: float,
         discord_logs_webhook_url: str | None = None,
+        discord_logs_webhook_wait: bool = True,
     ) -> None:
         self.base_url = (base_url or "").strip().rstrip("/")
         self.shared_secret = (shared_secret or "").strip()
@@ -31,6 +32,7 @@ class DiscordAuditLogger:
         self.webhook_logger = DiscordWebhookLogger(
             webhook_url=discord_logs_webhook_url,
             timeout_seconds=timeout_seconds,
+            wait_for_response=discord_logs_webhook_wait,
         )
 
     @property
