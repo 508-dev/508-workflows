@@ -32,6 +32,7 @@ from five08.logging import configure_observability
 from five08.queue import (
     EnqueuedJob,
     QueueClient,
+    JobStatus,
     list_jobs,
     enqueue_job,
     get_job,
@@ -684,17 +685,31 @@ async def jobs_handler(
     request: Request,
     minutes: int = Query(default=60, ge=1),
     limit: int = Query(default=100, ge=1, le=1000),
+    status: str | None = Query(default=None),
+    job_type: str | None = Query(default=None, alias="type"),
 ) -> JSONResponse:
     """Return jobs created within the last N minutes."""
     if not _is_authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=minutes)
+    job_status: JobStatus | None = None
+    if status is not None:
+        try:
+            job_status = JobStatus(status)
+        except ValueError:
+            return JSONResponse(
+                {"error": "invalid_status", "status": status},
+                status_code=400,
+            )
+
     recent_jobs = await asyncio.to_thread(
         list_jobs,
         settings,
         created_after=cutoff,
         limit=limit,
+        status=job_status,
+        job_type=job_type,
     )
 
     payload = [
