@@ -4,6 +4,7 @@ from five08.worker.models import (
     AuditEventPayload,
     DocusealWebhookPayload,
     EspoCRMWebhookPayload,
+    GoogleFormsIntakePayload,
 )
 
 
@@ -88,3 +89,22 @@ def test_docuseal_webhook_payload_accepts_payload_without_template() -> None:
     )
 
     assert payload.data.template is None
+
+
+def test_google_forms_intake_payload_parses_submission() -> None:
+    """Intake payload should parse all fields with correct defaults."""
+    payload = GoogleFormsIntakePayload.model_validate(
+        {
+            "email": "new@example.com",
+            "first_name": "Jane",
+            "last_name": "Doe",
+            "phone": "+15551234567",
+            "discord_username": "janedoe",
+        }
+    )
+    assert payload.email == "new@example.com"
+    assert payload.first_name == "Jane"
+    assert payload.last_name == "Doe"
+    assert payload.phone == "+15551234567"
+    assert payload.linkedin_url is None
+    assert payload.submission_id is None
