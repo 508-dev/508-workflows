@@ -6,6 +6,7 @@ import contextlib
 import json
 import logging
 from urllib import error, request
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 logger = logging.getLogger(__name__)
 
@@ -13,9 +14,16 @@ logger = logging.getLogger(__name__)
 class DiscordWebhookLogger:
     """Send short messages to a Discord webhook URL without affecting workflows."""
 
-    def __init__(self, webhook_url: str | None, timeout_seconds: float = 2.0) -> None:
+    def __init__(
+        self,
+        webhook_url: str | None,
+        timeout_seconds: float = 2.0,
+        *,
+        wait_for_response: bool = True,
+    ) -> None:
         self.webhook_url = (webhook_url or "").strip()
         self.timeout_seconds = timeout_seconds
+        self.wait_for_response = wait_for_response
 
     @property
     def enabled(self) -> bool:
@@ -27,10 +35,10 @@ class DiscordWebhookLogger:
         if not self.enabled:
             return
 
-        payload = {"content": content}
-        body = json.dumps(payload).encode("utf-8")
+        query_params = self._request_query_params()
+        body = json.dumps({"content": content}).encode("utf-8")
         req = request.Request(
-            self.webhook_url,
+            self._request_url(query_params),
             data=body,
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -58,3 +66,16 @@ class DiscordWebhookLogger:
             Exception
         ) as exc:  # pragma: no cover - defensive for transport edge-cases
             logger.warning("Discord webhook failed error=%s", exc)
+
+    def _request_query_params(self) -> dict[str, str]:
+        """Build webhook query params with explicit delivery and thread routing."""
+        parsed = urlparse(self.webhook_url)
+        query_params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        if self.wait_for_response and "wait" not in query_params:
+            query_params["wait"] = "true"
+        return query_params
+
+    def _request_url(self, query_params: dict[str, str]) -> str:
+        """Build webhook URL with request query params."""
+        parsed = urlparse(self.webhook_url)
+        return urlunparse(parsed._replace(query=urlencode(query_params)))

@@ -47,6 +47,7 @@ dramatiq.set_broker(DRAMATIQ_BROKER)
 _JOB_WEBHOOK_LOGGER = DiscordWebhookLogger(
     webhook_url=settings.discord_logs_webhook_url,
     timeout_seconds=2.0,
+    wait_for_response=settings.discord_logs_webhook_wait,
 )
 
 _QUEUE_NAMES = parse_queue_names(settings.worker_queue_names)

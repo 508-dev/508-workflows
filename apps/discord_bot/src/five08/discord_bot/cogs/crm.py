@@ -1005,6 +1005,7 @@ class CRMCog(commands.Cog):
             shared_secret=settings.api_shared_secret,
             timeout_seconds=settings.audit_api_timeout_seconds,
             discord_logs_webhook_url=settings.discord_logs_webhook_url,
+            discord_logs_webhook_wait=settings.discord_logs_webhook_wait,
         )
 
     def _audit_command(
