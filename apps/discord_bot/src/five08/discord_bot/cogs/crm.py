@@ -856,7 +856,7 @@ class ResumeCreateContactView(discord.ui.View):
         search_term: str | None,
         overwrite: bool,
         link_user: discord.Member | None,
-        inferred_contact_meta: dict[str, str] | None,
+        inferred_contact_meta: dict[str, Any] | None,
         target_scope: str,
         create_payload_override: dict[str, str] | None = None,
         created_target_scope: str = "created",
@@ -2177,6 +2177,22 @@ class CRMCog(commands.Cog):
             "linkedin_urls": linkedin_matches,
         }
 
+    def _format_inferred_attempts(self, attempts: list[dict[str, Any]] | None) -> str:
+        if not attempts:
+            return ""
+
+        formatted: list[str] = []
+        for attempt in attempts:
+            if not isinstance(attempt, dict):
+                continue
+            method = str(attempt.get("method", "")).strip()
+            value = str(attempt.get("value", "")).strip()
+            if not method or not value:
+                continue
+            formatted.append(f"{method}: `{value}`")
+
+        return ", ".join(formatted)
+
     def _extract_resume_name_hint(self, file_content: bytes) -> str:
         """Best-effort contact name extraction from resume text."""
         text = file_content.decode("utf-8", errors="ignore")
@@ -2277,47 +2293,66 @@ class CRMCog(commands.Cog):
 
     async def _infer_contact_from_resume(
         self, file_content: bytes
-    ) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         """Infer target contact from resume identifiers."""
         hints = self._extract_resume_contact_hints(file_content)
+        attempts: list[dict[str, Any]] = []
         for email in hints["emails"]:
+            attempts.append({"method": "email", "value": email})
             contacts = await self._search_contact_for_linking(email)
             if len(contacts) == 1:
-                return contacts[0], {"method": "email", "value": email}
+                return contacts[0], {
+                    "method": "email",
+                    "value": email,
+                    "attempts": attempts,
+                }
             if len(contacts) > 1:
                 return None, {
                     "method": "email",
                     "value": email,
                     "reason": "multiple_matches",
+                    "attempts": attempts,
                 }
 
         for github_username in hints["github_usernames"]:
+            attempts.append({"method": "github", "value": github_username})
             contacts = await self._search_contacts_by_field(
                 field="cGitHubUsername", value=github_username
             )
             if len(contacts) == 1:
-                return contacts[0], {"method": "github", "value": github_username}
+                return contacts[0], {
+                    "method": "github",
+                    "value": github_username,
+                    "attempts": attempts,
+                }
             if len(contacts) > 1:
                 return None, {
                     "method": "github",
                     "value": github_username,
                     "reason": "multiple_matches",
+                    "attempts": attempts,
                 }
 
         for linkedin_url in hints["linkedin_urls"]:
+            attempts.append({"method": "linkedin", "value": linkedin_url})
             contacts = await self._search_contacts_by_field(
                 field="cLinkedInUrl", value=linkedin_url
             )
             if len(contacts) == 1:
-                return contacts[0], {"method": "linkedin", "value": linkedin_url}
+                return contacts[0], {
+                    "method": "linkedin",
+                    "value": linkedin_url,
+                    "attempts": attempts,
+                }
             if len(contacts) > 1:
                 return None, {
                     "method": "linkedin",
                     "value": linkedin_url,
                     "reason": "multiple_matches",
+                    "attempts": attempts,
                 }
 
-        return None, {"reason": "no_matching_contact"}
+        return None, {"reason": "no_matching_contact", "attempts": attempts}
 
     async def _perform_discord_linking(
         self,
@@ -4027,7 +4062,7 @@ class CRMCog(commands.Cog):
         search_term: str | None,
         overwrite: bool,
         link_user: discord.Member | None,
-        inferred_contact_meta: dict[str, str] | None,
+        inferred_contact_meta: dict[str, Any] | None,
     ) -> None:
         """Upload attachment and launch the worker preview for a given contact."""
         contact_id = contact.get("id")
@@ -4279,7 +4314,7 @@ class CRMCog(commands.Cog):
             # Determine target contact
             target_contact = None
             target_scope = "self"
-            inferred_contact_meta: dict[str, str] | None = None
+            inferred_contact_meta: dict[str, Any] | None = None
 
             if search_term:
                 contacts = await self._search_contact_for_linking(search_term)
@@ -4378,6 +4413,7 @@ class CRMCog(commands.Cog):
                     inferred_reason = (inferred_contact_meta or {}).get(
                         "reason", "resume_contact_not_found"
                     )
+                    inferred_attempts = (inferred_contact_meta or {}).get("attempts")
                     inference_metadata = {
                         "filename": file.filename,
                         "target_scope": "resume_inferred",
@@ -4387,6 +4423,19 @@ class CRMCog(commands.Cog):
                         inference_metadata["inferred_method"] = inferred_method
                     if inferred_value:
                         inference_metadata["inferred_value"] = inferred_value
+                    if inferred_attempts is not None:
+                        inference_metadata["inferred_attempts"] = inferred_attempts
+
+                    attempts_message = self._format_inferred_attempts(
+                        inferred_attempts
+                        if isinstance(inferred_attempts, list)
+                        else None
+                    )
+                    inferred_attempts_text = (
+                        f"\nTried contact lookups: {attempts_message}"
+                        if attempts_message
+                        else ""
+                    )
 
                     if inferred_reason == "multiple_matches" and inferred_value:
                         self._audit_command(
@@ -4420,7 +4469,8 @@ class CRMCog(commands.Cog):
                         )
                         await interaction.followup.send(
                             "⚠️ Could not find a unique contact from this resume. "
-                            "Would you like to create a new contact from the parsed details?",
+                            "Would you like to create a new contact from the parsed details?"
+                            + inferred_attempts_text,
                             view=view,
                         )
                     else:
