@@ -13,6 +13,9 @@ from five08.worker.masking import mask_email
 logger = logging.getLogger(__name__)
 
 
+DOCUSEAL_COMPLETED_AT_UTC_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
 def process_contact_skills_job(contact_id: str) -> dict[str, Any]:
     """Process one EspoCRM contact and update their skills."""
     logger.info("Processing queued contact skills job contact_id=%s", contact_id)
@@ -75,7 +78,12 @@ def process_docuseal_agreement_job(
     completed_at: str,
     submission_id: int,
 ) -> dict[str, Any]:
-    """Mark a CRM contact as having signed the member agreement via Docuseal."""
+    """Mark a CRM contact as having signed the member agreement via Docuseal.
+
+    Job input contract:
+    - completed_at is a UTC string, formatted as ``YYYY-MM-DD HH:mm:ss``.
+    - Keep it string-based to match JSON job payload serialization constraints.
+    """
     logger.info(
         "Processing Docuseal agreement job masked_email=%s submission_id=%s",
         mask_email(email),

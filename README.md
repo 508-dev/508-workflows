@@ -53,6 +53,8 @@ Migrations:
 - `POST /webhooks/{source}`: Generic webhook enqueue endpoint.
 - `POST /webhooks/espocrm`: EspoCRM webhook endpoint (expects array payload).
 - `POST /webhooks/espocrm/people-sync`: EspoCRM contact-change webhook for people cache sync.
+- `POST /webhooks/docuseal`: See worker webhook contract docs in
+  [`apps/worker/README.md`](apps/worker/README.md#webhooks).
 - `POST /process-contact/{contact_id}`: Manually enqueue one contact skills job.
 - `POST /sync/people`: Manually enqueue a full CRM->people cache sync.
 - `POST /audit/events`: Persist one human audit event (`discord` or `admin_dashboard`).

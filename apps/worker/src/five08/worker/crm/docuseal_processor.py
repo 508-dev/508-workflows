@@ -1,6 +1,7 @@
 """Docuseal member agreement processing workflow."""
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from five08.clients.espo import EspoAPI, EspoAPIError
@@ -17,13 +18,27 @@ class DocusealAgreementProcessor:
         api_url = settings.espo_base_url.rstrip("/") + "/api/v1"
         self.api = EspoAPI(api_url, settings.espo_api_key)
 
+    @staticmethod
+    def _normalize_completed_at(completed_at: str) -> str:
+        """Normalize timestamp to the CRM-expected UTC format."""
+        parsed = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        else:
+            parsed = parsed.astimezone(timezone.utc)
+        return parsed.strftime("%Y-%m-%d %H:%M:%S")
+
     def process_agreement(
         self,
         email: str,
         completed_at: str,
         submission_id: int,
     ) -> dict[str, Any]:
-        """Search for the signer by email and update cMemberAgreementSignedAt."""
+        """Search for the signer by email and update cMemberAgreementSignedAt.
+
+        Expected input is the queue contract value:
+        ``YYYY-MM-DD HH:mm:ss`` in UTC.
+        """
         masked_email = mask_email(email)
 
         try:
@@ -67,11 +82,28 @@ class DocusealAgreementProcessor:
         contact_id = contact["id"]
 
         try:
+            crm_completed_at = self._normalize_completed_at(completed_at)
+        except ValueError as exc:
+            logger.error(
+                "CRM update failed for contact_id=%s due to invalid datetime=%s: %s",
+                contact_id,
+                completed_at,
+                exc,
+            )
+            return {
+                "success": False,
+                "masked_email": masked_email,
+                "submission_id": submission_id,
+                "contact_id": contact_id,
+                "error": f"invalid_completed_at: {exc}",
+            }
+
+        try:
             self.api.request(
                 "PUT",
                 f"Contact/{contact_id}",
                 {
-                    "cMemberAgreementSignedAt": completed_at,
+                    "cMemberAgreementSignedAt": crm_completed_at,
                 },
             )
         except EspoAPIError as exc:
@@ -94,5 +126,5 @@ class DocusealAgreementProcessor:
             "masked_email": masked_email,
             "contact_id": contact_id,
             "submission_id": submission_id,
-            "completed_at": completed_at,
+            "completed_at": crm_completed_at,
         }

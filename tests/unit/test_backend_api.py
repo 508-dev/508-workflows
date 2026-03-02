@@ -631,7 +631,46 @@ def test_docuseal_webhook_enqueues_agreement_job(
     assert payload["submission_id"] == 4200
 
     call_kwargs = mock_enqueue.call_args.kwargs
+    assert call_kwargs["args"] == ("member@508.dev", "2026-02-25 12:00:00", 4200)
+    assert call_kwargs["args"][1] == "2026-02-25 12:00:00"
     assert call_kwargs["idempotency_key"] == "docuseal-agreement:4200"
+
+
+def test_docuseal_webhook_converts_completed_at_to_utc_payload_contract(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Docuseal timestamps should be serialized as UTC string contract payload args."""
+    monkeypatch.setattr(
+        api.settings,
+        "docuseal_member_agreement_template_id",
+        68,
+    )
+    payload = {
+        **_DOCUSEAL_PAYLOAD,
+        "data": {
+            **_DOCUSEAL_PAYLOAD["data"],
+            "completed_at": "2026-03-02T10:02:30.572+02:00",
+        },
+        "timestamp": "2026-03-02T10:02:30.572+02:00",
+    }
+    with patch("five08.backend.api.enqueue_job") as mock_enqueue:
+        mock_enqueue.return_value = Mock(id="job-ds-utc")
+        response = client.post(
+            "/webhooks/docuseal",
+            json=payload,
+            headers=auth_headers,
+        )
+
+    payload = response.json()
+    assert response.status_code == 202
+    assert payload["status"] == "queued"
+    assert payload["job_id"] == "job-ds-utc"
+    assert payload["submission_id"] == 4200
+
+    call_kwargs = mock_enqueue.call_args.kwargs
+    assert call_kwargs["args"][1] == "2026-03-02 08:02:30"
 
 
 def test_docuseal_webhook_ignored_when_template_filter_unset(

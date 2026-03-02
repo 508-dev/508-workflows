@@ -124,6 +124,15 @@ def _resume_extract_model_name() -> str:
     return "heuristic"
 
 
+def _coerce_docuseal_completed_at_to_utc(value: str) -> str:
+    """Normalize Docuseal completion timestamps for queue/job payload contract."""
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    utc_value = parsed.astimezone(timezone.utc)
+    return utc_value.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _crm_sync_idempotency_key(*, now: datetime) -> str:
     interval_seconds = max(1, settings.crm_sync_interval_seconds)
     bucket = int(now.timestamp()) // interval_seconds
@@ -692,7 +701,11 @@ async def espocrm_people_sync_webhook_handler(request: Request) -> JSONResponse:
 
 
 async def docuseal_webhook_handler(request: Request) -> JSONResponse:
-    """Process a Docuseal form.completed webhook and enqueue agreement job."""
+    """Process a Docuseal form.completed webhook and enqueue agreement job.
+
+    Job payload contract for the queue is:
+    completed_at = "YYYY-MM-DD HH:mm:ss" in UTC.
+    """
     if not _is_authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
@@ -764,7 +777,7 @@ async def docuseal_webhook_handler(request: Request) -> JSONResponse:
         return JSONResponse({"error": "invalid_payload"}, status_code=400)
 
     try:
-        datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+        completed_at = _coerce_docuseal_completed_at_to_utc(completed_at)
     except ValueError:
         return JSONResponse({"error": "invalid_payload"}, status_code=400)
 
