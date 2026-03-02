@@ -47,6 +47,9 @@ def mock_interaction() -> Mock:
     interaction.followup.send = AsyncMock()
     interaction.user = Mock()
     interaction.user.name = "admin"
+    admin_role = Mock()
+    admin_role.name = "Admin"
+    interaction.user.roles = [admin_role]
     return interaction
 
 
