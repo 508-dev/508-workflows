@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 import logging
 import secrets
 import time
@@ -55,6 +54,7 @@ from five08.backend.auth import (
 from five08.worker.config import settings
 from five08.worker.db_migrations import run_job_migrations
 from five08.worker.dispatcher import build_queue_client
+from five08.worker.masking import mask_email
 from five08.worker.jobs import (
     apply_resume_profile_job,
     extract_resume_profile_job,
@@ -72,11 +72,6 @@ from five08.worker.models import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _masked_email(email: str) -> str:
-    """Return a deterministic masked value for logging and responses."""
-    return hashlib.sha256(email.encode("utf-8")).hexdigest()[:12]
 
 
 class ResumeExtractRequest(BaseModel):
@@ -108,8 +103,13 @@ def _is_authorized(request: Request) -> bool:
         logger.error("Rejecting request: API_SHARED_SECRET is not configured")
         return False
 
+    # TODO: security-hardening: move webhook auth to per-webhook generated secrets
+    # sourced from an admin dashboard with copyable callback URLs.
     provided_secret = request.headers.get("X-API-Secret", "")
-    return secrets.compare_digest(provided_secret, settings.api_shared_secret)
+    if secrets.compare_digest(provided_secret, settings.api_shared_secret):
+        return True
+
+    return False
 
 
 def _extract_idempotency_key(value: object) -> str | None:
@@ -771,7 +771,7 @@ async def docuseal_webhook_handler(request: Request) -> JSONResponse:
     if not email:
         return JSONResponse({"error": "invalid_payload"}, status_code=400)
 
-    masked_email = _masked_email(email)
+    masked_email = mask_email(email)
 
     queue = request.app.state.queue
     try:

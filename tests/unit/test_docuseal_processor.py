@@ -1,14 +1,10 @@
 """Unit tests for Docuseal processor logic."""
 
-import hashlib
 from unittest.mock import Mock, patch
 
 from five08.clients.espo import EspoAPIError
 from five08.worker.crm.docuseal_processor import DocusealAgreementProcessor
-
-
-def _expected_masked_email(email: str) -> str:
-    return hashlib.sha256(email.encode("utf-8")).hexdigest()[:12]
+from five08.worker.masking import mask_email
 
 
 def test_docuseal_processor_marks_member_agreement_and_flag() -> None:
@@ -19,7 +15,7 @@ def test_docuseal_processor_marks_member_agreement_and_flag() -> None:
         {"updated": True},
     ]
     expected_email = "member@508.dev"
-    expected_masked = _expected_masked_email(expected_email)
+    expected_masked = mask_email(expected_email)
 
     with patch("five08.worker.crm.docuseal_processor.EspoAPI", return_value=mock_api):
         processor = DocusealAgreementProcessor()
@@ -57,7 +53,7 @@ def test_docuseal_processor_returns_contact_not_found_when_missing_contact() -> 
 
     assert result["success"] is False
     assert result["error"] == "contact_not_found"
-    assert result["masked_email"] == _expected_masked_email("missing@508.dev")
+    assert result["masked_email"] == mask_email("missing@508.dev")
     assert result["masked_email"] != "missing@508.dev"
     assert mock_api.request.call_count == 1
 
@@ -77,5 +73,5 @@ def test_docuseal_processor_returns_error_on_search_failure() -> None:
 
     assert result["success"] is False
     assert result["error"] == "CRM search failed: CRM unavailable"
-    assert result["masked_email"] == _expected_masked_email("broken@508.dev")
+    assert result["masked_email"] == mask_email("broken@508.dev")
     assert result["masked_email"] != "broken@508.dev"

@@ -1,21 +1,17 @@
 """Docuseal member agreement processing workflow."""
 
 import logging
-import hashlib
 from typing import Any
 
 from five08.clients.espo import EspoAPI, EspoAPIError
 from five08.worker.config import settings
+from five08.worker.masking import mask_email
 
 logger = logging.getLogger(__name__)
 
 
 class DocusealAgreementProcessor:
     """Look up a CRM contact by email and mark their member agreement as signed."""
-
-    @staticmethod
-    def _masked_email(email: str) -> str:
-        return hashlib.sha256(email.encode("utf-8")).hexdigest()[:12]
 
     def __init__(self) -> None:
         api_url = settings.espo_base_url.rstrip("/") + "/api/v1"
@@ -28,7 +24,7 @@ class DocusealAgreementProcessor:
         submission_id: int,
     ) -> dict[str, Any]:
         """Search for the signer by email and update cMemberAgreementSignedAt."""
-        masked_email = self._masked_email(email)
+        masked_email = mask_email(email)
 
         try:
             result = self.api.request(

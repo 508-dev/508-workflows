@@ -1,11 +1,11 @@
 """Unit tests for backend dashboard/ingest API."""
 
-import hashlib
 import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import AsyncMock, Mock, patch
 
 from five08.backend import api
+from five08.worker.masking import mask_email
 
 
 class _HealthyRedis:
@@ -596,10 +596,6 @@ _DOCUSEAL_PAYLOAD = {
 }
 
 
-def _expected_masked_email(email: str) -> str:
-    return hashlib.sha256(email.encode("utf-8")).hexdigest()[:12]
-
-
 def test_docuseal_webhook_rejects_unauthorized(client: TestClient) -> None:
     """Docuseal webhook should reject requests without valid auth."""
     response = client.post("/webhooks/docuseal", json=_DOCUSEAL_PAYLOAD)
@@ -631,7 +627,7 @@ def test_docuseal_webhook_enqueues_agreement_job(
     assert payload["status"] == "queued"
     assert payload["source"] == "docuseal"
     assert payload["job_id"] == "job-ds-1"
-    assert payload["masked_email"] == _expected_masked_email("member@508.dev")
+    assert payload["masked_email"] == mask_email("member@508.dev")
     assert payload["submission_id"] == 4200
 
     call_kwargs = mock_enqueue.call_args.kwargs
@@ -687,9 +683,15 @@ def test_docuseal_webhook_rejects_invalid_payload(
 def test_docuseal_webhook_rejects_blank_email(
     client: TestClient,
     auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
     email: str,
 ) -> None:
     """Blank submitter email should be rejected."""
+    monkeypatch.setattr(
+        api.settings,
+        "docuseal_member_agreement_template_id",
+        68,
+    )
     payload = {
         **_DOCUSEAL_PAYLOAD,
         "data": {**_DOCUSEAL_PAYLOAD["data"], "email": email},
@@ -708,9 +710,15 @@ def test_docuseal_webhook_rejects_blank_email(
 def test_docuseal_webhook_rejects_blank_timestamp(
     client: TestClient,
     auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
     timestamp: str,
 ) -> None:
     """Blank submitter completion time should be rejected."""
+    monkeypatch.setattr(
+        api.settings,
+        "docuseal_member_agreement_template_id",
+        68,
+    )
     payload = {
         **_DOCUSEAL_PAYLOAD,
         "timestamp": timestamp,
@@ -779,7 +787,7 @@ def test_docuseal_webhook_processes_matching_template(
     assert payload["status"] == "queued"
     assert payload["source"] == "docuseal"
     assert payload["job_id"] == "job-ds-2"
-    assert payload["masked_email"] == _expected_masked_email("member@508.dev")
+    assert payload["masked_email"] == mask_email("member@508.dev")
     assert payload["submission_id"] == 4200
     assert mock_enqueue.call_args.kwargs["idempotency_key"] == "docuseal-agreement:4200"
 
@@ -850,7 +858,7 @@ def test_docuseal_webhook_uses_submitter_id_when_submission_id_missing(
     assert payload["status"] == "queued"
     assert payload["source"] == "docuseal"
     assert payload["job_id"] == "job-ds-4"
-    assert payload["masked_email"] == _expected_masked_email("member@508.dev")
+    assert payload["masked_email"] == mask_email("member@508.dev")
     assert payload["submission_id"] == 42
 
     call_kwargs = mock_enqueue.call_args.kwargs

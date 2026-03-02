@@ -1,7 +1,6 @@
 """Domain job functions executed by worker actors."""
 
 import logging
-import hashlib
 from datetime import datetime, timezone
 from typing import Any
 
@@ -9,13 +8,9 @@ from five08.worker.crm.docuseal_processor import DocusealAgreementProcessor
 from five08.worker.crm.people_sync import PeopleSyncProcessor
 from five08.worker.crm.processor import ContactSkillsProcessor
 from five08.worker.crm.resume_profile_processor import ResumeProfileProcessor
+from five08.worker.masking import mask_email
 
 logger = logging.getLogger(__name__)
-
-
-def _masked_email(email: str) -> str:
-    """Return a deterministic masked value for email in logs."""
-    return hashlib.sha256(email.encode("utf-8")).hexdigest()[:12]
 
 
 def process_contact_skills_job(contact_id: str) -> dict[str, Any]:
@@ -83,7 +78,7 @@ def process_docuseal_agreement_job(
     """Mark a CRM contact as having signed the member agreement via Docuseal."""
     logger.info(
         "Processing Docuseal agreement job masked_email=%s submission_id=%s",
-        _masked_email(email),
+        mask_email(email),
         submission_id,
     )
     processor = DocusealAgreementProcessor()
