@@ -10,7 +10,7 @@ from five08.settings import SharedSettings
 class WorkerSettings(SharedSettings):
     """Worker-specific settings layered on top of shared stack settings."""
 
-    worker_name: str = "integrations-worker"
+    worker_name: str = "worker"
     worker_queue_names: str = "jobs.default"
     worker_burst: bool = False
 

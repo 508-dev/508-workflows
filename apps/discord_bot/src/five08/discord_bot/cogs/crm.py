@@ -678,6 +678,36 @@ class ResumeUpdateConfirmationView(discord.ui.View):
                 link_discord_applied = raw_link_applied
 
         if status != "succeeded":
+            result_error = str(apply_result.get("last_error", ""))
+            result_success = None
+            if isinstance(result, dict):
+                result_success = result.get("success")
+
+            if result_success is False:
+                error_message = str(
+                    result.get("error") if isinstance(result, dict) else ""
+                )
+                if not error_message:
+                    error_message = result_error or "Unknown error"
+                _audit_apply_event(
+                    "error",
+                    {
+                        "contact_id": self.contact_id,
+                        "stage": "apply_failed",
+                        "job_id": apply_job_id,
+                        "job_status": status,
+                        "last_error": result_error,
+                        "apply_error": error_message,
+                        "updated_fields": updated_fields,
+                        "link_discord_applied": link_discord_applied,
+                    },
+                )
+                await interaction.followup.send(
+                    f"❌ Apply job failed (status: {status}). Error: {error_message}",
+                    ephemeral=True,
+                )
+                return
+
             _audit_apply_event(
                 "error",
                 {
@@ -693,6 +723,51 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             await interaction.followup.send(
                 f"❌ Apply job failed (status: {status}). "
                 f"Error: {apply_result.get('last_error') or 'Unknown error'}",
+                ephemeral=True,
+            )
+            return
+
+        if isinstance(result, dict) and result.get("success") is False:
+            error_message = str(result.get("error") or "")
+            if not error_message:
+                error_message = str(apply_result.get("last_error", "Unknown error"))
+            _audit_apply_event(
+                "error",
+                {
+                    "contact_id": self.contact_id,
+                    "stage": "apply_failed",
+                    "job_id": apply_job_id,
+                    "job_status": status,
+                    "updated_fields": updated_fields,
+                    "link_discord_applied": link_discord_applied,
+                },
+            )
+            await interaction.followup.send(
+                "❌ Apply completed but returned a failed result. "
+                f"Error: {error_message}",
+                ephemeral=True,
+            )
+            return
+
+        if (
+            isinstance(result, dict)
+            and result.get("success") is True
+            and not updated_fields
+        ):
+            _audit_apply_event(
+                "error",
+                {
+                    "contact_id": self.contact_id,
+                    "stage": "apply_no_updates",
+                    "job_id": apply_job_id,
+                    "job_status": status,
+                    "updated_fields": updated_fields,
+                    "link_discord_applied": link_discord_applied,
+                },
+            )
+            await interaction.followup.send(
+                "❌ Apply reported success but no fields were updated. "
+                "Please verify your permissions or contact field mapping and try again.",
                 ephemeral=True,
             )
             return
@@ -783,6 +858,8 @@ class ResumeCreateContactView(discord.ui.View):
         link_user: discord.Member | None,
         inferred_contact_meta: dict[str, str] | None,
         target_scope: str,
+        create_payload_override: dict[str, str] | None = None,
+        created_target_scope: str = "created",
     ) -> None:
         super().__init__(timeout=180)
         self.crm_cog = crm_cog
@@ -795,6 +872,8 @@ class ResumeCreateContactView(discord.ui.View):
         self.link_user = link_user
         self.inferred_contact_meta = inferred_contact_meta
         self.target_scope = target_scope
+        self.create_payload_override = create_payload_override
+        self.created_target_scope = created_target_scope
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.original_interaction.user.id:
@@ -829,10 +908,14 @@ class ResumeCreateContactView(discord.ui.View):
     ) -> None:
         """Create the inferred contact and continue resume upload."""
         await interaction.response.defer(ephemeral=True)
+        create_payload: dict[str, str] | None = None
         try:
-            create_payload = self.crm_cog._build_resume_create_contact_payload(
-                file_content=self.file_content
-            )
+            if self.create_payload_override:
+                create_payload = dict(self.create_payload_override)
+            else:
+                create_payload = self.crm_cog._build_resume_create_contact_payload(
+                    file_content=self.file_content
+                )
             target_contact = self.crm_cog.espo_api.request(
                 "POST", "Contact", create_payload
             )
@@ -855,23 +938,36 @@ class ResumeCreateContactView(discord.ui.View):
                 filename=self.filename,
                 file_size=self.file_size,
                 contact=target_contact,
-                target_scope="created",
+                target_scope=self.created_target_scope,
                 search_term=self.search_term,
                 overwrite=self.overwrite,
                 link_user=self.link_user,
                 inferred_contact_meta=self.inferred_contact_meta,
             )
-        except (EspoAPIError, ValueError, TypeError) as exc:
+        except Exception as exc:
+            status_code = getattr(self.crm_cog.espo_api, "status_code", None)
+            logger.exception(
+                "Failed to create contact from resume filename=%s target_scope=%s inferred_meta=%s status_code=%s payload=%s",
+                self.filename,
+                self.target_scope,
+                self.inferred_contact_meta,
+                status_code,
+                create_payload,
+            )
+            audit_metadata: dict[str, Any] = {
+                "filename": self.filename,
+                "target_scope": self.target_scope,
+                "reason": "contact_create_failed",
+                "error": str(exc),
+                "status_code": status_code,
+            }
+            if create_payload:
+                audit_metadata["create_payload_keys"] = sorted(create_payload.keys())
             self.crm_cog._audit_command(
                 interaction=interaction,
                 action="crm.upload_resume",
                 result="error",
-                metadata={
-                    "filename": self.filename,
-                    "target_scope": self.target_scope,
-                    "reason": "contact_create_failed",
-                    "error": str(exc),
-                },
+                metadata=audit_metadata,
             )
             await interaction.followup.send(
                 "⚠️ Could not create a contact from this resume. "
@@ -908,6 +1004,7 @@ class CRMCog(commands.Cog):
             base_url=settings.audit_api_base_url,
             shared_secret=settings.api_shared_secret,
             timeout_seconds=settings.audit_api_timeout_seconds,
+            discord_logs_webhook_url=settings.discord_logs_webhook_url,
         )
 
     def _audit_command(
@@ -2003,16 +2100,53 @@ class CRMCog(commands.Cog):
         """Build a minimal contact create payload from resume hints."""
         hints = self._extract_resume_contact_hints(file_content)
         name = self._extract_resume_name_hint(file_content)
+        contact_name = name if name != "Unknown Contact" else "Resume Candidate"
 
-        payload: dict[str, str] = {"name": name}
+        payload: dict[str, str] = {"name": contact_name}
         if hints["emails"]:
-            payload["emailAddress"] = hints["emails"][0]
-            payload["c508Email"] = hints["emails"][0]
+            primary_email = hints["emails"][0]
+            if primary_email.endswith("@508.dev"):
+                payload["c508Email"] = primary_email
+            else:
+                payload["emailAddress"] = primary_email
         if hints["github_usernames"]:
             payload["cGitHubUsername"] = hints["github_usernames"][0]
         if hints["linkedin_urls"]:
             payload["cLinkedInUrl"] = hints["linkedin_urls"][0]
 
+        return payload
+
+    def _discord_display_name(self, user: discord.Member) -> str:
+        """Format Discord username for CRM fields."""
+        if hasattr(user, "discriminator") and user.discriminator != "0":
+            return f"{user.name}#{user.discriminator}"
+        return str(user.name)
+
+    def _discord_link_fields(self, user: discord.Member) -> dict[str, str]:
+        """Build CRM fields used to persist Discord linkage."""
+        return {
+            "cDiscordUsername": self._discord_display_name(user),
+            "cDiscordUserID": str(user.id),
+        }
+
+    def _fallback_contact_name_for_discord_user(self, user: discord.Member) -> str:
+        display_name = str(getattr(user, "display_name", "")).strip()
+        if display_name:
+            return display_name
+        username = str(getattr(user, "name", "")).strip()
+        if username:
+            return username
+        return f"Discord User {user.id}"
+
+    def _build_contact_payload_for_link_user(
+        self, *, user: discord.Member, file_content: bytes
+    ) -> dict[str, str]:
+        """Build contact payload from resume hints plus explicit Discord linkage."""
+        payload = self._build_resume_create_contact_payload(file_content=file_content)
+        parsed_name = str(payload.get("name", "")).strip()
+        if not parsed_name or parsed_name == "Resume Candidate":
+            payload["name"] = self._fallback_contact_name_for_discord_user(user)
+        payload.update(self._discord_link_fields(user))
         return payload
 
     async def _search_contacts_by_field(
@@ -2094,16 +2228,10 @@ class CRMCog(commands.Cog):
             contact_name = contact.get("name", "Unknown")
 
             # Prepare the Discord username for storage (without ID) and display
-            if hasattr(user, "discriminator") and user.discriminator != "0":
-                discord_display = f"{user.name}#{user.discriminator}"
-            else:
-                discord_display = f"{user.name}"
+            discord_display = self._discord_display_name(user)
 
             # Update the contact's Discord username and user ID
-            update_data = {
-                "cDiscordUsername": discord_display,
-                "cDiscordUserID": str(user.id),
-            }
+            update_data = self._discord_link_fields(user)
 
             update_response = self.espo_api.request(
                 "PUT", f"Contact/{contact_id}", update_data
@@ -2534,7 +2662,6 @@ class CRMCog(commands.Cog):
                         "contact_id": str(contact_id),
                         "verified_by": verified_by,
                         "verified_at": verified_at,
-                        "id_type": id_type,
                     },
                     resource_type="crm_contact",
                     resource_id=str(contact_id),
@@ -3924,6 +4051,10 @@ class CRMCog(commands.Cog):
                     str(link_user.id)
                 )
                 if not target_contact:
+                    create_payload = self._build_contact_payload_for_link_user(
+                        user=link_user,
+                        file_content=file_content,
+                    )
                     self._audit_command(
                         interaction=interaction,
                         action="crm.upload_resume",
@@ -3932,11 +4063,32 @@ class CRMCog(commands.Cog):
                             "filename": file.filename,
                             "target_scope": target_scope,
                             "reason": "discord_not_linked",
+                            "stage": "create_contact_prompt_shown",
+                            "link_user_id": str(link_user.id),
                         },
                     )
+                    view = ResumeCreateContactView(
+                        crm_cog=self,
+                        interaction=interaction,
+                        file_content=file_content,
+                        filename=file.filename,
+                        file_size=file.size,
+                        search_term=search_term,
+                        overwrite=overwrite,
+                        link_user=link_user,
+                        inferred_contact_meta={
+                            "reason": "discord_not_linked",
+                            "link_user_id": str(link_user.id),
+                        },
+                        target_scope=target_scope,
+                        create_payload_override=create_payload,
+                        created_target_scope="other_autocreated",
+                    )
                     await interaction.followup.send(
-                        "❌ The provided Discord user is not linked to a CRM contact. "
-                        "Please link this user first."
+                        "⚠️ The provided Discord user is not linked to a CRM contact. "
+                        "Would you like to create a new contact for this Discord user "
+                        "from the resume details?",
+                        view=view,
                     )
                     return
             elif is_steering:

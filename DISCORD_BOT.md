@@ -5,7 +5,7 @@ This document captures Discord bot behavior, permissions, and slash command usag
 ## Overview
 
 - Bot package: `apps/discord_bot`
-- Main entrypoint: `discord-bot` (`uv run --package discord-bot-app discord-bot`)
+- Main entrypoint: `discord-bot` (`uv run --package discord_bot discord-bot`)
 - Core command cogs: `apps/discord_bot/src/five08/discord_bot/cogs/`
 - Bot settings: `apps/discord_bot/src/five08/discord_bot/config.py`
 
@@ -14,11 +14,11 @@ This document captures Discord bot behavior, permissions, and slash command usag
 - **Everyone**: can see and invoke non-restricted commands.
 - **Member**: has member-only command access in addition to everyone commands.
 - **Steering Committee**: includes member permissions and adds additional moderation/admin-assist commands.
-- **Admin**: can run sensitive writes such as ID verification updates (including `/mark-id-verified`).
+- **Admin**: can run sensitive writes such as ID verification updates.
 
 ## Slash Commands
 
-- `/mark-id-verified` (Admin only)
+- `/mark-id-verified`
   - Description: Mark a contact as ID verified.
   - Required role: Admin
   - Args:

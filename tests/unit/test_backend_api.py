@@ -1,6 +1,7 @@
 """Unit tests for backend dashboard/ingest API."""
 
 import re
+from datetime import datetime, timezone
 import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import AsyncMock, Mock, patch
@@ -259,6 +260,69 @@ def test_job_status_handler_returns_result(
     assert payload["job_id"] == "job-123"
     assert payload["status"] == "succeeded"
     assert payload["result"] == {"success": True}
+
+
+def test_jobs_handler_returns_recent_jobs(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Jobs list endpoint should return created jobs sorted by API-reported query order."""
+    mock_job = Mock(
+        id="job-2",
+        type="sync_people_from_crm_job",
+        status=Mock(value="queued"),
+        attempts=1,
+        max_attempts=8,
+        last_error=None,
+        created_at=datetime(2026, 2, 26, 12, 0, 0, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 2, 26, 12, 1, 0, tzinfo=timezone.utc),
+    )
+    mock_job2 = Mock(
+        id="job-1",
+        type="extract_resume_profile_job",
+        status=Mock(value="succeeded"),
+        attempts=2,
+        max_attempts=8,
+        last_error="boom",
+        created_at=datetime(2026, 2, 26, 13, 0, 0, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 2, 26, 13, 5, 0, tzinfo=timezone.utc),
+    )
+
+    with patch(
+        "five08.backend.api.list_jobs",
+        return_value=[mock_job2, mock_job],
+    ) as mock_list_jobs:
+        response = client.get("/jobs?minutes=15&limit=2", headers=auth_headers)
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload == [
+        {
+            "job_id": "job-1",
+            "type": "extract_resume_profile_job",
+            "status": "succeeded",
+            "attempts": 2,
+            "max_attempts": 8,
+            "last_error": "boom",
+            "created_at": "2026-02-26T13:00:00+00:00",
+            "updated_at": "2026-02-26T13:05:00+00:00",
+        },
+        {
+            "job_id": "job-2",
+            "type": "sync_people_from_crm_job",
+            "status": "queued",
+            "attempts": 1,
+            "max_attempts": 8,
+            "last_error": None,
+            "created_at": "2026-02-26T12:00:00+00:00",
+            "updated_at": "2026-02-26T12:01:00+00:00",
+        },
+    ]
+
+    mock_list_jobs.assert_called_once()
+    called_kwargs = mock_list_jobs.call_args.kwargs
+    assert called_kwargs["limit"] == 2
+    assert called_kwargs["created_after"].tzinfo == timezone.utc
 
 
 def test_rerun_job_handler_enqueues_new_job(
