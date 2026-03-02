@@ -1,38 +1,66 @@
 # Development Guide
 
-## Environment setup
+This guide covers setup and workflows for the 508.dev monorepo (`discord bot + api + worker + shared package`).
 
-```bash
-brew install uv  # or use your package manager
-uv --version
-uv sync
-cp .env.example .env
-# edit .env as needed
+## Prerequisites
+
+- Python 3.12+
+- [uv](https://docs.astral.sh/uv/)
+- Docker (optional, for Compose-based local runs)
+
+## Monorepo Layout
+
+```text
+apps/discord_bot/src/five08/discord_bot/  # Discord bot package
+apps/api/src/five08/backend/              # Backend API package
+apps/worker/src/five08/worker/            # Worker consumer package
+packages/shared/src/five08/     # Shared package
 ```
 
-## First-time setup
+## Setup
 
-1. Install dependencies with `uv sync`.
-2. Copy and populate environment:
-   - `cp .env.example .env`
-   - set required values from `ENVIRONMENT.md` (`ESPO_BASE_URL`, `ESPO_API_KEY`, `API_SHARED_SECRET`, `MINIO_ROOT_PASSWORD` for non-local, `DISCORD_BOT_TOKEN`, `CHANNEL_ID`).
-3. Start supporting services:
-   - `docker compose up --build`
-4. Run one app at a time for local iteration:
-   - `uv run --package discord-bot-app discord-bot`
-   - `uv run --package integrations-worker backend-api`
-   - `uv run --package integrations-worker worker-consumer`
-
-## Local runtime commands
+1. Install dependencies:
 
 ```bash
-uv run --package discord-bot-app discord-bot
-uv run --package integrations-worker backend-api
-uv run --package integrations-worker worker-consumer
+uv sync
+```
+
+2. Configure environment:
+
+```bash
+cp .env.example .env
+```
+
+The backend API process runs Alembic migrations on startup (`apps/worker/src/five08/worker/db_migrations.py`) so the `jobs` table is created or upgraded before requests are accepted.
+
+3. Run services:
+
+```bash
+# bot
+uv run --package discord_bot discord-bot
+
+# webhook ingest API
+uv run --package api backend-api
+
+# job consumer
+uv run --package worker worker-consumer
+```
+
+## Docker Compose Workflow
+
+Start full stack (bot + backend-api + worker-consumer + redis + postgres + minio):
+
+```bash
 docker compose up --build
 ```
 
-## Validation commands
+Stop stack:
+
+```bash
+docker compose down
+```
+
+## Testing and Quality
 
 ```bash
 ./scripts/test.sh
@@ -41,8 +69,71 @@ docker compose up --build
 ./scripts/mypy.sh
 ```
 
-## Reference docs
+## Adding Bot Features
 
-- Environment settings: `ENVIRONMENT.md`
-- Core project docs and usage: `README.md`
-- Discord bot feature docs: `DISCORD_BOT.md`
+Bot features remain Discord.py cogs in:
+
+- `apps/discord_bot/src/five08/discord_bot/cogs/`
+
+Pattern:
+
+```python
+from discord.ext import commands
+
+class MyCog(commands.Cog):
+    def __init__(self, bot: commands.Bot) -> None:
+        self.bot = bot
+
+async def setup(bot: commands.Bot) -> None:
+    await bot.add_cog(MyCog(bot))
+```
+
+## Adding Worker Jobs
+
+1. Add job function in `apps/worker/src/five08/worker/jobs.py`.
+2. Enqueue from `apps/api/src/five08/backend/api.py` (or from bot code if needed).
+3. Ensure job type/queue settings and Postgres settings are configured in `.env`.
+
+### Job architecture
+
+- API layer persists jobs first in Postgres with idempotency keys.
+- Queue layer uses Dramatiq actors over Redis for delivery.
+- MinIO is the current internal transfer mechanism (bucket: `internal-transfers`) and is intended only for stack-internal file movement; external S3 integrations are separate.
+
+## Worker CRM Flow
+
+- EspoCRM webhooks are accepted at `POST /webhooks/espocrm`.
+- Each event enqueues `five08.worker.jobs.process_contact_skills_job`.
+- Jobs use modules under `apps/worker/src/five08/worker/crm/` to:
+  - fetch contact + attachments from EspoCRM
+  - extract text from resume-like files
+  - extract skills (LLM when configured, heuristic fallback otherwise)
+  - update contact skills field in EspoCRM
+- Manual queueing is available via `POST /process-contact/{contact_id}`.
+- Human action audit ingest is available at `POST /audit/events`.
+
+## Discord CRM Audit Flow
+
+- CRM slash commands in `apps/discord_bot/src/five08/discord_bot/cogs/crm.py` emit best-effort audit events for human actions.
+- Audit writing is centralized in `apps/discord_bot/src/five08/discord_bot/utils/audit.py`.
+- Audit writes must never break command execution; failures are logged as warnings only.
+
+## Environment Variables
+
+Use `.env.example` as source of truth. Key categories:
+
+- Shared queue/runtime: `REDIS_URL`, `REDIS_QUEUE_NAME`, `POSTGRES_URL`, `JOB_MAX_ATTEMPTS`, `JOB_RETRY_BASE_SECONDS`, `JOB_RETRY_MAX_SECONDS`, `LOG_LEVEL`, webhook settings
+- Bot credentials/integrations: Discord, email, Espo, Kimai
+- Discord CRM audit writer: `AUDIT_API_BASE_URL`, `AUDIT_API_TIMEOUT_SECONDS` (plus shared `API_SHARED_SECRET`)
+- Worker controls: `WORKER_NAME`, `WORKER_QUEUE_NAMES`, `WORKER_BURST`
+- Worker CRM processing: `MAX_ATTACHMENTS_PER_CONTACT`, `MAX_FILE_SIZE_MB`, `ALLOWED_FILE_TYPES`, `RESUME_KEYWORDS`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`, `RESUME_EXTRACTOR_VERSION`
+- Resume upload UX wiring: `BACKEND_API_BASE_URL` on bot, `CRM_LINKEDIN_FIELD` on worker.
+
+## CI Notes
+
+GitHub Actions runs tests, lint, mypy, and security checks against:
+
+- `apps/discord_bot/src/five08/discord_bot/`
+- `apps/worker/src/five08/worker/`
+- `packages/shared/src/five08/`
+- `tests/`

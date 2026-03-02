@@ -11,10 +11,10 @@ COPY packages/shared/pyproject.toml packages/shared/pyproject.toml
 COPY apps/discord_bot/src apps/discord_bot/src
 COPY packages/shared/src packages/shared/src
 
-RUN uv sync --frozen --no-dev --package discord-bot-app
+RUN uv sync --frozen --no-dev --package discord_bot
 RUN groupadd -r appgroup && useradd -r -g appgroup -d /app -s /usr/sbin/nologin appuser
 RUN chown -R appuser:appgroup /app
 
 USER appuser
 
-CMD ["uv", "run", "--package", "discord-bot-app", "discord-bot"]
+CMD ["uv", "run", "--package", "discord_bot", "discord-bot"]
