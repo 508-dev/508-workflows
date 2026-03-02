@@ -11,14 +11,6 @@ from five08.worker.masking import mask_email
 logger = logging.getLogger(__name__)
 
 
-class DocusealAgreementProcessingError(RuntimeError):
-    """Raised when Docuseal processing hits a retryable execution error."""
-
-
-class DocusealAgreementNonRetryableError(RuntimeError):
-    """Raised when Docuseal processing fails with non-retryable input/state."""
-
-
 class DocusealAgreementProcessor:
     """Look up a CRM contact by email and mark their member agreement as signed."""
 
@@ -67,9 +59,11 @@ class DocusealAgreementProcessor:
             )
         except EspoAPIError as exc:
             logger.error("CRM search failed for masked_email=%s: %s", masked_email, exc)
-            raise DocusealAgreementProcessingError(
-                f"CRM search failed for masked_email={masked_email}: {exc}"
-            ) from exc
+            return {
+                "success": False,
+                "masked_email": masked_email,
+                "error": f"CRM search failed: {exc}",
+            }
 
         contacts = result.get("list", [])
         if not contacts:
@@ -96,9 +90,13 @@ class DocusealAgreementProcessor:
                 completed_at,
                 exc,
             )
-            raise DocusealAgreementNonRetryableError(
-                f"invalid_completed_at for contact_id={contact_id}: {exc}"
-            ) from exc
+            return {
+                "success": False,
+                "masked_email": masked_email,
+                "submission_id": submission_id,
+                "contact_id": contact_id,
+                "error": f"invalid_completed_at: {exc}",
+            }
 
         try:
             self.api.request(
@@ -110,9 +108,13 @@ class DocusealAgreementProcessor:
             )
         except EspoAPIError as exc:
             logger.error("CRM update failed for contact_id=%s: %s", contact_id, exc)
-            raise DocusealAgreementProcessingError(
-                f"CRM update failed for contact_id={contact_id}: {exc}"
-            ) from exc
+            return {
+                "success": False,
+                "masked_email": masked_email,
+                "submission_id": submission_id,
+                "contact_id": contact_id,
+                "error": f"CRM update failed: {exc}",
+            }
 
         logger.info(
             "Marked member agreement signed contact_id=%s masked_email=%s",

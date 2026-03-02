@@ -21,7 +21,6 @@ from five08.queue import (
 )
 from five08.queue import parse_queue_names
 from five08.worker.config import settings
-from five08.worker.crm.docuseal_processor import DocusealAgreementNonRetryableError
 from five08.worker.jobs import (
     apply_resume_profile_job,
     extract_resume_profile_job,
@@ -119,21 +118,6 @@ def _run_job(job_id: str) -> None:
             base_payload=job.payload,
         )
         logger.info("Completed job_id=%s type=%s", job_id, job.type)
-    except DocusealAgreementNonRetryableError as exc:
-        next_attempt = job.attempts + 1
-        error = f"{type(exc).__name__}: {exc}"
-        logger.error(
-            "Job failed non-retryable id=%s attempt=%s error=%s",
-            job_id,
-            next_attempt,
-            error,
-        )
-        mark_job_dead(
-            settings,
-            job_id,
-            attempts=next_attempt,
-            last_error=error,
-        )
     except Exception as exc:
         next_attempt = job.attempts + 1
         error = f"{type(exc).__name__}: {exc}"

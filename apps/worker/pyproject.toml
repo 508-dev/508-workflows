@@ -28,7 +28,6 @@ five08 = { workspace = true }
 [project.scripts]
 backend-api = "five08.backend.api:run"
 worker-consumer = "five08.worker.consumer:run"
-jobsctl = "five08.jobcli:run"
 
 [tool.alembic]
 script_location = "src/five08/worker/migrations"
