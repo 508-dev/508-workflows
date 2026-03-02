@@ -46,25 +46,8 @@ Migrations:
 
 ### Backend API Endpoints
 
-- `GET /health`: Redis/Postgres/worker health check.
-- `GET /jobs/{job_id}`: Fetch queued job status/result payload.
-- `POST /jobs/resume-extract`: Enqueue resume profile extraction.
-- `POST /jobs/resume-apply`: Enqueue confirmed CRM field apply.
-- `POST /webhooks/{source}`: Generic webhook enqueue endpoint.
-- `POST /webhooks/espocrm`: EspoCRM webhook endpoint (expects array payload).
-- `POST /webhooks/espocrm/people-sync`: EspoCRM contact-change webhook for people cache sync.
-- `POST /webhooks/docuseal`: See worker webhook contract docs in
-  [`apps/worker/README.md`](apps/worker/README.md#webhooks).
-- `POST /process-contact/{contact_id}`: Manually enqueue one contact skills job.
-- `POST /sync/people`: Manually enqueue a full CRM->people cache sync.
-- `POST /audit/events`: Persist one human audit event (`discord` or `admin_dashboard`).
-- `GET /auth/login`: Start OIDC Auth Code + PKCE login flow.
-- `GET /auth/callback`: Complete OIDC callback and set HttpOnly session cookie.
-- `GET /auth/me`: Return active session identity.
-- `POST /auth/logout`: Clear active session cookie + server session.
-- `POST /auth/discord/links`: Create one-time dashboard deep link from Discord command context.
-- `GET /auth/discord/link/{token}`: Resolve Discord deep link into authenticated dashboard redirect.
-- Auth flows emit best-effort human audit events (`auth.login`, `auth.logout`) under source `admin_dashboard`.
+See the worker service docs: [`apps/worker/README.md#backend-api-endpoints`](apps/worker/README.md#backend-api-endpoints).
+CLI request examples are documented at [`apps/worker/README.md#cli-usage`](apps/worker/README.md#cli-usage).
 
 ## Local Development
 
@@ -94,6 +77,9 @@ uv run --package integrations-worker backend-api
 
 # Worker queue consumer
 uv run --package integrations-worker worker-consumer
+
+# Jobs CLI
+uv run --package integrations-worker jobsctl --help
 ```
 
 Or run the full stack with Docker Compose:
