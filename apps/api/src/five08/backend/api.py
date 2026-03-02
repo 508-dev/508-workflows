@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 import os
 import secrets
 import time
+import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, cast
@@ -64,6 +66,7 @@ from five08.worker.jobs import (
     process_contact_skills_job,
     process_mailbox_message_job,
     process_docuseal_agreement_job,
+    process_intake_form_job,
     process_webhook_event,
     sync_people_from_crm_job,
     sync_person_from_crm_job,
@@ -73,6 +76,7 @@ from five08.worker.models import (
     AuditEventPayload,
     DocusealWebhookPayload,
     EspoCRMWebhookPayload,
+    GoogleFormsIntakePayload,
 )
 
 logger = logging.getLogger(__name__)
@@ -169,6 +173,47 @@ def _crm_sync_idempotency_key(*, now: datetime) -> str:
     interval_seconds = max(1, settings.crm_sync_interval_seconds)
     bucket = int(now.timestamp()) // interval_seconds
     return f"crm-sync:{bucket}"
+
+
+def _normalize_google_forms_input(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _google_forms_intake_idempotency_key(
+    *,
+    email: str,
+    submission_id: str | None,
+    submitted_at: str | None,
+    payload: dict[str, Any],
+) -> str:
+    token = _normalize_google_forms_input(submission_id) or ""
+    if not token:
+        token = _normalize_google_forms_input(submitted_at) or ""
+    if not token:
+        normalized_payload = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        token = hashlib.sha256(normalized_payload.encode("utf-8")).hexdigest()
+    return f"intake:{email}:{token}"
+
+
+def _validate_google_forms_submission(
+    payload: GoogleFormsIntakePayload,
+) -> JSONResponse | None:
+    allowed_form_ids = settings.google_forms_allowed_form_ids_set
+    if not allowed_form_ids:
+        return None
+
+    form_id = (payload.form_id or "").strip()
+    if form_id and form_id in allowed_form_ids:
+        return None
+
+    return JSONResponse({"error": "invalid_form_id"}, status_code=403)
 
 
 async def _enqueue_full_crm_sync_job(queue: QueueClient, *, reason: str) -> EnqueuedJob:
@@ -985,6 +1030,74 @@ async def docuseal_webhook_handler(request: Request) -> JSONResponse:
     )
 
 
+async def google_forms_intake_webhook_handler(request: Request) -> JSONResponse:
+    """Validate a Google Forms intake submission and enqueue a processing job."""
+    if not _is_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    try:
+        payload_data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+
+    try:
+        payload = GoogleFormsIntakePayload.model_validate(payload_data)
+    except (ValidationError, TypeError) as exc:
+        return JSONResponse(
+            {"error": "invalid_payload", "detail": str(exc)},
+            status_code=400,
+        )
+
+    form_validation_error = _validate_google_forms_submission(payload)
+    if form_validation_error is not None:
+        return form_validation_error
+
+    email = (payload.email or "").strip().lower()
+    first_name = (payload.first_name or "").strip()
+    last_name = (payload.last_name or "").strip()
+    if not email or not first_name or not last_name:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    normalized_payload = payload.model_dump(exclude_none=True)
+    normalized_payload["email"] = email
+    normalized_payload["first_name"] = first_name
+    normalized_payload["last_name"] = last_name
+
+    idempotency_key = _google_forms_intake_idempotency_key(
+        email=email,
+        submission_id=payload.submission_id,
+        submitted_at=payload.submitted_at,
+        payload=normalized_payload,
+    )
+
+    queue = request.app.state.queue
+    try:
+        job = await asyncio.to_thread(
+            enqueue_job,
+            queue=queue,
+            fn=process_intake_form_job,
+            args=(normalized_payload,),
+            settings=settings,
+            idempotency_key=idempotency_key,
+        )
+    except Exception:
+        logger.exception(
+            "Failed enqueueing intake form job masked_email=%s",
+            mask_email(email),
+        )
+        return JSONResponse({"error": "enqueue_failed"}, status_code=503)
+
+    return JSONResponse(
+        {
+            "status": "queued",
+            "source": "google_forms",
+            "job_id": job.id,
+            "email": email,
+        },
+        status_code=202,
+    )
+
+
 async def audit_event_handler(request: Request) -> JSONResponse:
     """Persist one human audit event."""
     if not _is_authorized(request):
@@ -1538,6 +1651,11 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
     app.add_api_route(
         "/webhooks/docuseal",
         docuseal_webhook_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/webhooks/google-forms",
+        google_forms_intake_webhook_handler,
         methods=["POST"],
     )
     app.add_api_route("/webhooks/{source}", ingest_handler, methods=["POST"])

@@ -8,6 +8,7 @@ from typing import Any
 
 from five08.worker.config import settings
 from five08.worker.crm.docuseal_processor import DocusealAgreementProcessor
+from five08.worker.crm.intake_form_processor import IntakeFormProcessor
 from five08.worker.crm.people_sync import PeopleSyncProcessor
 from five08.worker.crm.processor import ContactSkillsProcessor
 from five08.worker.crm.resume_profile_processor import ResumeProfileProcessor
@@ -95,6 +96,16 @@ def process_docuseal_agreement_job(
     )
     processor = DocusealAgreementProcessor()
     return processor.process_agreement(email, completed_at, submission_id)
+
+
+def process_intake_form_job(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Process a Google Forms member intake submission against CRM."""
+    email = str(payload.get("email", ""))
+    logger.info("Processing intake form job masked_email=%s", mask_email(email))
+    processor = IntakeFormProcessor()
+    return processor.process_intake(payload=payload)
 
 
 def process_mailbox_message_job(raw_message_b64: str) -> dict[str, Any]:
