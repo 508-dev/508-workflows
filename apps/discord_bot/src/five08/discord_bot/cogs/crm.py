@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 ID_VERIFIED_AT_FIELD = "cIdVerifiedAt"
 ID_VERIFIED_BY_FIELD = "cIdVerifiedBy"
+ID_VERIFIED_TYPE_FIELD = "cVerifiedIdType"
 
 EspoAPI = espo.EspoAPI
 EspoAPIError = espo.EspoAPIError
@@ -236,6 +237,7 @@ class MarkIdVerifiedSelectionButton(discord.ui.Button["MarkIdVerifiedSelectionVi
         contact: dict[str, Any],
         verified_by: str,
         verified_at: str,
+        id_type: str | None,
         requester_id: int,
     ) -> None:
         contact_name = contact.get("name", "Unknown")
@@ -244,6 +246,7 @@ class MarkIdVerifiedSelectionButton(discord.ui.Button["MarkIdVerifiedSelectionVi
         self.contact = contact
         self.verified_by = verified_by
         self.verified_at = verified_at
+        self.id_type = id_type
         self.requester_id = requester_id
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -265,6 +268,7 @@ class MarkIdVerifiedSelectionButton(discord.ui.Button["MarkIdVerifiedSelectionVi
                 contact=self.contact,
                 verified_by=self.verified_by,
                 verified_at=self.verified_at,
+                id_type=self.id_type,
             )
 
             for item in self.view.children:
@@ -296,12 +300,14 @@ class MarkIdVerifiedSelectionView(discord.ui.View):
         requester_id: int,
         verified_by: str,
         verified_at: str,
+        id_type: str | None,
     ) -> None:
         super().__init__(timeout=300)  # 5 minute timeout
         self.crm_cog = crm_cog
         self.requester_id = requester_id
         self.verified_by = verified_by
         self.verified_at = verified_at
+        self.id_type = id_type
 
     def add_contact_button(
         self,
@@ -314,6 +320,7 @@ class MarkIdVerifiedSelectionView(discord.ui.View):
             contact=contact,
             verified_by=self.verified_by,
             verified_at=self.verified_at,
+            id_type=self.id_type,
             requester_id=self.requester_id,
         )
         self.add_item(button)
@@ -2309,6 +2316,7 @@ class CRMCog(commands.Cog):
         contact: dict[str, Any],
         verified_by: str,
         verified_at: str,
+        id_type: str | None,
     ) -> bool:
         """Persist ID verification metadata to CRM."""
         contact_id = contact.get("id")
@@ -2332,6 +2340,8 @@ class CRMCog(commands.Cog):
             ID_VERIFIED_AT_FIELD: verified_at,
             ID_VERIFIED_BY_FIELD: verified_by,
         }
+        if id_type:
+            payload[ID_VERIFIED_TYPE_FIELD] = id_type
 
         try:
             update_response = self.espo_api.request(
@@ -2345,6 +2355,8 @@ class CRMCog(commands.Cog):
                 )
                 embed.add_field(name="📅 Verified at", value=verified_at, inline=True)
                 embed.add_field(name="✅ Verified by", value=verified_by, inline=True)
+                if id_type:
+                    embed.add_field(name="🆔 ID type", value=id_type, inline=True)
                 profile_url = f"{self.base_url}/#Contact/view/{contact_id}"
                 embed.add_field(
                     name="🔗 CRM Profile",
@@ -2429,6 +2441,7 @@ class CRMCog(commands.Cog):
         contacts: list[dict[str, Any]],
         verified_by: str,
         verified_at: str,
+        id_type: str | None,
     ) -> None:
         """Show contact choices when multiple candidates are found."""
         embed = discord.Embed(
@@ -2445,6 +2458,7 @@ class CRMCog(commands.Cog):
             requester_id=interaction.user.id,
             verified_by=verified_by,
             verified_at=verified_at,
+            id_type=id_type,
         )
 
         for i, contact in enumerate(contacts[:5], 1):
@@ -2473,6 +2487,7 @@ class CRMCog(commands.Cog):
     @app_commands.describe(
         search_term="Email, 508 username, or name.",
         verified_by="Verifier 508 username or @Discord mention.",
+        id_type="Type of ID used for verification (e.g. passport, driver's license).",
         verified_at=(
             "Date verified (e.g. YYYY-MM-DD, DD/MM/YYYY, March 5, 2026). "
             "Defaults to today."
@@ -2484,9 +2499,10 @@ class CRMCog(commands.Cog):
         interaction: discord.Interaction,
         search_term: str,
         verified_by: str,
+        id_type: str | None = None,
         verified_at: str | None = None,
     ) -> None:
-        """Mark a contact as ID verified."""
+        """Mark a contact as ID verified and record verifier, ID type, and date."""
         try:
             await interaction.response.defer(ephemeral=True)
 
@@ -2502,6 +2518,7 @@ class CRMCog(commands.Cog):
                         "search_term": search_term,
                         "verified_by": verified_by,
                         "verified_at": verified_at,
+                        "id_type": id_type,
                         "reason": "verified_by_not_resolved",
                     },
                 )
@@ -2509,6 +2526,16 @@ class CRMCog(commands.Cog):
                     "❌ Unable to resolve verifier from `verified_by`."
                 )
                 return
+
+            if id_type is not None and verified_at is None:
+                try:
+                    await self._parse_verified_at(id_type)
+                except ValueError:
+                    pass
+                else:
+                    verified_at = id_type
+                    id_type = None
+
             resolved_verified_at = await self._parse_verified_at(verified_at)
 
             contacts = await self._search_contacts_for_mark_id_verification(search_term)
@@ -2522,6 +2549,7 @@ class CRMCog(commands.Cog):
                         "search_term": search_term,
                         "verified_by": resolved_verified_by,
                         "verified_at": resolved_verified_at,
+                        "id_type": id_type,
                         "contacts_found": 0,
                     },
                 )
@@ -2539,6 +2567,7 @@ class CRMCog(commands.Cog):
                         "search_term": search_term,
                         "verified_by": resolved_verified_by,
                         "verified_at": resolved_verified_at,
+                        "id_type": id_type,
                         "contacts_found": len(contacts),
                         "requires_selection": True,
                     },
@@ -2549,6 +2578,7 @@ class CRMCog(commands.Cog):
                     contacts=contacts,
                     verified_by=resolved_verified_by,
                     verified_at=resolved_verified_at,
+                    id_type=id_type,
                 )
                 return
 
@@ -2561,6 +2591,7 @@ class CRMCog(commands.Cog):
                     "search_term": search_term,
                     "verified_by": resolved_verified_by,
                     "verified_at": resolved_verified_at,
+                    "id_type": id_type,
                     "contacts_found": 1,
                 },
                 resource_type="crm_contact",
@@ -2571,6 +2602,7 @@ class CRMCog(commands.Cog):
                 contact=target_contact,
                 verified_by=resolved_verified_by,
                 verified_at=resolved_verified_at,
+                id_type=id_type,
             )
         except ValueError as exc:
             logger.error(f"Invalid verified_at value: {exc}")

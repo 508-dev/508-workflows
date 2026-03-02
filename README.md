@@ -237,6 +237,8 @@ Use `.env.example` as the source of truth for defaults.
 ./scripts/mypy.sh
 ```
 
+For Discord bot docs, see [`Discord Bot`](DISCORD_BOT.md).
+
 ## Deployment
 
 Deploy as a single Compose application.
