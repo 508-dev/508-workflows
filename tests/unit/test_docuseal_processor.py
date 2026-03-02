@@ -7,8 +7,8 @@ from five08.worker.crm.docuseal_processor import DocusealAgreementProcessor
 from five08.worker.masking import mask_email
 
 
-def test_docuseal_processor_marks_member_agreement_and_flag() -> None:
-    """Processor should update agreement date and bool fields on matching contact."""
+def test_docuseal_processor_marks_member_agreement_signed_timestamp() -> None:
+    """Processor should update the member agreement signed-at timestamp."""
     mock_api = Mock()
     mock_api.request.side_effect = [
         {"list": [{"id": "contact-1"}]},
@@ -29,7 +29,6 @@ def test_docuseal_processor_marks_member_agreement_and_flag() -> None:
     assert mock_api.request.call_args_list[1].args[1] == "Contact/contact-1"
     assert mock_api.request.call_args_list[1].args[2] == {
         "cMemberAgreementSignedAt": "2026-02-25T12:00:00Z",
-        "cSignedMemberAgreement": True,
     }
     assert result["success"] is True
     assert result["masked_email"] == expected_masked

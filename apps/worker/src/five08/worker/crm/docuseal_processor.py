@@ -72,7 +72,6 @@ class DocusealAgreementProcessor:
                 f"Contact/{contact_id}",
                 {
                     "cMemberAgreementSignedAt": completed_at,
-                    "cSignedMemberAgreement": True,
                 },
             )
         except EspoAPIError as exc:
