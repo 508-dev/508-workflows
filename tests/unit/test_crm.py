@@ -6,7 +6,12 @@ import pytest
 from unittest.mock import Mock, AsyncMock, patch
 import discord
 
-from five08.discord_bot.cogs.crm import CRMCog, ResumeButtonView, ResumeDownloadButton
+from five08.discord_bot.cogs.crm import (
+    CRMCog,
+    ResumeButtonView,
+    ResumeCreateContactView,
+    ResumeDownloadButton,
+)
 from five08.clients.espo import EspoAPIError
 
 
@@ -1523,6 +1528,202 @@ class TestCRMCog:
 
         assert has_duplicate is False
         assert resume_id is None
+
+    def test_build_resume_create_contact_payload_sets_email_field_by_domain(
+        self, crm_cog
+    ):
+        """Test that resume payload writes either emailAddress or c508Email."""
+        with (
+            patch.object(
+                crm_cog,
+                "_extract_resume_contact_hints",
+                return_value={
+                    "emails": ["person@example.com"],
+                    "github_usernames": [],
+                    "linkedin_urls": [],
+                },
+            ),
+            patch.object(
+                crm_cog, "_extract_resume_name_hint", return_value="Person Example"
+            ),
+        ):
+            payload = crm_cog._build_resume_create_contact_payload(b"resume")
+            assert payload["emailAddress"] == "person@example.com"
+            assert "c508Email" not in payload
+
+        with (
+            patch.object(
+                crm_cog,
+                "_extract_resume_contact_hints",
+                return_value={
+                    "emails": ["person@508.dev"],
+                    "github_usernames": [],
+                    "linkedin_urls": [],
+                },
+            ),
+            patch.object(
+                crm_cog, "_extract_resume_name_hint", return_value="Person 508"
+            ),
+        ):
+            payload = crm_cog._build_resume_create_contact_payload(b"resume")
+            assert payload["c508Email"] == "person@508.dev"
+            assert "emailAddress" not in payload
+
+    @pytest.mark.asyncio
+    async def test_upload_resume_link_user_shows_confirm_then_creates_contact(
+        self, crm_cog, mock_interaction
+    ):
+        """Test /upload-resume prompts before creating contact for unlinked link_user."""
+        mock_interaction.user.id = 101
+        mock_interaction.user.name = "Requester"
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+
+        resume_file = Mock()
+        resume_file.filename = "candidate.pdf"
+        resume_file.size = 1024
+        resume_file.read = AsyncMock(return_value=b"resume-bytes")
+
+        link_user = Mock()
+        link_user.id = 202
+        link_user.name = "candidateuser"
+        link_user.display_name = "Candidate User"
+        link_user.discriminator = "0"
+
+        created_contact = {"id": "contact123", "name": "Candidate User"}
+
+        with (
+            patch(
+                "five08.discord_bot.cogs.crm.check_user_roles_with_hierarchy",
+                return_value=True,
+            ),
+            patch.object(
+                crm_cog, "_find_contact_by_discord_id", new=AsyncMock(return_value=None)
+            ),
+            patch.object(
+                crm_cog, "_upload_resume_attachment_to_contact", new=AsyncMock()
+            ) as mock_upload,
+            patch.object(
+                crm_cog,
+                "_build_resume_create_contact_payload",
+                return_value={"name": "Resume Candidate"},
+            ),
+            patch(
+                "five08.discord_bot.cogs.crm.settings.api_shared_secret",
+                "test-shared-secret",
+            ),
+        ):
+            crm_cog.espo_api.request.return_value = created_contact
+
+            await crm_cog.upload_resume.callback(
+                crm_cog,
+                mock_interaction,
+                resume_file,
+                None,
+                False,
+                link_user,
+            )
+
+            crm_cog.espo_api.request.assert_not_called()
+            mock_upload.assert_not_awaited()
+            mock_interaction.followup.send.assert_called_once()
+            followup_kwargs = mock_interaction.followup.send.call_args.kwargs
+            assert "view" in followup_kwargs
+            view = followup_kwargs["view"]
+            assert isinstance(view, ResumeCreateContactView)
+
+            confirm_interaction = AsyncMock()
+            confirm_interaction.user = Mock()
+            confirm_interaction.user.id = 101
+            confirm_interaction.user.name = "Requester"
+            confirm_interaction.response = AsyncMock()
+            confirm_interaction.response.defer = AsyncMock()
+            confirm_interaction.followup = AsyncMock()
+            confirm_interaction.followup.send = AsyncMock()
+            confirm_interaction.message = None
+
+            create_button = next(
+                child
+                for child in view.children
+                if isinstance(child, discord.ui.Button)
+                and child.label == "Create Contact"
+            )
+            await create_button.callback(confirm_interaction)
+
+            crm_cog.espo_api.request.assert_called_once_with(
+                "POST",
+                "Contact",
+                {
+                    "name": "Candidate User",
+                    "cDiscordUsername": "candidateuser",
+                    "cDiscordUserID": "202",
+                },
+            )
+            mock_upload.assert_awaited_once()
+            assert (
+                mock_upload.await_args.kwargs.get("target_scope") == "other_autocreated"
+            )
+            assert mock_upload.await_args.kwargs.get("contact") == created_contact
+
+    @pytest.mark.asyncio
+    async def test_resume_create_contact_view_logs_create_failure(
+        self, crm_cog, mock_interaction
+    ):
+        """Test create-contact view writes debug context when contact creation fails."""
+        original_interaction = Mock()
+        original_interaction.user = Mock()
+        original_interaction.user.id = 123
+
+        mock_interaction.user.id = 123
+        mock_interaction.user.name = "Requester"
+        mock_interaction.message = None
+        mock_interaction.response = AsyncMock()
+        mock_interaction.response.defer = AsyncMock()
+        mock_interaction.followup = AsyncMock()
+        mock_interaction.followup.send = AsyncMock()
+
+        crm_cog._audit_command = Mock()
+        crm_cog._build_resume_create_contact_payload = Mock(
+            return_value={
+                "name": "Resume Candidate",
+                "emailAddress": "person@example.com",
+            }
+        )
+        crm_cog.espo_api.status_code = 422
+        crm_cog.espo_api.request.side_effect = EspoAPIError("validation failed")
+
+        view = ResumeCreateContactView(
+            crm_cog=crm_cog,
+            interaction=original_interaction,
+            file_content=b"resume-bytes",
+            filename="candidate.pdf",
+            file_size=1024,
+            search_term=None,
+            overwrite=False,
+            link_user=None,
+            inferred_contact_meta={"reason": "no_matching_contact"},
+            target_scope="resume_inferred",
+        )
+
+        with patch(
+            "five08.discord_bot.cogs.crm.logger.exception"
+        ) as mock_log_exception:
+            create_button = next(
+                child
+                for child in view.children
+                if isinstance(child, discord.ui.Button)
+                and child.label == "Create Contact"
+            )
+            await create_button.callback(mock_interaction)
+
+        mock_log_exception.assert_called_once()
+        crm_cog._audit_command.assert_called_once()
+        audit_metadata = crm_cog._audit_command.call_args.kwargs["metadata"]
+        assert audit_metadata["reason"] == "contact_create_failed"
+        assert audit_metadata["status_code"] == 422
+        assert audit_metadata["create_payload_keys"] == ["emailAddress", "name"]
+        mock_interaction.followup.send.assert_called_once()
 
 
 class TestResumeButtonView:
