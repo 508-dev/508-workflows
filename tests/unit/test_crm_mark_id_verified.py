@@ -2,7 +2,7 @@
 
 from datetime import date
 
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
 
@@ -10,6 +10,7 @@ from five08.discord_bot.cogs.crm import (
     CRMCog,
     ID_VERIFIED_AT_FIELD,
     ID_VERIFIED_BY_FIELD,
+    MarkIdVerifiedOverwriteConfirmationView,
     MarkIdVerifiedSelectionView,
 )
 
@@ -135,7 +136,10 @@ class TestMarkIdVerifiedCommand:
         crm_cog._search_contacts_for_mark_id_verification = AsyncMock(
             return_value=[contact]
         )
-        crm_cog.espo_api.request.return_value = {"id": "contact-123"}
+        crm_cog.espo_api.request.side_effect = [
+            {ID_VERIFIED_BY_FIELD: "", ID_VERIFIED_AT_FIELD: ""},
+            {"id": "contact-123"},
+        ]
 
         await crm_cog.mark_id_verified.callback(
             crm_cog,
@@ -145,17 +149,64 @@ class TestMarkIdVerifiedCommand:
             "2026-02-26",
         )
 
-        crm_cog.espo_api.request.assert_called_once_with(
-            "PUT",
-            "Contact/contact-123",
-            {
-                ID_VERIFIED_AT_FIELD: "2026-02-26",
-                ID_VERIFIED_BY_FIELD: "caleb",
-            },
+        crm_cog.espo_api.request.assert_has_calls(
+            [
+                call("GET", "Contact/contact-123"),
+                call(
+                    "PUT",
+                    "Contact/contact-123",
+                    {
+                        ID_VERIFIED_AT_FIELD: "2026-02-26",
+                        ID_VERIFIED_BY_FIELD: "caleb",
+                    },
+                ),
+            ]
         )
         args, kwargs = mock_interaction.followup.send.call_args
         assert "embed" in kwargs
         assert "ID Verified" in kwargs["embed"].title
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "current_values",
+        [
+            {ID_VERIFIED_BY_FIELD: "existing-user", ID_VERIFIED_AT_FIELD: "2026-01-01"},
+            {ID_VERIFIED_BY_FIELD: "caleb", ID_VERIFIED_AT_FIELD: "2025-01-01"},
+            {ID_VERIFIED_BY_FIELD: "", ID_VERIFIED_AT_FIELD: "2026-01-01"},
+            {ID_VERIFIED_BY_FIELD: "existing-user", ID_VERIFIED_AT_FIELD: ""},
+        ],
+    )
+    async def test_mark_id_verified_single_contact_prompts_for_overwrite_if_already_verified(
+        self,
+        crm_cog,
+        mock_interaction,
+        current_values: dict[str, str],
+    ):
+        contact = {
+            "id": "contact-123",
+            "name": "Caleb",
+            "c508Email": "caleb@508.dev",
+        }
+        crm_cog._search_contacts_for_mark_id_verification = AsyncMock(
+            return_value=[contact]
+        )
+        crm_cog.espo_api.request.return_value = {
+            **current_values,
+            "id": "contact-123",
+        }
+
+        await crm_cog.mark_id_verified.callback(
+            crm_cog,
+            mock_interaction,
+            "caleb",
+            "caleb",
+            "2026-02-26",
+        )
+
+        crm_cog.espo_api.request.assert_called_once_with("GET", "Contact/contact-123")
+        args, kwargs = mock_interaction.followup.send.call_args
+        assert "already ID verified" in args[0]
+        assert kwargs["view"].__class__ is MarkIdVerifiedOverwriteConfirmationView
 
     @pytest.mark.asyncio
     async def test_mark_id_verified_multiple_contacts_shows_selector(
