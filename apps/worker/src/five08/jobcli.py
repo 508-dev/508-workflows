@@ -13,14 +13,21 @@ import httpx
 from five08.queue import JobStatus
 
 DEFAULT_API_URL = "http://localhost:8090"
+DEFAULT_DOCKER_API_URL = "http://backend-api:8090"
 DEFAULT_TIMEOUT_SECONDS = 10.0
 API_SECRET_ENV_VAR = "API_SHARED_SECRET"
 JOB_STATUSES = [status.value for status in JobStatus]
+DOCKER_ENV_FILE = "/.dockerenv"
 
 
 def _default_api_url() -> str:
     """Return default backend API URL, preferring explicit environment overrides."""
-    return os.getenv("WORKER_API_BASE_URL", DEFAULT_API_URL)
+    explicit_url = os.getenv("WORKER_API_BASE_URL")
+    if explicit_url:
+        return explicit_url
+    if os.path.exists(DOCKER_ENV_FILE):
+        return DEFAULT_DOCKER_API_URL
+    return DEFAULT_API_URL
 
 
 def _default_api_secret() -> str | None:
