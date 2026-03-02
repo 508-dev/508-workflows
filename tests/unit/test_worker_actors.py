@@ -55,7 +55,8 @@ def test_run_job_schedules_retry_for_docuseal_processing_error() -> None:
     mock_mark_dead.assert_not_called()
     mock_schedule_retry.assert_called_once()
     call_args = mock_schedule_retry.call_args
-    assert call_args.args[0] == "job-123"
+    assert isinstance(call_args.args[0], JobRecord)
+    assert call_args.args[0].id == "job-123"
     assert call_args.args[1] == 1
     assert (
         "DocusealAgreementProcessingError: CRM unavailable" == call_args.kwargs["error"]
