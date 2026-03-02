@@ -473,6 +473,22 @@ class GoogleFormsIntakePayload(BaseModel):
             mapped_key = name_aliases.get(key.strip().lower(), key)
             transformed[mapped_key] = value
 
+        raw_email_value = normalized.get("email")
+        if isinstance(raw_email_value, str) and raw_email_value.strip():
+            transformed["email"] = raw_email_value.strip().lower()
+        else:
+            for raw_key, raw_value in normalized.items():
+                if not isinstance(raw_key, str) or not isinstance(raw_value, str):
+                    continue
+                if raw_key.strip().lower() in {
+                    "emailaddress",
+                    "email address",
+                    "email_address",
+                }:
+                    if raw_value.strip():
+                        transformed["email"] = raw_value.strip().lower()
+                        break
+
         name_value = transformed.get("name")
         if name_value and (
             not transformed.get("first_name") or not transformed.get("last_name")

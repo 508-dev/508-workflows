@@ -876,10 +876,16 @@ async def google_forms_intake_webhook_handler(request: Request) -> JSONResponse:
         return form_validation_error
 
     email = (payload.email or "").strip().lower()
-    if not email or not payload.first_name or not payload.last_name:
+    first_name = (payload.first_name or "").strip()
+    last_name = (payload.last_name or "").strip()
+    if not email or not first_name or not last_name:
         return JSONResponse({"error": "invalid_payload"}, status_code=400)
 
     normalized_payload = payload.model_dump(exclude_none=True)
+    normalized_payload["email"] = email
+    normalized_payload["first_name"] = first_name
+    normalized_payload["last_name"] = last_name
+
     idempotency_key = _google_forms_intake_idempotency_key(
         email=email,
         submission_id=payload.submission_id,
