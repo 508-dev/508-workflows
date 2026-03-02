@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from typing import Any
 
 import discord
@@ -92,8 +93,26 @@ class DiscordAuditLogger:
         self._queue_event(event_payload)
 
     def _queue_event(self, event_payload: dict[str, Any]) -> None:
-        task = asyncio.create_task(self._post_event(event_payload))
+        try:
+            task = asyncio.create_task(self._post_event(event_payload))
+        except RuntimeError:
+            thread = threading.Thread(
+                target=self._run_event_in_thread,
+                args=(event_payload,),
+                daemon=True,
+            )
+            thread.start()
+            return
+
         task.add_done_callback(self._on_task_done)
+
+    def _run_event_in_thread(self, event_payload: dict[str, Any]) -> None:
+        try:
+            asyncio.run(self._post_event(event_payload))
+        except Exception as exc:
+            self._on_task_done(error=exc)
+        else:
+            self._on_task_done()
 
     async def _post_event(self, event_payload: dict[str, Any]) -> None:
         await asyncio.to_thread(self._send_event_sync, event_payload)
@@ -129,11 +148,20 @@ class DiscordAuditLogger:
                 exc,
             )
 
-    def _on_task_done(self, task: asyncio.Task[None]) -> None:
-        try:
-            task.result()
-        except Exception as exc:  # pragma: no cover - defensive fallback
-            logger.warning("Unexpected audit task failure: %s", exc)
+    def _on_task_done(
+        self,
+        task: asyncio.Task[None] | None = None,
+        *,
+        error: Exception | None = None,
+    ) -> None:
+        if error is None and task is not None:
+            try:
+                task.result()
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                error = exc
+
+        if error is not None:
+            logger.warning("Unexpected audit task failure: %s", error)
 
     def _build_discord_payload(
         self,

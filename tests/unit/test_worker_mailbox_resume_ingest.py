@@ -9,12 +9,12 @@ from unittest.mock import Mock
 from five08.worker.mailbox_resume_ingest import ResumeAttachment, ResumeMailboxProcessor
 
 
-class _FakeProfile:
-    def __init__(self, email: str | None) -> None:
-        self._email = email
+class _MinimalProfile:
+    def __init__(self, email: str | None = None) -> None:
+        self.email = email
 
     def model_dump(self) -> dict[str, str | None]:
-        return {"email": self._email}
+        return {"email": self.email}
 
 
 def _build_settings() -> SimpleNamespace:
@@ -52,6 +52,7 @@ def test_process_message_happy_path() -> None:
     processor = ResumeMailboxProcessor(_build_settings())
     processor._audit_mailbox_outcome = Mock()
     processor._sender_is_authorized = Mock(return_value=True)
+    processor._has_authenticated_sender = Mock(return_value=True)
     processor._find_or_create_staging_contact = Mock(return_value={"id": "staging-1"})
     processor._process_attachment = Mock(return_value=True)
 
@@ -67,6 +68,7 @@ def test_process_message_denies_unauthorized_sender() -> None:
     processor = ResumeMailboxProcessor(_build_settings())
     processor._audit_mailbox_outcome = Mock()
     processor._sender_is_authorized = Mock(return_value=False)
+    processor._has_authenticated_sender = Mock(return_value=True)
 
     result = processor.process_message(_build_message())
 
@@ -82,15 +84,18 @@ def test_process_attachment_updates_candidate_contact() -> None:
     processor._append_contact_resume = Mock(return_value=True)
     processor._find_contact_by_email = Mock(return_value=None)
     processor._create_contact_for_email = Mock(return_value={"id": "candidate-1"})
+    processor._candidate_email_from_extract_result = Mock(
+        side_effect=["candidate@example.com", None]
+    )
 
     staging_extract = SimpleNamespace(
         success=True,
-        extracted_profile=_FakeProfile("candidate@example.com"),
+        extracted_profile=_MinimalProfile("candidate@example.com"),
         proposed_updates={},
     )
     candidate_extract = SimpleNamespace(
         success=True,
-        extracted_profile=_FakeProfile(None),
+        extracted_profile=_MinimalProfile(),
         proposed_updates={"phoneNumber": "14155551234"},
     )
     apply_result = SimpleNamespace(success=True)

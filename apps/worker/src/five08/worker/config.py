@@ -37,6 +37,7 @@ class WorkerSettings(SharedSettings):
     email_username: str | None = None
     email_password: str | None = None
     imap_server: str | None = None
+    imap_timeout_seconds: float = 10.0
     email_resume_allowed_extensions: str = "pdf,doc,docx"
     email_resume_max_file_size_mb: int = 10
     email_require_sender_auth_headers: bool = True
