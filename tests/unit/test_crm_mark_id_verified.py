@@ -8,7 +8,6 @@ import pytest
 
 from five08.discord_bot.cogs.crm import (
     CRMCog,
-    ID_VERIFIED_FIELD,
     ID_VERIFIED_AT_FIELD,
     ID_VERIFIED_BY_FIELD,
     MarkIdVerifiedSelectionView,
@@ -150,7 +149,6 @@ class TestMarkIdVerifiedCommand:
             "PUT",
             "Contact/contact-123",
             {
-                ID_VERIFIED_FIELD: True,
                 ID_VERIFIED_AT_FIELD: "2026-02-26",
                 ID_VERIFIED_BY_FIELD: "caleb",
             },

@@ -30,7 +30,6 @@ from five08.discord_bot.utils.role_decorators import (
 
 logger = logging.getLogger(__name__)
 
-ID_VERIFIED_FIELD = "cIdVerified"
 ID_VERIFIED_AT_FIELD = "cIdVerifiedAt"
 ID_VERIFIED_BY_FIELD = "cIdVerifiedBy"
 
@@ -235,7 +234,7 @@ class MarkIdVerifiedSelectionButton(discord.ui.Button["MarkIdVerifiedSelectionVi
     def __init__(
         self,
         contact: dict[str, Any],
-        verified_by: str | None,
+        verified_by: str,
         verified_at: str,
         requester_id: int,
     ) -> None:
@@ -295,7 +294,7 @@ class MarkIdVerifiedSelectionView(discord.ui.View):
         self,
         crm_cog: "CRMCog",
         requester_id: int,
-        verified_by: str | None,
+        verified_by: str,
         verified_at: str,
     ) -> None:
         super().__init__(timeout=300)  # 5 minute timeout
@@ -2308,7 +2307,7 @@ class CRMCog(commands.Cog):
         self,
         interaction: discord.Interaction,
         contact: dict[str, Any],
-        verified_by: str | None,
+        verified_by: str,
         verified_at: str,
     ) -> bool:
         """Persist ID verification metadata to CRM."""
@@ -2329,9 +2328,10 @@ class CRMCog(commands.Cog):
             await interaction.followup.send("❌ Contact ID not found.")
             return False
 
-        payload = {ID_VERIFIED_FIELD: True, ID_VERIFIED_AT_FIELD: verified_at}
-        if verified_by:
-            payload[ID_VERIFIED_BY_FIELD] = verified_by
+        payload = {
+            ID_VERIFIED_AT_FIELD: verified_at,
+            ID_VERIFIED_BY_FIELD: verified_by,
+        }
 
         try:
             update_response = self.espo_api.request(
@@ -2344,10 +2344,7 @@ class CRMCog(commands.Cog):
                     color=0x00FF00,
                 )
                 embed.add_field(name="📅 Verified at", value=verified_at, inline=True)
-                if verified_by:
-                    embed.add_field(
-                        name="✅ Verified by", value=verified_by, inline=True
-                    )
+                embed.add_field(name="✅ Verified by", value=verified_by, inline=True)
                 profile_url = f"{self.base_url}/#Contact/view/{contact_id}"
                 embed.add_field(
                     name="🔗 CRM Profile",
@@ -2430,7 +2427,7 @@ class CRMCog(commands.Cog):
         interaction: discord.Interaction,
         search_term: str,
         contacts: list[dict[str, Any]],
-        verified_by: str | None,
+        verified_by: str,
         verified_at: str,
     ) -> None:
         """Show contact choices when multiple candidates are found."""
@@ -2475,10 +2472,7 @@ class CRMCog(commands.Cog):
     )
     @app_commands.describe(
         search_term="Email, 508 username, or name.",
-        verified_by=(
-            "Verifier 508 username or @Discord mention. "
-            "Defaults to the command invoker if not provided."
-        ),
+        verified_by="Verifier 508 username or @Discord mention.",
         verified_at=(
             "Date verified (e.g. YYYY-MM-DD, DD/MM/YYYY, March 5, 2026). "
             "Defaults to today."
@@ -2489,7 +2483,7 @@ class CRMCog(commands.Cog):
         self,
         interaction: discord.Interaction,
         search_term: str,
-        verified_by: str | None = None,
+        verified_by: str,
         verified_at: str | None = None,
     ) -> None:
         """Mark a contact as ID verified."""
@@ -2497,12 +2491,24 @@ class CRMCog(commands.Cog):
             await interaction.response.defer(ephemeral=True)
 
             resolved_verified_by = await self._resolve_verified_by(
-                interaction, verified_by or ""
+                interaction, verified_by
             )
-            if verified_by is None and not resolved_verified_by:
-                resolved_verified_by = self._normalize_508_username(
-                    str(interaction.user.name)
+            if not resolved_verified_by:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.mark_id_verified",
+                    result="denied",
+                    metadata={
+                        "search_term": search_term,
+                        "verified_by": verified_by,
+                        "verified_at": verified_at,
+                        "reason": "verified_by_not_resolved",
+                    },
                 )
+                await interaction.followup.send(
+                    "❌ Unable to resolve verifier from `verified_by`."
+                )
+                return
             resolved_verified_at = await self._parse_verified_at(verified_at)
 
             contacts = await self._search_contacts_for_mark_id_verification(search_term)
