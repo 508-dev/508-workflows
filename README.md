@@ -46,8 +46,8 @@ Migrations:
 
 ### Backend API Endpoints
 
-See the worker service docs: [`apps/worker/README.md#backend-api-endpoints`](apps/worker/README.md#backend-api-endpoints).
-CLI request examples are documented at [`apps/worker/README.md#cli-usage`](apps/worker/README.md#cli-usage).
+See the worker service docs: [`apps/worker/README.md#backend-api-endpoints`](./apps/worker/README.md#backend-api-endpoints).
+CLI request examples are documented at [`apps/worker/README.md#cli-usage`](./apps/worker/README.md#cli-usage).
 
 ## Local Development
 
@@ -98,7 +98,7 @@ Use `.env.example` as the source of truth for defaults.
 - `Required` for protected endpoints: `API_SHARED_SECRET` (ingest requests are rejected when unset)
 - `Required` in non-local environments: `MINIO_ROOT_PASSWORD`
 
-See [`ENVIRONMENT.md`](ENVIRONMENT.md) for optional and non-critical environment variables.
+See [`ENVIRONMENT.md`](./ENVIRONMENT.md) for optional and non-critical environment variables.
 
 ## Commands
 
@@ -109,9 +109,9 @@ uv run --package integrations-worker worker-consumer
 docker compose up --build
 ```
 
-For Discord bot docs, see [`Discord Bot`](DISCORD_BOT.md).
+For Discord bot docs, see [`Discord Bot`](./DISCORD_BOT.md).
 
-For local development helper commands, see [`development.md`](development.md).
+For local development helper commands, see [`DEVELOPMENT.md`](./DEVELOPMENT.md).
 
 ## Deployment
 

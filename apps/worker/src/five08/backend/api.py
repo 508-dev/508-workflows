@@ -28,7 +28,7 @@ from five08.audit import (
     AuditSource,
     insert_audit_event,
 )
-from five08.logging import configure_logging
+from five08.logging import configure_observability
 from five08.queue import (
     EnqueuedJob,
     QueueClient,
@@ -1506,7 +1506,11 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
 
 def run() -> None:
     """Entrypoint for backend API service."""
-    configure_logging(settings.log_level)
+    configure_observability(
+        settings=settings,
+        service_name="backend-api",
+        include_fastapi=True,
+    )
     uvicorn.run(
         create_app(),
         host=settings.webhook_ingest_host,

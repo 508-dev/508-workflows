@@ -4,7 +4,7 @@ import logging
 import signal
 import threading
 
-from five08.logging import configure_logging
+from five08.logging import configure_observability
 from five08.queue import parse_queue_names
 from five08.worker.config import settings
 
@@ -31,7 +31,10 @@ def run() -> None:
     worker: Worker | None = None
     stop_requested = threading.Event()
 
-    configure_logging(settings.log_level)
+    configure_observability(
+        settings=settings,
+        service_name="worker-consumer",
+    )
 
     if not _safe_import_actors():
         raise RuntimeError("Worker startup aborted due to actor import failure.")

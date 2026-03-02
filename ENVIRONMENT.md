@@ -13,7 +13,15 @@ Use `.env.example` as the source of defaults.
 
 ## Core Runtime (Bot + Worker)
 
-- `Optional` (non-local): `RUNTIME_ENV` (default: `local`; non-local environments must set explicit `POSTGRES_URL` and `MINIO_ROOT_PASSWORD`)
+- `Optional` (non-local): `ENVIRONMENT` (default: `local`; non-local environments must set explicit `POSTGRES_URL` and `MINIO_ROOT_PASSWORD`)
+- `Optional`: `SENTRY_DSN` (default: unset; set to enable Sentry event capture)
+- `Optional`: `SENTRY_ENVIRONMENT` (defaults to `ENVIRONMENT`)
+- `Optional`: `SENTRY_RELEASE` (optional release identifier for Sentry)
+- `Optional`: `SENTRY_SAMPLE_RATE` (default: `1.0`)
+- `Optional`: `SENTRY_TRACES_SAMPLE_RATE` (default: `0.0`)
+- `Optional`: `SENTRY_PROFILES_SAMPLE_RATE` (default: `0.0`)
+- `Optional`: `SENTRY_SEND_DEFAULT_PII` (default: `false`)
+- `Optional`: `SENTRY_DEBUG` (default: `false`)
 
 ## Queue + Job Runtime
 

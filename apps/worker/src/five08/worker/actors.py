@@ -32,10 +32,13 @@ from five08.worker.jobs import (
     sync_person_from_crm_job,
 )
 
-from five08.logging import configure_logging
+from five08.logging import configure_observability
 
 logger = logging.getLogger(__name__)
-configure_logging(settings.log_level)
+configure_observability(
+    settings=settings,
+    service_name="worker-actors",
+)
 
 DRAMATIQ_BROKER = RedisBroker(url=settings.redis_url)
 dramatiq.set_broker(DRAMATIQ_BROKER)
