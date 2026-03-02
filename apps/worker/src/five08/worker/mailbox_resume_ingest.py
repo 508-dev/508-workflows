@@ -545,9 +545,11 @@ class ResumeMailboxProcessor:
             return False
 
         proposed_updates = {
-            str(field): str(value)
+            str(field): value
             for field, value in candidate_extract.proposed_updates.items()
-            if value is not None and str(value).strip()
+            if value is not None
+            and not (isinstance(value, (dict, list, tuple, set)) and len(value) == 0)
+            and (not isinstance(value, str) or value.strip())
         }
         if not proposed_updates:
             return True

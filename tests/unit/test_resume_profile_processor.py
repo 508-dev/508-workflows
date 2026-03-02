@@ -1,6 +1,5 @@
 """Unit tests for resume profile worker processor."""
 
-import json
 from unittest.mock import Mock
 
 from five08.worker.crm.resume_profile_processor import ResumeProfileProcessor
@@ -54,11 +53,7 @@ def test_extract_profile_proposal_filters_508_email() -> None:
     assert result.proposed_updates["cGitHubUsername"] == "new-gh"
     assert result.proposed_updates["cLinkedInUrl"] == "https://linkedin.com/in/new"
     assert result.proposed_updates["phoneNumber"] == "14155551234"
-    assert result.proposed_updates["skills"] == "Python, FastAPI"
-    assert "cSkillAttrs" in result.proposed_updates
-    attrs_payload = json.loads(result.proposed_updates["cSkillAttrs"])
-    assert attrs_payload["python"]["strength"] == 5
-    assert attrs_payload["fastapi"]["strength"] == 4
+    assert result.proposed_updates["skills"] == ["Python", "FastAPI"]
     assert result.new_skills == ["Python", "FastAPI"]
     assert any(item.field == "emailAddress" for item in result.skipped)
     processor.crm.update_contact.assert_called_once()
@@ -121,11 +116,11 @@ def test_extract_profile_proposal_normalizes_existing_skill_punctuation() -> Non
     )
 
     assert result.success is True
-    assert result.proposed_updates["skills"] == "node, ab testing, product management"
-    attrs_payload = json.loads(result.proposed_updates["cSkillAttrs"])
-    assert attrs_payload["node"]["strength"] == 5
-    assert attrs_payload["ab testing"]["strength"] == 3
-    assert attrs_payload["product management"]["strength"] == 4
+    assert result.proposed_updates["skills"] == [
+        "node",
+        "ab testing",
+        "product management",
+    ]
 
 
 def test_apply_profile_updates_adds_discord_and_filters_email() -> None:
@@ -139,8 +134,7 @@ def test_apply_profile_updates_adds_discord_and_filters_email() -> None:
             "emailAddress": "member@508.dev",
             "cGitHubUsername": "new-gh",
             "phoneNumber": "14155551234",
-            "skills": "Python, FastAPI",
-            "cSkillAttrs": '{"python":{"strength":4},"fastapi":{"strength":3}}',
+            "skills": ["Python", "FastAPI"],
         },
         link_discord={"user_id": "123", "username": "member#0001"},
     )
@@ -151,11 +145,7 @@ def test_apply_profile_updates_adds_discord_and_filters_email() -> None:
     assert "emailAddress" not in update_payload
     assert update_payload["cGitHubUsername"] == "new-gh"
     assert update_payload["phoneNumber"] == "14155551234"
-    assert update_payload["skills"] == "Python, FastAPI"
-    assert update_payload["cSkillAttrs"] == {
-        "fastapi": {"strength": 3},
-        "python": {"strength": 4},
-    }
+    assert update_payload["skills"] == ["Python", "FastAPI"]
     assert update_payload["cDiscordUserID"] == "123"
     assert update_payload["cDiscordUsername"] == "member#0001 (ID: 123)"
 

@@ -54,3 +54,19 @@ def test_normalize_extracted_payload_canonicalizes_and_clamps_strength() -> None
     assert result.skill_attrs["ab testing"].strength == 1
     assert result.skill_attrs["node"].strength == 2
     assert result.skill_attrs["go to market"].strength == 4
+
+
+def test_normalize_extracted_payload_parses_inline_strength_suffixes() -> None:
+    """Inline strengths like `skill (4)` should be parsed when included in the skills list."""
+    extractor = SkillsExtractor()
+
+    result = extractor._normalize_extracted_payload(
+        skills_value=["Python (4)", "code review ()", "TypeScript"],
+        skill_attrs_value=None,
+        confidence=0.9,
+        source="model",
+    )
+
+    assert result.skills == ["code review", "python", "typescript"]
+    assert result.skill_attrs["python"].strength == 4
+    assert "code review" not in result.skill_attrs

@@ -83,7 +83,10 @@ class SkillsExtractor:
                             "engineering, product, data, design, growth, and marketing. "
                             "Return JSON only, no prose. "
                             "Normalize skills to concise canonical names, lowercase. "
-                            "Provide a strength from 1-5 for each skill, where 5 is strongest."
+                            "Provide a strength from 1-5 when known, where 5 is strongest. "
+                            "If uncertain, you may omit it or leave it blank. "
+                            "Bias 3 for simple mentions, 4-5 for recent/current project usage, "
+                            "and 1-2 for weak, outdated, or minimal exposure."
                         ),
                     },
                     {"role": "user", "content": prompt},
@@ -137,14 +140,17 @@ class SkillsExtractor:
             "data, design, growth, and marketing.\n"
             "Exclude personal traits and vague soft skills unless role-critical.\n"
             "Return JSON with this exact schema:\n"
-            '{"skills": ["skill1", "skill2"], '
-            '"skill_attrs": {"skill1": {"strength": 4}}, '
+            '{"skills": ["skill1", "skill2", "skill3 (4)"], '
             '"confidence": 0.8}\n'
             "Rules:\n"
             "- skills must be lowercase canonical names with minimal punctuation\n"
             '- prefer forms like "nodejs", "ab testing", "go to market"\n'
-            "- skill_attrs keys must match skills\n"
-            "- strength is integer 1-5 (5 strongest)\n"
+            "- optional strength may be included inline for a skill in parentheses, e.g. skill (4)\n"
+            "- if strength is uncertain, omit the suffix or use an empty suffix, e.g. skill ()\n"
+            "- strength is integer 1-5 (5 strongest), and should be assigned per above.\n"
+            "- use 3 when a skill is simply mentioned without strong context\n"
+            "- use 4 or 5 when usage is clearly current or recent in project work\n"
+            "- use 2 for older, side, or weak mentions and 1 for very weak/outdated evidence\n"
             "- no extra keys\n\n"
             f"Resume:\n{snippet}"
         )
@@ -168,28 +174,27 @@ class SkillsExtractor:
         confidence: float,
         source: str,
     ) -> ExtractedSkills:
+        attrs_map: dict[str, SkillAttributes] = {}
         raw_skills = skills_value if isinstance(skills_value, list) else []
         normalized_skills: list[str] = []
         for skill in raw_skills:
-            canonical = self._normalize_skill_name(str(skill))
+            canonical, inline_strength = self._parse_skill_with_strength(str(skill))
             if canonical:
                 normalized_skills.append(canonical)
+                if inline_strength is not None:
+                    attrs_map[canonical] = SkillAttributes(strength=inline_strength)
 
-        attrs_map: dict[str, SkillAttributes] = {}
         if isinstance(skill_attrs_value, dict):
             for raw_name, raw_attr in skill_attrs_value.items():
                 canonical = self._normalize_skill_name(str(raw_name))
                 if not canonical:
                     continue
-                attrs_map[canonical] = SkillAttributes(
-                    strength=self._parse_strength(raw_attr)
-                )
+                strength = self._parse_strength(raw_attr)
+                if strength is not None:
+                    attrs_map[canonical] = SkillAttributes(strength=strength)
 
-        # Ensure attrs exists for every skill and include attr-only entries in skill list.
+        # Include attr-only entries in the skill list.
         deduped_skills = sorted(set(normalized_skills) | set(attrs_map.keys()))
-        for skill in deduped_skills:
-            if skill not in attrs_map:
-                attrs_map[skill] = SkillAttributes(strength=DEFAULT_SKILL_STRENGTH)
 
         return ExtractedSkills(
             skills=deduped_skills,
@@ -198,15 +203,38 @@ class SkillsExtractor:
             source=source,
         )
 
-    def _parse_strength(self, value: Any) -> int:
+    def _parse_strength(self, value: Any) -> int | None:
         raw: Any = value
         if isinstance(value, dict):
             raw = value.get("strength")
+        if raw is None:
+            return None
+        if isinstance(raw, str) and not raw.strip():
+            return None
         try:
             numeric = int(float(raw))
         except Exception:
-            numeric = DEFAULT_SKILL_STRENGTH
+            return None
+        if numeric <= 0:
+            return None
         return max(1, min(5, numeric))
+
+    def _parse_skill_with_strength(self, value: str) -> tuple[str, int | None]:
+        raw = value.strip()
+        match = re.match(r"^(.*)\((\d)\)\s*$", raw)
+        if match is None:
+            return self._normalize_skill_name(raw), None
+
+        base = match.group(1).strip()
+        parsed_strength = self._parse_strength(match.group(2))
+        if not base:
+            return "", None
+        normalized_base = self._normalize_skill_name(base)
+        if not normalized_base:
+            return "", None
+        if parsed_strength is None:
+            return normalized_base, None
+        return normalized_base, parsed_strength
 
     def _normalize_skill_name(self, value: str) -> str:
         return normalize_skill(value)

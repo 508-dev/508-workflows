@@ -546,7 +546,7 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         requester_id: int,
         contact_id: str,
         contact_name: str,
-        proposed_updates: dict[str, str],
+        proposed_updates: dict[str, Any],
         link_discord: dict[str, str] | None = None,
     ) -> None:
         super().__init__(timeout=300)
@@ -1116,7 +1116,7 @@ class CRMCog(commands.Cog):
         self,
         *,
         contact_id: str,
-        updates: dict[str, str],
+        updates: dict[str, Any],
         link_discord: dict[str, str] | None = None,
     ) -> str:
         payload = {
@@ -1176,15 +1176,19 @@ class CRMCog(commands.Cog):
         contact_name: str,
         result: dict[str, Any],
         link_member: discord.Member | None,
-    ) -> tuple[discord.Embed, dict[str, str]]:
+    ) -> tuple[discord.Embed, dict[str, Any]]:
         """Render backend extraction result as a Discord preview embed."""
         proposed_updates_raw = result.get("proposed_updates")
-        proposed_updates: dict[str, str] = {}
+        proposed_updates: dict[str, Any] = {}
         if isinstance(proposed_updates_raw, dict):
             proposed_updates = {
-                str(field): str(value)
+                str(field): value
                 for field, value in proposed_updates_raw.items()
-                if value is not None and str(value).strip()
+                if value is not None
+                and not (
+                    isinstance(value, (dict, list, tuple, set)) and len(value) == 0
+                )
+                and (not isinstance(value, str) or value.strip())
             }
 
         changes = result.get("proposed_changes")

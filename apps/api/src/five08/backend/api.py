@@ -91,7 +91,7 @@ class ResumeApplyRequest(BaseModel):
     """Request schema for queued resume apply updates."""
 
     contact_id: str
-    updates: dict[str, str]
+    updates: dict[str, Any]
     link_discord: dict[str, str] | None = None
 
 

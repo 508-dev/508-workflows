@@ -98,7 +98,7 @@ class ResumeExtractionResult(BaseModel):
 
     contact_id: str
     attachment_id: str
-    proposed_updates: dict[str, str]
+    proposed_updates: dict[str, Any]
     proposed_changes: list[ResumeFieldChange]
     skipped: list[ResumeSkipReason]
     extracted_profile: ResumeExtractedProfile

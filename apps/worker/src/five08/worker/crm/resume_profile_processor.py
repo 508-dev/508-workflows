@@ -274,8 +274,9 @@ class ResumeProfileProcessor:
                 extracted_attrs=extracted_skills_result.skill_attrs,
                 merged_skills=merged_skills,
             )
+            skills_attrs_updated = merged_skill_attrs != existing_skill_attrs
 
-            proposed_updates: dict[str, str] = {}
+            proposed_updates: dict[str, Any] = {}
             proposed_changes: list[ResumeFieldChange] = []
             skipped: list[ResumeSkipReason] = []
 
@@ -317,33 +318,23 @@ class ResumeProfileProcessor:
                 proposed_changes=proposed_changes,
                 skipped=skipped,
             )
-            if new_skills:
-                proposed_updates["skills"] = ", ".join(merged_skills)
+            if new_skills or skills_attrs_updated:
+                proposed_updates["skills"] = merged_skills
                 proposed_changes.append(
                     ResumeFieldChange(
                         field="skills",
                         label="Skills",
-                        current=", ".join(existing_skills) if existing_skills else None,
-                        proposed=", ".join(merged_skills),
-                        reason=f"Added {len(new_skills)} skills from resume extraction",
-                    )
-                )
-
-            if merged_skill_attrs and merged_skill_attrs != existing_skill_attrs:
-                proposed_updates["cSkillAttrs"] = self._serialize_skill_attrs(
-                    merged_skill_attrs
-                )
-                proposed_changes.append(
-                    ResumeFieldChange(
-                        field="cSkillAttrs",
-                        label="Skill Attributes",
                         current=(
-                            f"{len(existing_skill_attrs)} skills rated"
-                            if existing_skill_attrs
+                            self._format_skills_with_strength(
+                                existing_skills, existing_skill_attrs
+                            )
+                            if existing_skills
                             else None
                         ),
-                        proposed=f"{len(merged_skill_attrs)} skills rated (strength 1-5)",
-                        reason="Updated structured skill strengths from resume extraction",
+                        proposed=self._format_skills_with_strength(
+                            merged_skills, merged_skill_attrs
+                        ),
+                        reason="Updated skills from resume extraction",
                     )
                 )
 
@@ -407,7 +398,7 @@ class ResumeProfileProcessor:
         self,
         *,
         contact_id: str,
-        updates: dict[str, str],
+        updates: dict[str, Any],
         link_discord: dict[str, str] | None = None,
     ) -> ResumeApplyResult:
         """Apply confirmed updates to contact in CRM."""
@@ -418,7 +409,6 @@ class ResumeProfileProcessor:
                 settings.crm_linkedin_field,
                 "phoneNumber",
                 "skills",
-                "cSkillAttrs",
             }
             sanitized_updates: dict[str, Any] = {
                 field: value
@@ -427,18 +417,10 @@ class ResumeProfileProcessor:
             }
 
             email_value = sanitized_updates.get("emailAddress")
-            if email_value and email_value.lower().endswith("@508.dev"):
+            if isinstance(email_value, str) and email_value.lower().endswith(
+                "@508.dev"
+            ):
                 sanitized_updates.pop("emailAddress")
-
-            if "cSkillAttrs" in sanitized_updates:
-                parsed_attrs = self._parse_skill_attrs(sanitized_updates["cSkillAttrs"])
-                # Be forgiving: if value is malformed, overwrite with an empty object.
-                if parsed_attrs:
-                    sanitized_updates["cSkillAttrs"] = json.loads(
-                        self._serialize_skill_attrs(parsed_attrs)
-                    )
-                else:
-                    sanitized_updates["cSkillAttrs"] = {}
 
             if not sanitized_updates:
                 return ResumeApplyResult(
@@ -614,7 +596,7 @@ class ResumeProfileProcessor:
         label: str,
         current: Any,
         proposed: str | None,
-        proposed_updates: dict[str, str],
+        proposed_updates: dict[str, Any],
         proposed_changes: list[ResumeFieldChange],
         skipped: list[ResumeSkipReason],
         blocked_reason: str | None = None,
@@ -672,6 +654,23 @@ class ResumeProfileProcessor:
             normalized.append(canonical)
         return normalized
 
+    def _format_skills_with_strength(
+        self,
+        skills: list[str],
+        attrs: dict[str, int],
+    ) -> str:
+        formatted: list[str] = []
+        for raw_skill in skills:
+            skill = raw_skill.strip()
+            if not skill:
+                continue
+            strength = attrs.get(skill.casefold())
+            if strength:
+                formatted.append(f"{skill} ({strength})")
+            else:
+                formatted.append(skill)
+        return ", ".join(formatted)
+
     def _parse_skill_attrs(self, value: Any) -> dict[str, int]:
         if value is None:
             return {}
@@ -716,25 +715,12 @@ class ResumeProfileProcessor:
     ) -> dict[str, int]:
         merged: dict[str, int] = dict(existing_attrs)
 
-        for skill in merged_skills:
-            key = str(skill).strip().casefold()
-            if key and key not in merged:
-                merged[key] = 3
-
         for skill, attrs in extracted_attrs.items():
             key = str(skill).strip().casefold()
             if key:
                 merged[key] = max(1, min(5, int(attrs.strength)))
 
         return merged
-
-    def _serialize_skill_attrs(self, attrs: dict[str, int]) -> str:
-        payload = {
-            skill: {"strength": max(1, min(5, int(strength)))}
-            for skill, strength in sorted(attrs.items())
-            if skill
-        }
-        return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
     def _mark_resume_processed(self, contact_id: str) -> None:
         """Best-effort update for extraction completion tracking."""

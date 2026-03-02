@@ -63,7 +63,7 @@ def extract_resume_profile_job(
 
 def apply_resume_profile_job(
     contact_id: str,
-    updates: dict[str, str],
+    updates: dict[str, Any],
     link_discord: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Apply confirmed CRM profile updates after bot-side confirmation."""
