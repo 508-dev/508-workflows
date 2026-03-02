@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from datetime import datetime, timezone
 from typing import Any
 
 import discord
@@ -13,6 +14,11 @@ import requests
 from five08.discord_webhook import DiscordWebhookLogger
 
 logger = logging.getLogger(__name__)
+DEFAULT_WEBHOOK_USERNAME = "508 Workflows"
+_WEBHOOK_SUCCESS_COLOR = 0x2ECC71
+_WEBHOOK_ERROR_COLOR = 0xE74C3C
+_WEBHOOK_WARNING_COLOR = 0xF1C40F
+_WEBHOOK_INFO_COLOR = 0x3498DB
 
 
 class DiscordAuditLogger:
@@ -171,7 +177,10 @@ class DiscordAuditLogger:
     def _send_webhook_event(self, event_payload: dict[str, Any]) -> None:
         if not self.webhook_enabled:
             return
-        self.webhook_logger.send(content=self._build_webhook_message(event_payload))
+        self.webhook_logger.send(
+            username=DEFAULT_WEBHOOK_USERNAME,
+            embeds=[self._build_webhook_embed(event_payload)],
+        )
 
     @staticmethod
     def _result_emoji(result: str) -> str:
@@ -188,34 +197,95 @@ class DiscordAuditLogger:
             return text
         return f"{text[: max_length - 3]}..."
 
-    def _build_webhook_message(self, event_payload: dict[str, Any]) -> str:
+    @staticmethod
+    def _webhook_color(result: str) -> int:
+        normalized = result.strip().lower()
+        if normalized in {"success", "ok", "created", "queued", "succeeded"}:
+            return _WEBHOOK_SUCCESS_COLOR
+        if normalized in {"error", "failed", "failure", "denied"}:
+            return _WEBHOOK_ERROR_COLOR
+        if normalized in {"retrying", "warning"}:
+            return _WEBHOOK_WARNING_COLOR
+        return _WEBHOOK_INFO_COLOR
+
+    def _build_webhook_embed(self, event_payload: dict[str, Any]) -> dict[str, Any]:
         source = str(event_payload.get("source") or "unknown")
         action = str(event_payload.get("action") or "unknown")
         result = str(event_payload.get("result") or "unknown")
+        service = "Discord Bot"
         actor = (
             str(event_payload.get("actor_display_name"))
             if event_payload.get("actor_display_name")
             else str(event_payload.get("actor_subject"))
+        )
+        actor_subject = str(event_payload.get("actor_subject") or actor)
+        resource = (
+            f"{event_payload.get('resource_type')}:{event_payload.get('resource_id')}"
+            if event_payload.get("resource_type")
+            else None
         )
         metadata = (
             event_payload.get("metadata")
             if isinstance(event_payload.get("metadata"), dict)
             else {}
         )
-
-        command = metadata.get("command") if isinstance(metadata, dict) else None
-        resource = (
-            f"{event_payload.get('resource_type')}:{event_payload.get('resource_id')}"
-            if event_payload.get("resource_type")
+        correlation_id = str(event_payload.get("correlation_id") or "") or None
+        error = (
+            metadata.get("error")
+            if isinstance(metadata, dict) and metadata.get("error") is not None
             else None
         )
-        target = command or resource or "resource unknown"
-        error = metadata.get("error") if isinstance(metadata, dict) else None
-        suffix = f" | error={self._shorten(str(error))}" if error else ""
-        return (
-            f"{self._result_emoji(result)} {source} {action} · {target}"
-            f" · actor={actor} · result={result}{suffix}"
+        command = metadata.get("command") if isinstance(metadata, dict) else None
+        actor_value = f"{actor} ({actor_subject})" if actor != actor_subject else actor
+        description = (
+            f"{self._result_emoji(result)} {source} {action}\nresult: **{result}**"
         )
+        fields: list[dict[str, Any]] = [
+            {"name": "Service", "value": service, "inline": True},
+            {"name": "Actor", "value": self._shorten(actor_value, 64), "inline": True},
+            {"name": "Action", "value": self._shorten(action, 128), "inline": True},
+        ]
+
+        if resource:
+            fields.append(
+                {
+                    "name": "Resource",
+                    "value": self._shorten(str(resource), 128),
+                    "inline": True,
+                },
+            )
+        if correlation_id:
+            fields.append(
+                {
+                    "name": "Correlation ID",
+                    "value": self._shorten(correlation_id, 128),
+                    "inline": False,
+                },
+            )
+        if command:
+            fields.append(
+                {
+                    "name": "Command",
+                    "value": self._shorten(str(command), 128),
+                    "inline": False,
+                },
+            )
+        if error:
+            fields.append(
+                {
+                    "name": "Error",
+                    "value": self._shorten(str(error), 1024),
+                    "inline": False,
+                },
+            )
+
+        return {
+            "title": f"{self._result_emoji(result)} {source}:{action}",
+            "description": description,
+            "color": self._webhook_color(result),
+            "fields": fields,
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        }
 
     def _on_task_done(
         self,

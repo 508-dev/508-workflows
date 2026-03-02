@@ -23,9 +23,6 @@ class Settings(SharedSettings):
     # Healthcheck Configuration
     healthcheck_port: int = 3000
 
-    # Core channel configuration
-    channel_id: int
-
     # CRM/EspoCRM settings
     espo_api_key: str
     espo_base_url: str
