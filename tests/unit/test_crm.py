@@ -10,6 +10,7 @@ from five08.discord_bot.cogs.crm import (
     CRMCog,
     ResumeButtonView,
     ResumeCreateContactView,
+    ResumeReprocessConfirmationView,
     ResumeDownloadButton,
 )
 from five08.clients.espo import EspoAPIError
@@ -1998,6 +1999,209 @@ class TestCRMCog:
         assert audit_metadata["status_code"] == 422
         assert audit_metadata["create_payload_keys"] == ["emailAddress", "name"]
         mock_interaction.followup.send.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_reprocess_resume_shows_confirmation(self, crm_cog, mock_interaction):
+        """Show a confirmation view before reprocessing a contact's latest resume."""
+        mock_interaction.user.id = 101
+        mock_interaction.user.name = "Operator"
+
+        with (
+            patch(
+                "five08.discord_bot.cogs.crm.settings.api_shared_secret",
+                "test-shared-secret",
+            ),
+            patch(
+                "five08.discord_bot.cogs.crm.check_user_roles_with_hierarchy",
+                return_value=True,
+            ),
+            patch.object(
+                crm_cog,
+                "_search_contacts_for_reprocess_resume",
+                new=AsyncMock(
+                    return_value=[
+                        {"id": "contact123", "name": "Candidate User"},
+                    ]
+                ),
+            ),
+            patch.object(
+                crm_cog,
+                "_get_latest_resume_attachment_for_contact",
+                new=AsyncMock(return_value=("resume123", "candidate.pdf")),
+            ),
+        ):
+            await crm_cog.reprocess_resume.callback(
+                crm_cog, mock_interaction, "candidate"
+            )
+
+        mock_interaction.followup.send.assert_called_once()
+        followup_kwargs = mock_interaction.followup.send.call_args.kwargs
+        assert "view" in followup_kwargs
+        assert isinstance(followup_kwargs["view"], ResumeReprocessConfirmationView)
+        view = followup_kwargs["view"]
+        assert view.contact_id == "contact123"
+        assert view.contact_name == "Candidate User"
+        assert view.attachment_id == "resume123"
+        assert view.filename == "candidate.pdf"
+
+    @pytest.mark.asyncio
+    async def test_reprocess_resume_shows_no_contact_message(
+        self, crm_cog, mock_interaction
+    ):
+        """Error when no contact matches the reprocess search term."""
+        mock_interaction.user.id = 101
+        with (
+            patch(
+                "five08.discord_bot.cogs.crm.settings.api_shared_secret",
+                "test-shared-secret",
+            ),
+            patch(
+                "five08.discord_bot.cogs.crm.check_user_roles_with_hierarchy",
+                return_value=True,
+            ),
+            patch.object(
+                crm_cog,
+                "_search_contacts_for_reprocess_resume",
+                new=AsyncMock(return_value=[]),
+            ),
+        ):
+            await crm_cog.reprocess_resume.callback(
+                crm_cog, mock_interaction, "missing-user"
+            )
+
+        mock_interaction.followup.send.assert_called_once_with(
+            "❌ No contact found for: `missing-user`"
+        )
+
+    @pytest.mark.asyncio
+    async def test_reprocess_resume_rejects_multiple_contacts(
+        self, crm_cog, mock_interaction
+    ):
+        """Error when multiple contacts match the reprocess search term."""
+        mock_interaction.user.id = 101
+        with (
+            patch(
+                "five08.discord_bot.cogs.crm.settings.api_shared_secret",
+                "test-shared-secret",
+            ),
+            patch(
+                "five08.discord_bot.cogs.crm.check_user_roles_with_hierarchy",
+                return_value=True,
+            ),
+            patch.object(
+                crm_cog,
+                "_search_contacts_for_reprocess_resume",
+                new=AsyncMock(
+                    return_value=[
+                        {"id": "contact123", "name": "John Doe"},
+                        {"id": "contact456", "name": "John Smith"},
+                    ]
+                ),
+            ),
+        ):
+            await crm_cog.reprocess_resume.callback(crm_cog, mock_interaction, "john")
+
+        message = mock_interaction.followup.send.call_args.args[0]
+        assert "Multiple contacts found for `john`" in message
+
+    @pytest.mark.asyncio
+    async def test_reprocess_resume_no_resume_found(self, crm_cog, mock_interaction):
+        """Error when the target contact has no resume on file."""
+        mock_interaction.user.id = 101
+        with (
+            patch(
+                "five08.discord_bot.cogs.crm.settings.api_shared_secret",
+                "test-shared-secret",
+            ),
+            patch(
+                "five08.discord_bot.cogs.crm.check_user_roles_with_hierarchy",
+                return_value=True,
+            ),
+            patch.object(
+                crm_cog,
+                "_search_contacts_for_reprocess_resume",
+                new=AsyncMock(
+                    return_value=[{"id": "contact123", "name": "Candidate User"}]
+                ),
+            ),
+            patch.object(
+                crm_cog,
+                "_get_latest_resume_attachment_for_contact",
+                new=AsyncMock(return_value=(None, None)),
+            ),
+        ):
+            await crm_cog.reprocess_resume.callback(
+                crm_cog, mock_interaction, "candidate"
+            )
+
+        message = mock_interaction.followup.send.call_args.args[0]
+        assert "No resume found for `Candidate User`" in message
+
+    @pytest.mark.asyncio
+    async def test_reprocess_resume_requires_steering(self, crm_cog, mock_interaction):
+        """Non-steering users cannot reprocess resumes."""
+        mock_interaction.user.id = 101
+        with (
+            patch(
+                "five08.discord_bot.cogs.crm.settings.api_shared_secret",
+                "test-shared-secret",
+            ),
+            patch(
+                "five08.discord_bot.cogs.crm.check_user_roles_with_hierarchy",
+                return_value=False,
+            ),
+        ):
+            await crm_cog.reprocess_resume.callback(
+                crm_cog, mock_interaction, "candidate"
+            )
+
+        message = mock_interaction.followup.send.call_args.args[0]
+        assert "You must have Steering Committee role or higher" in message
+
+    @pytest.mark.asyncio
+    async def test_reprocess_confirmation_view_calls_reprocess_preview(
+        self, crm_cog, mock_interaction
+    ):
+        """Confirming resume reprocessing triggers resume extraction with reprocess action."""
+        original_interaction = Mock()
+        original_interaction.user = Mock()
+        original_interaction.user.id = 101
+
+        crm_cog._run_resume_extract_and_preview = AsyncMock()
+
+        confirm_interaction = AsyncMock()
+        confirm_interaction.user = Mock()
+        confirm_interaction.user.id = 101
+        confirm_interaction.user.name = "Operator"
+        confirm_interaction.response = AsyncMock()
+        confirm_interaction.response.defer = AsyncMock()
+        confirm_interaction.followup = AsyncMock()
+        confirm_interaction.followup.send = AsyncMock()
+        confirm_interaction.message = None
+
+        view = ResumeReprocessConfirmationView(
+            crm_cog=crm_cog,
+            interaction=original_interaction,
+            contact_id="contact123",
+            contact_name="Candidate User",
+            attachment_id="resume123",
+            filename="candidate.pdf",
+        )
+        confirm_button = next(
+            child
+            for child in view.children
+            if isinstance(child, discord.ui.Button)
+            and child.label == "Reprocess Resume"
+        )
+        await confirm_button.callback(confirm_interaction)
+
+        crm_cog._run_resume_extract_and_preview.assert_awaited_once()
+        kwargs = crm_cog._run_resume_extract_and_preview.await_args.kwargs
+        assert kwargs["action"] == "crm.reprocess_resume"
+        assert (
+            kwargs["status_message"]
+            == "🔄 Reprocessing resume and extracting profile fields now..."
+        )
 
 
 class TestResumeButtonView:
