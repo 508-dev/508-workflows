@@ -18,6 +18,13 @@ This document captures Discord bot behavior, permissions, and slash command usag
 
 ## Slash Commands
 
+- `/create-mailbox`
+  - Description: Create a Migadu mailbox and set a contact’s `c508Email`.
+  - Prerequisites: `MIGADU_API_USER` and `MIGADU_API_KEY` must be configured (configured in env; command will fail if missing).
+  - Required role: Admin
+  - Args:
+    - `backup_email` (required): Backup email (e.g. `alice`, `alice@`, `alice@gmail.com`, `alice@508.dev`).
+
 - `/mark-id-verified`
   - Description: Mark a contact as ID verified.
   - Required role: Admin
