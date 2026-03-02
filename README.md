@@ -35,7 +35,7 @@ This repository follows a service-oriented monorepo layout:
 Migrations:
 
 - `apps/worker/src/five08/worker/migrations` (Alembic)
-- `backend-api` runs `run_job_migrations()` during startup to keep DB schema current.
+- `api` runs `run_job_migrations()` during startup to keep DB schema current.
 
 ### Job model
 
@@ -48,8 +48,8 @@ Migrations:
 
 ### Backend API Endpoints
 
-See the API service docs: [`apps/api/README.md#backend-api-endpoints`](apps/api/README.md#backend-api-endpoints).
-CLI request examples are documented at [`apps/worker/README.md#cli-usage`](apps/worker/README.md#cli-usage).
+See the API service docs: [`apps/api/README.md#backend-api-endpoints`](./apps/api/README.md#backend-api-endpoints).
+CLI request examples are documented at [`apps/worker/README.md#cli-usage`](./apps/worker/README.md#cli-usage).
 
 ## Local Development
 
@@ -82,6 +82,8 @@ uv run --package worker worker-consumer
 
 # Jobs CLI
 uv run --package worker jobsctl --help
+# recent jobs (past hour by default):
+uv run --package worker jobsctl recent
 ```
 
 Or run the full stack with Docker Compose:
@@ -225,7 +227,10 @@ Use `.env.example` as the source of truth for defaults.
 ./scripts/mypy.sh
 ```
 
-For Discord bot docs, see [`Discord Bot`](DISCORD_BOT.md).
+For Discord bot docs, see [`Discord Bot`](./DISCORD_BOT.md).
+
+For local development helper commands, see [`DEVELOPMENT.md`](./DEVELOPMENT.md).
+
 
 ## Deployment
 

@@ -9,7 +9,7 @@ import os
 import secrets
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, cast
 from urllib.parse import urlencode
 from uuid import uuid4
@@ -32,6 +32,7 @@ from five08.logging import configure_observability
 from five08.queue import (
     EnqueuedJob,
     QueueClient,
+    list_jobs,
     enqueue_job,
     get_job,
     get_postgres_connection,
@@ -658,6 +659,39 @@ async def job_status_handler(request: Request, job_id: str) -> JSONResponse:
             "result": result,
         }
     )
+
+
+async def jobs_handler(
+    request: Request,
+    minutes: int = Query(default=60, ge=1),
+    limit: int = Query(default=100, ge=1, le=1000),
+) -> JSONResponse:
+    """Return jobs created within the last N minutes."""
+    if not _is_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=minutes)
+    recent_jobs = await asyncio.to_thread(
+        list_jobs,
+        settings,
+        created_after=cutoff,
+        limit=limit,
+    )
+
+    payload = [
+        {
+            "job_id": job.id,
+            "type": job.type,
+            "status": job.status.value,
+            "attempts": job.attempts,
+            "max_attempts": job.max_attempts,
+            "last_error": job.last_error,
+            "created_at": job.created_at.isoformat(),
+            "updated_at": job.updated_at.isoformat(),
+        }
+        for job in recent_jobs
+    ]
+    return JSONResponse(payload)
 
 
 async def rerun_job_handler(request: Request, job_id: str) -> JSONResponse:
@@ -1455,6 +1489,7 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
     app.add_api_route("/", health_handler, methods=["GET"])
     app.add_api_route("/health", health_handler, methods=["GET"])
 
+    app.add_api_route("/jobs", jobs_handler, methods=["GET"])
     app.add_api_route("/jobs/{job_id}", job_status_handler, methods=["GET"])
     app.add_api_route("/jobs/{job_id}/rerun", rerun_job_handler, methods=["POST"])
     app.add_api_route("/jobs/resume-extract", resume_extract_handler, methods=["POST"])

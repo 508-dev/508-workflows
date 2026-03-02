@@ -2587,7 +2587,6 @@ class CRMCog(commands.Cog):
                         "contact_id": str(contact_id),
                         "verified_by": verified_by,
                         "verified_at": verified_at,
-                        "id_type": id_type,
                     },
                     resource_type="crm_contact",
                     resource_id=str(contact_id),
