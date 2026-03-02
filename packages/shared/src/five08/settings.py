@@ -45,6 +45,7 @@ class SharedSettings(BaseSettings):
     webhook_ingest_host: str = "0.0.0.0"
     webhook_ingest_port: int = 8090
     api_shared_secret: str | None = None
+    discord_logs_webhook_url: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
