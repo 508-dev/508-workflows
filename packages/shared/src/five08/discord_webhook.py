@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+from typing import Any
 from urllib import error, request
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -15,6 +16,7 @@ class DiscordWebhookLogger:
     """Send short messages to a Discord webhook URL without affecting workflows."""
 
     _MAX_CONTENT_LENGTH = 2000
+    _MAX_EMBED_COUNT = 10
 
     def __init__(
         self,
@@ -32,18 +34,27 @@ class DiscordWebhookLogger:
         """Return whether webhook logging is configured."""
         return bool(self.webhook_url)
 
-    def send(self, *, content: str) -> None:
+    def send(
+        self,
+        *,
+        content: str | None = None,
+        embeds: list[dict[str, Any]] | None = None,
+        username: str | None = None,
+    ) -> None:
         """Best-effort send one Discord message."""
         if not self.enabled:
             return
 
+        payload = self._build_payload(
+            content=content,
+            embeds=embeds,
+            username=username,
+        )
+        if not payload:
+            return
+
         query_params = self._request_query_params()
-        body = json.dumps(
-            {
-                "content": self._normalize_content(content),
-                "allowed_mentions": {"parse": []},
-            },
-        ).encode("utf-8")
+        body = json.dumps(payload).encode("utf-8")
         req = request.Request(
             self._request_url(query_params),
             data=body,
@@ -84,6 +95,63 @@ class DiscordWebhookLogger:
             return f"{normalized[: self._MAX_CONTENT_LENGTH - 3]}..."
 
         return normalized
+
+    @staticmethod
+    def _normalize_embed(embed: dict[str, Any]) -> dict[str, Any]:
+        """Drop empty or non-JSON-serializable embed fields."""
+        normalized: dict[str, Any] = {}
+        for key, value in embed.items():
+            if value is None:
+                continue
+            if key == "fields" and isinstance(value, list):
+                normalized_fields: list[dict[str, Any]] = []
+                for raw_field in value:
+                    if not isinstance(raw_field, dict):
+                        continue
+                    name = str(raw_field.get("name", "")).strip()
+                    if not name:
+                        continue
+                    field_value = str(raw_field.get("value", "")).strip()
+                    field_entry: dict[str, Any] = {"name": name, "value": field_value}
+                    if isinstance(raw_field.get("inline"), bool):
+                        field_entry["inline"] = raw_field["inline"]
+                    normalized_fields.append(field_entry)
+                if normalized_fields:
+                    normalized["fields"] = normalized_fields
+                continue
+
+            if isinstance(value, (str, int, float, bool, list, dict)):
+                if isinstance(value, str) and not value.strip():
+                    continue
+                normalized[key] = value
+        return normalized
+
+    def _build_payload(
+        self,
+        *,
+        content: str | None,
+        embeds: list[dict[str, Any]] | None,
+        username: str | None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"allowed_mentions": {"parse": []}}
+        if content is not None:
+            payload["content"] = self._normalize_content(content)
+        if username:
+            trimmed_username = username.strip()
+            if trimmed_username:
+                payload["username"] = trimmed_username
+        if embeds:
+            payload["embeds"] = [
+                self._normalize_embed(embed)
+                for embed in embeds[: self._MAX_EMBED_COUNT]
+                if embed
+            ]
+            payload["embeds"] = [embed for embed in payload["embeds"] if embed]
+            if not payload["embeds"]:
+                payload.pop("embeds")
+        if not content and "embeds" not in payload and not payload.get("content"):
+            return {}
+        return payload
 
     def _request_query_params(self) -> dict[str, str]:
         """Build webhook query params while enforcing text-only message behavior."""

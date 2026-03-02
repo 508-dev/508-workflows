@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
+from typing import Final
 from typing import Any
 
 import dramatiq
@@ -41,6 +42,11 @@ configure_observability(
     settings=settings,
     service_name="worker-actors",
 )
+_DEFAULT_WEBHOOK_USERNAME: Final[str] = "508 Workflows"
+_WEBHOOK_INFO_COLOR: Final[int] = 0x3498DB
+_WEBHOOK_WARNING_COLOR: Final[int] = 0xF1C40F
+_WEBHOOK_ERROR_COLOR: Final[int] = 0xE74C3C
+_WEBHOOK_SUCCESS_COLOR: Final[int] = 0x2ECC71
 
 DRAMATIQ_BROKER = RedisBroker(url=settings.redis_url)
 dramatiq.set_broker(DRAMATIQ_BROKER)
@@ -100,20 +106,79 @@ def _log_job_event(
     if not _JOB_WEBHOOK_LOGGER.enabled:
         return
 
-    parts = [
-        f"{event_type.upper()} job",
-        f"type={job_type}",
-        f"id={job_id}",
-        f"attempt={attempts}/{max_attempts}",
-        f"worker={worker_name}",
+    _JOB_WEBHOOK_LOGGER.send(
+        username=_DEFAULT_WEBHOOK_USERNAME,
+        embeds=[
+            {
+                "title": f"{event_type.upper()} Job",
+                "description": f"Worker job lifecycle event for `{job_type}`",
+                "color": _job_event_color(event_type=event_type, has_error=bool(error)),
+                "fields": _job_event_fields(
+                    event_type=event_type,
+                    job_id=job_id,
+                    job_type=job_type,
+                    attempts=attempts,
+                    max_attempts=max_attempts,
+                    worker_name=worker_name,
+                    error=error,
+                    result=result,
+                ),
+                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            }
+        ],
+    )
+
+
+def _job_event_color(*, event_type: str, has_error: bool = False) -> int:
+    if event_type.lower() == "succeeded":
+        return _WEBHOOK_SUCCESS_COLOR
+    if event_type.lower() in {"dead", "failed"} or has_error:
+        return _WEBHOOK_ERROR_COLOR
+    if event_type.lower() == "retrying":
+        return _WEBHOOK_WARNING_COLOR
+    return _WEBHOOK_INFO_COLOR
+
+
+def _job_event_fields(
+    *,
+    event_type: str,
+    job_id: str,
+    job_type: str,
+    attempts: int,
+    max_attempts: int,
+    worker_name: str,
+    error: str | None,
+    result: Any,
+) -> list[dict[str, Any]]:
+    fields: list[dict[str, Any]] = [
+        {"name": "Event", "value": event_type, "inline": True},
+        {"name": "Job ID", "value": _truncate(job_id, 64), "inline": True},
+        {"name": "Type", "value": _truncate(job_type, 64), "inline": True},
+        {
+            "name": "Attempt",
+            "value": f"{attempts}/{max_attempts}",
+            "inline": True,
+        },
+        {"name": "Worker", "value": _truncate(worker_name, 64), "inline": True},
     ]
 
     if result is not None:
-        parts.append(f"result={_summarize_job_result(result)}")
+        fields.append(
+            {
+                "name": "Result",
+                "value": _truncate(_summarize_job_result(result), 1024),
+                "inline": False,
+            },
+        )
     if error:
-        parts.append(f"error={_truncate(error, 160)}")
-
-    _JOB_WEBHOOK_LOGGER.send(content=" | ".join(parts))
+        fields.append(
+            {
+                "name": "Error",
+                "value": _truncate(error, 1024),
+                "inline": False,
+            },
+        )
+    return fields
 
 
 def _extract_call_args(job: JobRecord) -> tuple[tuple[Any, ...], dict[str, Any]]:

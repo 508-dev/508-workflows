@@ -96,3 +96,38 @@ def test_send_truncates_long_content() -> None:
 
     assert payload["content"] == ("a" * 1997 + "...")
     assert payload["allowed_mentions"] == {"parse": []}
+
+
+def test_send_supports_embed_payload() -> None:
+    logger = DiscordWebhookLogger("https://discord.com/api/webhooks/1/token")
+    embed_payload = {
+        "title": "Test Alert",
+        "description": "Something happened.",
+        "color": 15158332,
+        "fields": [
+            {"name": "Environment", "value": "production", "inline": True},
+            {"name": "Service", "value": "api", "inline": True},
+        ],
+    }
+
+    with patch(
+        "five08.discord_webhook.request.urlopen",
+        return_value=_urlopen_context(),
+    ) as mock_urlopen:
+        logger.send(username="508 Workflows", embeds=[embed_payload])
+
+    request_obj = mock_urlopen.call_args.args[0]
+    payload = json.loads(request_obj.data.decode("utf-8"))
+
+    assert payload["username"] == "508 Workflows"
+    assert payload["embeds"] == [embed_payload]
+    assert payload["allowed_mentions"] == {"parse": []}
+
+
+def test_send_no_content_no_embeds_does_nothing() -> None:
+    logger = DiscordWebhookLogger("https://discord.com/api/webhooks/1/token")
+
+    with patch("five08.discord_webhook.request.urlopen") as mock_urlopen:
+        logger.send(content=None, embeds=None)
+
+    mock_urlopen.assert_not_called()

@@ -7,7 +7,7 @@ from unittest.mock import Mock, AsyncMock, patch
 from pathlib import Path
 import discord
 
-from five08.discord_bot.bot import Bot508, create_bot
+from five08.discord_bot.bot import Bot508, create_bot, settings
 
 
 class TestBot508:
@@ -81,19 +81,30 @@ class TestBot508:
                 assert "broken_feature" in caplog.text
 
     @pytest.mark.asyncio
-    async def test_on_ready_sends_activation_message(self, mock_discord_channel):
-        """Test that on_ready sends activation message to channel."""
+    async def test_on_ready_sends_activation_message(self):
+        """Test that on_ready sends activation message to webhook."""
         bot = Bot508()
         mock_user = Mock()
         mock_user.__str__ = Mock(return_value="TestBot")
+        webhook_url = "https://discord.com/api/webhooks/123/abc"
 
-        with patch.object(bot, "get_channel", return_value=mock_discord_channel):
-            with patch.object(type(bot), "user", new_callable=lambda: mock_user):
-                await bot.on_ready()
+        with patch.object(settings, "discord_logs_webhook_url", webhook_url):
+            with patch(
+                "five08.discord_bot.bot.DiscordWebhookLogger"
+            ) as mock_logger_cls:
+                with patch.object(type(bot), "user", new_callable=lambda: mock_user):
+                    await bot.on_ready()
 
-                mock_discord_channel.send.assert_called_once()
-                call_args = mock_discord_channel.send.call_args[0][0]
-                assert "508.dev Bot activated" in call_args
+                    mock_logger_cls.assert_called_once_with(
+                        webhook_url=webhook_url,
+                        timeout_seconds=2.0,
+                        wait_for_response=settings.discord_logs_webhook_wait,
+                    )
+
+                    mock_logger_instance = mock_logger_cls.return_value
+                    mock_logger_instance.send.assert_called_once()
+                    sent_content = mock_logger_instance.send.call_args.kwargs["content"]
+                    assert "508.dev Bot activated" in sent_content
 
     @pytest.mark.asyncio
     async def test_on_ready_handles_missing_channel(self, caplog):
