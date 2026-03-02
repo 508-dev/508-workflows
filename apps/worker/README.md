@@ -32,6 +32,8 @@ uv run --package integrations-worker jobsctl --help
 uv run --package integrations-worker jobsctl status <job_id>
 uv run --package integrations-worker jobsctl rerun <job_id>
 uv run --package integrations-worker jobsctl recent --minutes 60
+uv run --package integrations-worker jobsctl recent --minutes 60 --status queued
+uv run --package integrations-worker jobsctl recent --minutes 120 --type process_webhook_event_job
 ```
 
 Examples:
@@ -44,6 +46,7 @@ uv run --package integrations-worker jobsctl status job-123
 uv run --package integrations-worker jobsctl rerun job-123
 uv run --package integrations-worker jobsctl recent --minutes 60
 uv run --package integrations-worker jobsctl recent --minutes 120 --limit 20
+uv run --package integrations-worker jobsctl recent --minutes 120 --status succeeded --type sync_people_from_crm_job
 ```
 
 If needed, pass overrides explicitly:
@@ -75,7 +78,8 @@ curl -X POST "http://localhost:8090/jobs/<job_id>/rerun" \
 
 - `GET /health`: Redis/Postgres/worker health check.
 - `GET /jobs/{job_id}`: Fetch queued job status/result payload.
-- `GET /jobs?minutes=<n>&limit=<n>`: Fetch recent job metadata for jobs created in the last `<minutes>`.
+- `GET /jobs?minutes=<n>&limit=<n>[&status=<status>][&type=<job_type>]`:
+  Fetch recent job metadata for jobs created in the last `<minutes>`, optionally filtered by status and/or type.
 - `POST /jobs/{job_id}/rerun`: Enqueue a duplicate rerun of an existing job id.
 - `POST /jobs/resume-extract`: Enqueue resume profile extraction.
 - `POST /jobs/resume-apply`: Enqueue confirmed CRM field apply.
@@ -130,18 +134,20 @@ Example success response (`202`):
 }
 ```
 
-### `GET /jobs?minutes=<minutes>&limit=<limit>`
+### `GET /jobs?minutes=<minutes>&limit=<limit>[&status=<status>][&type=<job_type>]`
 
 Return recent jobs created in a rolling time window.
 
 - Query params:
   - `minutes` (integer, default: `60`, minimum: `1`): look back window size.
   - `limit` (integer, default: `100`, minimum: `1`, maximum: `1000`): number of rows to return.
+  - `status` (optional string): filter jobs by persisted status (`queued`, `running`, `succeeded`, `failed`, `dead`, `canceled`).
+  - `type` (optional string): filter jobs by type/function name.
 
 Example:
 
 ```bash
-curl -X GET "http://localhost:8090/jobs?minutes=120&limit=50" \
+curl -X GET "http://localhost:8090/jobs?minutes=120&limit=50&status=succeeded" \
   -H "X-API-Secret: $API_SHARED_SECRET"
 ```
 

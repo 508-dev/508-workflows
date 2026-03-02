@@ -292,7 +292,10 @@ def test_jobs_handler_returns_recent_jobs(
         "five08.backend.api.list_jobs",
         return_value=[mock_job2, mock_job],
     ) as mock_list_jobs:
-        response = client.get("/jobs?minutes=15&limit=2", headers=auth_headers)
+        response = client.get(
+            "/jobs?minutes=15&limit=2&status=queued&type=sync_people_from_crm_job",
+            headers=auth_headers,
+        )
 
     payload = response.json()
     assert response.status_code == 200
@@ -321,8 +324,23 @@ def test_jobs_handler_returns_recent_jobs(
 
     mock_list_jobs.assert_called_once()
     called_kwargs = mock_list_jobs.call_args.kwargs
+    assert called_kwargs["status"].value == "queued"
+    assert called_kwargs["job_type"] == "sync_people_from_crm_job"
     assert called_kwargs["limit"] == 2
     assert called_kwargs["created_after"].tzinfo == timezone.utc
+
+
+def test_jobs_handler_rejects_invalid_status(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Jobs list endpoint should reject unknown status filters."""
+    response = client.get("/jobs?minutes=15&status=not-a-status", headers=auth_headers)
+
+    payload = response.json()
+    assert response.status_code == 400
+    assert payload["error"] == "invalid_status"
+    assert payload["status"] == "not-a-status"
 
 
 def test_rerun_job_handler_enqueues_new_job(
