@@ -14,11 +14,11 @@ This document captures Discord bot behavior, permissions, and slash command usag
 - **Everyone**: can see and invoke non-restricted commands.
 - **Member**: has member-only command access in addition to everyone commands.
 - **Steering Committee**: includes member permissions and adds additional moderation/admin-assist commands.
-- **Admin**: can run sensitive writes such as ID verification updates.
+- **Admin**: can run sensitive writes such as ID verification updates (including `/mark-id-verified`).
 
 ## Slash Commands
 
-- `/mark-id-verified`
+- `/mark-id-verified` (Admin only)
   - Description: Mark a contact as ID verified.
   - Required role: Admin
   - Args:
