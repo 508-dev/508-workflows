@@ -2449,14 +2449,15 @@ class CRMCog(commands.Cog):
         normalized_verified_by = verified_by.strip()
         normalized_verified_at = verified_at.strip()
 
-        needs_confirmation = (
+        verified_by_conflict = (
             bool(existing_verified_by)
-            and bool(existing_verified_at)
-            and (
-                existing_verified_by != normalized_verified_by
-                or existing_verified_at != normalized_verified_at
-            )
+            and existing_verified_by != normalized_verified_by
         )
+        verified_at_conflict = (
+            bool(existing_verified_at)
+            and existing_verified_at != normalized_verified_at
+        )
+        needs_confirmation = verified_by_conflict or verified_at_conflict
 
         if needs_confirmation and not allow_overwrite:
             self._audit_command(

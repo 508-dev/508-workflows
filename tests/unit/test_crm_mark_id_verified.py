@@ -167,10 +167,20 @@ class TestMarkIdVerifiedCommand:
         assert "ID Verified" in kwargs["embed"].title
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "current_values",
+        [
+            {ID_VERIFIED_BY_FIELD: "existing-user", ID_VERIFIED_AT_FIELD: "2026-01-01"},
+            {ID_VERIFIED_BY_FIELD: "caleb", ID_VERIFIED_AT_FIELD: "2025-01-01"},
+            {ID_VERIFIED_BY_FIELD: "", ID_VERIFIED_AT_FIELD: "2026-01-01"},
+            {ID_VERIFIED_BY_FIELD: "existing-user", ID_VERIFIED_AT_FIELD: ""},
+        ],
+    )
     async def test_mark_id_verified_single_contact_prompts_for_overwrite_if_already_verified(
         self,
         crm_cog,
         mock_interaction,
+        current_values: dict[str, str],
     ):
         contact = {
             "id": "contact-123",
@@ -181,8 +191,7 @@ class TestMarkIdVerifiedCommand:
             return_value=[contact]
         )
         crm_cog.espo_api.request.return_value = {
-            ID_VERIFIED_BY_FIELD: "existing-user",
-            ID_VERIFIED_AT_FIELD: "2026-01-01",
+            **current_values,
             "id": "contact-123",
         }
 
