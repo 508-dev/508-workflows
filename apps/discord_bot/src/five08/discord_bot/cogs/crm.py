@@ -10,7 +10,7 @@ import ast
 import io
 import json
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 import re
 from typing import Any, Literal
 
@@ -45,6 +45,7 @@ ONBOARDER_FIELD_CANDIDATES = (
 )
 EXCLUDED_ONBOARDING_STATES = frozenset({"onboarded", "waitlist", "rejected"})
 ONBOARDING_QUEUE_MAX_SIZE = 200
+ONBOARDING_QUEUE_PAGE_SIZE = 1
 
 EspoAPI = espo.EspoAPI
 EspoAPIError = espo.EspoAPIError
@@ -1411,11 +1412,100 @@ class ResumeCreateContactView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button["ResumeCreateContactView"],
     ) -> None:
+        """Cancel contact creation and keep the queue untouched."""
+        self.crm_cog._audit_command(
+            interaction=interaction,
+            action="crm.upload_resume",
+            result="denied",
+            metadata={
+                "filename": self.filename,
+                "target_scope": self.target_scope,
+                "reason": "create_contact_cancelled",
+            },
+            resource_type="crm_contact",
+        )
         await interaction.response.send_message(
-            "ℹ️ Resume upload cancelled. No new contact was created.",
+            "Contact creation cancelled. No changes were made.",
             ephemeral=True,
         )
         await self._finalize(interaction)
+
+
+class OnboardingQueuePagerView(discord.ui.View):
+    """View for paging through onboarding queue entries one person at a time."""
+
+    def __init__(
+        self,
+        crm_cog: "CRMCog",
+        interaction: discord.Interaction,
+        queue_rows: list[dict[str, str]],
+        *,
+        page_size: int = ONBOARDING_QUEUE_PAGE_SIZE,
+    ) -> None:
+        super().__init__(timeout=300)
+        self.crm_cog = crm_cog
+        self.requester_id = getattr(interaction.user, "id", 0)
+        self.queue_rows = queue_rows
+        self.page_size = max(1, page_size)
+        self.page_index = 0
+        self._message: discord.Message | None = None
+        self.total_pages = (
+            (len(self.queue_rows) - 1) // self.page_size + 1 if self.queue_rows else 0
+        )
+        self._update_button_states()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Allow only the original command requester to page through the queue."""
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "❌ Only the command requester can page through this queue.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    def _build_embed(self) -> discord.Embed:
+        return self.crm_cog._build_onboarding_queue_page_embed(
+            self.queue_rows, page_index=self.page_index, page_size=self.page_size
+        )
+
+    def _set_message(self, message: discord.Message | None) -> None:
+        self._message = message
+
+    async def on_timeout(self) -> None:
+        """Disable controls after pager timeout."""
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+        if self._message:
+            try:
+                await self._message.edit(view=self)
+            except discord.NotFound:
+                pass
+            except discord.HTTPException as exc:
+                logger.warning("Failed to disable onboarding queue pager view: %s", exc)
+
+    def _update_button_states(self) -> None:
+        if not self.children:
+            return
+        if len(self.children) >= 1:
+            next_button = self.children[0]
+            if isinstance(next_button, discord.ui.Button):
+                next_button.disabled = self.page_index >= self.total_pages - 1
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.primary, emoji="▶️")
+    async def next_page(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button["OnboardingQueuePagerView"],
+    ) -> None:
+        """Show next contact in the onboarding queue."""
+        if self.page_index >= self.total_pages - 1:
+            return
+
+        self.page_index += 1
+        self._update_button_states()
+        await interaction.response.edit_message(embed=self._build_embed(), view=self)
 
 
 class CRMCog(commands.Cog):
@@ -1585,6 +1675,38 @@ class CRMCog(commands.Cog):
             return ""
         return str(value).strip().lower()
 
+    def _format_onboarding_updated_at(self, raw_value: Any) -> str:
+        """Normalize the onboarding updated-at value for display."""
+        if raw_value is None:
+            return "Unknown"
+
+        if isinstance(raw_value, (int, float)):
+            try:
+                return datetime.fromtimestamp(raw_value, tz=timezone.utc).strftime(
+                    "%Y-%m-%d %H:%M UTC"
+                )
+            except (OSError, OverflowError, ValueError):
+                return str(raw_value)
+
+        raw_value_text = str(raw_value).strip()
+        if not raw_value_text:
+            return "Unknown"
+
+        try:
+            parsed = datetime.fromisoformat(raw_value_text.replace("Z", "+00:00"))
+        except ValueError:
+            return raw_value_text
+
+        if parsed.tzinfo is None:
+            if parsed.time() and parsed.time() != datetime.min.time():
+                return parsed.strftime("%Y-%m-%d %H:%M")
+            return parsed.strftime("%Y-%m-%d")
+
+        parsed_utc = parsed.astimezone(timezone.utc)
+        if parsed_utc.time() and parsed_utc.time() != datetime.min.time():
+            return parsed_utc.strftime("%Y-%m-%d %H:%M UTC")
+        return parsed_utc.strftime("%Y-%m-%d")
+
     async def _resolve_onboarder_username(
         self, interaction: discord.Interaction, raw_onboarder: str
     ) -> str | None:
@@ -1661,6 +1783,126 @@ class CRMCog(commands.Cog):
             contact_info = f"🔗 [View in CRM]({profile_url})\n{contact_info}"
 
         return contact_info
+
+    def _build_onboarding_queue_row(
+        self, contact_record: dict[str, Any], status: str
+    ) -> dict[str, str]:
+        """Build a compact dictionary for one onboarding queue row."""
+        email = str(contact_record.get("emailAddress") or "No email")
+        name = str(contact_record.get("name") or "Unknown")
+        contact_id = str(contact_record.get("id") or "")
+
+        discord_user_id = contact_record.get("cDiscordUserID")
+        discord_username = contact_record.get("cDiscordUsername")
+        clean_discord_username = "No Discord"
+        if isinstance(discord_username, str) and discord_username.strip():
+            clean_discord_username = (
+                discord_username.split(" (ID: ")[0]
+                if " (ID: " in discord_username
+                else discord_username.strip()
+            )
+
+        onboarder_field = self._resolve_field_name(
+            contact_record, candidates=ONBOARDER_FIELD_CANDIDATES
+        )
+        onboarder_value = (
+            str(contact_record.get(onboarder_field, "")).strip()
+            if onboarder_field
+            else ""
+        )
+
+        return {
+            "name": name,
+            "email": email,
+            "status": status or "Unknown",
+            "onboarder": onboarder_value or "Unassigned",
+            "discord_user": clean_discord_username,
+            "discord_user_id": str(discord_user_id or ""),
+            "onboarding_updated_at": self._format_onboarding_updated_at(
+                contact_record.get("cOnboardingUpdatedAt")
+            ),
+            "crm_url": f"{self.base_url}/#Contact/view/{contact_id}"
+            if contact_id
+            else "",
+            "id": contact_id,
+        }
+
+    def _build_onboarding_queue_rows(
+        self,
+        interaction: discord.Interaction,
+        queue_entries: list[tuple[dict[str, Any], str]],
+    ) -> list[dict[str, str]]:
+        """Build compact per-row onboarding data."""
+        rows: list[dict[str, str]] = []
+        for contact_record, status in queue_entries:
+            row = self._build_onboarding_queue_row(contact_record, status)
+
+            discord_user_id = row.get("discord_user_id")
+            discord_display = row.get("discord_user", "No Discord")
+            if discord_user_id and interaction.guild:
+                try:
+                    member = interaction.guild.get_member(int(discord_user_id))
+                    if member:
+                        discord_display = f"{member.mention} ({discord_display})"
+                except (TypeError, ValueError):
+                    pass
+            row["discord_user"] = discord_display
+            rows.append(row)
+        return rows
+
+    def _build_onboarding_queue_page_embed(
+        self,
+        queue_rows: list[dict[str, str]],
+        *,
+        page_index: int,
+        page_size: int,
+    ) -> discord.Embed:
+        """Build one-page onboarding queue embed."""
+        if not queue_rows:
+            return discord.Embed(
+                title="📋 Onboarding Queue",
+                description="No onboarding contacts were found.",
+                color=0x0099FF,
+            )
+
+        total_rows = len(queue_rows)
+        start = max(0, page_index) * page_size
+        end = min(start + page_size, total_rows)
+        shown_rows = queue_rows[start:end]
+
+        embed = discord.Embed(
+            title="📋 Onboarding Queue",
+            description=(
+                "Contacts currently outside `onboarded`, `waitlist`, and "
+                f"`rejected` states. Showing {start + 1}-{end} of {total_rows}."
+            ),
+            color=0x0099FF,
+        )
+
+        for row in shown_rows:
+            details = [
+                f"📧 **Email:** {row.get('email', 'No email')}",
+                f"👤 **Name:** {row.get('name', 'Unknown')}",
+                f"💬 **Linked Discord:** {row.get('discord_user', 'No Discord')}",
+                f"🕘 **cOnboardingUpdatedAt:** {row.get('onboarding_updated_at', 'Unknown')}",
+                f"📌 **cOnboardingState:** {row.get('status', 'Unknown')}",
+                f"🧑‍💼 **cOnboarder:** {row.get('onboarder', 'Unassigned')}",
+            ]
+            crm_url = row.get("crm_url", "")
+            if crm_url:
+                details.append(f"🔗 [View in CRM]({crm_url})")
+            else:
+                details.append("🔗 **CRM:** Unavailable")
+
+            embed.add_field(
+                name=f"Contact: {row.get('name', 'Unknown')}",
+                value="\n".join(details),
+                inline=False,
+            )
+
+        total_pages = (total_rows - 1) // page_size + 1
+        embed.set_footer(text=f"Page {page_index + 1} of {total_pages}")
+        return embed
 
     def _build_resume_preview_embed(
         self,
@@ -2564,6 +2806,11 @@ class CRMCog(commands.Cog):
                 "Contact",
                 {
                     "maxSize": ONBOARDING_QUEUE_MAX_SIZE,
+                    "select": (
+                        "id,name,emailAddress,cDiscordUsername,cDiscordUserID,"
+                        "cOnboardingState,cOnboardingStatus,cOnboarding,"
+                        "cOnboarder,cOnboardingCoordinator,cOnboardingUpdatedAt"
+                    ),
                 },
             )
             contacts = response.get("list", [])
@@ -2598,55 +2845,31 @@ class CRMCog(commands.Cog):
                 key=lambda item: (item[1] or "unknown", str(item[0].get("name", "")))
             )
 
-            embed = discord.Embed(
-                title="📋 Onboarding Queue",
-                description=(
-                    "Contacts currently outside `onboarded`, `waitlist`, and `rejected` states."
-                ),
-                color=0x0099FF,
+            queue_rows = self._build_onboarding_queue_rows(interaction, queue_entries)
+            view = OnboardingQueuePagerView(
+                crm_cog=self,
+                interaction=interaction,
+                queue_rows=queue_rows,
+                page_size=ONBOARDING_QUEUE_PAGE_SIZE,
             )
-
-            for contact_record, status in queue_entries[:25]:
-                contact_id = contact_record.get("id", "")
-                onboarder_field = self._resolve_field_name(
-                    contact_record, candidates=ONBOARDER_FIELD_CANDIDATES
-                )
-                onboarder_value = (
-                    str(contact_record.get(onboarder_field, "")).strip()
-                    if onboarder_field
-                    else ""
-                )
-
-                additional_fields: list[tuple[str, str]] = [
-                    ("📌 Onboarding Status", status or "Unknown"),
-                    ("🆔 ID", str(contact_id)),
-                ]
-                if onboarder_value:
-                    additional_fields.append(("🧑‍💼 Onboarder", onboarder_value))
-
-                contact_info = self._format_contact_card(
-                    contact_record,
-                    interaction=interaction,
-                    additional_fields=additional_fields,
-                )
-                embed.add_field(
-                    name=f"👤 {contact_record.get('name', 'Unknown')}",
-                    value=contact_info,
-                    inline=False,
-                )
-
-            if len(queue_entries) > 25:
-                embed.set_footer(
-                    text=f"Showing 25 of {len(queue_entries)} matching contacts."
-                )
+            embed = view._build_embed()
 
             self._audit_command(
                 interaction=interaction,
                 action="crm.view_onboarding_queue",
                 result="success",
-                metadata={"count": len(queue_entries)},
+                metadata={
+                    "count": len(queue_entries),
+                    "output_format": "embed_paged",
+                },
             )
-            await interaction.followup.send(embed=embed)
+            if view.total_pages > 1:
+                message = await interaction.followup.send(
+                    embed=embed, view=view, wait=True
+                )
+                view._set_message(message)
+            else:
+                await interaction.followup.send(embed=embed)
 
         except EspoAPIError as e:
             logger.error(f"EspoCRM API error in view_onboarding_queue: {e}")

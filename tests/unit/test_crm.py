@@ -603,20 +603,39 @@ class TestCRMCog:
         await crm_cog.view_onboarding_queue.callback(crm_cog, mock_interaction)
 
         crm_cog.espo_api.request.assert_called_once_with(
-            "GET", "Contact", {"maxSize": 200}
+            "GET",
+            "Contact",
+            {
+                "maxSize": 200,
+                "select": (
+                    "id,name,emailAddress,cDiscordUsername,cDiscordUserID,"
+                    "cOnboardingState,cOnboardingStatus,cOnboarding,"
+                    "cOnboarder,cOnboardingCoordinator,cOnboardingUpdatedAt"
+                ),
+            },
         )
 
-        embed = mock_interaction.followup.send.call_args[1]["embed"]
+        send_kwargs = mock_interaction.followup.send.call_args[1]
+        assert "embed" in send_kwargs
+        assert "view" in send_kwargs
+        embed = send_kwargs["embed"]
         names = [field.name for field in embed.fields]
         values = [field.value for field in embed.fields]
-        assert any("Alice" in n for n in names)
-        assert any("Eli" in n for n in names)
-        assert not any("Bob" in n for n in names)
-        assert not any("Cara" in n for n in names)
-        assert not any("Drew" in n for n in names)
-        assert any("📌 Onboarding Status: pending" in value for value in values)
-        assert any("📌 Onboarding Status: Unknown" in value for value in values)
-        assert any("🧑‍💼 Onboarder: mentorA" in value for value in values)
+        assert any("Contact: Alice" in name for name in names)
+        assert all("Contact: Eli" not in name for name in names)
+        assert any("📧 **Email:** No email" in value for value in values)
+        assert any("💬 **Linked Discord:** No Discord" in value for value in values)
+        assert any("🧑‍💼 **cOnboarder:** mentorA" in value for value in values)
+        assert any("📌 **cOnboardingState:** pending" in value for value in values)
+        assert any("🔗 [View in CRM](" in value for value in values)
+
+        view = send_kwargs["view"]
+        queue_rows = getattr(view, "queue_rows", None)
+        assert queue_rows is not None
+        queued_names = {row.get("name") for row in queue_rows}
+        assert queued_names == {"Alice", "Eli"}
+        for row in queue_rows:
+            assert row.get("status") not in {"onboarded", "waitlist", "rejected"}
 
     @pytest.mark.asyncio
     async def test_view_onboarding_queue_empty_when_only_excluded(
@@ -638,7 +657,16 @@ class TestCRMCog:
         await crm_cog.view_onboarding_queue.callback(crm_cog, mock_interaction)
 
         crm_cog.espo_api.request.assert_called_once_with(
-            "GET", "Contact", {"maxSize": 200}
+            "GET",
+            "Contact",
+            {
+                "maxSize": 200,
+                "select": (
+                    "id,name,emailAddress,cDiscordUsername,cDiscordUserID,"
+                    "cOnboardingState,cOnboardingStatus,cOnboarding,"
+                    "cOnboarder,cOnboardingCoordinator,cOnboardingUpdatedAt"
+                ),
+            },
         )
         message = mock_interaction.followup.send.call_args[0][0]
         assert "✅ No contacts found in onboarding queue." in message
@@ -657,6 +685,105 @@ class TestCRMCog:
 
         message = mock_interaction.followup.send.call_args[0][0]
         assert "❌ CRM API error: Queue service down" in message
+
+    @pytest.mark.asyncio
+    async def test_view_onboarding_queue_uses_pagination_for_large_queues(
+        self, crm_cog, mock_interaction
+    ):
+        """Large queues should be returned as paginated embeds."""
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+
+        long_name_suffix = "X" * 120
+        long_email_suffix = "y" * 80
+        crm_cog.espo_api.request.return_value = {
+            "list": [
+                {
+                    "id": f"c{i}",
+                    "name": f"Contact {i} {long_name_suffix}",
+                    "emailAddress": f"user{i}@{long_email_suffix}.example.com",
+                    "type": "Member",
+                    "c508Email": f"member{i}@508.dev",
+                    "cDiscordUsername": f"member{i}#1234",
+                    "cOnboardingState": "pending",
+                    "cOnboarder": f"mentor{i}",
+                }
+                for i in range(1, 26)
+            ]
+        }
+
+        await crm_cog.view_onboarding_queue.callback(crm_cog, mock_interaction)
+
+        assert mock_interaction.followup.send.call_count == 1
+        send_kwargs = mock_interaction.followup.send.call_args[1]
+        assert "embed" in send_kwargs
+        assert "view" in send_kwargs
+        assert send_kwargs["view"].total_pages > 1
+
+    def test_format_onboarding_updated_at_normalizes_timezone(self, crm_cog):
+        """Timestamps should be normalized consistently for display."""
+        assert crm_cog._format_onboarding_updated_at(0) == "1970-01-01 00:00 UTC"
+        assert (
+            crm_cog._format_onboarding_updated_at("2026-03-03T12:00:00-05:00")
+            == "2026-03-03 17:00 UTC"
+        )
+        assert crm_cog._format_onboarding_updated_at("2026-03-03T12:00:00") == (
+            "2026-03-03 12:00"
+        )
+        assert crm_cog._format_onboarding_updated_at("2026-03-03T00:00:00Z") == (
+            "2026-03-03"
+        )
+
+    @pytest.mark.asyncio
+    async def test_resume_create_contact_view_cancel_path(
+        self, crm_cog, mock_interaction
+    ):
+        """Canceling contact creation should not create a contact."""
+        original_interaction = Mock()
+        original_interaction.user = Mock(id=101)
+
+        mock_interaction.user.id = 101
+        mock_interaction.response = AsyncMock()
+        mock_interaction.response.send_message = AsyncMock()
+        mock_interaction.followup = AsyncMock()
+        mock_interaction.followup.send = AsyncMock()
+        mock_interaction.message = AsyncMock()
+        mock_interaction.message.edit = AsyncMock()
+
+        crm_cog._audit_command = Mock()
+
+        view = ResumeCreateContactView(
+            crm_cog=crm_cog,
+            interaction=original_interaction,
+            file_content=b"resume-bytes",
+            filename="candidate.pdf",
+            file_size=1024,
+            search_term=None,
+            overwrite=False,
+            link_user=None,
+            inferred_contact_meta={"reason": "no_matching_contact"},
+            target_scope="resume_inferred",
+        )
+
+        cancel_button = next(
+            child
+            for child in view.children
+            if isinstance(child, discord.ui.Button) and child.label == "Cancel"
+        )
+
+        await cancel_button.callback(mock_interaction)
+
+        crm_cog.espo_api.request.assert_not_called()
+        crm_cog._audit_command.assert_called_once()
+        mock_interaction.response.send_message.assert_called_once_with(
+            "Contact creation cancelled. No changes were made.",
+            ephemeral=True,
+        )
+        assert all(
+            isinstance(item, discord.ui.Button) and item.disabled
+            for item in view.children
+        )
 
     @pytest.mark.asyncio
     async def test_view_skills_self_uses_structured_attrs(
