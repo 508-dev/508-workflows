@@ -427,7 +427,9 @@ def _normalize_role_collection(value: Any) -> list[str]:
 
 def _normalize_website_url(value: str) -> str:
     candidate = unicodedata.normalize("NFKC", value)
-    candidate = candidate.encode("ascii", "ignore").decode("ascii").strip()
+    if any(ord(ch) > 127 for ch in candidate):
+        return ""
+    candidate = candidate.strip()
     candidate = candidate.strip(")]},.;:")
     if not candidate:
         return ""

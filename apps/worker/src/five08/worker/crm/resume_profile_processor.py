@@ -1199,11 +1199,9 @@ class ResumeProfileProcessor:
 
     @staticmethod
     def _normalize_website_url(value: str) -> str | None:
-        candidate = (
-            unicodedata.normalize("NFKC", value)
-            .encode("ascii", "ignore")
-            .decode("ascii")
-        )
+        candidate = unicodedata.normalize("NFKC", value)
+        if any(ord(ch) > 127 for ch in candidate):
+            return None
         candidate = candidate.strip().strip(")]},.;:")
         if not candidate:
             return None
