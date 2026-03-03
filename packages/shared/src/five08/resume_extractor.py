@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -129,11 +130,26 @@ def _normalize_seniority(value: Any) -> str | None:
         return "junior"
     if normalized in {"mid-level", "midlevel", "mid", "intermediate"}:
         return "midlevel"
-    if normalized in {"senior", "lead", "principal"}:
-        return normalized
-    if normalized in {"staff", "staff+"}:
+    if normalized in {"staff", "staff+", "staff and beyond"}:
         return "staff"
-    return normalized
+    if normalized in {
+        "senior",
+        "sr",
+        "sr. engineer",
+        "lead",
+        "lead engineer",
+        "lead engineer/tech lead",
+        "principal",
+        "principal engineer",
+    }:
+        return "senior"
+    if "lead" in normalized and ("engineer" in normalized or "lead" == normalized):
+        return "senior"
+    if "staff" in normalized:
+        return "staff"
+    if normalized.startswith("sr "):
+        return "senior"
+    return None
 
 
 def _normalize_skills(value: Any) -> list[str]:
@@ -256,7 +272,10 @@ class ResumeProfileExtractor:
                 phone=_normalize_phone(parsed.get("phone")),
                 website_links=_normalize_website_links(parsed.get("website_links")),
                 address_country=_normalize_country(parsed.get("address_country")),
-                seniority_level=_normalize_seniority(parsed.get("seniority_level")),
+                seniority_level=(
+                    _normalize_seniority(parsed.get("seniority_level"))
+                    or self._infer_seniority_from_resume(resume_text)
+                ),
                 skills=_normalize_skills(parsed.get("skills")),
                 confidence=_bounded_confidence(
                     parsed.get("confidence", 0.75),
@@ -326,6 +345,13 @@ class ResumeProfileExtractor:
             "- for github_username return username only (no URL, no @)\n"
             "- for linkedin_url return full linkedin profile URL when available\n"
             "- for phone return digits with optional leading +\n"
+            "- infer seniority_level as one of: junior, midlevel, senior, staff\n"
+            "- use 4-5 years with ownership and impact cues as senior\n"
+            "- use staff for 7+ years, or 5+ years with strong technical ownership/leadership\n"
+            "- weight company impact:\n"
+            "  - +1 for leadership titles (staff/lead/principal/architect)\n"
+            "  - +1 for enterprise-scale impact signals (team ownership, direct reports, cross-team work, large org terms)\n"
+            "  - when company signal is ambiguous, return conservative midlevel\n"
             "- use null for unknown or ambiguous fields\n"
             "- confidence is 0-1 for overall extraction reliability\n\n"
             f"Resume:\n{snippet}"
@@ -364,8 +390,81 @@ class ResumeProfileExtractor:
             resume_text,
         )
         if match:
-            return _normalize_seniority(match.group(1))
+            parsed = _normalize_seniority(match.group(1))
+            if parsed:
+                return parsed
+
+        inferred = ResumeProfileExtractor._infer_seniority_from_resume(resume_text)
+        if inferred:
+            return inferred
+
         return None
+
+    @staticmethod
+    def _infer_seniority_from_resume(resume_text: str) -> str | None:
+        lower_text = resume_text.lower()
+        years = ResumeProfileExtractor._extract_years_of_experience(resume_text)
+        if years is None:
+            return None
+
+        impact_score = 0
+        if re.search(
+            r"\b(staff|principal|lead engineer|principal engineer)\b", lower_text
+        ):
+            impact_score += 2
+        if re.search(
+            r"\b(architect|engineering lead|tech lead|lead dev|leading|led a team|team lead)\b",
+            lower_text,
+        ):
+            impact_score += 1
+        if re.search(
+            r"\b(team of\s+\d+|managed|mentored|cross-functional|enterprise|global|series [abcd]|"
+            r"\b500\+?|\b1000\+?|\b10[0-9]{2,}\s+employees",
+            lower_text,
+        ):
+            impact_score += 1
+
+        if years >= 7:
+            return "staff" if impact_score >= 1 else "senior"
+        if years >= 5:
+            return "senior"
+        if years >= 4:
+            return "senior" if impact_score >= 1 else "midlevel"
+        if years >= 2:
+            return "midlevel"
+        return "junior"
+
+    @staticmethod
+    def _extract_years_of_experience(resume_text: str) -> int | None:
+        years = []
+        year_patterns = [
+            r"(\d{1,2})\+?\s*years?\s+of\s+(?:software\s+|engineering\s+)?experience",
+            r"(?:experience|career)\s*(?:\:\s*)?(\d{1,2})\+?\s*years",
+            r"over\s+(\d{1,2})\s+years",
+        ]
+        for pattern in year_patterns:
+            for match in re.finditer(pattern, resume_text, flags=re.IGNORECASE):
+                try:
+                    years.append(int(match.group(1)))
+                except Exception:
+                    pass
+
+        date_range_pattern = re.compile(
+            r"\b((?:19|20)\d{2})\s*-\s*((?:19|20)\d{2}|present|current)\b",
+            flags=re.IGNORECASE,
+        )
+        today_year = datetime.now(timezone.utc).year
+        for match in date_range_pattern.finditer(resume_text):
+            start_year = int(match.group(1))
+            end_token = match.group(2).lower()
+            end_year = (
+                today_year if end_token in {"present", "current"} else int(end_token)
+            )
+            years.append(max(0, end_year - start_year))
+
+        if not years:
+            return None
+        return max(years)
 
     @staticmethod
     def _extract_skills(resume_text: str) -> list[str]:

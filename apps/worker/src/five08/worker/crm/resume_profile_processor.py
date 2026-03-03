@@ -75,11 +75,9 @@ class ResumeProfileProcessor:
             model_name = extracted.source
             extracted_skills_result = self.skills_extractor.extract_skills(text)
             extracted_skills = extracted_skills_result.skills
-            normalized_extracted_skills = [
-                normalized_skill
-                for skill in extracted_skills
-                if (normalized_skill := self.skills_extractor.canonicalize_skill(skill))
-            ]
+            normalized_extracted_skills = self._dedupe_normalized_skills(
+                extracted_skills
+            )
             existing_skills = self._parse_existing_skills(contact.get("skills"))
             existing_skill_attrs = self._parse_skill_attrs(contact.get("cSkillAttrs"))
             existing_websites = self._coerce_website_links(contact.get("cWebsiteLink"))
@@ -89,7 +87,7 @@ class ResumeProfileProcessor:
                 for skill in normalized_extracted_skills
                 if skill.casefold() not in existing_lower
             ]
-            merged_skills = list(dict.fromkeys(existing_skills + new_skills))
+            merged_skills = self._dedupe_normalized_skills(existing_skills + new_skills)
             merged_websites = self._merge_website_links(
                 existing=existing_websites,
                 extracted=extracted.website_links,
@@ -138,6 +136,15 @@ class ResumeProfileProcessor:
                 label="Phone",
                 current=contact.get("phoneNumber"),
                 proposed=extracted.phone,
+                proposed_updates=proposed_updates,
+                proposed_changes=proposed_changes,
+                skipped=skipped,
+            )
+            self._collect_change(
+                crm_field="cSeniority",
+                label="Seniority",
+                current=self._normalize_seniority(contact.get("cSeniority")),
+                proposed=self._normalize_seniority(extracted.seniority_level),
                 proposed_updates=proposed_updates,
                 proposed_changes=proposed_changes,
                 skipped=skipped,
@@ -317,10 +324,18 @@ class ResumeProfileProcessor:
                 else:
                     normalized_updates.pop("emailAddressData", None)
 
+            if "cSeniority" in normalized_updates:
+                normalized_updates["cSeniority"] = self._normalize_seniority(
+                    normalized_updates.get("cSeniority")
+                )
+                if not normalized_updates["cSeniority"]:
+                    normalized_updates.pop("cSeniority", None)
+
             allowed_fields = {
                 "emailAddressData",
                 "cGitHubUsername",
                 settings.crm_linkedin_field,
+                "cSeniority",
                 "phoneNumber",
                 "skills",
                 "cSkillAttrs",
@@ -462,8 +477,7 @@ class ResumeProfileProcessor:
             return str(value).lower()
         return str(value).strip()
 
-    @staticmethod
-    def _coerce_skills_updates(value: Any) -> list[str]:
+    def _coerce_skills_updates(self, value: Any) -> list[str]:
         if isinstance(value, (list, tuple, set)):
             raw_skills = [item for item in value]
         elif isinstance(value, str):
@@ -474,7 +488,7 @@ class ResumeProfileProcessor:
         normalized: list[str] = []
         seen: set[str] = set()
         for raw_skill in raw_skills:
-            skill = str(raw_skill).strip().casefold()
+            skill = self.skills_extractor.canonicalize_skill(str(raw_skill).strip())
             if not skill:
                 continue
             key = skill.casefold()
@@ -566,31 +580,66 @@ class ResumeProfileProcessor:
 
         if isinstance(value, list):
             raw_skills = [str(item).strip() for item in value if str(item).strip()]
+        elif isinstance(value, (tuple, set)):
+            raw_skills = [str(item).strip() for item in value if str(item).strip()]
         else:
             raw_skills = [
                 item.strip() for item in str(value).split(",") if item.strip()
             ]
+        return self._dedupe_normalized_skills(raw_skills)
 
-        normalized: list[str] = []
-        seen: set[str] = set()
-        for skill in raw_skills:
-            canonical = self.skills_extractor.canonicalize_skill(skill)
-            if not canonical:
-                continue
-            key = canonical.casefold()
-            if key in seen:
-                continue
-            seen.add(key)
-            normalized.append(canonical)
-        return normalized
+    @staticmethod
+    def _normalize_seniority(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip().lower().replace("_", "-")
+        if not normalized:
+            return None
+        if normalized in {
+            "jr",
+            "junior",
+            "intern",
+            "internship",
+            "entry",
+            "entry-level",
+            "entry level",
+        }:
+            return "junior"
+        if normalized in {"mid", "mid-level", "midlevel", "intermediate"}:
+            return "midlevel"
+        if normalized in {
+            "senior",
+            "sr",
+            "sr. engineer",
+            "senior engineer",
+            "lead",
+            "lead engineer",
+            "lead engineer/tech lead",
+            "tech lead",
+        }:
+            return "senior"
+        if normalized in {
+            "staff",
+            "staff+",
+            "staff and beyond",
+            "principal",
+            "principal engineer",
+        }:
+            return "staff"
+        if "lead " in normalized and "engineer" in normalized:
+            return "senior"
+        if normalized.startswith("lead "):
+            return "senior"
+        return None
 
     def _format_skills_with_strength(
         self,
         skills: list[str],
         attrs: dict[str, int],
     ) -> str:
+        deduped_skills = self._dedupe_normalized_skills(skills)
         formatted: list[str] = []
-        for raw_skill in skills:
+        for raw_skill in deduped_skills:
             skill = raw_skill.strip()
             if not skill:
                 continue
@@ -600,6 +649,30 @@ class ResumeProfileProcessor:
             else:
                 formatted.append(skill)
         return ", ".join(formatted)
+
+    def _dedupe_normalized_skills(self, value: Any) -> list[str]:
+        if value is None:
+            return []
+
+        if isinstance(value, str):
+            raw_skills = [item.strip() for item in value.split(",") if item.strip()]
+        elif isinstance(value, (list, tuple, set)):
+            raw_skills = [str(item).strip() for item in value if str(item).strip()]
+        else:
+            return []
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw_skill in raw_skills:
+            canonical = self.skills_extractor.canonicalize_skill(raw_skill)
+            if not canonical:
+                continue
+            key = canonical.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(canonical)
+        return normalized
 
     def _parse_skill_attrs(self, value: Any) -> dict[str, int]:
         if value is None:
@@ -646,7 +719,10 @@ class ResumeProfileProcessor:
         merged: dict[str, int] = dict(existing_attrs)
 
         for skill, attrs in extracted_attrs.items():
-            key = str(skill).strip().casefold()
+            key = self.skills_extractor.canonicalize_skill(str(skill).strip())
+            if not key:
+                continue
+            key = key.casefold()
             if key:
                 merged[key] = max(1, min(5, int(attrs.strength)))
 
