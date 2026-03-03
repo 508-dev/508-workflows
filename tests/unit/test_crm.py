@@ -579,6 +579,44 @@ class TestCRMCog:
         assert "❌ CRM API error: Queue service down" in message
 
     @pytest.mark.asyncio
+    async def test_view_onboarding_queue_falls_back_to_text_when_embed_too_large(
+        self, crm_cog, mock_interaction
+    ):
+        """Large queue payloads should switch to plain-text output."""
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+
+        long_name_suffix = "X" * 120
+        long_email_suffix = "y" * 80
+        crm_cog.espo_api.request.return_value = {
+            "list": [
+                {
+                    "id": f"c{i}",
+                    "name": f"Contact {i} {long_name_suffix}",
+                    "emailAddress": f"user{i}@{long_email_suffix}.example.com",
+                    "type": "Member",
+                    "c508Email": f"member{i}@508.dev",
+                    "cDiscordUsername": f"member{i}#1234",
+                    "cOnboardingState": "pending",
+                    "cOnboarder": f"mentor{i}",
+                }
+                for i in range(1, 26)
+            ]
+        }
+
+        await crm_cog.view_onboarding_queue.callback(crm_cog, mock_interaction)
+
+        assert mock_interaction.followup.send.call_count >= 1
+        for call_args in mock_interaction.followup.send.call_args_list:
+            kwargs = call_args[1]
+            assert "embed" not in kwargs
+            assert "file" not in kwargs
+
+        first_call = mock_interaction.followup.send.call_args_list[0]
+        assert "too large for embed format" in first_call[0][0]
+
+    @pytest.mark.asyncio
     async def test_view_skills_self_uses_structured_attrs(
         self, crm_cog, mock_interaction, mock_member_role
     ):

@@ -45,6 +45,9 @@ ONBOARDER_FIELD_CANDIDATES = (
 )
 EXCLUDED_ONBOARDING_STATES = frozenset({"onboarded", "waitlist", "rejected"})
 ONBOARDING_QUEUE_MAX_SIZE = 200
+ONBOARDING_QUEUE_EMBED_MAX_FIELDS = 25
+DISCORD_EMBED_MAX_TOTAL_CHARS = 6000
+DISCORD_MESSAGE_MAX_CHARS = 2000
 
 EspoAPI = espo.EspoAPI
 EspoAPIError = espo.EspoAPIError
@@ -1341,6 +1344,68 @@ class CRMCog(commands.Cog):
 
         return contact_info
 
+    def _build_onboarding_queue_text(
+        self, queue_entries: list[tuple[dict[str, Any], str]]
+    ) -> str:
+        """Build a compact plain-text view for onboarding queue entries."""
+        lines = [
+            "Onboarding queue",
+            "Excludes states: onboarded, waitlist, rejected",
+            f"Total contacts: {len(queue_entries)}",
+            "",
+        ]
+
+        for index, (contact_record, status) in enumerate(queue_entries, start=1):
+            name = str(contact_record.get("name") or "Unknown")
+            contact_id = str(contact_record.get("id") or "")
+
+            onboarder_field = self._resolve_field_name(
+                contact_record, candidates=ONBOARDER_FIELD_CANDIDATES
+            )
+            onboarder_value = (
+                str(contact_record.get(onboarder_field, "")).strip()
+                if onboarder_field
+                else ""
+            )
+
+            parts = [f"{index}. {name}", f"status={status or 'unknown'}"]
+            if onboarder_value:
+                parts.append(f"onboarder={onboarder_value}")
+            if contact_id:
+                parts.append(f"id={contact_id}")
+
+            lines.append(" | ".join(parts))
+
+        return "\n".join(lines)
+
+    async def _send_onboarding_queue_text(
+        self,
+        interaction: discord.Interaction,
+        queue_entries: list[tuple[dict[str, Any], str]],
+    ) -> None:
+        """Send onboarding queue in plain text split across safe message chunks."""
+        queue_text = self._build_onboarding_queue_text(queue_entries)
+        prefix = (
+            "📄 Onboarding queue is too large for embed format. Sending plain text."
+        )
+
+        messages: list[str] = []
+        current_message = prefix
+        for line in queue_text.splitlines():
+            candidate = f"{current_message}\n{line}" if current_message else line
+            if len(candidate) <= DISCORD_MESSAGE_MAX_CHARS:
+                current_message = candidate
+                continue
+
+            messages.append(current_message)
+            current_message = line
+
+        if current_message:
+            messages.append(current_message)
+
+        for message in messages:
+            await interaction.followup.send(message)
+
     def _build_resume_preview_embed(
         self,
         *,
@@ -2285,7 +2350,11 @@ class CRMCog(commands.Cog):
                 color=0x0099FF,
             )
 
-            for contact_record, status in queue_entries[:25]:
+            shown_count = 0
+            embed_too_large = False
+            for contact_record, status in queue_entries[
+                :ONBOARDING_QUEUE_EMBED_MAX_FIELDS
+            ]:
                 contact_id = contact_record.get("id", "")
                 onboarder_field = self._resolve_field_name(
                     contact_record, candidates=ONBOARDER_FIELD_CANDIDATES
@@ -2308,22 +2377,44 @@ class CRMCog(commands.Cog):
                     interaction=interaction,
                     additional_fields=additional_fields,
                 )
-                embed.add_field(
-                    name=f"👤 {contact_record.get('name', 'Unknown')}",
-                    value=contact_info,
-                    inline=False,
-                )
+                field_name = f"👤 {contact_record.get('name', 'Unknown')}"
+                projected_size = len(embed) + len(field_name) + len(contact_info)
+                if projected_size > DISCORD_EMBED_MAX_TOTAL_CHARS:
+                    embed_too_large = True
+                    break
 
-            if len(queue_entries) > 25:
-                embed.set_footer(
-                    text=f"Showing 25 of {len(queue_entries)} matching contacts."
+                embed.add_field(name=field_name, value=contact_info, inline=False)
+                shown_count += 1
+
+            if embed_too_large:
+                await self._send_onboarding_queue_text(interaction, queue_entries)
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.view_onboarding_queue",
+                    result="success",
+                    metadata={
+                        "count": len(queue_entries),
+                        "output_format": "text",
+                    },
                 )
+                return
+
+            if len(queue_entries) > shown_count:
+                footer_text = (
+                    f"Showing {shown_count} of {len(queue_entries)} matching contacts."
+                )
+                if len(embed) + len(footer_text) <= DISCORD_EMBED_MAX_TOTAL_CHARS:
+                    embed.set_footer(text=footer_text)
 
             self._audit_command(
                 interaction=interaction,
                 action="crm.view_onboarding_queue",
                 result="success",
-                metadata={"count": len(queue_entries)},
+                metadata={
+                    "count": len(queue_entries),
+                    "shown_count": shown_count,
+                    "output_format": "embed",
+                },
             )
             await interaction.followup.send(embed=embed)
 
