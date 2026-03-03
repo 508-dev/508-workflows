@@ -22,13 +22,15 @@ _WEBHOOK_INFO_COLOR = 0x3498DB
 _FAILURE_RESULTS: Final[frozenset[str]] = frozenset(
     {"error", "failed", "failure", "denied"}
 )
+_SUCCESS_RESULTS: Final[frozenset[str]] = frozenset(
+    {"success", "ok", "created", "queued", "succeeded"}
+)
+_WARNING_RESULTS: Final[frozenset[str]] = frozenset({"retrying", "warning"})
 _NON_MUTATING_COMMAND_ACTIONS: Final[frozenset[str]] = frozenset(
     {
         "crm.resume_download_button",
         "crm.status",
         "crm.unlinked_discord_users",
-        "crm.view_onboarding_queue",
-        "crm.view_skills",
     }
 )
 _NON_MUTATING_COMMAND_PREFIXES: Final[tuple[str, ...]] = (
@@ -98,10 +100,12 @@ class DiscordAuditLogger:
 
     @staticmethod
     def _is_failure_result(result: str) -> bool:
+        """Return True when command result should always be audited."""
         return result.strip().lower() in _FAILURE_RESULTS
 
     @staticmethod
     def _is_non_mutating_action(action: str) -> bool:
+        """Return True when the command action is treated as non-mutating."""
         normalized_action = action.strip().lower()
         if normalized_action in _NON_MUTATING_COMMAND_ACTIONS:
             return True
@@ -112,6 +116,7 @@ class DiscordAuditLogger:
 
     @staticmethod
     def _should_log_command_event(*, action: str, result: str) -> bool:
+        """Return whether a command event should be emitted."""
         if DiscordAuditLogger._is_failure_result(result):
             return True
         return not DiscordAuditLogger._is_non_mutating_action(action)
@@ -224,9 +229,9 @@ class DiscordAuditLogger:
     @staticmethod
     def _result_emoji(result: str) -> str:
         normalized = result.strip().lower()
-        if normalized in {"success", "ok", "created", "queued"}:
+        if normalized in _SUCCESS_RESULTS:
             return "✅"
-        if normalized in {"error", "failed", "failure", "denied"}:
+        if normalized in _FAILURE_RESULTS:
             return "❌"
         return "ℹ️"
 
@@ -239,11 +244,11 @@ class DiscordAuditLogger:
     @staticmethod
     def _webhook_color(result: str) -> int:
         normalized = result.strip().lower()
-        if normalized in {"success", "ok", "created", "queued", "succeeded"}:
+        if normalized in _SUCCESS_RESULTS:
             return _WEBHOOK_SUCCESS_COLOR
-        if normalized in {"error", "failed", "failure", "denied"}:
+        if normalized in _FAILURE_RESULTS:
             return _WEBHOOK_ERROR_COLOR
-        if normalized in {"retrying", "warning"}:
+        if normalized in _WARNING_RESULTS:
             return _WEBHOOK_WARNING_COLOR
         return _WEBHOOK_INFO_COLOR
 

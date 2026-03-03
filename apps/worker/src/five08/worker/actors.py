@@ -230,16 +230,15 @@ def _run_job(job_id: str) -> None:
         error = f"Unknown job type: {job.type}"
         logger.error("Marking job dead id=%s error=%s", job_id, error)
         mark_job_dead(settings, job_id, attempts=job.attempts, last_error=error)
-        if _should_log_job_event(event_type="dead", job_type=job.type):
-            _log_job_event(
-                event_type="dead",
-                job_id=job.id,
-                job_type=job.type,
-                attempts=_job_attempt_display(job.attempts),
-                max_attempts=job.max_attempts,
-                worker_name=settings.worker_name,
-                error=error,
-            )
+        _log_job_event(
+            event_type="dead",
+            job_id=job.id,
+            job_type=job.type,
+            attempts=_job_attempt_display(job.attempts),
+            max_attempts=job.max_attempts,
+            worker_name=settings.worker_name,
+            error=error,
+        )
         return
 
     mark_job_running(settings, job_id, worker_name=settings.worker_name)
@@ -288,16 +287,15 @@ def _run_job(job_id: str) -> None:
             attempts=next_attempt,
             last_error=error,
         )
-        if _should_log_job_event(event_type="dead", job_type=job.type):
-            _log_job_event(
-                event_type="dead",
-                job_id=job.id,
-                job_type=job.type,
-                attempts=next_attempt,
-                max_attempts=job.max_attempts,
-                worker_name=settings.worker_name,
-                error=error,
-            )
+        _log_job_event(
+            event_type="dead",
+            job_id=job.id,
+            job_type=job.type,
+            attempts=next_attempt,
+            max_attempts=job.max_attempts,
+            worker_name=settings.worker_name,
+            error=error,
+        )
     except Exception as exc:
         next_attempt = job.attempts + 1
         error = f"{type(exc).__name__}: {exc}"
