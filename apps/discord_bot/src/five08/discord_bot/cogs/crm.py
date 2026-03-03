@@ -3179,6 +3179,9 @@ class CRMCog(commands.Cog):
             "address_country": profile.address_country,
             "seniority_level": profile.seniority_level,
             "skills": profile.skills,
+            "availability": profile.availability,
+            "rate_range": profile.rate_range,
+            "referred_by": profile.referred_by,
         }
 
     def _extract_resume_profile(self, file_content: bytes) -> Any:
@@ -3227,6 +3230,52 @@ class CRMCog(commands.Cog):
 
         return ", ".join(formatted)
 
+    def _build_inference_lookup_summary(
+        self, *, file_content: bytes, attempts: list[dict[str, Any]] | None
+    ) -> str:
+        """Build a user-facing description of resume-derived lookup values."""
+        attempts_text = self._format_inferred_attempts(attempts)
+        if attempts_text:
+            return f"\nTried contact lookups: {attempts_text}"
+
+        hints = self._extract_resume_contact_hints(file_content)
+
+        def _to_values(raw_values: Any) -> list[str]:
+            values: list[str] = []
+            if not isinstance(raw_values, list):
+                return values
+            for item in raw_values:
+                if not isinstance(item, str):
+                    continue
+                normalized = item.strip()
+                if normalized and normalized not in values:
+                    values.append(normalized)
+            return values
+
+        email_values = _to_values(hints.get("emails"))
+        github_usernames = _to_values(hints.get("github_usernames"))
+        linkedin_urls = _to_values(hints.get("linkedin_urls"))
+
+        summary_parts: list[str] = []
+        if email_values:
+            summary_parts.append(
+                "emails: " + ", ".join(f"`{value}`" for value in email_values)
+            )
+        if github_usernames:
+            summary_parts.append(
+                "github usernames: "
+                + ", ".join(f"`{value}`" for value in github_usernames)
+            )
+        if linkedin_urls:
+            summary_parts.append(
+                "linkedin URLs: " + ", ".join(f"`{value}`" for value in linkedin_urls)
+            )
+
+        if not summary_parts:
+            return ""
+
+        return "\nParsed resume identifiers: " + "; ".join(summary_parts)
+
     def _extract_resume_name_hint(self, file_content: bytes) -> str:
         """Best-effort contact name extraction from resume text."""
         hints = self._extract_resume_contact_hints(file_content)
@@ -3255,7 +3304,10 @@ class CRMCog(commands.Cog):
         if not isinstance(skills, list):
             skills = []
 
-        payload: dict[str, str] = {"name": contact_name}
+        payload: dict[str, str] = {
+            "type": "Prospect",
+            "name": contact_name,
+        }
         if emails:
             primary_email = emails[0]
             if primary_email.endswith("@508.dev"):
@@ -5507,15 +5559,11 @@ class CRMCog(commands.Cog):
                     if inferred_attempts is not None:
                         inference_metadata["inferred_attempts"] = inferred_attempts
 
-                    attempts_message = self._format_inferred_attempts(
-                        inferred_attempts
+                    inferred_attempts_text = self._build_inference_lookup_summary(
+                        file_content=file_content,
+                        attempts=inferred_attempts
                         if isinstance(inferred_attempts, list)
-                        else None
-                    )
-                    inferred_attempts_text = (
-                        f"\nTried contact lookups: {attempts_message}"
-                        if attempts_message
-                        else ""
+                        else None,
                     )
 
                     if inferred_reason == "multiple_matches" and inferred_value:
@@ -5528,6 +5576,7 @@ class CRMCog(commands.Cog):
                         await interaction.followup.send(
                             f"⚠️ Multiple contacts match `{inferred_value}` from the resume. "
                             "Please provide `search_term` or `link_user`."
+                            + inferred_attempts_text
                         )
                     elif inferred_reason == "no_matching_contact":
                         self._audit_command(
