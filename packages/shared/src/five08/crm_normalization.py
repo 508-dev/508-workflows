@@ -183,7 +183,7 @@ def normalize_roles(value: Any, role_map: dict[str, str] | None = None) -> list[
     if isinstance(value, str):
         raw_values = [item.strip() for item in re.split(r"[,\n;]+", value)]
     elif isinstance(value, (list, tuple, set)):
-        raw_values = [str(item).strip() for item in value]
+        raw_values = [item.strip() for item in value if isinstance(item, str)]
     else:
         return []
 

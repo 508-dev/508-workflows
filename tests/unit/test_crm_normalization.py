@@ -60,3 +60,10 @@ def test_normalize_seniority_modes() -> None:
     assert normalize_seniority("senior engineer") == "senior"
     assert normalize_seniority("  ", empty_as_unknown=False) is None
     assert normalize_seniority("  ", empty_as_unknown=True) == "unknown"
+
+
+def test_normalize_roles_skips_non_string_items() -> None:
+    assert normalize_roles(["Developer", None, 42, " Biz Dev "]) == [
+        "developer",
+        "biz_dev",
+    ]
