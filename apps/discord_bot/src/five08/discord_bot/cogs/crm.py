@@ -3395,9 +3395,19 @@ class CRMCog(commands.Cog):
 
     def _discord_display_name(self, user: discord.Member) -> str:
         """Format Discord username for CRM fields."""
-        if hasattr(user, "discriminator") and user.discriminator != "0":
-            return f"{user.name}#{user.discriminator}"
-        return str(user.name)
+        username = str(getattr(user, "name", "")).strip()
+        display_name = str(getattr(user, "display_name", "")).strip()
+        discriminator = getattr(user, "discriminator", "0")
+        if (
+            isinstance(discriminator, str)
+            and discriminator.strip()
+            and discriminator.strip() != "0"
+            and discriminator.strip().isdigit()
+        ):
+            return f"{username}#{discriminator.strip()}"
+        if display_name:
+            return display_name
+        return username
 
     def _discord_link_fields(self, user: discord.Member) -> dict[str, str]:
         """Build CRM fields used to persist Discord linkage."""
