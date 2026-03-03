@@ -61,15 +61,7 @@ from five08.worker.db_migrations import run_job_migrations
 from five08.worker.dispatcher import build_queue_client
 from five08.worker.masking import mask_email
 from five08.worker.jobs import (
-    apply_resume_profile_job,
-    extract_resume_profile_job,
-    process_contact_skills_job,
-    process_mailbox_message_job,
-    process_docuseal_agreement_job,
-    process_intake_form_job,
-    process_webhook_event,
-    sync_people_from_crm_job,
-    sync_person_from_crm_job,
+    JOB_FUNCTIONS,
 )
 from five08.worker.mailbox_resume_ingest import ResumeMailboxProcessor
 from five08.worker.models import (
@@ -95,7 +87,7 @@ class ResumeApplyRequest(BaseModel):
     """Request schema for queued resume apply updates."""
 
     contact_id: str
-    updates: dict[str, str]
+    updates: dict[str, Any]
     link_discord: dict[str, str] | None = None
 
 
@@ -106,16 +98,18 @@ class DiscordLinkCreateRequest(BaseModel):
     next_path: str | None = None
 
 
-_JOB_FUNCTIONS: dict[str, Any] = {
-    process_webhook_event.__name__: process_webhook_event,
-    process_contact_skills_job.__name__: process_contact_skills_job,
-    extract_resume_profile_job.__name__: extract_resume_profile_job,
-    apply_resume_profile_job.__name__: apply_resume_profile_job,
-    sync_people_from_crm_job.__name__: sync_people_from_crm_job,
-    sync_person_from_crm_job.__name__: sync_person_from_crm_job,
-    process_mailbox_message_job.__name__: process_mailbox_message_job,
-    process_docuseal_agreement_job.__name__: process_docuseal_agreement_job,
-}
+_JOB_FUNCTIONS = JOB_FUNCTIONS
+
+# Backward-compatible direct handler exports expected by existing call sites/tests.
+process_webhook_event = JOB_FUNCTIONS["process_webhook_event"]
+process_contact_skills_job = JOB_FUNCTIONS["process_contact_skills_job"]
+extract_resume_profile_job = JOB_FUNCTIONS["extract_resume_profile_job"]
+apply_resume_profile_job = JOB_FUNCTIONS["apply_resume_profile_job"]
+process_intake_form_job = JOB_FUNCTIONS["process_intake_form_job"]
+process_mailbox_message_job = JOB_FUNCTIONS["process_mailbox_message_job"]
+sync_people_from_crm_job = JOB_FUNCTIONS["sync_people_from_crm_job"]
+sync_person_from_crm_job = JOB_FUNCTIONS["sync_person_from_crm_job"]
+process_docuseal_agreement_job = JOB_FUNCTIONS["process_docuseal_agreement_job"]
 
 
 def _is_authorized(request: Request) -> bool:
@@ -124,12 +118,10 @@ def _is_authorized(request: Request) -> bool:
         logger.error("Rejecting request: API_SHARED_SECRET is not configured")
         return False
 
-    # TODO: security-hardening: move webhook auth to per-webhook generated secrets
-    # sourced from an admin dashboard with copyable callback URLs.
     provided_secret = request.headers.get("X-API-Secret", "")
     if secrets.compare_digest(provided_secret, settings.api_shared_secret):
         return True
-
+    logger.warning("Rejecting request: invalid X-API-Secret")
     return False
 
 
@@ -221,7 +213,7 @@ async def _enqueue_full_crm_sync_job(queue: QueueClient, *, reason: str) -> Enqu
     job: EnqueuedJob = await asyncio.to_thread(
         enqueue_job,
         queue=queue,
-        fn=sync_people_from_crm_job,
+        fn=JOB_FUNCTIONS["sync_people_from_crm_job"],
         args=(),
         settings=settings,
         idempotency_key=_crm_sync_idempotency_key(now=now),
@@ -262,7 +254,7 @@ async def _email_resume_scheduler() -> None:
                 job = await asyncio.to_thread(
                     enqueue_job,
                     queue=queue,
-                    fn=process_mailbox_message_job,
+                    fn=JOB_FUNCTIONS["process_mailbox_message_job"],
                     args=(message.raw_message_b64,),
                     settings=settings,
                     idempotency_key=f"mailbox-inbox:{idempotency_key}",
@@ -312,7 +304,7 @@ def _enqueue_espocrm_batch_sync(queue: QueueClient, event_ids: list[str]) -> Non
     for event_id in event_ids:
         enqueue_job(
             queue=queue,
-            fn=process_contact_skills_job,
+            fn=JOB_FUNCTIONS["process_contact_skills_job"],
             args=(event_id,),
             settings=settings,
             idempotency_key=f"espocrm:{event_id}",
@@ -329,7 +321,7 @@ def _enqueue_espocrm_people_sync_batch_sync(
     for event_id in event_ids:
         enqueue_job(
             queue=queue,
-            fn=sync_person_from_crm_job,
+            fn=JOB_FUNCTIONS["sync_person_from_crm_job"],
             args=(event_id,),
             settings=settings,
             idempotency_key=f"crm-contact-sync:{event_id}:{bucket}",
@@ -493,7 +485,7 @@ async def ingest_handler(request: Request, source: str) -> JSONResponse:
     job: EnqueuedJob = await asyncio.to_thread(
         enqueue_job,
         queue=queue,
-        fn=process_webhook_event,
+        fn=JOB_FUNCTIONS["process_webhook_event"],
         args=(source, payload),
         settings=settings,
         idempotency_key=_extract_idempotency_key(payload.get("id")),
@@ -578,7 +570,7 @@ async def process_contact_handler(request: Request, contact_id: str) -> JSONResp
     job = await asyncio.to_thread(
         enqueue_job,
         queue=queue,
-        fn=process_contact_skills_job,
+        fn=JOB_FUNCTIONS["process_contact_skills_job"],
         args=(normalized_contact_id,),
         settings=settings,
         idempotency_key=f"manual:{normalized_contact_id}:{manual_nonce}:{nonce_suffix}",
@@ -627,7 +619,7 @@ async def resume_extract_handler(request: Request) -> JSONResponse:
     job = await asyncio.to_thread(
         enqueue_job,
         queue=queue,
-        fn=extract_resume_profile_job,
+        fn=JOB_FUNCTIONS["extract_resume_profile_job"],
         args=(payload.contact_id, payload.attachment_id, payload.filename),
         settings=settings,
         idempotency_key=idempotency_key,
@@ -674,7 +666,7 @@ async def resume_apply_handler(request: Request) -> JSONResponse:
     job = await asyncio.to_thread(
         enqueue_job,
         queue=queue,
-        fn=apply_resume_profile_job,
+        fn=JOB_FUNCTIONS["apply_resume_profile_job"],
         args=(payload.contact_id, payload.updates, payload.link_discord),
         settings=settings,
         idempotency_key=f"resume-apply:{payload.contact_id}:{manual_nonce}",
@@ -786,7 +778,7 @@ async def rerun_job_handler(request: Request, job_id: str) -> JSONResponse:
     if source_job is None:
         return JSONResponse({"error": "job_not_found"}, status_code=404)
 
-    fn = _JOB_FUNCTIONS.get(source_job.type)
+    fn = JOB_FUNCTIONS.get(source_job.type)
     if fn is None:
         return JSONResponse(
             {
@@ -1000,7 +992,7 @@ async def docuseal_webhook_handler(request: Request) -> JSONResponse:
         job: EnqueuedJob = await asyncio.to_thread(
             enqueue_job,
             queue=queue,
-            fn=process_docuseal_agreement_job,
+            fn=JOB_FUNCTIONS["process_docuseal_agreement_job"],
             args=(email, completed_at, submission_id),
             settings=settings,
             idempotency_key=f"docuseal-agreement:{submission_id}",
@@ -1075,7 +1067,7 @@ async def google_forms_intake_webhook_handler(request: Request) -> JSONResponse:
         job = await asyncio.to_thread(
             enqueue_job,
             queue=queue,
-            fn=process_intake_form_job,
+            fn=JOB_FUNCTIONS["process_intake_form_job"],
             args=(normalized_payload,),
             settings=settings,
             idempotency_key=idempotency_key,

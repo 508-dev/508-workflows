@@ -26,11 +26,12 @@ This document captures Discord bot behavior, permissions, and slash command usag
     - Returns an ephemeral one-time URL with expiry.
 
 - `/create-mailbox`
-  - Description: Create a Migadu mailbox and set a contact’s `c508Email`.
+  - Description: Create a Migadu mailbox for a 508 user and email the invitation to a backup address.
   - Prerequisites: `MIGADU_API_USER` and `MIGADU_API_KEY` must be configured (configured in env; command will fail if missing).
   - Required role: Admin
   - Args:
-    - `backup_email` (required): Full backup email (e.g. `alice@gmail.com`; `@508.dev` emails are not accepted).
+    - `mailbox_username` (required): 508 mailbox address (e.g. `alice@508.dev`).
+    - `backup_email` (required): Full backup email where invite should be sent (e.g. `alice@gmail.com`).
 
 - `/mark-id-verified`
   - Description: Mark a contact as ID verified.

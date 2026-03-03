@@ -8,6 +8,10 @@
 - `GET /health` and most OIDC session routes (`/auth/login`, `/auth/callback`, `/auth/me`, `/auth/logout`) do not use `X-API-Secret`.
 - `POST /auth/discord/links` does use `X-API-Secret` because it is called by trusted backend/bot components.
 
+### API auth strategy
+
+- Protected routes (including webhooks) use `X-API-Secret` with `API_SHARED_SECRET`.
+
 Example:
 
 ```bash
@@ -43,6 +47,10 @@ Discord deep-link identity policy:
 - `OIDC_ADMIN_GROUPS` controls normal OIDC dashboard admin membership (`authentik Admins` recommended).
 - `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=true` (default): Discord deep links also require OIDC admin group + OIDC email linked to Discord admin identity.
 - `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=false`: bootstrap mode; Discord deep links skip OIDC group/email-link checks after successful OIDC authentication.
+
+### Known handler wiring expectation
+
+- `/jobs/{job_id}/rerun` replays the source job’s stored call arguments; rerunnable job types must only include callables that are also registered for worker execution.
 
 ## Jobs
 

@@ -51,6 +51,12 @@ Migrations:
 See the API service docs: [`apps/api/README.md#backend-api-endpoints`](./apps/api/README.md#backend-api-endpoints).
 CLI request examples are documented at [`apps/worker/README.md#cli-usage`](./apps/worker/README.md#cli-usage).
 
+### Current API/queue caveats
+
+- Protected API endpoints use a shared `API_SHARED_SECRET` in `X-API-Secret` today. This includes webhook and admin routes until per-webhook/per-route auth is introduced.
+- Worker startup uses a single effective queue name for actor registration; keep this explicit if you later add true multi-queue routing.
+- Backend rerun/enqueue behavior relies on one shared job-handler set. Add any new worker callable consistently to both backend handler resolution and worker dispatch.
+
 ## Local Development
 
 ### 1. Install dependencies

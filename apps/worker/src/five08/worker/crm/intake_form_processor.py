@@ -12,9 +12,9 @@ from urllib.parse import urlsplit
 import requests
 
 from five08.clients.espo import EspoAPI, EspoAPIError
+from five08.resume_extractor import ResumeProfileExtractor
 from five08.worker.config import settings
 from five08.worker.crm.document_processor import DocumentProcessor
-from five08.worker.crm.resume_profile_processor import ResumeProfileExtractor
 from five08.worker.crm.skills_extractor import SkillsExtractor
 from five08.worker.masking import mask_email
 
@@ -61,9 +61,22 @@ SENIORITY_MAP = {
     "mid-level": "midlevel",
     "midlevel": "midlevel",
     "senior": "senior",
+    "principal": "staff",
+    "principal engineer": "staff",
     "staff": "staff",
     "staff and beyond": "staff",
     "staff+": "staff",
+}
+
+
+ROLE_NORMALIZATION_MAP: dict[str, str] = {
+    "developer": "developer",
+    "data scientist": "data_scientist",
+    "program manager": "program_manager",
+    "designer": "designer",
+    "user research": "user_research",
+    "biz dev": "biz_dev",
+    "marketing": "marketing",
 }
 
 
@@ -74,7 +87,11 @@ class IntakeFormProcessor:
         api_url = settings.espo_base_url.rstrip("/") + "/api/v1"
         self.api = EspoAPI(api_url, settings.espo_api_key)
         self.document_processor = DocumentProcessor()
-        self.resume_extractor = ResumeProfileExtractor()
+        self.resume_extractor = ResumeProfileExtractor(
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+            model=settings.resolved_resume_ai_model,
+        )
         self.skills_extractor = SkillsExtractor()
 
     def process_intake(self, *, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -307,6 +324,12 @@ class IntakeFormProcessor:
         for local_key, crm_field in FIELD_MAP.items():
             if local_key == "github_username":
                 value = self._normalize_github_username(payload.get(local_key))
+            elif local_key == "primary_role":
+                normalized_roles = self._parse_roles(payload.get(local_key))
+                if not normalized_roles:
+                    continue
+                updates[crm_field] = normalized_roles
+                continue
             else:
                 value = self._normalize_text(payload.get(local_key))
             if value:
@@ -323,7 +346,7 @@ class IntakeFormProcessor:
         form_skill_attrs = self._build_form_skill_attrs(payload)
         if form_skill_attrs:
             updates["cSkillAttrs"] = json.dumps(form_skill_attrs)
-            updates["skills"] = ", ".join(sorted(form_skill_attrs.keys()))
+            updates["skills"] = sorted(form_skill_attrs.keys())
 
         submitted_at = self._normalize_text(payload.get("submitted_at"))
         completed_field = (settings.crm_intake_completed_field or "").strip()
@@ -347,7 +370,10 @@ class IntakeFormProcessor:
             strength = self._parse_skill_strength(normalized)
             if strength is None:
                 continue
-            skills[label] = {"strength": strength}
+            normalized_label = self.skills_extractor.canonicalize_skill(label)
+            if not normalized_label:
+                continue
+            skills[normalized_label] = {"strength": strength}
         return skills
 
     def _build_description(self, payload: Mapping[str, Any]) -> str | None:
@@ -391,28 +417,118 @@ class IntakeFormProcessor:
 
         updates: dict[str, Any] = {}
         try:
-            extracted_profile = self.resume_extractor.extract(resume_text)
+            extra_sources: dict[str, str] = {}
+            for field, raw_value in {
+                "availability": payload.get("availability"),
+                "rate_range": payload.get("rate_range"),
+                "referred_by": payload.get("referred_by"),
+                "content_email": payload.get("content_email"),
+            }.items():
+                normalized_value = self._normalize_text(raw_value)
+                if normalized_value:
+                    extra_sources[field] = normalized_value
+            extracted_profile = self.resume_extractor.extract(
+                resume_text,
+                extra_sources=extra_sources,
+            )
             profile_phone = self._normalize_text(extracted_profile.phone)
             profile_github = self._normalize_text(extracted_profile.github_username)
             profile_linkedin = self._normalize_text(extracted_profile.linkedin_url)
+            profile_availability = self._normalize_text(
+                getattr(extracted_profile, "availability", None)
+            )
+            profile_rate_range = self._normalize_text(
+                getattr(extracted_profile, "rate_range", None)
+            )
+            profile_referred_by = self._normalize_text(
+                getattr(extracted_profile, "referred_by", None)
+            )
             if profile_phone:
                 updates["phoneNumber"] = profile_phone
             if profile_github:
                 updates["cGitHubUsername"] = profile_github
             if profile_linkedin:
                 updates[settings.crm_linkedin_field] = profile_linkedin
+            if profile_availability:
+                updates.setdefault("cAvailableTimes", profile_availability)
+            if profile_rate_range:
+                updates.setdefault("cRateRange", profile_rate_range)
+            if profile_referred_by:
+                updates.setdefault("cReferredBy", profile_referred_by)
+            profile_attrs = self._parse_profile_skill_attrs(extracted_profile)
+            if profile_attrs:
+                updates["cSkillAttrs"] = json.dumps(profile_attrs)
+                updates["skills"] = sorted(profile_attrs.keys())
+            profile_websites = self._parse_profile_website_links(
+                getattr(extracted_profile, "website_links", [])
+            )
+            if profile_websites:
+                updates["cWebsiteLink"] = profile_websites
+            profile_social_links = self._parse_profile_social_links(
+                getattr(extracted_profile, "social_links", [])
+            )
+            if profile_social_links:
+                updates["cSocialLinks"] = profile_social_links
         except Exception as exc:
             logger.warning("Resume profile extraction failed: %s", exc)
-
-        try:
-            extracted_skills = self.skills_extractor.extract_skills(resume_text)
-            parsed_attrs = self._parse_skill_attrs(extracted_skills.skill_attrs)
-            if parsed_attrs:
-                updates["cSkillAttrs"] = json.dumps(parsed_attrs)
-                updates["skills"] = ", ".join(sorted(parsed_attrs.keys()))
-        except Exception as exc:
-            logger.warning("Resume skill extraction failed: %s", exc)
         return updates
+
+    def _parse_profile_website_links(self, links: Any) -> list[str]:
+        if not isinstance(links, list):
+            return []
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw_link in links:
+            if not isinstance(raw_link, str):
+                continue
+            candidate = raw_link.strip().rstrip("/").strip(")]},.;:")
+            if not candidate:
+                continue
+            if not candidate.startswith(("http://", "https://")):
+                continue
+            key = candidate.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(candidate)
+        return normalized
+
+    def _parse_profile_social_links(self, links: Any) -> list[str]:
+        if not isinstance(links, list):
+            return []
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw_link in links:
+            if not isinstance(raw_link, str):
+                continue
+            candidate = raw_link.strip().rstrip("/").strip(")]},.;:")
+            if not candidate:
+                continue
+            if not candidate.startswith(("http://", "https://")):
+                continue
+            key = candidate.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(candidate)
+        return normalized
+
+    def _parse_profile_skill_attrs(self, profile: Any) -> dict[str, int]:
+        raw_attrs = getattr(profile, "skill_attrs", {})
+        if not isinstance(raw_attrs, dict):
+            return {}
+        parsed: dict[str, int] = {}
+        for raw_skill, raw_payload in raw_attrs.items():
+            normalized_name = self.skills_extractor.canonicalize_skill(str(raw_skill))
+            if not normalized_name:
+                continue
+            if isinstance(raw_payload, dict):
+                raw_payload = raw_payload.get("strength")
+            try:
+                parsed[normalized_name] = max(1, min(5, int(raw_payload)))
+            except Exception:
+                continue
+        return parsed
 
     def _parse_skill_strength(self, value: str | None) -> int | None:
         if not value:
@@ -445,7 +561,7 @@ class IntakeFormProcessor:
         if attrs is None:
             return parsed
         for raw_name, raw_attr in attrs.items():
-            normalized_name = self._normalize_text(raw_name)
+            normalized_name = self.skills_extractor.canonicalize_skill(str(raw_name))
             if not normalized_name:
                 continue
             strength = raw_attr
@@ -475,7 +591,7 @@ class IntakeFormProcessor:
             return "midlevel"
         if "junior" in normalized:
             return "junior"
-        return None
+        return "unknown"
 
     def _normalize_text(self, value: object) -> str | None:
         if not isinstance(value, str):
@@ -531,6 +647,34 @@ class IntakeFormProcessor:
                 if isinstance(item, str) and item.strip()
             ]
         return []
+
+    def _normalize_role(self, value: str) -> str | None:
+        normalized = self._normalize_text(value)
+        if normalized is None:
+            return None
+
+        lowered = normalized.lower().strip()
+        mapped = ROLE_NORMALIZATION_MAP.get(lowered)
+        if mapped is not None:
+            return mapped
+
+        normalized_role = "_".join(lowered.split())
+        normalized_role = "".join(
+            ch for ch in normalized_role if ch.isalnum() or ch in {"_", "-"}
+        )
+        return normalized_role or None
+
+    def _parse_roles(self, roles: Any) -> list[str]:
+        parsed = self._normalize_collection(roles)
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for role in parsed:
+            normalized_role = self._normalize_role(role)
+            if normalized_role is None or normalized_role in seen:
+                continue
+            seen.add(normalized_role)
+            normalized.append(normalized_role)
+        return normalized
 
     def _filename_from_url(self, url: str) -> str | None:
         path = urlsplit(url).path.strip()

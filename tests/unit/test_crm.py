@@ -10,6 +10,7 @@ from five08.discord_bot.cogs.crm import (
     CRMCog,
     ResumeButtonView,
     ResumeCreateContactView,
+    ResumeUpdateConfirmationView,
     ResumeReprocessConfirmationView,
     ResumeDownloadButton,
 )
@@ -93,6 +94,85 @@ class TestCRMCog:
         result = crm_cog._check_member_role(mock_interaction)
 
         assert result is False
+
+    @pytest.mark.asyncio
+    async def test_resume_apply_confirmation_combines_skills_and_strengths(
+        self, crm_cog
+    ):
+        """Applied updates should render skills and skill attrs as one combined line."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+        )
+
+        lines = view._build_applied_updates_lines(
+            updated_fields=["skills", "cSkillAttrs", "cGitHubUsername"],
+            updated_values={
+                "skills": ["python", "redis"],
+                "cSkillAttrs": {
+                    "python": {"strength": 5},
+                    "redis": {"strength": 3},
+                },
+                "cGitHubUsername": "wumichaelm",
+            },
+        )
+
+        assert lines[0] == "**Skills**: `python (5), redis (3)`"
+        assert lines[1] == "**GitHub**: `@wumichaelm`"
+        assert len(lines) == 2
+
+    @pytest.mark.asyncio
+    async def test_resume_apply_confirmation_maps_skill_attrs_only_to_skills(
+        self, crm_cog
+    ):
+        """Updated fields should collapse cSkillAttrs-only changes into Skills label."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+        )
+
+        collapsed = view._collapse_updated_fields(["cSkillAttrs", "phoneNumber"])
+
+        assert collapsed == ["skills", "phoneNumber"]
+
+    @pytest.mark.asyncio
+    async def test_resume_apply_confirmation_caps_updated_fields_length(self, crm_cog):
+        """Updated Fields text should stay within Discord field limits."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+        )
+
+        labels = [f"field-{idx:03d}" for idx in range(400)]
+        summary = view._format_updated_fields_value(labels)
+
+        assert len(summary) <= view._EMBED_FIELD_LIMIT
+
+    @pytest.mark.asyncio
+    async def test_resume_apply_confirmation_caps_applied_updates_length(self, crm_cog):
+        """Applied updates text should stay within Discord field limits."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+        )
+
+        long_value = "x" * 500
+        lines = [f"**Field {idx}**: `{long_value}`" for idx in range(20)]
+        summary = view._format_applied_updates_value(lines)
+
+        assert len(summary) <= view._APPLIED_FIELD_TOTAL_LIMIT
 
     @pytest.mark.asyncio
     async def test_download_and_send_resume_success(self, crm_cog, mock_interaction):
@@ -232,6 +312,24 @@ class TestCRMCog:
         assert where_filters[1]["type"] == "arrayAllOf"
         assert where_filters[1]["attribute"] == "skills"
         assert where_filters[1]["value"] == ["python", "sql"]
+
+    @pytest.mark.asyncio
+    async def test_search_contacts_skills_query_normalizes_to_lowercase(
+        self, crm_cog, mock_interaction, mock_member_role
+    ):
+        """Skill-only search should normalize incoming terms before arrayAllOf filtering."""
+        mock_interaction.user.roles = [mock_member_role]
+        crm_cog.espo_api.request.return_value = {"list": []}
+
+        await crm_cog.search_members.callback(
+            crm_cog, mock_interaction, None, "Python, FastAPI "
+        )
+
+        crm_cog.espo_api.request.assert_called_once()
+        call_args = crm_cog.espo_api.request.call_args
+        search_params = call_args[0][2]
+        assert search_params["where"][0]["type"] == "arrayAllOf"
+        assert search_params["where"][0]["value"] == ["python", "fastapi"]
 
     def test_parse_contact_skill_attrs_recovers_python_literal(self, crm_cog):
         """Malformed JSON-like skill attrs should recover via literal parsing."""
@@ -930,8 +1028,26 @@ class TestCRMCog:
         call_args = crm_cog.espo_api.request.call_args
         search_params = call_args[0][2]  # Third argument is the search params
         # Check that it searched for "john" as a name
-        assert search_params["where"][0]["attribute"] == "name"
-        assert search_params["where"][0]["value"] == "john"
+        first_where = search_params["where"][0]
+        if first_where.get("type") == "or" and isinstance(
+            first_where.get("value"), list
+        ):
+            where_filters = first_where["value"]
+            assert isinstance(where_filters, list)
+            where_filter = next(
+                (
+                    item
+                    for item in where_filters
+                    if isinstance(item, dict) and item.get("attribute") == "name"
+                ),
+                None,
+            )
+            assert where_filter is not None
+            assert where_filter.get("value") == "john"
+            return
+
+        assert first_where.get("attribute") == "name"
+        assert first_where.get("value") == "john"
 
     @pytest.mark.asyncio
     async def test_link_discord_user_modern_username(

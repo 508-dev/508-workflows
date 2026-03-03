@@ -52,6 +52,10 @@ Thumbs.db
 *.log
 logs/
 
+# Local runtime caches
+.superset/
+.mypy_cache/
+
 # Testing
 .pytest_cache/
 .coverage

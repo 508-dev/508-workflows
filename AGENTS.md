@@ -84,6 +84,12 @@ async def setup(bot: commands.Bot) -> None:
 - Internal file movement is routed through MinIO (`internal-transfers`) inside the stack; this is explicitly the internal transfer path, with external object store adapters kept separate for future needs.
 - Worker schema is managed with Alembic migrations in `apps/worker/src/five08/worker/migrations` and applied at backend-api startup.
 
+## Current Operational Notes (temporary)
+
+- Protected API auth uses `API_SHARED_SECRET` for all protected API routes, including webhooks.
+- Worker queue configuration is now resolved to a single effective `worker_queue_name`; startup fails when `WORKER_QUEUE_NAMES` contains multiple queue names.
+- Job handler lookup for rerun and worker execution is now centralized in `five08.worker.jobs.JOB_FUNCTIONS`.
+
 ## Data Model Note
 
 - Shared job state is persisted in Postgres table `jobs` with job type, status (`queued`, `running`, `succeeded`, `failed`, `dead`, `canceled`), payload, idempotency key, attempt counters, scheduling, and lock metadata.

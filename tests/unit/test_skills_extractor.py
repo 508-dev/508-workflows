@@ -25,8 +25,8 @@ def test_heuristic_extractor_includes_two_letter_go_skill() -> None:
     assert "python" in result.skills
 
 
-def test_normalize_extracted_payload_canonicalizes_and_clamps_strength() -> None:
-    """LLM payload normalization should map aliases and clamp strengths to 1-5."""
+def test_normalize_extracted_payload_canonicalizes_and_validates_strength() -> None:
+    """LLM payload normalization should map aliases and ignore out-of-range strengths."""
     extractor = SkillsExtractor()
 
     result = extractor._normalize_extracted_payload(
@@ -49,8 +49,77 @@ def test_normalize_extracted_payload_canonicalizes_and_clamps_strength() -> None
         "node",
         "product management",
     ]
-    assert result.skill_attrs["javascript"].strength == 5
+    assert "javascript" not in result.skill_attrs
     assert result.skill_attrs["product management"].strength == 4
-    assert result.skill_attrs["ab testing"].strength == 1
+    assert "ab testing" not in result.skill_attrs
     assert result.skill_attrs["node"].strength == 2
     assert result.skill_attrs["go to market"].strength == 4
+
+
+def test_normalize_extracted_payload_parses_inline_strength_suffixes() -> None:
+    """Inline strengths like `skill (4)` should be parsed when included in the skills list."""
+    extractor = SkillsExtractor()
+
+    result = extractor._normalize_extracted_payload(
+        skills_value=[
+            "Python (4)",
+            "Code Review (5)",
+            "Testing (3)",
+            "Code Quality (2)",
+            "UI/UX (4)",
+            "TypeScript",
+        ],
+        skill_attrs_value=None,
+        confidence=0.9,
+        source="model",
+    )
+
+    assert result.skills == ["python", "typescript", "ui ux"]
+    assert result.skill_attrs["python"].strength == 4
+    assert "code review" not in result.skills
+    assert "testing" not in result.skills
+    assert "code quality" not in result.skills
+
+
+def test_normalize_extracted_payload_keeps_ab_testing_and_ui_ux() -> None:
+    """Keep technology-like and product-specific terms while dropping broad generic terms."""
+    extractor = SkillsExtractor()
+
+    result = extractor._normalize_extracted_payload(
+        skills_value=["AB Testing", "UI/UX", "database optimization", "testing"],
+        skill_attrs_value={
+            "ab testing": {"strength": 5},
+            "ui/ux": {"strength": 4},
+            "testing": {"strength": 5},
+            "database optimization": {"strength": 3},
+        },
+        confidence=0.85,
+        source="model",
+    )
+
+    assert result.skills == [
+        "ab testing",
+        "database optimization",
+        "ui ux",
+    ]
+    assert result.skill_attrs["ab testing"].strength == 5
+    assert result.skill_attrs["ui ux"].strength == 4
+    assert result.skill_attrs["database optimization"].strength == 3
+    assert "testing" not in result.skills
+    assert "testing" not in result.skill_attrs
+
+
+def test_normalize_extracted_payload_disallows_bug_tracking() -> None:
+    """Generic operational terms like bug tracking should be removed from skill extraction."""
+    extractor = SkillsExtractor()
+
+    result = extractor._normalize_extracted_payload(
+        skills_value=["Bug Tracking", "Python", "bugtracking", "Code Review"],
+        skill_attrs_value=None,
+        confidence=0.8,
+        source="model",
+    )
+
+    assert "bug tracking" not in result.skills
+    assert "bugtracking" not in result.skills
+    assert result.skills == ["python"]

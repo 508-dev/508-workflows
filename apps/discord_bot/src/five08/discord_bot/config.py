@@ -32,6 +32,9 @@ class Settings(SharedSettings):
     migadu_api_user: str | None = None
     migadu_api_key: str | None = None
     migadu_mailbox_domain: str = "508.dev"
+    openai_api_key: str | None = None
+    openai_base_url: str | None = None
+    openai_model: str = "gpt-4o-mini"
 
     # Kimai time tracking settings
     kimai_base_url: str

@@ -99,6 +99,11 @@ Discord deep-link identity policy:
 - `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=true` (default): Discord deep links also require OIDC admin group + OIDC email linked to Discord admin identity.
 - `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=false`: bootstrap mode; Discord deep links skip OIDC group/email-link checks after successful OIDC authentication.
 
+### Current API/Worker behavior
+
+- Worker queue configuration resolves to one effective queue via `WORKER_QUEUE_NAMES`.
+- Job handler registration for rerun and worker execution is centralized in `five08.worker.jobs.JOB_FUNCTIONS`.
+
 ## Jobs
 
 ### `GET /jobs/{job_id}`
@@ -247,5 +252,3 @@ EspoCRM contact-change webhook for people cache sync.
 
 - JSON body:
   - Array of event objects, each with at least `id` (string).
-=======
->>>>>>> origin/main

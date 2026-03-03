@@ -5,7 +5,11 @@ import logging
 import re
 from typing import Any
 
-from five08.skills import normalize_skill
+from five08.skills import (
+    DISALLOWED_RESUME_SKILLS,
+    normalize_skill,
+    normalize_skill_payload,
+)
 from five08.worker.config import settings
 from five08.worker.models import ExtractedSkills, SkillAttributes
 
@@ -49,6 +53,8 @@ COMMON_SKILLS = {
     "content marketing",
 }
 
+DISALLOWED_SKILLS = DISALLOWED_RESUME_SKILLS
+
 DEFAULT_SKILL_STRENGTH = 3
 
 
@@ -83,7 +89,10 @@ class SkillsExtractor:
                             "engineering, product, data, design, growth, and marketing. "
                             "Return JSON only, no prose. "
                             "Normalize skills to concise canonical names, lowercase. "
-                            "Provide a strength from 1-5 for each skill, where 5 is strongest."
+                            "Provide a strength from 1-5 when known, where 5 is strongest. "
+                            "If uncertain, you may omit it or leave it blank. "
+                            "Bias 3 for simple mentions, 4-5 for recent/current project usage, "
+                            "and 1-2 for weak, outdated, or minimal exposure."
                         ),
                     },
                     {"role": "user", "content": prompt},
@@ -114,7 +123,7 @@ class SkillsExtractor:
         detected: set[str] = set()
         for token in token_matches:
             canonical = self._normalize_skill_name(token)
-            if canonical in COMMON_SKILLS:
+            if canonical in COMMON_SKILLS and canonical not in DISALLOWED_SKILLS:
                 detected.add(canonical)
 
         sorted_skills = sorted(detected)
@@ -137,14 +146,17 @@ class SkillsExtractor:
             "data, design, growth, and marketing.\n"
             "Exclude personal traits and vague soft skills unless role-critical.\n"
             "Return JSON with this exact schema:\n"
-            '{"skills": ["skill1", "skill2"], '
-            '"skill_attrs": {"skill1": {"strength": 4}}, '
+            '{"skills": ["skill1", "skill2", "skill3 (4)"], '
             '"confidence": 0.8}\n'
             "Rules:\n"
             "- skills must be lowercase canonical names with minimal punctuation\n"
             '- prefer forms like "nodejs", "ab testing", "go to market"\n'
-            "- skill_attrs keys must match skills\n"
-            "- strength is integer 1-5 (5 strongest)\n"
+            "- optional strength may be included inline for a skill in parentheses, e.g. skill (4)\n"
+            "- if strength is uncertain, omit the suffix or use an empty suffix, e.g. skill ()\n"
+            "- strength is integer 1-5 (5 strongest), and should be assigned per above.\n"
+            "- use 3 when a skill is simply mentioned without strong context\n"
+            "- use 4 or 5 when usage is clearly current or recent in project work\n"
+            "- use 2 for older, side, or weak mentions and 1 for very weak/outdated evidence\n"
             "- no extra keys\n\n"
             f"Resume:\n{snippet}"
         )
@@ -168,45 +180,56 @@ class SkillsExtractor:
         confidence: float,
         source: str,
     ) -> ExtractedSkills:
-        raw_skills = skills_value if isinstance(skills_value, list) else []
-        normalized_skills: list[str] = []
-        for skill in raw_skills:
-            canonical = self._normalize_skill_name(str(skill))
-            if canonical:
-                normalized_skills.append(canonical)
-
-        attrs_map: dict[str, SkillAttributes] = {}
-        if isinstance(skill_attrs_value, dict):
-            for raw_name, raw_attr in skill_attrs_value.items():
-                canonical = self._normalize_skill_name(str(raw_name))
-                if not canonical:
-                    continue
-                attrs_map[canonical] = SkillAttributes(
-                    strength=self._parse_strength(raw_attr)
-                )
-
-        # Ensure attrs exists for every skill and include attr-only entries in skill list.
-        deduped_skills = sorted(set(normalized_skills) | set(attrs_map.keys()))
-        for skill in deduped_skills:
-            if skill not in attrs_map:
-                attrs_map[skill] = SkillAttributes(strength=DEFAULT_SKILL_STRENGTH)
+        deduped_skills, normalized_attrs = normalize_skill_payload(
+            skills_value=skills_value,
+            skill_attrs_value=skill_attrs_value,
+            disallowed=DISALLOWED_SKILLS,
+        )
+        ordered_skills = sorted(deduped_skills)
+        attrs_map = {
+            skill: SkillAttributes(strength=strength)
+            for skill, strength in normalized_attrs.items()
+        }
 
         return ExtractedSkills(
-            skills=deduped_skills,
+            skills=ordered_skills,
             skill_attrs=attrs_map,
             confidence=max(0.0, min(1.0, confidence)),
             source=source,
         )
 
-    def _parse_strength(self, value: Any) -> int:
+    def _parse_strength(self, value: Any) -> int | None:
         raw: Any = value
         if isinstance(value, dict):
             raw = value.get("strength")
+        if raw is None:
+            return None
+        if isinstance(raw, str) and not raw.strip():
+            return None
         try:
             numeric = int(float(raw))
         except Exception:
-            numeric = DEFAULT_SKILL_STRENGTH
-        return max(1, min(5, numeric))
+            return None
+        if numeric < 1 or numeric > 5:
+            return None
+        return numeric
+
+    def _parse_skill_with_strength(self, value: str) -> tuple[str, int | None]:
+        raw = value.strip()
+        match = re.match(r"^(.*)\(\s*(\d*)\s*\)\s*$", raw)
+        if match is None:
+            return self._normalize_skill_name(raw), None
+
+        base = match.group(1).strip()
+        parsed_strength = self._parse_strength(match.group(2))
+        if not base:
+            return "", None
+        normalized_base = self._normalize_skill_name(base)
+        if not normalized_base:
+            return "", None
+        if parsed_strength is None:
+            return normalized_base, None
+        return normalized_base, parsed_strength
 
     def _normalize_skill_name(self, value: str) -> str:
         return normalize_skill(value)

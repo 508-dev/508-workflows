@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import re
 from collections.abc import Callable
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 from typing import Any
 
 from five08.clients.espo import EspoAPI, EspoAPIError
+from five08.skills import (
+    DISALLOWED_RESUME_SKILLS,
+    normalize_skill,
+    normalize_skill_list,
+    normalize_skill_payload,
+)
+from five08.resume_extractor import ResumeProfileExtractor
 from five08.queue import get_postgres_connection
 from five08.worker.config import settings
 from five08.worker.crm.document_processor import DocumentProcessor
@@ -17,6 +26,7 @@ from five08.worker.crm.skills_extractor import SkillsExtractor
 from five08.worker.models import (
     ResumeApplyResult,
     ResumeExtractedProfile,
+    ExtractedSkills,
     ResumeExtractionResult,
     ResumeFieldChange,
     ResumeSkipReason,
@@ -24,11 +34,7 @@ from five08.worker.models import (
 )
 
 logger = logging.getLogger(__name__)
-
-try:  # pragma: no cover - import success depends on environment
-    from openai import OpenAI as OpenAIClient
-except Exception:  # pragma: no cover
-    OpenAIClient = None  # type: ignore[misc,assignment]
+DEFAULT_SKILL_STRENGTH = 3
 
 
 class ResumeEspoClient:
@@ -48,196 +54,16 @@ class ResumeEspoClient:
         self.api.request("PUT", f"Contact/{contact_id}", updates)
 
 
-class ResumeProfileExtractor:
-    """Extract candidate profile fields from resume text."""
-
-    def __init__(self) -> None:
-        self.model = settings.resolved_resume_ai_model
-        self.client: Any = None
-
-        if settings.openai_api_key and OpenAIClient is not None:
-            self.client = OpenAIClient(
-                api_key=settings.openai_api_key,
-                base_url=settings.openai_base_url,
-            )
-
-    def extract(self, resume_text: str) -> ResumeExtractedProfile:
-        """Return extracted fields from resume text."""
-        if self.client is None:
-            return self._heuristic_extract(resume_text)
-
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You extract candidate contact fields from resumes for a CRM. "
-                            "Return JSON only with no commentary. Be conservative: when unsure, use null. "
-                            "Prefer candidate-owned contact info and ignore references or company contact details."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": self._build_prompt(resume_text),
-                    },
-                ],
-                temperature=0.1,
-                max_tokens=800,
-            )
-            raw_content = response.choices[0].message.content
-            if not raw_content:
-                raise ValueError("LLM returned empty content")
-
-            parsed = self._parse_json(raw_content)
-            return ResumeExtractedProfile(
-                email=self._normalize_email(parsed.get("email")),
-                github_username=self._normalize_github(parsed.get("github_username")),
-                linkedin_url=self._normalize_linkedin(parsed.get("linkedin_url")),
-                phone=self._normalize_phone(parsed.get("phone")),
-                confidence=self._bounded_confidence(parsed.get("confidence", 0.75)),
-                source=self.model,
-            )
-        except Exception as exc:
-            logger.warning("LLM resume extraction failed, using fallback: %s", exc)
-            return self._heuristic_extract(resume_text)
-
-    def _heuristic_extract(self, resume_text: str) -> ResumeExtractedProfile:
-        email_match = re.search(
-            r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", resume_text
-        )
-        github_match = re.search(
-            r"(?:https?://)?(?:www\.)?github\.com/([A-Za-z0-9-]{1,39})",
-            resume_text,
-            flags=re.IGNORECASE,
-        )
-        linkedin_match = re.search(
-            r"(?:https?://)?(?:[\w.-]+\.)?linkedin\.com/in/[A-Za-z0-9\-_%]+/?",
-            resume_text,
-            flags=re.IGNORECASE,
-        )
-        phone_match = re.search(
-            r"(?:\+?\d[\d\s().-]{7,}\d)",
-            resume_text,
-        )
-
-        github_value: str | None = None
-        if github_match:
-            github_value = github_match.group(1)
-
-        linkedin_value: str | None = None
-        if linkedin_match:
-            linkedin_value = linkedin_match.group(0)
-
-        phone_value: str | None = None
-        if phone_match:
-            phone_value = phone_match.group(0)
-
-        return ResumeExtractedProfile(
-            email=self._normalize_email(email_match.group(0) if email_match else None),
-            github_username=self._normalize_github(github_value),
-            linkedin_url=self._normalize_linkedin(linkedin_value),
-            phone=self._normalize_phone(phone_value),
-            confidence=0.45,
-            source="heuristic",
-        )
-
-    def _build_prompt(self, resume_text: str) -> str:
-        snippet = resume_text[:12000]
-        return (
-            "Extract candidate contact fields from this resume.\n"
-            "Return JSON with exact keys and no extras:\n"
-            '{"email": string|null, "github_username": string|null, '
-            '"linkedin_url": string|null, "phone": string|null, '
-            '"confidence": number}\n'
-            "Rules:\n"
-            "- prefer explicit values from header/contact sections\n"
-            "- for github_username return username only (no URL, no @)\n"
-            "- for linkedin_url return full linkedin profile URL when available\n"
-            "- for phone return digits with optional leading +\n"
-            "- use null for unknown/ambiguous fields\n"
-            "- confidence is 0-1 for overall extraction reliability\n\n"
-            f"Resume:\n{snippet}"
-        )
-
-    def _parse_json(self, content: str) -> dict[str, Any]:
-        raw = content.strip()
-        if raw.startswith("```"):
-            lines = [line for line in raw.splitlines() if not line.startswith("```")]
-            raw = "\n".join(lines).strip()
-
-        parsed = json.loads(raw)
-        if not isinstance(parsed, dict):
-            raise ValueError("Model output was not a JSON object")
-        return parsed
-
-    def _bounded_confidence(self, value: Any) -> float:
-        try:
-            numeric = float(value)
-        except Exception:
-            numeric = 0.0
-        return max(0.0, min(1.0, numeric))
-
-    def _normalize_email(self, value: Any) -> str | None:
-        if not isinstance(value, str):
-            return None
-        normalized = value.strip().lower()
-        return normalized or None
-
-    def _normalize_github(self, value: Any) -> str | None:
-        if not isinstance(value, str):
-            return None
-        candidate = value.strip()
-        if not candidate:
-            return None
-
-        github_match = re.search(
-            r"(?:https?://)?(?:www\.)?github\.com/([A-Za-z0-9-]{1,39})",
-            candidate,
-            flags=re.IGNORECASE,
-        )
-        if github_match:
-            candidate = github_match.group(1)
-
-        candidate = candidate.lstrip("@").strip().strip("/")
-        return candidate or None
-
-    def _normalize_linkedin(self, value: Any) -> str | None:
-        if not isinstance(value, str):
-            return None
-        candidate = value.strip()
-        if not candidate:
-            return None
-
-        if "linkedin.com" not in candidate.lower():
-            return None
-        if not candidate.lower().startswith(("http://", "https://")):
-            candidate = f"https://{candidate}"
-        return candidate.rstrip("/")
-
-    def _normalize_phone(self, value: Any) -> str | None:
-        if not isinstance(value, str):
-            return None
-        candidate = value.strip()
-        if not candidate:
-            return None
-
-        digits = re.sub(r"\D", "", candidate)
-        if len(digits) < 7:
-            return None
-
-        if candidate.startswith("+"):
-            return "+" + digits
-        return digits
-
-
 class ResumeProfileProcessor:
     """End-to-end extraction and apply operations for uploaded resumes."""
 
     def __init__(self) -> None:
         self.crm = ResumeEspoClient()
-        self.extractor = ResumeProfileExtractor()
+        self.extractor = ResumeProfileExtractor(
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+            model=settings.resolved_resume_ai_model,
+        )
         self.skills_extractor = SkillsExtractor()
         self.document_processor = DocumentProcessor()
 
@@ -258,24 +84,39 @@ class ResumeProfileProcessor:
             text = self.document_processor.extract_text(content, filename)
             extracted = self.extractor.extract(text)
             model_name = extracted.source
-            extracted_skills_result = self.skills_extractor.extract_skills(text)
+            extracted_skills_result = self._coerce_profile_skill_result(extracted, text)
             extracted_skills = extracted_skills_result.skills
+            normalized_extracted_skills = self._dedupe_normalized_skills(
+                extracted_skills
+            )
             existing_skills = self._parse_existing_skills(contact.get("skills"))
             existing_skill_attrs = self._parse_skill_attrs(contact.get("cSkillAttrs"))
+            existing_websites = self._coerce_website_links(contact.get("cWebsiteLink"))
+            existing_social_links = self._coerce_website_links(
+                contact.get("cSocialLinks")
+            )
             existing_lower = {item.casefold() for item in existing_skills}
             new_skills = [
                 skill
-                for skill in extracted_skills
+                for skill in normalized_extracted_skills
                 if skill.casefold() not in existing_lower
             ]
-            merged_skills = existing_skills + new_skills
+            merged_skills = self._dedupe_normalized_skills(existing_skills + new_skills)
+            merged_websites = self._merge_website_links(
+                existing=existing_websites,
+                extracted=extracted.website_links,
+            )
+            merged_social_links = self._merge_website_links(
+                existing=existing_social_links,
+                extracted=extracted.social_links,
+            )
             merged_skill_attrs = self._merge_skill_attrs(
                 existing_attrs=existing_skill_attrs,
                 extracted_attrs=extracted_skills_result.skill_attrs,
                 merged_skills=merged_skills,
             )
 
-            proposed_updates: dict[str, str] = {}
+            proposed_updates: dict[str, Any] = {}
             proposed_changes: list[ResumeFieldChange] = []
             skipped: list[ResumeSkipReason] = []
 
@@ -290,6 +131,17 @@ class ResumeProfileProcessor:
                 blocked_reason="Skipped because @508.dev emails are managed separately",
                 is_blocked=lambda value: value.lower().endswith("@508.dev"),
             )
+            if extracted.additional_emails:
+                proposed_updates["additional_emails"] = extracted.additional_emails
+                proposed_changes.append(
+                    ResumeFieldChange(
+                        field="additional_emails",
+                        label="Additional Emails",
+                        current=None,
+                        proposed=", ".join(extracted.additional_emails),
+                        reason="Extracted additional emails from uploaded resume",
+                    )
+                )
             self._collect_change(
                 crm_field="cGitHubUsername",
                 label="GitHub",
@@ -317,33 +169,62 @@ class ResumeProfileProcessor:
                 proposed_changes=proposed_changes,
                 skipped=skipped,
             )
+            self._collect_change(
+                crm_field="cSeniority",
+                label="Seniority",
+                current=self._normalize_seniority(contact.get("cSeniority")),
+                proposed=self._normalize_seniority(extracted.seniority_level),
+                proposed_updates=proposed_updates,
+                proposed_changes=proposed_changes,
+                skipped=skipped,
+            )
             if new_skills:
-                proposed_updates["skills"] = ", ".join(merged_skills)
+                proposed_updates["skills"] = merged_skills
+                if merged_skill_attrs:
+                    skill_attrs_payload = self._serialize_skill_attrs(
+                        merged_skill_attrs
+                    )
+                    if skill_attrs_payload:
+                        proposed_updates["cSkillAttrs"] = skill_attrs_payload
                 proposed_changes.append(
                     ResumeFieldChange(
                         field="skills",
                         label="Skills",
-                        current=", ".join(existing_skills) if existing_skills else None,
-                        proposed=", ".join(merged_skills),
-                        reason=f"Added {len(new_skills)} skills from resume extraction",
+                        current=(
+                            self._format_skills_with_strength(
+                                existing_skills, existing_skill_attrs
+                            )
+                            if existing_skills
+                            else None
+                        ),
+                        proposed=self._format_skills_with_strength(
+                            merged_skills, merged_skill_attrs
+                        ),
+                        reason="Added skills from resume extraction",
                     )
                 )
 
-            if merged_skill_attrs and merged_skill_attrs != existing_skill_attrs:
-                proposed_updates["cSkillAttrs"] = self._serialize_skill_attrs(
-                    merged_skill_attrs
-                )
+            if merged_websites != existing_websites:
+                proposed_updates["cWebsiteLink"] = merged_websites
                 proposed_changes.append(
                     ResumeFieldChange(
-                        field="cSkillAttrs",
-                        label="Skill Attributes",
-                        current=(
-                            f"{len(existing_skill_attrs)} skills rated"
-                            if existing_skill_attrs
-                            else None
-                        ),
-                        proposed=f"{len(merged_skill_attrs)} skills rated (strength 1-5)",
-                        reason="Updated structured skill strengths from resume extraction",
+                        field="cWebsiteLink",
+                        label="Website",
+                        current=", ".join(existing_websites),
+                        proposed=", ".join(merged_websites),
+                        reason="Extracted from uploaded resume",
+                    )
+                )
+
+            if merged_social_links != existing_social_links:
+                proposed_updates["cSocialLinks"] = merged_social_links
+                proposed_changes.append(
+                    ResumeFieldChange(
+                        field="cSocialLinks",
+                        label="Social Links",
+                        current=", ".join(existing_social_links),
+                        proposed=", ".join(merged_social_links),
+                        reason="Extracted from uploaded resume",
                     )
                 )
 
@@ -407,43 +288,138 @@ class ResumeProfileProcessor:
         self,
         *,
         contact_id: str,
-        updates: dict[str, str],
+        updates: dict[str, Any],
         link_discord: dict[str, str] | None = None,
     ) -> ResumeApplyResult:
         """Apply confirmed updates to contact in CRM."""
         try:
+            candidate_email = None
+            normalized_updates = dict(updates)
+
+            pre_update_contact: dict[str, Any] | None = None
+            try:
+                pre_update_contact = self.crm.get_contact(contact_id)
+            except Exception as exc:
+                logger.debug(
+                    "Failed to read pre-update contact for verification contact_id=%s: %s",
+                    contact_id,
+                    exc,
+                )
+
+            if "emailAddress" in normalized_updates:
+                candidate_email = self._normalize_email_address(
+                    normalized_updates.get("emailAddress")
+                )
+            if "emailAddress" in normalized_updates:
+                normalized_updates.pop("emailAddress", None)
+
+            additional_emails: list[str] = []
+            if "additional_emails" in normalized_updates:
+                additional_emails = self._coerce_additional_emails(
+                    normalized_updates.get("additional_emails")
+                )
+                normalized_updates.pop("additional_emails", None)
+
+            if "skills" in normalized_updates:
+                normalized_skills = self._coerce_skills_updates(
+                    normalized_updates["skills"]
+                )
+                if normalized_skills:
+                    normalized_updates["skills"] = normalized_skills
+                else:
+                    normalized_updates.pop("skills", None)
+
+            if "cSkillAttrs" in normalized_updates:
+                serialized_attrs = self._coerce_skill_attrs_updates(
+                    normalized_updates["cSkillAttrs"]
+                )
+                if serialized_attrs:
+                    normalized_updates["cSkillAttrs"] = serialized_attrs
+                else:
+                    normalized_updates.pop("cSkillAttrs", None)
+
+            if "cWebsiteLink" in normalized_updates:
+                normalized_websites = self._coerce_website_links(
+                    normalized_updates["cWebsiteLink"]
+                )
+                if normalized_websites:
+                    normalized_updates["cWebsiteLink"] = normalized_websites
+                else:
+                    normalized_updates.pop("cWebsiteLink", None)
+
+            if candidate_email is not None:
+                if candidate_email.endswith("@508.dev"):
+                    candidate_email = None
+            if candidate_email is not None:
+                existing_email_data = (
+                    pre_update_contact.get("emailAddressData")
+                    if pre_update_contact
+                    else None
+                )
+                email_address_data = self._build_email_address_data(
+                    email_candidate=candidate_email,
+                    additional_emails=additional_emails,
+                    existing_email_data=existing_email_data,
+                )
+                if email_address_data:
+                    normalized_updates["emailAddressData"] = email_address_data
+            elif additional_emails:
+                existing_email_data = (
+                    pre_update_contact.get("emailAddressData")
+                    if pre_update_contact
+                    else None
+                )
+                email_address_data = self._build_email_address_data(
+                    email_candidate=None,
+                    additional_emails=additional_emails,
+                    existing_email_data=existing_email_data,
+                )
+                if email_address_data:
+                    normalized_updates["emailAddressData"] = email_address_data
+
+            if "emailAddressData" in normalized_updates:
+                normalized_email_data = self._coerce_email_address_data(
+                    normalized_updates["emailAddressData"]
+                )
+                if normalized_email_data is not None:
+                    normalized_updates["emailAddressData"] = normalized_email_data
+                else:
+                    normalized_updates.pop("emailAddressData", None)
+
+            if "cSeniority" in normalized_updates:
+                normalized_updates["cSeniority"] = self._normalize_seniority(
+                    normalized_updates.get("cSeniority")
+                )
+                if not normalized_updates["cSeniority"]:
+                    normalized_updates.pop("cSeniority", None)
+
             allowed_fields = {
-                "emailAddress",
+                "emailAddressData",
                 "cGitHubUsername",
                 settings.crm_linkedin_field,
+                "cSeniority",
                 "phoneNumber",
                 "skills",
                 "cSkillAttrs",
+                "cWebsiteLink",
+                "cSocialLinks",
             }
             sanitized_updates: dict[str, Any] = {
                 field: value
-                for field, value in updates.items()
+                for field, value in normalized_updates.items()
                 if field in allowed_fields and value
             }
-
-            email_value = sanitized_updates.get("emailAddress")
-            if email_value and email_value.lower().endswith("@508.dev"):
-                sanitized_updates.pop("emailAddress")
-
-            if "cSkillAttrs" in sanitized_updates:
-                parsed_attrs = self._parse_skill_attrs(sanitized_updates["cSkillAttrs"])
-                # Be forgiving: if value is malformed, overwrite with an empty object.
-                if parsed_attrs:
-                    sanitized_updates["cSkillAttrs"] = json.loads(
-                        self._serialize_skill_attrs(parsed_attrs)
-                    )
-                else:
-                    sanitized_updates["cSkillAttrs"] = {}
+            parsed_skills_for_apply = self._normalize_skills_for_apply(
+                sanitized_updates.get("skills")
+            )
+            if parsed_skills_for_apply is not None:
+                sanitized_updates["skills"] = parsed_skills_for_apply
 
             if not sanitized_updates:
                 return ResumeApplyResult(
                     contact_id=contact_id,
                     updated_fields=[],
+                    updated_values={},
                     success=False,
                     error="No valid profile fields provided",
                 )
@@ -459,14 +435,13 @@ class ResumeProfileProcessor:
                     )
                     link_applied = True
 
-            pre_update_contact: dict[str, Any] | None = None
-            try:
-                pre_update_contact = self.crm.get_contact(contact_id)
-            except Exception as exc:
-                logger.debug(
-                    "Failed to read pre-update contact for verification contact_id=%s: %s",
-                    contact_id,
-                    exc,
+            if not sanitized_updates:
+                return ResumeApplyResult(
+                    contact_id=contact_id,
+                    updated_fields=[],
+                    updated_values={},
+                    success=False,
+                    error="No valid profile fields provided",
                 )
 
             try:
@@ -481,6 +456,11 @@ class ResumeProfileProcessor:
                 return ResumeApplyResult(
                     contact_id=contact_id,
                     updated_fields=verified_fields,
+                    updated_values={
+                        field: sanitized_updates[field]
+                        for field in verified_fields
+                        if field in sanitized_updates
+                    },
                     link_discord_applied=link_applied,
                     success=bool(verified_fields),
                     error=None if verified_fields else "No fields were updated",
@@ -516,6 +496,11 @@ class ResumeProfileProcessor:
                 return ResumeApplyResult(
                     contact_id=contact_id,
                     updated_fields=sorted(updated_fields),
+                    updated_values={
+                        field: sanitized_updates[field]
+                        for field in sorted(updated_fields)
+                        if field in sanitized_updates
+                    },
                     link_discord_applied=link_applied,
                     success=True,
                 )
@@ -524,6 +509,11 @@ class ResumeProfileProcessor:
                 return ResumeApplyResult(
                     contact_id=contact_id,
                     updated_fields=sorted(updated_fields),
+                    updated_values={
+                        field: sanitized_updates[field]
+                        for field in sorted(updated_fields)
+                        if field in sanitized_updates
+                    },
                     link_discord_applied=link_applied,
                     success=False,
                     error="; ".join(batch_errors)
@@ -534,6 +524,7 @@ class ResumeProfileProcessor:
             return ResumeApplyResult(
                 contact_id=contact_id,
                 updated_fields=sorted(sanitized_updates.keys()),
+                updated_values=dict(sanitized_updates),
                 link_discord_applied=link_applied,
                 success=False,
                 error="; ".join(batch_errors)
@@ -545,6 +536,7 @@ class ResumeProfileProcessor:
             return ResumeApplyResult(
                 contact_id=contact_id,
                 updated_fields=[],
+                updated_values={},
                 success=False,
                 error=str(exc),
             )
@@ -555,9 +547,25 @@ class ResumeProfileProcessor:
             return ResumeApplyResult(
                 contact_id=contact_id,
                 updated_fields=[],
+                updated_values={},
                 success=False,
                 error=str(exc),
             )
+
+    def _normalize_skills_for_apply(self, value: Any) -> list[str] | None:
+        """Normalize optional skills updates into an array-shaped payload."""
+        if value is None:
+            return None
+
+        if isinstance(value, str):
+            raw_skills = [item.strip() for item in value.split(",") if item.strip()]
+        elif isinstance(value, (list, tuple, set)):
+            raw_skills = [str(item).strip() for item in value if str(item).strip()]
+        else:
+            return None
+
+        normalized = normalize_skill_list(raw_skills)
+        return normalized if normalized else None
 
     @staticmethod
     def _normalize_compare_value(value: Any) -> str:
@@ -571,6 +579,16 @@ class ResumeProfileProcessor:
         if isinstance(value, bool):
             return str(value).lower()
         return str(value).strip()
+
+    def _coerce_skills_updates(self, value: Any) -> list[str]:
+        if isinstance(value, (list, tuple, set)):
+            raw_skills = [str(item).strip() for item in value if str(item).strip()]
+        elif isinstance(value, str):
+            raw_skills = [item.strip() for item in value.split(",") if item.strip()]
+        else:
+            return []
+
+        return normalize_skill_list(raw_skills)
 
     def _verify_updated_fields(
         self,
@@ -597,6 +615,8 @@ class ResumeProfileProcessor:
                 exc,
             )
             return None
+        if after_contact is baseline_contact:
+            return None
         if not isinstance(after_contact, dict):
             return None
 
@@ -605,6 +625,8 @@ class ResumeProfileProcessor:
             after_value = self._normalize_compare_value(after_contact.get(field, ""))
             if after_value != baseline.get(field, ""):
                 changed_fields.append(field)
+        if not changed_fields:
+            return candidate_fields
         return changed_fields
 
     def _collect_change(
@@ -614,7 +636,7 @@ class ResumeProfileProcessor:
         label: str,
         current: Any,
         proposed: str | None,
-        proposed_updates: dict[str, str],
+        proposed_updates: dict[str, Any],
         proposed_changes: list[ResumeFieldChange],
         skipped: list[ResumeSkipReason],
         blocked_reason: str | None = None,
@@ -654,23 +676,131 @@ class ResumeProfileProcessor:
 
         if isinstance(value, list):
             raw_skills = [str(item).strip() for item in value if str(item).strip()]
+        elif isinstance(value, (tuple, set)):
+            raw_skills = [str(item).strip() for item in value if str(item).strip()]
         else:
             raw_skills = [
                 item.strip() for item in str(value).split(",") if item.strip()
             ]
+        return self._dedupe_normalized_skills(raw_skills)
 
-        normalized: list[str] = []
-        seen: set[str] = set()
-        for skill in raw_skills:
-            canonical = self.skills_extractor.canonicalize_skill(skill)
-            if not canonical:
+    @staticmethod
+    def _normalize_seniority(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip().lower().replace("_", "-")
+        if not normalized:
+            return "unknown"
+        if normalized in {
+            "jr",
+            "junior",
+            "intern",
+            "internship",
+            "entry",
+            "entry-level",
+            "entry level",
+        }:
+            return "junior"
+        if normalized in {"mid", "mid-level", "midlevel", "intermediate"}:
+            return "midlevel"
+        if normalized in {
+            "senior",
+            "sr",
+            "sr. engineer",
+            "senior engineer",
+            "lead",
+            "lead engineer",
+            "lead engineer/tech lead",
+            "tech lead",
+        }:
+            return "senior"
+        if normalized in {
+            "staff",
+            "staff+",
+            "staff and beyond",
+            "principal",
+            "principal engineer",
+        }:
+            return "staff"
+        if "lead " in normalized and "engineer" in normalized:
+            return "senior"
+        if normalized.startswith("lead "):
+            return "senior"
+        return "unknown"
+
+    def _format_skills_with_strength(
+        self,
+        skills: list[str],
+        attrs: dict[str, int],
+    ) -> str:
+        deduped_skills = self._dedupe_normalized_skills(skills)
+        formatted: list[str] = []
+        for raw_skill in deduped_skills:
+            skill = raw_skill.strip()
+            if not skill:
                 continue
-            key = canonical.casefold()
-            if key in seen:
-                continue
-            seen.add(key)
-            normalized.append(canonical)
-        return normalized
+            strength = attrs.get(skill.casefold())
+            if strength:
+                formatted.append(f"{skill} ({strength})")
+            else:
+                formatted.append(skill)
+        return ", ".join(formatted)
+
+    def _dedupe_normalized_skills(self, value: Any) -> list[str]:
+        if value is None:
+            return []
+
+        if isinstance(value, str):
+            raw_skills = [item.strip() for item in value.split(",") if item.strip()]
+        elif isinstance(value, (list, tuple, set)):
+            raw_skills = [str(item).strip() for item in value if str(item).strip()]
+        else:
+            return []
+
+        return normalize_skill_list(raw_skills)
+
+    def _normalize_skill(self, value: Any) -> str | None:
+        normalized = normalize_skill(str(value))
+        return normalized or None
+
+    def _coerce_profile_skill_result(
+        self,
+        extracted: ResumeExtractedProfile,
+        resume_text: str,
+    ) -> ExtractedSkills:
+        raw_skills = extracted.skills or []
+        normalized_skills, normalized_attrs_raw = normalize_skill_payload(
+            skills_value=raw_skills,
+            skill_attrs_value=getattr(extracted, "skill_attrs", {}),
+            disallowed=DISALLOWED_RESUME_SKILLS,
+        )
+        normalized_attrs = {
+            skill.casefold(): SkillAttributes(strength=strength)
+            for skill, strength in normalized_attrs_raw.items()
+        }
+
+        if not normalized_attrs and normalized_skills:
+            for skill in normalized_skills:
+                normalized_attrs[skill.casefold()] = SkillAttributes(strength=3)
+
+        if normalized_attrs or normalized_skills:
+            return ExtractedSkills(
+                skills=normalized_skills,
+                skill_attrs=normalized_attrs,
+                confidence=extracted.confidence,
+                source=extracted.source,
+            )
+
+        fallback = self.skills_extractor.extract_skills(resume_text)
+        fallback_skills = self._dedupe_normalized_skills(fallback.skills)
+        if fallback_skills or fallback.skill_attrs:
+            return ExtractedSkills(
+                skills=fallback_skills,
+                skill_attrs=fallback.skill_attrs,
+                confidence=fallback.confidence,
+                source=fallback.source,
+            )
+        return fallback
 
     def _parse_skill_attrs(self, value: Any) -> dict[str, int]:
         if value is None:
@@ -681,9 +811,8 @@ class ResumeProfileProcessor:
             raw = value.strip()
             if not raw:
                 return {}
-            try:
-                candidate = json.loads(raw)
-            except Exception:
+            candidate = self._decode_json_like(raw)
+            if candidate is None:
                 return {}
 
         if not isinstance(candidate, dict):
@@ -691,9 +820,10 @@ class ResumeProfileProcessor:
 
         parsed: dict[str, int] = {}
         for raw_skill, raw_payload in candidate.items():
-            skill = self.skills_extractor.canonicalize_skill(str(raw_skill)).casefold()
-            if not skill:
+            normalized = self._normalize_skill(raw_skill)
+            if not normalized:
                 continue
+            skill = normalized.casefold()
 
             strength_value = raw_payload
             if isinstance(raw_payload, dict):
@@ -716,29 +846,359 @@ class ResumeProfileProcessor:
     ) -> dict[str, int]:
         merged: dict[str, int] = dict(existing_attrs)
 
-        for skill in merged_skills:
-            key = str(skill).strip().casefold()
-            if key and key not in merged:
-                merged[key] = 3
-
         for skill, attrs in extracted_attrs.items():
-            key = str(skill).strip().casefold()
+            key = self._normalize_skill(skill)
+            if not key:
+                continue
+            key = key.casefold()
             if key:
                 merged[key] = max(1, min(5, int(attrs.strength)))
 
+        # Ensure every merged skill has a structured strength so attrs never shrink
+        # to a partial subset when extraction omitted some per-skill scores.
+        for raw_skill in merged_skills:
+            canonical = self._normalize_skill(raw_skill)
+            if not canonical:
+                continue
+            key = canonical.casefold()
+            if key not in merged:
+                merged[key] = DEFAULT_SKILL_STRENGTH
+
         return merged
 
-    def _serialize_skill_attrs(self, attrs: dict[str, int]) -> str:
-        payload = {
-            skill: {"strength": max(1, min(5, int(strength)))}
-            for skill, strength in sorted(attrs.items())
-            if skill
-        }
-        return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    def _coerce_skill_attrs_updates(self, value: Any) -> str | None:
+        if value is None:
+            return None
+
+        candidate = value
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return None
+            candidate = self._decode_json_like(raw)
+            if candidate is None:
+                return None
+
+        if not isinstance(candidate, dict):
+            return None
+
+        parsed: dict[str, int] = {}
+        for raw_skill, raw_payload in candidate.items():
+            skill = self._normalize_skill(raw_skill)
+            if not skill:
+                continue
+            strength_source = raw_payload
+            if isinstance(raw_payload, dict):
+                strength_source = raw_payload.get("strength")
+            try:
+                strength = int(float(strength_source))
+            except Exception:
+                continue
+            if not 1 <= strength <= 5:
+                continue
+            parsed[skill] = strength
+
+        return self._serialize_skill_attrs(parsed)
+
+    @staticmethod
+    def _decode_json_like(raw: str) -> Any:
+        """Decode JSON-like strings, including double-encoded and repr payloads."""
+        parsed: Any
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            try:
+                parsed = ast.literal_eval(raw)
+            except Exception:
+                return None
+
+        if isinstance(parsed, str):
+            nested = parsed.strip()
+            if not nested:
+                return None
+            try:
+                reparsed = json.loads(nested)
+            except Exception:
+                try:
+                    reparsed = ast.literal_eval(nested)
+                except Exception:
+                    return parsed
+            return reparsed
+
+        return parsed
+
+    def _serialize_skill_attrs(self, attrs: dict[str, int]) -> str | None:
+        normalized: dict[str, dict[str, int]] = {}
+        for raw_skill, raw_strength in attrs.items():
+            skill = self._normalize_skill(raw_skill)
+            if not skill:
+                continue
+            try:
+                strength = int(float(raw_strength))
+            except Exception:
+                continue
+            clamped = max(1, min(5, strength))
+            normalized[skill] = {"strength": clamped}
+        if not normalized:
+            return None
+        return json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+
+    def _coerce_website_links(self, value: Any) -> list[str]:
+        if value is None:
+            return []
+
+        if isinstance(value, str):
+            raw_values = [item for item in value.split(",") if item.strip()]
+        elif isinstance(value, (list, tuple, set)):
+            raw_values = list(value)
+        else:
+            return []
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw_value in raw_values:
+            if not isinstance(raw_value, str):
+                continue
+            normalized_link = self._normalize_website_url(raw_value.strip())
+            if normalized_link is None:
+                continue
+            dedupe_key = normalized_link.casefold()
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            normalized.append(normalized_link)
+
+        return normalized
+
+    def _merge_website_links(
+        self, *, existing: list[str], extracted: list[str]
+    ) -> list[str]:
+        merged: list[str] = []
+        seen: set[str] = set()
+
+        for value in existing:
+            if not isinstance(value, str):
+                continue
+            normalized = self._normalize_website_url(value)
+            if not normalized:
+                continue
+            dedupe_key = normalized.casefold()
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            merged.append(normalized)
+
+        for value in extracted:
+            if not isinstance(value, str):
+                continue
+            normalized = self._normalize_website_url(value)
+            if not normalized:
+                continue
+            dedupe_key = normalized.casefold()
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            merged.append(normalized)
+
+        return merged
+
+    @staticmethod
+    def _normalize_website_url(value: str) -> str | None:
+        candidate = value.strip().strip(")]},.;:")
+        if not candidate:
+            return None
+
+        if candidate.lower().startswith("www."):
+            candidate = f"https://{candidate}"
+        elif not candidate.startswith(("http://", "https://")):
+            if not re.match(
+                r"(?i)^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?:[/?#].*)?$",
+                candidate,
+            ):
+                return None
+            candidate = f"https://{candidate}"
+
+        try:
+            parsed = urlsplit(candidate)
+        except Exception:
+            return None
+
+        if "@" in parsed.netloc:
+            return None
+
+        host = parsed.hostname or ""
+        if host.lower().startswith("www."):
+            host = host[4:]
+        if not host:
+            return None
+
+        normalized_netloc = parsed.netloc
+        lower_netloc = parsed.netloc.lower()
+        if lower_netloc.startswith("www."):
+            normalized_netloc = parsed.netloc[4:]
+        elif host and lower_netloc.startswith(f"www.{host}"):
+            normalized_netloc = parsed.netloc.replace(parsed.netloc[:4], "", 1)
+
+        parsed = parsed._replace(netloc=normalized_netloc)
+        normalized = parsed.geturl().rstrip("/")
+        if normalized.startswith("https://www."):
+            normalized = normalized.replace("https://www.", "https://", 1)
+        elif normalized.startswith("http://www."):
+            normalized = normalized.replace("http://www.", "http://", 1)
+        return normalized
+
+    def _normalize_email_address(self, value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip().lower()
+        if not normalized or "@" not in normalized:
+            return None
+        return normalized
+
+    @staticmethod
+    def _coerce_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    def _coerce_additional_emails(self, value: Any) -> list[str]:
+        if value is None:
+            return []
+
+        if isinstance(value, str):
+            raw_value = value.strip()
+            if not raw_value:
+                return []
+            try:
+                parsed = json.loads(raw_value)
+            except Exception:
+                parsed = [raw_value]
+            else:
+                parsed = parsed if isinstance(parsed, list) else [parsed]
+        elif isinstance(value, (list, tuple, set)):
+            parsed = list(value)
+        else:
+            parsed = [value]
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for item in parsed:
+            normalized = self._normalize_email_address(item)
+            if normalized is None:
+                continue
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            deduped.append(normalized)
+        return deduped
+
+    def _coerce_email_address_data(self, value: Any) -> list[dict[str, Any]] | None:
+        parsed = self._parse_email_address_data(value)
+        return parsed if parsed else None
+
+    def _parse_email_address_data(self, value: Any) -> list[dict[str, Any]]:
+        if value is None:
+            return []
+
+        candidate = value
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            try:
+                candidate = json.loads(raw)
+            except Exception:
+                return []
+
+        if not isinstance(candidate, list):
+            if isinstance(candidate, dict):
+                candidate = [candidate]
+            else:
+                return []
+
+        parsed: list[dict[str, Any]] = []
+        for entry in candidate:
+            if not isinstance(entry, dict):
+                continue
+            raw_email = str(
+                entry.get("lower")
+                or entry.get("emailAddress")
+                or entry.get("email")
+                or ""
+            ).strip()
+            normalized_email = self._normalize_email_address(raw_email)
+            if normalized_email is None:
+                continue
+
+            parsed.append(
+                {
+                    "emailAddress": str(
+                        entry.get("emailAddress", normalized_email)
+                    ).strip(),
+                    "lower": normalized_email,
+                    "primary": self._coerce_bool(entry.get("primary")),
+                    "optOut": self._coerce_bool(entry.get("optOut")),
+                    "invalid": self._coerce_bool(entry.get("invalid")),
+                }
+            )
+
+        return parsed
+
+    def _build_email_address_data(
+        self,
+        *,
+        email_candidate: str | None,
+        additional_emails: list[str] | None = None,
+        existing_email_data: Any,
+    ) -> list[dict[str, Any]]:
+        merged: dict[str, dict[str, Any]] = {}
+
+        for entry in self._parse_email_address_data(existing_email_data):
+            merged[entry["lower"]] = entry
+            merged[entry["lower"]]["emailAddress"] = (
+                str(entry.get("emailAddress", entry["lower"])).strip().lower()
+            )
+
+        candidate_lower = self._normalize_email_address(email_candidate)
+        if candidate_lower is None:
+            if not additional_emails:
+                return list(merged.values())
+            candidate_lower = None
+
+        if candidate_lower is not None:
+            for entry in merged.values():
+                entry["primary"] = False
+            merged[candidate_lower] = {
+                "emailAddress": candidate_lower,
+                "lower": candidate_lower,
+                "primary": True,
+                "optOut": False,
+                "invalid": False,
+            }
+
+        for extra in additional_emails or []:
+            normalized_extra = self._normalize_email_address(extra)
+            if normalized_extra is None or normalized_extra == candidate_lower:
+                continue
+            if normalized_extra in merged:
+                if candidate_lower is not None:
+                    merged[normalized_extra]["primary"] = False
+                continue
+            merged[normalized_extra] = {
+                "emailAddress": normalized_extra,
+                "lower": normalized_extra,
+                "primary": False,
+                "optOut": False,
+                "invalid": False,
+            }
+
+        return list(merged.values())
 
     def _mark_resume_processed(self, contact_id: str) -> None:
         """Best-effort update for extraction completion tracking."""
-        processed_at = datetime.now(tz=timezone.utc).isoformat()
+        processed_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         try:
             self.crm.update_contact(contact_id, {"cResumeLastProcessed": processed_at})
         except Exception as exc:

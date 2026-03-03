@@ -12,7 +12,7 @@ import json
 import logging
 from datetime import date, datetime
 import re
-from typing import Any
+from typing import Any, Literal
 
 import aiohttp
 import discord
@@ -22,6 +22,7 @@ from discord.ext import commands
 from five08.discord_bot.config import settings
 from five08.clients import espo
 from five08.skills import normalize_skill_list
+from five08.resume_extractor import ResumeExtractedProfile, ResumeProfileExtractor
 from five08.discord_bot.utils.audit import DiscordAuditLogger
 from five08.discord_bot.utils.role_decorators import (
     require_role,
@@ -33,7 +34,6 @@ logger = logging.getLogger(__name__)
 ID_VERIFIED_AT_FIELD = "cIdVerifiedAt"
 ID_VERIFIED_BY_FIELD = "cIdVerifiedBy"
 ID_VERIFIED_TYPE_FIELD = "cVerifiedIdType"
-MIGADU_API_BASE_URL = "https://api.migadu.com/v1"
 ONBOARDING_STATUS_FIELD_CANDIDATES = (
     "cOnboardingState",
     "cOnboardingStatus",
@@ -550,6 +550,23 @@ class ResumeConfirmationView(discord.ui.View):
 class ResumeUpdateConfirmationView(discord.ui.View):
     """Confirm extracted profile updates before writing to CRM."""
 
+    _EMBED_FIELD_LIMIT = 1024
+    _APPLIED_VALUE_LIMIT = 150
+    _APPLIED_FIELD_TOTAL_LIMIT = 900
+
+    _FIELD_LABELS: dict[str, str] = {
+        "emailAddressData": "Email Addresses",
+        "cGitHubUsername": "GitHub",
+        "phoneNumber": "Phone",
+        "skills": "Skills",
+        "cSkillAttrs": "Skill Strengths",
+        "cWebsiteLink": "Website",
+        "cSocialLinks": "Social Links",
+        "cSeniority": "Seniority",
+        "cDiscordUserID": "Discord User ID",
+        "cDiscordUsername": "Discord Username",
+    }
+
     def __init__(
         self,
         *,
@@ -557,7 +574,7 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         requester_id: int,
         contact_id: str,
         contact_name: str,
-        proposed_updates: dict[str, str],
+        proposed_updates: dict[str, Any],
         link_discord: dict[str, str] | None = None,
     ) -> None:
         super().__init__(timeout=300)
@@ -567,6 +584,290 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         self.contact_name = contact_name
         self.proposed_updates = proposed_updates
         self.link_discord = link_discord
+
+    @classmethod
+    def _field_label(cls, field: str) -> str:
+        linkedin_field = getattr(settings, "crm_linkedin_field", "cLinkedInUrl")
+        if field == linkedin_field:
+            return "LinkedIn"
+        return cls._FIELD_LABELS.get(field, field)
+
+    @staticmethod
+    def _truncate_embed_field(value: str, limit: int = 1024) -> str:
+        if len(value) <= limit:
+            return value
+        if limit <= 3:
+            return value[:limit]
+        return value[: limit - 3] + "..."
+
+    @staticmethod
+    def _decode_json_like_mapping(value: Any) -> dict[str, Any] | None:
+        candidate = value
+        if isinstance(candidate, str):
+            raw = candidate.strip()
+            if not raw:
+                return None
+            try:
+                candidate = json.loads(raw)
+            except Exception:
+                try:
+                    candidate = ast.literal_eval(raw)
+                except Exception:
+                    return None
+            if isinstance(candidate, str):
+                nested = candidate.strip()
+                if not nested:
+                    return None
+                try:
+                    candidate = json.loads(nested)
+                except Exception:
+                    try:
+                        candidate = ast.literal_eval(nested)
+                    except Exception:
+                        return None
+        if not isinstance(candidate, dict):
+            return None
+        return {str(key): item_value for key, item_value in candidate.items()}
+
+    @classmethod
+    def _format_field_value(cls, field: str, value: Any) -> str:
+        if value is None:
+            return "None"
+
+        if field == "cGitHubUsername":
+            username = str(value).strip().lstrip("@")
+            return f"@{username}" if username else "None"
+
+        if field == "skills":
+            if isinstance(value, str):
+                return cls._truncate_embed_field(value, cls._APPLIED_VALUE_LIMIT)
+            if isinstance(value, (list, tuple, set)):
+                items = [str(item).strip() for item in value if str(item).strip()]
+                joined = ", ".join(items) if items else "None"
+                return cls._truncate_embed_field(joined, cls._APPLIED_VALUE_LIMIT)
+
+        if field == "cSkillAttrs":
+            parsed = cls._decode_json_like_mapping(value)
+            if parsed:
+                formatted: list[str] = []
+                for raw_skill, raw_payload in parsed.items():
+                    strength_value = (
+                        raw_payload.get("strength")
+                        if isinstance(raw_payload, dict)
+                        else raw_payload
+                    )
+                    if strength_value is None:
+                        strength = 0
+                        skill = str(raw_skill).strip()
+                        if not skill:
+                            continue
+                        formatted.append(skill)
+                        continue
+                    try:
+                        strength = int(float(strength_value))
+                    except Exception:
+                        strength = 0
+                    skill = str(raw_skill).strip()
+                    if not skill:
+                        continue
+                    if 1 <= strength <= 5:
+                        formatted.append(f"{skill} ({strength})")
+                    else:
+                        formatted.append(skill)
+                joined = ", ".join(formatted) if formatted else "None"
+                return cls._truncate_embed_field(joined, cls._APPLIED_VALUE_LIMIT)
+
+        if isinstance(value, (list, tuple, set)):
+            items = [str(item).strip() for item in value if str(item).strip()]
+            joined = ", ".join(items) if items else "None"
+            return cls._truncate_embed_field(joined, cls._APPLIED_VALUE_LIMIT)
+        if isinstance(value, dict):
+            try:
+                encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
+            except Exception:
+                encoded = str(value)
+            return cls._truncate_embed_field(encoded, cls._APPLIED_VALUE_LIMIT)
+
+        text = str(value).strip()
+        return cls._truncate_embed_field(text or "None", cls._APPLIED_VALUE_LIMIT)
+
+    def _build_applied_updates_lines(
+        self,
+        *,
+        updated_fields: list[str],
+        updated_values: dict[str, Any],
+    ) -> list[str]:
+        has_skills_field = "skills" in updated_fields
+        has_skill_attrs_field = "cSkillAttrs" in updated_fields
+        lines: list[str] = []
+        if has_skills_field or has_skill_attrs_field:
+            skills_value = updated_values.get(
+                "skills", self.proposed_updates.get("skills")
+            )
+            attrs_value = updated_values.get(
+                "cSkillAttrs",
+                self.proposed_updates.get("cSkillAttrs"),
+            )
+            combined_skills = self._format_combined_skills_value(
+                skills_value=skills_value,
+                attrs_value=attrs_value,
+            )
+            truncated_combined_skills = self._truncate_embed_field(
+                combined_skills, self._APPLIED_VALUE_LIMIT
+            )
+            lines.append(f"**Skills**: `{truncated_combined_skills}`")
+
+        for field in self._collapse_updated_fields(updated_fields):
+            if field == "skills":
+                continue
+            label = self._field_label(field)
+            value = updated_values.get(field, self.proposed_updates.get(field))
+            formatted = self._format_field_value(field, value)
+            lines.append(f"**{label}**: `{formatted}`")
+        return lines
+
+    @classmethod
+    def _format_updated_fields_value(cls, labeled_fields: list[str]) -> str:
+        if not labeled_fields:
+            return "No field changes"
+
+        full = ", ".join(labeled_fields)
+        if len(full) <= cls._EMBED_FIELD_LIMIT:
+            return full
+
+        kept: list[str] = []
+        for index, field in enumerate(labeled_fields):
+            kept.append(field)
+            remaining = len(labeled_fields) - index - 1
+            suffix = f", and {remaining} more" if remaining > 0 else ""
+            candidate = ", ".join(kept) + suffix
+            if len(candidate) > cls._EMBED_FIELD_LIMIT:
+                kept.pop()
+                break
+
+        if not kept:
+            return cls._truncate_embed_field(full, cls._EMBED_FIELD_LIMIT)
+
+        remaining = len(labeled_fields) - len(kept)
+        if remaining > 0:
+            candidate = ", ".join(kept) + f", and {remaining} more"
+            return cls._truncate_embed_field(candidate, cls._EMBED_FIELD_LIMIT)
+        return cls._truncate_embed_field(", ".join(kept), cls._EMBED_FIELD_LIMIT)
+
+    @classmethod
+    def _format_applied_updates_value(cls, applied_lines: list[str]) -> str:
+        if not applied_lines:
+            return "No applied updates"
+
+        kept: list[str] = []
+        total = 0
+        for index, line in enumerate(applied_lines[:8]):
+            line_len = len(line) + (1 if kept else 0)
+            remaining = len(applied_lines[:8]) - index - 1
+            suffix = f"... and {remaining} more" if remaining > 0 else ""
+            projected = total + line_len
+            if suffix:
+                projected += len(suffix) + 1
+            if projected > cls._APPLIED_FIELD_TOTAL_LIMIT:
+                break
+            kept.append(line)
+            total += line_len
+
+        if not kept:
+            joined = "\n".join(applied_lines[:8])
+            return cls._truncate_embed_field(joined, cls._APPLIED_FIELD_TOTAL_LIMIT)
+
+        remaining = len(applied_lines[:8]) - len(kept)
+        if remaining > 0:
+            kept.append(f"... and {remaining} more")
+        joined = "\n".join(kept)
+        return cls._truncate_embed_field(joined, cls._APPLIED_FIELD_TOTAL_LIMIT)
+
+    @staticmethod
+    def _collapse_updated_fields(updated_fields: list[str]) -> list[str]:
+        """Collapse skill fields into a single logical skills entry."""
+        collapsed: list[str] = []
+        seen: set[str] = set()
+        has_skills = "skills" in updated_fields
+        has_skill_attrs = "cSkillAttrs" in updated_fields
+
+        for field in updated_fields:
+            normalized_field = field
+            if field == "cSkillAttrs":
+                if has_skills:
+                    continue
+                if has_skill_attrs:
+                    normalized_field = "skills"
+            key = normalized_field.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            collapsed.append(normalized_field)
+        return collapsed
+
+    @classmethod
+    def _format_combined_skills_value(
+        cls,
+        *,
+        skills_value: Any,
+        attrs_value: Any,
+    ) -> str:
+        skills: list[str] = []
+        if isinstance(skills_value, str):
+            skills = [item.strip() for item in skills_value.split(",") if item.strip()]
+        elif isinstance(skills_value, (list, tuple, set)):
+            skills = [str(item).strip() for item in skills_value if str(item).strip()]
+
+        parsed_attrs = cls._decode_json_like_mapping(attrs_value) or {}
+        strengths: dict[str, int] = {}
+        display_by_key: dict[str, str] = {}
+        for raw_skill, raw_payload in parsed_attrs.items():
+            skill_name = str(raw_skill).strip()
+            if not skill_name:
+                continue
+            key = skill_name.casefold()
+            display_by_key.setdefault(key, skill_name)
+            strength_value = (
+                raw_payload.get("strength")
+                if isinstance(raw_payload, dict)
+                else raw_payload
+            )
+            if strength_value is None:
+                continue
+            try:
+                strength = int(float(strength_value))
+            except Exception:
+                continue
+            if 1 <= strength <= 5:
+                strengths[key] = strength
+
+        ordered: list[str] = []
+        seen_order: set[str] = set()
+        for raw_skill in skills:
+            key = raw_skill.casefold()
+            if key in seen_order:
+                continue
+            seen_order.add(key)
+            ordered.append(raw_skill)
+            display_by_key.setdefault(key, raw_skill)
+        for key, display_name in display_by_key.items():
+            if key in seen_order:
+                continue
+            seen_order.add(key)
+            ordered.append(display_name)
+
+        if not ordered:
+            return "None"
+
+        formatted: list[str] = []
+        for skill_name in ordered:
+            key = skill_name.casefold()
+            skill_strength = strengths.get(key)
+            if skill_strength is not None:
+                formatted.append(f"{skill_name} ({skill_strength})")
+            else:
+                formatted.append(skill_name)
+        return ", ".join(formatted) if formatted else "None"
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """Allow only the original requester to confirm/cancel."""
@@ -680,11 +981,17 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         status = str(apply_result.get("status", "unknown"))
         result = apply_result.get("result")
         updated_fields: list[str] = []
+        updated_values: dict[str, Any] = {}
         link_discord_applied: bool | None = None
         if isinstance(result, dict):
             raw_fields = result.get("updated_fields")
             if isinstance(raw_fields, list):
                 updated_fields = [str(field) for field in raw_fields]
+            raw_values = result.get("updated_values")
+            if isinstance(raw_values, dict):
+                updated_values = {
+                    str(field): value for field, value in raw_values.items()
+                }
             raw_link_applied = result.get("link_discord_applied")
             if isinstance(raw_link_applied, bool):
                 link_discord_applied = raw_link_applied
@@ -789,11 +1096,25 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             description=f"Applied updates for **{self.contact_name}**.",
             color=0x00FF00,
         )
+        display_fields = self._collapse_updated_fields(updated_fields)
+        labeled_fields = [self._field_label(field) for field in display_fields]
+        updated_fields_value = self._format_updated_fields_value(labeled_fields)
         embed.add_field(
             name="Updated Fields",
-            value=", ".join(updated_fields) if updated_fields else "No field changes",
+            value=updated_fields_value,
             inline=False,
         )
+        applied_lines = self._build_applied_updates_lines(
+            updated_fields=updated_fields,
+            updated_values=updated_values,
+        )
+        if applied_lines:
+            applied_updates_value = self._format_applied_updates_value(applied_lines)
+            embed.add_field(
+                name="Applied Updates",
+                value=applied_updates_value,
+                inline=False,
+            )
         profile_url = f"{self.crm_cog.base_url}/#Contact/view/{self.contact_id}"
         embed.add_field(name="🔗 CRM Profile", value=f"[View in CRM]({profile_url})")
         _audit_apply_event(
@@ -1107,6 +1428,12 @@ class CRMCog(commands.Cog):
         self.espo_api = EspoAPI(api_url, settings.espo_api_key)
         # Store base URL for profile links
         self.base_url = settings.espo_base_url.rstrip("/")
+        self.resume_extractor = ResumeProfileExtractor(
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+            model=settings.openai_model,
+        )
+        self._resume_profile_cache: tuple[int, ResumeExtractedProfile] | None = None
         self.audit_logger = DiscordAuditLogger(
             base_url=settings.audit_api_base_url,
             shared_secret=settings.api_shared_secret,
@@ -1144,53 +1471,36 @@ class CRMCog(commands.Cog):
             "Content-Type": "application/json",
         }
 
-    def _migadu_credentials(self) -> tuple[str, str]:
-        """Return Migadu username and API token from configured settings."""
-        username = (settings.migadu_api_user or "").strip()
-        if not username:
-            raise ValueError("MIGADU_API_USER is required to create Migadu mailboxes.")
+    async def _backend_request_json(
+        self,
+        method: Literal["GET", "POST"],
+        path: str,
+        *,
+        expected_status: int,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        timeout = aiohttp.ClientTimeout(total=30)
+        request_kwargs: dict[str, Any] = {
+            "headers": self._backend_headers(),
+            "timeout": timeout,
+        }
+        if payload is not None:
+            request_kwargs["json"] = payload
 
-        raw_key = (settings.migadu_api_key or "").strip()
-        if not raw_key:
-            raise ValueError("MIGADU_API_KEY is required to create Migadu mailboxes.")
-        return username, raw_key
-
-    def _migadu_mailbox_domain(self) -> str:
-        """Resolve the mailbox domain configured for new 508 addresses."""
-        domain = (
-            (settings.migadu_mailbox_domain or "508.dev").strip().lower().lstrip(".")
-        )
-        if not domain:
-            domain = "508.dev"
-        return domain
-
-    def _normalize_mailbox_request(self, backup_email: str) -> tuple[str, str, str]:
-        """
-        Normalize user input and derive both:
-            - backup_email: the value to match against existing CRM email fields
-            - mailbox_email: the generated 508 mailbox address to create
-            - local_part: mailbox local-part for Migadu API
-        """
-        normalized = backup_email.strip().lower()
-        if not normalized:
-            raise ValueError("Please provide a full backup email address.")
-        if " " in normalized:
-            raise ValueError("Backup email cannot include spaces.")
-        if normalized.count("@") != 1:
-            raise ValueError("Backup email must be a full email address.")
-
-        domain = self._migadu_mailbox_domain()
-        local_part, provided_domain = normalized.split("@", 1)
-        if not local_part:
-            raise ValueError("Backup email is missing a local part.")
-        if not provided_domain:
-            raise ValueError("Backup email is missing a domain.")
-        if provided_domain in {"508", "508.dev"}:
-            raise ValueError("Backup email cannot be an @508.dev email.")
-
-        normalized_domain = provided_domain.strip().lower()
-        mailbox_email = f"{local_part}@{domain}"
-        return f"{local_part}@{normalized_domain}", mailbox_email, local_part
+        async with aiohttp.ClientSession() as session:
+            async with session.request(
+                method,
+                self._backend_url(path),
+                **request_kwargs,
+            ) as response:
+                data = await response.json()
+                if response.status != expected_status:
+                    raise ValueError(f"Backend {method} {path} failed: {data}")
+                if not isinstance(data, dict):
+                    raise ValueError(
+                        f"Backend {method} {path} returned a non-object response."
+                    )
+                return data
 
     def _backend_url(self, path: str) -> str:
         return f"{settings.backend_api_base_url.rstrip('/')}{path}"
@@ -1203,26 +1513,22 @@ class CRMCog(commands.Cog):
             "attachment_id": attachment_id,
             "filename": filename,
         }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                self._backend_url("/jobs/resume-extract"),
-                headers=self._backend_headers(),
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                data = await response.json()
-                if response.status != 202:
-                    raise ValueError(f"Backend extract enqueue failed: {data}")
-                job_id = data.get("job_id")
-                if not isinstance(job_id, str) or not job_id:
-                    raise ValueError("Missing backend extract job_id in response.")
-                return job_id
+        data = await self._backend_request_json(
+            "POST",
+            "/jobs/resume-extract",
+            payload=payload,
+            expected_status=202,
+        )
+        job_id = data.get("job_id")
+        if not isinstance(job_id, str) or not job_id:
+            raise ValueError("Missing backend extract job_id in response.")
+        return job_id
 
     async def _enqueue_resume_apply_job(
         self,
         *,
         contact_id: str,
-        updates: dict[str, str],
+        updates: dict[str, Any],
         link_discord: dict[str, str] | None = None,
     ) -> str:
         payload = {
@@ -1230,34 +1536,23 @@ class CRMCog(commands.Cog):
             "updates": updates,
             "link_discord": link_discord,
         }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                self._backend_url("/jobs/resume-apply"),
-                headers=self._backend_headers(),
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                data = await response.json()
-                if response.status != 202:
-                    raise ValueError(f"Backend apply enqueue failed: {data}")
-                job_id = data.get("job_id")
-                if not isinstance(job_id, str) or not job_id:
-                    raise ValueError("Missing backend apply job_id in response.")
-                return job_id
+        data = await self._backend_request_json(
+            "POST",
+            "/jobs/resume-apply",
+            payload=payload,
+            expected_status=202,
+        )
+        job_id = data.get("job_id")
+        if not isinstance(job_id, str) or not job_id:
+            raise ValueError("Missing backend apply job_id in response.")
+        return job_id
 
     async def _get_backend_job_status(self, job_id: str) -> dict[str, Any]:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                self._backend_url(f"/jobs/{job_id}"),
-                headers=self._backend_headers(),
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                data = await response.json()
-                if response.status != 200:
-                    raise ValueError(f"Backend job status failed: {data}")
-                if not isinstance(data, dict):
-                    raise ValueError("Backend job status response must be an object.")
-                return data
+        return await self._backend_request_json(
+            "GET",
+            f"/jobs/{job_id}",
+            expected_status=200,
+        )
 
     async def _wait_for_backend_job_result(
         self, job_id: str, *, timeout_seconds: int = 180, poll_seconds: float = 2.0
@@ -1374,15 +1669,19 @@ class CRMCog(commands.Cog):
         contact_name: str,
         result: dict[str, Any],
         link_member: discord.Member | None,
-    ) -> tuple[discord.Embed, dict[str, str]]:
+    ) -> tuple[discord.Embed, dict[str, Any]]:
         """Render backend extraction result as a Discord preview embed."""
         proposed_updates_raw = result.get("proposed_updates")
-        proposed_updates: dict[str, str] = {}
+        proposed_updates: dict[str, Any] = {}
         if isinstance(proposed_updates_raw, dict):
             proposed_updates = {
-                str(field): str(value)
+                str(field): value
                 for field, value in proposed_updates_raw.items()
-                if value is not None and str(value).strip()
+                if value is not None
+                and not (
+                    isinstance(value, (dict, list, tuple, set)) and len(value) == 0
+                )
+                and (not isinstance(value, str) or value.strip())
             }
 
         changes = result.get("proposed_changes")
@@ -2428,171 +2727,6 @@ class CRMCog(commands.Cog):
             await interaction.followup.send(embed=embed)
 
     @app_commands.command(
-        name="create-mailbox",
-        description="Create a Migadu mailbox for a contact and sync 508 email (Admin only).",
-    )
-    @app_commands.describe(
-        backup_email=(
-            "Full backup email for the contact (e.g. john@gmail.com). "
-            "`@508.dev` is not allowed."
-        )
-    )
-    @require_role("Admin")
-    async def create_mailbox(
-        self, interaction: discord.Interaction, backup_email: str
-    ) -> None:
-        """Create a 508 mailbox and update the CRM contact."""
-        try:
-            await interaction.response.defer(ephemeral=True)
-
-            backup_lookup, mailbox_email, local_part = self._normalize_mailbox_request(
-                backup_email
-            )
-            matches = await self._search_contacts_for_mailbox_command(
-                backup_email=backup_lookup, mailbox_email=mailbox_email
-            )
-
-            if not matches:
-                self._audit_command(
-                    interaction=interaction,
-                    action="crm.create_mailbox",
-                    result="denied",
-                    metadata={
-                        "backup_email": backup_email,
-                        "reason": "contact_not_found",
-                    },
-                )
-                await interaction.followup.send(
-                    "❌ No contact found for the provided backup email."
-                )
-                return
-
-            if len(matches) > 1:
-                match_lines = []
-                for contact in matches[:5]:
-                    match_lines.append(
-                        f"{contact.get('name', 'Unknown')} — "
-                        f"{contact.get('emailAddress', 'No email')} "
-                        f"(c508: {contact.get('c508Email', 'No 508 email')})"
-                    )
-                self._audit_command(
-                    interaction=interaction,
-                    action="crm.create_mailbox",
-                    result="denied",
-                    metadata={
-                        "backup_email": backup_lookup,
-                        "mailbox_email": mailbox_email,
-                        "reason": "multiple_contacts",
-                    },
-                )
-                await interaction.followup.send(
-                    "⚠️ Multiple contacts match this value:\n" + "\n".join(match_lines)
-                )
-                return
-
-            contact = matches[0]
-            contact_id = contact.get("id")
-            contact_name = contact.get("name", "Unknown")
-            if not contact_id:
-                self._audit_command(
-                    interaction=interaction,
-                    action="crm.create_mailbox",
-                    result="error",
-                    metadata={
-                        "backup_email": backup_lookup,
-                        "reason": "contact_missing_id",
-                    },
-                )
-                await interaction.followup.send(
-                    "❌ Contact is missing an ID; cannot create mailbox."
-                )
-                return
-
-            mailbox = await self._create_migadu_mailbox(
-                local_part=local_part,
-                backup_email=backup_lookup,
-            )
-
-            update_data = {"c508Email": mailbox_email}
-            update_response = self.espo_api.request(
-                "PUT", f"Contact/{contact_id}", update_data
-            )
-            if not update_response:
-                self._audit_command(
-                    interaction=interaction,
-                    action="crm.create_mailbox",
-                    result="error",
-                    metadata={
-                        "backup_email": backup_lookup,
-                        "mailbox_email": mailbox_email,
-                        "contact_id": str(contact_id),
-                    },
-                )
-                await interaction.followup.send(
-                    "⚠️ Mailbox was created, but CRM contact could not be updated. "
-                    "Please set `c508Email` manually."
-                )
-                return
-
-            created_address = mailbox.get("address")
-            embed = discord.Embed(
-                title="✅ Mailbox Created",
-                color=0x00FF00,
-            )
-            embed.add_field(name="Contact", value=contact_name, inline=False)
-            embed.add_field(
-                name="Mailbox", value=created_address or mailbox_email, inline=True
-            )
-            embed.add_field(name="Backup", value=backup_lookup, inline=True)
-            profile_url = f"{self.base_url}/#Contact/view/{contact_id}"
-            embed.add_field(name="CRM", value=f"[View]({profile_url})", inline=True)
-            await interaction.followup.send(embed=embed)
-
-            self._audit_command(
-                interaction=interaction,
-                action="crm.create_mailbox",
-                result="success",
-                metadata={
-                    "backup_email": backup_lookup,
-                    "mailbox_email": mailbox_email,
-                    "contact_id": str(contact_id),
-                    "contact_name": contact_name,
-                },
-                resource_type="crm_contact",
-                resource_id=str(contact_id),
-            )
-
-        except ValueError as e:
-            logger.error(f"Invalid request in create_mailbox: {e}")
-            self._audit_command(
-                interaction=interaction,
-                action="crm.create_mailbox",
-                result="denied",
-                metadata={"error": str(e), "backup_email": backup_email},
-            )
-            await interaction.followup.send(f"⚠️ {e}")
-        except EspoAPIError as e:
-            logger.error(f"CRM error in create_mailbox: {e}")
-            self._audit_command(
-                interaction=interaction,
-                action="crm.create_mailbox",
-                result="error",
-                metadata={"error": str(e), "backup_email": backup_email},
-            )
-            await interaction.followup.send(f"❌ CRM API error: {str(e)}")
-        except Exception as e:
-            logger.error(f"Unexpected error in create_mailbox: {e}")
-            self._audit_command(
-                interaction=interaction,
-                action="crm.create_mailbox",
-                result="error",
-                metadata={"error": str(e), "backup_email": backup_email},
-            )
-            await interaction.followup.send(
-                "❌ An unexpected error occurred while creating the mailbox."
-            )
-
-    @app_commands.command(
         name="get-resume", description="Download and send a contact's resume"
     )
     @app_commands.describe(
@@ -2802,129 +2936,57 @@ class CRMCog(commands.Cog):
 
         return deduplicated_contacts
 
-    async def _search_contacts_for_mailbox_command(
-        self, *, backup_email: str, mailbox_email: str
-    ) -> list[dict[str, Any]]:
-        """Search contacts for a backup email and prospective 508 mailbox address."""
-        values = {backup_email, mailbox_email}
-        where_values = []
-        for value in values:
-            if not value:
-                continue
-            where_values.extend(
-                [
-                    {"type": "equals", "attribute": "emailAddress", "value": value},
-                    {"type": "equals", "attribute": "c508Email", "value": value},
-                ]
-            )
-
-        if not where_values:
-            return []
-
-        search_params = {
-            "where": [{"type": "or", "value": where_values}],
-            "maxSize": 10,
-            "select": "id,name,emailAddress,c508Email,cDiscordUsername",
-        }
-
-        response = self.espo_api.request("GET", "Contact", search_params)
-        contacts: list[dict[str, Any]] = response.get("list", [])
-
-        # Deduplicate contacts by ID to avoid showing duplicates
-        deduplicated_contacts = []
-        seen_ids = set()
-        for contact in contacts:
-            contact_id = contact.get("id")
-            if contact_id and contact_id not in seen_ids:
-                seen_ids.add(contact_id)
-                deduplicated_contacts.append(contact)
-
-        return deduplicated_contacts
-
-    async def _create_migadu_mailbox(
-        self, *, local_part: str, backup_email: str
-    ) -> dict[str, Any]:
-        """Create a mailbox in Migadu for the given local-part."""
-        username, token = self._migadu_credentials()
-        base_url = MIGADU_API_BASE_URL.rstrip("/")
-        domain = self._migadu_mailbox_domain()
-
-        payload = {
-            "local_part": local_part,
-            "name": local_part,
-            "password_method": "invitation",
-            "password_recovery_email": backup_email,
-            "forwarding_to": backup_email,
-        }
-
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.post(
-                    f"{base_url}/domains/{domain}/mailboxes",
-                    auth=aiohttp.BasicAuth(login=username, password=token),
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as response:
-                    if response.status not in {200, 201}:
-                        body = await response.text()
-                        raise ValueError(
-                            f"Migadu mailbox creation failed: status={response.status}, body={body}"
-                        )
-                    data = await response.json()
-                    if not isinstance(data, dict):
-                        raise ValueError(
-                            "Migadu response payload must be a JSON object."
-                        )
-                    return data
-            except aiohttp.ClientError as exc:
-                raise ValueError(f"Migadu API request failed: {exc}") from exc
-
-    def _extract_resume_contact_hints(
-        self, file_content: bytes
-    ) -> dict[str, list[str]]:
-        """Extract basic contact-identifying signals from resume bytes."""
-        text = file_content.decode("utf-8", errors="ignore")
-        if not text:
-            return {"emails": [], "github_usernames": [], "linkedin_urls": []}
-
-        # Keep this lightweight; heuristics are only used for contact targeting.
-        snippet = text[:12000]
-        email_re = re.compile(
-            r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
-            flags=re.IGNORECASE,
-        )
-        github_re = re.compile(
-            r"(?:https?://)?(?:www\.)?github\.com/([A-Za-z0-9-]{1,39})",
-            flags=re.IGNORECASE,
-        )
-        linkedin_re = re.compile(
-            r"(?:https?://)?(?:[\w.-]+\.)?linkedin\.com/in/[A-Za-z0-9\\-_%]+/?",
-            flags=re.IGNORECASE,
-        )
-
-        email_matches: list[str] = []
-        for email in email_re.findall(snippet):
-            candidate = str(email).strip().lower()
-            if candidate and candidate not in email_matches:
-                email_matches.append(candidate)
-
-        github_matches: list[str] = []
-        for username in github_re.findall(snippet):
-            candidate = str(username).strip().lower()
-            if candidate and candidate not in github_matches:
-                github_matches.append(candidate)
-
-        linkedin_matches: list[str] = []
-        for linkedin_url in linkedin_re.findall(snippet):
-            candidate = str(linkedin_url).strip().lower().rstrip("/")
-            if candidate and candidate not in linkedin_matches:
-                linkedin_matches.append(candidate)
-
+    def _extract_resume_contact_hints(self, file_content: bytes) -> dict[str, Any]:
+        """Extract contact-identifying signals and shared resume fields from bytes."""
+        profile = self._extract_resume_profile(file_content)
+        emails: list[str] = []
+        if profile.email:
+            emails.append(profile.email)
+        for raw_email in getattr(profile, "additional_emails", []) or []:
+            if raw_email and raw_email not in emails:
+                emails.append(raw_email)
         return {
-            "emails": email_matches,
-            "github_usernames": github_matches,
-            "linkedin_urls": linkedin_matches,
+            "emails": emails,
+            "github_usernames": [profile.github_username]
+            if profile.github_username
+            else [],
+            "linkedin_urls": [profile.linkedin_url] if profile.linkedin_url else [],
+            "phone": profile.phone,
+            "name": profile.name,
+            "address_country": profile.address_country,
+            "seniority_level": profile.seniority_level,
+            "skills": profile.skills,
         }
+
+    def _extract_resume_profile(self, file_content: bytes) -> Any:
+        """Extract resume profile fields and cache per-file-content results."""
+        cache = self._resume_profile_cache
+        cache_key = hash(file_content)
+        if cache and cache[0] == cache_key:
+            return cache[1]
+
+        text = file_content.decode("utf-8", errors="ignore")
+        profile = self.resume_extractor.extract(text)
+        self._resume_profile_cache = (cache_key, profile)
+        return profile
+
+    def _extract_resume_name_fallback(self, file_content: bytes) -> str:
+        """Simple name heuristic fallback when extraction did not return a name."""
+        text = file_content.decode("utf-8", errors="ignore")
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        for line in lines[:40]:
+            candidate = line.strip()
+            if not candidate:
+                continue
+            if len(candidate) < 2:
+                continue
+            if "@" in candidate or "http" in candidate.lower():
+                continue
+            if not any(char.isalpha() for char in candidate):
+                continue
+            if len(candidate.split()) >= 1 and len(candidate) <= 70:
+                return candidate
+        return "Unknown Contact"
 
     def _format_inferred_attempts(self, attempts: list[dict[str, Any]] | None) -> str:
         if not attempts:
@@ -2944,23 +3006,11 @@ class CRMCog(commands.Cog):
 
     def _extract_resume_name_hint(self, file_content: bytes) -> str:
         """Best-effort contact name extraction from resume text."""
-        text = file_content.decode("utf-8", errors="ignore")
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        for line in lines[:40]:
-            candidate = line.strip()
-            if not candidate:
-                continue
-            if len(candidate) < 2:
-                continue
-            if "@" in candidate or "http" in candidate.lower():
-                continue
-            if not any(char.isalpha() for char in candidate):
-                continue
-            # Prefer short, title-like lines at the top as candidate names.
-            if len(candidate.split()) >= 1 and len(candidate) <= 70:
-                return candidate
-
-        return "Unknown Contact"
+        hints = self._extract_resume_contact_hints(file_content)
+        extracted_name = str(hints.get("name") or "").strip()
+        if extracted_name:
+            return extracted_name
+        return self._extract_resume_name_fallback(file_content)
 
     def _build_resume_create_contact_payload(
         self, file_content: bytes
@@ -2969,18 +3019,45 @@ class CRMCog(commands.Cog):
         hints = self._extract_resume_contact_hints(file_content)
         name = self._extract_resume_name_hint(file_content)
         contact_name = name if name != "Unknown Contact" else "Resume Candidate"
+        emails = hints.get("emails", [])
+        github_usernames = hints.get("github_usernames", [])
+        linkedin_urls = hints.get("linkedin_urls", [])
+        skills = hints.get("skills", [])
+        if not isinstance(emails, list):
+            emails = []
+        if not isinstance(github_usernames, list):
+            github_usernames = []
+        if not isinstance(linkedin_urls, list):
+            linkedin_urls = []
+        if not isinstance(skills, list):
+            skills = []
 
         payload: dict[str, str] = {"name": contact_name}
-        if hints["emails"]:
-            primary_email = hints["emails"][0]
+        if emails:
+            primary_email = emails[0]
             if primary_email.endswith("@508.dev"):
                 payload["c508Email"] = primary_email
             else:
                 payload["emailAddress"] = primary_email
-        if hints["github_usernames"]:
-            payload["cGitHubUsername"] = hints["github_usernames"][0]
-        if hints["linkedin_urls"]:
-            payload["cLinkedInUrl"] = hints["linkedin_urls"][0]
+        if github_usernames:
+            payload["cGitHubUsername"] = github_usernames[0]
+        if linkedin_urls:
+            payload["cLinkedInUrl"] = linkedin_urls[0]
+        phone = hints.get("phone")
+        if isinstance(phone, str) and phone.strip():
+            payload["phoneNumber"] = phone.strip()
+        address_country = str(hints.get("address_country", "")).strip()
+        if address_country:
+            payload["addressCountry"] = address_country
+        seniority = str(hints.get("seniority_level", "")).strip()
+        if seniority:
+            payload["cSeniority"] = seniority
+        if skills:
+            normalized_skills = [
+                str(item).strip() for item in skills if str(item).strip()
+            ]
+            if normalized_skills:
+                payload["skills"] = ", ".join(normalized_skills)
 
         return payload
 
@@ -3046,7 +3123,10 @@ class CRMCog(commands.Cog):
         """Infer target contact from resume identifiers."""
         hints = self._extract_resume_contact_hints(file_content)
         attempts: list[dict[str, Any]] = []
-        for email in hints["emails"]:
+        emails = hints.get("emails", [])
+        if not isinstance(emails, list):
+            emails = []
+        for email in emails:
             attempts.append({"method": "email", "value": email})
             contacts = await self._search_contact_for_linking(email)
             if len(contacts) == 1:
@@ -3063,7 +3143,10 @@ class CRMCog(commands.Cog):
                     "attempts": attempts,
                 }
 
-        for github_username in hints["github_usernames"]:
+        github_usernames = hints.get("github_usernames", [])
+        if not isinstance(github_usernames, list):
+            github_usernames = []
+        for github_username in github_usernames:
             attempts.append({"method": "github", "value": github_username})
             contacts = await self._search_contacts_by_field(
                 field="cGitHubUsername", value=github_username
@@ -3082,7 +3165,10 @@ class CRMCog(commands.Cog):
                     "attempts": attempts,
                 }
 
-        for linkedin_url in hints["linkedin_urls"]:
+        linkedin_urls = hints.get("linkedin_urls", [])
+        if not isinstance(linkedin_urls, list):
+            linkedin_urls = []
+        for linkedin_url in linkedin_urls:
             attempts.append({"method": "linkedin", "value": linkedin_url})
             contacts = await self._search_contacts_by_field(
                 field="cLinkedInUrl", value=linkedin_url

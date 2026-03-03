@@ -545,9 +545,11 @@ class ResumeMailboxProcessor:
             return False
 
         proposed_updates = {
-            str(field): str(value)
+            str(field): value
             for field, value in candidate_extract.proposed_updates.items()
-            if value is not None and str(value).strip()
+            if value is not None
+            and not (isinstance(value, (dict, list, tuple, set)) and len(value) == 0)
+            and (not isinstance(value, str) or value.strip())
         }
         if not proposed_updates:
             return True
@@ -564,16 +566,24 @@ class ResumeMailboxProcessor:
     ) -> str | None:
         extracted_profile_raw = extract_result.get("extracted_profile")
         if isinstance(extracted_profile_raw, dict):
+            email_raw = extracted_profile_raw.get("email")
             email_value = self._normalize_email(
-                str(extracted_profile_raw.get("email", "")).strip()
+                email_raw if isinstance(email_raw, str) else None
             )
             if email_value:
                 return email_value
+            extracted_additional = extracted_profile_raw.get("additional_emails")
+            if isinstance(extracted_additional, list):
+                for raw_email in extracted_additional:
+                    email_value = self._normalize_email(str(raw_email).strip())
+                    if email_value:
+                        return email_value
 
         proposed_updates = extract_result.get("proposed_updates")
         if isinstance(proposed_updates, dict):
+            email_raw = proposed_updates.get("emailAddress")
             email_value = self._normalize_email(
-                str(proposed_updates.get("emailAddress", "")).strip()
+                email_raw if isinstance(email_raw, str) else None
             )
             if email_value:
                 return email_value

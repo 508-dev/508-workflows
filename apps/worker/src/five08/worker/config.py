@@ -34,6 +34,21 @@ class WorkerSettings(SharedSettings):
     crm_sync_enabled: bool = True
     crm_sync_interval_seconds: int = 900
     crm_sync_page_size: int = 200
+
+    @property
+    def worker_queue_name(self) -> str:
+        queue_names = [
+            name.strip() for name in self.worker_queue_names.split(",") if name.strip()
+        ]
+        if len(queue_names) > 1:
+            raise ValueError(
+                "WORKER_QUEUE_NAMES currently supports one queue name. "
+                "Configure a single queue to align actor registration and worker consume set."
+            )
+        if queue_names:
+            return queue_names[0]
+        return self.redis_queue_name
+
     email_resume_intake_enabled: bool = False
     check_email_wait: int = 2
     email_username: str | None = None
