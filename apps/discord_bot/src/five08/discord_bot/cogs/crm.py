@@ -3424,7 +3424,6 @@ class CRMCog(commands.Cog):
     def _discord_display_name(self, user: discord.Member) -> str:
         """Format Discord username for CRM fields."""
         username = str(getattr(user, "name", "")).strip()
-        display_name = str(getattr(user, "display_name", "")).strip()
         discriminator = getattr(user, "discriminator", "0")
         if (
             isinstance(discriminator, str)
@@ -3433,8 +3432,6 @@ class CRMCog(commands.Cog):
             and discriminator.strip().isdigit()
         ):
             return f"{username}#{discriminator.strip()}"
-        if display_name:
-            return display_name
         return username
 
     def _discord_link_fields(self, user: discord.Member) -> dict[str, str]:

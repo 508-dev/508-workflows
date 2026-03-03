@@ -2386,7 +2386,7 @@ class TestCRMCog:
         assert payload["name"] == "Monica Geller"
         assert payload["firstName"] == "Monica"
         assert payload["lastName"] == "Geller"
-        assert payload["cDiscordUsername"] == "Monica Geller"
+        assert payload["cDiscordUsername"] == "monica"
         assert payload["cDiscordUserID"] == "999"
 
     def test_build_inference_lookup_summary_uses_attempt_text(self, crm_cog):
