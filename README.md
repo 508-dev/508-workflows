@@ -106,7 +106,7 @@ Use `.env.example` as the source of truth for defaults.
 
 - `Required`: `ESPO_BASE_URL`, `ESPO_API_KEY`
 - `Optional`: `LOG_LEVEL` (default: `INFO`)
-- `Optional`: `RUNTIME_ENV` (default: `local`; non-local values require explicit `POSTGRES_URL` and `MINIO_ROOT_PASSWORD`)
+- `Optional`: `ENVIRONMENT` (default: `local`; non-local values require explicit `POSTGRES_URL` and `MINIO_ROOT_PASSWORD`)
 
 ### Queue + Job Runtime
 
@@ -194,6 +194,9 @@ Use `.env.example` as the source of truth for defaults.
 - `Optional`: `RESUME_AI_MODEL` (default: `gpt-4o-mini`; use plain names like `gpt-4o-mini`, OpenRouter gets auto-prefixed to `openai/<model>`)
 - `Optional`: `OPENAI_MODEL` (default: `gpt-4o-mini`; fallback/legacy model setting)
 - `Optional`: `RESUME_EXTRACTOR_VERSION` (default: `v1`; used in resume processing idempotency/ledger keys)
+- `Optional`: `INTAKE_RESUME_FETCH_TIMEOUT_SECONDS` (default: `20.0`; timeout for intake resume URL downloads)
+- `Optional`: `INTAKE_RESUME_MAX_REDIRECTS` (default: `3`; max redirects followed for intake resume URL downloads)
+- `Optional`: `INTAKE_RESUME_ALLOWED_HOSTS` (default: empty; optional comma-separated host allowlist for intake resume URL downloads)
 - `Optional`: `EMAIL_RESUME_INTAKE_ENABLED` (default: `false`; enables worker-side mailbox resume processing loop)
 - `Optional`: `EMAIL_RESUME_ALLOWED_EXTENSIONS` (default: `pdf,doc,docx`)
 - `Optional`: `EMAIL_RESUME_MAX_FILE_SIZE_MB` (default: `10`)

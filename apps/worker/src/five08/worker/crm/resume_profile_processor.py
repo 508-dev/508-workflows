@@ -5,14 +5,21 @@ from __future__ import annotations
 import ast
 import json
 import logging
-import re
-import unicodedata
 from collections.abc import Callable
 from datetime import datetime, timezone
-from urllib.parse import urlsplit
 from typing import Any
 
 from five08.clients.espo import EspoAPI, EspoAPIError
+from five08.crm_normalization import (
+    ROLE_NORMALIZATION_MAP,
+    normalize_city,
+    normalize_country,
+    normalize_role,
+    normalize_roles,
+    normalize_seniority,
+    normalize_timezone,
+    normalize_website_url,
+)
 from five08.skills import (
     DISALLOWED_RESUME_SKILLS,
     normalize_skill,
@@ -36,16 +43,6 @@ from five08.worker.models import (
 
 logger = logging.getLogger(__name__)
 DEFAULT_SKILL_STRENGTH = 3
-ROLE_NORMALIZATION_MAP = {
-    "developer": "developer",
-    "data scientist": "data_scientist",
-    "program manager": "program_manager",
-    "product manager": "product_manager",
-    "designer": "designer",
-    "user research": "user_research",
-    "biz dev": "biz_dev",
-    "marketing": "marketing",
-}
 
 
 class ResumeEspoClient:
@@ -783,145 +780,27 @@ class ResumeProfileProcessor:
 
     @staticmethod
     def _normalize_seniority(value: Any) -> str | None:
-        if not isinstance(value, str):
-            return None
-        normalized = value.strip().lower().replace("_", "-")
-        if not normalized:
-            return "unknown"
-        if normalized in {
-            "jr",
-            "junior",
-            "intern",
-            "internship",
-            "entry",
-            "entry-level",
-            "entry level",
-        }:
-            return "junior"
-        if normalized in {"mid", "mid-level", "midlevel", "intermediate"}:
-            return "midlevel"
-        if normalized in {
-            "senior",
-            "sr",
-            "sr. engineer",
-            "senior engineer",
-            "lead",
-            "lead engineer",
-            "lead engineer/tech lead",
-            "tech lead",
-        }:
-            return "senior"
-        if normalized in {
-            "staff",
-            "staff+",
-            "staff and beyond",
-            "principal",
-            "principal engineer",
-        }:
-            return "staff"
-        if "lead " in normalized and "engineer" in normalized:
-            return "senior"
-        if normalized.startswith("lead "):
-            return "senior"
-        return "unknown"
+        return normalize_seniority(value, empty_as_unknown=True)
 
     @staticmethod
     def _normalize_country(value: Any) -> str | None:
-        if not isinstance(value, str):
-            return None
-        normalized = value.strip()
-        return normalized.title() if normalized else None
+        return normalize_country(value)
 
     @staticmethod
     def _normalize_city(value: Any) -> str | None:
-        if not isinstance(value, str):
-            return None
-        normalized = value.strip()
-        if not normalized:
-            return None
-        normalized = normalized.split(",")[0].strip()
-        if not normalized:
-            return None
-        return " ".join(part.strip().title() for part in normalized.split())
+        return normalize_city(value, strip_parenthetical=False)
 
     @staticmethod
     def _normalize_timezone(value: Any) -> str | None:
-        if not isinstance(value, str):
-            return None
-
-        raw = value.strip().replace(" ", "")
-        if not raw:
-            return None
-
-        utc_pattern = re.search(
-            r"(?i)\b(?:utc|gmt)\s*([+-]\d{1,2}(?:[:.]?[0-5]?\d)?)\b", raw
-        )
-        if utc_pattern:
-            raw = utc_pattern.group(1)
-        if raw.lower() in {"utc", "gmt"}:
-            return "UTC+00:00"
-
-        if raw[0] not in {"+", "-"}:
-            return None
-        match = re.match(r"([+-])(\d{1,2})(?::?([0-5]?\d))?$", raw)
-        if not match:
-            return None
-
-        sign = match.group(1)
-        try:
-            hours = int(match.group(2))
-        except Exception:
-            return None
-        if not 0 <= hours <= 14:
-            return None
-        minutes = match.group(3)
-        if minutes is None:
-            minutes_value = 0
-        else:
-            try:
-                minutes_value = int(minutes)
-            except Exception:
-                return None
-            if minutes_value > 59:
-                return None
-        return f"UTC{sign}{hours:02d}:{minutes_value:02d}"
+        return normalize_timezone(value)
 
     @staticmethod
     def _normalize_role(value: Any) -> str | None:
-        if not isinstance(value, str):
-            return None
-        normalized = value.strip().lower()
-        if not normalized:
-            return None
-        mapped = ROLE_NORMALIZATION_MAP.get(normalized)
-        if mapped is not None:
-            return mapped
-        normalized = "_".join(normalized.split())
-        normalized = "".join(
-            ch for ch in normalized if ch.isalnum() or ch in {"_", "-"}
-        )
-        return normalized or None
+        return normalize_role(value, ROLE_NORMALIZATION_MAP)
 
     @staticmethod
     def _normalize_roles(value: Any) -> list[str]:
-        if value is None:
-            return []
-        if isinstance(value, str):
-            raw_values = [item.strip() for item in re.split(r"[,\n;]+", value)]
-        elif isinstance(value, (list, tuple, set)):
-            raw_values = [str(item).strip() for item in value]
-        else:
-            return []
-
-        normalized: list[str] = []
-        seen: set[str] = set()
-        for raw_value in raw_values:
-            normalized_value = ResumeProfileProcessor._normalize_role(raw_value)
-            if not normalized_value or normalized_value in seen:
-                continue
-            seen.add(normalized_value)
-            normalized.append(normalized_value)
-        return normalized
+        return normalize_roles(value, ROLE_NORMALIZATION_MAP)
 
     def _format_skills_with_strength(
         self,
@@ -1199,54 +1078,7 @@ class ResumeProfileProcessor:
 
     @staticmethod
     def _normalize_website_url(value: str) -> str | None:
-        candidate = unicodedata.normalize("NFKC", value)
-        candidate = "".join(
-            char for char in candidate if unicodedata.category(char) != "Cf"
-        )
-        candidate = candidate.strip().strip(")]},.;:")
-        if any(ord(ch) > 127 for ch in candidate):
-            return None
-        if not candidate:
-            return None
-
-        if candidate.lower().startswith("www."):
-            candidate = f"https://{candidate}"
-        elif not candidate.startswith(("http://", "https://")):
-            if not re.match(
-                r"(?i)^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?:[/?#].*)?$",
-                candidate,
-            ):
-                return None
-            candidate = f"https://{candidate}"
-
-        try:
-            parsed = urlsplit(candidate)
-        except Exception:
-            return None
-
-        if "@" in parsed.netloc:
-            return None
-
-        host = parsed.hostname or ""
-        if host.lower().startswith("www."):
-            host = host[4:]
-        if not host:
-            return None
-
-        normalized_netloc = parsed.netloc
-        lower_netloc = parsed.netloc.lower()
-        if lower_netloc.startswith("www."):
-            normalized_netloc = parsed.netloc[4:]
-        elif host and lower_netloc.startswith(f"www.{host}"):
-            normalized_netloc = parsed.netloc.replace(parsed.netloc[:4], "", 1)
-
-        parsed = parsed._replace(netloc=normalized_netloc)
-        normalized = parsed.geturl().rstrip("/")
-        if normalized.startswith("https://www."):
-            normalized = normalized.replace("https://www.", "https://", 1)
-        elif normalized.startswith("http://www."):
-            normalized = normalized.replace("http://www.", "http://", 1)
-        return normalized
+        return normalize_website_url(value, allow_scheme_less=True)
 
     def _normalize_email_address(self, value: Any) -> str | None:
         if not isinstance(value, str):

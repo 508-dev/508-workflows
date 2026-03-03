@@ -176,7 +176,7 @@ def test_jobsctl_rerun_uses_default_secret_from_environment(
     assert mock_request.call_args.kwargs["headers"]["X-API-Secret"] == "from-env"
 
 
-def test_jobsctl_status_defaults_to_backend_api_service_in_docker(
+def test_jobsctl_status_defaults_to_api_service_in_docker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("API_SHARED_SECRET", "from-env")
@@ -190,16 +190,14 @@ def test_jobsctl_status_defaults_to_backend_api_service_in_docker(
             status_code=200,
             payload={"status": "succeeded", "job_id": "job-123"},
             method="GET",
-            url="http://backend-api:8090/jobs/job-123",
+            url="http://api:8090/jobs/job-123",
         )
 
         exit_code = jobcli.run(["status", "job-123"])
 
     assert exit_code == 0
     mock_request.assert_called_once()
-    assert (
-        mock_request.call_args.kwargs["url"] == "http://backend-api:8090/jobs/job-123"
-    )
+    assert mock_request.call_args.kwargs["url"] == "http://api:8090/jobs/job-123"
 
 
 def test_jobsctl_status_prints_error_when_api_returns_error(

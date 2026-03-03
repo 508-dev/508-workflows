@@ -7,7 +7,8 @@ Guidance for agents working in the 508.dev integrations monorepo.
 This repo contains multiple services:
 
 - Discord bot (`apps/discord_bot`)
-- Worker ingest + consumer (`apps/worker`)
+- Backend API (`apps/api`)
+- Worker consumer (`apps/worker`)
 - Shared package (`packages/shared`)
 
 ## Architecture Principles
@@ -22,7 +23,8 @@ This repo contains multiple services:
 
 3. Service separation
 - `apps/discord_bot`: Discord gateway and bot commands/cogs
-- `apps/worker`: webhook ingest API and queue consumer
+- `apps/api`: webhook ingest API and dashboard auth routes
+- `apps/worker`: queue consumer and processing jobs
 - `docker-compose.yml`: stack orchestration with Redis, Postgres, and MinIO
 
 4. Human audit logging
@@ -35,7 +37,7 @@ This repo contains multiple services:
 - Bot core: `apps/discord_bot/src/five08/discord_bot/bot.py`
 - Bot config: `apps/discord_bot/src/five08/discord_bot/config.py`
 - Bot audit helper: `apps/discord_bot/src/five08/discord_bot/utils/audit.py`
-- Backend API: `apps/worker/src/five08/backend/api.py`
+- Backend API: `apps/api/src/five08/backend/api.py`
 - Worker consumer: `apps/worker/src/five08/worker/consumer.py`
 - Shared settings: `packages/shared/src/five08/settings.py`
 - Shared queue helpers: `packages/shared/src/five08/queue.py`
@@ -53,9 +55,9 @@ uv sync
 Run services directly:
 
 ```bash
-uv run --package discord-bot-app discord-bot
-uv run --package integrations-worker backend-api
-uv run --package integrations-worker worker-consumer
+uv run --package discord_bot discord-bot
+uv run --package api backend-api
+uv run --package worker worker-consumer
 ```
 
 Run stack with Compose:
