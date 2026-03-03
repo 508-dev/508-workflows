@@ -2189,6 +2189,75 @@ class TestCRMCog:
             assert payload["cSeniority"] == "senior"
             assert payload["skills"] == "Python, fastapi"
 
+    def test_build_inference_lookup_summary_uses_attempt_text(self, crm_cog):
+        """Test lookup summary uses attempt text when attempts are present."""
+        with (
+            patch.object(
+                crm_cog,
+                "_format_inferred_attempts",
+                return_value="`jane@example.com`, `janedoe`",
+            ),
+            patch.object(crm_cog, "_extract_resume_contact_hints") as extract_hints,
+        ):
+            summary = crm_cog._build_inference_lookup_summary(
+                file_content=b"resume",
+                attempts=[
+                    {"method": "email", "value": "jane@example.com"},
+                    {"method": "github", "value": "janedoe"},
+                ],
+            )
+
+            assert summary == "\nTried contact lookups: `jane@example.com`, `janedoe`"
+            extract_hints.assert_not_called()
+
+    def test_build_inference_lookup_summary_falls_back_to_parsed_identifiers(
+        self, crm_cog
+    ):
+        """Test lookup summary fallback uses parsed identifiers with cleanup."""
+        with (
+            patch.object(crm_cog, "_format_inferred_attempts", return_value=""),
+            patch.object(
+                crm_cog,
+                "_extract_resume_contact_hints",
+                return_value={
+                    "emails": [
+                        " jane@example.com ",
+                        "jane@example.com",
+                        "",
+                        " second@example.com ",
+                        "second@example.com",
+                    ],
+                    "github_usernames": [" janedoe ", "janedoe", " "],
+                    "linkedin_urls": [
+                        "https://linkedin.com/in/jane",
+                        "https://linkedin.com/in/jane",
+                    ],
+                },
+            ),
+        ):
+            summary = crm_cog._build_inference_lookup_summary(
+                file_content=b"resume", attempts=[]
+            )
+
+            assert (
+                summary
+                == "\nParsed resume identifiers: "
+                + "emails: `jane@example.com`, `second@example.com`; "
+                + "github usernames: `janedoe`; linkedin URLs: `https://linkedin.com/in/jane`"
+            )
+
+    def test_build_inference_lookup_summary_with_non_dict_hints(self, crm_cog):
+        """Test non-dict parsed contact hints produce empty summary safely."""
+        with (
+            patch.object(crm_cog, "_format_inferred_attempts", return_value=""),
+            patch.object(crm_cog, "_extract_resume_contact_hints", return_value=None),
+        ):
+            summary = crm_cog._build_inference_lookup_summary(
+                file_content=b"resume", attempts=[]
+            )
+
+            assert summary == ""
+
     @pytest.mark.asyncio
     async def test_upload_resume_link_user_shows_confirm_then_creates_contact(
         self, crm_cog, mock_interaction

@@ -3238,7 +3238,11 @@ class CRMCog(commands.Cog):
         if attempts_text:
             return f"\nTried contact lookups: {attempts_text}"
 
-        hints = self._extract_resume_contact_hints(file_content)
+        hints_raw = self._extract_resume_contact_hints(file_content)
+        if isinstance(hints_raw, dict):
+            hints: dict[str, Any] = hints_raw
+        else:
+            hints = {}
 
         def _to_values(raw_values: Any) -> list[str]:
             values: list[str] = []
@@ -5576,7 +5580,8 @@ class CRMCog(commands.Cog):
                         await interaction.followup.send(
                             f"⚠️ Multiple contacts match `{inferred_value}` from the resume. "
                             "Please provide `search_term` or `link_user`."
-                            + inferred_attempts_text
+                            + inferred_attempts_text,
+                            ephemeral=True,
                         )
                     elif inferred_reason == "no_matching_contact":
                         self._audit_command(
@@ -5602,6 +5607,7 @@ class CRMCog(commands.Cog):
                             "Would you like to create a new contact from the parsed details?"
                             + inferred_attempts_text,
                             view=view,
+                            ephemeral=True,
                         )
                     else:
                         self._audit_command(
