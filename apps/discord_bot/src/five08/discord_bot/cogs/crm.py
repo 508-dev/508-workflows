@@ -12,7 +12,7 @@ import json
 import logging
 from datetime import date, datetime
 import re
-from typing import Any
+from typing import Any, Literal
 
 import aiohttp
 import discord
@@ -1151,6 +1151,37 @@ class CRMCog(commands.Cog):
             "Content-Type": "application/json",
         }
 
+    async def _backend_request_json(
+        self,
+        method: Literal["GET", "POST"],
+        path: str,
+        *,
+        expected_status: int,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        timeout = aiohttp.ClientTimeout(total=30)
+        request_kwargs: dict[str, Any] = {
+            "headers": self._backend_headers(),
+            "timeout": timeout,
+        }
+        if payload is not None:
+            request_kwargs["json"] = payload
+
+        async with aiohttp.ClientSession() as session:
+            async with session.request(
+                method,
+                self._backend_url(path),
+                **request_kwargs,
+            ) as response:
+                data = await response.json()
+                if response.status != expected_status:
+                    raise ValueError(f"Backend {method} {path} failed: {data}")
+                if not isinstance(data, dict):
+                    raise ValueError(
+                        f"Backend {method} {path} returned a non-object response."
+                    )
+                return data
+
     def _migadu_credentials(self) -> tuple[str, str]:
         """Return Migadu username and API token from configured settings."""
         username = (settings.migadu_api_user or "").strip()
@@ -1210,20 +1241,16 @@ class CRMCog(commands.Cog):
             "attachment_id": attachment_id,
             "filename": filename,
         }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                self._backend_url("/jobs/resume-extract"),
-                headers=self._backend_headers(),
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                data = await response.json()
-                if response.status != 202:
-                    raise ValueError(f"Backend extract enqueue failed: {data}")
-                job_id = data.get("job_id")
-                if not isinstance(job_id, str) or not job_id:
-                    raise ValueError("Missing backend extract job_id in response.")
-                return job_id
+        data = await self._backend_request_json(
+            "POST",
+            "/jobs/resume-extract",
+            payload=payload,
+            expected_status=202,
+        )
+        job_id = data.get("job_id")
+        if not isinstance(job_id, str) or not job_id:
+            raise ValueError("Missing backend extract job_id in response.")
+        return job_id
 
     async def _enqueue_resume_apply_job(
         self,
@@ -1237,34 +1264,23 @@ class CRMCog(commands.Cog):
             "updates": updates,
             "link_discord": link_discord,
         }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                self._backend_url("/jobs/resume-apply"),
-                headers=self._backend_headers(),
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                data = await response.json()
-                if response.status != 202:
-                    raise ValueError(f"Backend apply enqueue failed: {data}")
-                job_id = data.get("job_id")
-                if not isinstance(job_id, str) or not job_id:
-                    raise ValueError("Missing backend apply job_id in response.")
-                return job_id
+        data = await self._backend_request_json(
+            "POST",
+            "/jobs/resume-apply",
+            payload=payload,
+            expected_status=202,
+        )
+        job_id = data.get("job_id")
+        if not isinstance(job_id, str) or not job_id:
+            raise ValueError("Missing backend apply job_id in response.")
+        return job_id
 
     async def _get_backend_job_status(self, job_id: str) -> dict[str, Any]:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                self._backend_url(f"/jobs/{job_id}"),
-                headers=self._backend_headers(),
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                data = await response.json()
-                if response.status != 200:
-                    raise ValueError(f"Backend job status failed: {data}")
-                if not isinstance(data, dict):
-                    raise ValueError("Backend job status response must be an object.")
-                return data
+        return await self._backend_request_json(
+            "GET",
+            f"/jobs/{job_id}",
+            expected_status=200,
+        )
 
     async def _wait_for_backend_job_result(
         self, job_id: str, *, timeout_seconds: int = 180, poll_seconds: float = 2.0

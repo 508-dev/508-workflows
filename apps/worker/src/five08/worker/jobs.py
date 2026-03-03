@@ -4,6 +4,7 @@ import base64
 import logging
 from datetime import datetime, timezone
 from email import message_from_bytes
+from collections.abc import Callable
 from typing import Any
 
 from five08.worker.config import settings
@@ -153,3 +154,16 @@ def sync_person_from_crm_job(contact_id: str) -> dict[str, Any]:
     processor = PeopleSyncProcessor()
     result = processor.sync_contact(contact_id)
     return result
+
+
+JOB_FUNCTIONS: dict[str, Callable[..., dict[str, Any]]] = {
+    process_webhook_event.__name__: process_webhook_event,
+    process_contact_skills_job.__name__: process_contact_skills_job,
+    extract_resume_profile_job.__name__: extract_resume_profile_job,
+    apply_resume_profile_job.__name__: apply_resume_profile_job,
+    process_intake_form_job.__name__: process_intake_form_job,
+    process_mailbox_message_job.__name__: process_mailbox_message_job,
+    sync_people_from_crm_job.__name__: sync_people_from_crm_job,
+    sync_person_from_crm_job.__name__: sync_person_from_crm_job,
+    process_docuseal_agreement_job.__name__: process_docuseal_agreement_job,
+}

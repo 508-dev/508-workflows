@@ -92,6 +92,11 @@ curl -X POST "http://localhost:8090/jobs/<job_id>/rerun" \
 - `GET /auth/discord/link/{token}`: Resolve Discord deep link into authenticated dashboard redirect.
 - Auth flows emit best-effort human audit events (`auth.login`, `auth.logout`) under source `admin_dashboard`.
 
+### Current API/Worker behavior
+
+- Worker queue configuration resolves to one effective queue via `WORKER_QUEUE_NAMES`.
+- Job handler registration for rerun and worker execution is centralized in `five08.worker.jobs.JOB_FUNCTIONS`.
+
 ## Jobs
 
 ### `GET /jobs/{job_id}`
@@ -240,5 +245,3 @@ EspoCRM contact-change webhook for people cache sync.
 
 - JSON body:
   - Array of event objects, each with at least `id` (string).
-=======
->>>>>>> origin/main

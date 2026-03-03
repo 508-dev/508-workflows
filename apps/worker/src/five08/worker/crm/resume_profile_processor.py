@@ -346,6 +346,11 @@ class ResumeProfileProcessor:
                 for field, value in normalized_updates.items()
                 if field in allowed_fields and value
             }
+            normalized_skills = self._normalize_skills_for_apply(
+                sanitized_updates.get("skills")
+            )
+            if normalized_skills is not None:
+                sanitized_updates["skills"] = normalized_skills
 
             if not sanitized_updates:
                 return ResumeApplyResult(
@@ -463,6 +468,32 @@ class ResumeProfileProcessor:
                 success=False,
                 error=str(exc),
             )
+
+    @staticmethod
+    def _normalize_skills_for_apply(value: Any) -> list[str] | None:
+        """Normalize optional skills updates into an array-shaped payload."""
+        if value is None:
+            return None
+
+        if isinstance(value, str):
+            raw_skills = [item.strip() for item in value.split(",")]
+        elif isinstance(value, (list, tuple, set)):
+            raw_skills = [str(item).strip() for item in value]
+        else:
+            return None
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for skill in raw_skills:
+            if not skill:
+                continue
+            key = skill.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(skill)
+
+        return normalized if normalized else None
 
     @staticmethod
     def _normalize_compare_value(value: Any) -> str:
