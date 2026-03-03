@@ -33,6 +33,8 @@ FIELD_MAP = {
     "linkedin_url": settings.crm_linkedin_field,
     "github_username": "cGitHubUsername",
     "address_country": "addressCountry",
+    "address_city": "addressCity",
+    "timezone": "cTimezone",
     "primary_role": "cRoles",
     "availability": "cAvailableTimes",
     "rate_range": "cRateRange",
@@ -434,6 +436,12 @@ class IntakeFormProcessor:
             profile_phone = self._normalize_text(extracted_profile.phone)
             profile_github = self._normalize_text(extracted_profile.github_username)
             profile_linkedin = self._normalize_text(extracted_profile.linkedin_url)
+            profile_timezone = self._normalize_timezone(
+                getattr(extracted_profile, "timezone", None)
+            )
+            profile_city = self._normalize_city(
+                getattr(extracted_profile, "address_city", None)
+            )
             profile_availability = self._normalize_text(
                 getattr(extracted_profile, "availability", None)
             )
@@ -443,18 +451,35 @@ class IntakeFormProcessor:
             profile_referred_by = self._normalize_text(
                 getattr(extracted_profile, "referred_by", None)
             )
+            profile_description = self._normalize_text(
+                getattr(extracted_profile, "description", None)
+            )
             if profile_phone:
                 updates["phoneNumber"] = profile_phone
             if profile_github:
                 updates["cGitHubUsername"] = profile_github
             if profile_linkedin:
                 updates[settings.crm_linkedin_field] = profile_linkedin
+            if profile_timezone:
+                updates.setdefault("cTimezone", profile_timezone)
+            if profile_city:
+                updates.setdefault("addressCity", profile_city)
+            profile_country = self._normalize_text(extracted_profile.address_country)
+            if profile_country:
+                updates.setdefault("addressCountry", profile_country)
+            profile_roles = self._parse_roles(
+                getattr(extracted_profile, "primary_roles", [])
+            )
+            if profile_roles:
+                updates.setdefault("cRoles", profile_roles)
             if profile_availability:
                 updates.setdefault("cAvailableTimes", profile_availability)
             if profile_rate_range:
                 updates.setdefault("cRateRange", profile_rate_range)
             if profile_referred_by:
                 updates.setdefault("cReferredBy", profile_referred_by)
+            if profile_description:
+                updates.setdefault("description", profile_description)
             profile_attrs = self._parse_profile_skill_attrs(extracted_profile)
             if profile_attrs:
                 updates["cSkillAttrs"] = json.dumps(profile_attrs)
@@ -598,6 +623,51 @@ class IntakeFormProcessor:
             return None
         normalized = value.strip()
         return normalized or None
+
+    def _normalize_timezone(self, value: object) -> str | None:
+        if not isinstance(value, str):
+            return None
+        raw = value.strip().replace(" ", "")
+        if not raw:
+            return None
+        pattern = re.search(
+            r"(?i)\b(?:utc|gmt)\s*([+-]\d{1,2}(?:[:.]?[0-5]?\d)?)\b", raw
+        )
+        if pattern:
+            raw = pattern.group(1)
+        if raw.lower() in {"utc", "gmt"}:
+            return "UTC+00:00"
+        if raw[0] not in {"+", "-"}:
+            return None
+        match = re.match(r"([+-])(\d{1,2})(?::?([0-5]?\d))?$", raw)
+        if not match:
+            return None
+        sign = match.group(1)
+        try:
+            hours = int(match.group(2))
+        except Exception:
+            return None
+        if not 0 <= hours <= 14:
+            return None
+        minutes = match.group(3)
+        if minutes is None:
+            minutes_value = 0
+        else:
+            minutes_value = int(minutes)
+            if minutes_value > 59:
+                return None
+        return f"UTC{sign}{hours:02d}:{minutes_value:02d}"
+
+    def _normalize_city(self, value: object) -> str | None:
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+        normalized = normalized.split(",")[0].strip()
+        if not normalized:
+            return None
+        return " ".join(part.strip().title() for part in normalized.split())
 
     def _normalize_github_username(self, value: object) -> str | None:
         normalized = self._normalize_text(value)

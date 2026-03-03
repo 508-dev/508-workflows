@@ -50,7 +50,23 @@ PERSONAL_WEBSITE_DISALLOWED_HOSTS = {
     "github.com",
     "linkedin.com",
     "node.js",
+    "asp.net",
+    "next.js",
 }
+TECH_STACK_WEBSITE_DISALLOWED_PREFIXES = frozenset(
+    {
+        "asp",
+        "next",
+        "node",
+        "react",
+        "vue",
+        "angular",
+        "nuxt",
+        "svelte",
+        "tailwind",
+        "gatsby",
+    }
+)
 PERSONAL_WEBSITE_MIN_CONFIDENCE = 0.7
 LLM_WEBSITE_URL_MIN_CONFIDENCE = 0.45
 LLM_SOCIAL_URL_MIN_CONFIDENCE = 0.7
@@ -71,6 +87,16 @@ DEFAULT_FALLBACK_FIRST_NAME = "Resume"
 DEFAULT_FALLBACK_LAST_NAME = "Candidate"
 SINGLE_NAME_FALLBACK_LAST_NAME = "Unknown"
 _PLACEHOLDER_NAME_TOKENS = {"unknown", "n/a", "na", "none", "null", "resume candidate"}
+ROLE_NORMALIZATION_MAP = {
+    "developer": "developer",
+    "data scientist": "data_scientist",
+    "program manager": "program_manager",
+    "product manager": "product_manager",
+    "designer": "designer",
+    "user research": "user_research",
+    "biz dev": "biz_dev",
+    "marketing": "marketing",
+}
 NAME_PREFIXES = {
     "dr",
     "mr",
@@ -168,6 +194,13 @@ def _normalize_scalar(value: Any) -> str | None:
     return normalized or None
 
 
+def _normalize_description(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = re.sub(r"\s+", " ", value.strip())
+    return normalized[:2000] or None
+
+
 def _normalize_github(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -251,6 +284,113 @@ def _normalize_country(value: Any) -> str | None:
     return normalized.title() if normalized else None
 
 
+def _normalize_city(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    normalized = normalized.split("(")[0].strip()
+    normalized = normalized.split(",")[0].strip()
+    return re.sub(r"\s+", " ", normalized).strip() or None
+
+
+def _normalize_timezone_offset(value: str) -> str | None:
+    raw = value.strip().replace(" ", "")
+    if not raw:
+        return None
+
+    if raw.lower() in {"utc", "gmt"}:
+        return "UTC+00:00"
+
+    raw = re.sub(r"(?i)\b(?:utc|gmt)\b", "", raw).strip()
+    if not raw:
+        return "UTC+00:00"
+
+    match = re.match(r"([+-])\s*(\d{1,2})(?:[:.]([0-9]{1,2}))?$", raw)
+    if match is None:
+        return None
+
+    sign = match.group(1)
+    try:
+        hours = int(match.group(2))
+    except Exception:
+        return None
+    if hours > 14:
+        return None
+
+    minutes = match.group(3)
+    if minutes is None:
+        minutes_value = 0
+    else:
+        try:
+            minutes_value = int(minutes)
+        except Exception:
+            return None
+        if minutes_value > 59:
+            return None
+
+    return f"UTC{sign}{hours:02d}:{minutes_value:02d}"
+
+
+def _normalize_timezone(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+
+    patterns = [
+        r"(?im)^(?:timezone|time\s*zone|tz|utc|gmt)\s*[:\-]\s*(.+)$",
+        r"(?i)\b(?:utc|gmt)\s*([+-]\s*\d{1,2}(?:[:.]\d{1,2})?)\b",
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, raw):
+            normalized_offset = _normalize_timezone_offset(match.group(1))
+            if normalized_offset:
+                return normalized_offset
+
+    if raw.lower() in {"utc", "gmt", "utc+0", "utc+00", "utc+000"}:
+        return "UTC+00:00"
+
+    return _normalize_timezone_offset(raw)
+
+
+def _normalize_role(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if not normalized:
+        return None
+    mapped = ROLE_NORMALIZATION_MAP.get(normalized)
+    if mapped is not None:
+        return mapped
+    normalized = "_".join(normalized.split())
+    normalized = "".join(ch for ch in normalized if ch.isalnum() or ch in {"_", "-"})
+    return normalized or None
+
+
+def _normalize_role_collection(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_values = [item.strip() for item in re.split(r"[,\n;]+", value)]
+    elif isinstance(value, (list, tuple, set)):
+        raw_values = [str(item).strip() for item in value]
+    else:
+        return []
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_value in raw_values:
+        normalized_value = _normalize_role(raw_value)
+        if not normalized_value or normalized_value in seen:
+            continue
+        seen.add(normalized_value)
+        normalized.append(normalized_value)
+    return normalized
+
+
 def _normalize_website_url(value: str) -> str:
     candidate = value.strip().strip(")]},.;:")
     if not candidate:
@@ -280,6 +420,8 @@ def _normalize_website_url(value: str) -> str:
         host = host[4:]
     if not host:
         return ""
+    if _is_disallowed_personal_website_host(host):
+        return ""
 
     normalized_netloc = parsed.netloc
     lower_netloc = parsed.netloc.lower()
@@ -290,6 +432,25 @@ def _normalize_website_url(value: str) -> str:
 
     parsed = parsed._replace(netloc=normalized_netloc)
     return parsed.geturl().rstrip("/")
+
+
+def _is_disallowed_personal_website_host(host: str) -> bool:
+    normalized_host = host.casefold()
+    if normalized_host.startswith("www."):
+        normalized_host = normalized_host[4:]
+
+    if normalized_host in PERSONAL_WEBSITE_DISALLOWED_HOSTS:
+        return True
+
+    match = re.fullmatch(r"([a-z0-9-]+)\.js", normalized_host)
+    if match and match.group(1) in TECH_STACK_WEBSITE_DISALLOWED_PREFIXES:
+        return True
+    if normalized_host in {
+        f"{prefix}.net" for prefix in TECH_STACK_WEBSITE_DISALLOWED_PREFIXES
+    }:
+        return True
+
+    return False
 
 
 def _normalize_website_links(value: Any) -> list[str]:
@@ -480,10 +641,7 @@ def _is_personal_website_disallowed(url: str) -> bool:
     host = urlsplit(url).hostname
     if not host:
         return False
-    normalized_host = host.casefold()
-    if normalized_host.startswith("www."):
-        normalized_host = normalized_host[4:]
-    return normalized_host in PERSONAL_WEBSITE_DISALLOWED_HOSTS
+    return _is_disallowed_personal_website_host(host)
 
 
 def _extract_github_username(links: list[str]) -> str | None:
@@ -608,8 +766,12 @@ class ResumeExtractedProfile(BaseModel):
     first_name: str | None = None
     last_name: str | None = None
     email: str | None = None
+    primary_roles: list[str] = Field(default_factory=list)
     github_username: str | None = None
     linkedin_url: str | None = None
+    timezone: str | None = None
+    address_city: str | None = None
+    description: str | None = None
     phone: str | None = None
     website_links: list[str] = Field(default_factory=list)
     social_links: list[str] = Field(default_factory=list)
@@ -633,13 +795,13 @@ class ResumeProfileExtractor:
         *,
         api_key: str | None,
         base_url: str | None = None,
-        model: str = "gpt-4o-mini",
+        model: str = "5o-mini",
         max_tokens: int = 800,
         snippet_chars: int = 12000,
     ) -> None:
-        self.model = model.strip() if model else "gpt-4o-mini"
+        self.model = model.strip() if model else "5o-mini"
         if not self.model:
-            self.model = "gpt-4o-mini"
+            self.model = "5o-mini"
         self.max_tokens = max_tokens
         self.snippet_chars = max(1000, snippet_chars)
         self.client: Any = None
@@ -785,8 +947,14 @@ class ResumeProfileExtractor:
                 last_name=extracted_last_name,
                 email=parsed_email,
                 additional_emails=parsed_emails,
+                description=_normalize_description(parsed.get("description")),
+                primary_roles=_normalize_role_collection(
+                    parsed.get("primary_roles") or parsed.get("primary_role")
+                ),
                 github_username=github_username,
                 linkedin_url=linkedin_url,
+                timezone=_normalize_timezone(parsed.get("timezone")),
+                address_city=_normalize_city(parsed.get("address_city")),
                 phone=_normalize_phone(parsed.get("phone")),
                 website_links=parsed_website_links,
                 social_links=parsed_social_links,
@@ -846,6 +1014,8 @@ class ResumeProfileExtractor:
             linkedin_url = _extract_linkedin_url_from_links(
                 [*website_links, *social_links]
             )
+        timezone = self._extract_timezone(snippet)
+        city = self._extract_city(snippet)
         linkedin_profile_key = _linkedin_profile_key(linkedin_url)
         if linkedin_profile_key:
             website_links = [
@@ -882,6 +1052,9 @@ class ResumeProfileExtractor:
             last_name=last_name,
             email=extracted_emails[0] if extracted_emails else None,
             additional_emails=extracted_emails[1:],
+            primary_roles=self._extract_roles(snippet),
+            timezone=timezone,
+            address_city=city,
             github_username=github_username,
             linkedin_url=linkedin_url,
             phone=_normalize_phone(phone_match.group(0)) if phone_match else None,
@@ -943,6 +1116,9 @@ class ResumeProfileExtractor:
             '{"name": string|null, "firstName": string|null, "lastName": string|null, '
             '"email": string|null, "additional_emails": string[]|null, '
             '"github_username": string|null, "linkedin_url": string|null, '
+            '"primary_roles": string[]|null, '
+            '"timezone": string|null, "address_city": string|null, '
+            '"description": string|null, '
             '"website_url_candidates": ['
             '{"url": string|null, "kind": "personal_website|social_profile|other", '
             '"confidence": number, "reason": string|null}|null], '
@@ -961,18 +1137,24 @@ class ResumeProfileExtractor:
             "- treat a candidate as personal_website only when confidence is high (>=0.85)\n"
             "- treat a candidate as social_profile when confidence is high (>=0.7)\n"
             "- route candidate urls to website_links and social_links by type and host-level validation\n"
+            '- personal_website candidates should be explicit portfolio/homepage signals (for example: "portfolio", "personal website", "homepage", contact header), not technology/framework mentions\n'
             "- website_links/social_links should mirror high-confidence candidates; if website_url_candidates are unavailable, use website_links/social_links and heuristics as fallback\n"
             "- prefer explicit values from header/contact sections\n"
             "- treat website_links as personal or portfolio homepage URLs only\n"
+            "- if a URL token looks like a language, framework, or package name (for example: asp.net, next.js, node.js, react.js), never emit it as a website candidate\n"
             "- do not include github.com or linkedin.com profile URLs in website_links\n"
             "- if a URL is a social profile, place it into dedicated profile fields (github_username, linkedin_url) or social_links for cSocialLinks\n"
             "- infer URLs from regex-like patterns in the provided text, including markdown links\n"
             "- when in doubt, omit website URLs (be conservative)\n"
+            "- only assign high confidence to PERSONAL website candidates when you can verify the link is a person-owned homepage/portfolio and not a technology reference\n"
             "- for github_username return username only (no URL, no @)\n"
             "- for linkedin_url return full linkedin profile URL when available\n"
             "- infer linkedin_url and website_links from bare domains when scheme is missing\n"
             "- for phone return digits with optional leading +\n"
+            "- if timezone is provided, normalize it to UTC offset form like UTC±HH:MM before output\n"
             "- infer seniority_level as one of: junior, midlevel, senior, staff\n"
+            "- for description, produce 1-2 concise sentences that describe the person and their focus areas, based only on explicit resume details; otherwise null\n"
+            "- keep description factual and neutral; avoid marketing/sales phrasing\n"
             "- map strengths from 1-5 where available; omit when unknown\n"
             "- return skills as lowercase canonical names with minimal punctuation\n"
             "- canonicalize known variants like ab testing, go to market, react native\n"
@@ -1187,6 +1369,39 @@ class ResumeProfileExtractor:
         return None
 
     @staticmethod
+    def _extract_timezone(resume_text: str) -> str | None:
+        match = re.search(
+            r"(?im)^(?:timezone|time\s*zone|tz)\s*[:\-]\s*(.+)$",
+            resume_text,
+        )
+        if match:
+            normalized = _normalize_timezone(match.group(1))
+            if normalized:
+                return normalized
+
+        inline_matches = re.findall(
+            r"(?i)\b(?:utc|gmt)\s*([+-]\s*\d{1,2}(?:[:.]\d{1,2})?)\b",
+            resume_text,
+        )
+        for raw_offset in inline_matches:
+            normalized = _normalize_timezone_offset(raw_offset)
+            if normalized:
+                return normalized
+
+        return None
+
+    @staticmethod
+    def _extract_city(resume_text: str) -> str | None:
+        match = re.search(
+            r"(?im)^(?:address\s*city|current\s*city|city)\s*[:\-]\s*(.+)$",
+            resume_text,
+        )
+        if match:
+            return _normalize_city(match.group(1))
+
+        return None
+
+    @staticmethod
     def _extract_seniority(resume_text: str) -> str | None:
         match = re.search(
             r"(?im)^\s*seniority\s*[:\-]\s*(.+)$",
@@ -1202,6 +1417,16 @@ class ResumeProfileExtractor:
             return inferred
 
         return "unknown"
+
+    @staticmethod
+    def _extract_roles(resume_text: str) -> list[str]:
+        roles: list[str] = []
+        for match in re.finditer(
+            r"(?im)^\s*(?:primary\s*roles?|roles?|role)\s*[:\-]\s*(.+)$",
+            resume_text,
+        ):
+            roles.extend(_normalize_role_collection(match.group(1)))
+        return roles
 
     @staticmethod
     def _infer_seniority_from_resume(resume_text: str) -> str | None:

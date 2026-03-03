@@ -22,8 +22,8 @@ class WorkerSettings(SharedSettings):
 
     openai_api_key: str | None = None
     openai_base_url: str | None = None
-    openai_model: str = "gpt-4o-mini"
-    resume_ai_model: str = "gpt-4o-mini"
+    openai_model: str = "5o-mini"
+    resume_ai_model: str = "5o-mini"
     resume_extractor_version: str = "v1"
     docuseal_member_agreement_template_id: int | None = None
 
@@ -157,7 +157,7 @@ class WorkerSettings(SharedSettings):
         if not candidate:
             candidate = self.openai_model.strip()
         if not candidate:
-            return "gpt-4o-mini"
+            return "5o-mini"
 
         # Keep explicit provider prefixes intact.
         if "/" in candidate:
