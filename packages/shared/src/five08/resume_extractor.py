@@ -134,6 +134,32 @@ def _normalize_linkedin(value: Any) -> str | None:
     return candidate.rstrip("/")
 
 
+def _linkedin_profile_key(value: Any) -> str | None:
+    """Return a canonical key for LinkedIn profile identity comparison."""
+    normalized = _normalize_linkedin(value)
+    if not normalized:
+        return None
+
+    try:
+        parsed = urlsplit(normalized)
+    except Exception:
+        return None
+
+    host = (parsed.hostname or "").casefold()
+    if host.startswith("www."):
+        host = host[4:]
+    if host != "linkedin.com" and not host.endswith(".linkedin.com"):
+        return None
+
+    path = re.sub(r"/+", "/", parsed.path or "").rstrip("/")
+    if not path:
+        return None
+    profile_path = path.casefold()
+    if profile_path.startswith("/in/") or profile_path.startswith("/pub/"):
+        return profile_path
+    return None
+
+
 def _normalize_phone(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -162,7 +188,7 @@ def _normalize_website_url(value: str) -> str:
 
     if candidate.lower().startswith("www."):
         candidate = f"https://{candidate}"
-    elif not candidate.startswith(("http://", "https://")):
+    elif not candidate.lower().startswith(("http://", "https://")):
         # Accept scheme-less domains from resumes (for example: mysite.dev/path).
         if not re.match(
             r"(?i)^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?:[/?#].*)?$",
@@ -472,17 +498,17 @@ class ResumeProfileExtractor:
             linkedin_url = _normalize_linkedin(parsed.get("linkedin_url")) or (
                 self._extract_linkedin_url(resume_text)
             )
-            if linkedin_url:
-                linkedin_key = linkedin_url.casefold()
+            linkedin_profile_key = _linkedin_profile_key(linkedin_url)
+            if linkedin_profile_key:
                 parsed_website_links = [
                     item
                     for item in parsed_website_links
-                    if item.casefold() != linkedin_key
+                    if _linkedin_profile_key(item) != linkedin_profile_key
                 ]
                 parsed_social_links = [
                     item
                     for item in parsed_social_links
-                    if item.casefold() != linkedin_key
+                    if _linkedin_profile_key(item) != linkedin_profile_key
                 ]
             return ResumeExtractedProfile(
                 name=_normalize_name(parsed.get("name")),
@@ -540,13 +566,17 @@ class ResumeProfileExtractor:
         website_links, social_links = _split_social_and_website_links(
             website_and_social
         )
-        if linkedin_url:
-            linkedin_key = linkedin_url.casefold()
+        linkedin_profile_key = _linkedin_profile_key(linkedin_url)
+        if linkedin_profile_key:
             website_links = [
-                item for item in website_links if item.casefold() != linkedin_key
+                item
+                for item in website_links
+                if _linkedin_profile_key(item) != linkedin_profile_key
             ]
             social_links = [
-                item for item in social_links if item.casefold() != linkedin_key
+                item
+                for item in social_links
+                if _linkedin_profile_key(item) != linkedin_profile_key
             ]
         availability = _normalize_scalar(source_texts.get("availability"))
         if not availability:

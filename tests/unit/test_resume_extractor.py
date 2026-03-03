@@ -35,6 +35,15 @@ def test_extract_website_links_includes_scheme_less_domains() -> None:
     assert "https://example.com" not in links
 
 
+def test_extract_website_links_accepts_uppercase_scheme() -> None:
+    """Uppercase HTTP(S) schemes should be treated as valid URLs."""
+    links = ResumeProfileExtractor._extract_website_links(
+        "Portfolio: HTTPS://Example.com/path"
+    )
+
+    assert any(link.casefold() == "https://example.com/path" for link in links)
+
+
 def test_extract_backfills_linkedin_and_website_when_llm_omits_them() -> None:
     """LLM mode should backfill missing links from the resume text heuristics."""
 
@@ -94,3 +103,20 @@ def test_extract_linkedin_url_supports_hyphenated_slugs() -> None:
     )
 
     assert url == "https://linkedin.com/in/wu-michael-dev"
+
+
+def test_extract_dedupes_linkedin_profile_variants_from_website_links() -> None:
+    """Equivalent LinkedIn profile URLs should not remain in website links."""
+    extractor = ResumeProfileExtractor(api_key=None)
+    result = extractor.extract(
+        "LinkedIn: linkedin.com/in/wumichaelm\n"
+        "https://www.linkedin.com/in/wumichaelm?trk=foo\n"
+        "Portfolio: https://michaelwu.dev"
+    )
+
+    assert result.linkedin_url == "https://linkedin.com/in/wumichaelm"
+    assert all(
+        "linkedin.com/in/wumichaelm" not in link.casefold()
+        for link in result.website_links
+    )
+    assert "https://michaelwu.dev" in [link.casefold() for link in result.website_links]
