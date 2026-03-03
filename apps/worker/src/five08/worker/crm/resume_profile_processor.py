@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
+import re
 from collections.abc import Callable
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 from typing import Any
 
 from five08.clients.espo import EspoAPI, EspoAPIError
-from five08.skills import normalize_skill
+from five08.skills import (
+    DISALLOWED_RESUME_SKILLS,
+    normalize_skill,
+    normalize_skill_list,
+    normalize_skill_payload,
+)
 from five08.resume_extractor import ResumeProfileExtractor
 from five08.queue import get_postgres_connection
 from five08.worker.config import settings
@@ -27,6 +34,7 @@ from five08.worker.models import (
 )
 
 logger = logging.getLogger(__name__)
+DEFAULT_SKILL_STRENGTH = 3
 
 
 class ResumeEspoClient:
@@ -411,6 +419,7 @@ class ResumeProfileProcessor:
                 return ResumeApplyResult(
                     contact_id=contact_id,
                     updated_fields=[],
+                    updated_values={},
                     success=False,
                     error="No valid profile fields provided",
                 )
@@ -430,6 +439,7 @@ class ResumeProfileProcessor:
                 return ResumeApplyResult(
                     contact_id=contact_id,
                     updated_fields=[],
+                    updated_values={},
                     success=False,
                     error="No valid profile fields provided",
                 )
@@ -446,6 +456,11 @@ class ResumeProfileProcessor:
                 return ResumeApplyResult(
                     contact_id=contact_id,
                     updated_fields=verified_fields,
+                    updated_values={
+                        field: sanitized_updates[field]
+                        for field in verified_fields
+                        if field in sanitized_updates
+                    },
                     link_discord_applied=link_applied,
                     success=bool(verified_fields),
                     error=None if verified_fields else "No fields were updated",
@@ -481,6 +496,11 @@ class ResumeProfileProcessor:
                 return ResumeApplyResult(
                     contact_id=contact_id,
                     updated_fields=sorted(updated_fields),
+                    updated_values={
+                        field: sanitized_updates[field]
+                        for field in sorted(updated_fields)
+                        if field in sanitized_updates
+                    },
                     link_discord_applied=link_applied,
                     success=True,
                 )
@@ -489,6 +509,11 @@ class ResumeProfileProcessor:
                 return ResumeApplyResult(
                     contact_id=contact_id,
                     updated_fields=sorted(updated_fields),
+                    updated_values={
+                        field: sanitized_updates[field]
+                        for field in sorted(updated_fields)
+                        if field in sanitized_updates
+                    },
                     link_discord_applied=link_applied,
                     success=False,
                     error="; ".join(batch_errors)
@@ -499,6 +524,7 @@ class ResumeProfileProcessor:
             return ResumeApplyResult(
                 contact_id=contact_id,
                 updated_fields=sorted(sanitized_updates.keys()),
+                updated_values=dict(sanitized_updates),
                 link_discord_applied=link_applied,
                 success=False,
                 error="; ".join(batch_errors)
@@ -510,6 +536,7 @@ class ResumeProfileProcessor:
             return ResumeApplyResult(
                 contact_id=contact_id,
                 updated_fields=[],
+                updated_values={},
                 success=False,
                 error=str(exc),
             )
@@ -520,6 +547,7 @@ class ResumeProfileProcessor:
             return ResumeApplyResult(
                 contact_id=contact_id,
                 updated_fields=[],
+                updated_values={},
                 success=False,
                 error=str(exc),
             )
@@ -530,25 +558,13 @@ class ResumeProfileProcessor:
             return None
 
         if isinstance(value, str):
-            raw_skills = [item.strip() for item in value.split(",")]
+            raw_skills = [item.strip() for item in value.split(",") if item.strip()]
         elif isinstance(value, (list, tuple, set)):
-            raw_skills = [str(item).strip() for item in value]
+            raw_skills = [str(item).strip() for item in value if str(item).strip()]
         else:
             return None
 
-        normalized: list[str] = []
-        seen: set[str] = set()
-        for skill in raw_skills:
-            if not skill:
-                continue
-            key = self._normalize_skill(skill)
-            if key is None:
-                continue
-            if key in seen:
-                continue
-            seen.add(key)
-            normalized.append(key)
-
+        normalized = normalize_skill_list(raw_skills)
         return normalized if normalized else None
 
     @staticmethod
@@ -566,24 +582,13 @@ class ResumeProfileProcessor:
 
     def _coerce_skills_updates(self, value: Any) -> list[str]:
         if isinstance(value, (list, tuple, set)):
-            raw_skills = [item for item in value]
+            raw_skills = [str(item).strip() for item in value if str(item).strip()]
         elif isinstance(value, str):
             raw_skills = [item.strip() for item in value.split(",") if item.strip()]
         else:
             return []
 
-        normalized: list[str] = []
-        seen: set[str] = set()
-        for raw_skill in raw_skills:
-            skill = self._normalize_skill(str(raw_skill).strip())
-            if not skill:
-                continue
-            key = skill.casefold()
-            if key in seen:
-                continue
-            seen.add(key)
-            normalized.append(skill)
-        return normalized
+        return normalize_skill_list(raw_skills)
 
     def _verify_updated_fields(
         self,
@@ -752,18 +757,7 @@ class ResumeProfileProcessor:
         else:
             return []
 
-        normalized: list[str] = []
-        seen: set[str] = set()
-        for raw_skill in raw_skills:
-            canonical = self._normalize_skill(raw_skill)
-            if not canonical:
-                continue
-            key = canonical.casefold()
-            if key in seen:
-                continue
-            seen.add(key)
-            normalized.append(canonical)
-        return normalized
+        return normalize_skill_list(raw_skills)
 
     def _normalize_skill(self, value: Any) -> str | None:
         normalized = normalize_skill(str(value))
@@ -774,32 +768,22 @@ class ResumeProfileProcessor:
         extracted: ResumeExtractedProfile,
         resume_text: str,
     ) -> ExtractedSkills:
-        normalized_attrs: dict[str, SkillAttributes] = {}
-        skills = extracted.skills or []
-        normalized_skills = self._dedupe_normalized_skills(skills)
-        for raw_skill, raw_attr in getattr(extracted, "skill_attrs", {}).items():
-            skill = self._normalize_skill(raw_skill)
-            if not skill:
-                continue
-            try:
-                strength = int(float(raw_attr))
-            except Exception:
-                continue
-            if not 1 <= strength <= 5:
-                continue
-            normalized_attrs[skill.casefold()] = SkillAttributes(strength=strength)
+        raw_skills = extracted.skills or []
+        normalized_skills, normalized_attrs_raw = normalize_skill_payload(
+            skills_value=raw_skills,
+            skill_attrs_value=getattr(extracted, "skill_attrs", {}),
+            disallowed=DISALLOWED_RESUME_SKILLS,
+        )
+        normalized_attrs = {
+            skill.casefold(): SkillAttributes(strength=strength)
+            for skill, strength in normalized_attrs_raw.items()
+        }
 
-        if not normalized_attrs and isinstance(skills, list) and skills:
-            for raw_skill in skills:
-                skill = self._normalize_skill(raw_skill)
-                if not skill:
-                    continue
-                key = skill.casefold()
-                if key in normalized_attrs:
-                    continue
-                normalized_attrs[key] = SkillAttributes(strength=3)
+        if not normalized_attrs and normalized_skills:
+            for skill in normalized_skills:
+                normalized_attrs[skill.casefold()] = SkillAttributes(strength=3)
 
-        if normalized_attrs or skills:
+        if normalized_attrs or normalized_skills:
             return ExtractedSkills(
                 skills=normalized_skills,
                 skill_attrs=normalized_attrs,
@@ -827,9 +811,8 @@ class ResumeProfileProcessor:
             raw = value.strip()
             if not raw:
                 return {}
-            try:
-                candidate = json.loads(raw)
-            except Exception:
+            candidate = self._decode_json_like(raw)
+            if candidate is None:
                 return {}
 
         if not isinstance(candidate, dict):
@@ -871,6 +854,16 @@ class ResumeProfileProcessor:
             if key:
                 merged[key] = max(1, min(5, int(attrs.strength)))
 
+        # Ensure every merged skill has a structured strength so attrs never shrink
+        # to a partial subset when extraction omitted some per-skill scores.
+        for raw_skill in merged_skills:
+            canonical = self._normalize_skill(raw_skill)
+            if not canonical:
+                continue
+            key = canonical.casefold()
+            if key not in merged:
+                merged[key] = DEFAULT_SKILL_STRENGTH
+
         return merged
 
     def _coerce_skill_attrs_updates(self, value: Any) -> str | None:
@@ -882,9 +875,8 @@ class ResumeProfileProcessor:
             raw = value.strip()
             if not raw:
                 return None
-            try:
-                candidate = json.loads(raw)
-            except Exception:
+            candidate = self._decode_json_like(raw)
+            if candidate is None:
                 return None
 
         if not isinstance(candidate, dict):
@@ -907,6 +899,33 @@ class ResumeProfileProcessor:
             parsed[skill] = strength
 
         return self._serialize_skill_attrs(parsed)
+
+    @staticmethod
+    def _decode_json_like(raw: str) -> Any:
+        """Decode JSON-like strings, including double-encoded and repr payloads."""
+        parsed: Any
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            try:
+                parsed = ast.literal_eval(raw)
+            except Exception:
+                return None
+
+        if isinstance(parsed, str):
+            nested = parsed.strip()
+            if not nested:
+                return None
+            try:
+                reparsed = json.loads(nested)
+            except Exception:
+                try:
+                    reparsed = ast.literal_eval(nested)
+                except Exception:
+                    return parsed
+            return reparsed
+
+        return parsed
 
     def _serialize_skill_attrs(self, attrs: dict[str, int]) -> str | None:
         normalized: dict[str, dict[str, int]] = {}
@@ -991,8 +1010,13 @@ class ResumeProfileProcessor:
 
         if candidate.lower().startswith("www."):
             candidate = f"https://{candidate}"
-        if not candidate.startswith(("http://", "https://")):
-            return None
+        elif not candidate.startswith(("http://", "https://")):
+            if not re.match(
+                r"(?i)^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?:[/?#].*)?$",
+                candidate,
+            ):
+                return None
+            candidate = f"https://{candidate}"
 
         try:
             parsed = urlsplit(candidate)

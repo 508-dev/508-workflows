@@ -5,7 +5,11 @@ import logging
 import re
 from typing import Any
 
-from five08.skills import normalize_skill
+from five08.skills import (
+    DISALLOWED_RESUME_SKILLS,
+    normalize_skill,
+    normalize_skill_payload,
+)
 from five08.worker.config import settings
 from five08.worker.models import ExtractedSkills, SkillAttributes
 
@@ -49,18 +53,7 @@ COMMON_SKILLS = {
     "content marketing",
 }
 
-DISALLOWED_SKILLS = {
-    # These terms are disallowed because they are too generic to represent actionable,
-    # specific professional skill signals for resume-based CRM enrichment.
-    "code review",
-    "debugging",
-    "performance optimization",
-    "testing",
-    "code quality",
-    "bug tracking",
-    "bugtracking",
-    "bug-tracking",
-}
+DISALLOWED_SKILLS = DISALLOWED_RESUME_SKILLS
 
 DEFAULT_SKILL_STRENGTH = 3
 
@@ -187,34 +180,19 @@ class SkillsExtractor:
         confidence: float,
         source: str,
     ) -> ExtractedSkills:
-        attrs_map: dict[str, SkillAttributes] = {}
-        raw_skills = skills_value if isinstance(skills_value, list) else []
-        normalized_skills: list[str] = []
-        for skill in raw_skills:
-            canonical, inline_strength = self._parse_skill_with_strength(str(skill))
-            if canonical in DISALLOWED_SKILLS:
-                continue
-            if canonical:
-                normalized_skills.append(canonical)
-                if inline_strength is not None:
-                    attrs_map[canonical] = SkillAttributes(strength=inline_strength)
-
-        if isinstance(skill_attrs_value, dict):
-            for raw_name, raw_attr in skill_attrs_value.items():
-                canonical = self._normalize_skill_name(str(raw_name))
-                if canonical in DISALLOWED_SKILLS:
-                    continue
-                if not canonical:
-                    continue
-                strength = self._parse_strength(raw_attr)
-                if strength is not None:
-                    attrs_map[canonical] = SkillAttributes(strength=strength)
-
-        # Include attr-only entries in the skill list.
-        deduped_skills = sorted(set(normalized_skills) | set(attrs_map.keys()))
+        deduped_skills, normalized_attrs = normalize_skill_payload(
+            skills_value=skills_value,
+            skill_attrs_value=skill_attrs_value,
+            disallowed=DISALLOWED_SKILLS,
+        )
+        ordered_skills = sorted(deduped_skills)
+        attrs_map = {
+            skill: SkillAttributes(strength=strength)
+            for skill, strength in normalized_attrs.items()
+        }
 
         return ExtractedSkills(
-            skills=deduped_skills,
+            skills=ordered_skills,
             skill_attrs=attrs_map,
             confidence=max(0.0, min(1.0, confidence)),
             source=source,

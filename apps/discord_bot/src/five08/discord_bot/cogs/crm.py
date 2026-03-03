@@ -551,6 +551,19 @@ class ResumeConfirmationView(discord.ui.View):
 class ResumeUpdateConfirmationView(discord.ui.View):
     """Confirm extracted profile updates before writing to CRM."""
 
+    _FIELD_LABELS: dict[str, str] = {
+        "emailAddressData": "Email Addresses",
+        "cGitHubUsername": "GitHub",
+        "phoneNumber": "Phone",
+        "skills": "Skills",
+        "cSkillAttrs": "Skill Strengths",
+        "cWebsiteLink": "Website",
+        "cSocialLinks": "Social Links",
+        "cSeniority": "Seniority",
+        "cDiscordUserID": "Discord User ID",
+        "cDiscordUsername": "Discord Username",
+    }
+
     def __init__(
         self,
         *,
@@ -568,6 +581,114 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         self.contact_name = contact_name
         self.proposed_updates = proposed_updates
         self.link_discord = link_discord
+
+    @classmethod
+    def _field_label(cls, field: str) -> str:
+        linkedin_field = getattr(settings, "crm_linkedin_field", "cLinkedInUrl")
+        if field == linkedin_field:
+            return "LinkedIn"
+        return cls._FIELD_LABELS.get(field, field)
+
+    @staticmethod
+    def _decode_json_like_mapping(value: Any) -> dict[str, Any] | None:
+        candidate = value
+        if isinstance(candidate, str):
+            raw = candidate.strip()
+            if not raw:
+                return None
+            try:
+                candidate = json.loads(raw)
+            except Exception:
+                try:
+                    candidate = ast.literal_eval(raw)
+                except Exception:
+                    return None
+            if isinstance(candidate, str):
+                nested = candidate.strip()
+                if not nested:
+                    return None
+                try:
+                    candidate = json.loads(nested)
+                except Exception:
+                    try:
+                        candidate = ast.literal_eval(nested)
+                    except Exception:
+                        return None
+        if not isinstance(candidate, dict):
+            return None
+        return {str(key): value for key, value in candidate.items()}
+
+    @classmethod
+    def _format_field_value(cls, field: str, value: Any) -> str:
+        if value is None:
+            return "None"
+
+        if field == "cGitHubUsername":
+            username = str(value).strip().lstrip("@")
+            return f"@{username}" if username else "None"
+
+        if field == "skills":
+            if isinstance(value, str):
+                return value
+            if isinstance(value, (list, tuple, set)):
+                items = [str(item).strip() for item in value if str(item).strip()]
+                return ", ".join(items) if items else "None"
+
+        if field == "cSkillAttrs":
+            parsed = cls._decode_json_like_mapping(value)
+            if parsed:
+                formatted: list[str] = []
+                for raw_skill, raw_payload in parsed.items():
+                    strength_value = (
+                        raw_payload.get("strength")
+                        if isinstance(raw_payload, dict)
+                        else raw_payload
+                    )
+                    if strength_value is None:
+                        strength = 0
+                        skill = str(raw_skill).strip()
+                        if not skill:
+                            continue
+                        formatted.append(skill)
+                        continue
+                    try:
+                        strength = int(float(strength_value))
+                    except Exception:
+                        strength = 0
+                    skill = str(raw_skill).strip()
+                    if not skill:
+                        continue
+                    if 1 <= strength <= 5:
+                        formatted.append(f"{skill} ({strength})")
+                    else:
+                        formatted.append(skill)
+                return ", ".join(formatted) if formatted else "None"
+
+        if isinstance(value, (list, tuple, set)):
+            items = [str(item).strip() for item in value if str(item).strip()]
+            return ", ".join(items) if items else "None"
+        if isinstance(value, dict):
+            try:
+                return json.dumps(value, sort_keys=True, separators=(",", ":"))
+            except Exception:
+                return str(value)
+
+        text = str(value).strip()
+        return text or "None"
+
+    def _build_applied_updates_lines(
+        self,
+        *,
+        updated_fields: list[str],
+        updated_values: dict[str, Any],
+    ) -> list[str]:
+        lines: list[str] = []
+        for field in updated_fields:
+            label = self._field_label(field)
+            value = updated_values.get(field, self.proposed_updates.get(field))
+            formatted = self._format_field_value(field, value)
+            lines.append(f"**{label}**: `{formatted}`")
+        return lines
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """Allow only the original requester to confirm/cancel."""
@@ -681,11 +802,17 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         status = str(apply_result.get("status", "unknown"))
         result = apply_result.get("result")
         updated_fields: list[str] = []
+        updated_values: dict[str, Any] = {}
         link_discord_applied: bool | None = None
         if isinstance(result, dict):
             raw_fields = result.get("updated_fields")
             if isinstance(raw_fields, list):
                 updated_fields = [str(field) for field in raw_fields]
+            raw_values = result.get("updated_values")
+            if isinstance(raw_values, dict):
+                updated_values = {
+                    str(field): value for field, value in raw_values.items()
+                }
             raw_link_applied = result.get("link_discord_applied")
             if isinstance(raw_link_applied, bool):
                 link_discord_applied = raw_link_applied
@@ -790,11 +917,22 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             description=f"Applied updates for **{self.contact_name}**.",
             color=0x00FF00,
         )
+        labeled_fields = [self._field_label(field) for field in updated_fields]
         embed.add_field(
             name="Updated Fields",
-            value=", ".join(updated_fields) if updated_fields else "No field changes",
+            value=", ".join(labeled_fields) if labeled_fields else "No field changes",
             inline=False,
         )
+        applied_lines = self._build_applied_updates_lines(
+            updated_fields=updated_fields,
+            updated_values=updated_values,
+        )
+        if applied_lines:
+            embed.add_field(
+                name="Applied Updates",
+                value="\n".join(applied_lines[:8]),
+                inline=False,
+            )
         profile_url = f"{self.crm_cog.base_url}/#Contact/view/{self.contact_id}"
         embed.add_field(name="🔗 CRM Profile", value=f"[View in CRM]({profile_url})")
         _audit_apply_event(
