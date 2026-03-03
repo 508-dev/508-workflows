@@ -492,26 +492,54 @@ class IntakeFormProcessor:
         current_url = resume_url
         max_redirects = max(0, settings.intake_resume_max_redirects)
         timeout_seconds = max(1.0, settings.intake_resume_fetch_timeout_seconds)
+        # Maximum allowed file size in bytes, enforced during download to avoid DoS.
+        max_bytes = int(settings.max_file_size_mb * 1024 * 1024)
 
         for _ in range(max_redirects + 1):
             validation_error = self._validate_resume_url(current_url)
             if validation_error:
                 raise ValueError(validation_error)
 
-            response = requests.get(
+            with requests.get(
                 current_url,
                 timeout=timeout_seconds,
                 allow_redirects=False,
-            )
-            if response.status_code in {301, 302, 303, 307, 308}:
-                redirect_to = response.headers.get("Location")
-                if not redirect_to:
-                    raise ValueError("Resume URL redirect missing Location header")
-                current_url = urljoin(current_url, redirect_to)
-                continue
+                stream=True,
+            ) as response:
+                if response.status_code in {301, 302, 303, 307, 308}:
+                    redirect_to = response.headers.get("Location")
+                    if not redirect_to:
+                        raise ValueError("Resume URL redirect missing Location header")
+                    current_url = urljoin(current_url, redirect_to)
+                    continue
 
-            response.raise_for_status()
-            return response.content
+                response.raise_for_status()
+
+                # Check Content-Length header early if present to fail fast.
+                if max_bytes > 0:
+                    content_length = response.headers.get("Content-Length")
+                    if content_length:
+                        try:
+                            content_len_bytes = int(content_length)
+                        except (ValueError, TypeError):
+                            # Malformed Content-Length; fall through to streaming check.
+                            pass
+                        else:
+                            if content_len_bytes > max_bytes:
+                                raise ValueError(
+                                    "Resume file exceeds maximum allowed size."
+                                )
+
+                # Stream the response body and enforce size limit while downloading.
+                data = bytearray()
+                for chunk in response.iter_content(chunk_size=8192):
+                    if not chunk:
+                        continue
+                    data.extend(chunk)
+                    if max_bytes > 0 and len(data) > max_bytes:
+                        raise ValueError("Resume file exceeds maximum allowed size.")
+
+                return bytes(data)
 
         raise ValueError("Resume URL exceeded max redirect limit")
 
