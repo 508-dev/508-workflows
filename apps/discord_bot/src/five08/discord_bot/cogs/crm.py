@@ -6210,19 +6210,44 @@ class CRMCog(commands.Cog):
 
     @app_commands.command(
         name="match-candidates",
-        description="Analyze a job posting and find ranked matching candidates from the people cache.",
+        description="Reads this thread's opening message as a job posting and returns ranked matching candidates.",
     )
-    @app_commands.describe(posting="Paste the full job posting text here")
     @require_role("Member")
     async def match_candidates(
         self,
         interaction: discord.Interaction,
-        posting: str,
     ) -> None:
-        """Parse a job posting with OpenAI and find matching candidates ranked by fit.
+        """Parse the thread's starter message with OpenAI and find matching candidates ranked by fit.
 
-        The response is posted publicly in the current channel or thread.
+        Must be invoked inside a thread. The starter message is used as the job posting text.
+        The response is posted publicly in the thread.
         """
+        if not isinstance(interaction.channel, discord.Thread):
+            await interaction.response.send_message(
+                "⚠️ This command must be used inside a thread. "
+                "Open a thread on the job posting message and run `/match-candidates` there.",
+                ephemeral=True,
+            )
+            return
+
+        thread: discord.Thread = interaction.channel
+        starter = thread.starter_message
+        if starter is None and isinstance(thread.parent, discord.TextChannel):
+            try:
+                starter = await thread.parent.fetch_message(thread.id)
+            except Exception:
+                starter = None
+
+        if starter is None or not starter.content.strip():
+            await interaction.response.send_message(
+                "⚠️ Could not read the thread's opening message. "
+                "Make sure the thread was created from a job posting message.",
+                ephemeral=True,
+            )
+            return
+
+        posting = starter.content
+
         await interaction.response.defer(ephemeral=False)
 
         try:
