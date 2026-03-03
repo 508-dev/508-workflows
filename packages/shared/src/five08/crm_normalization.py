@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlsplit
@@ -203,7 +204,10 @@ def normalize_website_url(
     allow_scheme_less: bool = True,
     disallowed_host_predicate: Callable[[str], bool] | None = None,
 ) -> str | None:
-    candidate = value.strip().strip(")]},.;:")
+    candidate = unicodedata.normalize("NFKC", value)
+    if any(ord(ch) > 127 for ch in candidate):
+        return None
+    candidate = candidate.strip().strip(")]},.;:")
     if not candidate:
         return None
 

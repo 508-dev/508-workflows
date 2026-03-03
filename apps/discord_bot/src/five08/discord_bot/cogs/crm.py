@@ -61,7 +61,7 @@ def _configured_linkedin_field_from_settings() -> str:
         value = value.strip()
         if value:
             return value
-    return "cLinkedInUrl"
+    return "cLinkedIn"
 
 
 class ResumeButtonView(discord.ui.View):
