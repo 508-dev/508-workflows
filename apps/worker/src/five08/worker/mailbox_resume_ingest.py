@@ -566,8 +566,9 @@ class ResumeMailboxProcessor:
     ) -> str | None:
         extracted_profile_raw = extract_result.get("extracted_profile")
         if isinstance(extracted_profile_raw, dict):
+            email_raw = extracted_profile_raw.get("email")
             email_value = self._normalize_email(
-                str(extracted_profile_raw.get("email", "")).strip()
+                email_raw if isinstance(email_raw, str) else None
             )
             if email_value:
                 return email_value
@@ -580,8 +581,9 @@ class ResumeMailboxProcessor:
 
         proposed_updates = extract_result.get("proposed_updates")
         if isinstance(proposed_updates, dict):
+            email_raw = proposed_updates.get("emailAddress")
             email_value = self._normalize_email(
-                str(proposed_updates.get("emailAddress", "")).strip()
+                email_raw if isinstance(email_raw, str) else None
             )
             if email_value:
                 return email_value
