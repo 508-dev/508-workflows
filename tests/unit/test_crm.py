@@ -811,8 +811,8 @@ class TestCRMCog:
         embed = call_args[1]["embed"]
         assert embed.title == "🛠️ CRM Skills"
         assert "Skills for **John Doe**" in embed.description
-        assert "`go` (5/5)" in embed.fields[0].value
-        assert "`python` (4/5)" in embed.fields[0].value
+        assert "go (5)" in embed.fields[0].value
+        assert "python (4)" in embed.fields[0].value
 
     @pytest.mark.asyncio
     async def test_view_skills_falls_back_to_skills_when_attrs_unrecoverable(
@@ -837,8 +837,8 @@ class TestCRMCog:
         mock_interaction.followup.send.assert_called_once()
         call_args = mock_interaction.followup.send.call_args
         embed = call_args[1]["embed"]
-        assert "`python`" in embed.fields[0].value
-        assert "`sql`" in embed.fields[0].value
+        assert "python" in embed.fields[0].value
+        assert "sql" in embed.fields[0].value
         assert "/5" not in embed.fields[0].value
 
     @pytest.mark.asyncio

@@ -4639,12 +4639,12 @@ class CRMCog(commands.Cog):
             skill_lines: list[str] = []
             for skill, strength in skills[:25]:
                 if strength is None:
-                    skill_lines.append(f"- `{skill}`")
+                    skill_lines.append(skill)
                 else:
-                    skill_lines.append(f"- `{skill}` ({strength}/5)")
+                    skill_lines.append(f"{skill} ({strength})")
             if len(skills) > 25:
                 skill_lines.append(f"...and {len(skills) - 25} more.")
-            embed.add_field(name="Skills", value="\n".join(skill_lines), inline=False)
+            embed.add_field(name="Skills", value=", ".join(skill_lines), inline=False)
             embed.add_field(
                 name="🔗 CRM Profile",
                 value=f"[View in CRM]({self.base_url}/#Contact/view/{contact_id})",
