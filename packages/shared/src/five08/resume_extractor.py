@@ -6,6 +6,7 @@ import json
 import re
 from datetime import datetime, timezone
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 from five08.skills import normalize_skill
@@ -28,6 +29,18 @@ DISALLOWED_SKILLS = {
 }
 
 DEFAULT_SKILL_STRENGTH = 3
+
+SOCIAL_LINK_DOMAINS = {
+    "facebook.com",
+    "fb.com",
+    "instagram.com",
+    "x.com",
+    "twitter.com",
+    "threads.net",
+    "tiktok.com",
+    "youtube.com",
+    "youtube-nocookie.com",
+}
 
 
 def _bounded_confidence(value: Any, fallback: float) -> float:
@@ -131,6 +144,51 @@ def _normalize_website_links(value: Any) -> list[str]:
         normalized.append(candidate.rstrip("/"))
 
     return normalized
+
+
+def _is_social_url(value: str) -> bool:
+    try:
+        host = urlsplit(value).hostname
+    except Exception:
+        return False
+    if not host:
+        return False
+    normalized_host = host.casefold().lstrip("www.")
+    return any(
+        normalized_host == domain or normalized_host.endswith(f".{domain}")
+        for domain in SOCIAL_LINK_DOMAINS
+    )
+
+
+def _split_social_and_website_links(
+    website_links: list[str],
+) -> tuple[list[str], list[str]]:
+    social_links: list[str] = []
+    normal_links: list[str] = []
+    seen_social: set[str] = set()
+    seen_normal: set[str] = set()
+
+    for raw_link in website_links:
+        if not isinstance(raw_link, str):
+            continue
+        candidate = raw_link.strip().rstrip("/")
+        if not candidate:
+            continue
+        if _is_social_url(candidate):
+            social_key = candidate.casefold()
+            if social_key in seen_social:
+                continue
+            seen_social.add(social_key)
+            social_links.append(candidate)
+            continue
+
+        normal_key = candidate.casefold()
+        if normal_key in seen_normal:
+            continue
+        seen_normal.add(normal_key)
+        normal_links.append(candidate)
+
+    return normal_links, social_links
 
 
 def _normalize_seniority(value: Any) -> str | None:
@@ -303,6 +361,7 @@ class ResumeExtractedProfile(BaseModel):
     linkedin_url: str | None = None
     phone: str | None = None
     website_links: list[str] = Field(default_factory=list)
+    social_links: list[str] = Field(default_factory=list)
     address_country: str | None = None
     seniority_level: str | None = None
     skills: list[str] = Field(default_factory=list)
@@ -381,6 +440,10 @@ class ResumeProfileExtractor:
                 raise ValueError("LLM returned empty content")
 
             parsed = _parse_json_object(raw_content)
+            parsed_website_links = _normalize_website_links(parsed.get("website_links"))
+            parsed_website_links, parsed_social_links = _split_social_and_website_links(
+                parsed_website_links
+            )
             parsed_skills, parsed_skill_attrs = _normalize_skill_payload(
                 parsed.get("skills"),
                 parsed.get("skill_attrs"),
@@ -391,7 +454,8 @@ class ResumeProfileExtractor:
                 github_username=_normalize_github(parsed.get("github_username")),
                 linkedin_url=_normalize_linkedin(parsed.get("linkedin_url")),
                 phone=_normalize_phone(parsed.get("phone")),
-                website_links=_normalize_website_links(parsed.get("website_links")),
+                website_links=parsed_website_links,
+                social_links=parsed_social_links,
                 address_country=_normalize_country(parsed.get("address_country")),
                 seniority_level=(
                     _normalize_seniority(parsed.get("seniority_level"))
@@ -436,6 +500,10 @@ class ResumeProfileExtractor:
         country = self._extract_country(snippet)
         seniority = self._extract_seniority(snippet)
         skills, skill_attrs = self._extract_skills(snippet)
+        website_and_social = self._extract_website_links(snippet)
+        website_links, social_links = _split_social_and_website_links(
+            website_and_social
+        )
 
         return ResumeExtractedProfile(
             name=name_match,
@@ -447,7 +515,8 @@ class ResumeProfileExtractor:
                 _normalize_linkedin(linkedin_match.group(0)) if linkedin_match else None
             ),
             phone=_normalize_phone(phone_match.group(0)) if phone_match else None,
-            website_links=self._extract_website_links(snippet),
+            website_links=website_links,
+            social_links=social_links,
             address_country=country,
             seniority_level=seniority,
             skills=skills,
@@ -501,6 +570,7 @@ class ResumeProfileExtractor:
             '{"name": string|null, "email": string|null, '
             '"github_username": string|null, "linkedin_url": string|null, '
             '"phone": string|null, "website_links": string[]|null, '
+            '"social_links": string[]|null, '
             '"address_country": string|null, '
             '"seniority_level": string|null, "skills": string[]|null, '
             '"skill_attrs": {"<skill>": {"strength": 1-5}}|null, '

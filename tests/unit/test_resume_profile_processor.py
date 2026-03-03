@@ -133,6 +133,57 @@ def test_extract_profile_proposal_merges_and_serializes_website_and_skill_attrs(
     }
 
 
+def test_extract_profile_proposal_merges_and_serializes_social_links() -> None:
+    """Social links should be merged and persisted to cSocialLinks without duplication."""
+    processor = ResumeProfileProcessor()
+    processor.crm = Mock()
+    processor.extractor = Mock()
+    processor.skills_extractor = Mock()
+    processor.document_processor = Mock()
+    processor._record_processing_run = Mock()
+    processor.skills_extractor.canonicalize_skill.side_effect = (
+        lambda v: str(v).strip().lower()
+    )
+
+    processor.crm.get_contact.return_value = {
+        "emailAddress": "member@example.com",
+        "cWebsiteLink": ["https://portfolio.example.com"],
+        "cSocialLinks": ["https://x.com/old"],
+    }
+    processor.crm.download_attachment.return_value = b"resume-bytes"
+    processor.document_processor.extract_text.return_value = "resume text"
+    processor.document_processor.get_content_hash.return_value = "hash-social"
+    processor.extractor.extract.return_value = ResumeExtractedProfile(
+        email="new@example.com",
+        github_username=None,
+        linkedin_url=None,
+        phone=None,
+        website_links=["https://portfolio.example.com", "https://blog.example.com"],
+        social_links=["https://x.com/new", "https://instagram.com/example"],
+        confidence=0.9,
+        source="gpt-4o-mini",
+    )
+    processor.skills_extractor.extract_skills.return_value = ExtractedSkills(
+        skills=[],
+        skill_attrs={},
+        confidence=0.8,
+        source="gpt-4o-mini",
+    )
+
+    result = processor.extract_profile_proposal(
+        contact_id="contact-social",
+        attachment_id="att-social",
+        filename="resume.pdf",
+    )
+
+    assert result.success is True
+    assert result.proposed_updates["cSocialLinks"] == [
+        "https://x.com/old",
+        "https://x.com/new",
+        "https://instagram.com/example",
+    ]
+
+
 def test_extract_profile_proposal_deduplicates_skills_in_confirmation() -> None:
     """Duplicate extracted or existing skills should not appear in confirmation updates."""
     processor = ResumeProfileProcessor()

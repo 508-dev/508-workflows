@@ -82,6 +82,9 @@ class ResumeProfileProcessor:
             existing_skills = self._parse_existing_skills(contact.get("skills"))
             existing_skill_attrs = self._parse_skill_attrs(contact.get("cSkillAttrs"))
             existing_websites = self._coerce_website_links(contact.get("cWebsiteLink"))
+            existing_social_links = self._coerce_website_links(
+                contact.get("cSocialLinks")
+            )
             existing_lower = {item.casefold() for item in existing_skills}
             new_skills = [
                 skill
@@ -92,6 +95,10 @@ class ResumeProfileProcessor:
             merged_websites = self._merge_website_links(
                 existing=existing_websites,
                 extracted=extracted.website_links,
+            )
+            merged_social_links = self._merge_website_links(
+                existing=existing_social_links,
+                extracted=extracted.social_links,
             )
             merged_skill_attrs = self._merge_skill_attrs(
                 existing_attrs=existing_skill_attrs,
@@ -184,6 +191,18 @@ class ResumeProfileProcessor:
                         label="Website",
                         current=", ".join(existing_websites),
                         proposed=", ".join(merged_websites),
+                        reason="Extracted from uploaded resume",
+                    )
+                )
+
+            if merged_social_links != existing_social_links:
+                proposed_updates["cSocialLinks"] = merged_social_links
+                proposed_changes.append(
+                    ResumeFieldChange(
+                        field="cSocialLinks",
+                        label="Social Links",
+                        current=", ".join(existing_social_links),
+                        proposed=", ".join(merged_social_links),
                         reason="Extracted from uploaded resume",
                     )
                 )
@@ -341,6 +360,7 @@ class ResumeProfileProcessor:
                 "skills",
                 "cSkillAttrs",
                 "cWebsiteLink",
+                "cSocialLinks",
             }
             sanitized_updates: dict[str, Any] = {
                 field: value
