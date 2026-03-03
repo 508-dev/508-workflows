@@ -6247,6 +6247,9 @@ class CRMCog(commands.Cog):
             return
 
         posting = starter.content
+        if thread.applied_tags:
+            tag_names = ", ".join(t.name for t in thread.applied_tags)
+            posting = f"Thread tags: {tag_names}\n\n{posting}"
 
         await interaction.response.defer(ephemeral=False)
 
