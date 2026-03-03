@@ -68,6 +68,33 @@ curl -X POST "http://localhost:8090/jobs/<job_id>/rerun" \
   -H "X-API-Secret: $API_SHARED_SECRET"
 ```
 
+### Discord webhook smoke test
+
+Run this from a worker container to validate webhook delivery and payload shape:
+
+```bash
+docker compose exec worker uv run --package integrations-worker python - <<'PY'
+from five08.discord_webhook import DiscordWebhookLogger
+
+DiscordWebhookLogger(
+    webhook_url="https://discord.com/api/webhooks/<WEBHOOK_ID>/<WEBHOOK_TOKEN>"
+).send(
+    username="508 Workflows",
+    embeds=[
+        {
+            "title": "Test Alert",
+            "description": "Something happened.",
+            "color": 15158332,
+            "fields": [
+                {"name": "Environment", "value": "production", "inline": True},
+                {"name": "Service", "value": "api", "inline": True},
+            ],
+        }
+    ],
+)
+PY
+```
+
 ## Backend API Endpoints
 
 - `GET /health`: Redis/Postgres/worker health check.
