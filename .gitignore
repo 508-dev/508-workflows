@@ -35,6 +35,7 @@ env/
 .vscode/
 .idea/
 .claude/
+.superset/
 *.swp
 *.swo
 *~
@@ -52,11 +53,8 @@ Thumbs.db
 *.log
 logs/
 
-# Local runtime caches
-.superset/
-.mypy_cache/
-
 # Testing
+.mypy_cache/
 .pytest_cache/
 .coverage
 htmlcov/
