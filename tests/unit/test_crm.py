@@ -10,6 +10,7 @@ from five08.discord_bot.cogs.crm import (
     CRMCog,
     ResumeButtonView,
     ResumeCreateContactView,
+    ResumeUpdateConfirmationView,
     ResumeReprocessConfirmationView,
     ResumeDownloadButton,
 )
@@ -93,6 +94,52 @@ class TestCRMCog:
         result = crm_cog._check_member_role(mock_interaction)
 
         assert result is False
+
+    @pytest.mark.asyncio
+    async def test_resume_apply_confirmation_combines_skills_and_strengths(
+        self, crm_cog
+    ):
+        """Applied updates should render skills and skill attrs as one combined line."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+        )
+
+        lines = view._build_applied_updates_lines(
+            updated_fields=["skills", "cSkillAttrs", "cGitHubUsername"],
+            updated_values={
+                "skills": ["python", "redis"],
+                "cSkillAttrs": {
+                    "python": {"strength": 5},
+                    "redis": {"strength": 3},
+                },
+                "cGitHubUsername": "wumichaelm",
+            },
+        )
+
+        assert lines[0] == "**Skills**: `python (5), redis (3)`"
+        assert lines[1] == "**GitHub**: `@wumichaelm`"
+        assert len(lines) == 2
+
+    @pytest.mark.asyncio
+    async def test_resume_apply_confirmation_maps_skill_attrs_only_to_skills(
+        self, crm_cog
+    ):
+        """Updated fields should collapse cSkillAttrs-only changes into Skills label."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+        )
+
+        collapsed = view._collapse_updated_fields(["cSkillAttrs", "phoneNumber"])
+
+        assert collapsed == ["skills", "phoneNumber"]
 
     @pytest.mark.asyncio
     async def test_download_and_send_resume_success(self, crm_cog, mock_interaction):

@@ -682,13 +682,117 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         updated_fields: list[str],
         updated_values: dict[str, Any],
     ) -> list[str]:
+        has_skills_field = "skills" in updated_fields
+        has_skill_attrs_field = "cSkillAttrs" in updated_fields
         lines: list[str] = []
-        for field in updated_fields:
+        if has_skills_field or has_skill_attrs_field:
+            skills_value = updated_values.get(
+                "skills", self.proposed_updates.get("skills")
+            )
+            attrs_value = updated_values.get(
+                "cSkillAttrs",
+                self.proposed_updates.get("cSkillAttrs"),
+            )
+            combined_skills = self._format_combined_skills_value(
+                skills_value=skills_value,
+                attrs_value=attrs_value,
+            )
+            lines.append(f"**Skills**: `{combined_skills}`")
+
+        for field in self._collapse_updated_fields(updated_fields):
+            if field == "skills":
+                continue
             label = self._field_label(field)
             value = updated_values.get(field, self.proposed_updates.get(field))
             formatted = self._format_field_value(field, value)
             lines.append(f"**{label}**: `{formatted}`")
         return lines
+
+    @staticmethod
+    def _collapse_updated_fields(updated_fields: list[str]) -> list[str]:
+        """Collapse skill fields into a single logical skills entry."""
+        collapsed: list[str] = []
+        seen: set[str] = set()
+        has_skills = "skills" in updated_fields
+        has_skill_attrs = "cSkillAttrs" in updated_fields
+
+        for field in updated_fields:
+            normalized_field = field
+            if field == "cSkillAttrs":
+                if has_skills:
+                    continue
+                if has_skill_attrs:
+                    normalized_field = "skills"
+            key = normalized_field.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            collapsed.append(normalized_field)
+        return collapsed
+
+    @classmethod
+    def _format_combined_skills_value(
+        cls,
+        *,
+        skills_value: Any,
+        attrs_value: Any,
+    ) -> str:
+        skills: list[str] = []
+        if isinstance(skills_value, str):
+            skills = [item.strip() for item in skills_value.split(",") if item.strip()]
+        elif isinstance(skills_value, (list, tuple, set)):
+            skills = [str(item).strip() for item in skills_value if str(item).strip()]
+
+        parsed_attrs = cls._decode_json_like_mapping(attrs_value) or {}
+        strengths: dict[str, int] = {}
+        display_by_key: dict[str, str] = {}
+        for raw_skill, raw_payload in parsed_attrs.items():
+            skill_name = str(raw_skill).strip()
+            if not skill_name:
+                continue
+            key = skill_name.casefold()
+            display_by_key.setdefault(key, skill_name)
+            strength_value = (
+                raw_payload.get("strength")
+                if isinstance(raw_payload, dict)
+                else raw_payload
+            )
+            if strength_value is None:
+                continue
+            try:
+                strength = int(float(strength_value))
+            except Exception:
+                continue
+            if 1 <= strength <= 5:
+                strengths[key] = strength
+
+        ordered: list[str] = []
+        seen_order: set[str] = set()
+        for raw_skill in skills:
+            key = raw_skill.casefold()
+            if key in seen_order:
+                continue
+            seen_order.add(key)
+            ordered.append(raw_skill)
+            display_by_key.setdefault(key, raw_skill)
+        for key, display_name in display_by_key.items():
+            if key in seen_order:
+                continue
+            seen_order.add(key)
+            ordered.append(display_name)
+
+        if not ordered:
+            return "None"
+
+        formatted: list[str] = []
+        for skill_name in ordered:
+            key = skill_name.casefold()
+            skill_strength = strengths.get(key)
+            if skill_strength is not None:
+                formatted.append(f"{skill_name} ({skill_strength})")
+            else:
+                formatted.append(skill_name)
+        return ", ".join(formatted) if formatted else "None"
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """Allow only the original requester to confirm/cancel."""
@@ -917,7 +1021,8 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             description=f"Applied updates for **{self.contact_name}**.",
             color=0x00FF00,
         )
-        labeled_fields = [self._field_label(field) for field in updated_fields]
+        display_fields = self._collapse_updated_fields(updated_fields)
+        labeled_fields = [self._field_label(field) for field in display_fields]
         embed.add_field(
             name="Updated Fields",
             value=", ".join(labeled_fields) if labeled_fields else "No field changes",
