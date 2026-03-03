@@ -390,3 +390,54 @@ def test_extract_dedupes_linkedin_profile_variants_from_website_links() -> None:
         for link in result.website_links
     )
     assert "https://michaelwu.dev" in [link.casefold() for link in result.website_links]
+
+
+def test_extract_name_skips_resume_heading_lines() -> None:
+    """Heading labels like 'Resume:' should not be extracted as names."""
+    extractor = ResumeProfileExtractor(api_key=None)
+
+    result = extractor.extract(
+        "Resume:\nJane Doe\njane@example.com\n8 years of software experience\n"
+    )
+
+    assert result.name == "Jane Doe"
+
+
+def test_extract_name_skips_resume_heading_lines_with_spacing_variant() -> None:
+    """Heading labels like 'Resume :' should not be extracted as names."""
+    extractor = ResumeProfileExtractor(api_key=None)
+
+    result = extractor.extract(
+        "Resume :\nJane Doe\njane@example.com\n8 years of software experience\n"
+    )
+
+    assert result.name == "Jane Doe"
+
+
+def test_extract_name_skips_heading_lines_with_extra_internal_spacing() -> None:
+    """Heading labels with extra spacing should not be extracted as names."""
+    extractor = ResumeProfileExtractor(api_key=None)
+
+    result = extractor.extract(
+        "Curriculum  Vitae\nJane Doe\njane@example.com\n8 years of software experience\n"
+    )
+
+    assert result.name == "Jane Doe"
+
+
+def test_infer_seniority_regex_handles_scale_keywords() -> None:
+    """Seniority inference should not crash on scale/impact keyword checks."""
+    level = ResumeProfileExtractor._infer_seniority_from_resume(
+        "10 years of software experience. Managed teams at a Series B startup."
+    )
+
+    assert level == "staff"
+
+
+def test_infer_seniority_regex_does_not_match_larger_numeric_prefixes() -> None:
+    """Standalone 500/1000 tokens should not trigger from larger numbers like 5000."""
+    level = ResumeProfileExtractor._infer_seniority_from_resume(
+        "10 years of software experience. Built tooling used across 5000 projects."
+    )
+
+    assert level == "senior"

@@ -2389,6 +2389,14 @@ class TestCRMCog:
         assert payload["cDiscordUsername"] == "monica"
         assert payload["cDiscordUserID"] == "999"
 
+    def test_is_valid_resume_name_candidate_rejects_heading_spacing_variants(
+        self, crm_cog
+    ):
+        """Heading-like names with spacing variants should be rejected."""
+        assert crm_cog._is_valid_resume_name_candidate("Curriculum  Vitae") is False
+        assert crm_cog._is_valid_resume_name_candidate("Resume :") is False
+        assert crm_cog._is_valid_resume_name_candidate("Jane Doe") is True
+
     def test_build_inference_lookup_summary_uses_attempt_text(self, crm_cog):
         """Test lookup summary uses attempt text when attempts are present."""
         with (
@@ -2478,6 +2486,59 @@ class TestCRMCog:
                 summary
                 == "\nParsed contact details: name=`Jane Doe`, email=`jane@example.com`"
             )
+
+    def test_build_resume_parsed_identity_summary_ignores_heading_name(self, crm_cog):
+        """Heading-like parsed names should fall back to heuristic name extraction."""
+        with (
+            patch.object(
+                crm_cog,
+                "_extract_resume_contact_hints",
+                return_value={
+                    "name": "Resume:",
+                    "emails": ["jane@example.com"],
+                },
+            ),
+            patch.object(
+                crm_cog,
+                "_extract_resume_name_fallback",
+                return_value="Jane Doe",
+            ) as fallback_name,
+        ):
+            summary = crm_cog._build_resume_parsed_identity_summary(
+                file_content=b"resume",
+                filename="candidate.pdf",
+            )
+
+        fallback_name.assert_called_once_with(b"resume", filename="candidate.pdf")
+        assert (
+            summary
+            == "\nParsed contact details: name=`Jane Doe`, email=`jane@example.com`"
+        )
+
+    def test_extract_resume_profile_uses_filename_aware_text_extraction(self, crm_cog):
+        """Profile extraction should use filename-aware document text extraction."""
+        profile = Mock()
+        with (
+            patch.object(
+                crm_cog,
+                "_extract_resume_text",
+                return_value="Jane Doe\njane@example.com",
+            ) as extract_text,
+            patch.object(
+                crm_cog.resume_extractor, "extract", return_value=profile
+            ) as extract_profile,
+        ):
+            result = crm_cog._extract_resume_profile(
+                b"%PDF-binary",
+                filename="candidate.pdf",
+            )
+
+        assert result is profile
+        extract_text.assert_called_once_with(
+            b"%PDF-binary",
+            filename="candidate.pdf",
+        )
+        extract_profile.assert_called_once_with("Jane Doe\njane@example.com")
 
     @pytest.mark.asyncio
     async def test_upload_resume_link_user_shows_confirm_then_creates_contact(

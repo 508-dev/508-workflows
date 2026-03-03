@@ -22,7 +22,12 @@ from discord.ext import commands
 from five08.discord_bot.config import settings
 from five08.clients import espo
 from five08.skills import normalize_skill_list
-from five08.resume_extractor import ResumeExtractedProfile, ResumeProfileExtractor
+from five08.resume_extractor import (
+    ResumeExtractedProfile,
+    ResumeProfileExtractor,
+    is_reserved_resume_name_token,
+    normalize_resume_name_token,
+)
 from five08.discord_bot.utils.audit import DiscordAuditLogger
 from five08.discord_bot.utils.role_decorators import (
     require_role,
@@ -46,7 +51,6 @@ ONBOARDER_FIELD_CANDIDATES = (
 EXCLUDED_ONBOARDING_STATES = frozenset({"onboarded", "waitlist", "rejected"})
 ONBOARDING_QUEUE_MAX_SIZE = 200
 ONBOARDING_QUEUE_PAGE_SIZE = 1
-
 EspoAPI = espo.EspoAPI
 EspoAPIError = espo.EspoAPIError
 
@@ -1351,8 +1355,11 @@ class ResumeCreateContactView(discord.ui.View):
             if self.create_payload_override:
                 create_payload = dict(self.create_payload_override)
             else:
-                create_payload = self.crm_cog._build_resume_create_contact_payload(
-                    file_content=self.file_content
+                create_payload = (
+                    await self.crm_cog._build_resume_create_contact_payload_async(
+                        file_content=self.file_content,
+                        filename=self.filename,
+                    )
                 )
             self.crm_cog._populate_name_fields(
                 create_payload,
@@ -1540,7 +1547,9 @@ class CRMCog(commands.Cog):
             base_url=settings.openai_base_url,
             model=settings.openai_model,
         )
-        self._resume_profile_cache: tuple[int, ResumeExtractedProfile] | None = None
+        self._resume_profile_cache: (
+            tuple[tuple[int, str], ResumeExtractedProfile] | None
+        ) = None
         self.audit_logger = DiscordAuditLogger(
             base_url=settings.audit_api_base_url,
             shared_secret=settings.api_shared_secret,
@@ -3207,9 +3216,83 @@ class CRMCog(commands.Cog):
 
         return deduplicated_contacts
 
-    def _extract_resume_contact_hints(self, file_content: bytes) -> dict[str, Any]:
+    @staticmethod
+    def _resume_file_extension(filename: str | None) -> str:
+        if not filename or "." not in filename:
+            return ""
+        return "." + filename.rsplit(".", 1)[-1].lower()
+
+    @staticmethod
+    def _is_valid_resume_name_candidate(value: str) -> bool:
+        normalized = value.strip()
+        if len(normalized) < 2:
+            return False
+        if not any(char.isalpha() for char in normalized):
+            return False
+        normalized_token = normalize_resume_name_token(normalized)
+        if is_reserved_resume_name_token(normalized):
+            return False
+        if normalized.endswith(":") and len(normalized_token.split()) <= 3:
+            return False
+        return True
+
+    def _extract_resume_text(
+        self,
+        file_content: bytes,
+        *,
+        filename: str | None,
+    ) -> str:
+        extension = self._resume_file_extension(filename)
+        extracted_text = ""
+
+        try:
+            if extension == ".pdf":
+                from pdfminer.high_level import extract_text as extract_pdf_text
+
+                extracted_text = extract_pdf_text(io.BytesIO(file_content)).strip()
+            elif extension == ".docx":
+                from docx import Document
+
+                document = Document(io.BytesIO(file_content))
+                chunks: list[str] = []
+                for paragraph in document.paragraphs:
+                    text = paragraph.text.strip()
+                    if text:
+                        chunks.append(text)
+                for table in document.tables:
+                    for row in table.rows:
+                        row_cells = [
+                            cell.text.strip() for cell in row.cells if cell.text.strip()
+                        ]
+                        if row_cells:
+                            chunks.append(" | ".join(row_cells))
+                extracted_text = "\n".join(chunks).strip()
+            elif extension == ".doc":
+                extracted_text = file_content.decode("utf-8", errors="ignore")
+                extracted_text = re.sub(r"[^\x20-\x7E\n\r\t]", " ", extracted_text)
+                extracted_text = re.sub(r"\s+", " ", extracted_text).strip()
+            else:
+                extracted_text = file_content.decode("utf-8", errors="ignore").strip()
+        except Exception as exc:
+            logger.warning(
+                "Failed to extract resume text filename=%s extension=%s error=%s",
+                filename,
+                extension,
+                exc,
+            )
+
+        if extracted_text:
+            return extracted_text
+        return file_content.decode("utf-8", errors="ignore")
+
+    def _extract_resume_contact_hints(
+        self,
+        file_content: bytes,
+        *,
+        filename: str | None = None,
+    ) -> dict[str, Any]:
         """Extract contact-identifying signals and shared resume fields from bytes."""
-        profile = self._extract_resume_profile(file_content)
+        profile = self._extract_resume_profile(file_content, filename=filename)
         emails: list[str] = []
         if profile.email:
             emails.append(profile.email)
@@ -3232,21 +3315,44 @@ class CRMCog(commands.Cog):
             "referred_by": profile.referred_by,
         }
 
-    def _extract_resume_profile(self, file_content: bytes) -> Any:
+    async def _extract_resume_contact_hints_async(
+        self,
+        file_content: bytes,
+        *,
+        filename: str | None = None,
+    ) -> dict[str, Any]:
+        """Extract contact hints without blocking the event loop."""
+        return await asyncio.to_thread(
+            self._extract_resume_contact_hints,
+            file_content,
+            filename=filename,
+        )
+
+    def _extract_resume_profile(
+        self,
+        file_content: bytes,
+        *,
+        filename: str | None = None,
+    ) -> Any:
         """Extract resume profile fields and cache per-file-content results."""
         cache = self._resume_profile_cache
-        cache_key = hash(file_content)
+        cache_key = (hash(file_content), self._resume_file_extension(filename))
         if cache and cache[0] == cache_key:
             return cache[1]
 
-        text = file_content.decode("utf-8", errors="ignore")
+        text = self._extract_resume_text(file_content, filename=filename)
         profile = self.resume_extractor.extract(text)
         self._resume_profile_cache = (cache_key, profile)
         return profile
 
-    def _extract_resume_name_fallback(self, file_content: bytes) -> str:
+    def _extract_resume_name_fallback(
+        self,
+        file_content: bytes,
+        *,
+        filename: str | None = None,
+    ) -> str:
         """Simple name heuristic fallback when extraction did not return a name."""
-        text = file_content.decode("utf-8", errors="ignore")
+        text = self._extract_resume_text(file_content, filename=filename)
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         for line in lines[:40]:
             candidate = line.strip()
@@ -3256,9 +3362,9 @@ class CRMCog(commands.Cog):
                 continue
             if "@" in candidate or "http" in candidate.lower():
                 continue
-            if not any(char.isalpha() for char in candidate):
+            if not self._is_valid_resume_name_candidate(candidate):
                 continue
-            if len(candidate.split()) >= 1 and len(candidate) <= 70:
+            if len(candidate) <= 70:
                 return candidate
         return "Unknown Contact"
 
@@ -3279,14 +3385,18 @@ class CRMCog(commands.Cog):
         return ", ".join(formatted)
 
     def _build_inference_lookup_summary(
-        self, *, file_content: bytes, attempts: list[dict[str, Any]] | None
+        self,
+        *,
+        file_content: bytes,
+        attempts: list[dict[str, Any]] | None,
+        filename: str | None = None,
     ) -> str:
         """Build a user-facing description of resume-derived lookup values."""
         attempts_text = self._format_inferred_attempts(attempts)
         if attempts_text:
             return f"\nTried contact lookups: {attempts_text}"
 
-        hints_raw = self._extract_resume_contact_hints(file_content)
+        hints_raw = self._extract_resume_contact_hints(file_content, filename=filename)
         if isinstance(hints_raw, dict):
             hints: dict[str, Any] = hints_raw
         else:
@@ -3328,12 +3438,31 @@ class CRMCog(commands.Cog):
 
         return "\nParsed resume identifiers: " + "; ".join(summary_parts)
 
-    def _build_resume_parsed_identity_summary(self, file_content: bytes) -> str:
+    async def _build_inference_lookup_summary_async(
+        self,
+        *,
+        file_content: bytes,
+        attempts: list[dict[str, Any]] | None,
+        filename: str | None = None,
+    ) -> str:
+        """Build lookup summary without blocking the event loop."""
+        return await asyncio.to_thread(
+            self._build_inference_lookup_summary,
+            file_content=file_content,
+            attempts=attempts,
+            filename=filename,
+        )
+
+    def _build_resume_parsed_identity_summary(
+        self, file_content: bytes, *, filename: str | None = None
+    ) -> str:
         """Build a short display summary of parsed contact identity fields."""
-        hints = self._extract_resume_contact_hints(file_content)
+        hints = self._extract_resume_contact_hints(file_content, filename=filename)
         parsed_name = str(hints.get("name") or "").strip()
-        if not parsed_name:
-            parsed_name = self._extract_resume_name_fallback(file_content)
+        if not self._is_valid_resume_name_candidate(parsed_name):
+            parsed_name = self._extract_resume_name_fallback(
+                file_content, filename=filename
+            )
 
         emails = hints.get("emails", [])
         if not isinstance(emails, list):
@@ -3348,13 +3477,25 @@ class CRMCog(commands.Cog):
             f"\nParsed contact details: name=`{parsed_name}`, email=`{primary_email}`"
         )
 
-    def _extract_resume_name_hint(self, file_content: bytes) -> str:
+    async def _build_resume_parsed_identity_summary_async(
+        self, file_content: bytes, *, filename: str | None = None
+    ) -> str:
+        """Build parsed identity summary without blocking the event loop."""
+        return await asyncio.to_thread(
+            self._build_resume_parsed_identity_summary,
+            file_content,
+            filename=filename,
+        )
+
+    def _extract_resume_name_hint(
+        self, file_content: bytes, *, filename: str | None = None
+    ) -> str:
         """Best-effort contact name extraction from resume text."""
-        hints = self._extract_resume_contact_hints(file_content)
+        hints = self._extract_resume_contact_hints(file_content, filename=filename)
         extracted_name = str(hints.get("name") or "").strip()
-        if extracted_name:
+        if self._is_valid_resume_name_candidate(extracted_name):
             return extracted_name
-        return self._extract_resume_name_fallback(file_content)
+        return self._extract_resume_name_fallback(file_content, filename=filename)
 
     def _populate_name_fields(
         self, payload: dict[str, str], *, source_name: str
@@ -3369,11 +3510,14 @@ class CRMCog(commands.Cog):
         payload["lastName"] = last_name
 
     def _build_resume_create_contact_payload(
-        self, file_content: bytes
+        self,
+        file_content: bytes,
+        *,
+        filename: str | None = None,
     ) -> dict[str, str]:
         """Build a minimal contact create payload from resume hints."""
-        hints = self._extract_resume_contact_hints(file_content)
-        name = self._extract_resume_name_hint(file_content)
+        hints = self._extract_resume_contact_hints(file_content, filename=filename)
+        name = self._extract_resume_name_hint(file_content, filename=filename)
         contact_name = name if name != "Unknown Contact" else "Resume Candidate"
         emails = hints.get("emails", [])
         github_usernames = hints.get("github_usernames", [])
@@ -3421,6 +3565,19 @@ class CRMCog(commands.Cog):
 
         return payload
 
+    async def _build_resume_create_contact_payload_async(
+        self,
+        file_content: bytes,
+        *,
+        filename: str | None = None,
+    ) -> dict[str, str]:
+        """Build contact payload without blocking the event loop."""
+        return await asyncio.to_thread(
+            self._build_resume_create_contact_payload,
+            file_content,
+            filename=filename,
+        )
+
     def _discord_display_name(self, user: discord.Member) -> str:
         """Format Discord username for CRM fields."""
         username = str(getattr(user, "name", "")).strip()
@@ -3451,10 +3608,17 @@ class CRMCog(commands.Cog):
         return f"Discord User {user.id}"
 
     def _build_contact_payload_for_link_user(
-        self, *, user: discord.Member, file_content: bytes
+        self,
+        *,
+        user: discord.Member,
+        file_content: bytes,
+        filename: str | None = None,
     ) -> dict[str, str]:
         """Build contact payload from resume hints plus explicit Discord linkage."""
-        payload = self._build_resume_create_contact_payload(file_content=file_content)
+        payload = self._build_resume_create_contact_payload(
+            file_content=file_content,
+            filename=filename,
+        )
         parsed_name = str(payload.get("name", "")).strip()
         if not parsed_name or parsed_name == "Resume Candidate":
             payload["name"] = self._fallback_contact_name_for_discord_user(user)
@@ -3465,6 +3629,21 @@ class CRMCog(commands.Cog):
         )
         payload.update(self._discord_link_fields(user))
         return payload
+
+    async def _build_contact_payload_for_link_user_async(
+        self,
+        *,
+        user: discord.Member,
+        file_content: bytes,
+        filename: str | None = None,
+    ) -> dict[str, str]:
+        """Build link-user payload without blocking the event loop."""
+        return await asyncio.to_thread(
+            self._build_contact_payload_for_link_user,
+            user=user,
+            file_content=file_content,
+            filename=filename,
+        )
 
     async def _search_contacts_by_field(
         self, *, field: str, value: str, max_size: int = 10
@@ -3500,10 +3679,13 @@ class CRMCog(commands.Cog):
         return deduplicated_contacts
 
     async def _infer_contact_from_resume(
-        self, file_content: bytes
+        self, file_content: bytes, *, filename: str | None = None
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         """Infer target contact from resume identifiers."""
-        hints = self._extract_resume_contact_hints(file_content)
+        hints = await self._extract_resume_contact_hints_async(
+            file_content,
+            filename=filename,
+        )
         attempts: list[dict[str, Any]] = []
         emails = hints.get("emails", [])
         if not isinstance(emails, list):
@@ -5602,9 +5784,12 @@ class CRMCog(commands.Cog):
                     str(link_user.id)
                 )
                 if not target_contact:
-                    create_payload = self._build_contact_payload_for_link_user(
-                        user=link_user,
-                        file_content=file_content,
+                    create_payload = (
+                        await self._build_contact_payload_for_link_user_async(
+                            user=link_user,
+                            file_content=file_content,
+                            filename=file.filename,
+                        )
                     )
                     self._audit_command(
                         interaction=interaction,
@@ -5647,7 +5832,10 @@ class CRMCog(commands.Cog):
                 (
                     target_contact,
                     inferred_contact_meta,
-                ) = await self._infer_contact_from_resume(file_content)
+                ) = await self._infer_contact_from_resume(
+                    file_content,
+                    filename=file.filename,
+                )
                 if not target_contact:
                     inferred_method = (inferred_contact_meta or {}).get("method")
                     inferred_value = (inferred_contact_meta or {}).get("value")
@@ -5667,11 +5855,14 @@ class CRMCog(commands.Cog):
                     if inferred_attempts is not None:
                         inference_metadata["inferred_attempts"] = inferred_attempts
 
-                    inferred_attempts_text = self._build_inference_lookup_summary(
-                        file_content=file_content,
-                        attempts=inferred_attempts
-                        if isinstance(inferred_attempts, list)
-                        else None,
+                    inferred_attempts_text = (
+                        await self._build_inference_lookup_summary_async(
+                            file_content=file_content,
+                            attempts=inferred_attempts
+                            if isinstance(inferred_attempts, list)
+                            else None,
+                            filename=file.filename,
+                        )
                     )
 
                     if inferred_reason == "multiple_matches" and inferred_value:
@@ -5710,7 +5901,10 @@ class CRMCog(commands.Cog):
                             "⚠️ Could not find a unique contact from this resume. "
                             "Would you like to create a new contact from the parsed details?"
                             + inferred_attempts_text
-                            + self._build_resume_parsed_identity_summary(file_content),
+                            + await self._build_resume_parsed_identity_summary_async(
+                                file_content,
+                                filename=file.filename,
+                            ),
                             view=view,
                             ephemeral=True,
                         )
