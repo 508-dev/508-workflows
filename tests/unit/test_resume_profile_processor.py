@@ -24,7 +24,7 @@ def test_extract_profile_proposal_filters_508_email() -> None:
     processor.crm.get_contact.return_value = {
         "emailAddress": "member@example.com",
         "cGitHubUsername": "old-gh",
-        "cLinkedInUrl": "https://linkedin.com/in/old",
+        "cLinkedIn": "https://linkedin.com/in/old",
         "phoneNumber": "1234567890",
     }
     processor.crm.download_attachment.return_value = b"resume-bytes"
@@ -57,7 +57,7 @@ def test_extract_profile_proposal_filters_508_email() -> None:
     assert result.success is True
     assert "emailAddress" not in result.proposed_updates
     assert result.proposed_updates["cGitHubUsername"] == "new-gh"
-    assert result.proposed_updates["cLinkedInUrl"] == "https://linkedin.com/in/new"
+    assert result.proposed_updates["cLinkedIn"] == "https://linkedin.com/in/new"
     assert result.proposed_updates["phoneNumber"] == "14155551234"
     assert result.proposed_updates["skills"] == ["python", "fastapi"]
     assert result.new_skills == ["python", "fastapi"]

@@ -1802,7 +1802,7 @@ class TestCRMCog:
         assert update_call[0][1] == "Contact/contact123"
         update_payload = update_call[0][2]
         assert update_payload["cGitHubUsername"] == "myusername"
-        assert update_payload["cLinkedInUrl"] == "https://linkedin.com/in/test"
+        assert update_payload["cLinkedIn"] == "https://linkedin.com/in/test"
         assert update_payload["rateRange"] == "120k-150k"
         assert update_payload["skills"] == "python, amazon web services"
         assert '"python":{"strength":4}' in update_payload["cSkillAttrs"]
@@ -2321,7 +2321,7 @@ class TestCRMCog:
             assert payload["name"] == "Jane Doe"
             assert payload["emailAddress"] == "jane@example.com"
             assert payload["cGitHubUsername"] == "janedoe"
-            assert payload["cLinkedInUrl"] == "https://linkedin.com/in/janedoe"
+            assert payload["cLinkedIn"] == "https://linkedin.com/in/janedoe"
             assert payload["phoneNumber"] == "+1 555-0100"
             assert payload["addressCountry"] == "Canada"
             assert payload["cSeniority"] == "senior"

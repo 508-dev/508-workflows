@@ -16,7 +16,7 @@ class WorkerSettings(SharedSettings):
 
     espo_base_url: str
     espo_api_key: str
-    crm_linkedin_field: str = "cLinkedInUrl"
+    crm_linkedin_field: str = "cLinkedIn"
     crm_intake_completed_field: str = ""
     google_forms_allowed_form_ids: str = ""
 

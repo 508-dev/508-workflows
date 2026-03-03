@@ -106,7 +106,7 @@ Use `.env.example` as the source of defaults.
 - `Optional`: `CRM_SYNC_INTERVAL_SECONDS` (default: `900`)
 - `Optional`: `CRM_SYNC_PAGE_SIZE` (default: `200`)
 - `Optional`: `CHECK_EMAIL_WAIT` (default: `2`; minutes between mailbox polls)
-- `Optional`: `CRM_LINKEDIN_FIELD` (default: `cLinkedInUrl`)
+- `Optional`: `CRM_LINKEDIN_FIELD` (default: `cLinkedIn`)
 - `Optional`: `MAX_ATTACHMENTS_PER_CONTACT` (default: `3`)
 - `Optional`: `MAX_FILE_SIZE_MB` (default: `10`)
 - `Optional`: `ALLOWED_FILE_TYPES` (default: `pdf,doc,docx,txt`)
