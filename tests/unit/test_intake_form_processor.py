@@ -149,9 +149,9 @@ def test_build_intake_updates_normalizes_primary_role() -> None:
 
     assert updates["cRoles"] == [
         "developer",
-        "data_scientist",
-        "biz_dev",
-        "staff_engineering",
+        "data scientist",
+        "biz dev",
+        "staff engineering",
     ]
 
 

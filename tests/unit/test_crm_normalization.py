@@ -19,12 +19,12 @@ def test_normalize_timezone_parses_utc_offsets() -> None:
 
 
 def test_normalize_role_and_roles_dedupe() -> None:
-    role_map = {"biz dev": "biz_dev"}
-    assert normalize_role(" Biz Dev ", role_map) == "biz_dev"
-    assert normalize_role("Staff Engineering", role_map) == "staff_engineering"
+    role_map = {"biz dev": "biz dev"}
+    assert normalize_role(" Biz Dev ", role_map) == "biz dev"
+    assert normalize_role("Staff Engineering", role_map) == "staff engineering"
     assert normalize_roles(
         "Developer, Biz Dev, developer, Staff Engineering", role_map
-    ) == ["developer", "biz_dev", "staff_engineering"]
+    ) == ["developer", "biz dev", "staff engineering"]
 
 
 def test_normalize_website_url_scheme_less_and_cleanup() -> None:
@@ -65,5 +65,5 @@ def test_normalize_seniority_modes() -> None:
 def test_normalize_roles_skips_non_string_items() -> None:
     assert normalize_roles(["Developer", None, 42, " Biz Dev "]) == [
         "developer",
-        "biz_dev",
+        "biz dev",
     ]
