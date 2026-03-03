@@ -702,6 +702,8 @@ def test_auth_callback_success_writes_login_audit(client: TestClient) -> None:
     assert audit_payload.source == api.AuditSource.ADMIN_DASHBOARD
     assert audit_payload.actor_provider == api.ActorProvider.ADMIN_SSO
     assert audit_payload.actor_subject == "admin@508.dev"
+    assert audit_payload.metadata is not None
+    assert "discord_link_identity_checks_enforced" not in audit_payload.metadata
 
 
 def test_auth_callback_denied_writes_login_audit(client: TestClient) -> None:
@@ -794,7 +796,7 @@ def test_auth_callback_discord_link_can_skip_oidc_identity_checks(
         patch("five08.backend.api._auth_store_from_app", return_value=store),
         patch("five08.backend.api._oidc_client_from_app", return_value=oidc),
         patch("five08.backend.api._http_client_from_app", return_value=Mock()),
-        patch("five08.backend.api.insert_audit_event"),
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
     ):
         response = client.get(
             "/auth/callback?code=code-1&state=state-1",
@@ -805,6 +807,10 @@ def test_auth_callback_discord_link_can_skip_oidc_identity_checks(
     saved_session = store.save_session.call_args.kwargs["payload"]
     assert saved_session.is_admin is True
     store.delete_discord_link.assert_awaited_once_with("link-1")
+    audit_payload = mock_insert.call_args.args[1]
+    assert audit_payload.metadata is not None
+    assert audit_payload.metadata["via_discord_link"] is True
+    assert audit_payload.metadata["discord_link_identity_checks_enforced"] is False
 
 
 def test_auth_discord_link_redirect_skips_session_identity_checks_when_disabled(
@@ -842,8 +848,11 @@ def test_auth_discord_link_redirect_skips_session_identity_checks_when_disabled(
         response = client.get("/auth/discord/link/link-1", follow_redirects=False)
 
     assert response.status_code == 302
-    assert response.headers["location"] == "/dashboard"
-    store.delete_discord_link.assert_awaited_once_with("link-1")
+    assert (
+        response.headers["location"]
+        == "/auth/login?next=%2Fdashboard&discord_link_token=link-1"
+    )
+    store.delete_discord_link.assert_not_awaited()
 
 
 def test_auth_logout_writes_logout_audit(client: TestClient) -> None:

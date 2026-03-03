@@ -1375,19 +1375,22 @@ async def auth_callback_handler(
     )
     response = RedirectResponse(url=redirect_to, status_code=302)
     _set_session_cookie(response, session_id)
+    login_audit_metadata: dict[str, Any] = {
+        "is_admin": is_admin,
+        "groups": groups,
+        "via_discord_link": bool(pending.discord_link_token),
+    }
+    if pending.discord_link_token:
+        login_audit_metadata["discord_link_identity_checks_enforced"] = (
+            enforce_discord_link_identity_checks
+        )
+
     await _write_auth_audit_event(
         action="auth.login",
         result=AuditResult.SUCCESS,
         actor_subject=audit_actor_subject,
         actor_display_name=display_name,
-        metadata={
-            "is_admin": is_admin,
-            "groups": groups,
-            "via_discord_link": bool(pending.discord_link_token),
-            "discord_link_identity_checks_enforced": (
-                enforce_discord_link_identity_checks
-            ),
-        },
+        metadata=login_audit_metadata,
         resource_id=session_id,
         correlation_id=state,
     )
@@ -1542,6 +1545,14 @@ async def auth_discord_link_redirect_handler(
 
     _, session = await _current_session(request)
     if session is not None:
+        # In bootstrap mode, always route through OIDC so the callback can mint
+        # or upgrade an admin session tied to the Discord one-time link.
+        if not settings.discord_link_require_oidc_identity_checks:
+            login_query = urlencode(
+                {"next": grant.next_path, "discord_link_token": token}
+            )
+            return RedirectResponse(url=f"/auth/login?{login_query}", status_code=302)
+
         if settings.discord_link_require_oidc_identity_checks:
             if not session.is_admin:
                 return JSONResponse(
