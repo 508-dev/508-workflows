@@ -3308,6 +3308,10 @@ class CRMCog(commands.Cog):
             "phone": profile.phone,
             "name": profile.name,
             "address_country": profile.address_country,
+            "timezone": profile.timezone,
+            "address_city": profile.address_city,
+            "description": profile.description,
+            "primary_roles": profile.primary_roles,
             "seniority_level": profile.seniority_level,
             "skills": profile.skills,
             "availability": profile.availability,
@@ -3383,6 +3387,50 @@ class CRMCog(commands.Cog):
             formatted.append(f"{method}: `{value}`")
 
         return ", ".join(formatted)
+
+    @staticmethod
+    def _normalize_timezone(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+
+        raw = value.strip().replace(" ", "")
+        if not raw:
+            return None
+
+        utc_pattern = re.search(
+            r"(?i)\b(?:utc|gmt)\s*([+-]\d{1,2}(?:[:.]?[0-5]?\d)?)\b", raw
+        )
+        if utc_pattern:
+            raw = utc_pattern.group(1)
+        if raw.lower() in {"utc", "gmt"}:
+            return "UTC+00:00"
+
+        if raw[0] not in {"+", "-"}:
+            return None
+        match = re.match(r"([+-])(\d{1,2})(?::?([0-5]?\d))?$", raw)
+        if not match:
+            return None
+
+        sign = match.group(1)
+        try:
+            hours = int(match.group(2))
+        except Exception:
+            return None
+        if not 0 <= hours <= 14:
+            return None
+
+        minutes = match.group(3)
+        if minutes is None:
+            minutes_value = 0
+        else:
+            try:
+                minutes_value = int(minutes)
+            except Exception:
+                return None
+            if minutes_value > 59:
+                return None
+
+        return f"UTC{sign}{hours:02d}:{minutes_value:02d}"
 
     def _build_inference_lookup_summary(
         self,
@@ -3523,6 +3571,7 @@ class CRMCog(commands.Cog):
         github_usernames = hints.get("github_usernames", [])
         linkedin_urls = hints.get("linkedin_urls", [])
         skills = hints.get("skills", [])
+        description = str(hints.get("description", "")).strip()
         if not isinstance(emails, list):
             emails = []
         if not isinstance(github_usernames, list):
@@ -3532,7 +3581,7 @@ class CRMCog(commands.Cog):
         if not isinstance(skills, list):
             skills = []
 
-        payload: dict[str, str] = {
+        payload: dict[str, Any] = {
             "type": "Prospect",
             "name": contact_name,
         }
@@ -3550,12 +3599,29 @@ class CRMCog(commands.Cog):
         phone = hints.get("phone")
         if isinstance(phone, str) and phone.strip():
             payload["phoneNumber"] = phone.strip()
+        primary_roles = hints.get("primary_roles")
+        if isinstance(primary_roles, list):
+            normalized_roles = [
+                str(role).strip()
+                for role in primary_roles
+                if isinstance(role, str) and role.strip()
+            ]
+            if normalized_roles:
+                payload["cRoles"] = normalized_roles
         address_country = str(hints.get("address_country", "")).strip()
         if address_country:
             payload["addressCountry"] = address_country
+        timezone = self._normalize_timezone(hints.get("timezone"))
+        if timezone:
+            payload["cTimezone"] = timezone
+        address_city = str(hints.get("address_city", "")).strip()
+        if address_city:
+            payload["addressCity"] = address_city
         seniority = str(hints.get("seniority_level", "")).strip()
         if seniority:
             payload["cSeniority"] = seniority
+        if description:
+            payload["description"] = description
         if skills:
             normalized_skills = [
                 str(item).strip() for item in skills if str(item).strip()

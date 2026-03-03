@@ -35,6 +35,16 @@ from five08.worker.models import (
 
 logger = logging.getLogger(__name__)
 DEFAULT_SKILL_STRENGTH = 3
+ROLE_NORMALIZATION_MAP = {
+    "developer": "developer",
+    "data scientist": "data_scientist",
+    "program manager": "program_manager",
+    "product manager": "product_manager",
+    "designer": "designer",
+    "user research": "user_research",
+    "biz dev": "biz_dev",
+    "marketing": "marketing",
+}
 
 
 class ResumeEspoClient:
@@ -169,6 +179,57 @@ class ResumeProfileProcessor:
                 proposed_changes=proposed_changes,
                 skipped=skipped,
             )
+            self._collect_change(
+                crm_field="addressCountry",
+                label="Country",
+                current=contact.get("addressCountry"),
+                proposed=self._normalize_country(extracted.address_country),
+                proposed_updates=proposed_updates,
+                proposed_changes=proposed_changes,
+                skipped=skipped,
+            )
+            self._collect_change(
+                crm_field="cTimezone",
+                label="Timezone",
+                current=contact.get("cTimezone"),
+                proposed=self._normalize_timezone(extracted.timezone),
+                proposed_updates=proposed_updates,
+                proposed_changes=proposed_changes,
+                skipped=skipped,
+            )
+            self._collect_change(
+                crm_field="addressCity",
+                label="City",
+                current=contact.get("addressCity"),
+                proposed=self._normalize_city(extracted.address_city),
+                proposed_updates=proposed_updates,
+                proposed_changes=proposed_changes,
+                skipped=skipped,
+            )
+            self._collect_change(
+                crm_field="description",
+                label="Description",
+                current=contact.get("description"),
+                proposed=extracted.description.strip()
+                if extracted.description
+                else None,
+                proposed_updates=proposed_updates,
+                proposed_changes=proposed_changes,
+                skipped=skipped,
+            )
+            extracted_roles = self._normalize_roles(extracted.primary_roles)
+            existing_roles = self._normalize_roles(contact.get("cRoles"))
+            if extracted_roles and sorted(extracted_roles) != sorted(existing_roles):
+                proposed_updates["cRoles"] = extracted_roles
+                proposed_changes.append(
+                    ResumeFieldChange(
+                        field="cRoles",
+                        label="Roles",
+                        current=", ".join(existing_roles),
+                        proposed=", ".join(extracted_roles),
+                        reason="Extracted from uploaded resume",
+                    )
+                )
             current_seniority = self._normalize_seniority(contact.get("cSeniority"))
             proposed_seniority = self._normalize_seniority(extracted.seniority_level)
             self._collect_change(
@@ -400,13 +461,40 @@ class ResumeProfileProcessor:
                 )
                 if not normalized_updates["cSeniority"]:
                     normalized_updates.pop("cSeniority", None)
+            if "cRoles" in normalized_updates:
+                normalized_roles = self._normalize_roles(normalized_updates["cRoles"])
+                if normalized_roles:
+                    normalized_updates["cRoles"] = normalized_roles
+                else:
+                    normalized_updates.pop("cRoles", None)
+            if "cTimezone" in normalized_updates:
+                normalized_tz = self._normalize_timezone(
+                    normalized_updates.get("cTimezone")
+                )
+                if normalized_tz:
+                    normalized_updates["cTimezone"] = normalized_tz
+                else:
+                    normalized_updates.pop("cTimezone", None)
+            if "addressCity" in normalized_updates:
+                normalized_city = self._normalize_city(
+                    normalized_updates.get("addressCity")
+                )
+                if normalized_city:
+                    normalized_updates["addressCity"] = normalized_city
+                else:
+                    normalized_updates.pop("addressCity", None)
 
             allowed_fields = {
                 "emailAddressData",
                 "cGitHubUsername",
                 settings.crm_linkedin_field,
                 "cSeniority",
+                "addressCountry",
+                "cTimezone",
+                "addressCity",
+                "description",
                 "phoneNumber",
+                "cRoles",
                 "skills",
                 "cSkillAttrs",
                 "cWebsiteLink",
@@ -735,6 +823,104 @@ class ResumeProfileProcessor:
         if normalized.startswith("lead "):
             return "senior"
         return "unknown"
+
+    @staticmethod
+    def _normalize_country(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip()
+        return normalized.title() if normalized else None
+
+    @staticmethod
+    def _normalize_city(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+        normalized = normalized.split(",")[0].strip()
+        if not normalized:
+            return None
+        return " ".join(part.strip().title() for part in normalized.split())
+
+    @staticmethod
+    def _normalize_timezone(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+
+        raw = value.strip().replace(" ", "")
+        if not raw:
+            return None
+
+        utc_pattern = re.search(
+            r"(?i)\b(?:utc|gmt)\s*([+-]\d{1,2}(?:[:.]?[0-5]?\d)?)\b", raw
+        )
+        if utc_pattern:
+            raw = utc_pattern.group(1)
+        if raw.lower() in {"utc", "gmt"}:
+            return "UTC+00:00"
+
+        if raw[0] not in {"+", "-"}:
+            return None
+        match = re.match(r"([+-])(\d{1,2})(?::?([0-5]?\d))?$", raw)
+        if not match:
+            return None
+
+        sign = match.group(1)
+        try:
+            hours = int(match.group(2))
+        except Exception:
+            return None
+        if not 0 <= hours <= 14:
+            return None
+        minutes = match.group(3)
+        if minutes is None:
+            minutes_value = 0
+        else:
+            try:
+                minutes_value = int(minutes)
+            except Exception:
+                return None
+            if minutes_value > 59:
+                return None
+        return f"UTC{sign}{hours:02d}:{minutes_value:02d}"
+
+    @staticmethod
+    def _normalize_role(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip().lower()
+        if not normalized:
+            return None
+        mapped = ROLE_NORMALIZATION_MAP.get(normalized)
+        if mapped is not None:
+            return mapped
+        normalized = "_".join(normalized.split())
+        normalized = "".join(
+            ch for ch in normalized if ch.isalnum() or ch in {"_", "-"}
+        )
+        return normalized or None
+
+    @staticmethod
+    def _normalize_roles(value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            raw_values = [item.strip() for item in re.split(r"[,\n;]+", value)]
+        elif isinstance(value, (list, tuple, set)):
+            raw_values = [str(item).strip() for item in value]
+        else:
+            return []
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw_value in raw_values:
+            normalized_value = ResumeProfileProcessor._normalize_role(raw_value)
+            if not normalized_value or normalized_value in seen:
+                continue
+            seen.add(normalized_value)
+            normalized.append(normalized_value)
+        return normalized
 
     def _format_skills_with_strength(
         self,
