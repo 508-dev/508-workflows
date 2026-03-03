@@ -1037,7 +1037,7 @@ class ResumeProfileProcessor:
 
     def _mark_resume_processed(self, contact_id: str) -> None:
         """Best-effort update for extraction completion tracking."""
-        processed_at = datetime.now(tz=timezone.utc).isoformat()
+        processed_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         try:
             self.crm.update_contact(contact_id, {"cResumeLastProcessed": processed_at})
         except Exception as exc:

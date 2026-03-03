@@ -1,6 +1,7 @@
 """Unit tests for resume profile worker processor."""
 
 import json
+from datetime import datetime
 
 from unittest.mock import Mock
 
@@ -70,6 +71,12 @@ def test_extract_profile_proposal_filters_508_email() -> None:
     update_contact_payload = processor.crm.update_contact.call_args.args[1]
     assert "cResumeLastProcessed" in update_contact_payload
     assert isinstance(update_contact_payload["cResumeLastProcessed"], str)
+    assert (
+        datetime.strptime(
+            update_contact_payload["cResumeLastProcessed"], "%Y-%m-%d %H:%M:%S"
+        )
+        is not None
+    )
     processor._record_processing_run.assert_called_once()
     record_kwargs = processor._record_processing_run.call_args.kwargs
     assert record_kwargs["status"] == "succeeded"
