@@ -69,6 +69,17 @@ SENIORITY_MAP = {
 }
 
 
+ROLE_NORMALIZATION_MAP: dict[str, str] = {
+    "developer": "developer",
+    "data scientist": "data_scientist",
+    "program manager": "program_manager",
+    "designer": "designer",
+    "user research": "user_research",
+    "biz dev": "biz_dev",
+    "marketing": "marketing",
+}
+
+
 class IntakeFormProcessor:
     """Process a Google Forms member intake submission against CRM."""
 
@@ -313,6 +324,12 @@ class IntakeFormProcessor:
         for local_key, crm_field in FIELD_MAP.items():
             if local_key == "github_username":
                 value = self._normalize_github_username(payload.get(local_key))
+            elif local_key == "primary_role":
+                normalized_roles = self._parse_roles(payload.get(local_key))
+                if not normalized_roles:
+                    continue
+                updates[crm_field] = normalized_roles
+                continue
             else:
                 value = self._normalize_text(payload.get(local_key))
             if value:
@@ -602,6 +619,34 @@ class IntakeFormProcessor:
                 if isinstance(item, str) and item.strip()
             ]
         return []
+
+    def _normalize_role(self, value: str) -> str | None:
+        normalized = self._normalize_text(value)
+        if normalized is None:
+            return None
+
+        lowered = normalized.lower().strip()
+        mapped = ROLE_NORMALIZATION_MAP.get(lowered)
+        if mapped is not None:
+            return mapped
+
+        normalized_role = "_".join(lowered.split())
+        normalized_role = "".join(
+            ch for ch in normalized_role if ch.isalnum() or ch in {"_", "-"}
+        )
+        return normalized_role or None
+
+    def _parse_roles(self, roles: Any) -> list[str]:
+        parsed = self._normalize_collection(roles)
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for role in parsed:
+            normalized_role = self._normalize_role(role)
+            if normalized_role is None or normalized_role in seen:
+                continue
+            seen.add(normalized_role)
+            normalized.append(normalized_role)
+        return normalized
 
     def _filename_from_url(self, url: str) -> str | None:
         path = urlsplit(url).path.strip()

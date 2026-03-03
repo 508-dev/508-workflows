@@ -131,6 +131,28 @@ def test_build_intake_updates_normalizes_form_skills_to_lowercase() -> None:
     assert updates["skills"] == ["ai ml engineering", "next js", "project management"]
 
 
+def test_build_intake_updates_normalizes_primary_role() -> None:
+    """Primary role should normalize to lowercase no-space values for cRoles."""
+    processor = IntakeFormProcessor()
+
+    updates = processor._build_intake_updates(
+        email="new@example.com",
+        first_name="New",
+        last_name="Person",
+        payload={
+            "primary_role": "Developer, Data Scientist, Biz Dev, Staff Engineering"
+        },
+        include_email=True,
+    )
+
+    assert updates["cRoles"] == [
+        "developer",
+        "data_scientist",
+        "biz_dev",
+        "staff_engineering",
+    ]
+
+
 def test_build_resume_updates_includes_website_links_as_url_multiple() -> None:
     """Website links extracted from resume should be set to cWebsiteLink as an array."""
     processor = IntakeFormProcessor()
