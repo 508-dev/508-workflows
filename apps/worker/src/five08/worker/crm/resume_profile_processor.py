@@ -594,7 +594,7 @@ class ResumeProfileProcessor:
             return None
         normalized = value.strip().lower().replace("_", "-")
         if not normalized:
-            return None
+            return "unknown"
         if normalized in {
             "jr",
             "junior",
@@ -630,7 +630,7 @@ class ResumeProfileProcessor:
             return "senior"
         if normalized.startswith("lead "):
             return "senior"
-        return None
+        return "unknown"
 
     def _format_skills_with_strength(
         self,

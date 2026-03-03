@@ -123,7 +123,7 @@ def _normalize_seniority(value: Any) -> str | None:
         return None
     normalized = value.strip().lower()
     if not normalized:
-        return None
+        return "unknown"
     if normalized in {"jr", "junior", "entry", "entry-level", "entry level"}:
         return "junior"
     if normalized in {"intern", "internship"}:
@@ -149,7 +149,7 @@ def _normalize_seniority(value: Any) -> str | None:
         return "staff"
     if normalized.startswith("sr "):
         return "senior"
-    return None
+    return "unknown"
 
 
 def _normalize_skills(value: Any) -> list[str]:
@@ -275,6 +275,7 @@ class ResumeProfileExtractor:
                 seniority_level=(
                     _normalize_seniority(parsed.get("seniority_level"))
                     or self._infer_seniority_from_resume(resume_text)
+                    or "unknown"
                 ),
                 skills=_normalize_skills(parsed.get("skills")),
                 confidence=_bounded_confidence(
@@ -352,7 +353,7 @@ class ResumeProfileExtractor:
             "  - +1 for leadership titles (staff/lead/principal/architect)\n"
             "  - +1 for enterprise-scale impact signals (team ownership, direct reports, cross-team work, large org terms)\n"
             "  - when company signal is ambiguous, return conservative midlevel\n"
-            "- use null for unknown or ambiguous fields\n"
+            "- use 'unknown' for unknown or ambiguous fields\n"
             "- confidence is 0-1 for overall extraction reliability\n\n"
             f"Resume:\n{snippet}"
         )
@@ -398,7 +399,7 @@ class ResumeProfileExtractor:
         if inferred:
             return inferred
 
-        return None
+        return "unknown"
 
     @staticmethod
     def _infer_seniority_from_resume(resume_text: str) -> str | None:

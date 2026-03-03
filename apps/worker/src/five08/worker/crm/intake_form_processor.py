@@ -482,7 +482,7 @@ class IntakeFormProcessor:
             return "midlevel"
         if "junior" in normalized:
             return "junior"
-        return None
+        return "unknown"
 
     def _normalize_text(self, value: object) -> str | None:
         if not isinstance(value, str):
