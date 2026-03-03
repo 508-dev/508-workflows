@@ -68,10 +68,11 @@ def search_candidates(
     Ranking priority:
     1. Members before prospects.
     2. Location match (hard filter when us_only, else soft signal).
-    3. Required skill count matched.
-    4. Required skill strength score (sum of skill_attrs values).
-    5. Preferred skill count matched.
-    6. Seniority score (applied in Python after the query).
+    3. Timezone match (when preferred_timezones provided).
+    4. Required skill count matched.
+    5. Required skill strength score (sum of skill_attrs values).
+    6. Preferred skill count matched.
+    7. Seniority score (applied in Python after the query).
     """
     required_skills = requirements.required_skills
     preferred_skills = requirements.preferred_skills
@@ -83,6 +84,7 @@ def search_candidates(
         return []
 
     us_only = requirements.location_type == "us_only"
+    preferred_timezones = requirements.preferred_timezones or []
 
     # Build the query. We use unnest + lateral subselects so a single round-trip
     # handles scoring without pulling all rows into Python.
@@ -120,7 +122,12 @@ def search_candidates(
             (SELECT count(*)::int
              FROM unnest(p.skills) s
              WHERE s = ANY((SELECT skills FROM pref))
-            ) AS preferred_matched
+            ) AS preferred_matched,
+            -- Timezone match: 1 if candidate timezone is in the preferred list
+            CASE
+              WHEN %s::text[] = '{}'::text[] THEN 0
+              ELSE (p.timezone = ANY(%s::text[]))::int
+            END AS timezone_matched
         FROM people p
         WHERE p.sync_status = 'active'
           -- Must have at least one required skill
@@ -132,6 +139,7 @@ def search_candidates(
           )
         ORDER BY
             p.is_member DESC,
+            timezone_matched DESC,
             required_matched DESC,
             required_skill_score DESC,
             preferred_matched DESC
@@ -147,6 +155,8 @@ def search_candidates(
                 (
                     required_skills,
                     preferred_skills,
+                    preferred_timezones,
+                    preferred_timezones,
                     us_only,
                     us_values,
                     limit,
@@ -185,10 +195,15 @@ def search_candidates(
             )
         )
 
-    # Secondary sort: among equal SQL scores, rank by seniority alignment.
-    # This is stable (preserves SQL order within same seniority bucket).
+    # Secondary sort: preserve primary SQL ranking, break ties with seniority alignment.
     results.sort(
-        key=lambda c: (not c.is_member, -c.required_skill_score, -c.seniority_score)
+        key=lambda c: (
+            not c.is_member,
+            -len(c.matched_required_skills),
+            -c.required_skill_score,
+            -len(c.matched_preferred_skills),
+            -c.seniority_score,
+        )
     )
 
     return results

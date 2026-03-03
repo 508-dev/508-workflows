@@ -28,10 +28,7 @@ _US_ONLY_RE = re.compile(
 
 _SENIORITY_KEYWORDS: dict[str, str] = {
     "junior": "junior",
-    "entry level": "junior",
-    "entry-level": "junior",
-    "mid level": "midlevel",
-    "mid-level": "midlevel",
+    "entrylevel": "junior",
     "midlevel": "midlevel",
     "senior": "senior",
     "staff": "staff",
@@ -174,7 +171,12 @@ def extract_job_requirements(
         logger.error("OpenAI job extraction call failed: %s", exc)
         raise RuntimeError(f"OpenAI extraction failed: {exc}") from exc
 
-    raw_content = (response.choices[0].message.content or "").strip()
+    if not response.choices or not response.choices[0].message.content:
+        raise RuntimeError(
+            f"OpenAI returned empty or missing response content (finish_reason="
+            f"{response.choices[0].finish_reason if response.choices else 'no choices'})."
+        )
+    raw_content = response.choices[0].message.content.strip()
 
     try:
         data = _parse_llm_response(raw_content)
@@ -190,16 +192,26 @@ def extract_job_requirements(
     )
 
     raw_seniority = data.get("seniority")
-    seniority = raw_seniority if raw_seniority in SENIORITY_ORDER else None
+    normalized_seniority = (
+        raw_seniority.strip().lower() if isinstance(raw_seniority, str) else None
+    )
+    seniority = (
+        normalized_seniority if normalized_seniority in SENIORITY_ORDER else None
+    )
 
     raw_location_type = data.get("location_type")
-    location_type = (
-        raw_location_type
-        if raw_location_type in ("us_only", "timezone_preferred", "remote_any")
+    normalized_location_type = (
+        raw_location_type.strip().lower()
+        if isinstance(raw_location_type, str)
         else None
     )
-    # Honour regex detection even if LLM missed it
-    if hints.get("us_only_detected") and location_type is None:
+    location_type = (
+        normalized_location_type
+        if normalized_location_type in ("us_only", "timezone_preferred", "remote_any")
+        else None
+    )
+    # Regex detection always wins — LLM may return "remote_any" despite explicit US-only text
+    if hints.get("us_only_detected"):
         location_type = "us_only"
 
     preferred_timezones = _coerce_str_list(data.get("preferred_timezones"))

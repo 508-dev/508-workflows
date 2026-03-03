@@ -153,7 +153,7 @@ def upsert_person(settings: SharedSettings, person: PersonRecord) -> str:
             %s, %s, %s, %s, %s,
             %s, %s, %s, %s, %s,
             %s, %s, %s, %s, %s,
-            %s, %s, %s, %s,
+            %s, %s, %s, %s, %s,
             %s
         )
         ON CONFLICT (crm_contact_id) DO UPDATE

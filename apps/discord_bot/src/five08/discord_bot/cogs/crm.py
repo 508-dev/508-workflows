@@ -6234,6 +6234,12 @@ class CRMCog(commands.Cog):
                 ),
             )
         except RuntimeError as exc:
+            self._audit_command(
+                interaction=interaction,
+                action="crm.match_candidates",
+                result="error",
+                metadata={"stage": "extract_requirements", "error": str(exc)},
+            )
             await interaction.followup.send(
                 f"❌ Failed to analyze the job posting: {exc}",
                 ephemeral=True,
@@ -6241,6 +6247,12 @@ class CRMCog(commands.Cog):
             return
 
         if not requirements.required_skills:
+            self._audit_command(
+                interaction=interaction,
+                action="crm.match_candidates",
+                result="denied",
+                metadata={"stage": "no_required_skills_extracted"},
+            )
             await interaction.followup.send(
                 "⚠️ No required skills could be extracted from this posting. "
                 "Please include explicit skill requirements and try again.",
@@ -6255,6 +6267,12 @@ class CRMCog(commands.Cog):
             )
         except Exception as exc:
             logger.error("Candidate search failed: %s", exc)
+            self._audit_command(
+                interaction=interaction,
+                action="crm.match_candidates",
+                result="error",
+                metadata={"stage": "search_candidates", "error": str(exc)},
+            )
             await interaction.followup.send(
                 "❌ Candidate search failed. Please try again later.",
                 ephemeral=True,
@@ -6326,6 +6344,18 @@ class CRMCog(commands.Cog):
 
         for msg in messages:
             await interaction.followup.send(msg)
+
+        self._audit_command(
+            interaction=interaction,
+            action="crm.match_candidates",
+            result="success",
+            metadata={
+                "title": requirements.title,
+                "required_skills_count": len(requirements.required_skills),
+                "preferred_skills_count": len(requirements.preferred_skills),
+                "candidates_returned": len(candidates),
+            },
+        )
 
 
 async def setup(bot: commands.Bot) -> None:

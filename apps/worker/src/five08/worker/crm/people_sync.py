@@ -348,9 +348,7 @@ class PeopleSyncProcessor:
                     value = payload.get("strength")
                     parsed = self._coerce_int(value)
                     if parsed is not None:
-                        attrs[raw.casefold()] = max(
-                            attrs.get(raw.casefold(), 0), parsed
-                        )
+                        attrs[raw] = max(attrs.get(raw, 0), parsed)
         return skills, attrs
 
     @staticmethod
