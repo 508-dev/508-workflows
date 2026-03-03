@@ -1084,14 +1084,28 @@ class ResumeProfileExtractor:
             )
 
         if len(parts) >= 2 and parts[-1].lower().strip(".") in NAME_SUFFIXES:
+            last = parts[-2]
+            if len(parts) < 3:
+                return (
+                    parts[0],
+                    SINGLE_NAME_FALLBACK_LAST_NAME,
+                )
+            normalized_last = _normalize_name_part(last)
             return (
                 parts[0],
-                parts[-2] if len(parts) >= 3 else SINGLE_NAME_FALLBACK_LAST_NAME,
+                normalized_last or SINGLE_NAME_FALLBACK_LAST_NAME,
+            )
+
+        last = _normalize_name_part(parts[-1])
+        if not last:
+            return (
+                parts[0],
+                SINGLE_NAME_FALLBACK_LAST_NAME,
             )
 
         return (
             parts[0],
-            parts[-1],
+            last,
         )
 
     @staticmethod

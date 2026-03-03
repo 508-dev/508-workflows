@@ -101,6 +101,16 @@ def test_split_name_single_token_returns_unknown_last_name() -> None:
     assert last_name == "Unknown"
 
 
+def test_split_name_ignores_numeric_last_token() -> None:
+    """Fallback names should avoid non-alpha trailing tokens as last names."""
+    extractor = ResumeProfileExtractor(api_key=None)
+
+    first_name, last_name = extractor.split_name("Person 508")
+
+    assert first_name == "Person"
+    assert last_name == "Unknown"
+
+
 def test_extract_profile_backfills_website_and_social_urls_from_markdown() -> None:
     """Markdown links should be split by website vs social and routed correctly."""
 
