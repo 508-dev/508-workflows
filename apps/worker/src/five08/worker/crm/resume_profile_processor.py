@@ -217,6 +217,15 @@ class ResumeProfileProcessor:
     ) -> ResumeApplyResult:
         """Apply confirmed updates to contact in CRM."""
         try:
+            normalized_updates = dict(updates)
+            if "skills" in normalized_updates:
+                normalized_skills = self._coerce_skills_updates(
+                    normalized_updates["skills"]
+                )
+                if normalized_skills:
+                    normalized_updates["skills"] = normalized_skills
+                else:
+                    normalized_updates.pop("skills", None)
             allowed_fields = {
                 "emailAddress",
                 "cGitHubUsername",
@@ -226,7 +235,7 @@ class ResumeProfileProcessor:
             }
             sanitized_updates: dict[str, Any] = {
                 field: value
-                for field, value in updates.items()
+                for field, value in normalized_updates.items()
                 if field in allowed_fields and value
             }
 
@@ -367,6 +376,28 @@ class ResumeProfileProcessor:
         if isinstance(value, bool):
             return str(value).lower()
         return str(value).strip()
+
+    @staticmethod
+    def _coerce_skills_updates(value: Any) -> list[str]:
+        if isinstance(value, (list, tuple, set)):
+            raw_skills = [item for item in value]
+        elif isinstance(value, str):
+            raw_skills = [item.strip() for item in value.split(",") if item.strip()]
+        else:
+            return []
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw_skill in raw_skills:
+            skill = str(raw_skill).strip()
+            if not skill:
+                continue
+            key = skill.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(skill)
+        return normalized
 
     def _verify_updated_fields(
         self,
