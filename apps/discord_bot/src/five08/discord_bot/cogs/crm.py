@@ -2653,7 +2653,7 @@ class CRMCog(commands.Cog):
                 self._audit_command(
                     interaction=interaction,
                     action="crm.assign_onboarder",
-                    result="denied",
+                    result="error",
                     metadata={"contact": contact, "onboarder": onboarder_username},
                 )
                 await interaction.followup.send(f"❌ No contact found for: `{contact}`")
@@ -5459,7 +5459,7 @@ class CRMCog(commands.Cog):
                     self._audit_command(
                         interaction=interaction,
                         action="crm.upload_resume",
-                        result="denied",
+                        result="error",
                         metadata={
                             "search_term": search_term,
                             "filename": file.filename,
@@ -5505,7 +5505,7 @@ class CRMCog(commands.Cog):
                     self._audit_command(
                         interaction=interaction,
                         action="crm.upload_resume",
-                        result="denied",
+                        result="error",
                         metadata={
                             "filename": file.filename,
                             "target_scope": target_scope,
@@ -5587,7 +5587,7 @@ class CRMCog(commands.Cog):
                         self._audit_command(
                             interaction=interaction,
                             action="crm.upload_resume",
-                            result="denied",
+                            result="error",
                             metadata=inference_metadata,
                         )
                         view = ResumeCreateContactView(
@@ -5613,7 +5613,7 @@ class CRMCog(commands.Cog):
                         self._audit_command(
                             interaction=interaction,
                             action="crm.upload_resume",
-                            result="denied",
+                            result="error",
                             metadata=inference_metadata,
                         )
                         await interaction.followup.send(
@@ -5631,7 +5631,7 @@ class CRMCog(commands.Cog):
                     self._audit_command(
                         interaction=interaction,
                         action="crm.upload_resume",
-                        result="denied",
+                        result="error",
                         metadata={
                             "filename": file.filename,
                             "target_scope": "self",
