@@ -1388,21 +1388,23 @@ class ResumeCreateContactView(discord.ui.View):
             )
         except Exception as exc:
             status_code = getattr(self.crm_cog.espo_api, "status_code", None)
-            error_detail = str(exc).strip() or "Unknown error"
+            error_detail = self.crm_cog._sanitize_error_message_for_discord(exc)
             status_note = f" (status {status_code})" if status_code else ""
             logger.exception(
-                "Failed to create contact from resume filename=%s target_scope=%s inferred_meta=%s status_code=%s payload=%s",
+                "Failed to create contact from resume filename=%s target_scope=%s inferred_meta=%s "
+                "status_code=%s payload=%s error=%s",
                 self.filename,
                 self.target_scope,
                 self.inferred_contact_meta,
                 status_code,
                 create_payload,
+                error_detail,
             )
             audit_metadata: dict[str, Any] = {
                 "filename": self.filename,
                 "target_scope": self.target_scope,
                 "reason": "contact_create_failed",
-                "error": str(exc),
+                "error": error_detail,
                 "status_code": status_code,
             }
             if create_payload:
@@ -1551,6 +1553,32 @@ class CRMCog(commands.Cog):
     def _configured_linkedin_field() -> str:
         """Return the configured field for LinkedIn profile values."""
         return _configured_linkedin_field_from_settings()
+
+    @staticmethod
+    def _sanitize_error_message_for_discord(
+        raw_error: Any,
+        max_length: int = 1900,
+    ) -> str:
+        """Normalize and truncate error text for safe Discord/log output."""
+        text = str(raw_error).strip()
+        if not text:
+            return "Unknown error"
+
+        text = text.replace("`", "'")
+        text = re.sub(
+            r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]",
+            " ",
+            text,
+        )
+        text = re.sub(r"\s+", " ", text).strip()
+
+        if len(text) <= max_length:
+            return text
+
+        if max_length <= 1:
+            return text[:max_length]
+
+        return text[: max_length - 1].rstrip() + "…"
 
     def _audit_command(
         self,

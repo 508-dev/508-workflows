@@ -3018,6 +3018,63 @@ class TestCRMCog:
         assert "Please provide `search_term` or `link_user`." in failure_message
 
     @pytest.mark.asyncio
+    async def test_resume_create_contact_view_sanitizes_long_error_details(
+        self, crm_cog, mock_interaction
+    ):
+        """Very long/unsafe error details are sanitized before being sent to Discord."""
+        raw_error = "validation\x00failed\nwith\tcontrol\nchars\r and `backticks` " + (
+            "x" * 2500
+        )
+        mock_interaction.user.id = 123
+        mock_interaction.user.name = "Requester"
+        mock_interaction.message = None
+        mock_interaction.response = AsyncMock()
+        mock_interaction.response.defer = AsyncMock()
+        mock_interaction.followup = AsyncMock()
+        mock_interaction.followup.send = AsyncMock()
+
+        crm_cog._audit_command = Mock()
+        crm_cog._build_resume_create_contact_payload = Mock(
+            return_value={
+                "name": "Resume Candidate",
+                "emailAddress": "person@example.com",
+            }
+        )
+        crm_cog.espo_api.status_code = 422
+        crm_cog.espo_api.request.side_effect = Exception(raw_error)
+
+        view = ResumeCreateContactView(
+            crm_cog=crm_cog,
+            interaction=mock_interaction,
+            file_content=b"resume-bytes",
+            filename="candidate.pdf",
+            file_size=1024,
+            search_term=None,
+            overwrite=False,
+            link_user=None,
+            inferred_contact_meta={"reason": "no_matching_contact"},
+            target_scope="resume_inferred",
+        )
+
+        create_button = next(
+            child
+            for child in view.children
+            if isinstance(child, discord.ui.Button) and child.label == "Create Contact"
+        )
+
+        await create_button.callback(mock_interaction)
+
+        failure_message = mock_interaction.followup.send.call_args.args[0]
+        sanitized = crm_cog._sanitize_error_message_for_discord(raw_error)
+        assert sanitized in failure_message
+        assert "`backticks`" not in failure_message
+        assert "\x00" not in failure_message
+        assert "\r" not in failure_message
+        assert "\n" not in failure_message
+        assert "\t" not in failure_message
+        assert len(sanitized) <= 1900
+
+    @pytest.mark.asyncio
     async def test_reprocess_resume_shows_confirmation(self, crm_cog, mock_interaction):
         """Show a confirmation view before reprocessing a contact's latest resume."""
         mock_interaction.user.id = 101
