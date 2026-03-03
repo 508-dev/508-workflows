@@ -126,7 +126,7 @@ def test_send_supports_embed_payload() -> None:
 
     assert payload["username"] == "508 Workflows"
     assert payload["embeds"] == [embed_payload]
-    assert "allowed_mentions" not in payload
+    assert payload["allowed_mentions"] == {"parse": []}
 
 
 def test_send_no_content_no_embeds_does_nothing() -> None:

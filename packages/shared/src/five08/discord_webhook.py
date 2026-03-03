@@ -139,10 +139,9 @@ class DiscordWebhookLogger:
         embeds: list[dict[str, Any]] | None,
         username: str | None,
     ) -> dict[str, Any]:
-        payload: dict[str, Any] = {}
+        payload: dict[str, Any] = {"allowed_mentions": {"parse": []}}
         if content is not None:
             payload["content"] = self._normalize_content(content)
-            payload["allowed_mentions"] = {"parse": []}
         if username:
             trimmed_username = username.strip()
             if trimmed_username:

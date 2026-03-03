@@ -73,7 +73,7 @@ curl -X POST "http://localhost:8090/jobs/<job_id>/rerun" \
 Run this from a worker container to validate webhook delivery and payload shape:
 
 ```bash
-docker compose exec worker uv run --package integrations-worker python - <<'PY'
+docker compose exec worker uv run --package worker python - <<'PY'
 from five08.discord_webhook import DiscordWebhookLogger
 
 DiscordWebhookLogger(
