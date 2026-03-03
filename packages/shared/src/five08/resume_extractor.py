@@ -112,6 +112,41 @@ def _normalize_country(value: Any) -> str | None:
     return normalized.title() if normalized else None
 
 
+def _normalize_website_url(value: str) -> str:
+    candidate = value.strip().strip(")]},.;:")
+    if not candidate:
+        return ""
+
+    if candidate.lower().startswith("www."):
+        candidate = f"https://{candidate}"
+    if not candidate.startswith(("http://", "https://")):
+        return ""
+
+    try:
+        parsed = urlsplit(candidate)
+    except Exception:
+        return ""
+
+    if "@" in parsed.netloc:
+        return ""
+
+    host = parsed.hostname or ""
+    if host.lower().startswith("www."):
+        host = host[4:]
+    if not host:
+        return ""
+
+    normalized_netloc = parsed.netloc
+    lower_netloc = parsed.netloc.lower()
+    if lower_netloc.startswith("www."):
+        normalized_netloc = parsed.netloc[4:]
+    elif host and lower_netloc.startswith(f"www.{host}"):
+        normalized_netloc = parsed.netloc.replace(parsed.netloc[:4], "", 1)
+
+    parsed = parsed._replace(netloc=normalized_netloc)
+    return parsed.geturl().rstrip("/")
+
+
 def _normalize_website_links(value: Any) -> list[str]:
     if value is None:
         return []
@@ -123,7 +158,7 @@ def _normalize_website_links(value: Any) -> list[str]:
     else:
         return []
 
-    normalized: list[str] = []
+    normalized_links: list[str] = []
     seen: set[str] = set()
     for raw_value in raw_values:
         if not isinstance(raw_value, str):
@@ -131,19 +166,16 @@ def _normalize_website_links(value: Any) -> list[str]:
         candidate = raw_value.strip().strip(")]},.;:")
         if not candidate:
             continue
-        if candidate.lower().startswith("www."):
-            candidate = f"https://{candidate}"
-        if not candidate.startswith(("http://", "https://")):
+        normalized_link = _normalize_website_url(candidate)
+        if not normalized_link:
             continue
-        if "@" in candidate:
-            continue
-        lower = candidate.lower()
+        lower = normalized_link.lower()
         if lower in seen:
             continue
         seen.add(lower)
-        normalized.append(candidate.rstrip("/"))
+        normalized_links.append(normalized_link)
 
-    return normalized
+    return normalized_links
 
 
 def _is_social_url(value: str) -> bool:

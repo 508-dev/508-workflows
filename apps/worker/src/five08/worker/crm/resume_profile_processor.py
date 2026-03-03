@@ -6,9 +6,11 @@ import json
 import logging
 from collections.abc import Callable
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 from typing import Any
 
 from five08.clients.espo import EspoAPI, EspoAPIError
+from five08.skills import normalize_skill
 from five08.resume_extractor import ResumeProfileExtractor
 from five08.queue import get_postgres_connection
 from five08.worker.config import settings
@@ -490,8 +492,7 @@ class ResumeProfileProcessor:
                 error=str(exc),
             )
 
-    @staticmethod
-    def _normalize_skills_for_apply(value: Any) -> list[str] | None:
+    def _normalize_skills_for_apply(self, value: Any) -> list[str] | None:
         """Normalize optional skills updates into an array-shaped payload."""
         if value is None:
             return None
@@ -508,11 +509,13 @@ class ResumeProfileProcessor:
         for skill in raw_skills:
             if not skill:
                 continue
-            key = skill.casefold()
+            key = self._normalize_skill(skill)
+            if key is None:
+                continue
             if key in seen:
                 continue
             seen.add(key)
-            normalized.append(skill)
+            normalized.append(key)
 
         return normalized if normalized else None
 
@@ -540,7 +543,7 @@ class ResumeProfileProcessor:
         normalized: list[str] = []
         seen: set[str] = set()
         for raw_skill in raw_skills:
-            skill = self.skills_extractor.canonicalize_skill(str(raw_skill).strip())
+            skill = self._normalize_skill(str(raw_skill).strip())
             if not skill:
                 continue
             key = skill.casefold()
@@ -574,6 +577,8 @@ class ResumeProfileProcessor:
                 contact_id,
                 exc,
             )
+            return None
+        if after_contact is baseline_contact:
             return None
         if not isinstance(after_contact, dict):
             return None
@@ -716,7 +721,7 @@ class ResumeProfileProcessor:
         normalized: list[str] = []
         seen: set[str] = set()
         for raw_skill in raw_skills:
-            canonical = self.skills_extractor.canonicalize_skill(raw_skill)
+            canonical = self._normalize_skill(raw_skill)
             if not canonical:
                 continue
             key = canonical.casefold()
@@ -726,6 +731,10 @@ class ResumeProfileProcessor:
             normalized.append(canonical)
         return normalized
 
+    def _normalize_skill(self, value: Any) -> str | None:
+        normalized = normalize_skill(str(value))
+        return normalized or None
+
     def _coerce_profile_skill_result(
         self,
         extracted: ResumeExtractedProfile,
@@ -733,7 +742,7 @@ class ResumeProfileProcessor:
     ) -> ExtractedSkills:
         normalized_attrs: dict[str, SkillAttributes] = {}
         for raw_skill, raw_attr in getattr(extracted, "skill_attrs", {}).items():
-            skill = self.skills_extractor.canonicalize_skill(str(raw_skill))
+            skill = self._normalize_skill(raw_skill)
             if not skill:
                 continue
             try:
@@ -747,7 +756,7 @@ class ResumeProfileProcessor:
         skills = extracted.skills or []
         if not normalized_attrs and isinstance(skills, list) and skills:
             for raw_skill in skills:
-                skill = self.skills_extractor.canonicalize_skill(str(raw_skill))
+                skill = self._normalize_skill(raw_skill)
                 if not skill:
                     continue
                 key = skill.casefold()
@@ -785,9 +794,10 @@ class ResumeProfileProcessor:
 
         parsed: dict[str, int] = {}
         for raw_skill, raw_payload in candidate.items():
-            skill = self.skills_extractor.canonicalize_skill(str(raw_skill)).casefold()
-            if not skill:
+            normalized = self._normalize_skill(raw_skill)
+            if not normalized:
                 continue
+            skill = normalized.casefold()
 
             strength_value = raw_payload
             if isinstance(raw_payload, dict):
@@ -811,7 +821,7 @@ class ResumeProfileProcessor:
         merged: dict[str, int] = dict(existing_attrs)
 
         for skill, attrs in extracted_attrs.items():
-            key = self.skills_extractor.canonicalize_skill(str(skill).strip())
+            key = self._normalize_skill(skill)
             if not key:
                 continue
             key = key.casefold()
@@ -839,7 +849,7 @@ class ResumeProfileProcessor:
 
         parsed: dict[str, int] = {}
         for raw_skill, raw_payload in candidate.items():
-            skill = self.skills_extractor.canonicalize_skill(str(raw_skill))
+            skill = self._normalize_skill(raw_skill)
             if not skill:
                 continue
             strength_source = raw_payload
@@ -858,7 +868,7 @@ class ResumeProfileProcessor:
     def _serialize_skill_attrs(self, attrs: dict[str, int]) -> str | None:
         normalized: dict[str, dict[str, int]] = {}
         for raw_skill, raw_strength in attrs.items():
-            skill = self.skills_extractor.canonicalize_skill(str(raw_skill))
+            skill = self._normalize_skill(raw_skill)
             if not skill:
                 continue
             try:
@@ -887,20 +897,14 @@ class ResumeProfileProcessor:
         for raw_value in raw_values:
             if not isinstance(raw_value, str):
                 continue
-            candidate = raw_value.strip().rstrip(")]},.;:")
-            if not candidate:
+            normalized_link = self._normalize_website_url(raw_value.strip())
+            if normalized_link is None:
                 continue
-            if candidate.lower().startswith("www."):
-                candidate = f"https://{candidate}"
-            if not candidate.startswith(("http://", "https://")):
-                continue
-            if "@" in candidate:
-                continue
-            dedupe_key = candidate.casefold()
+            dedupe_key = normalized_link.casefold()
             if dedupe_key in seen:
                 continue
             seen.add(dedupe_key)
-            normalized.append(candidate.rstrip("/"))
+            normalized.append(normalized_link)
 
         return normalized
 
@@ -913,7 +917,7 @@ class ResumeProfileProcessor:
         for value in existing:
             if not isinstance(value, str):
                 continue
-            normalized = value.strip().rstrip("/")
+            normalized = self._normalize_website_url(value)
             if not normalized:
                 continue
             dedupe_key = normalized.casefold()
@@ -925,7 +929,7 @@ class ResumeProfileProcessor:
         for value in extracted:
             if not isinstance(value, str):
                 continue
-            normalized = value.strip().rstrip("/")
+            normalized = self._normalize_website_url(value)
             if not normalized:
                 continue
             dedupe_key = normalized.casefold()
@@ -935,6 +939,41 @@ class ResumeProfileProcessor:
             merged.append(normalized)
 
         return merged
+
+    @staticmethod
+    def _normalize_website_url(value: str) -> str | None:
+        candidate = value.strip().strip(")]},.;:")
+        if not candidate:
+            return None
+
+        if candidate.lower().startswith("www."):
+            candidate = f"https://{candidate}"
+        if not candidate.startswith(("http://", "https://")):
+            return None
+
+        try:
+            parsed = urlsplit(candidate)
+        except Exception:
+            return None
+
+        if "@" in parsed.netloc:
+            return None
+
+        host = parsed.hostname or ""
+        if host.lower().startswith("www."):
+            host = host[4:]
+        if not host:
+            return None
+
+        normalized_netloc = parsed.netloc
+        lower_netloc = parsed.netloc.lower()
+        if lower_netloc.startswith("www."):
+            normalized_netloc = parsed.netloc[4:]
+        elif host and lower_netloc.startswith(f"www.{host}"):
+            normalized_netloc = parsed.netloc.replace(parsed.netloc[:4], "", 1)
+
+        parsed = parsed._replace(netloc=normalized_netloc)
+        return parsed.geturl().rstrip("/")
 
     def _normalize_email_address(self, value: Any) -> str | None:
         if not isinstance(value, str):

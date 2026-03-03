@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 from five08.clients.espo import EspoAPI, EspoAPIError
+from five08.skills import normalize_skill
 from five08.worker.config import settings
 from five08.worker.crm.document_processor import DocumentProcessor
 from five08.worker.crm.skills_extractor import SkillsExtractor
@@ -49,7 +50,7 @@ class EspoCRMClient:
             normalized: list[str] = []
             seen: set[str] = set()
             for raw_skill in skills:
-                canonical = self.skills_extractor.canonicalize_skill(str(raw_skill))
+                canonical = normalize_skill(str(raw_skill))
                 if not canonical:
                     continue
                 key = canonical.casefold()
@@ -128,7 +129,8 @@ class ContactSkillsProcessor:
 
             if new_skills:
                 success = self.espocrm_client.update_contact_skills(
-                    contact_id=contact_id, skills=updated_skills
+                    contact_id,
+                    updated_skills,
                 )
             else:
                 success = True
@@ -188,7 +190,7 @@ class ContactSkillsProcessor:
 
         deduped_skills: dict[str, str] = {}
         for skill in all_skills:
-            canonical = self.skills_extractor.canonicalize_skill(str(skill))
+            canonical = normalize_skill(str(skill))
             if not canonical:
                 continue
             key = canonical.casefold()
@@ -206,7 +208,7 @@ class ContactSkillsProcessor:
         normalized: list[str] = []
         seen: set[str] = set()
         for skill in parsed:
-            canonical = self.skills_extractor.canonicalize_skill(skill)
+            canonical = normalize_skill(skill)
             if not canonical:
                 continue
             key = canonical.casefold()
