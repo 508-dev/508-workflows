@@ -83,6 +83,40 @@ def _normalize_country(value: Any) -> str | None:
     return normalized.title() if normalized else None
 
 
+def _normalize_website_links(value: Any) -> list[str]:
+    if value is None:
+        return []
+
+    if isinstance(value, str):
+        raw_values = [value]
+    elif isinstance(value, (list, tuple)):
+        raw_values = list(value)
+    else:
+        return []
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_value in raw_values:
+        if not isinstance(raw_value, str):
+            continue
+        candidate = raw_value.strip().strip(")]},.;:")
+        if not candidate:
+            continue
+        if candidate.lower().startswith("www."):
+            candidate = f"https://{candidate}"
+        if not candidate.startswith(("http://", "https://")):
+            continue
+        if "@" in candidate:
+            continue
+        lower = candidate.lower()
+        if lower in seen:
+            continue
+        seen.add(lower)
+        normalized.append(candidate.rstrip("/"))
+
+    return normalized
+
+
 def _normalize_seniority(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -151,6 +185,7 @@ class ResumeExtractedProfile(BaseModel):
     github_username: str | None = None
     linkedin_url: str | None = None
     phone: str | None = None
+    website_links: list[str] = Field(default_factory=list)
     address_country: str | None = None
     seniority_level: str | None = None
     skills: list[str] = Field(default_factory=list)
@@ -219,6 +254,7 @@ class ResumeProfileExtractor:
                 github_username=_normalize_github(parsed.get("github_username")),
                 linkedin_url=_normalize_linkedin(parsed.get("linkedin_url")),
                 phone=_normalize_phone(parsed.get("phone")),
+                website_links=_normalize_website_links(parsed.get("website_links")),
                 address_country=_normalize_country(parsed.get("address_country")),
                 seniority_level=_normalize_seniority(parsed.get("seniority_level")),
                 skills=_normalize_skills(parsed.get("skills")),
@@ -266,6 +302,7 @@ class ResumeProfileExtractor:
                 _normalize_linkedin(linkedin_match.group(0)) if linkedin_match else None
             ),
             phone=_normalize_phone(phone_match.group(0)) if phone_match else None,
+            website_links=self._extract_website_links(snippet),
             address_country=country,
             seniority_level=seniority,
             skills=skills,
@@ -280,7 +317,8 @@ class ResumeProfileExtractor:
             "Return JSON with exact keys and no extras:\n"
             '{"name": string|null, "email": string|null, '
             '"github_username": string|null, "linkedin_url": string|null, '
-            '"phone": string|null, "address_country": string|null, '
+            '"phone": string|null, "website_links": string[]|null, '
+            '"address_country": string|null, '
             '"seniority_level": string|null, "skills": string[]|null, '
             '"confidence": number}\n'
             "Rules:\n"
@@ -344,3 +382,10 @@ class ResumeProfileExtractor:
         if first_line:
             return _normalize_skills(first_line)
         return []
+
+    @staticmethod
+    def _extract_website_links(resume_text: str) -> list[str]:
+        matches = re.findall(
+            r"https?://[^\s\]\[()\"<>]+", resume_text, flags=re.IGNORECASE
+        )
+        return _normalize_website_links(matches)
