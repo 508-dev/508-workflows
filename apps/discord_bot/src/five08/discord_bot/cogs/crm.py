@@ -1345,6 +1345,10 @@ class ResumeCreateContactView(discord.ui.View):
                 create_payload = self.crm_cog._build_resume_create_contact_payload(
                     file_content=self.file_content
                 )
+            self.crm_cog._populate_name_fields(
+                create_payload,
+                source_name=str(create_payload.get("name", "")).strip(),
+            )
             target_contact = self.crm_cog.espo_api.request(
                 "POST", "Contact", create_payload
             )
@@ -3280,6 +3284,26 @@ class CRMCog(commands.Cog):
 
         return "\nParsed resume identifiers: " + "; ".join(summary_parts)
 
+    def _build_resume_parsed_identity_summary(self, file_content: bytes) -> str:
+        """Build a short display summary of parsed contact identity fields."""
+        hints = self._extract_resume_contact_hints(file_content)
+        parsed_name = str(hints.get("name") or "").strip()
+        if not parsed_name:
+            parsed_name = self._extract_resume_name_fallback(file_content)
+
+        emails = hints.get("emails", [])
+        if not isinstance(emails, list):
+            emails = []
+        primary_email = "No email parsed"
+        if emails:
+            raw_email = str(emails[0]).strip()
+            if raw_email:
+                primary_email = raw_email
+
+        return (
+            f"\nParsed contact details: name=`{parsed_name}`, email=`{primary_email}`"
+        )
+
     def _extract_resume_name_hint(self, file_content: bytes) -> str:
         """Best-effort contact name extraction from resume text."""
         hints = self._extract_resume_contact_hints(file_content)
@@ -3287,6 +3311,18 @@ class CRMCog(commands.Cog):
         if extracted_name:
             return extracted_name
         return self._extract_resume_name_fallback(file_content)
+
+    def _populate_name_fields(
+        self, payload: dict[str, str], *, source_name: str
+    ) -> None:
+        """Populate firstName and lastName fields for CRM contact creation payloads."""
+        first_name, last_name = self.resume_extractor.split_name(
+            full_name=source_name,
+            first_name_hint=str(payload.get("firstName", "")).strip() or None,
+            last_name_hint=str(payload.get("lastName", "")).strip() or None,
+        )
+        payload["firstName"] = first_name
+        payload["lastName"] = last_name
 
     def _build_resume_create_contact_payload(
         self, file_content: bytes
@@ -3312,6 +3348,7 @@ class CRMCog(commands.Cog):
             "type": "Prospect",
             "name": contact_name,
         }
+        self._populate_name_fields(payload, source_name=contact_name)
         if emails:
             primary_email = emails[0]
             if primary_email.endswith("@508.dev"):
@@ -3370,6 +3407,9 @@ class CRMCog(commands.Cog):
         parsed_name = str(payload.get("name", "")).strip()
         if not parsed_name or parsed_name == "Resume Candidate":
             payload["name"] = self._fallback_contact_name_for_discord_user(user)
+        self._populate_name_fields(
+            payload, source_name=str(payload.get("name", "")).strip()
+        )
         payload.update(self._discord_link_fields(user))
         return payload
 
@@ -5605,7 +5645,8 @@ class CRMCog(commands.Cog):
                         await interaction.followup.send(
                             "⚠️ Could not find a unique contact from this resume. "
                             "Would you like to create a new contact from the parsed details?"
-                            + inferred_attempts_text,
+                            + inferred_attempts_text
+                            + self._build_resume_parsed_identity_summary(file_content),
                             view=view,
                             ephemeral=True,
                         )
