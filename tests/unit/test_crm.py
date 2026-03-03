@@ -523,20 +523,31 @@ class TestCRMCog:
         await crm_cog.view_onboarding_queue.callback(crm_cog, mock_interaction)
 
         crm_cog.espo_api.request.assert_called_once_with(
-            "GET", "Contact", {"maxSize": 200}
+            "GET",
+            "Contact",
+            {
+                "maxSize": 200,
+                "select": (
+                    "id,name,emailAddress,cDiscordUsername,cDiscordUserID,"
+                    "cOnboardingState,cOnboardingStatus,cOnboarding,"
+                    "cOnboarder,cOnboardingCoordinator,cOnboardingUpdatedAt"
+                ),
+            },
         )
 
-        embed = mock_interaction.followup.send.call_args[1]["embed"]
+        send_kwargs = mock_interaction.followup.send.call_args[1]
+        assert "embed" in send_kwargs
+        assert "view" in send_kwargs
+        embed = send_kwargs["embed"]
         names = [field.name for field in embed.fields]
         values = [field.value for field in embed.fields]
-        assert any("Alice" in n for n in names)
-        assert any("Eli" in n for n in names)
-        assert not any("Bob" in n for n in names)
-        assert not any("Cara" in n for n in names)
-        assert not any("Drew" in n for n in names)
-        assert any("📌 Onboarding Status: pending" in value for value in values)
-        assert any("📌 Onboarding Status: Unknown" in value for value in values)
-        assert any("🧑‍💼 Onboarder: mentorA" in value for value in values)
+        assert any("Contact: Alice" in name for name in names)
+        assert all("Contact: Eli" not in name for name in names)
+        assert any("📧 **Email:** No email" in value for value in values)
+        assert any("💬 **Linked Discord:** No Discord" in value for value in values)
+        assert any("🧑‍💼 **cOnboarder:** mentorA" in value for value in values)
+        assert any("📌 **cOnboardingState:** pending" in value for value in values)
+        assert any("🔗 [View in CRM](" in value for value in values)
 
     @pytest.mark.asyncio
     async def test_view_onboarding_queue_empty_when_only_excluded(
@@ -558,7 +569,16 @@ class TestCRMCog:
         await crm_cog.view_onboarding_queue.callback(crm_cog, mock_interaction)
 
         crm_cog.espo_api.request.assert_called_once_with(
-            "GET", "Contact", {"maxSize": 200}
+            "GET",
+            "Contact",
+            {
+                "maxSize": 200,
+                "select": (
+                    "id,name,emailAddress,cDiscordUsername,cDiscordUserID,"
+                    "cOnboardingState,cOnboardingStatus,cOnboarding,"
+                    "cOnboarder,cOnboardingCoordinator,cOnboardingUpdatedAt"
+                ),
+            },
         )
         message = mock_interaction.followup.send.call_args[0][0]
         assert "✅ No contacts found in onboarding queue." in message
@@ -579,10 +599,10 @@ class TestCRMCog:
         assert "❌ CRM API error: Queue service down" in message
 
     @pytest.mark.asyncio
-    async def test_view_onboarding_queue_falls_back_to_text_when_embed_too_large(
+    async def test_view_onboarding_queue_uses_pagination_for_large_queues(
         self, crm_cog, mock_interaction
     ):
-        """Large queue payloads should switch to plain-text output."""
+        """Large queues should be returned as paginated embeds."""
         steering_role = Mock()
         steering_role.name = "Steering Committee"
         mock_interaction.user.roles = [steering_role]
@@ -607,14 +627,11 @@ class TestCRMCog:
 
         await crm_cog.view_onboarding_queue.callback(crm_cog, mock_interaction)
 
-        assert mock_interaction.followup.send.call_count >= 1
-        for call_args in mock_interaction.followup.send.call_args_list:
-            kwargs = call_args[1]
-            assert "embed" not in kwargs
-            assert "file" not in kwargs
-
-        first_call = mock_interaction.followup.send.call_args_list[0]
-        assert "too large for embed format" in first_call[0][0]
+        assert mock_interaction.followup.send.call_count == 1
+        send_kwargs = mock_interaction.followup.send.call_args[1]
+        assert "embed" in send_kwargs
+        assert "view" in send_kwargs
+        assert send_kwargs["view"].total_pages > 1
 
     @pytest.mark.asyncio
     async def test_view_skills_self_uses_structured_attrs(
