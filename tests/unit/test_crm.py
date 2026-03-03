@@ -1248,24 +1248,77 @@ class TestCRMCog:
         call_args = mock_interaction.followup.send.call_args
         assert "❌ This command can only be used in a server." in call_args[0][0]
 
-    def test_query_normalization_username(self, crm_cog):
-        """Test that username gets @508.dev appended."""
-        # This would be tested in the actual command, but we can verify the logic
-        query = "john"
-        # Simulate the normalization logic from get_resume
-        normalized = (
-            f"{query}@508.dev"
-            if "@" not in query and not any(char in query for char in [" ", ".", "#"])
-            else query
-        )
-        assert normalized == "john@508.dev"
+    def test_build_contact_search_filters_username(self, crm_cog):
+        """Build shared search filters for a plain 508 username."""
+        filters = crm_cog._build_contact_search_filters("john")
 
-    def test_query_normalization_at_sign(self, crm_cog):
-        """Test that john@ becomes john@508.dev."""
-        query = "john@"
-        # Simulate the normalization logic from get_resume
-        normalized = f"{query}508.dev" if query.endswith("@") else query
-        assert normalized == "john@508.dev"
+        assert {"type": "contains", "attribute": "name", "value": "john"} in filters
+        assert {
+            "type": "equals",
+            "attribute": "c508Email",
+            "value": "john@508.dev",
+        } in filters
+
+    def test_build_contact_search_filters_trailing_at(self, crm_cog):
+        """Build shared search filters for trailing 508 usernames."""
+        filters = crm_cog._build_contact_search_filters("john@")
+
+        assert {
+            "type": "equals",
+            "attribute": "emailAddress",
+            "value": "john@508.dev",
+        } in filters
+        assert {
+            "type": "equals",
+            "attribute": "c508Email",
+            "value": "john@508.dev",
+        } in filters
+
+    def test_build_contact_search_filters_email(self, crm_cog):
+        """Build shared search filters for explicit email addresses."""
+        filters = crm_cog._build_contact_search_filters("john@example.com")
+
+        assert {
+            "type": "equals",
+            "attribute": "emailAddress",
+            "value": "john@example.com",
+        } in filters
+        assert {
+            "type": "equals",
+            "attribute": "c508Email",
+            "value": "john@example.com",
+        } in filters
+
+    def test_build_contact_search_filters_discord_mention(self, crm_cog):
+        """Build shared search filters for Discord mentions."""
+        filters = crm_cog._build_contact_search_filters("<@111111111>")
+
+        assert filters == [
+            {
+                "type": "equals",
+                "attribute": "cDiscordUserID",
+                "value": "111111111",
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_search_contact_for_linking_includes_discord_username_filter_when_requested(
+        self, crm_cog
+    ):
+        """Search helper includes Discord username criteria when requested."""
+        crm_cog.espo_api.request.return_value = {"list": []}
+
+        await crm_cog._search_contact_for_linking(
+            "john", include_discord_username_search=True, max_size=10
+        )
+
+        call = crm_cog.espo_api.request.call_args.args
+        where_filters = call[2]["where"][0]["value"]
+        assert {
+            "type": "contains",
+            "attribute": "cDiscordUsername",
+            "value": "john",
+        } in where_filters
 
     @pytest.mark.asyncio
     async def test_crm_status_success(self, crm_cog, mock_interaction):
