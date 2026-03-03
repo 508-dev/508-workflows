@@ -1621,7 +1621,7 @@ class ResumeProfileExtractor:
             if match.start() > 0 and resume_text[match.start() - 1] == "@":
                 continue
             raw_url = match.group(0)
-            confidence = PERSONAL_WEBSITE_MIN_CONFIDENCE * _website_position_scale(
+            position_scale = _website_position_scale(
                 text_length=len(resume_text),
                 start_index=match.start(),
                 end_index=match.end(),
@@ -1631,14 +1631,9 @@ class ResumeProfileExtractor:
                 match.start(),
                 match.end(),
             ):
-                confidence = (
-                    PERSONAL_WEBSITE_CONTEXT_CONFIDENCE
-                    * _website_position_scale(
-                        text_length=text_length,
-                        start_index=match.start(),
-                        end_index=match.end(),
-                    )
-                )
+                confidence = PERSONAL_WEBSITE_CONTEXT_CONFIDENCE
+            else:
+                confidence = PERSONAL_WEBSITE_MIN_CONFIDENCE * position_scale
             if confidence < PERSONAL_WEBSITE_MIN_CONFIDENCE:
                 continue
             matches.append((raw_url, confidence))
