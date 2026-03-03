@@ -6,6 +6,7 @@ import ast
 import json
 import logging
 import re
+import unicodedata
 from collections.abc import Callable
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
@@ -1198,7 +1199,12 @@ class ResumeProfileProcessor:
 
     @staticmethod
     def _normalize_website_url(value: str) -> str | None:
-        candidate = value.strip().strip(")]},.;:")
+        candidate = (
+            unicodedata.normalize("NFKC", value)
+            .encode("ascii", "ignore")
+            .decode("ascii")
+        )
+        candidate = candidate.strip().strip(")]},.;:")
         if not candidate:
             return None
 
