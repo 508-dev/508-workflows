@@ -3,6 +3,8 @@
 from unittest.mock import Mock, patch
 
 from five08.resume_extractor import _coerce_email_list
+from five08.resume_extractor import _normalize_name_part
+from five08.resume_extractor import _normalize_website_url
 from five08.resume_extractor import ResumeProfileExtractor
 
 
@@ -44,6 +46,23 @@ def test_extract_website_links_accepts_uppercase_scheme() -> None:
     )
 
     assert any(link.casefold() == "https://example.com/path" for link in links)
+
+
+def test_extract_website_links_includes_middle_scheme_url() -> None:
+    """Middle-of-document URLs should be retained for markdown or scheme links."""
+    links = ResumeProfileExtractor._extract_website_links(
+        f"{'a' * 500}\nWebsite: https://michaelwu.dev\n{'b' * 500}"
+    )
+
+    assert "https://michaelwu.dev" in links
+
+
+def test_normalize_website_url_removes_zero_width_characters() -> None:
+    """Unicode formatting characters should not block valid URL normalization."""
+    assert (
+        _normalize_website_url("https://michaelwu.dev\u200b").casefold()
+        == "https://michaelwu.dev"
+    )
 
 
 def test_extract_profile_links_route_social_urls_away_from_website() -> None:
@@ -425,6 +444,17 @@ def test_extract_name_skips_heading_lines_with_extra_internal_spacing() -> None:
     assert result.name == "Jane Doe"
 
 
+def test_extract_name_case_normalizes_all_caps_name() -> None:
+    """Uppercase resume names should be normalized before exporting."""
+    extractor = ResumeProfileExtractor(api_key=None)
+
+    result = extractor.extract("WILL GUTIERREZ\nSoftware Engineer\nwill@example.com\n")
+
+    assert result.name == "Will Gutierrez"
+    assert result.first_name == "Will"
+    assert result.last_name == "Gutierrez"
+
+
 def test_infer_seniority_regex_handles_scale_keywords() -> None:
     """Seniority inference should not crash on scale/impact keyword checks."""
     level = ResumeProfileExtractor._infer_seniority_from_resume(
@@ -441,3 +471,9 @@ def test_infer_seniority_regex_does_not_match_larger_numeric_prefixes() -> None:
     )
 
     assert level == "senior"
+
+
+def test_normalize_name_part_preserves_non_uppercase_casing() -> None:
+    """Only all-caps names should be title-cased; mixed-case names stay unchanged."""
+    assert _normalize_name_part("McDonald") == "McDonald"
+    assert _normalize_name_part("mcdonald") == "mcdonald"

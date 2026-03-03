@@ -35,6 +35,7 @@ EMAIL_REGEX = r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"
 PERSONAL_WEBSITE_CONTEXT_CONFIDENCE = 0.85
 PERSONAL_WEBSITE_CONTEXT_KEYWORDS = (
     "personal website",
+    "personal blog",
     "portfolio",
     "portfolio site",
     "my website",
@@ -82,6 +83,9 @@ LLM_WEBSITE_URL_MIN_CONFIDENCE = 0.45
 LLM_SOCIAL_URL_MIN_CONFIDENCE = 0.7
 LLM_PERSONAL_URL_MIN_CONFIDENCE = 0.85
 LLM_URL_CANDIDATE_KIND_PERSONAL = "personal_website"
+MAX_PERSONAL_WEBSITE_PATH_COMPONENTS = 1
+TOP_BOTTOM_BIAS_WINDOW = 0.1
+MIDDLE_WEBSITE_POSITION_SCALE = 0.55
 LLM_URL_CANDIDATE_KIND_SOCIAL = "social_profile"
 LLM_URL_CANDIDATE_KIND_OTHER = "other"
 MARKDOWN_URL_PATTERN = re.compile(r"\[[^\]]+\]\(\s*([^)]+?)\s*\)")
@@ -184,6 +188,8 @@ def _normalize_name_part(value: Any) -> str | None:
     normalized = re.sub(r"\s+", " ", normalized).strip()
     if not any(char.isalpha() for char in normalized):
         return None
+    if normalized.isupper():
+        return normalized.title()
     return normalized
 
 
@@ -403,6 +409,14 @@ def _normalize_website_links(value: Any) -> list[str]:
     return normalized_links
 
 
+def _has_excessive_personal_path_segments(path: str) -> bool:
+    stripped = path.strip("/")
+    if not stripped:
+        return False
+    segments = [part for part in stripped.split("/") if part]
+    return len(segments) > MAX_PERSONAL_WEBSITE_PATH_COMPONENTS
+
+
 def _normalize_url_candidate_kind(value: Any) -> str:
     if not isinstance(value, str):
         return LLM_URL_CANDIDATE_KIND_OTHER
@@ -473,6 +487,19 @@ def _has_personal_website_context(
     return any(keyword in context for keyword in PERSONAL_WEBSITE_CONTEXT_KEYWORDS)
 
 
+def _website_position_scale(
+    text_length: int, start_index: int, end_index: int
+) -> float:
+    if text_length <= 0:
+        return 1.0
+
+    start_ratio = start_index / text_length
+    end_ratio = end_index / text_length
+    if start_ratio <= TOP_BOTTOM_BIAS_WINDOW or end_ratio >= 1 - TOP_BOTTOM_BIAS_WINDOW:
+        return 1.0
+    return MIDDLE_WEBSITE_POSITION_SCALE
+
+
 def _build_website_and_social_from_candidates(
     llm_candidates: list[tuple[str, str, float]],
     heuristic_candidates: list[tuple[str, float]],
@@ -497,7 +524,7 @@ def _build_website_and_social_from_candidates(
         urls_to_consider.append(candidate_url)
 
     for candidate_url, candidate_confidence in heuristic_candidates:
-        if candidate_confidence < PERSONAL_WEBSITE_MIN_CONFIDENCE:
+        if candidate_confidence < MIDDLE_WEBSITE_POSITION_SCALE:
             continue
 
         candidate_key = candidate_url.casefold()
@@ -631,6 +658,9 @@ def _normalize_name(value: Any) -> str | None:
         return None
     if is_reserved_resume_name_token(normalized):
         return None
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if normalized == normalized.upper():
+        return normalized.title()
     return normalized
 
 
@@ -940,9 +970,10 @@ class ResumeProfileExtractor:
         rate_range = _normalize_scalar(source_texts.get("rate_range"))
         referred_by = _normalize_scalar(source_texts.get("referred_by"))
         first_name, last_name = self.split_name(full_name=name_match)
+        heuristic_name = _normalize_name(name_match)
 
         return ResumeExtractedProfile(
-            name=name_match,
+            name=heuristic_name,
             first_name=first_name,
             last_name=last_name,
             email=extracted_emails[0] if extracted_emails else None,
@@ -1421,26 +1452,45 @@ class ResumeProfileExtractor:
         resume_text: str,
     ) -> list[tuple[str, float]]:
         matches: list[tuple[str, float]] = []
+        text_length = len(resume_text)
         for match in MARKDOWN_URL_PATTERN.finditer(resume_text):
             raw_url = match.group(1).strip().strip(")]},.;:")
             if not raw_url:
                 continue
-            matches.append((raw_url, 1.0))
+            confidence = 1.0 * _website_position_scale(
+                text_length=text_length,
+                start_index=match.start(),
+                end_index=match.end(),
+            )
+            matches.append((raw_url, confidence))
 
         for match in SCHEME_URL_PATTERN.finditer(resume_text):
-            matches.append((match.group(0), 1.0))
+            confidence = 1.0 * _website_position_scale(
+                text_length=text_length,
+                start_index=match.start(),
+                end_index=match.end(),
+            )
+            matches.append((match.group(0), confidence))
 
         for match in BARE_DOMAIN_URL_PATTERN.finditer(resume_text):
             if match.start() > 0 and resume_text[match.start() - 1] == "@":
                 continue
             raw_url = match.group(0)
-            confidence = PERSONAL_WEBSITE_MIN_CONFIDENCE
+            position_scale = _website_position_scale(
+                text_length=len(resume_text),
+                start_index=match.start(),
+                end_index=match.end(),
+            )
             if _has_personal_website_context(
                 resume_text,
                 match.start(),
                 match.end(),
             ):
                 confidence = PERSONAL_WEBSITE_CONTEXT_CONFIDENCE
+            else:
+                confidence = PERSONAL_WEBSITE_MIN_CONFIDENCE * position_scale
+            if confidence < PERSONAL_WEBSITE_MIN_CONFIDENCE:
+                continue
             matches.append((raw_url, confidence))
 
         normalized_links: list[tuple[str, float]] = []

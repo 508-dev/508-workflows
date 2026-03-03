@@ -205,6 +205,8 @@ def normalize_website_url(
     disallowed_host_predicate: Callable[[str], bool] | None = None,
 ) -> str | None:
     candidate = unicodedata.normalize("NFKC", value)
+    # Strip Unicode format characters (e.g. zero-width spaces) before ASCII check.
+    candidate = "".join(ch for ch in candidate if unicodedata.category(ch) != "Cf")
     if any(ord(ch) > 127 for ch in candidate):
         return None
     candidate = candidate.strip().strip(")]},.;:")
