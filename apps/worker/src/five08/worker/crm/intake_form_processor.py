@@ -61,6 +61,8 @@ SENIORITY_MAP = {
     "mid-level": "midlevel",
     "midlevel": "midlevel",
     "senior": "senior",
+    "principal": "staff",
+    "principal engineer": "staff",
     "staff": "staff",
     "staff and beyond": "staff",
     "staff+": "staff",

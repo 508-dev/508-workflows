@@ -139,8 +139,6 @@ def _normalize_seniority(value: Any) -> str | None:
         "lead",
         "lead engineer",
         "lead engineer/tech lead",
-        "principal",
-        "principal engineer",
     }:
         return "senior"
     if "lead" in normalized and ("engineer" in normalized or "lead" == normalized):
