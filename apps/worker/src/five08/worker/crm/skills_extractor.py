@@ -215,13 +215,11 @@ class SkillsExtractor:
             numeric = int(float(raw))
         except Exception:
             return None
-        if numeric <= 0:
-            return None
         return max(1, min(5, numeric))
 
     def _parse_skill_with_strength(self, value: str) -> tuple[str, int | None]:
         raw = value.strip()
-        match = re.match(r"^(.*)\((\d)\)\s*$", raw)
+        match = re.match(r"^(.*)\(\s*(\d*)\s*\)\s*$", raw)
         if match is None:
             return self._normalize_skill_name(raw), None
 
