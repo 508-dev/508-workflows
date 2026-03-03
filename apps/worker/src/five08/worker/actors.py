@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Final
-from typing import Any
+from typing import Any, Final
 
 import dramatiq
 from dramatiq.brokers.redis import RedisBroker
@@ -21,19 +20,10 @@ from five08.queue import (
     mark_job_running,
     mark_job_succeeded,
 )
-from five08.queue import parse_queue_names
 from five08.worker.config import settings
 from five08.worker.crm.docuseal_processor import DocusealAgreementNonRetryableError
 from five08.worker.jobs import (
-    apply_resume_profile_job,
-    extract_resume_profile_job,
-    process_intake_form_job,
-    process_mailbox_message_job,
-    process_contact_skills_job,
-    process_docuseal_agreement_job,
-    process_webhook_event,
-    sync_people_from_crm_job,
-    sync_person_from_crm_job,
+    JOB_FUNCTIONS,
 )
 
 from five08.logging import configure_observability
@@ -58,20 +48,7 @@ _JOB_WEBHOOK_LOGGER = DiscordWebhookLogger(
     wait_for_response=settings.discord_logs_webhook_wait,
 )
 
-_QUEUE_NAMES = parse_queue_names(settings.worker_queue_names)
-_QUEUE_NAME = _QUEUE_NAMES[0] if _QUEUE_NAMES else settings.redis_queue_name
-
-_HANDLERS: dict[str, Any] = {
-    process_webhook_event.__name__: process_webhook_event,
-    process_contact_skills_job.__name__: process_contact_skills_job,
-    extract_resume_profile_job.__name__: extract_resume_profile_job,
-    apply_resume_profile_job.__name__: apply_resume_profile_job,
-    process_intake_form_job.__name__: process_intake_form_job,
-    process_mailbox_message_job.__name__: process_mailbox_message_job,
-    sync_people_from_crm_job.__name__: sync_people_from_crm_job,
-    sync_person_from_crm_job.__name__: sync_person_from_crm_job,
-    process_docuseal_agreement_job.__name__: process_docuseal_agreement_job,
-}
+_QUEUE_NAME = settings.worker_queue_name
 
 
 def _job_attempt_display(attempts: int) -> int:
@@ -239,7 +216,7 @@ def _run_job(job_id: str) -> None:
         )
         return
 
-    handler = _HANDLERS.get(job.type)
+    handler = JOB_FUNCTIONS.get(job.type)
     if handler is None:
         error = f"Unknown job type: {job.type}"
         logger.error("Marking job dead id=%s error=%s", job_id, error)

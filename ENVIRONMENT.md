@@ -62,6 +62,7 @@ Use `.env.example` as the source of defaults.
 
 - `Optional`: `WEBHOOK_INGEST_HOST` (default: `0.0.0.0`)
 - `Optional`: `WEBHOOK_INGEST_PORT` (default: `8090`)
+- `Required`: `API_SHARED_SECRET` (global shared secret for protected endpoints and webhooks)
 
 ## Backend API OIDC Session Auth
 
@@ -95,7 +96,8 @@ Use `.env.example` as the source of defaults.
 ## Worker Consumer
 
 - `Optional`: `WORKER_NAME` (default: `integrations-worker`)
-- `Optional`: `WORKER_QUEUE_NAMES` (default: `jobs.default`, comma-separated)
+- `Required`: `WORKER_QUEUE_NAMES` (default: `jobs.default`)
+- `Required` (single queue): only one queue value is currently supported. Configure one name only, without commas, to keep worker actor registration and consumer consumption aligned.
 - `Optional`: `WORKER_BURST` (default: `false`)
 
 ## Worker CRM Sync + Skills Extraction
