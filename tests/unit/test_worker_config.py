@@ -99,3 +99,34 @@ def test_google_forms_allowed_form_ids_parses_as_set() -> None:
     )
 
     assert settings.google_forms_allowed_form_ids_set == {"form-1", "form-2", "form-3"}
+
+
+def test_intake_resume_fetch_timeout_must_be_positive() -> None:
+    with pytest.raises(ValidationError):
+        WorkerSettings(
+            espo_base_url="https://crm.test.com",
+            espo_api_key="test-key",
+            intake_resume_fetch_timeout_seconds=0,
+        )
+
+
+def test_intake_resume_max_redirects_must_be_non_negative() -> None:
+    with pytest.raises(ValidationError):
+        WorkerSettings(
+            espo_base_url="https://crm.test.com",
+            espo_api_key="test-key",
+            intake_resume_max_redirects=-1,
+        )
+
+
+def test_intake_resume_allowed_hostnames_normalizes_dots_and_empties() -> None:
+    settings = WorkerSettings(
+        espo_base_url="https://crm.test.com",
+        espo_api_key="test-key",
+        intake_resume_allowed_hosts=" .Example.com., ., sub.example.com., , ",
+    )
+
+    assert settings.intake_resume_allowed_hostnames == {
+        "example.com",
+        "sub.example.com",
+    }

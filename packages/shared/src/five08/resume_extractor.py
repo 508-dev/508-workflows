@@ -587,7 +587,7 @@ def _extract_linkedin_url_from_links(links: list[str]) -> str | None:
 
 
 def _normalize_seniority(value: Any) -> str | None:
-    return shared_normalize_seniority(value, empty_as_unknown=True)
+    return shared_normalize_seniority(value, empty_as_unknown=False)
 
 
 def _normalize_skills(value: Any) -> list[str]:
@@ -690,13 +690,13 @@ class ResumeProfileExtractor:
         *,
         api_key: str | None,
         base_url: str | None = None,
-        model: str = "5o-mini",
+        model: str = "gpt-4o-mini",
         max_tokens: int = 800,
         snippet_chars: int = 12000,
     ) -> None:
-        self.model = model.strip() if model else "5o-mini"
+        self.model = model.strip() if model else "gpt-4o-mini"
         if not self.model:
-            self.model = "5o-mini"
+            self.model = "gpt-4o-mini"
         self.max_tokens = max_tokens
         self.snippet_chars = max(1000, snippet_chars)
         self.client: Any = None
