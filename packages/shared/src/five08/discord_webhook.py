@@ -160,13 +160,9 @@ class DiscordWebhookLogger:
         return payload
 
     def _request_query_params(self) -> dict[str, str]:
-        """Build webhook query params while enforcing text-only message behavior."""
+        """Build webhook query params while preserving caller-supplied values."""
         parsed = urlparse(self.webhook_url)
-        query_params = {
-            key: value
-            for key, value in parse_qsl(parsed.query, keep_blank_values=True)
-            if key == "wait"
-        }
+        query_params = dict(parse_qsl(parsed.query, keep_blank_values=True))
         if self.wait_for_response and "wait" not in query_params:
             query_params["wait"] = "true"
         return query_params
