@@ -590,7 +590,7 @@ def _normalize_name(value: Any) -> str | None:
     normalized = value.strip()
     if not normalized:
         return None
-    lowered = normalized.casefold().rstrip(":")
+    lowered = normalized.casefold().rstrip(":").strip()
     if lowered in _PLACEHOLDER_NAME_TOKENS or lowered in _NAME_HEADING_TOKENS:
         return None
     return normalized
@@ -1178,7 +1178,7 @@ class ResumeProfileExtractor:
                 continue
             if not any(char.isalpha() for char in line):
                 continue
-            normalized = line.casefold().rstrip(":")
+            normalized = line.casefold().rstrip(":").strip()
             if (
                 normalized in _PLACEHOLDER_NAME_TOKENS
                 or normalized in _NAME_HEADING_TOKENS
@@ -1243,7 +1243,7 @@ class ResumeProfileExtractor:
             impact_score += 1
         if re.search(
             r"(?:\bteam of\s+\d+\b|\bmanaged\b|\bmentored\b|\bcross-functional\b|"
-            r"\benterprise\b|\bglobal\b|\bseries [abcd]\b|\b500\+?|\b1000\+?|"
+            r"\benterprise\b|\bglobal\b|\bseries [abcd]\b|\b500\+?(?!\d)|\b1000\+?(?!\d)|"
             r"\b10[0-9]{2,}\s+employees\b)",
             lower_text,
         ):
