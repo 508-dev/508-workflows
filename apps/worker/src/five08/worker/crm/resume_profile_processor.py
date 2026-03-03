@@ -125,6 +125,15 @@ class ResumeProfileProcessor:
             )
             if extracted.additional_emails:
                 proposed_updates["additional_emails"] = extracted.additional_emails
+                proposed_changes.append(
+                    ResumeFieldChange(
+                        field="additional_emails",
+                        label="Additional Emails",
+                        current=None,
+                        proposed=", ".join(extracted.additional_emails),
+                        reason="Extracted additional emails from uploaded resume",
+                    )
+                )
             self._collect_change(
                 crm_field="cGitHubUsername",
                 label="GitHub",
@@ -1134,10 +1143,9 @@ class ResumeProfileProcessor:
                 return list(merged.values())
             candidate_lower = None
 
-        for _, entry in merged.items():
-            entry["primary"] = False
-
         if candidate_lower is not None:
+            for entry in merged.values():
+                entry["primary"] = False
             merged[candidate_lower] = {
                 "emailAddress": candidate_lower,
                 "lower": candidate_lower,
@@ -1151,7 +1159,8 @@ class ResumeProfileProcessor:
             if normalized_extra is None or normalized_extra == candidate_lower:
                 continue
             if normalized_extra in merged:
-                merged[normalized_extra]["primary"] = False
+                if candidate_lower is not None:
+                    merged[normalized_extra]["primary"] = False
                 continue
             merged[normalized_extra] = {
                 "emailAddress": normalized_extra,

@@ -68,7 +68,17 @@ def _coerce_email_list(value: Any) -> list[str]:
     if isinstance(value, str):
         raw_values = re.findall(EMAIL_REGEX, value)
     elif isinstance(value, (list, tuple, set)):
-        raw_values = [str(item) for item in value]
+        raw_values = []
+        for item in value:
+            if isinstance(item, str):
+                raw_values.extend(re.findall(EMAIL_REGEX, item))
+            elif isinstance(item, (bytes, bytearray)):
+                try:
+                    raw_values.extend(
+                        re.findall(EMAIL_REGEX, item.decode("utf-8", errors="ignore"))
+                    )
+                except Exception:
+                    continue
     else:
         return []
 
@@ -77,6 +87,8 @@ def _coerce_email_list(value: Any) -> list[str]:
     for raw_email in raw_values:
         normalized_email = _normalize_email(raw_email)
         if not normalized_email:
+            continue
+        if re.fullmatch(EMAIL_REGEX, normalized_email) is None:
             continue
         if normalized_email in seen:
             continue
