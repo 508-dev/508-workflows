@@ -1,7 +1,8 @@
 """Unit tests for Google Forms intake processor."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, Mock, patch
 
+from five08.resume_extractor import ResumeExtractedProfile
 from five08.worker.crm.intake_form_processor import IntakeFormProcessor
 
 
@@ -128,3 +129,45 @@ def test_build_intake_updates_normalizes_form_skills_to_lowercase() -> None:
     )
 
     assert updates["skills"] == ["ai ml engineering", "next js", "project management"]
+
+
+def test_build_resume_updates_includes_website_links_as_url_multiple() -> None:
+    """Website links extracted from resume should be set to cWebsiteLink as an array."""
+    processor = IntakeFormProcessor()
+    processor.document_processor = MagicMock()
+    processor.resume_extractor = MagicMock()
+    processor.document_processor.extract_text.return_value = "resume text"
+    processor.resume_extractor.extract.return_value = ResumeExtractedProfile(
+        email=None,
+        github_username=None,
+        linkedin_url=None,
+        phone=None,
+        website_links=[
+            "https://portfolio.example.com",
+            "https://blog.example.com/",
+            "https://PORTFOLIO.EXAMPLE.COM",
+        ],
+        address_country=None,
+        confidence=0.9,
+        source="gpt-4o-mini",
+        skills=[],
+        skill_attrs={},
+    )
+    response = Mock()
+    response.content = b"resume-bytes"
+    response.raise_for_status = Mock()
+
+    with patch(
+        "five08.worker.crm.intake_form_processor.requests.get",
+        return_value=response,
+    ):
+        updates = processor._build_resume_updates(
+            {
+                "resume_url": "https://example.com/resume.pdf",
+            }
+        )
+
+    assert updates["cWebsiteLink"] == [
+        "https://portfolio.example.com",
+        "https://blog.example.com",
+    ]

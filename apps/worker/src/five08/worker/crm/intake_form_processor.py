@@ -414,6 +414,11 @@ class IntakeFormProcessor:
             if profile_attrs:
                 updates["cSkillAttrs"] = json.dumps(profile_attrs)
                 updates["skills"] = sorted(profile_attrs.keys())
+            profile_websites = self._parse_profile_website_links(
+                getattr(extracted_profile, "website_links", [])
+            )
+            if profile_websites:
+                updates["cWebsiteLink"] = profile_websites
             profile_social_links = self._parse_profile_social_links(
                 getattr(extracted_profile, "social_links", [])
             )
@@ -422,6 +427,26 @@ class IntakeFormProcessor:
         except Exception as exc:
             logger.warning("Resume profile extraction failed: %s", exc)
         return updates
+
+    def _parse_profile_website_links(self, links: Any) -> list[str]:
+        if not isinstance(links, list):
+            return []
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw_link in links:
+            if not isinstance(raw_link, str):
+                continue
+            candidate = raw_link.strip().rstrip("/").strip(")]},.;:")
+            if not candidate:
+                continue
+            if not candidate.startswith(("http://", "https://")):
+                continue
+            key = candidate.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(candidate)
+        return normalized
 
     def _parse_profile_social_links(self, links: Any) -> list[str]:
         if not isinstance(links, list):
