@@ -29,6 +29,7 @@ DISALLOWED_SKILLS = {
 }
 
 DEFAULT_SKILL_STRENGTH = 3
+EMAIL_REGEX = r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"
 
 SOCIAL_LINK_DOMAINS = {
     "facebook.com",
@@ -56,6 +57,44 @@ def _normalize_email(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
     normalized = value.strip().lower()
+    return normalized or None
+
+
+def _coerce_email_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+
+    raw_values: list[str]
+    if isinstance(value, str):
+        raw_values = re.findall(EMAIL_REGEX, value)
+    elif isinstance(value, (list, tuple, set)):
+        raw_values = [str(item) for item in value]
+    else:
+        return []
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_email in raw_values:
+        normalized_email = _normalize_email(raw_email)
+        if not normalized_email:
+            continue
+        if normalized_email in seen:
+            continue
+        seen.add(normalized_email)
+        normalized.append(normalized_email)
+    return normalized
+
+
+def _extract_emails(value: Any) -> list[str]:
+    if not isinstance(value, str):
+        return []
+    return _coerce_email_list(value)
+
+
+def _normalize_scalar(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
     return normalized or None
 
 
@@ -396,6 +435,10 @@ class ResumeExtractedProfile(BaseModel):
     social_links: list[str] = Field(default_factory=list)
     address_country: str | None = None
     seniority_level: str | None = None
+    additional_emails: list[str] = Field(default_factory=list)
+    availability: str | None = None
+    rate_range: str | None = None
+    referred_by: str | None = None
     skills: list[str] = Field(default_factory=list)
     skill_attrs: dict[str, int] = Field(default_factory=dict)
     confidence: float = Field(..., ge=0.0, le=1.0)
@@ -480,9 +523,15 @@ class ResumeProfileExtractor:
                 parsed.get("skills"),
                 parsed.get("skill_attrs"),
             )
+            parsed_emails = _coerce_email_list(parsed.get("additional_emails"))
+            parsed_email = _normalize_email(parsed.get("email"))
+            if not parsed_email and parsed_emails:
+                parsed_email = parsed_emails[0]
+                parsed_emails = parsed_emails[1:]
             return ResumeExtractedProfile(
                 name=_normalize_name(parsed.get("name")),
-                email=_normalize_email(parsed.get("email")),
+                email=parsed_email,
+                additional_emails=parsed_emails,
                 github_username=_normalize_github(parsed.get("github_username")),
                 linkedin_url=_normalize_linkedin(parsed.get("linkedin_url")),
                 phone=_normalize_phone(parsed.get("phone")),
@@ -494,6 +543,12 @@ class ResumeProfileExtractor:
                     or self._infer_seniority_from_resume(resume_text)
                     or "unknown"
                 ),
+                availability=_normalize_scalar(parsed.get("availability"))
+                or _normalize_scalar(source_texts.get("availability", "")),
+                rate_range=_normalize_scalar(parsed.get("rate_range"))
+                or _normalize_scalar(source_texts.get("rate_range", "")),
+                referred_by=_normalize_scalar(parsed.get("referred_by"))
+                or _normalize_scalar(source_texts.get("referred_by", "")),
                 skills=parsed_skills,
                 skill_attrs=parsed_skill_attrs,
                 confidence=_bounded_confidence(
@@ -510,10 +565,7 @@ class ResumeProfileExtractor:
         source_texts: Mapping[str, str] | dict[str, str],
     ) -> ResumeExtractedProfile:
         snippet = self._build_source_blob(source_texts).strip()[: self.snippet_chars]
-        email_match = re.search(
-            r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
-            snippet,
-        )
+        extracted_emails = _extract_emails(snippet)
         github_match = re.search(
             r"(?:https?://)?(?:www\.)?github\.com/([A-Za-z0-9-]{1,39})",
             snippet,
@@ -536,10 +588,16 @@ class ResumeProfileExtractor:
         website_links, social_links = _split_social_and_website_links(
             website_and_social
         )
+        availability = _normalize_scalar(source_texts.get("availability"))
+        if not availability:
+            availability = _normalize_scalar(source_texts.get("rate"))
+        rate_range = _normalize_scalar(source_texts.get("rate_range"))
+        referred_by = _normalize_scalar(source_texts.get("referred_by"))
 
         return ResumeExtractedProfile(
             name=name_match,
-            email=_normalize_email(email_match.group(0)) if email_match else None,
+            email=extracted_emails[0] if extracted_emails else None,
+            additional_emails=extracted_emails[1:],
             github_username=(
                 _normalize_github(github_match.group(1)) if github_match else None
             ),
@@ -551,6 +609,9 @@ class ResumeProfileExtractor:
             social_links=social_links,
             address_country=country,
             seniority_level=seniority,
+            availability=availability,
+            rate_range=rate_range,
+            referred_by=referred_by,
             skills=skills,
             skill_attrs=skill_attrs,
             confidence=0.45,
@@ -599,12 +660,14 @@ class ResumeProfileExtractor:
         return (
             "Extract candidate profile fields from all provided sources.\n"
             "Return JSON with exact keys and no extras:\n"
-            '{"name": string|null, "email": string|null, '
+            '{"name": string|null, "email": string|null, "additional_emails": string[]|null, '
             '"github_username": string|null, "linkedin_url": string|null, '
             '"phone": string|null, "website_links": string[]|null, '
             '"social_links": string[]|null, '
             '"address_country": string|null, '
-            '"seniority_level": string|null, "skills": string[]|null, '
+            '"seniority_level": string|null, "availability": string|null, '
+            '"rate_range": string|null, "referred_by": string|null, '
+            '"skills": string[]|null, '
             '"skill_attrs": {"<skill>": {"strength": 1-5}}|null, '
             '"confidence": number}\n'
             "Rules:\n"
@@ -623,6 +686,7 @@ class ResumeProfileExtractor:
             "  - +1 for leadership titles (staff/lead/principal/architect)\n"
             "  - +1 for enterprise-scale impact signals (team ownership, direct reports, cross-team work, large org terms)\n"
             "  - when company signal is ambiguous, return conservative midlevel\n"
+            "- copy availability, rate_range, and referred_by if they are provided in source text\n"
             "- use 'unknown' for unknown or ambiguous fields\n"
             "- confidence is 0-1 for overall extraction reliability\n\n"
             f"Sources:\n{snippet}"

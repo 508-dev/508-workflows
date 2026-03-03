@@ -193,3 +193,42 @@ def test_build_resume_updates_includes_website_links_as_url_multiple() -> None:
         "https://portfolio.example.com",
         "https://blog.example.com",
     ]
+
+
+def test_build_resume_updates_uses_extracted_profile_fields_for_form_fields() -> None:
+    processor = IntakeFormProcessor()
+    processor.document_processor = Mock()
+    processor.resume_extractor = Mock()
+    processor.document_processor.extract_text.return_value = "resume text"
+    processor.resume_extractor.extract.return_value = ResumeExtractedProfile(
+        email=None,
+        github_username=None,
+        linkedin_url=None,
+        phone=None,
+        additional_emails=["alt@example.com"],
+        availability="10-15 hours/week",
+        rate_range="$80 - $120",
+        referred_by="Referral Source",
+        address_country=None,
+        confidence=0.95,
+        source="gpt-4o-mini",
+        skills=[],
+        skill_attrs={},
+    )
+    response = Mock()
+    response.content = b"resume-bytes"
+    response.raise_for_status = Mock()
+
+    with patch(
+        "five08.worker.crm.intake_form_processor.requests.get",
+        return_value=response,
+    ):
+        updates = processor._build_resume_updates(
+            {
+                "resume_url": "https://example.com/resume.pdf",
+            }
+        )
+
+    assert updates["cAvailableTimes"] == "10-15 hours/week"
+    assert updates["cRateRange"] == "$80 - $120"
+    assert updates["cReferredBy"] == "Referral Source"

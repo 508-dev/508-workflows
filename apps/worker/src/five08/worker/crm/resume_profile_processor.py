@@ -123,6 +123,8 @@ class ResumeProfileProcessor:
                 blocked_reason="Skipped because @508.dev emails are managed separately",
                 is_blocked=lambda value: value.lower().endswith("@508.dev"),
             )
+            if extracted.additional_emails:
+                proposed_updates["additional_emails"] = extracted.additional_emails
             self._collect_change(
                 crm_field="cGitHubUsername",
                 label="GitHub",
@@ -294,6 +296,13 @@ class ResumeProfileProcessor:
             if "emailAddress" in normalized_updates:
                 normalized_updates.pop("emailAddress", None)
 
+            additional_emails: list[str] = []
+            if "additional_emails" in normalized_updates:
+                additional_emails = self._coerce_additional_emails(
+                    normalized_updates.get("additional_emails")
+                )
+                normalized_updates.pop("additional_emails", None)
+
             if "skills" in normalized_updates:
                 normalized_skills = self._coerce_skills_updates(
                     normalized_updates["skills"]
@@ -324,18 +333,32 @@ class ResumeProfileProcessor:
             if candidate_email is not None:
                 if candidate_email.endswith("@508.dev"):
                     candidate_email = None
-                else:
-                    existing_email_data = (
-                        pre_update_contact.get("emailAddressData")
-                        if pre_update_contact
-                        else None
-                    )
-                    email_address_data = self._build_email_address_data(
-                        email_candidate=candidate_email,
-                        existing_email_data=existing_email_data,
-                    )
-                    if email_address_data:
-                        normalized_updates["emailAddressData"] = email_address_data
+            if candidate_email is not None:
+                existing_email_data = (
+                    pre_update_contact.get("emailAddressData")
+                    if pre_update_contact
+                    else None
+                )
+                email_address_data = self._build_email_address_data(
+                    email_candidate=candidate_email,
+                    additional_emails=additional_emails,
+                    existing_email_data=existing_email_data,
+                )
+                if email_address_data:
+                    normalized_updates["emailAddressData"] = email_address_data
+            elif additional_emails:
+                existing_email_data = (
+                    pre_update_contact.get("emailAddressData")
+                    if pre_update_contact
+                    else None
+                )
+                email_address_data = self._build_email_address_data(
+                    email_candidate=None,
+                    additional_emails=additional_emails,
+                    existing_email_data=existing_email_data,
+                )
+                if email_address_data:
+                    normalized_updates["emailAddressData"] = email_address_data
 
             if "emailAddressData" in normalized_updates:
                 normalized_email_data = self._coerce_email_address_data(
@@ -1007,6 +1030,37 @@ class ResumeProfileProcessor:
             return value.strip().lower() in {"1", "true", "yes", "on"}
         return bool(value)
 
+    def _coerce_additional_emails(self, value: Any) -> list[str]:
+        if value is None:
+            return []
+
+        if isinstance(value, str):
+            raw_value = value.strip()
+            if not raw_value:
+                return []
+            try:
+                parsed = json.loads(raw_value)
+            except Exception:
+                parsed = [raw_value]
+            else:
+                parsed = parsed if isinstance(parsed, list) else [parsed]
+        elif isinstance(value, (list, tuple, set)):
+            parsed = list(value)
+        else:
+            parsed = [value]
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for item in parsed:
+            normalized = self._normalize_email_address(item)
+            if normalized is None:
+                continue
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            deduped.append(normalized)
+        return deduped
+
     def _coerce_email_address_data(self, value: Any) -> list[dict[str, Any]] | None:
         parsed = self._parse_email_address_data(value)
         return parsed if parsed else None
@@ -1062,7 +1116,8 @@ class ResumeProfileProcessor:
     def _build_email_address_data(
         self,
         *,
-        email_candidate: str,
+        email_candidate: str | None,
+        additional_emails: list[str] | None = None,
         existing_email_data: Any,
     ) -> list[dict[str, Any]]:
         merged: dict[str, dict[str, Any]] = {}
@@ -1075,18 +1130,36 @@ class ResumeProfileProcessor:
 
         candidate_lower = self._normalize_email_address(email_candidate)
         if candidate_lower is None:
-            return list(merged.values())
+            if not additional_emails:
+                return list(merged.values())
+            candidate_lower = None
 
         for _, entry in merged.items():
             entry["primary"] = False
 
-        merged[candidate_lower] = {
-            "emailAddress": candidate_lower,
-            "lower": candidate_lower,
-            "primary": True,
-            "optOut": False,
-            "invalid": False,
-        }
+        if candidate_lower is not None:
+            merged[candidate_lower] = {
+                "emailAddress": candidate_lower,
+                "lower": candidate_lower,
+                "primary": True,
+                "optOut": False,
+                "invalid": False,
+            }
+
+        for extra in additional_emails or []:
+            normalized_extra = self._normalize_email_address(extra)
+            if normalized_extra is None or normalized_extra == candidate_lower:
+                continue
+            if normalized_extra in merged:
+                merged[normalized_extra]["primary"] = False
+                continue
+            merged[normalized_extra] = {
+                "emailAddress": normalized_extra,
+                "lower": normalized_extra,
+                "primary": False,
+                "optOut": False,
+                "invalid": False,
+            }
 
         return list(merged.values())
 

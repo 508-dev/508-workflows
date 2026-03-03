@@ -17,6 +17,23 @@ class _MinimalProfile:
         return {"email": self.email}
 
 
+class _MinimalProfileWithExtras(_MinimalProfile):
+    def __init__(
+        self,
+        *,
+        email: str | None = None,
+        additional_emails: list[str] | None = None,
+    ) -> None:
+        super().__init__(email=email)
+        self.additional_emails = additional_emails
+
+    def model_dump(self) -> dict[str, object]:
+        return {
+            "email": self.email,
+            "additional_emails": self.additional_emails or [],
+        }
+
+
 def _build_settings() -> SimpleNamespace:
     return SimpleNamespace(
         espo_base_url="https://crm.test.com",
@@ -121,3 +138,17 @@ def test_process_attachment_updates_candidate_contact() -> None:
         updates={"phoneNumber": "14155551234"},
         link_discord=None,
     )
+
+
+def test_candidate_email_from_extract_result_falls_back_to_additional_email() -> None:
+    processor = ResumeMailboxProcessor(_build_settings())
+
+    result = processor._candidate_email_from_extract_result(
+        {
+            "extracted_profile": _MinimalProfileWithExtras(
+                additional_emails=["secondary@example.com"]
+            ).model_dump(),
+        }
+    )
+
+    assert result == "secondary@example.com"

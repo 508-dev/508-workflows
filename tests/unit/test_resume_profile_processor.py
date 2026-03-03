@@ -84,6 +84,51 @@ def test_extract_profile_proposal_filters_508_email() -> None:
     assert record_kwargs["attachment_id"] == "att-1"
 
 
+def test_extract_profile_proposal_includes_additional_emails() -> None:
+    """Extractor results with additional emails should include them in proposed_updates."""
+    processor = ResumeProfileProcessor()
+    processor.crm = Mock()
+    processor.extractor = Mock()
+    processor.skills_extractor = Mock()
+    processor.document_processor = Mock()
+    processor._record_processing_run = Mock()
+    processor.skills_extractor.canonicalize_skill.side_effect = lambda v: (
+        str(v).strip().lower()
+    )
+
+    processor.crm.get_contact.return_value = {"emailAddress": "member@example.com"}
+    processor.crm.download_attachment.return_value = b"resume-bytes"
+    processor.document_processor.extract_text.return_value = "resume text"
+    processor.document_processor.get_content_hash.return_value = "hash-additional"
+    processor.extractor.extract.return_value = ResumeExtractedProfile(
+        email="lead@example.com",
+        additional_emails=["lead2@example.com", "lead3@example.com"],
+        github_username=None,
+        linkedin_url=None,
+        phone=None,
+        confidence=0.9,
+        source="gpt-4o-mini",
+    )
+    processor.skills_extractor.extract_skills.return_value = ExtractedSkills(
+        skills=[],
+        skill_attrs={},
+        confidence=0.8,
+        source="gpt-4o-mini",
+    )
+
+    result = processor.extract_profile_proposal(
+        contact_id="contact-extra",
+        attachment_id="att-extra",
+        filename="resume.pdf",
+    )
+
+    assert result.success is True
+    assert result.proposed_updates["additional_emails"] == [
+        "lead2@example.com",
+        "lead3@example.com",
+    ]
+
+
 def test_extract_profile_proposal_merges_and_serializes_website_and_skill_attrs() -> (
     None
 ):
@@ -403,6 +448,46 @@ def test_apply_profile_updates_appends_resume_email_as_primary_emailAddressData(
     assert by_lower["newperson@example.com"]["primary"] is True
     assert by_lower["legacy@example.com"]["primary"] is False
     assert payload["phoneNumber"] == "5551112222"
+
+
+def test_apply_profile_updates_appends_additional_emails_without_replacing_primary() -> (
+    None
+):
+    """Additional emails should be merged into emailAddressData and stay non-primary."""
+    processor = ResumeProfileProcessor()
+    processor.crm = Mock()
+    processor.crm.get_contact.return_value = {
+        "emailAddressData": [
+            {
+                "emailAddress": "legacy@example.com",
+                "lower": "legacy@example.com",
+                "primary": True,
+                "optOut": False,
+                "invalid": False,
+            }
+        ]
+    }
+    result = processor.apply_profile_updates(
+        contact_id="contact-4",
+        updates={
+            "emailAddress": "NewPerson@Example.Com",
+            "additional_emails": [
+                "Extra@Example.Com",
+                "legacy@example.com",
+                "SECONDARY@Example.Com",
+            ],
+        },
+    )
+
+    assert result.success is True
+    processor.crm.update_contact.assert_called_once()
+    payload = processor.crm.update_contact.call_args[0][1]
+    email_data = payload["emailAddressData"]
+    by_lower = {item["lower"]: item for item in email_data}
+    assert by_lower["legacy@example.com"]["primary"] is False
+    assert by_lower["newperson@example.com"]["primary"] is True
+    assert by_lower["extra@example.com"]["primary"] is False
+    assert by_lower["secondary@example.com"]["primary"] is False
 
 
 def test_extract_profile_proposal_normalizes_existing_skill_punctuation() -> None:

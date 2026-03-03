@@ -2909,8 +2909,14 @@ class CRMCog(commands.Cog):
     def _extract_resume_contact_hints(self, file_content: bytes) -> dict[str, Any]:
         """Extract contact-identifying signals and shared resume fields from bytes."""
         profile = self._extract_resume_profile(file_content)
+        emails: list[str] = []
+        if profile.email:
+            emails.append(profile.email)
+        for raw_email in getattr(profile, "additional_emails", []) or []:
+            if raw_email and raw_email not in emails:
+                emails.append(raw_email)
         return {
-            "emails": [profile.email] if profile.email else [],
+            "emails": emails,
             "github_usernames": [profile.github_username]
             if profile.github_username
             else [],

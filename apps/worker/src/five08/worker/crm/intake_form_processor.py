@@ -417,16 +417,44 @@ class IntakeFormProcessor:
 
         updates: dict[str, Any] = {}
         try:
-            extracted_profile = self.resume_extractor.extract(resume_text)
+            extra_sources: dict[str, str] = {}
+            for field, raw_value in {
+                "availability": payload.get("availability"),
+                "rate_range": payload.get("rate_range"),
+                "referred_by": payload.get("referred_by"),
+                "content_email": payload.get("content_email"),
+            }.items():
+                normalized_value = self._normalize_text(raw_value)
+                if normalized_value:
+                    extra_sources[field] = normalized_value
+            extracted_profile = self.resume_extractor.extract(
+                resume_text,
+                extra_sources=extra_sources,
+            )
             profile_phone = self._normalize_text(extracted_profile.phone)
             profile_github = self._normalize_text(extracted_profile.github_username)
             profile_linkedin = self._normalize_text(extracted_profile.linkedin_url)
+            profile_availability = self._normalize_text(
+                getattr(extracted_profile, "availability", None)
+            )
+            profile_rate_range = self._normalize_text(
+                getattr(extracted_profile, "rate_range", None)
+            )
+            profile_referred_by = self._normalize_text(
+                getattr(extracted_profile, "referred_by", None)
+            )
             if profile_phone:
                 updates["phoneNumber"] = profile_phone
             if profile_github:
                 updates["cGitHubUsername"] = profile_github
             if profile_linkedin:
                 updates[settings.crm_linkedin_field] = profile_linkedin
+            if profile_availability:
+                updates.setdefault("cAvailableTimes", profile_availability)
+            if profile_rate_range:
+                updates.setdefault("cRateRange", profile_rate_range)
+            if profile_referred_by:
+                updates.setdefault("cReferredBy", profile_referred_by)
             profile_attrs = self._parse_profile_skill_attrs(extracted_profile)
             if profile_attrs:
                 updates["cSkillAttrs"] = json.dumps(profile_attrs)
