@@ -101,6 +101,24 @@ def test_split_name_single_token_returns_unknown_last_name() -> None:
     assert last_name == "Unknown"
 
 
+def test_split_name_heuristic_parses_last_comma_first() -> None:
+    """Comma-delimited names should parse as Last, First."""
+    assert ResumeProfileExtractor._split_name_heuristically("Doe, Jane") == (
+        "Jane",
+        "Doe",
+    )
+
+
+def test_split_name_heuristic_preserves_multi_part_first_name_with_last_comma_first() -> (
+    None
+):
+    """Multi-token first names after comma still keep the final last name."""
+    assert ResumeProfileExtractor._split_name_heuristically("Doe, Jane Marie") == (
+        "Jane",
+        "Doe",
+    )
+
+
 def test_split_name_ignores_numeric_last_token() -> None:
     """Fallback names should avoid non-alpha trailing tokens as last names."""
     extractor = ResumeProfileExtractor(api_key=None)

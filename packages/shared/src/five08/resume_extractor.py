@@ -1093,6 +1093,17 @@ class ResumeProfileExtractor:
 
     @staticmethod
     def _split_name_heuristically(full_name: str) -> tuple[str, str]:
+        normalized_input = full_name.strip()
+        if not normalized_input:
+            return (
+                DEFAULT_FALLBACK_FIRST_NAME,
+                DEFAULT_FALLBACK_LAST_NAME,
+            )
+
+        comma_left, comma, comma_right = normalized_input.partition(",")
+        if comma and comma_left.strip() and comma_right.strip():
+            full_name = f"{comma_right.strip()} {comma_left.strip()}"
+
         parts = [
             token.strip() for token in re.split(r"\s+", full_name) if token.strip()
         ]
