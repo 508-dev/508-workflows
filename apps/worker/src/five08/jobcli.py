@@ -13,7 +13,7 @@ import httpx
 from five08.queue import JobStatus
 
 DEFAULT_API_URL = "http://localhost:8090"
-DEFAULT_DOCKER_API_URL = "http://backend-api:8090"
+DEFAULT_DOCKER_API_URL = "http://api:8090"
 DEFAULT_TIMEOUT_SECONDS = 10.0
 API_SECRET_ENV_VAR = "API_SHARED_SECRET"
 JOB_STATUSES = [status.value for status in JobStatus]

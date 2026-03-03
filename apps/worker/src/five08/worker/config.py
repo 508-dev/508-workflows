@@ -55,6 +55,9 @@ class WorkerSettings(SharedSettings):
     email_password: str | None = None
     imap_server: str | None = None
     imap_timeout_seconds: float = 10.0
+    intake_resume_fetch_timeout_seconds: float = 20.0
+    intake_resume_max_redirects: int = 3
+    intake_resume_allowed_hosts: str = ""
     email_resume_allowed_extensions: str = "pdf,doc,docx"
     email_resume_max_file_size_mb: int = 10
     email_require_sender_auth_headers: bool = True
@@ -148,6 +151,15 @@ class WorkerSettings(SharedSettings):
             keyword.strip().lower()
             for keyword in self.resume_keywords.split(",")
             if keyword.strip()
+        }
+
+    @property
+    def intake_resume_allowed_hostnames(self) -> set[str]:
+        """Optional host allowlist for intake resume URL fetches."""
+        return {
+            host.strip().lower().lstrip(".")
+            for host in self.intake_resume_allowed_hosts.split(",")
+            if host.strip()
         }
 
     @property

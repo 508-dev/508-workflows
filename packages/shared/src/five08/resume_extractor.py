@@ -9,6 +9,16 @@ from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
+from five08.crm_normalization import (
+    normalize_city as shared_normalize_city,
+    normalize_country as shared_normalize_country,
+    normalize_role as shared_normalize_role,
+    normalize_roles as shared_normalize_roles,
+    normalize_seniority as shared_normalize_seniority,
+    normalize_timezone as shared_normalize_timezone,
+    normalize_timezone_offset as shared_normalize_timezone_offset,
+    normalize_website_url as shared_normalize_website_url,
+)
 from five08.skills import (
     DISALLOWED_RESUME_SKILLS,
     normalize_skill_payload,
@@ -309,160 +319,36 @@ def _normalize_phone(value: Any) -> str | None:
 
 
 def _normalize_country(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    normalized = value.strip()
-    return normalized.title() if normalized else None
+    return shared_normalize_country(value)
 
 
 def _normalize_city(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    normalized = value.strip()
-    if not normalized:
-        return None
-    normalized = normalized.split("(")[0].strip()
-    normalized = normalized.split(",")[0].strip()
-    return re.sub(r"\s+", " ", normalized).strip() or None
+    return shared_normalize_city(value, strip_parenthetical=True)
 
 
 def _normalize_timezone_offset(value: str) -> str | None:
-    raw = value.strip().replace(" ", "")
-    if not raw:
-        return None
-
-    if raw.lower() in {"utc", "gmt"}:
-        return "UTC+00:00"
-
-    raw = re.sub(r"(?i)\b(?:utc|gmt)\b", "", raw).strip()
-    if not raw:
-        return "UTC+00:00"
-
-    match = re.match(r"([+-])\s*(\d{1,2})(?:[:.]([0-9]{1,2}))?$", raw)
-    if match is None:
-        return None
-
-    sign = match.group(1)
-    try:
-        hours = int(match.group(2))
-    except Exception:
-        return None
-    if hours > 14:
-        return None
-
-    minutes = match.group(3)
-    if minutes is None:
-        minutes_value = 0
-    else:
-        try:
-            minutes_value = int(minutes)
-        except Exception:
-            return None
-        if minutes_value > 59:
-            return None
-
-    return f"UTC{sign}{hours:02d}:{minutes_value:02d}"
+    return shared_normalize_timezone_offset(value)
 
 
 def _normalize_timezone(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    raw = value.strip()
-    if not raw:
-        return None
-
-    patterns = [
-        r"(?im)^(?:timezone|time\s*zone|tz|utc|gmt)\s*[:\-]\s*(.+)$",
-        r"(?i)\b(?:utc|gmt)\s*([+-]\s*\d{1,2}(?:[:.]\d{1,2})?)\b",
-    ]
-    for pattern in patterns:
-        for match in re.finditer(pattern, raw):
-            normalized_offset = _normalize_timezone_offset(match.group(1))
-            if normalized_offset:
-                return normalized_offset
-
-    if raw.lower() in {"utc", "gmt", "utc+0", "utc+00", "utc+000"}:
-        return "UTC+00:00"
-
-    return _normalize_timezone_offset(raw)
+    return shared_normalize_timezone(value)
 
 
 def _normalize_role(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    normalized = value.strip().lower()
-    if not normalized:
-        return None
-    mapped = ROLE_NORMALIZATION_MAP.get(normalized)
-    if mapped is not None:
-        return mapped
-    normalized = "_".join(normalized.split())
-    normalized = "".join(ch for ch in normalized if ch.isalnum() or ch in {"_", "-"})
-    return normalized or None
+    return shared_normalize_role(value, ROLE_NORMALIZATION_MAP)
 
 
 def _normalize_role_collection(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        raw_values = [item.strip() for item in re.split(r"[,\n;]+", value)]
-    elif isinstance(value, (list, tuple, set)):
-        raw_values = [str(item).strip() for item in value]
-    else:
-        return []
-
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for raw_value in raw_values:
-        normalized_value = _normalize_role(raw_value)
-        if not normalized_value or normalized_value in seen:
-            continue
-        seen.add(normalized_value)
-        normalized.append(normalized_value)
-    return normalized
+    return shared_normalize_roles(value, ROLE_NORMALIZATION_MAP)
 
 
 def _normalize_website_url(value: str) -> str:
-    candidate = value.strip().strip(")]},.;:")
-    if not candidate:
-        return ""
-
-    if candidate.lower().startswith("www."):
-        candidate = f"https://{candidate}"
-    elif not candidate.lower().startswith(("http://", "https://")):
-        # Accept scheme-less domains from resumes (for example: mysite.dev/path).
-        if not re.match(
-            r"(?i)^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?:[/?#].*)?$",
-            candidate,
-        ):
-            return ""
-        candidate = f"https://{candidate}"
-
-    try:
-        parsed = urlsplit(candidate)
-    except Exception:
-        return ""
-
-    if "@" in parsed.netloc:
-        return ""
-
-    host = parsed.hostname or ""
-    if host.lower().startswith("www."):
-        host = host[4:]
-    if not host:
-        return ""
-    if _is_disallowed_personal_website_host(host):
-        return ""
-
-    normalized_netloc = parsed.netloc
-    lower_netloc = parsed.netloc.lower()
-    if lower_netloc.startswith("www."):
-        normalized_netloc = parsed.netloc[4:]
-    elif host and lower_netloc.startswith(f"www.{host}"):
-        normalized_netloc = parsed.netloc.replace(parsed.netloc[:4], "", 1)
-
-    parsed = parsed._replace(netloc=normalized_netloc)
-    return parsed.geturl().rstrip("/")
+    normalized = shared_normalize_website_url(
+        value,
+        allow_scheme_less=True,
+        disallowed_host_predicate=_is_disallowed_personal_website_host,
+    )
+    return normalized or ""
 
 
 def _is_disallowed_personal_website_host(host: str) -> bool:
@@ -699,35 +585,7 @@ def _extract_linkedin_url_from_links(links: list[str]) -> str | None:
 
 
 def _normalize_seniority(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    normalized = value.strip().lower()
-    if not normalized:
-        return "unknown"
-    if normalized in {"jr", "junior", "entry", "entry-level", "entry level"}:
-        return "junior"
-    if normalized in {"intern", "internship"}:
-        return "junior"
-    if normalized in {"mid-level", "midlevel", "mid", "intermediate"}:
-        return "midlevel"
-    if normalized in {"staff", "staff+", "staff and beyond"}:
-        return "staff"
-    if normalized in {
-        "senior",
-        "sr",
-        "sr. engineer",
-        "lead",
-        "lead engineer",
-        "lead engineer/tech lead",
-    }:
-        return "senior"
-    if "lead" in normalized and ("engineer" in normalized or "lead" == normalized):
-        return "senior"
-    if "staff" in normalized:
-        return "staff"
-    if normalized.startswith("sr "):
-        return "senior"
-    return "unknown"
+    return shared_normalize_seniority(value, empty_as_unknown=True)
 
 
 def _normalize_skills(value: Any) -> list[str]:

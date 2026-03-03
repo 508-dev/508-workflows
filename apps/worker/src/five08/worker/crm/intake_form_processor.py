@@ -3,15 +3,26 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import re
+import socket
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import requests
 
 from five08.clients.espo import EspoAPI, EspoAPIError
+from five08.crm_normalization import (
+    ROLE_NORMALIZATION_MAP as DEFAULT_ROLE_NORMALIZATION_MAP,
+    normalize_city,
+    normalize_role,
+    normalize_roles,
+    normalize_seniority,
+    normalize_timezone,
+    normalize_website_url,
+)
 from five08.resume_extractor import ResumeProfileExtractor
 from five08.worker.config import settings
 from five08.worker.crm.document_processor import DocumentProcessor
@@ -21,6 +32,7 @@ from five08.worker.masking import mask_email
 import logging
 
 logger = logging.getLogger(__name__)
+IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 
 DESCRIPTION_SECTIONS = {
     "primary_skills_interests": "Primary skills and interests",
@@ -58,28 +70,7 @@ SKILL_PROFICIENCY_TO_LABEL = {
     "skill_proficiency_internal_business_development": "internal business development",
 }
 
-SENIORITY_MAP = {
-    "junior": "junior",
-    "mid-level": "midlevel",
-    "midlevel": "midlevel",
-    "senior": "senior",
-    "principal": "staff",
-    "principal engineer": "staff",
-    "staff": "staff",
-    "staff and beyond": "staff",
-    "staff+": "staff",
-}
-
-
-ROLE_NORMALIZATION_MAP: dict[str, str] = {
-    "developer": "developer",
-    "data scientist": "data_scientist",
-    "program manager": "program_manager",
-    "designer": "designer",
-    "user research": "user_research",
-    "biz dev": "biz_dev",
-    "marketing": "marketing",
-}
+ROLE_NORMALIZATION_MAP: dict[str, str] = dict(DEFAULT_ROLE_NORMALIZATION_MAP)
 
 
 class IntakeFormProcessor:
@@ -402,9 +393,7 @@ class IntakeFormProcessor:
             return {}
 
         try:
-            response = requests.get(resume_url, timeout=20)
-            response.raise_for_status()
-            content = response.content
+            content = self._download_resume_content(resume_url)
         except Exception as exc:
             logger.warning("Failed to download resume_url=%s error=%s", resume_url, exc)
             return {}
@@ -498,6 +487,115 @@ class IntakeFormProcessor:
             logger.warning("Resume profile extraction failed: %s", exc)
         return updates
 
+    def _download_resume_content(self, resume_url: str) -> bytes:
+        """Fetch a resume URL with SSRF guardrails and bounded redirect handling."""
+        current_url = resume_url
+        max_redirects = max(0, settings.intake_resume_max_redirects)
+        timeout_seconds = max(1.0, settings.intake_resume_fetch_timeout_seconds)
+
+        for _ in range(max_redirects + 1):
+            validation_error = self._validate_resume_url(current_url)
+            if validation_error:
+                raise ValueError(validation_error)
+
+            response = requests.get(
+                current_url,
+                timeout=timeout_seconds,
+                allow_redirects=False,
+            )
+            if response.status_code in {301, 302, 303, 307, 308}:
+                redirect_to = response.headers.get("Location")
+                if not redirect_to:
+                    raise ValueError("Resume URL redirect missing Location header")
+                current_url = urljoin(current_url, redirect_to)
+                continue
+
+            response.raise_for_status()
+            return response.content
+
+        raise ValueError("Resume URL exceeded max redirect limit")
+
+    def _validate_resume_url(self, candidate_url: str) -> str | None:
+        """Return validation error string when URL should not be fetched."""
+        try:
+            parsed = urlsplit(candidate_url)
+        except Exception:
+            return "Resume URL is invalid."
+
+        if parsed.scheme.lower() != "https":
+            return "Resume URL must use https."
+
+        if parsed.username or parsed.password:
+            return "Resume URL must not include credentials."
+
+        host = (parsed.hostname or "").strip().lower().rstrip(".")
+        if not host:
+            return "Resume URL must include a hostname."
+
+        if not self._is_allowed_resume_host(host):
+            return "Resume URL host is not in the configured allowlist."
+
+        if not self._hostname_resolves_publicly(host):
+            return "Resume URL host resolves to a non-public address."
+
+        return None
+
+    def _is_allowed_resume_host(self, host: str) -> bool:
+        allowed_hosts = settings.intake_resume_allowed_hostnames
+        if not allowed_hosts:
+            return True
+        return any(
+            host == allowed_host or host.endswith(f".{allowed_host}")
+            for allowed_host in allowed_hosts
+        )
+
+    def _hostname_resolves_publicly(self, host: str) -> bool:
+        if host in {"localhost", "localhost.localdomain"}:
+            return False
+
+        ip_literal = self._parse_ip_literal(host)
+        if ip_literal is not None:
+            return self._is_public_ip(ip_literal)
+
+        try:
+            addr_infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+        except socket.gaierror:
+            return False
+        except Exception:
+            return False
+
+        resolved_ips: set[IPAddress] = set()
+        for _, _, _, _, sockaddr in addr_infos:
+            if not sockaddr:
+                continue
+            ip_text = str(sockaddr[0]).strip()
+            parsed_ip = self._parse_ip_literal(ip_text)
+            if parsed_ip is None:
+                continue
+            resolved_ips.add(parsed_ip)
+
+        if not resolved_ips:
+            return False
+        return all(self._is_public_ip(parsed_ip) for parsed_ip in resolved_ips)
+
+    @staticmethod
+    def _parse_ip_literal(value: str) -> IPAddress | None:
+        try:
+            return ipaddress.ip_address(value)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _is_public_ip(value: IPAddress) -> bool:
+        return not (
+            value.is_private
+            or value.is_loopback
+            or value.is_link_local
+            or value.is_multicast
+            or value.is_reserved
+            or value.is_unspecified
+        )
+
     def _parse_profile_website_links(self, links: Any) -> list[str]:
         if not isinstance(links, list):
             return []
@@ -506,10 +604,8 @@ class IntakeFormProcessor:
         for raw_link in links:
             if not isinstance(raw_link, str):
                 continue
-            candidate = raw_link.strip().rstrip("/").strip(")]},.;:")
+            candidate = normalize_website_url(raw_link, allow_scheme_less=False)
             if not candidate:
-                continue
-            if not candidate.startswith(("http://", "https://")):
                 continue
             key = candidate.casefold()
             if key in seen:
@@ -526,10 +622,8 @@ class IntakeFormProcessor:
         for raw_link in links:
             if not isinstance(raw_link, str):
                 continue
-            candidate = raw_link.strip().rstrip("/").strip(")]},.;:")
+            candidate = normalize_website_url(raw_link, allow_scheme_less=False)
             if not candidate:
-                continue
-            if not candidate.startswith(("http://", "https://")):
                 continue
             key = candidate.casefold()
             if key in seen:
@@ -601,22 +695,7 @@ class IntakeFormProcessor:
         return parsed
 
     def _normalize_seniority(self, value: Any) -> str | None:
-        normalized = self._normalize_text(value)
-        if not normalized:
-            return None
-
-        normalized = normalized.lower().replace("_", "-").strip()
-        if normalized in SENIORITY_MAP:
-            return SENIORITY_MAP[normalized]
-        if "staff" in normalized:
-            return "staff"
-        if "senior" in normalized:
-            return "senior"
-        if "mid" in normalized:
-            return "midlevel"
-        if "junior" in normalized:
-            return "junior"
-        return "unknown"
+        return normalize_seniority(value, empty_as_unknown=False)
 
     def _normalize_text(self, value: object) -> str | None:
         if not isinstance(value, str):
@@ -625,49 +704,10 @@ class IntakeFormProcessor:
         return normalized or None
 
     def _normalize_timezone(self, value: object) -> str | None:
-        if not isinstance(value, str):
-            return None
-        raw = value.strip().replace(" ", "")
-        if not raw:
-            return None
-        pattern = re.search(
-            r"(?i)\b(?:utc|gmt)\s*([+-]\d{1,2}(?:[:.]?[0-5]?\d)?)\b", raw
-        )
-        if pattern:
-            raw = pattern.group(1)
-        if raw.lower() in {"utc", "gmt"}:
-            return "UTC+00:00"
-        if raw[0] not in {"+", "-"}:
-            return None
-        match = re.match(r"([+-])(\d{1,2})(?::?([0-5]?\d))?$", raw)
-        if not match:
-            return None
-        sign = match.group(1)
-        try:
-            hours = int(match.group(2))
-        except Exception:
-            return None
-        if not 0 <= hours <= 14:
-            return None
-        minutes = match.group(3)
-        if minutes is None:
-            minutes_value = 0
-        else:
-            minutes_value = int(minutes)
-            if minutes_value > 59:
-                return None
-        return f"UTC{sign}{hours:02d}:{minutes_value:02d}"
+        return normalize_timezone(value)
 
     def _normalize_city(self, value: object) -> str | None:
-        if not isinstance(value, str):
-            return None
-        normalized = value.strip()
-        if not normalized:
-            return None
-        normalized = normalized.split(",")[0].strip()
-        if not normalized:
-            return None
-        return " ".join(part.strip().title() for part in normalized.split())
+        return normalize_city(value, strip_parenthetical=False)
 
     def _normalize_github_username(self, value: object) -> str | None:
         normalized = self._normalize_text(value)
@@ -719,32 +759,12 @@ class IntakeFormProcessor:
         return []
 
     def _normalize_role(self, value: str) -> str | None:
-        normalized = self._normalize_text(value)
-        if normalized is None:
-            return None
-
-        lowered = normalized.lower().strip()
-        mapped = ROLE_NORMALIZATION_MAP.get(lowered)
-        if mapped is not None:
-            return mapped
-
-        normalized_role = "_".join(lowered.split())
-        normalized_role = "".join(
-            ch for ch in normalized_role if ch.isalnum() or ch in {"_", "-"}
-        )
-        return normalized_role or None
+        return normalize_role(value, ROLE_NORMALIZATION_MAP)
 
     def _parse_roles(self, roles: Any) -> list[str]:
-        parsed = self._normalize_collection(roles)
-        normalized: list[str] = []
-        seen: set[str] = set()
-        for role in parsed:
-            normalized_role = self._normalize_role(role)
-            if normalized_role is None or normalized_role in seen:
-                continue
-            seen.add(normalized_role)
-            normalized.append(normalized_role)
-        return normalized
+        return normalize_roles(
+            self._normalize_collection(roles), ROLE_NORMALIZATION_MAP
+        )
 
     def _filename_from_url(self, url: str) -> str | None:
         path = urlsplit(url).path.strip()

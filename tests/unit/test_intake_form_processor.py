@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock, Mock, patch
 
+import pytest
+
 from five08.resume_extractor import ResumeExtractedProfile
 from five08.worker.crm.intake_form_processor import IntakeFormProcessor
 
@@ -179,9 +181,12 @@ def test_build_resume_updates_includes_website_links_as_url_multiple() -> None:
     response.content = b"resume-bytes"
     response.raise_for_status = Mock()
 
-    with patch(
-        "five08.worker.crm.intake_form_processor.requests.get",
-        return_value=response,
+    with (
+        patch(
+            "five08.worker.crm.intake_form_processor.requests.get",
+            return_value=response,
+        ),
+        patch.object(processor, "_hostname_resolves_publicly", return_value=True),
     ):
         updates = processor._build_resume_updates(
             {
@@ -219,9 +224,12 @@ def test_build_resume_updates_uses_extracted_profile_fields_for_form_fields() ->
     response.content = b"resume-bytes"
     response.raise_for_status = Mock()
 
-    with patch(
-        "five08.worker.crm.intake_form_processor.requests.get",
-        return_value=response,
+    with (
+        patch(
+            "five08.worker.crm.intake_form_processor.requests.get",
+            return_value=response,
+        ),
+        patch.object(processor, "_hostname_resolves_publicly", return_value=True),
     ):
         updates = processor._build_resume_updates(
             {
@@ -232,3 +240,51 @@ def test_build_resume_updates_uses_extracted_profile_fields_for_form_fields() ->
     assert updates["cAvailableTimes"] == "10-15 hours/week"
     assert updates["cRateRange"] == "$80 - $120"
     assert updates["cReferredBy"] == "Referral Source"
+
+
+def test_build_resume_updates_rejects_non_https_resume_url() -> None:
+    processor = IntakeFormProcessor()
+
+    with patch("five08.worker.crm.intake_form_processor.requests.get") as mock_get:
+        updates = processor._build_resume_updates(
+            {
+                "resume_url": "http://example.com/resume.pdf",
+            }
+        )
+
+    assert updates == {}
+    mock_get.assert_not_called()
+
+
+def test_build_resume_updates_rejects_private_ip_resume_url() -> None:
+    processor = IntakeFormProcessor()
+
+    with patch("five08.worker.crm.intake_form_processor.requests.get") as mock_get:
+        updates = processor._build_resume_updates(
+            {
+                "resume_url": "https://127.0.0.1/resume.pdf",
+            }
+        )
+
+    assert updates == {}
+    mock_get.assert_not_called()
+
+
+def test_build_resume_updates_rejects_resume_host_outside_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processor = IntakeFormProcessor()
+    monkeypatch.setattr(
+        "five08.worker.crm.intake_form_processor.settings.intake_resume_allowed_hosts",
+        "allowed.example",
+    )
+
+    with patch("five08.worker.crm.intake_form_processor.requests.get") as mock_get:
+        updates = processor._build_resume_updates(
+            {
+                "resume_url": "https://blocked.example/resume.pdf",
+            }
+        )
+
+    assert updates == {}
+    mock_get.assert_not_called()
