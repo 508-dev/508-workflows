@@ -22,6 +22,7 @@ from discord.ext import commands
 from five08.discord_bot.config import settings
 from five08.clients import espo
 from five08.skills import normalize_skill_list
+from five08.resume_extractor import ResumeExtractedProfile, ResumeProfileExtractor
 from five08.discord_bot.utils.audit import DiscordAuditLogger
 from five08.discord_bot.utils.role_decorators import (
     require_role,
@@ -1107,6 +1108,12 @@ class CRMCog(commands.Cog):
         self.espo_api = EspoAPI(api_url, settings.espo_api_key)
         # Store base URL for profile links
         self.base_url = settings.espo_base_url.rstrip("/")
+        self.resume_extractor = ResumeProfileExtractor(
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+            model=settings.openai_model,
+        )
+        self._resume_profile_cache: tuple[int, ResumeExtractedProfile] | None = None
         self.audit_logger = DiscordAuditLogger(
             base_url=settings.audit_api_base_url,
             shared_secret=settings.api_shared_secret,
@@ -2883,52 +2890,51 @@ class CRMCog(commands.Cog):
             except aiohttp.ClientError as exc:
                 raise ValueError(f"Migadu API request failed: {exc}") from exc
 
-    def _extract_resume_contact_hints(
-        self, file_content: bytes
-    ) -> dict[str, list[str]]:
-        """Extract basic contact-identifying signals from resume bytes."""
-        text = file_content.decode("utf-8", errors="ignore")
-        if not text:
-            return {"emails": [], "github_usernames": [], "linkedin_urls": []}
-
-        # Keep this lightweight; heuristics are only used for contact targeting.
-        snippet = text[:12000]
-        email_re = re.compile(
-            r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
-            flags=re.IGNORECASE,
-        )
-        github_re = re.compile(
-            r"(?:https?://)?(?:www\.)?github\.com/([A-Za-z0-9-]{1,39})",
-            flags=re.IGNORECASE,
-        )
-        linkedin_re = re.compile(
-            r"(?:https?://)?(?:[\w.-]+\.)?linkedin\.com/in/[A-Za-z0-9\\-_%]+/?",
-            flags=re.IGNORECASE,
-        )
-
-        email_matches: list[str] = []
-        for email in email_re.findall(snippet):
-            candidate = str(email).strip().lower()
-            if candidate and candidate not in email_matches:
-                email_matches.append(candidate)
-
-        github_matches: list[str] = []
-        for username in github_re.findall(snippet):
-            candidate = str(username).strip().lower()
-            if candidate and candidate not in github_matches:
-                github_matches.append(candidate)
-
-        linkedin_matches: list[str] = []
-        for linkedin_url in linkedin_re.findall(snippet):
-            candidate = str(linkedin_url).strip().lower().rstrip("/")
-            if candidate and candidate not in linkedin_matches:
-                linkedin_matches.append(candidate)
-
+    def _extract_resume_contact_hints(self, file_content: bytes) -> dict[str, Any]:
+        """Extract contact-identifying signals and shared resume fields from bytes."""
+        profile = self._extract_resume_profile(file_content)
         return {
-            "emails": email_matches,
-            "github_usernames": github_matches,
-            "linkedin_urls": linkedin_matches,
+            "emails": [profile.email] if profile.email else [],
+            "github_usernames": [profile.github_username]
+            if profile.github_username
+            else [],
+            "linkedin_urls": [profile.linkedin_url] if profile.linkedin_url else [],
+            "phone": profile.phone,
+            "name": profile.name,
+            "address_country": profile.address_country,
+            "seniority_level": profile.seniority_level,
+            "skills": profile.skills,
         }
+
+    def _extract_resume_profile(self, file_content: bytes) -> Any:
+        """Extract resume profile fields and cache per-file-content results."""
+        cache = self._resume_profile_cache
+        cache_key = hash(file_content)
+        if cache and cache[0] == cache_key:
+            return cache[1]
+
+        text = file_content.decode("utf-8", errors="ignore")
+        profile = self.resume_extractor.extract(text)
+        self._resume_profile_cache = (cache_key, profile)
+        return profile
+
+    def _extract_resume_name_fallback(self, file_content: bytes) -> str:
+        """Simple name heuristic fallback when extraction did not return a name."""
+        text = file_content.decode("utf-8", errors="ignore")
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        for line in lines[:40]:
+            candidate = line.strip()
+            if not candidate:
+                continue
+            if len(candidate) < 2:
+                continue
+            if "@" in candidate or "http" in candidate.lower():
+                continue
+            if not any(char.isalpha() for char in candidate):
+                continue
+            if len(candidate.split()) >= 1 and len(candidate) <= 70:
+                return candidate
+        return "Unknown Contact"
 
     def _format_inferred_attempts(self, attempts: list[dict[str, Any]] | None) -> str:
         if not attempts:
@@ -2948,23 +2954,11 @@ class CRMCog(commands.Cog):
 
     def _extract_resume_name_hint(self, file_content: bytes) -> str:
         """Best-effort contact name extraction from resume text."""
-        text = file_content.decode("utf-8", errors="ignore")
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        for line in lines[:40]:
-            candidate = line.strip()
-            if not candidate:
-                continue
-            if len(candidate) < 2:
-                continue
-            if "@" in candidate or "http" in candidate.lower():
-                continue
-            if not any(char.isalpha() for char in candidate):
-                continue
-            # Prefer short, title-like lines at the top as candidate names.
-            if len(candidate.split()) >= 1 and len(candidate) <= 70:
-                return candidate
-
-        return "Unknown Contact"
+        hints = self._extract_resume_contact_hints(file_content)
+        extracted_name = str(hints.get("name") or "").strip()
+        if extracted_name:
+            return extracted_name
+        return self._extract_resume_name_fallback(file_content)
 
     def _build_resume_create_contact_payload(
         self, file_content: bytes
@@ -2973,18 +2967,45 @@ class CRMCog(commands.Cog):
         hints = self._extract_resume_contact_hints(file_content)
         name = self._extract_resume_name_hint(file_content)
         contact_name = name if name != "Unknown Contact" else "Resume Candidate"
+        emails = hints.get("emails", [])
+        github_usernames = hints.get("github_usernames", [])
+        linkedin_urls = hints.get("linkedin_urls", [])
+        skills = hints.get("skills", [])
+        if not isinstance(emails, list):
+            emails = []
+        if not isinstance(github_usernames, list):
+            github_usernames = []
+        if not isinstance(linkedin_urls, list):
+            linkedin_urls = []
+        if not isinstance(skills, list):
+            skills = []
 
         payload: dict[str, str] = {"name": contact_name}
-        if hints["emails"]:
-            primary_email = hints["emails"][0]
+        if emails:
+            primary_email = emails[0]
             if primary_email.endswith("@508.dev"):
                 payload["c508Email"] = primary_email
             else:
                 payload["emailAddress"] = primary_email
-        if hints["github_usernames"]:
-            payload["cGitHubUsername"] = hints["github_usernames"][0]
-        if hints["linkedin_urls"]:
-            payload["cLinkedInUrl"] = hints["linkedin_urls"][0]
+        if github_usernames:
+            payload["cGitHubUsername"] = github_usernames[0]
+        if linkedin_urls:
+            payload["cLinkedInUrl"] = linkedin_urls[0]
+        phone = hints.get("phone")
+        if isinstance(phone, str) and phone.strip():
+            payload["phoneNumber"] = phone.strip()
+        address_country = str(hints.get("address_country", "")).strip()
+        if address_country:
+            payload["addressCountry"] = address_country
+        seniority = str(hints.get("seniority_level", "")).strip()
+        if seniority:
+            payload["cSeniority"] = seniority
+        if skills:
+            normalized_skills = [
+                str(item).strip() for item in skills if str(item).strip()
+            ]
+            if normalized_skills:
+                payload["skills"] = ", ".join(normalized_skills)
 
         return payload
 
@@ -3050,7 +3071,10 @@ class CRMCog(commands.Cog):
         """Infer target contact from resume identifiers."""
         hints = self._extract_resume_contact_hints(file_content)
         attempts: list[dict[str, Any]] = []
-        for email in hints["emails"]:
+        emails = hints.get("emails", [])
+        if not isinstance(emails, list):
+            emails = []
+        for email in emails:
             attempts.append({"method": "email", "value": email})
             contacts = await self._search_contact_for_linking(email)
             if len(contacts) == 1:
@@ -3067,7 +3091,10 @@ class CRMCog(commands.Cog):
                     "attempts": attempts,
                 }
 
-        for github_username in hints["github_usernames"]:
+        github_usernames = hints.get("github_usernames", [])
+        if not isinstance(github_usernames, list):
+            github_usernames = []
+        for github_username in github_usernames:
             attempts.append({"method": "github", "value": github_username})
             contacts = await self._search_contacts_by_field(
                 field="cGitHubUsername", value=github_username
@@ -3086,7 +3113,10 @@ class CRMCog(commands.Cog):
                     "attempts": attempts,
                 }
 
-        for linkedin_url in hints["linkedin_urls"]:
+        linkedin_urls = hints.get("linkedin_urls", [])
+        if not isinstance(linkedin_urls, list):
+            linkedin_urls = []
+        for linkedin_url in linkedin_urls:
             attempts.append({"method": "linkedin", "value": linkedin_url})
             contacts = await self._search_contacts_by_field(
                 field="cLinkedInUrl", value=linkedin_url

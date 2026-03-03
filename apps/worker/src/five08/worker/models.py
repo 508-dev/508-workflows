@@ -4,6 +4,9 @@ from datetime import datetime
 from typing import Literal
 from typing import Any
 
+from five08.resume_extractor import (
+    ResumeExtractedProfile as SharedResumeExtractedProfile,
+)
 from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
 
@@ -64,15 +67,7 @@ class SkillsExtractionResult(BaseModel):
     error: str | None = None
 
 
-class ResumeExtractedProfile(BaseModel):
-    """Normalized profile fields extracted from resume text."""
-
-    email: str | None = None
-    github_username: str | None = None
-    linkedin_url: str | None = None
-    phone: str | None = None
-    confidence: float = Field(..., ge=0.0, le=1.0)
-    source: str
+ResumeExtractedProfile = SharedResumeExtractedProfile
 
 
 class ResumeFieldChange(BaseModel):

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
 from five08.clients.espo import EspoAPI, EspoAPIError
+from five08.resume_extractor import ResumeProfileExtractor
 from five08.queue import get_postgres_connection
 from five08.worker.config import settings
 from five08.worker.crm.document_processor import DocumentProcessor
@@ -24,11 +24,6 @@ from five08.worker.models import (
 )
 
 logger = logging.getLogger(__name__)
-
-try:  # pragma: no cover - import success depends on environment
-    from openai import OpenAI as OpenAIClient
-except Exception:  # pragma: no cover
-    OpenAIClient = None  # type: ignore[misc,assignment]
 
 
 class ResumeEspoClient:
@@ -48,196 +43,16 @@ class ResumeEspoClient:
         self.api.request("PUT", f"Contact/{contact_id}", updates)
 
 
-class ResumeProfileExtractor:
-    """Extract candidate profile fields from resume text."""
-
-    def __init__(self) -> None:
-        self.model = settings.resolved_resume_ai_model
-        self.client: Any = None
-
-        if settings.openai_api_key and OpenAIClient is not None:
-            self.client = OpenAIClient(
-                api_key=settings.openai_api_key,
-                base_url=settings.openai_base_url,
-            )
-
-    def extract(self, resume_text: str) -> ResumeExtractedProfile:
-        """Return extracted fields from resume text."""
-        if self.client is None:
-            return self._heuristic_extract(resume_text)
-
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You extract candidate contact fields from resumes for a CRM. "
-                            "Return JSON only with no commentary. Be conservative: when unsure, use null. "
-                            "Prefer candidate-owned contact info and ignore references or company contact details."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": self._build_prompt(resume_text),
-                    },
-                ],
-                temperature=0.1,
-                max_tokens=800,
-            )
-            raw_content = response.choices[0].message.content
-            if not raw_content:
-                raise ValueError("LLM returned empty content")
-
-            parsed = self._parse_json(raw_content)
-            return ResumeExtractedProfile(
-                email=self._normalize_email(parsed.get("email")),
-                github_username=self._normalize_github(parsed.get("github_username")),
-                linkedin_url=self._normalize_linkedin(parsed.get("linkedin_url")),
-                phone=self._normalize_phone(parsed.get("phone")),
-                confidence=self._bounded_confidence(parsed.get("confidence", 0.75)),
-                source=self.model,
-            )
-        except Exception as exc:
-            logger.warning("LLM resume extraction failed, using fallback: %s", exc)
-            return self._heuristic_extract(resume_text)
-
-    def _heuristic_extract(self, resume_text: str) -> ResumeExtractedProfile:
-        email_match = re.search(
-            r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", resume_text
-        )
-        github_match = re.search(
-            r"(?:https?://)?(?:www\.)?github\.com/([A-Za-z0-9-]{1,39})",
-            resume_text,
-            flags=re.IGNORECASE,
-        )
-        linkedin_match = re.search(
-            r"(?:https?://)?(?:[\w.-]+\.)?linkedin\.com/in/[A-Za-z0-9\-_%]+/?",
-            resume_text,
-            flags=re.IGNORECASE,
-        )
-        phone_match = re.search(
-            r"(?:\+?\d[\d\s().-]{7,}\d)",
-            resume_text,
-        )
-
-        github_value: str | None = None
-        if github_match:
-            github_value = github_match.group(1)
-
-        linkedin_value: str | None = None
-        if linkedin_match:
-            linkedin_value = linkedin_match.group(0)
-
-        phone_value: str | None = None
-        if phone_match:
-            phone_value = phone_match.group(0)
-
-        return ResumeExtractedProfile(
-            email=self._normalize_email(email_match.group(0) if email_match else None),
-            github_username=self._normalize_github(github_value),
-            linkedin_url=self._normalize_linkedin(linkedin_value),
-            phone=self._normalize_phone(phone_value),
-            confidence=0.45,
-            source="heuristic",
-        )
-
-    def _build_prompt(self, resume_text: str) -> str:
-        snippet = resume_text[:12000]
-        return (
-            "Extract candidate contact fields from this resume.\n"
-            "Return JSON with exact keys and no extras:\n"
-            '{"email": string|null, "github_username": string|null, '
-            '"linkedin_url": string|null, "phone": string|null, '
-            '"confidence": number}\n'
-            "Rules:\n"
-            "- prefer explicit values from header/contact sections\n"
-            "- for github_username return username only (no URL, no @)\n"
-            "- for linkedin_url return full linkedin profile URL when available\n"
-            "- for phone return digits with optional leading +\n"
-            "- use null for unknown/ambiguous fields\n"
-            "- confidence is 0-1 for overall extraction reliability\n\n"
-            f"Resume:\n{snippet}"
-        )
-
-    def _parse_json(self, content: str) -> dict[str, Any]:
-        raw = content.strip()
-        if raw.startswith("```"):
-            lines = [line for line in raw.splitlines() if not line.startswith("```")]
-            raw = "\n".join(lines).strip()
-
-        parsed = json.loads(raw)
-        if not isinstance(parsed, dict):
-            raise ValueError("Model output was not a JSON object")
-        return parsed
-
-    def _bounded_confidence(self, value: Any) -> float:
-        try:
-            numeric = float(value)
-        except Exception:
-            numeric = 0.0
-        return max(0.0, min(1.0, numeric))
-
-    def _normalize_email(self, value: Any) -> str | None:
-        if not isinstance(value, str):
-            return None
-        normalized = value.strip().lower()
-        return normalized or None
-
-    def _normalize_github(self, value: Any) -> str | None:
-        if not isinstance(value, str):
-            return None
-        candidate = value.strip()
-        if not candidate:
-            return None
-
-        github_match = re.search(
-            r"(?:https?://)?(?:www\.)?github\.com/([A-Za-z0-9-]{1,39})",
-            candidate,
-            flags=re.IGNORECASE,
-        )
-        if github_match:
-            candidate = github_match.group(1)
-
-        candidate = candidate.lstrip("@").strip().strip("/")
-        return candidate or None
-
-    def _normalize_linkedin(self, value: Any) -> str | None:
-        if not isinstance(value, str):
-            return None
-        candidate = value.strip()
-        if not candidate:
-            return None
-
-        if "linkedin.com" not in candidate.lower():
-            return None
-        if not candidate.lower().startswith(("http://", "https://")):
-            candidate = f"https://{candidate}"
-        return candidate.rstrip("/")
-
-    def _normalize_phone(self, value: Any) -> str | None:
-        if not isinstance(value, str):
-            return None
-        candidate = value.strip()
-        if not candidate:
-            return None
-
-        digits = re.sub(r"\D", "", candidate)
-        if len(digits) < 7:
-            return None
-
-        if candidate.startswith("+"):
-            return "+" + digits
-        return digits
-
-
 class ResumeProfileProcessor:
     """End-to-end extraction and apply operations for uploaded resumes."""
 
     def __init__(self) -> None:
         self.crm = ResumeEspoClient()
-        self.extractor = ResumeProfileExtractor()
+        self.extractor = ResumeProfileExtractor(
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+            model=settings.resolved_resume_ai_model,
+        )
         self.skills_extractor = SkillsExtractor()
         self.document_processor = DocumentProcessor()
 

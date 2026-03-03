@@ -12,9 +12,9 @@ from urllib.parse import urlsplit
 import requests
 
 from five08.clients.espo import EspoAPI, EspoAPIError
+from five08.resume_extractor import ResumeProfileExtractor
 from five08.worker.config import settings
 from five08.worker.crm.document_processor import DocumentProcessor
-from five08.worker.crm.resume_profile_processor import ResumeProfileExtractor
 from five08.worker.crm.skills_extractor import SkillsExtractor
 from five08.worker.masking import mask_email
 
@@ -74,7 +74,11 @@ class IntakeFormProcessor:
         api_url = settings.espo_base_url.rstrip("/") + "/api/v1"
         self.api = EspoAPI(api_url, settings.espo_api_key)
         self.document_processor = DocumentProcessor()
-        self.resume_extractor = ResumeProfileExtractor()
+        self.resume_extractor = ResumeProfileExtractor(
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+            model=settings.resolved_resume_ai_model,
+        )
         self.skills_extractor = SkillsExtractor()
 
     def process_intake(self, *, payload: Mapping[str, Any]) -> dict[str, Any]:
