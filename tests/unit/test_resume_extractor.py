@@ -1,5 +1,7 @@
 """Unit tests for resume extractor helpers."""
 
+from unittest.mock import Mock, patch
+
 from five08.resume_extractor import _coerce_email_list
 from five08.resume_extractor import ResumeProfileExtractor
 
@@ -58,6 +60,45 @@ def test_extract_profile_links_route_social_urls_away_from_website() -> None:
     assert result.github_username == "wumichaelm"
     assert result.linkedin_url == "https://linkedin.com/in/wumichaelm"
     assert all("node.js" not in link.casefold() for link in result.website_links)
+
+
+def test_split_name_prefers_llm_output() -> None:
+    """Split-name should prefer LLM output when it is available."""
+    extractor = ResumeProfileExtractor(api_key="test-key")
+    extractor.client = Mock()
+
+    with patch.object(
+        extractor,
+        "_split_name_with_llm",
+        return_value=("Ada", "Lovelace"),
+    ) as mock_llm_split:
+        first_name, last_name = extractor.split_name("Ada Lovelace")
+
+    assert first_name == "Ada"
+    assert last_name == "Lovelace"
+    mock_llm_split.assert_called_once_with("Ada Lovelace")
+
+
+def test_split_name_falls_back_to_heuristic_without_name_hints() -> None:
+    """Split-name should still split names using heuristics when LLM fails."""
+    extractor = ResumeProfileExtractor(api_key="test-key")
+    extractor.client = Mock()
+
+    with patch.object(extractor, "_split_name_with_llm", side_effect=RuntimeError()):
+        first_name, last_name = extractor.split_name("Dr. Grace Hopper")
+
+    assert first_name == "Grace"
+    assert last_name == "Hopper"
+
+
+def test_split_name_single_token_returns_unknown_last_name() -> None:
+    """Single token names should use a placeholder last name."""
+    extractor = ResumeProfileExtractor(api_key=None)
+
+    first_name, last_name = extractor.split_name("Cher")
+
+    assert first_name == "Cher"
+    assert last_name == "Unknown"
 
 
 def test_extract_profile_backfills_website_and_social_urls_from_markdown() -> None:

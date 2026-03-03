@@ -1647,6 +1647,28 @@ class TestCRMCog:
         } in where_filters
 
     @pytest.mark.asyncio
+    async def test_search_contacts_by_field_uses_configured_linkedin_field(
+        self, crm_cog
+    ):
+        """Search-by-field uses the configured LinkedIn field name."""
+        crm_cog.espo_api.request.return_value = {"list": []}
+
+        await crm_cog._search_contacts_by_field(
+            field="cLinkedIn", value="https://linkedin.com/in/test"
+        )
+
+        call = crm_cog.espo_api.request.call_args
+        assert call.args[0] == "GET"
+        assert call.args[1] == "Contact"
+        params = call.args[2]
+        assert params["where"][0]["attribute"] == "cLinkedIn"
+        assert params["where"][0]["value"] == "https://linkedin.com/in/test"
+        assert params["where"][0]["type"] == "equals"
+        select_fields = params["select"].split(",")
+        assert "cLinkedIn" in select_fields
+        assert "cLinkedInUrl" not in select_fields
+
+    @pytest.mark.asyncio
     async def test_crm_status_success(self, crm_cog, mock_interaction):
         """Test successful CRM status check."""
         crm_cog.espo_api.request.return_value = {"user": {"name": "Test User"}}
@@ -1906,6 +1928,45 @@ class TestCRMCog:
         crm_cog.espo_api.request.assert_not_called()
         message = mock_interaction.followup.send.call_args[0][0]
         assert "Provide at least one of" in message
+
+    @pytest.mark.asyncio
+    async def test_update_contact_uses_configured_linkedin_field(
+        self, crm_cog, mock_interaction
+    ):
+        """Configured LinkedIn custom field should flow through update payload and embed."""
+        mock_interaction.user.id = 123456789
+
+        with (
+            patch.object(
+                crm_cog, "_configured_linkedin_field", return_value="cLinkedIn"
+            ),
+            patch.object(
+                crm_cog,
+                "_find_contact_by_discord_id",
+                new=AsyncMock(return_value={"id": "contact123", "name": "Test User"}),
+            ),
+        ):
+            crm_cog.espo_api.request.return_value = {"id": "contact123"}
+
+            await crm_cog.update_contact.callback(
+                crm_cog,
+                mock_interaction,
+                linkedin="https://www.linkedin.com/in/test-user/",
+            )
+
+        assert mock_interaction.followup.send.call_count == 1
+        call = crm_cog.espo_api.request.call_args
+        assert call.args[0] == "PUT"
+        assert call.args[1] == "Contact/contact123"
+        assert call.args[2] == {"cLinkedIn": "https://www.linkedin.com/in/test-user/"}
+
+        send_kwargs = mock_interaction.followup.send.call_args.kwargs
+        linkedin_value = next(
+            field.value
+            for field in send_kwargs["embed"].fields
+            if field.name == "🔗 LinkedIn"
+        )
+        assert linkedin_value == "https://www.linkedin.com/in/test-user/"
 
     @pytest.mark.asyncio
     async def test_update_contact_self_not_linked(self, crm_cog, mock_interaction):
@@ -2204,6 +2265,8 @@ class TestCRMCog:
             assert payload["type"] == "Prospect"
             assert payload["name"] == "Person Example"
             assert payload["emailAddress"] == "person@example.com"
+            assert payload["firstName"] == "Person"
+            assert payload["lastName"] == "Example"
             assert "c508Email" not in payload
 
         with (
@@ -2224,6 +2287,8 @@ class TestCRMCog:
             assert payload["type"] == "Prospect"
             assert payload["name"] == "Person 508"
             assert payload["c508Email"] == "person@508.dev"
+            assert payload["firstName"] == "Person"
+            assert payload["lastName"] == "Unknown"
             assert "emailAddress" not in payload
 
     def test_build_resume_create_contact_payload_populates_prospect_details(
@@ -2256,6 +2321,32 @@ class TestCRMCog:
             assert payload["addressCountry"] == "Canada"
             assert payload["cSeniority"] == "senior"
             assert payload["skills"] == "Python, fastapi"
+            assert payload["firstName"] == "Jane"
+            assert payload["lastName"] == "Doe"
+
+    def test_build_resume_create_contact_payload_single_name_uses_unknown_last(
+        self, crm_cog
+    ):
+        """Single token names should include a placeholder lastName."""
+        with (
+            patch.object(
+                crm_cog,
+                "_extract_resume_contact_hints",
+                return_value={
+                    "emails": ["single@example.com"],
+                    "github_usernames": [],
+                    "linkedin_urls": [],
+                },
+            ),
+            patch.object(crm_cog, "_extract_resume_name_hint", return_value="Cher"),
+        ):
+            payload = crm_cog._build_resume_create_contact_payload(b"resume")
+
+        assert payload["type"] == "Prospect"
+        assert payload["name"] == "Cher"
+        assert payload["firstName"] == "Cher"
+        assert payload["lastName"] == "Unknown"
+        assert payload["emailAddress"] == "single@example.com"
 
     def test_build_inference_lookup_summary_uses_attempt_text(self, crm_cog):
         """Test lookup summary uses attempt text when attempts are present."""
@@ -2325,6 +2416,27 @@ class TestCRMCog:
             )
 
             assert summary == ""
+
+    def test_build_resume_parsed_identity_summary_includes_name_and_email(
+        self, crm_cog
+    ):
+        """Parsed name and email are included in resume identity summary."""
+        with patch.object(
+            crm_cog,
+            "_extract_resume_contact_hints",
+            return_value={
+                "name": "Jane Doe",
+                "emails": ["jane@example.com", "ignored@alt.example"],
+            },
+        ):
+            summary = crm_cog._build_resume_parsed_identity_summary(
+                file_content=b"resume"
+            )
+
+            assert (
+                summary
+                == "\nParsed contact details: name=`Jane Doe`, email=`jane@example.com`"
+            )
 
     @pytest.mark.asyncio
     async def test_upload_resume_link_user_shows_confirm_then_creates_contact(
@@ -2414,6 +2526,8 @@ class TestCRMCog:
                 "Contact",
                 {
                     "name": "Candidate User",
+                    "firstName": "Candidate",
+                    "lastName": "User",
                     "cDiscordUsername": "candidateuser",
                     "cDiscordUserID": "202",
                 },
@@ -2733,6 +2847,66 @@ class TestCRMCog:
         }
 
     @pytest.mark.asyncio
+    async def test_upload_resume_no_matching_inferred_contact_shows_name_and_email(
+        self, crm_cog, mock_interaction
+    ):
+        """No-match inference should show parsed name/email for the candidate."""
+        mock_interaction.user.id = 101
+        mock_interaction.user.name = "Requester"
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+
+        resume_file = Mock()
+        resume_file.filename = "candidate.pdf"
+        resume_file.size = 1024
+        resume_file.read = AsyncMock(return_value=b"resume-bytes")
+
+        with (
+            patch.object(
+                crm_cog,
+                "_infer_contact_from_resume",
+                new=AsyncMock(return_value=(None, {"reason": "no_matching_contact"})),
+            ),
+            patch.object(
+                crm_cog,
+                "_build_resume_parsed_identity_summary",
+                return_value=(
+                    "\nParsed contact details: name=`Jane Doe`, email=`jane@example.com`"
+                ),
+            ),
+            patch.object(
+                crm_cog,
+                "_find_contact_by_discord_id",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "five08.discord_bot.cogs.crm.check_user_roles_with_hierarchy",
+                return_value=True,
+            ),
+            patch(
+                "five08.discord_bot.cogs.crm.settings.api_shared_secret",
+                "test-shared-secret",
+            ),
+        ):
+            await crm_cog.upload_resume.callback(
+                crm_cog,
+                mock_interaction,
+                resume_file,
+                None,
+                False,
+                None,
+            )
+
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert "⚠️ Could not find a unique contact from this resume." in message
+        assert (
+            "Parsed contact details: name=`Jane Doe`, email=`jane@example.com`"
+            in message
+        )
+        assert "view" in mock_interaction.followup.send.call_args.kwargs
+
+    @pytest.mark.asyncio
     async def test_resume_create_contact_view_logs_create_failure(
         self, crm_cog, mock_interaction
     ):
@@ -2788,8 +2962,19 @@ class TestCRMCog:
         audit_metadata = crm_cog._audit_command.call_args.kwargs["metadata"]
         assert audit_metadata["reason"] == "contact_create_failed"
         assert audit_metadata["status_code"] == 422
-        assert audit_metadata["create_payload_keys"] == ["emailAddress", "name"]
+        assert audit_metadata["create_payload_keys"] == [
+            "emailAddress",
+            "firstName",
+            "lastName",
+            "name",
+        ]
         mock_interaction.followup.send.assert_called_once()
+        failure_message = mock_interaction.followup.send.call_args.args[0]
+        assert (
+            "Could not create a contact from this resume: `validation failed` (status 422)."
+            in failure_message
+        )
+        assert "Please provide `search_term` or `link_user`." in failure_message
 
     @pytest.mark.asyncio
     async def test_reprocess_resume_shows_confirmation(self, crm_cog, mock_interaction):
