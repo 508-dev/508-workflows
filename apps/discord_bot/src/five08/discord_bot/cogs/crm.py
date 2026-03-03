@@ -51,6 +51,15 @@ EspoAPI = espo.EspoAPI
 EspoAPIError = espo.EspoAPIError
 
 
+def _configured_linkedin_field_from_settings() -> str:
+    value = getattr(settings, "crm_linkedin_field", None)
+    if isinstance(value, str):
+        value = value.strip()
+        if value:
+            return value
+    return "cLinkedInUrl"
+
+
 class ResumeButtonView(discord.ui.View):
     """View containing resume download buttons for contact search results."""
 
@@ -588,7 +597,7 @@ class ResumeUpdateConfirmationView(discord.ui.View):
 
     @classmethod
     def _field_label(cls, field: str) -> str:
-        linkedin_field = getattr(settings, "crm_linkedin_field", "cLinkedInUrl")
+        linkedin_field = _configured_linkedin_field_from_settings()
         if field == linkedin_field:
             return "LinkedIn"
         return cls._FIELD_LABELS.get(field, field)
@@ -1541,7 +1550,7 @@ class CRMCog(commands.Cog):
     @staticmethod
     def _configured_linkedin_field() -> str:
         """Return the configured field for LinkedIn profile values."""
-        return str(getattr(settings, "crm_linkedin_field", "cLinkedInUrl"))
+        return _configured_linkedin_field_from_settings()
 
     def _audit_command(
         self,
@@ -3414,6 +3423,8 @@ class CRMCog(commands.Cog):
         parsed_name = str(payload.get("name", "")).strip()
         if not parsed_name or parsed_name == "Resume Candidate":
             payload["name"] = self._fallback_contact_name_for_discord_user(user)
+            payload.pop("firstName", None)
+            payload.pop("lastName", None)
         self._populate_name_fields(
             payload, source_name=str(payload.get("name", "")).strip()
         )

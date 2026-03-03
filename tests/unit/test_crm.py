@@ -1647,25 +1647,30 @@ class TestCRMCog:
         } in where_filters
 
     @pytest.mark.asyncio
-    async def test_search_contacts_by_field_uses_configured_linkedin_field(
+    async def test_search_contacts_by_field_includes_requested_field_and_excludes_default(
         self, crm_cog
     ):
-        """Search-by-field uses the configured LinkedIn field name."""
+        """Search-by-field includes the requested field and excludes the default."""
         crm_cog.espo_api.request.return_value = {"list": []}
 
-        await crm_cog._search_contacts_by_field(
-            field="cLinkedIn", value="https://linkedin.com/in/test"
-        )
+        with patch.object(
+            crm_cog, "_configured_linkedin_field", return_value="cLinkedIn"
+        ) as configured_field:
+            configured_linkedin_field = crm_cog._configured_linkedin_field()
+            await crm_cog._search_contacts_by_field(
+                field=configured_linkedin_field, value="https://linkedin.com/in/test"
+            )
 
         call = crm_cog.espo_api.request.call_args
         assert call.args[0] == "GET"
         assert call.args[1] == "Contact"
         params = call.args[2]
-        assert params["where"][0]["attribute"] == "cLinkedIn"
+        configured_field.assert_called_once()
+        assert params["where"][0]["attribute"] == configured_linkedin_field
         assert params["where"][0]["value"] == "https://linkedin.com/in/test"
         assert params["where"][0]["type"] == "equals"
         select_fields = params["select"].split(",")
-        assert "cLinkedIn" in select_fields
+        assert configured_linkedin_field in select_fields
         assert "cLinkedInUrl" not in select_fields
 
     @pytest.mark.asyncio
@@ -2347,6 +2352,42 @@ class TestCRMCog:
         assert payload["firstName"] == "Cher"
         assert payload["lastName"] == "Unknown"
         assert payload["emailAddress"] == "single@example.com"
+
+    def test_build_contact_payload_for_link_user_overwrites_stale_name_fields(
+        self, crm_cog
+    ):
+        """Link-user fallback should regenerate first/last names from Discord display name."""
+        user = Mock()
+        user.display_name = "Monica Geller"
+        user.name = "monica"
+        user.id = 999
+
+        with (
+            patch.object(
+                crm_cog,
+                "_build_resume_create_contact_payload",
+                return_value={
+                    "name": "Resume Candidate",
+                    "firstName": "Candidate",
+                    "lastName": "User",
+                },
+            ),
+            patch.object(
+                crm_cog,
+                "_fallback_contact_name_for_discord_user",
+                return_value="Monica Geller",
+            ),
+        ):
+            payload = crm_cog._build_contact_payload_for_link_user(
+                user=user,
+                file_content=b"resume",
+            )
+
+        assert payload["name"] == "Monica Geller"
+        assert payload["firstName"] == "Monica"
+        assert payload["lastName"] == "Geller"
+        assert payload["cDiscordUsername"] == "Monica Geller"
+        assert payload["cDiscordUserID"] == "999"
 
     def test_build_inference_lookup_summary_uses_attempt_text(self, crm_cog):
         """Test lookup summary uses attempt text when attempts are present."""

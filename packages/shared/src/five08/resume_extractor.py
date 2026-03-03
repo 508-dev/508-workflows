@@ -70,6 +70,7 @@ LINKEDIN_PROFILE_PATTERN = re.compile(
 DEFAULT_FALLBACK_FIRST_NAME = "Resume"
 DEFAULT_FALLBACK_LAST_NAME = "Candidate"
 SINGLE_NAME_FALLBACK_LAST_NAME = "Unknown"
+_PLACEHOLDER_NAME_TOKENS = {"unknown", "n/a", "na", "none", "null", "resume candidate"}
 NAME_PREFIXES = {
     "dr",
     "mr",
@@ -580,6 +581,14 @@ def _normalize_name(value: Any) -> str | None:
     return normalized or None
 
 
+def _is_placeholder_name(value: str | None) -> bool:
+    if not isinstance(value, str):
+        return False
+
+    normalized = value.strip().casefold()
+    return normalized in _PLACEHOLDER_NAME_TOKENS
+
+
 def _parse_json_object(content: str) -> dict[str, Any]:
     raw = content.strip()
     if raw.startswith("```"):
@@ -990,16 +999,30 @@ class ResumeProfileExtractor:
         """Return CRM-safe first/last-name pairs for a profile name."""
         first_name = _normalize_name_part(first_name_hint)
         last_name = _normalize_name_part(last_name_hint)
+        if first_name and _is_placeholder_name(first_name):
+            first_name = None
+        if last_name and _is_placeholder_name(last_name):
+            last_name = None
         normalized_full_name = _normalize_name(full_name)
+        if normalized_full_name and _is_placeholder_name(normalized_full_name):
+            normalized_full_name = None
 
         if first_name and last_name:
             return first_name, last_name
+
+        if not normalized_full_name:
+            return (
+                first_name or DEFAULT_FALLBACK_FIRST_NAME,
+                last_name or DEFAULT_FALLBACK_LAST_NAME,
+            )
 
         inferred_first: str | None = first_name
         inferred_last: str | None = last_name
         if normalized_full_name:
             inferred = None
-            if self.client is not None:
+            if self.client is not None and not _is_placeholder_name(
+                normalized_full_name
+            ):
                 try:
                     inferred = self._split_name_with_llm(normalized_full_name)
                 except Exception:
@@ -1053,9 +1076,20 @@ class ResumeProfileExtractor:
         split_last = _normalize_name_part(parsed.get("lastName"))
         split_first = split_first or _normalize_name_part(parsed.get("first_name"))
         split_last = split_last or _normalize_name_part(parsed.get("last_name"))
+        if split_first and _is_placeholder_name(split_first):
+            split_first = None
+        if split_last and _is_placeholder_name(split_last):
+            split_last = None
         if not split_first and not split_last:
             return None
-        return split_first or full_name, split_last or SINGLE_NAME_FALLBACK_LAST_NAME
+        if not split_first or not split_last:
+            heuristic_first, heuristic_last = self._split_name_heuristically(full_name)
+            split_first = split_first or heuristic_first
+            split_last = split_last or heuristic_last
+        return (
+            split_first or DEFAULT_FALLBACK_FIRST_NAME,
+            split_last or SINGLE_NAME_FALLBACK_LAST_NAME,
+        )
 
     @staticmethod
     def _split_name_heuristically(full_name: str) -> tuple[str, str]:

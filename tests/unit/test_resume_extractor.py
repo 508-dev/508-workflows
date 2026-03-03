@@ -111,6 +111,72 @@ def test_split_name_ignores_numeric_last_token() -> None:
     assert last_name == "Unknown"
 
 
+def test_split_name_treats_placeholder_hints_as_missing() -> None:
+    """Placeholder first/last hints should defer to parsed name when available."""
+    extractor = ResumeProfileExtractor(api_key=None)
+
+    first_name, last_name = extractor.split_name(
+        "Ada Lovelace",
+        first_name_hint="Unknown",
+        last_name_hint="N/A",
+    )
+
+    assert first_name == "Ada"
+    assert last_name == "Lovelace"
+
+
+def test_split_name_missing_full_name_uses_default_fallbacks() -> None:
+    """No full name should use the default candidate fallback values."""
+    extractor = ResumeProfileExtractor(api_key=None)
+
+    first_name, last_name = extractor.split_name(None)
+
+    assert first_name == "Resume"
+    assert last_name == "Candidate"
+
+
+def test_split_name_with_llm_partial_last_name_falls_back_to_heuristics() -> None:
+    """Partial LLM output should be completed by heuristic parsing."""
+
+    class _FakeChatCompletions:
+        @staticmethod
+        def create(**_: object) -> object:
+            return type(
+                "Response",
+                (),
+                {
+                    "choices": [
+                        type(
+                            "Choice",
+                            (),
+                            {
+                                "message": type(
+                                    "Message",
+                                    (),
+                                    {
+                                        "content": '{"firstName": null, "lastName": "Lovelace"}'
+                                    },
+                                )()
+                            },
+                        )()
+                    ]
+                },
+            )()
+
+    extractor = ResumeProfileExtractor(api_key="test-key")
+    extractor.client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": _FakeChatCompletions()})()},
+    )()
+    extractor.model = "fake-model"
+
+    first_name, last_name = extractor._split_name_with_llm("Ada Lovelace")
+
+    assert first_name == "Ada"
+    assert last_name == "Lovelace"
+
+
 def test_extract_profile_backfills_website_and_social_urls_from_markdown() -> None:
     """Markdown links should be split by website vs social and routed correctly."""
 
