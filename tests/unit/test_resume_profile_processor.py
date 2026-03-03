@@ -298,10 +298,7 @@ def test_extract_profile_proposal_includes_seniority_update() -> None:
         str(v).strip().lower()
     )
 
-    processor.crm.get_contact.return_value = {
-        "emailAddress": "member@example.com",
-        "cSeniority": "junior",
-    }
+    processor.crm.get_contact.return_value = {"emailAddress": "member@example.com"}
     processor.crm.download_attachment.return_value = b"resume-bytes"
     processor.document_processor.extract_text.return_value = "resume text"
     processor.document_processor.get_content_hash.return_value = "hash-4"
@@ -329,6 +326,54 @@ def test_extract_profile_proposal_includes_seniority_update() -> None:
 
     assert result.success is True
     assert result.proposed_updates["cSeniority"] == "senior"
+
+
+def test_extract_profile_proposal_preserves_existing_seniority() -> None:
+    """Existing non-unknown seniority should not be overwritten."""
+    processor = ResumeProfileProcessor()
+    processor.crm = Mock()
+    processor.extractor = Mock()
+    processor.skills_extractor = Mock()
+    processor.document_processor = Mock()
+    processor._record_processing_run = Mock()
+    processor.skills_extractor.canonicalize_skill.side_effect = lambda v: (
+        str(v).strip().lower()
+    )
+
+    processor.crm.get_contact.return_value = {
+        "emailAddress": "member@example.com",
+        "cSeniority": "Senior",
+    }
+    processor.crm.download_attachment.return_value = b"resume-bytes"
+    processor.document_processor.extract_text.return_value = "resume text"
+    processor.document_processor.get_content_hash.return_value = "hash-6"
+    processor.extractor.extract.return_value = ResumeExtractedProfile(
+        email=None,
+        github_username=None,
+        linkedin_url=None,
+        phone=None,
+        seniority_level="Junior",
+        confidence=0.9,
+        source="gpt-4o-mini",
+    )
+    processor.skills_extractor.extract_skills.return_value = ExtractedSkills(
+        skills=[],
+        skill_attrs={},
+        confidence=0.8,
+        source="gpt-4o-mini",
+    )
+
+    result = processor.extract_profile_proposal(
+        contact_id="contact-7",
+        attachment_id="att-7",
+        filename="resume.pdf",
+    )
+
+    assert result.success is True
+    assert "cSeniority" not in result.proposed_updates
+    assert any(
+        item.field == "cSeniority" and item.value == "junior" for item in result.skipped
+    )
 
 
 def test_extract_profile_proposal_maps_principal_to_staff() -> None:
