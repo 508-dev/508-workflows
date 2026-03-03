@@ -2502,46 +2502,12 @@ class CRMCog(commands.Cog):
         """Download and send a contact's resume as a file attachment."""
         try:
             await interaction.response.defer(ephemeral=True)
-
-            # Normalize the query - add @508.dev if it looks like a username or ends with @
-            normalized_query = query
-            if "@" not in query and not any(char in query for char in [" ", ".", "#"]):
-                # Looks like a username, add @508.dev
-                normalized_query = f"{query}@508.dev"
-            elif query.endswith("@"):
-                # Handle john@ -> john@508.dev
-                normalized_query = f"{query}508.dev"
-
-            # Search for the contact first
-            search_params = {
-                "where": [
-                    {
-                        "type": "or",
-                        "value": [
-                            {
-                                "type": "contains",
-                                "attribute": "emailAddress",
-                                "value": normalized_query,
-                            },
-                            {
-                                "type": "contains",
-                                "attribute": "c508Email",
-                                "value": normalized_query,
-                            },
-                            {
-                                "type": "contains",
-                                "attribute": "cDiscordUsername",
-                                "value": query,  # Use original query for Discord username
-                            },
-                        ],
-                    }
-                ],
-                "maxSize": 1,
-                "select": "id,name,emailAddress,c508Email,cDiscordUsername,resumeIds,resumeNames,resumeTypes",
-            }
-
-            response = self.espo_api.request("GET", "Contact", search_params)
-            contacts = response.get("list", [])
+            contacts = await self._search_contact_for_linking(
+                query,
+                max_size=1,
+                select="id,name,emailAddress,c508Email,cDiscordUsername,resumeIds,resumeNames,resumeTypes",
+                include_discord_username_search=True,
+            )
 
             if not contacts:
                 self._audit_command(
@@ -2627,10 +2593,65 @@ class CRMCog(commands.Cog):
         """Check if string looks like a hex contact ID."""
         return len(s) >= 15 and all(c in "0123456789abcdefABCDEF" for c in s)
 
+    def _build_contact_search_filters(self, search_term: str) -> list[dict[str, Any]]:
+        """Build a shared list of CRM search filters for contact lookup."""
+        normalized = search_term.strip()
+        if not normalized:
+            return []
+
+        mention_user_id = self._extract_discord_id_from_mention(normalized)
+        if mention_user_id:
+            return [
+                {
+                    "type": "equals",
+                    "attribute": "cDiscordUserID",
+                    "value": mention_user_id,
+                }
+            ]
+
+        search_filters: list[dict[str, Any]] = []
+        has_space = " " in normalized
+        has_at = "@" in normalized
+
+        if has_at:
+            local_part, _, domain = normalized.partition("@")
+            if local_part and (not domain or domain.lower() in {"", "508", "508.dev"}):
+                normalized = f"{local_part}@508.dev"
+
+            search_filters.extend(
+                [
+                    {
+                        "type": "equals",
+                        "attribute": "emailAddress",
+                        "value": normalized,
+                    },
+                    {"type": "equals", "attribute": "c508Email", "value": normalized},
+                ]
+            )
+            return search_filters
+
+        search_filters.append(
+            {"type": "contains", "attribute": "name", "value": normalized}
+        )
+        if not has_space:
+            search_filters.append(
+                {
+                    "type": "equals",
+                    "attribute": "c508Email",
+                    "value": f"{normalized}@508.dev",
+                }
+            )
+        return search_filters
+
     async def _search_contact_for_linking(
-        self, search_term: str
+        self,
+        search_term: str,
+        *,
+        max_size: int | None = None,
+        select: str = "id,name,emailAddress,c508Email,cDiscordUsername",
+        include_discord_username_search: bool = False,
     ) -> list[dict[str, Any]]:
-        """Search for contacts using multiple criteria."""
+        """Search for contacts using multiple shared criteria."""
         # Check if it looks like a hex contact ID
         if self._is_hex_string(search_term):
             try:
@@ -2640,53 +2661,31 @@ class CRMCog(commands.Cog):
             except EspoAPIError:
                 pass  # If direct ID lookup fails, fall through to regular search
 
-        # Determine if this is an email search vs name search
-        is_email = "@" in search_term
-        has_space = " " in search_term
+        search_filters = self._build_contact_search_filters(search_term)
+        if not search_filters:
+            return []
 
-        # For email searches or full names (with space), auto-select if single result
-        # For names without space, always show choices
-        should_auto_select = is_email or has_space
+        if include_discord_username_search and "@" not in search_term:
+            search_filters.append(
+                {
+                    "type": "contains",
+                    "attribute": "cDiscordUsername",
+                    "value": search_term.strip(),
+                }
+            )
 
-        if is_email:
-            # Email search - check both email fields
-            normalized_email = search_term
-            if "@" not in search_term.split("@")[-1]:  # Handle incomplete emails
-                if search_term.endswith("@"):
-                    normalized_email = f"{search_term}508.dev"
-                elif "@" not in search_term:
-                    normalized_email = f"{search_term}@508.dev"
+        has_at = "@" in search_term.strip()
+        has_space = " " in search_term.strip()
+        if max_size is None:
+            max_size = 1 if has_space and not has_at else 10
+            if self._extract_discord_id_from_mention(search_term.strip()):
+                max_size = 1
 
-            search_params = {
-                "where": [
-                    {
-                        "type": "or",
-                        "value": [
-                            {
-                                "type": "equals",
-                                "attribute": "emailAddress",
-                                "value": normalized_email,
-                            },
-                            {
-                                "type": "equals",
-                                "attribute": "c508Email",
-                                "value": normalized_email,
-                            },
-                        ],
-                    }
-                ],
-                "maxSize": 10,
-                "select": "id,name,emailAddress,c508Email,cDiscordUsername",
-            }
-        else:
-            # Name search
-            search_params = {
-                "where": [
-                    {"type": "contains", "attribute": "name", "value": search_term}
-                ],
-                "maxSize": 10 if not should_auto_select else 1,
-                "select": "id,name,emailAddress,c508Email,cDiscordUsername",
-            }
+        search_params = {
+            "where": [{"type": "or", "value": search_filters}],
+            "maxSize": max_size,
+            "select": select,
+        }
 
         response = self.espo_api.request("GET", "Contact", search_params)
         contacts: list[dict[str, Any]] = response.get("list", [])
@@ -2699,11 +2698,6 @@ class CRMCog(commands.Cog):
             if contact_id and contact_id not in seen_ids:
                 seen_ids.add(contact_id)
                 deduplicated_contacts.append(contact)
-
-        # For email or full name searches, auto-select if exactly one result
-        if should_auto_select and len(deduplicated_contacts) > 1:
-            # Multiple results for email/full name - still show choices
-            pass
 
         return deduplicated_contacts
 
@@ -3297,16 +3291,6 @@ class CRMCog(commands.Cog):
     ) -> list[dict[str, Any]]:
         """Search for contacts for ID verification."""
         contacts = await self._search_contact_for_linking(search_term)
-        if contacts:
-            return contacts
-
-        if "@" not in search_term and " " not in search_term:
-            contacts = await self._search_contact_for_linking(
-                f"{search_term.strip()}@508.dev"
-            )
-            if contacts:
-                return contacts
-
         return contacts
 
     async def _mark_id_verified_for_contact(
@@ -4058,23 +4042,7 @@ class CRMCog(commands.Cog):
         self, search_term: str
     ) -> list[dict[str, Any]]:
         """Resolve search term for view-skills lookup."""
-        mention_user_id = self._extract_discord_id_from_mention(search_term)
-        if mention_user_id:
-            by_discord_id = await self._find_contact_by_discord_id(mention_user_id)
-            return [by_discord_id] if by_discord_id else []
-
         contacts = await self._search_contact_for_linking(search_term)
-        if contacts:
-            return contacts
-
-        # `john` fallback -> `john@508.dev`
-        if (
-            "@" not in search_term
-            and " " not in search_term
-            and not self._is_hex_string(search_term)
-        ):
-            fallback_term = f"{search_term}@508.dev"
-            contacts = await self._search_contact_for_linking(fallback_term)
         return contacts
 
     @app_commands.command(
