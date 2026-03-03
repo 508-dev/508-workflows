@@ -5,14 +5,29 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Mapping
 
 from pydantic import BaseModel, Field
+from five08.skills import normalize_skill
 
 try:
     from openai import OpenAI as OpenAIClient
 except Exception:  # pragma: no cover
     OpenAIClient = None  # type: ignore[misc,assignment]
+
+
+DISALLOWED_SKILLS = {
+    "code review",
+    "debugging",
+    "performance optimization",
+    "testing",
+    "code quality",
+    "bug tracking",
+    "bugtracking",
+    "bug-tracking",
+}
+
+DEFAULT_SKILL_STRENGTH = 3
 
 
 def _bounded_confidence(value: Any, fallback: float) -> float:
@@ -172,6 +187,94 @@ def _normalize_skills(value: Any) -> list[str]:
     return normalized
 
 
+def _normalize_strength(value: Any) -> int | None:
+    raw: Any = value
+    if isinstance(raw, dict):
+        raw = raw.get("strength")
+    if raw is None:
+        return None
+    if isinstance(raw, str) and not raw.strip():
+        return None
+    try:
+        strength = int(float(raw))
+    except Exception:
+        return None
+    if not 1 <= strength <= 5:
+        return None
+    return strength
+
+
+def _parse_skill_with_strength(raw_skill: str) -> tuple[str, int | None]:
+    raw = raw_skill.strip()
+    match = re.match(r"^(.*)\(\s*(\d*)\s*\)\s*$", raw)
+    if match is None:
+        normalized = normalize_skill(raw)
+        if not normalized or normalized in DISALLOWED_SKILLS:
+            return "", None
+        return normalized, None
+
+    base = match.group(1).strip()
+    if not base:
+        return "", None
+    normalized = normalize_skill(base)
+    if not normalized or normalized in DISALLOWED_SKILLS:
+        return "", None
+    return normalized, _normalize_strength(match.group(2))
+
+
+def _normalize_skill_payload(
+    skills_value: Any,
+    skill_attrs_value: Any,
+) -> tuple[list[str], dict[str, int]]:
+    normalized_skills: list[str] = []
+    normalized_attrs: dict[str, int] = {}
+
+    raw_skill_items = skills_value if isinstance(skills_value, list) else []
+    for raw_skill in raw_skill_items:
+        skill, strength = _parse_skill_with_strength(str(raw_skill))
+        if not skill:
+            continue
+        key = skill.casefold()
+        if key in normalized_attrs and strength is not None:
+            normalized_attrs[key] = max(normalized_attrs[key], strength)
+            continue
+
+        normalized_skills.append(skill)
+        if strength is not None:
+            normalized_attrs[key] = strength
+
+    if isinstance(skill_attrs_value, dict):
+        for raw_name, raw_payload in skill_attrs_value.items():
+            normalized = normalize_skill(str(raw_name))
+            if not normalized or normalized in DISALLOWED_SKILLS:
+                continue
+            strength = _normalize_strength(raw_payload)
+            if strength is None:
+                continue
+            key = normalized.casefold()
+            normalized_attrs[key] = max(normalized_attrs.get(key, 0), strength)
+            if not any(existing.casefold() == key for existing in normalized_skills):
+                normalized_skills.append(normalized)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for raw_skill in normalized_skills:
+        skill = normalize_skill(raw_skill)
+        if not skill or skill in DISALLOWED_SKILLS:
+            continue
+        key = skill.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(skill)
+
+    return deduped, {
+        skill: normalized_attrs[skill.casefold()]
+        for skill in deduped
+        if normalized_attrs.get(skill.casefold(), 0) > 0
+    }
+
+
 def _normalize_name(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -203,6 +306,7 @@ class ResumeExtractedProfile(BaseModel):
     address_country: str | None = None
     seniority_level: str | None = None
     skills: list[str] = Field(default_factory=list)
+    skill_attrs: dict[str, int] = Field(default_factory=dict)
     confidence: float = Field(..., ge=0.0, le=1.0)
     source: str
 
@@ -232,14 +336,23 @@ class ResumeProfileExtractor:
                 base_url=base_url,
             )
 
-    def extract(self, resume_text: str) -> ResumeExtractedProfile:
+    def extract(
+        self,
+        resume_text: str,
+        *,
+        extra_sources: Mapping[str, str] | None = None,
+    ) -> ResumeExtractedProfile:
         """Return extracted fields from resume text."""
-        text = (resume_text or "").strip()
+        source_texts = self._build_source_inputs(
+            resume_text=resume_text,
+            extra_sources=extra_sources,
+        )
+        text = source_texts.get("resume", "")
         if not text:
-            return self._heuristic_extract("")
+            return self._heuristic_extract(source_texts)
 
         if self.client is None:
-            return self._heuristic_extract(text)
+            return self._heuristic_extract(source_texts)
 
         try:
             response = self.client.chat.completions.create(
@@ -252,7 +365,13 @@ class ResumeProfileExtractor:
                             "Return JSON only with no commentary. Be conservative: when unsure, use null."
                         ),
                     },
-                    {"role": "user", "content": self._build_prompt(text)},
+                    {
+                        "role": "user",
+                        "content": self._build_prompt(
+                            source_texts=source_texts,
+                            primary_text=text,
+                        ),
+                    },
                 ],
                 temperature=0.1,
                 max_tokens=self.max_tokens,
@@ -262,6 +381,10 @@ class ResumeProfileExtractor:
                 raise ValueError("LLM returned empty content")
 
             parsed = _parse_json_object(raw_content)
+            parsed_skills, parsed_skill_attrs = _normalize_skill_payload(
+                parsed.get("skills"),
+                parsed.get("skill_attrs"),
+            )
             return ResumeExtractedProfile(
                 name=_normalize_name(parsed.get("name")),
                 email=_normalize_email(parsed.get("email")),
@@ -275,7 +398,8 @@ class ResumeProfileExtractor:
                     or self._infer_seniority_from_resume(resume_text)
                     or "unknown"
                 ),
-                skills=_normalize_skills(parsed.get("skills")),
+                skills=parsed_skills,
+                skill_attrs=parsed_skill_attrs,
                 confidence=_bounded_confidence(
                     parsed.get("confidence", 0.75),
                     fallback=0.75,
@@ -283,10 +407,13 @@ class ResumeProfileExtractor:
                 source=self.model,
             )
         except Exception:
-            return self._heuristic_extract(text)
+            return self._heuristic_extract(source_texts)
 
-    def _heuristic_extract(self, resume_text: str) -> ResumeExtractedProfile:
-        snippet = (resume_text or "").strip()[: self.snippet_chars]
+    def _heuristic_extract(
+        self,
+        source_texts: Mapping[str, str] | dict[str, str],
+    ) -> ResumeExtractedProfile:
+        snippet = self._build_source_blob(source_texts).strip()[: self.snippet_chars]
         email_match = re.search(
             r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
             snippet,
@@ -308,7 +435,7 @@ class ResumeProfileExtractor:
         name_match = self._extract_name(snippet)
         country = self._extract_country(snippet)
         seniority = self._extract_seniority(snippet)
-        skills = self._extract_skills(snippet)
+        skills, skill_attrs = self._extract_skills(snippet)
 
         return ResumeExtractedProfile(
             name=name_match,
@@ -324,20 +451,59 @@ class ResumeProfileExtractor:
             address_country=country,
             seniority_level=seniority,
             skills=skills,
+            skill_attrs=skill_attrs,
             confidence=0.45,
             source="heuristic",
         )
 
-    def _build_prompt(self, resume_text: str) -> str:
-        snippet = resume_text[: self.snippet_chars]
+    def _build_source_inputs(
+        self,
+        *,
+        resume_text: str,
+        extra_sources: Mapping[str, str] | None = None,
+    ) -> dict[str, str]:
+        sources: dict[str, str] = {}
+        if resume_text:
+            sources["resume"] = resume_text.strip()
+        if extra_sources:
+            for label, value in extra_sources.items():
+                if not isinstance(label, str):
+                    continue
+                normalized_label = label.strip().lower()
+                if not normalized_label:
+                    continue
+                if not isinstance(value, str):
+                    continue
+                normalized_value = value.strip()
+                if not normalized_value:
+                    continue
+                sources[normalized_label] = normalized_value
+        return sources
+
+    @staticmethod
+    def _build_source_blob(sources: Mapping[str, str]) -> str:
+        return "\n\n".join(
+            f"{label}:\n{text}" for label, text in sources.items() if text.strip()
+        )
+
+    def _build_prompt(
+        self,
+        source_texts: Mapping[str, str] | None = None,
+        primary_text: str = "",
+    ) -> str:
+        merged_sources = source_texts or self._build_source_inputs(
+            resume_text=primary_text
+        )
+        snippet = self._build_source_blob(merged_sources)[: self.snippet_chars]
         return (
-            "Extract candidate profile fields from this resume.\n"
+            "Extract candidate profile fields from all provided sources.\n"
             "Return JSON with exact keys and no extras:\n"
             '{"name": string|null, "email": string|null, '
             '"github_username": string|null, "linkedin_url": string|null, '
             '"phone": string|null, "website_links": string[]|null, '
             '"address_country": string|null, '
             '"seniority_level": string|null, "skills": string[]|null, '
+            '"skill_attrs": {"<skill>": {"strength": 1-5}}|null, '
             '"confidence": number}\n'
             "Rules:\n"
             "- prefer explicit values from header/contact sections\n"
@@ -345,6 +511,10 @@ class ResumeProfileExtractor:
             "- for linkedin_url return full linkedin profile URL when available\n"
             "- for phone return digits with optional leading +\n"
             "- infer seniority_level as one of: junior, midlevel, senior, staff\n"
+            "- map strengths from 1-5 where available; omit when unknown\n"
+            "- return skills as lowercase canonical names with minimal punctuation\n"
+            "- canonicalize known variants like ab testing, go to market, react native\n"
+            "- never include generic/disallowed skills: code review, debugging, testing, bug tracking, code quality, performance optimization\n"
             "- use 4-5 years with ownership and impact cues as senior\n"
             "- use staff for 7+ years, or 5+ years with strong technical ownership/leadership\n"
             "- weight company impact:\n"
@@ -353,7 +523,7 @@ class ResumeProfileExtractor:
             "  - when company signal is ambiguous, return conservative midlevel\n"
             "- use 'unknown' for unknown or ambiguous fields\n"
             "- confidence is 0-1 for overall extraction reliability\n\n"
-            f"Resume:\n{snippet}"
+            f"Sources:\n{snippet}"
         )
 
     @staticmethod
@@ -466,20 +636,26 @@ class ResumeProfileExtractor:
         return max(years)
 
     @staticmethod
-    def _extract_skills(resume_text: str) -> list[str]:
+    def _extract_skills(resume_text: str) -> tuple[list[str], dict[str, int]]:
         match = re.search(
             r"(?im)^\s*(?:skills|technical\s+skills|technologies)\s*[:\-]?\s*$",
             resume_text,
         )
         if not match:
-            return []
+            return [], {}
 
         line_start = match.end()
         tail = resume_text[line_start : line_start + 500]
         first_line = tail.splitlines()[0] if tail else ""
         if first_line:
-            return _normalize_skills(first_line)
-        return []
+            skills, attrs = _normalize_skill_payload(
+                [item.strip() for item in first_line.split(",") if item.strip()],
+                None,
+            )
+            if skills and not attrs:
+                attrs = {skill.casefold(): DEFAULT_SKILL_STRENGTH for skill in skills}
+            return skills, attrs
+        return [], {}
 
     @staticmethod
     def _extract_website_links(resume_text: str) -> list[str]:

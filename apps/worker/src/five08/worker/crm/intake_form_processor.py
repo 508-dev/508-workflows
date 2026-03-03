@@ -410,18 +410,30 @@ class IntakeFormProcessor:
                 updates["cGitHubUsername"] = profile_github
             if profile_linkedin:
                 updates[settings.crm_linkedin_field] = profile_linkedin
+            profile_attrs = self._parse_profile_skill_attrs(extracted_profile)
+            if profile_attrs:
+                updates["cSkillAttrs"] = json.dumps(profile_attrs)
+                updates["skills"] = sorted(profile_attrs.keys())
         except Exception as exc:
             logger.warning("Resume profile extraction failed: %s", exc)
-
-        try:
-            extracted_skills = self.skills_extractor.extract_skills(resume_text)
-            parsed_attrs = self._parse_skill_attrs(extracted_skills.skill_attrs)
-            if parsed_attrs:
-                updates["cSkillAttrs"] = json.dumps(parsed_attrs)
-                updates["skills"] = sorted(parsed_attrs.keys())
-        except Exception as exc:
-            logger.warning("Resume skill extraction failed: %s", exc)
         return updates
+
+    def _parse_profile_skill_attrs(self, profile: Any) -> dict[str, int]:
+        raw_attrs = getattr(profile, "skill_attrs", {})
+        if not isinstance(raw_attrs, dict):
+            return {}
+        parsed: dict[str, int] = {}
+        for raw_skill, raw_payload in raw_attrs.items():
+            normalized_name = self.skills_extractor.canonicalize_skill(str(raw_skill))
+            if not normalized_name:
+                continue
+            if isinstance(raw_payload, dict):
+                raw_payload = raw_payload.get("strength")
+            try:
+                parsed[normalized_name] = max(1, min(5, int(raw_payload)))
+            except Exception:
+                continue
+        return parsed
 
     def _parse_skill_strength(self, value: str | None) -> int | None:
         if not value:

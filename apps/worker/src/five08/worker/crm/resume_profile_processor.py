@@ -17,6 +17,7 @@ from five08.worker.crm.skills_extractor import SkillsExtractor
 from five08.worker.models import (
     ResumeApplyResult,
     ResumeExtractedProfile,
+    ExtractedSkills,
     ResumeExtractionResult,
     ResumeFieldChange,
     ResumeSkipReason,
@@ -73,7 +74,7 @@ class ResumeProfileProcessor:
             text = self.document_processor.extract_text(content, filename)
             extracted = self.extractor.extract(text)
             model_name = extracted.source
-            extracted_skills_result = self.skills_extractor.extract_skills(text)
+            extracted_skills_result = self._coerce_profile_skill_result(extracted, text)
             extracted_skills = extracted_skills_result.skills
             normalized_extracted_skills = self._dedupe_normalized_skills(
                 extracted_skills
@@ -346,11 +347,11 @@ class ResumeProfileProcessor:
                 for field, value in normalized_updates.items()
                 if field in allowed_fields and value
             }
-            normalized_skills = self._normalize_skills_for_apply(
+            parsed_skills_for_apply = self._normalize_skills_for_apply(
                 sanitized_updates.get("skills")
             )
-            if normalized_skills is not None:
-                sanitized_updates["skills"] = normalized_skills
+            if parsed_skills_for_apply is not None:
+                sanitized_updates["skills"] = parsed_skills_for_apply
 
             if not sanitized_updates:
                 return ResumeApplyResult(
@@ -704,6 +705,46 @@ class ResumeProfileProcessor:
             seen.add(key)
             normalized.append(canonical)
         return normalized
+
+    def _coerce_profile_skill_result(
+        self,
+        extracted: ResumeExtractedProfile,
+        resume_text: str,
+    ) -> ExtractedSkills:
+        normalized_attrs: dict[str, SkillAttributes] = {}
+        for raw_skill, raw_attr in getattr(extracted, "skill_attrs", {}).items():
+            skill = self.skills_extractor.canonicalize_skill(str(raw_skill))
+            if not skill:
+                continue
+            try:
+                strength = int(float(raw_attr))
+            except Exception:
+                continue
+            if not 1 <= strength <= 5:
+                continue
+            normalized_attrs[skill.casefold()] = SkillAttributes(strength=strength)
+
+        skills = extracted.skills or []
+        if not normalized_attrs and isinstance(skills, list) and skills:
+            for raw_skill in skills:
+                skill = self.skills_extractor.canonicalize_skill(str(raw_skill))
+                if not skill:
+                    continue
+                key = skill.casefold()
+                if key in normalized_attrs:
+                    continue
+                normalized_attrs[key] = SkillAttributes(strength=3)
+
+        if normalized_attrs or skills:
+            return ExtractedSkills(
+                skills=skills,
+                skill_attrs=normalized_attrs,
+                confidence=extracted.confidence,
+                source=extracted.source,
+            )
+
+        fallback = self.skills_extractor.extract_skills(resume_text)
+        return fallback
 
     def _parse_skill_attrs(self, value: Any) -> dict[str, int]:
         if value is None:

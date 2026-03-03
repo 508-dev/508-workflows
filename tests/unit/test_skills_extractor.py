@@ -107,3 +107,19 @@ def test_normalize_extracted_payload_keeps_ab_testing_and_ui_ux() -> None:
     assert result.skill_attrs["database optimization"].strength == 3
     assert "testing" not in result.skills
     assert "testing" not in result.skill_attrs
+
+
+def test_normalize_extracted_payload_disallows_bug_tracking() -> None:
+    """Generic operational terms like bug tracking should be removed from skill extraction."""
+    extractor = SkillsExtractor()
+
+    result = extractor._normalize_extracted_payload(
+        skills_value=["Bug Tracking", "Python", "bugtracking", "Code Review"],
+        skill_attrs_value=None,
+        confidence=0.8,
+        source="model",
+    )
+
+    assert "bug tracking" not in result.skills
+    assert "bugtracking" not in result.skills
+    assert result.skills == ["python"]

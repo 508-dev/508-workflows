@@ -57,6 +57,9 @@ DISALLOWED_SKILLS = {
     "performance optimization",
     "testing",
     "code quality",
+    "bug tracking",
+    "bugtracking",
+    "bug-tracking",
 }
 
 DEFAULT_SKILL_STRENGTH = 3
