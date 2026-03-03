@@ -71,6 +71,16 @@ DEFAULT_FALLBACK_FIRST_NAME = "Resume"
 DEFAULT_FALLBACK_LAST_NAME = "Candidate"
 SINGLE_NAME_FALLBACK_LAST_NAME = "Unknown"
 _PLACEHOLDER_NAME_TOKENS = {"unknown", "n/a", "na", "none", "null", "resume candidate"}
+_NAME_HEADING_TOKENS = {
+    "resume",
+    "curriculum vitae",
+    "cv",
+    "contact",
+    "summary",
+    "profile",
+    "experience",
+    "skills",
+}
 NAME_PREFIXES = {
     "dr",
     "mr",
@@ -578,7 +588,12 @@ def _normalize_name(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
     normalized = value.strip()
-    return normalized or None
+    if not normalized:
+        return None
+    lowered = normalized.casefold().rstrip(":")
+    if lowered in _PLACEHOLDER_NAME_TOKENS or lowered in _NAME_HEADING_TOKENS:
+        return None
+    return normalized
 
 
 def _is_placeholder_name(value: str | None) -> bool:
@@ -1163,6 +1178,12 @@ class ResumeProfileExtractor:
                 continue
             if not any(char.isalpha() for char in line):
                 continue
+            normalized = line.casefold().rstrip(":")
+            if (
+                normalized in _PLACEHOLDER_NAME_TOKENS
+                or normalized in _NAME_HEADING_TOKENS
+            ):
+                continue
             return line
         return None
 
@@ -1221,8 +1242,9 @@ class ResumeProfileExtractor:
         ):
             impact_score += 1
         if re.search(
-            r"\b(team of\s+\d+|managed|mentored|cross-functional|enterprise|global|series [abcd]|"
-            r"\b500\+?|\b1000\+?|\b10[0-9]{2,}\s+employees",
+            r"(?:\bteam of\s+\d+\b|\bmanaged\b|\bmentored\b|\bcross-functional\b|"
+            r"\benterprise\b|\bglobal\b|\bseries [abcd]\b|\b500\+?|\b1000\+?|"
+            r"\b10[0-9]{2,}\s+employees\b)",
             lower_text,
         ):
             impact_score += 1
