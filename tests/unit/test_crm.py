@@ -595,8 +595,20 @@ class TestCRMCog:
         call_args = crm_cog.espo_api.request.call_args
         search_params = call_args[0][2]  # Third argument is the search params
         # Check that it searched for "john" as a name
-        assert search_params["where"][0]["attribute"] == "name"
-        assert search_params["where"][0]["value"] == "john"
+        first_where = search_params["where"][0]
+        if first_where.get("type") == "or":
+            where_filters = first_where.get("value", [])
+            assert isinstance(where_filters, list)
+            where_filter = next(
+                (item for item in where_filters if item.get("attribute") == "name"),
+                None,
+            )
+            assert where_filter is not None
+            assert where_filter["value"] == "john"
+            return
+
+        assert first_where["attribute"] == "name"
+        assert first_where["value"] == "john"
 
     @pytest.mark.asyncio
     async def test_link_discord_user_modern_username(
