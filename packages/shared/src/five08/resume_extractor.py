@@ -149,6 +149,10 @@ def _normalize_github(value: Any) -> str | None:
     )
     if github_match:
         candidate = github_match.group(1)
+    elif candidate.startswith("@"):
+        candidate = candidate[1:]
+    elif not re.fullmatch(r"[A-Za-z0-9-]{1,39}", candidate):
+        return None
 
     candidate = candidate.lstrip("@").strip().strip("/")
     return candidate or None
