@@ -10,7 +10,7 @@ import ast
 import io
 import json
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 import re
 from typing import Any, Literal
 
@@ -46,9 +46,6 @@ ONBOARDER_FIELD_CANDIDATES = (
 EXCLUDED_ONBOARDING_STATES = frozenset({"onboarded", "waitlist", "rejected"})
 ONBOARDING_QUEUE_MAX_SIZE = 200
 ONBOARDING_QUEUE_PAGE_SIZE = 1
-ONBOARDING_QUEUE_EMBED_MAX_FIELDS = 25
-DISCORD_EMBED_MAX_TOTAL_CHARS = 6000
-DISCORD_MESSAGE_MAX_CHARS = 2000
 
 EspoAPI = espo.EspoAPI
 EspoAPIError = espo.EspoAPIError
@@ -1088,6 +1085,30 @@ class ResumeCreateContactView(discord.ui.View):
         finally:
             await self._finalize(interaction)
 
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_create(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button["ResumeCreateContactView"],
+    ) -> None:
+        """Cancel contact creation and keep the queue untouched."""
+        self.crm_cog._audit_command(
+            interaction=interaction,
+            action="crm.upload_resume",
+            result="denied",
+            metadata={
+                "filename": self.filename,
+                "target_scope": self.target_scope,
+                "reason": "create_contact_cancelled",
+            },
+            resource_type="crm_contact",
+        )
+        await interaction.response.send_message(
+            "Contact creation cancelled. No changes were made.",
+            ephemeral=True,
+        )
+        await self._finalize(interaction)
+
 
 class OnboardingQueuePagerView(discord.ui.View):
     """View for paging through onboarding queue entries one person at a time."""
@@ -1106,6 +1127,7 @@ class OnboardingQueuePagerView(discord.ui.View):
         self.queue_rows = queue_rows
         self.page_size = max(1, page_size)
         self.page_index = 0
+        self._message: discord.Message | None = None
         self.total_pages = (
             (len(self.queue_rows) - 1) // self.page_size + 1 if self.queue_rows else 0
         )
@@ -1125,6 +1147,22 @@ class OnboardingQueuePagerView(discord.ui.View):
         return self.crm_cog._build_onboarding_queue_page_embed(
             self.queue_rows, page_index=self.page_index, page_size=self.page_size
         )
+
+    def _set_message(self, message: discord.Message | None) -> None:
+        self._message = message
+
+    async def on_timeout(self) -> None:
+        """Disable controls after pager timeout."""
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+        if self._message:
+            try:
+                await self._message.edit(view=self)
+            except discord.NotFound:
+                pass
+            except discord.HTTPException as exc:
+                logger.warning("Failed to disable onboarding queue pager view: %s", exc)
 
     def _update_button_states(self) -> None:
         if not self.children:
@@ -1323,7 +1361,9 @@ class CRMCog(commands.Cog):
 
         if isinstance(raw_value, (int, float)):
             try:
-                return datetime.fromtimestamp(raw_value).strftime("%Y-%m-%d %H:%M UTC")
+                return datetime.fromtimestamp(raw_value, tz=timezone.utc).strftime(
+                    "%Y-%m-%d %H:%M UTC"
+                )
             except (OSError, OverflowError, ValueError):
                 return str(raw_value)
 
@@ -1336,9 +1376,15 @@ class CRMCog(commands.Cog):
         except ValueError:
             return raw_value_text
 
-        if parsed.time() and parsed.time() != datetime.min.time():
-            return parsed.strftime("%Y-%m-%d %H:%M UTC")
-        return parsed.strftime("%Y-%m-%d")
+        if parsed.tzinfo is None:
+            if parsed.time() and parsed.time() != datetime.min.time():
+                return parsed.strftime("%Y-%m-%d %H:%M")
+            return parsed.strftime("%Y-%m-%d")
+
+        parsed_utc = parsed.astimezone(timezone.utc)
+        if parsed_utc.time() and parsed_utc.time() != datetime.min.time():
+            return parsed_utc.strftime("%Y-%m-%d %H:%M UTC")
+        return parsed_utc.strftime("%Y-%m-%d")
 
     async def _resolve_onboarder_username(
         self, interaction: discord.Interaction, raw_onboarder: str
@@ -1416,40 +1462,6 @@ class CRMCog(commands.Cog):
             contact_info = f"🔗 [View in CRM]({profile_url})\n{contact_info}"
 
         return contact_info
-
-    def _build_onboarding_queue_text(
-        self, queue_entries: list[tuple[dict[str, Any], str]]
-    ) -> str:
-        """Build a compact plain-text view for onboarding queue entries."""
-        lines = [
-            "Onboarding queue",
-            "Excludes states: onboarded, waitlist, rejected",
-            f"Total contacts: {len(queue_entries)}",
-            "",
-        ]
-
-        for index, (contact_record, status) in enumerate(queue_entries, start=1):
-            name = str(contact_record.get("name") or "Unknown")
-            contact_id = str(contact_record.get("id") or "")
-
-            onboarder_field = self._resolve_field_name(
-                contact_record, candidates=ONBOARDER_FIELD_CANDIDATES
-            )
-            onboarder_value = (
-                str(contact_record.get(onboarder_field, "")).strip()
-                if onboarder_field
-                else ""
-            )
-
-            parts = [f"{index}. {name}", f"status={status or 'unknown'}"]
-            if onboarder_value:
-                parts.append(f"onboarder={onboarder_value}")
-            if contact_id:
-                parts.append(f"id={contact_id}")
-
-            lines.append(" | ".join(parts))
-
-        return "\n".join(lines)
 
     def _build_onboarding_queue_row(
         self, contact_record: dict[str, Any], status: str
@@ -1570,34 +1582,6 @@ class CRMCog(commands.Cog):
         total_pages = (total_rows - 1) // page_size + 1
         embed.set_footer(text=f"Page {page_index + 1} of {total_pages}")
         return embed
-
-    async def _send_onboarding_queue_text(
-        self,
-        interaction: discord.Interaction,
-        queue_entries: list[tuple[dict[str, Any], str]],
-    ) -> None:
-        """Send onboarding queue in plain text split across safe message chunks."""
-        queue_text = self._build_onboarding_queue_text(queue_entries)
-        prefix = (
-            "📄 Onboarding queue is too large for embed format. Sending plain text."
-        )
-
-        messages: list[str] = []
-        current_message = prefix
-        for line in queue_text.splitlines():
-            candidate = f"{current_message}\n{line}" if current_message else line
-            if len(candidate) <= DISCORD_MESSAGE_MAX_CHARS:
-                current_message = candidate
-                continue
-
-            messages.append(current_message)
-            current_message = line
-
-        if current_message:
-            messages.append(current_message)
-
-        for message in messages:
-            await interaction.followup.send(message)
 
     def _build_resume_preview_embed(
         self,
@@ -2559,7 +2543,10 @@ class CRMCog(commands.Cog):
                 },
             )
             if view.total_pages > 1:
-                await interaction.followup.send(embed=embed, view=view)
+                message = await interaction.followup.send(
+                    embed=embed, view=view, wait=True
+                )
+                view._set_message(message)
             else:
                 await interaction.followup.send(embed=embed)
 

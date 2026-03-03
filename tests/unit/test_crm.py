@@ -549,6 +549,14 @@ class TestCRMCog:
         assert any("📌 **cOnboardingState:** pending" in value for value in values)
         assert any("🔗 [View in CRM](" in value for value in values)
 
+        view = send_kwargs["view"]
+        queue_rows = getattr(view, "queue_rows", None)
+        assert queue_rows is not None
+        queued_names = {row.get("name") for row in queue_rows}
+        assert queued_names == {"Alice", "Eli"}
+        for row in queue_rows:
+            assert row.get("status") not in {"onboarded", "waitlist", "rejected"}
+
     @pytest.mark.asyncio
     async def test_view_onboarding_queue_empty_when_only_excluded(
         self, crm_cog, mock_interaction
@@ -632,6 +640,70 @@ class TestCRMCog:
         assert "embed" in send_kwargs
         assert "view" in send_kwargs
         assert send_kwargs["view"].total_pages > 1
+
+    def test_format_onboarding_updated_at_normalizes_timezone(self, crm_cog):
+        """Timestamps should be normalized consistently for display."""
+        assert crm_cog._format_onboarding_updated_at(0) == "1970-01-01 00:00 UTC"
+        assert (
+            crm_cog._format_onboarding_updated_at("2026-03-03T12:00:00-05:00")
+            == "2026-03-03 17:00 UTC"
+        )
+        assert crm_cog._format_onboarding_updated_at("2026-03-03T12:00:00") == (
+            "2026-03-03 12:00"
+        )
+        assert crm_cog._format_onboarding_updated_at("2026-03-03T00:00:00Z") == (
+            "2026-03-03"
+        )
+
+    @pytest.mark.asyncio
+    async def test_resume_create_contact_view_cancel_path(
+        self, crm_cog, mock_interaction
+    ):
+        """Canceling contact creation should not create a contact."""
+        original_interaction = Mock()
+        original_interaction.user = Mock(id=101)
+
+        mock_interaction.user.id = 101
+        mock_interaction.response = AsyncMock()
+        mock_interaction.response.send_message = AsyncMock()
+        mock_interaction.followup = AsyncMock()
+        mock_interaction.followup.send = AsyncMock()
+        mock_interaction.message = AsyncMock()
+        mock_interaction.message.edit = AsyncMock()
+
+        crm_cog._audit_command = Mock()
+
+        view = ResumeCreateContactView(
+            crm_cog=crm_cog,
+            interaction=original_interaction,
+            file_content=b"resume-bytes",
+            filename="candidate.pdf",
+            file_size=1024,
+            search_term=None,
+            overwrite=False,
+            link_user=None,
+            inferred_contact_meta={"reason": "no_matching_contact"},
+            target_scope="resume_inferred",
+        )
+
+        cancel_button = next(
+            child
+            for child in view.children
+            if isinstance(child, discord.ui.Button) and child.label == "Cancel"
+        )
+
+        await cancel_button.callback(mock_interaction)
+
+        crm_cog.espo_api.request.assert_not_called()
+        crm_cog._audit_command.assert_called_once()
+        mock_interaction.response.send_message.assert_called_once_with(
+            "Contact creation cancelled. No changes were made.",
+            ephemeral=True,
+        )
+        assert all(
+            isinstance(item, discord.ui.Button) and item.disabled
+            for item in view.children
+        )
 
     @pytest.mark.asyncio
     async def test_view_skills_self_uses_structured_attrs(
