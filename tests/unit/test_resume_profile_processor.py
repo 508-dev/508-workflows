@@ -191,7 +191,7 @@ def test_apply_profile_updates_adds_discord_and_filters_email() -> None:
     assert "emailAddress" not in update_payload
     assert update_payload["cGitHubUsername"] == "new-gh"
     assert update_payload["phoneNumber"] == "14155551234"
-    assert update_payload["skills"] == ["Python", "FastAPI"]
+    assert update_payload["skills"] == ["python", "fastapi"]
     assert update_payload["cDiscordUserID"] == "123"
     assert update_payload["cDiscordUsername"] == "member#0001 (ID: 123)"
 
@@ -209,7 +209,7 @@ def test_apply_profile_updates_normalizes_csv_skills_to_array() -> None:
     assert result.success is True
     processor.crm.update_contact.assert_called_once()
     update_payload = processor.crm.update_contact.call_args[0][1]
-    assert update_payload["skills"] == ["Python", "FastAPI", "Rust"]
+    assert update_payload["skills"] == ["python", "fastapi", "rust"]
 
 
 def test_extract_profile_proposal_records_failed_run() -> None:

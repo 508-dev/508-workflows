@@ -18,6 +18,7 @@ class EspoCRMClient:
     def __init__(self) -> None:
         api_url = settings.espo_base_url.rstrip("/") + "/api/v1"
         self.api = EspoAPI(api_url, settings.espo_api_key)
+        self.skills_extractor = SkillsExtractor()
 
     def get_contact(self, contact_id: str) -> ContactData:
         try:
@@ -45,8 +46,19 @@ class EspoCRMClient:
 
     def update_contact_skills(self, contact_id: str, skills: list[str]) -> bool:
         try:
-            skills_text = ", ".join(skills)
-            self.api.request("PATCH", f"Contact/{contact_id}", {"skills": skills_text})
+            normalized: list[str] = []
+            seen: set[str] = set()
+            for raw_skill in skills:
+                canonical = self.skills_extractor.canonicalize_skill(str(raw_skill))
+                if not canonical:
+                    continue
+                key = canonical.casefold()
+                if key in seen:
+                    continue
+                seen.add(key)
+                normalized.append(canonical)
+
+            self.api.request("PATCH", f"Contact/{contact_id}", {"skills": normalized})
             return True
         except EspoAPIError as exc:
             logger.error("Error updating contact %s skills: %s", contact_id, exc)
@@ -176,9 +188,12 @@ class ContactSkillsProcessor:
 
         deduped_skills: dict[str, str] = {}
         for skill in all_skills:
-            key = skill.casefold()
+            canonical = self.skills_extractor.canonicalize_skill(str(skill))
+            if not canonical:
+                continue
+            key = canonical.casefold()
             if key not in deduped_skills:
-                deduped_skills[key] = skill
+                deduped_skills[key] = canonical
 
         unique_skills = sorted(deduped_skills.values())
         avg_confidence = confidence_sum / processed_count if processed_count else 0.0

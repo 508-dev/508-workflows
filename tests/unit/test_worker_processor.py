@@ -35,3 +35,7 @@ def test_process_contact_skills_merges_and_updates() -> None:
     assert result.success is True
     assert sorted(result.new_skills) == ["docker", "fastapi"]
     assert set(result.updated_skills) == {"python", "redis", "fastapi", "docker"}
+    processor.espocrm_client.update_contact_skills.assert_called_once_with(
+        "contact-1",
+        ["python", "redis", "fastapi", "docker"],
+    )

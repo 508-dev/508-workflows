@@ -108,3 +108,23 @@ def test_intake_form_processor_rejects_duplicate_contacts() -> None:
 
     assert result["success"] is False
     assert result["error"] == "Multiple contacts found for email"
+
+
+def test_build_intake_updates_normalizes_form_skills_to_lowercase() -> None:
+    """Skill tags from form labels should be canonicalized to lowercase list values."""
+    processor = IntakeFormProcessor()
+
+    updates = processor._build_intake_updates(
+        email="new@example.com",
+        first_name="New",
+        last_name="Person",
+        payload={
+            "skill_proficiency_next_js": "5",
+            "skill_proficiency_project_management": "4",
+            "skill_proficiency_ai_ml_engineering": "1",
+            "github_username": "person",
+        },
+        include_email=True,
+    )
+
+    assert updates["skills"] == ["ai ml engineering", "next js", "project management"]

@@ -327,7 +327,7 @@ class IntakeFormProcessor:
         form_skill_attrs = self._build_form_skill_attrs(payload)
         if form_skill_attrs:
             updates["cSkillAttrs"] = json.dumps(form_skill_attrs)
-            updates["skills"] = ", ".join(sorted(form_skill_attrs.keys()))
+            updates["skills"] = sorted(form_skill_attrs.keys())
 
         submitted_at = self._normalize_text(payload.get("submitted_at"))
         completed_field = (settings.crm_intake_completed_field or "").strip()
@@ -351,7 +351,10 @@ class IntakeFormProcessor:
             strength = self._parse_skill_strength(normalized)
             if strength is None:
                 continue
-            skills[label] = {"strength": strength}
+            normalized_label = self.skills_extractor.canonicalize_skill(label)
+            if not normalized_label:
+                continue
+            skills[normalized_label] = {"strength": strength}
         return skills
 
     def _build_description(self, payload: Mapping[str, Any]) -> str | None:
@@ -413,7 +416,7 @@ class IntakeFormProcessor:
             parsed_attrs = self._parse_skill_attrs(extracted_skills.skill_attrs)
             if parsed_attrs:
                 updates["cSkillAttrs"] = json.dumps(parsed_attrs)
-                updates["skills"] = ", ".join(sorted(parsed_attrs.keys()))
+                updates["skills"] = sorted(parsed_attrs.keys())
         except Exception as exc:
             logger.warning("Resume skill extraction failed: %s", exc)
         return updates
@@ -449,7 +452,7 @@ class IntakeFormProcessor:
         if attrs is None:
             return parsed
         for raw_name, raw_attr in attrs.items():
-            normalized_name = self._normalize_text(raw_name)
+            normalized_name = self.skills_extractor.canonicalize_skill(str(raw_name))
             if not normalized_name:
                 continue
             strength = raw_attr

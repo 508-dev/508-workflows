@@ -389,7 +389,7 @@ class ResumeProfileProcessor:
         normalized: list[str] = []
         seen: set[str] = set()
         for raw_skill in raw_skills:
-            skill = str(raw_skill).strip()
+            skill = str(raw_skill).strip().casefold()
             if not skill:
                 continue
             key = skill.casefold()
