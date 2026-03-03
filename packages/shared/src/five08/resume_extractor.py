@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from datetime import datetime, timezone
 from typing import Any, Mapping
 from urllib.parse import urlsplit
@@ -56,6 +57,8 @@ TECH_STACK_WEBSITE_DISALLOWED_PREFIXES = frozenset(
         "asp",
         "next",
         "node",
+        "express",
+        "passport",
         "react",
         "vue",
         "angular",
@@ -423,7 +426,11 @@ def _normalize_role_collection(value: Any) -> list[str]:
 
 
 def _normalize_website_url(value: str) -> str:
-    candidate = value.strip().strip(")]},.;:")
+    candidate = unicodedata.normalize("NFKC", value)
+    if any(ord(ch) > 127 for ch in candidate):
+        return ""
+    candidate = candidate.strip()
+    candidate = candidate.strip(")]},.;:")
     if not candidate:
         return ""
 
@@ -1172,7 +1179,9 @@ class ResumeProfileExtractor:
             "- treat a candidate as personal_website only when confidence is high (>=0.85)\n"
             "- treat a candidate as social_profile when confidence is high (>=0.7)\n"
             "- route candidate urls to website_links and social_links by type and host-level validation\n"
-            '- personal_website candidates should be explicit portfolio/homepage signals (for example: "portfolio", "personal website", "homepage", contact header), not technology/framework mentions\n'
+            '- personal_website candidates should be explicit portfolio/homepage/contact signals (for example: "portfolio", "personal website", "homepage", contact header), not technology/framework mentions\n'
+            '- trust the explicit source labels and sections (for example lines like "website:", "portfolio:", "my website", "homepage") when selecting personal_website candidates\n'
+            "- if a token can be either a technology name and a URL, default to excluding it from candidates unless context is clearly personal\n"
             "- website_links/social_links should mirror high-confidence candidates; if website_url_candidates are unavailable, use website_links/social_links and heuristics as fallback\n"
             "- prefer explicit values from header/contact sections\n"
             "- treat website_links as personal or portfolio homepage URLs only\n"
