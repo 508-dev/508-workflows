@@ -169,14 +169,22 @@ class ResumeProfileProcessor:
                 proposed_changes=proposed_changes,
                 skipped=skipped,
             )
+            current_seniority = self._normalize_seniority(contact.get("cSeniority"))
+            proposed_seniority = self._normalize_seniority(extracted.seniority_level)
             self._collect_change(
                 crm_field="cSeniority",
                 label="Seniority",
-                current=self._normalize_seniority(contact.get("cSeniority")),
-                proposed=self._normalize_seniority(extracted.seniority_level),
+                current=current_seniority,
+                proposed=proposed_seniority,
                 proposed_updates=proposed_updates,
                 proposed_changes=proposed_changes,
                 skipped=skipped,
+                is_blocked=lambda value: bool(
+                    current_seniority
+                    and current_seniority != "unknown"
+                    and value != current_seniority
+                ),
+                blocked_reason="Existing seniority is preserved unless unknown",
             )
             if new_skills:
                 proposed_updates["skills"] = merged_skills

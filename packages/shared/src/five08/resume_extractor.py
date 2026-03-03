@@ -22,11 +22,23 @@ except Exception:  # pragma: no cover
 
 DEFAULT_SKILL_STRENGTH = 3
 EMAIL_REGEX = r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"
+PERSONAL_WEBSITE_CONTEXT_CONFIDENCE = 0.85
+PERSONAL_WEBSITE_CONTEXT_KEYWORDS = (
+    "personal website",
+    "portfolio",
+    "portfolio site",
+    "my website",
+    "web site",
+    "homepage",
+    "website",
+)
 
 SOCIAL_LINK_DOMAINS = {
     "facebook.com",
     "fb.com",
     "instagram.com",
+    "github.com",
+    "linkedin.com",
     "x.com",
     "twitter.com",
     "threads.net",
@@ -34,6 +46,27 @@ SOCIAL_LINK_DOMAINS = {
     "youtube.com",
     "youtube-nocookie.com",
 }
+PERSONAL_WEBSITE_DISALLOWED_HOSTS = {
+    "github.com",
+    "linkedin.com",
+    "node.js",
+}
+PERSONAL_WEBSITE_MIN_CONFIDENCE = 0.7
+LLM_WEBSITE_URL_MIN_CONFIDENCE = 0.45
+LLM_SOCIAL_URL_MIN_CONFIDENCE = 0.7
+LLM_PERSONAL_URL_MIN_CONFIDENCE = 0.85
+LLM_URL_CANDIDATE_KIND_PERSONAL = "personal_website"
+LLM_URL_CANDIDATE_KIND_SOCIAL = "social_profile"
+LLM_URL_CANDIDATE_KIND_OTHER = "other"
+MARKDOWN_URL_PATTERN = re.compile(r"\[[^\]]+\]\(\s*([^)]+?)\s*\)")
+SCHEME_URL_PATTERN = re.compile(r"(?i)\b(?:https?://|www\.)[^\s\]\[()\"<>]+")
+BARE_DOMAIN_URL_PATTERN = re.compile(
+    r"(?i)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?:/[^\s\]\[()\"<>]*)?"
+)
+LINKEDIN_PROFILE_PATTERN = re.compile(
+    r"(?:https?://)?(?:[\w.-]+\.)?linkedin\.com/in/[A-Za-z0-9_%-]+/?",
+    flags=re.IGNORECASE,
+)
 
 
 def _bounded_confidence(value: Any, fallback: float) -> float:
@@ -105,7 +138,7 @@ def _normalize_scalar(value: Any) -> str | None:
 def _normalize_github(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
-    candidate = value.strip()
+    candidate = value.strip().strip("/")
     if not candidate:
         return None
 
@@ -116,6 +149,10 @@ def _normalize_github(value: Any) -> str | None:
     )
     if github_match:
         candidate = github_match.group(1)
+    elif candidate.startswith("@"):
+        candidate = candidate[1:]
+    elif not re.fullmatch(r"[A-Za-z0-9-]{1,39}", candidate):
+        return None
 
     candidate = candidate.lstrip("@").strip().strip("/")
     return candidate or None
@@ -253,6 +290,112 @@ def _normalize_website_links(value: Any) -> list[str]:
     return normalized_links
 
 
+def _normalize_url_candidate_kind(value: Any) -> str:
+    if not isinstance(value, str):
+        return LLM_URL_CANDIDATE_KIND_OTHER
+    normalized = value.strip().casefold().replace("-", "_").replace(" ", "_")
+    if normalized in {
+        "personal",
+        "personal_website",
+        "portfolio",
+        "homepage",
+        "website",
+    }:
+        return LLM_URL_CANDIDATE_KIND_PERSONAL
+    if normalized in {
+        "social",
+        "social_profile",
+        "social_url",
+        "social_link",
+        "social_profile_url",
+    }:
+        return LLM_URL_CANDIDATE_KIND_SOCIAL
+    return LLM_URL_CANDIDATE_KIND_OTHER
+
+
+def _extract_website_url_candidates(
+    value: Any,
+) -> list[tuple[str, str, float]]:
+    if not isinstance(value, (list, tuple)):
+        return []
+
+    normalized: dict[str, tuple[str, str, float]] = {}
+    for raw_candidate in value:
+        if not isinstance(raw_candidate, Mapping):
+            continue
+
+        raw_url = raw_candidate.get("url")
+        if not isinstance(raw_url, str):
+            continue
+
+        normalized_url = _normalize_website_url(raw_url)
+        if not normalized_url:
+            continue
+
+        kind = _normalize_url_candidate_kind(raw_candidate.get("kind"))
+        confidence = _bounded_confidence(
+            raw_candidate.get("confidence"),
+            LLM_WEBSITE_URL_MIN_CONFIDENCE,
+        )
+        if confidence < LLM_WEBSITE_URL_MIN_CONFIDENCE:
+            continue
+
+        key = normalized_url.casefold()
+        prior = normalized.get(key)
+        if prior is not None and prior[2] >= confidence:
+            continue
+        normalized[key] = (normalized_url, kind, confidence)
+
+    return list(normalized.values())
+
+
+def _has_personal_website_context(
+    resume_text: str,
+    start_index: int,
+    end_index: int,
+) -> bool:
+    context_start = max(0, start_index - 50)
+    context_end = min(len(resume_text), end_index + 50)
+    context = resume_text[context_start:context_end].casefold()
+    return any(keyword in context for keyword in PERSONAL_WEBSITE_CONTEXT_KEYWORDS)
+
+
+def _build_website_and_social_from_candidates(
+    llm_candidates: list[tuple[str, str, float]],
+    heuristic_candidates: list[tuple[str, float]],
+) -> tuple[list[str], list[str]]:
+    urls_to_consider: list[str] = []
+    seen: set[str] = set()
+
+    for candidate_url, candidate_kind, candidate_confidence in llm_candidates:
+        if candidate_kind == LLM_URL_CANDIDATE_KIND_PERSONAL:
+            if candidate_confidence < LLM_PERSONAL_URL_MIN_CONFIDENCE:
+                continue
+        elif candidate_kind == LLM_URL_CANDIDATE_KIND_SOCIAL:
+            if candidate_confidence < LLM_SOCIAL_URL_MIN_CONFIDENCE:
+                continue
+        elif candidate_confidence < PERSONAL_WEBSITE_MIN_CONFIDENCE:
+            continue
+
+        candidate_key = candidate_url.casefold()
+        if candidate_key in seen:
+            continue
+        seen.add(candidate_key)
+        urls_to_consider.append(candidate_url)
+
+    for candidate_url, candidate_confidence in heuristic_candidates:
+        if candidate_confidence < PERSONAL_WEBSITE_MIN_CONFIDENCE:
+            continue
+
+        candidate_key = candidate_url.casefold()
+        if candidate_key in seen:
+            continue
+        seen.add(candidate_key)
+        urls_to_consider.append(candidate_url)
+
+    return _split_social_and_website_links(urls_to_consider)
+
+
 def _is_social_url(value: str) -> bool:
     try:
         host = urlsplit(value).hostname
@@ -281,6 +424,8 @@ def _split_social_and_website_links(
         candidate = raw_link.strip().rstrip("/")
         if not candidate:
             continue
+        if _is_personal_website_disallowed(candidate) and not _is_social_url(candidate):
+            continue
         if _is_social_url(candidate):
             social_key = candidate.casefold()
             if social_key in seen_social:
@@ -296,6 +441,39 @@ def _split_social_and_website_links(
         normal_links.append(candidate)
 
     return normal_links, social_links
+
+
+def _is_personal_website_disallowed(url: str) -> bool:
+    host = urlsplit(url).hostname
+    if not host:
+        return False
+    normalized_host = host.casefold()
+    if normalized_host.startswith("www."):
+        normalized_host = normalized_host[4:]
+    return normalized_host in PERSONAL_WEBSITE_DISALLOWED_HOSTS
+
+
+def _extract_github_username(links: list[str]) -> str | None:
+    for raw_link in links:
+        if not isinstance(raw_link, str):
+            continue
+        username = _normalize_github(raw_link)
+        if username:
+            return username
+    return None
+
+
+def _extract_linkedin_url_from_links(links: list[str]) -> str | None:
+    for raw_link in links:
+        if not isinstance(raw_link, str):
+            continue
+        match = LINKEDIN_PROFILE_PATTERN.search(raw_link)
+        if match is None:
+            continue
+        linked_in_url = _normalize_linkedin(match.group(0))
+        if linked_in_url is not None:
+            return linked_in_url
+    return None
 
 
 def _normalize_seniority(value: Any) -> str | None:
@@ -474,18 +652,42 @@ class ResumeProfileExtractor:
                 raise ValueError("LLM returned empty content")
 
             parsed = _parse_json_object(raw_content)
-            parsed_website_links = _normalize_website_links(parsed.get("website_links"))
-            parsed_website_links, parsed_social_links = _split_social_and_website_links(
-                parsed_website_links
+            parsed_url_candidates = _extract_website_url_candidates(
+                parsed.get("website_url_candidates")
             )
-            heuristic_links = self._extract_website_links(resume_text)
-            if heuristic_links:
-                merged_links = _normalize_website_links(
-                    [*parsed_website_links, *parsed_social_links, *heuristic_links]
+            legacy_website_links = _normalize_website_links(parsed.get("website_links"))
+            legacy_social_links = _normalize_website_links(parsed.get("social_links"))
+            heuristic_candidates = (
+                ResumeProfileExtractor._extract_website_link_candidates(resume_text)
+            )
+            parsed_website_links, parsed_social_links = (
+                _build_website_and_social_from_candidates(
+                    parsed_url_candidates,
+                    heuristic_candidates,
                 )
-                parsed_website_links, parsed_social_links = (
-                    _split_social_and_website_links(merged_links)
+            )
+            if not parsed_url_candidates and (
+                legacy_website_links or legacy_social_links
+            ):
+                legacy_website_links, legacy_social_links = (
+                    _split_social_and_website_links(
+                        [*legacy_website_links, *legacy_social_links]
+                    )
                 )
+                parsed_website_set = {u.casefold() for u in parsed_website_links}
+                parsed_social_set = {u.casefold() for u in parsed_social_links}
+                for item in legacy_website_links:
+                    if item.casefold() not in parsed_website_set:
+                        parsed_website_set.add(item.casefold())
+                        parsed_website_links.append(item)
+                for item in legacy_social_links:
+                    if item.casefold() not in parsed_social_set:
+                        parsed_social_set.add(item.casefold())
+                        parsed_social_links.append(item)
+            derived_links = [*parsed_website_links, *parsed_social_links]
+            github_username = _normalize_github(parsed.get("github_username"))
+            if not github_username:
+                github_username = _extract_github_username(derived_links)
             parsed_skills, parsed_skill_attrs = _normalize_skill_payload(
                 parsed.get("skills"),
                 parsed.get("skill_attrs"),
@@ -497,7 +699,19 @@ class ResumeProfileExtractor:
                 parsed_emails = parsed_emails[1:]
             linkedin_url = _normalize_linkedin(parsed.get("linkedin_url")) or (
                 self._extract_linkedin_url(resume_text)
+                or _extract_linkedin_url_from_links(derived_links)
             )
+            if github_username:
+                parsed_website_links = [
+                    item
+                    for item in parsed_website_links
+                    if _normalize_github(item) != github_username
+                ]
+                parsed_social_links = [
+                    item
+                    for item in parsed_social_links
+                    if _normalize_github(item) != github_username
+                ]
             linkedin_profile_key = _linkedin_profile_key(linkedin_url)
             if linkedin_profile_key:
                 parsed_website_links = [
@@ -514,7 +728,7 @@ class ResumeProfileExtractor:
                 name=_normalize_name(parsed.get("name")),
                 email=parsed_email,
                 additional_emails=parsed_emails,
-                github_username=_normalize_github(parsed.get("github_username")),
+                github_username=github_username,
                 linkedin_url=linkedin_url,
                 phone=_normalize_phone(parsed.get("phone")),
                 website_links=parsed_website_links,
@@ -566,6 +780,15 @@ class ResumeProfileExtractor:
         website_links, social_links = _split_social_and_website_links(
             website_and_social
         )
+        github_username = (
+            _normalize_github(github_match.group(1)) if github_match else None
+        )
+        if not github_username:
+            github_username = _extract_github_username(website_and_social)
+        if not linkedin_url:
+            linkedin_url = _extract_linkedin_url_from_links(
+                [*website_links, *social_links]
+            )
         linkedin_profile_key = _linkedin_profile_key(linkedin_url)
         if linkedin_profile_key:
             website_links = [
@@ -578,6 +801,17 @@ class ResumeProfileExtractor:
                 for item in social_links
                 if _linkedin_profile_key(item) != linkedin_profile_key
             ]
+        if github_username:
+            website_links = [
+                item
+                for item in website_links
+                if _normalize_github(item) != github_username
+            ]
+            social_links = [
+                item
+                for item in social_links
+                if _normalize_github(item) != github_username
+            ]
         availability = _normalize_scalar(source_texts.get("availability"))
         if not availability:
             availability = _normalize_scalar(source_texts.get("rate"))
@@ -588,9 +822,7 @@ class ResumeProfileExtractor:
             name=name_match,
             email=extracted_emails[0] if extracted_emails else None,
             additional_emails=extracted_emails[1:],
-            github_username=(
-                _normalize_github(github_match.group(1)) if github_match else None
-            ),
+            github_username=github_username,
             linkedin_url=linkedin_url,
             phone=_normalize_phone(phone_match.group(0)) if phone_match else None,
             website_links=website_links,
@@ -650,6 +882,9 @@ class ResumeProfileExtractor:
             "Return JSON with exact keys and no extras:\n"
             '{"name": string|null, "email": string|null, "additional_emails": string[]|null, '
             '"github_username": string|null, "linkedin_url": string|null, '
+            '"website_url_candidates": ['
+            '{"url": string|null, "kind": "personal_website|social_profile|other", '
+            '"confidence": number, "reason": string|null}|null], '
             '"phone": string|null, "website_links": string[]|null, '
             '"social_links": string[]|null, '
             '"address_country": string|null, '
@@ -659,7 +894,19 @@ class ResumeProfileExtractor:
             '"skill_attrs": {"<skill>": {"strength": 1-5}}|null, '
             '"confidence": number}\n'
             "Rules:\n"
+            "- For each explicit website/social URL-like string in the source, emit website_url_candidates entries\n"
+            "- each candidate must include a 0-1 confidence score\n"
+            "- kind must be: personal_website, social_profile, or other\n"
+            "- treat a candidate as personal_website only when confidence is high (>=0.85)\n"
+            "- treat a candidate as social_profile when confidence is high (>=0.7)\n"
+            "- route candidate urls to website_links and social_links by type and host-level validation\n"
+            "- website_links/social_links should mirror high-confidence candidates; if website_url_candidates are unavailable, use website_links/social_links and heuristics as fallback\n"
             "- prefer explicit values from header/contact sections\n"
+            "- treat website_links as personal or portfolio homepage URLs only\n"
+            "- do not include github.com or linkedin.com profile URLs in website_links\n"
+            "- if a URL is a social profile, place it into dedicated profile fields (github_username, linkedin_url) or social_links for cSocialLinks\n"
+            "- infer URLs from regex-like patterns in the provided text, including markdown links\n"
+            "- when in doubt, omit website URLs (be conservative)\n"
             "- for github_username return username only (no URL, no @)\n"
             "- for linkedin_url return full linkedin profile URL when available\n"
             "- infer linkedin_url and website_links from bare domains when scheme is missing\n"
@@ -696,11 +943,7 @@ class ResumeProfileExtractor:
 
     @staticmethod
     def _extract_linkedin_url(resume_text: str) -> str | None:
-        match = re.search(
-            r"(?:https?://)?(?:[\w.-]+\.)?linkedin\.com/in/[A-Za-z0-9_%-]+/?",
-            resume_text,
-            flags=re.IGNORECASE,
-        )
+        match = LINKEDIN_PROFILE_PATTERN.search(resume_text)
         if not match:
             return None
         return _normalize_linkedin(match.group(0))
@@ -824,17 +1067,50 @@ class ResumeProfileExtractor:
         return [], {}
 
     @staticmethod
-    def _extract_website_links(resume_text: str) -> list[str]:
-        matches: list[str] = []
-        for match in re.finditer(
-            r"(?i)\b(?:https?://|www\.)[^\s\]\[()\"<>]+", resume_text
-        ):
-            matches.append(match.group(0))
-        for match in re.finditer(
-            r"(?i)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?:/[^\s\]\[()\"<>]*)?",
-            resume_text,
-        ):
+    def _extract_website_link_candidates(
+        resume_text: str,
+    ) -> list[tuple[str, float]]:
+        matches: list[tuple[str, float]] = []
+        for match in MARKDOWN_URL_PATTERN.finditer(resume_text):
+            raw_url = match.group(1).strip().strip(")]},.;:")
+            if not raw_url:
+                continue
+            matches.append((raw_url, 1.0))
+
+        for match in SCHEME_URL_PATTERN.finditer(resume_text):
+            matches.append((match.group(0), 1.0))
+
+        for match in BARE_DOMAIN_URL_PATTERN.finditer(resume_text):
             if match.start() > 0 and resume_text[match.start() - 1] == "@":
                 continue
-            matches.append(match.group(0))
-        return _normalize_website_links(matches)
+            raw_url = match.group(0)
+            confidence = PERSONAL_WEBSITE_MIN_CONFIDENCE
+            if _has_personal_website_context(
+                resume_text,
+                match.start(),
+                match.end(),
+            ):
+                confidence = PERSONAL_WEBSITE_CONTEXT_CONFIDENCE
+            matches.append((raw_url, confidence))
+
+        normalized_links: list[tuple[str, float]] = []
+        seen: set[str] = set()
+        for raw_link, confidence in matches:
+            normalized_link = _normalize_website_url(raw_link.strip())
+            if not normalized_link:
+                continue
+            normalized_key = normalized_link.casefold()
+            if normalized_key in seen:
+                continue
+            seen.add(normalized_key)
+            normalized_links.append((normalized_link, confidence))
+        return normalized_links
+
+    @staticmethod
+    def _extract_website_links(resume_text: str) -> list[str]:
+        return [
+            link
+            for link, _ in ResumeProfileExtractor._extract_website_link_candidates(
+                resume_text
+            )
+        ]
