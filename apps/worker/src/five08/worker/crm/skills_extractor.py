@@ -215,7 +215,9 @@ class SkillsExtractor:
             numeric = int(float(raw))
         except Exception:
             return None
-        return max(1, min(5, numeric))
+        if numeric < 1 or numeric > 5:
+            return None
+        return numeric
 
     def _parse_skill_with_strength(self, value: str) -> tuple[str, int | None]:
         raw = value.strip()

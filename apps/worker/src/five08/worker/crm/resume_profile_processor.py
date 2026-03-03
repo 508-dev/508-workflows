@@ -274,7 +274,6 @@ class ResumeProfileProcessor:
                 extracted_attrs=extracted_skills_result.skill_attrs,
                 merged_skills=merged_skills,
             )
-            skills_attrs_updated = merged_skill_attrs != existing_skill_attrs
 
             proposed_updates: dict[str, Any] = {}
             proposed_changes: list[ResumeFieldChange] = []
@@ -318,7 +317,7 @@ class ResumeProfileProcessor:
                 proposed_changes=proposed_changes,
                 skipped=skipped,
             )
-            if new_skills or skills_attrs_updated:
+            if new_skills:
                 proposed_updates["skills"] = merged_skills
                 proposed_changes.append(
                     ResumeFieldChange(
@@ -334,7 +333,7 @@ class ResumeProfileProcessor:
                         proposed=self._format_skills_with_strength(
                             merged_skills, merged_skill_attrs
                         ),
-                        reason="Updated skills from resume extraction",
+                        reason="Added skills from resume extraction",
                     )
                 )
 
