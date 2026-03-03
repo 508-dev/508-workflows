@@ -486,6 +486,7 @@ class TestCRMCog:
         steering_role = Mock()
         steering_role.name = "Steering Committee"
         mock_interaction.user.roles = [steering_role]
+        crm_cog._audit_command = Mock()
 
         with patch.object(
             crm_cog,
@@ -505,6 +506,15 @@ class TestCRMCog:
         embed = mock_interaction.followup.send.call_args[1]["embed"]
         assert embed.title == "⚠️ Multiple Contacts Found"
         assert len(embed.fields) == 2
+        crm_cog._audit_command.assert_called_once()
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["action"] == "crm.assign_onboarder"
+        assert audit_kwargs["result"] == "error"
+        assert audit_kwargs["metadata"] == {
+            "contact": "john",
+            "onboarder": "jane",
+            "contacts_found": 2,
+        }
 
     @pytest.mark.asyncio
     async def test_assign_onboarder_missing_contact(self, crm_cog, mock_interaction):
@@ -543,6 +553,7 @@ class TestCRMCog:
         steering_role = Mock()
         steering_role.name = "Steering Committee"
         mock_interaction.user.roles = [steering_role]
+        crm_cog._audit_command = Mock()
 
         with patch.object(
             crm_cog,
@@ -556,6 +567,54 @@ class TestCRMCog:
         crm_cog.espo_api.request.assert_not_called()
         message = mock_interaction.followup.send.call_args[0][0]
         assert "Could not resolve a valid 508 onboarder username." in message
+        crm_cog._audit_command.assert_called_once()
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["action"] == "crm.assign_onboarder"
+        assert audit_kwargs["result"] == "error"
+        assert audit_kwargs["metadata"] == {
+            "contact": "john",
+            "onboarder": "<@987654321>",
+        }
+
+    @pytest.mark.asyncio
+    async def test_assign_onboarder_missing_onboarder_field_records_error(
+        self, crm_cog, mock_interaction
+    ):
+        """Contacts without an onboarder field should return an actionable error."""
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+        crm_cog._audit_command = Mock()
+
+        with patch.object(
+            crm_cog,
+            "_search_contact_for_linking",
+            new=AsyncMock(return_value=[{"id": "contact123", "name": "John Doe"}]),
+        ):
+            crm_cog.espo_api.request.return_value = {
+                "id": "contact123",
+                "name": "John Doe",
+            }
+            await crm_cog.assign_onboarder.callback(
+                crm_cog, mock_interaction, "john", "jane"
+            )
+
+        crm_cog.espo_api.request.assert_called_once_with("GET", "Contact/contact123")
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert (
+            "Could not locate a known onboarder field for this CRM contact." in message
+        )
+        crm_cog._audit_command.assert_called_once()
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["action"] == "crm.assign_onboarder"
+        assert audit_kwargs["result"] == "error"
+        assert audit_kwargs["metadata"] == {
+            "contact_id": "contact123",
+            "onboarder": "jane",
+            "reason": "missing_onboarder_field",
+        }
+        assert audit_kwargs["resource_type"] == "crm_contact"
+        assert audit_kwargs["resource_id"] == "contact123"
 
     @pytest.mark.asyncio
     async def test_assign_onboarder_handles_espo_api_error(
@@ -2469,6 +2528,209 @@ class TestCRMCog:
         assert audit_kwargs["action"] == "crm.upload_resume"
         assert audit_kwargs["result"] == "error"
         assert audit_kwargs["metadata"]["target_scope"] == "self"
+
+    @pytest.mark.asyncio
+    async def test_upload_resume_invalid_file_type_records_error(
+        self, crm_cog, mock_interaction
+    ):
+        """Uploading non-PDF/DOC/DOCX/TXT files should be recorded as an error."""
+        mock_interaction.user.id = 101
+
+        resume_file = Mock()
+        resume_file.filename = "image.png"
+        resume_file.size = 1024
+
+        crm_cog._audit_command = Mock()
+
+        with patch(
+            "five08.discord_bot.cogs.crm.settings.api_shared_secret",
+            "test-shared-secret",
+        ):
+            await crm_cog.upload_resume.callback(
+                crm_cog,
+                mock_interaction,
+                resume_file,
+                None,
+                False,
+                None,
+            )
+
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert (
+            "Invalid file type. Please upload a PDF, DOC, DOCX, or TXT file." in message
+        )
+        crm_cog._audit_command.assert_called_once()
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["action"] == "crm.upload_resume"
+        assert audit_kwargs["result"] == "error"
+        assert audit_kwargs["metadata"] == {
+            "filename": "image.png",
+            "reason": "invalid_file_type",
+        }
+
+    @pytest.mark.asyncio
+    async def test_upload_resume_file_too_large_records_error(
+        self, crm_cog, mock_interaction
+    ):
+        """Uploading a resume above 10MB should be recorded as an error."""
+        mock_interaction.user.id = 101
+
+        resume_file = Mock()
+        resume_file.filename = "resume.pdf"
+        resume_file.size = 10 * 1024 * 1024 + 1
+
+        crm_cog._audit_command = Mock()
+
+        with patch(
+            "five08.discord_bot.cogs.crm.settings.api_shared_secret",
+            "test-shared-secret",
+        ):
+            await crm_cog.upload_resume.callback(
+                crm_cog,
+                mock_interaction,
+                resume_file,
+                None,
+                False,
+                None,
+            )
+
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert "File too large. Maximum size is 10MB." in message
+        crm_cog._audit_command.assert_called_once()
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["action"] == "crm.upload_resume"
+        assert audit_kwargs["result"] == "error"
+        assert audit_kwargs["metadata"] == {
+            "filename": "resume.pdf",
+            "size_bytes": 10485761,
+            "reason": "file_too_large",
+        }
+
+    @pytest.mark.asyncio
+    async def test_upload_resume_search_term_multiple_matches_records_error(
+        self, crm_cog, mock_interaction
+    ):
+        """Search-based uploads should require a unique match."""
+        mock_interaction.user.id = 101
+        mock_interaction.user.name = "Requester"
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+
+        resume_file = Mock()
+        resume_file.filename = "candidate.pdf"
+        resume_file.size = 1024
+        resume_file.read = AsyncMock(return_value=b"resume-bytes")
+
+        crm_cog._audit_command = Mock()
+
+        with (
+            patch(
+                "five08.discord_bot.cogs.crm.check_user_roles_with_hierarchy",
+                return_value=True,
+            ),
+            patch.object(
+                crm_cog,
+                "_search_contact_for_linking",
+                new=AsyncMock(
+                    return_value=[{"id": "contact123"}, {"id": "contact456"}]
+                ),
+            ),
+            patch.object(
+                crm_cog,
+                "_upload_resume_attachment_to_contact",
+                new=AsyncMock(),
+            ) as mock_upload,
+            patch(
+                "five08.discord_bot.cogs.crm.settings.api_shared_secret",
+                "test-shared-secret",
+            ),
+        ):
+            await crm_cog.upload_resume.callback(
+                crm_cog,
+                mock_interaction,
+                resume_file,
+                "john",
+                False,
+                None,
+            )
+
+        mock_upload.assert_not_awaited()
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert "⚠️ Multiple contacts found for `john`." in message
+        crm_cog._audit_command.assert_called_once()
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["action"] == "crm.upload_resume"
+        assert audit_kwargs["result"] == "error"
+        assert audit_kwargs["metadata"] == {
+            "search_term": "john",
+            "filename": "candidate.pdf",
+            "contact_found": False,
+            "target_scope": "other",
+            "reason": "multiple_contacts",
+        }
+
+    @pytest.mark.asyncio
+    async def test_upload_resume_inferred_multiple_matches_records_error(
+        self, crm_cog, mock_interaction
+    ):
+        """Resume inference returning multiple matches should be logged as an error."""
+        mock_interaction.user.id = 101
+        mock_interaction.user.name = "Operator"
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+
+        resume_file = Mock()
+        resume_file.filename = "candidate.pdf"
+        resume_file.size = 1024
+        resume_file.read = AsyncMock(return_value=b"resume-bytes")
+
+        crm_cog._audit_command = Mock()
+
+        with (
+            patch(
+                "five08.discord_bot.cogs.crm.check_user_roles_with_hierarchy",
+                return_value=True,
+            ),
+            patch.object(
+                crm_cog,
+                "_infer_contact_from_resume",
+                new=AsyncMock(
+                    return_value=(
+                        None,
+                        {"reason": "multiple_matches", "value": "jane@example.com"},
+                    )
+                ),
+            ),
+            patch(
+                "five08.discord_bot.cogs.crm.settings.api_shared_secret",
+                "test-shared-secret",
+            ),
+        ):
+            await crm_cog.upload_resume.callback(
+                crm_cog,
+                mock_interaction,
+                resume_file,
+                None,
+                False,
+                None,
+            )
+
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert (
+            "⚠️ Multiple contacts match `jane@example.com` from the resume." in message
+        )
+        crm_cog._audit_command.assert_called_once()
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["action"] == "crm.upload_resume"
+        assert audit_kwargs["result"] == "error"
+        assert audit_kwargs["metadata"] == {
+            "filename": "candidate.pdf",
+            "target_scope": "resume_inferred",
+            "reason": "multiple_matches",
+            "inferred_value": "jane@example.com",
+        }
 
     @pytest.mark.asyncio
     async def test_resume_create_contact_view_logs_create_failure(
