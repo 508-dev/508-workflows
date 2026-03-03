@@ -47,8 +47,6 @@ SOCIAL_LINK_DOMAINS = {
     "youtube-nocookie.com",
 }
 PERSONAL_WEBSITE_DISALLOWED_HOSTS = {
-    "github.com",
-    "linkedin.com",
     "node.js",
     "asp.net",
     "next.js",
