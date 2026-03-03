@@ -92,6 +92,13 @@ curl -X POST "http://localhost:8090/jobs/<job_id>/rerun" \
 - `GET /auth/discord/link/{token}`: Resolve Discord deep link into authenticated dashboard redirect.
 - Auth flows emit best-effort human audit events (`auth.login`, `auth.logout`) under source `admin_dashboard`.
 
+Discord deep-link identity policy:
+
+- `DISCORD_ADMIN_ROLES` controls who can mint/use Discord deep links (`Admin,Owner` recommended).
+- `OIDC_ADMIN_GROUPS` controls normal OIDC dashboard admin membership (`authentik Admins` recommended).
+- `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=true` (default): Discord deep links also require OIDC admin group + OIDC email linked to Discord admin identity.
+- `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=false`: bootstrap mode; Discord deep links skip OIDC group/email-link checks after successful OIDC authentication.
+
 ## Jobs
 
 ### `GET /jobs/{job_id}`

@@ -753,6 +753,99 @@ def test_auth_callback_denied_writes_login_audit(client: TestClient) -> None:
     assert audit_payload.actor_subject == "member@508.dev"
 
 
+def test_auth_callback_discord_link_can_skip_oidc_identity_checks(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    monkeypatch.setattr(
+        api.settings, "discord_link_require_oidc_identity_checks", False
+    )
+    store = Mock()
+    store.pop_oidc_state = AsyncMock(
+        return_value=api.PendingOIDCState(
+            nonce="nonce-1",
+            code_verifier="verifier-1",
+            next_path="/dashboard",
+            discord_link_token="link-1",
+        )
+    )
+    store.get_discord_link = AsyncMock(
+        return_value=api.DiscordLinkGrant(
+            discord_user_id="123456789",
+            next_path="/dashboard",
+        )
+    )
+    store.delete_discord_link = AsyncMock()
+    store.save_session = AsyncMock()
+
+    oidc = Mock()
+    oidc.configured = True
+    oidc.exchange_code = AsyncMock(return_value={"id_token": "id-token-1"})
+    oidc.validate_id_token = AsyncMock(
+        return_value={
+            "sub": "authentik-user-4",
+            "name": "Bootstrap User",
+            "groups": ["not-admin-yet"],
+            "exp": 4_102_444_800,
+        }
+    )
+
+    with (
+        patch("five08.backend.api._auth_store_from_app", return_value=store),
+        patch("five08.backend.api._oidc_client_from_app", return_value=oidc),
+        patch("five08.backend.api._http_client_from_app", return_value=Mock()),
+        patch("five08.backend.api.insert_audit_event"),
+    ):
+        response = client.get(
+            "/auth/callback?code=code-1&state=state-1",
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 302
+    saved_session = store.save_session.call_args.kwargs["payload"]
+    assert saved_session.is_admin is True
+    store.delete_discord_link.assert_awaited_once_with("link-1")
+
+
+def test_auth_discord_link_redirect_skips_session_identity_checks_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    monkeypatch.setattr(
+        api.settings, "discord_link_require_oidc_identity_checks", False
+    )
+    store = Mock()
+    store.get_discord_link = AsyncMock(
+        return_value=api.DiscordLinkGrant(
+            discord_user_id="123456789",
+            next_path="/dashboard",
+        )
+    )
+    store.delete_discord_link = AsyncMock()
+
+    session = api.AuthSession(
+        subject="authentik-user-5",
+        email=None,
+        display_name="Bootstrap User",
+        groups=["Member"],
+        is_admin=False,
+        id_token="id-token-5",
+        expires_at=4_102_444_800,
+    )
+
+    with (
+        patch("five08.backend.api._auth_store_from_app", return_value=store),
+        patch(
+            "five08.backend.api._current_session", return_value=("session-5", session)
+        ),
+    ):
+        response = client.get("/auth/discord/link/link-1", follow_redirects=False)
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "/dashboard"
+    store.delete_discord_link.assert_awaited_once_with("link-1")
+
+
 def test_auth_logout_writes_logout_audit(client: TestClient) -> None:
     store = Mock()
     store.delete_session = AsyncMock()

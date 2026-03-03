@@ -48,7 +48,7 @@ class WorkerSettings(SharedSettings):
     oidc_client_secret: str = ""
     oidc_scope: str = "openid profile email groups"
     oidc_groups_claim: str = "groups"
-    oidc_admin_groups: str = "Admin,Owner,Steering Committee"
+    oidc_admin_groups: str = "authentik Admins"
     oidc_callback_path: str = "/auth/callback"
     oidc_redirect_base_url: str | None = None
     oidc_http_timeout_seconds: float = 8.0
@@ -62,9 +62,10 @@ class WorkerSettings(SharedSettings):
     dashboard_public_base_url: str | None = None
     discord_bot_token: str | None = None
     discord_admin_guild_id: str | None = None
-    discord_admin_roles: str = "Admin,Owner,Steering Committee"
+    discord_admin_roles: str = "Admin,Owner"
     discord_api_timeout_seconds: float = 8.0
     discord_link_ttl_seconds: int = 600
+    discord_link_require_oidc_identity_checks: bool = True
 
     @property
     def google_forms_allowed_form_ids_set(self) -> set[str]:

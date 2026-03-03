@@ -18,6 +18,13 @@ This document captures Discord bot behavior, permissions, and slash command usag
 
 ## Slash Commands
 
+- `/login`
+  - Description: Generate a one-time admin dashboard login link.
+  - Required role: Admin (Owner also passes via hierarchy).
+  - Behavior:
+    - Calls backend `POST /auth/discord/links` using `API_SHARED_SECRET`.
+    - Returns an ephemeral one-time URL with expiry.
+
 - `/create-mailbox`
   - Description: Create a Migadu mailbox and set a contact’s `c508Email`.
   - Prerequisites: `MIGADU_API_USER` and `MIGADU_API_KEY` must be configured (configured in env; command will fail if missing).

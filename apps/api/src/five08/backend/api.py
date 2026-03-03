@@ -1277,6 +1277,9 @@ async def auth_callback_handler(
         display_name = None
 
     audit_actor_subject = (email or str(claims.get("sub", "")).strip()).strip()
+    enforce_discord_link_identity_checks = (
+        settings.discord_link_require_oidc_identity_checks
+    )
 
     if pending.discord_link_token:
         grant = await store.get_discord_link(pending.discord_link_token)
@@ -1291,58 +1294,63 @@ async def auth_callback_handler(
             )
             return JSONResponse({"error": "link_not_found"}, status_code=404)
 
-        if not is_admin:
-            await _write_auth_audit_event(
-                action="auth.login",
-                result=AuditResult.DENIED,
-                actor_subject=audit_actor_subject,
-                actor_display_name=display_name,
-                metadata={"reason": "admin_group_required", "groups": groups},
-                correlation_id=state,
-            )
-            return JSONResponse(
-                {"error": "forbidden", "detail": "admin_group_required"},
-                status_code=403,
-            )
+        if enforce_discord_link_identity_checks:
+            if not is_admin:
+                await _write_auth_audit_event(
+                    action="auth.login",
+                    result=AuditResult.DENIED,
+                    actor_subject=audit_actor_subject,
+                    actor_display_name=display_name,
+                    metadata={"reason": "admin_group_required", "groups": groups},
+                    correlation_id=state,
+                )
+                return JSONResponse(
+                    {"error": "forbidden", "detail": "admin_group_required"},
+                    status_code=403,
+                )
 
-        if not email:
-            await _write_auth_audit_event(
-                action="auth.login",
-                result=AuditResult.DENIED,
-                actor_subject=audit_actor_subject,
-                actor_display_name=display_name,
-                metadata={"reason": "email_claim_required"},
-                correlation_id=state,
-            )
-            return JSONResponse(
-                {"error": "forbidden", "detail": "email_claim_required"},
-                status_code=403,
-            )
+            if not email:
+                await _write_auth_audit_event(
+                    action="auth.login",
+                    result=AuditResult.DENIED,
+                    actor_subject=audit_actor_subject,
+                    actor_display_name=display_name,
+                    metadata={"reason": "email_claim_required"},
+                    correlation_id=state,
+                )
+                return JSONResponse(
+                    {"error": "forbidden", "detail": "email_claim_required"},
+                    status_code=403,
+                )
 
-        verifier = _discord_admin_verifier_from_app(request.app)
-        linked = await verifier.is_admin_email_for_discord_user(
-            email=email,
-            discord_user_id=grant.discord_user_id,
-        )
-        if not linked:
-            await _write_auth_audit_event(
-                action="auth.login",
-                result=AuditResult.DENIED,
-                actor_subject=audit_actor_subject,
-                actor_display_name=display_name,
-                metadata={
-                    "reason": "oidc_user_not_linked_to_discord_admin",
-                    "discord_user_id": grant.discord_user_id,
-                },
-                correlation_id=state,
+            verifier = _discord_admin_verifier_from_app(request.app)
+            linked = await verifier.is_admin_email_for_discord_user(
+                email=email,
+                discord_user_id=grant.discord_user_id,
             )
-            return JSONResponse(
-                {
-                    "error": "forbidden",
-                    "detail": "oidc_user_not_linked_to_discord_admin",
-                },
-                status_code=403,
-            )
+            if not linked:
+                await _write_auth_audit_event(
+                    action="auth.login",
+                    result=AuditResult.DENIED,
+                    actor_subject=audit_actor_subject,
+                    actor_display_name=display_name,
+                    metadata={
+                        "reason": "oidc_user_not_linked_to_discord_admin",
+                        "discord_user_id": grant.discord_user_id,
+                    },
+                    correlation_id=state,
+                )
+                return JSONResponse(
+                    {
+                        "error": "forbidden",
+                        "detail": "oidc_user_not_linked_to_discord_admin",
+                    },
+                    status_code=403,
+                )
+        else:
+            # Discord deep links are already restricted to Discord admin users.
+            # In bootstrap mode, skip OIDC group/email-link checks for this path.
+            is_admin = True
 
         await store.delete_discord_link(pending.discord_link_token)
 
@@ -1384,6 +1392,9 @@ async def auth_callback_handler(
             "is_admin": is_admin,
             "groups": groups,
             "via_discord_link": bool(pending.discord_link_token),
+            "discord_link_identity_checks_enforced": (
+                enforce_discord_link_identity_checks
+            ),
         },
         resource_id=session_id,
         correlation_id=state,
@@ -1539,31 +1550,32 @@ async def auth_discord_link_redirect_handler(
 
     _, session = await _current_session(request)
     if session is not None:
-        if not session.is_admin:
-            return JSONResponse(
-                {"error": "forbidden", "detail": "admin_group_required"},
-                status_code=403,
-            )
+        if settings.discord_link_require_oidc_identity_checks:
+            if not session.is_admin:
+                return JSONResponse(
+                    {"error": "forbidden", "detail": "admin_group_required"},
+                    status_code=403,
+                )
 
-        if not session.email:
-            return JSONResponse(
-                {"error": "forbidden", "detail": "email_claim_required"},
-                status_code=403,
-            )
+            if not session.email:
+                return JSONResponse(
+                    {"error": "forbidden", "detail": "email_claim_required"},
+                    status_code=403,
+                )
 
-        verifier = _discord_admin_verifier_from_app(request.app)
-        linked = await verifier.is_admin_email_for_discord_user(
-            email=session.email,
-            discord_user_id=grant.discord_user_id,
-        )
-        if not linked:
-            return JSONResponse(
-                {
-                    "error": "forbidden",
-                    "detail": "oidc_user_not_linked_to_discord_admin",
-                },
-                status_code=403,
+            verifier = _discord_admin_verifier_from_app(request.app)
+            linked = await verifier.is_admin_email_for_discord_user(
+                email=session.email,
+                discord_user_id=grant.discord_user_id,
             )
+            if not linked:
+                return JSONResponse(
+                    {
+                        "error": "forbidden",
+                        "detail": "oidc_user_not_linked_to_discord_admin",
+                    },
+                    status_code=403,
+                )
 
         await store.delete_discord_link(token)
         return RedirectResponse(url=grant.next_path, status_code=302)
