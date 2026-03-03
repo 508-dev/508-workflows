@@ -49,6 +49,7 @@ _JOB_WEBHOOK_LOGGER = DiscordWebhookLogger(
 )
 
 _QUEUE_NAME = settings.worker_queue_name
+_HANDLERS = JOB_FUNCTIONS
 
 
 def _job_attempt_display(attempts: int) -> int:
@@ -216,7 +217,7 @@ def _run_job(job_id: str) -> None:
         )
         return
 
-    handler = JOB_FUNCTIONS.get(job.type)
+    handler = _HANDLERS.get(job.type)
     if handler is None:
         error = f"Unknown job type: {job.type}"
         logger.error("Marking job dead id=%s error=%s", job_id, error)

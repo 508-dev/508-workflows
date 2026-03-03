@@ -60,7 +60,9 @@ from five08.worker.config import settings
 from five08.worker.db_migrations import run_job_migrations
 from five08.worker.dispatcher import build_queue_client
 from five08.worker.masking import mask_email
-from five08.worker.jobs import JOB_FUNCTIONS
+from five08.worker.jobs import (
+    JOB_FUNCTIONS,
+)
 from five08.worker.mailbox_resume_ingest import ResumeMailboxProcessor
 from five08.worker.models import (
     AuditEventPayload,
@@ -94,6 +96,9 @@ class DiscordLinkCreateRequest(BaseModel):
 
     discord_user_id: str
     next_path: str | None = None
+
+
+_JOB_FUNCTIONS = JOB_FUNCTIONS
 
 
 def _is_authorized(request: Request) -> bool:
