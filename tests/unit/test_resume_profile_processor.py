@@ -17,8 +17,8 @@ def test_extract_profile_proposal_filters_508_email() -> None:
     processor.skills_extractor = Mock()
     processor.document_processor = Mock()
     processor._record_processing_run = Mock()
-    processor.skills_extractor.canonicalize_skill.side_effect = (
-        lambda v: str(v).strip().lower()
+    processor.skills_extractor.canonicalize_skill.side_effect = lambda v: (
+        str(v).strip().lower()
     )
 
     processor.crm.get_contact.return_value = {
@@ -94,8 +94,8 @@ def test_extract_profile_proposal_merges_and_serializes_website_and_skill_attrs(
     processor.skills_extractor = Mock()
     processor.document_processor = Mock()
     processor._record_processing_run = Mock()
-    processor.skills_extractor.canonicalize_skill.side_effect = (
-        lambda v: str(v).strip().lower()
+    processor.skills_extractor.canonicalize_skill.side_effect = lambda v: (
+        str(v).strip().lower()
     )
 
     processor.crm.get_contact.return_value = {
@@ -148,8 +148,8 @@ def test_extract_profile_proposal_merges_and_serializes_social_links() -> None:
     processor.skills_extractor = Mock()
     processor.document_processor = Mock()
     processor._record_processing_run = Mock()
-    processor.skills_extractor.canonicalize_skill.side_effect = (
-        lambda v: str(v).strip().lower()
+    processor.skills_extractor.canonicalize_skill.side_effect = lambda v: (
+        str(v).strip().lower()
     )
 
     processor.crm.get_contact.return_value = {
@@ -199,8 +199,8 @@ def test_extract_profile_proposal_deduplicates_skills_in_confirmation() -> None:
     processor.skills_extractor = Mock()
     processor.document_processor = Mock()
     processor._record_processing_run = Mock()
-    processor.skills_extractor.canonicalize_skill.side_effect = (
-        lambda v: str(v).strip().lower()
+    processor.skills_extractor.canonicalize_skill.side_effect = lambda v: (
+        str(v).strip().lower()
     )
 
     processor.crm.get_contact.return_value = {
@@ -245,8 +245,8 @@ def test_extract_profile_proposal_includes_seniority_update() -> None:
     processor.skills_extractor = Mock()
     processor.document_processor = Mock()
     processor._record_processing_run = Mock()
-    processor.skills_extractor.canonicalize_skill.side_effect = (
-        lambda v: str(v).strip().lower()
+    processor.skills_extractor.canonicalize_skill.side_effect = lambda v: (
+        str(v).strip().lower()
     )
 
     processor.crm.get_contact.return_value = {
@@ -290,8 +290,8 @@ def test_extract_profile_proposal_maps_principal_to_staff() -> None:
     processor.skills_extractor = Mock()
     processor.document_processor = Mock()
     processor._record_processing_run = Mock()
-    processor.skills_extractor.canonicalize_skill.side_effect = (
-        lambda v: str(v).strip().lower()
+    processor.skills_extractor.canonicalize_skill.side_effect = lambda v: (
+        str(v).strip().lower()
     )
 
     processor.crm.get_contact.return_value = {"emailAddress": "member@example.com"}
@@ -332,8 +332,8 @@ def test_extract_profile_proposal_normalizes_unknown_seniority_to_unknown() -> N
     processor.skills_extractor = Mock()
     processor.document_processor = Mock()
     processor._record_processing_run = Mock()
-    processor.skills_extractor.canonicalize_skill.side_effect = (
-        lambda v: str(v).strip().lower()
+    processor.skills_extractor.canonicalize_skill.side_effect = lambda v: (
+        str(v).strip().lower()
     )
 
     processor.crm.get_contact.return_value = {
@@ -413,8 +413,8 @@ def test_extract_profile_proposal_normalizes_existing_skill_punctuation() -> Non
     processor.skills_extractor = Mock()
     processor.document_processor = Mock()
     processor._record_processing_run = Mock()
-    processor.skills_extractor.canonicalize_skill.side_effect = (
-        lambda v: str(v).strip().lower()
+    processor.skills_extractor.canonicalize_skill.side_effect = lambda v: (
+        str(v).strip().lower()
     )
 
     processor.crm.get_contact.return_value = {
@@ -472,8 +472,8 @@ def test_extract_profile_proposal_with_strength_change_only_no_skill_proposal() 
     processor.skills_extractor = Mock()
     processor.document_processor = Mock()
     processor._record_processing_run = Mock()
-    processor.skills_extractor.canonicalize_skill.side_effect = (
-        lambda v: str(v).strip().lower()
+    processor.skills_extractor.canonicalize_skill.side_effect = lambda v: (
+        str(v).strip().lower()
     )
 
     processor.crm.get_contact.return_value = {

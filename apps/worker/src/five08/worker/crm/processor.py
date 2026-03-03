@@ -129,8 +129,7 @@ class ContactSkillsProcessor:
 
             if new_skills:
                 success = self.espocrm_client.update_contact_skills(
-                    contact_id,
-                    updated_skills,
+                    contact_id, updated_skills
                 )
             else:
                 success = True
@@ -197,7 +196,7 @@ class ContactSkillsProcessor:
             if key not in deduped_skills:
                 deduped_skills[key] = canonical
 
-        unique_skills = sorted(deduped_skills.values())
+        unique_skills = list(deduped_skills.values())
         avg_confidence = confidence_sum / processed_count if processed_count else 0.0
         return unique_skills, avg_confidence
 

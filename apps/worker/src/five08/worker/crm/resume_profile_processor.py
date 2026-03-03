@@ -588,6 +588,8 @@ class ResumeProfileProcessor:
             after_value = self._normalize_compare_value(after_contact.get(field, ""))
             if after_value != baseline.get(field, ""):
                 changed_fields.append(field)
+        if not changed_fields:
+            return candidate_fields
         return changed_fields
 
     def _collect_change(
@@ -741,6 +743,8 @@ class ResumeProfileProcessor:
         resume_text: str,
     ) -> ExtractedSkills:
         normalized_attrs: dict[str, SkillAttributes] = {}
+        skills = extracted.skills or []
+        normalized_skills = self._dedupe_normalized_skills(skills)
         for raw_skill, raw_attr in getattr(extracted, "skill_attrs", {}).items():
             skill = self._normalize_skill(raw_skill)
             if not skill:
@@ -753,7 +757,6 @@ class ResumeProfileProcessor:
                 continue
             normalized_attrs[skill.casefold()] = SkillAttributes(strength=strength)
 
-        skills = extracted.skills or []
         if not normalized_attrs and isinstance(skills, list) and skills:
             for raw_skill in skills:
                 skill = self._normalize_skill(raw_skill)
@@ -766,13 +769,21 @@ class ResumeProfileProcessor:
 
         if normalized_attrs or skills:
             return ExtractedSkills(
-                skills=skills,
+                skills=normalized_skills,
                 skill_attrs=normalized_attrs,
                 confidence=extracted.confidence,
                 source=extracted.source,
             )
 
         fallback = self.skills_extractor.extract_skills(resume_text)
+        fallback_skills = self._dedupe_normalized_skills(fallback.skills)
+        if fallback_skills or fallback.skill_attrs:
+            return ExtractedSkills(
+                skills=fallback_skills,
+                skill_attrs=fallback.skill_attrs,
+                confidence=fallback.confidence,
+                source=fallback.source,
+            )
         return fallback
 
     def _parse_skill_attrs(self, value: Any) -> dict[str, int]:
@@ -973,7 +984,12 @@ class ResumeProfileProcessor:
             normalized_netloc = parsed.netloc.replace(parsed.netloc[:4], "", 1)
 
         parsed = parsed._replace(netloc=normalized_netloc)
-        return parsed.geturl().rstrip("/")
+        normalized = parsed.geturl().rstrip("/")
+        if normalized.startswith("https://www."):
+            normalized = normalized.replace("https://www.", "https://", 1)
+        elif normalized.startswith("http://www."):
+            normalized = normalized.replace("http://www.", "http://", 1)
+        return normalized
 
     def _normalize_email_address(self, value: Any) -> str | None:
         if not isinstance(value, str):
