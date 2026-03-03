@@ -6232,9 +6232,9 @@ class CRMCog(commands.Cog):
 
         thread: discord.Thread = interaction.channel
         starter = thread.starter_message
-        if starter is None and isinstance(thread.parent, discord.TextChannel):
+        if starter is None:
             try:
-                starter = await thread.parent.fetch_message(thread.id)
+                starter = await thread.fetch_message(thread.id)
             except Exception:
                 starter = None
 
