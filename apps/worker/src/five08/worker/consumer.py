@@ -5,7 +5,6 @@ import signal
 import threading
 
 from five08.logging import configure_observability
-from five08.queue import parse_queue_names
 from five08.worker.config import settings
 
 logger = logging.getLogger(__name__)
@@ -56,10 +55,8 @@ def run() -> None:
         signal.signal(signal.SIGHUP, _handle_shutdown_signal)
 
     try:
-        queue_names = parse_queue_names(settings.worker_queue_names)
-        if not queue_names:
-            queue_names = parse_queue_names(settings.redis_queue_name)
-        queue_set = set(queue_names)
+        queue_name = settings.worker_queue_name
+        queue_set = {queue_name}
         logger.debug("Resolved queue set=%s", sorted(queue_set))
         broker = dramatiq.get_broker()
         logger.debug("Resolved dramatiq broker=%s", type(broker).__name__)

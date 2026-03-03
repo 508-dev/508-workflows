@@ -8,6 +8,10 @@
 - `GET /health` and most OIDC session routes (`/auth/login`, `/auth/callback`, `/auth/me`, `/auth/logout`) do not use `X-API-Secret`.
 - `POST /auth/discord/links` does use `X-API-Secret` because it is called by trusted backend/bot components.
 
+### API auth strategy
+
+- Protected routes (including webhooks) use `X-API-Secret` with `API_SHARED_SECRET`.
+
 Example:
 
 ```bash
@@ -36,6 +40,10 @@ curl -X GET "http://localhost:8090/jobs/<job_id>" \
 - `POST /auth/discord/links`: Create one-time dashboard deep link from Discord command context.
 - `GET /auth/discord/link/{token}`: Resolve Discord deep link into authenticated dashboard redirect.
 - Auth flows emit best-effort human audit events (`auth.login`, `auth.logout`) under source `admin_dashboard`.
+
+### Known handler wiring expectation
+
+- `/jobs/{job_id}/rerun` replays the source job’s stored call arguments; rerunnable job types must only include callables that are also registered for worker execution.
 
 ## Jobs
 
