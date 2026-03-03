@@ -15,6 +15,7 @@ from five08.crm_normalization import (
     normalize_role as shared_normalize_role,
     normalize_roles as shared_normalize_roles,
     normalize_seniority as shared_normalize_seniority,
+    normalize_state as shared_normalize_state,
     normalize_timezone as shared_normalize_timezone,
     normalize_timezone_offset as shared_normalize_timezone_offset,
     normalize_website_url as shared_normalize_website_url,
@@ -120,12 +121,12 @@ _PLACEHOLDER_NAME_TOKENS = RESUME_NAME_PLACEHOLDER_TOKENS
 _NAME_HEADING_TOKENS = RESUME_NAME_HEADING_TOKENS
 ROLE_NORMALIZATION_MAP = {
     "developer": "developer",
-    "data scientist": "data_scientist",
-    "program manager": "program_manager",
-    "product manager": "product_manager",
+    "data scientist": "data scientist",
+    "program manager": "program manager",
+    "product manager": "product manager",
     "designer": "designer",
-    "user research": "user_research",
-    "biz dev": "biz_dev",
+    "user research": "user research",
+    "biz dev": "biz dev",
     "marketing": "marketing",
 }
 NAME_PREFIXES = {
@@ -330,8 +331,87 @@ def _normalize_country(value: Any) -> str | None:
     return shared_normalize_country(value)
 
 
+def _normalize_state(value: Any) -> str | None:
+    return shared_normalize_state(value)
+
+
 def _normalize_city(value: Any) -> str | None:
     return shared_normalize_city(value, strip_parenthetical=True)
+
+
+# Mapping of lowercase country name/abbreviation → ITU country calling code.
+_COUNTRY_PHONE_CODES: dict[str, str] = {
+    "united states": "1",
+    "usa": "1",
+    "us": "1",
+    "canada": "1",
+    "united kingdom": "44",
+    "uk": "44",
+    "great britain": "44",
+    "australia": "61",
+    "india": "91",
+    "germany": "49",
+    "france": "33",
+    "brazil": "55",
+    "mexico": "52",
+    "china": "86",
+    "japan": "81",
+    "south korea": "82",
+    "singapore": "65",
+    "philippines": "63",
+    "nigeria": "234",
+    "ghana": "233",
+    "kenya": "254",
+    "south africa": "27",
+    "pakistan": "92",
+    "bangladesh": "880",
+    "ukraine": "380",
+    "poland": "48",
+    "netherlands": "31",
+    "spain": "34",
+    "italy": "39",
+    "sweden": "46",
+    "norway": "47",
+    "denmark": "45",
+    "finland": "358",
+    "switzerland": "41",
+    "austria": "43",
+    "belgium": "32",
+    "portugal": "351",
+    "russia": "7",
+    "turkey": "90",
+    "israel": "972",
+    "egypt": "20",
+    "argentina": "54",
+    "colombia": "57",
+    "chile": "56",
+    "peru": "51",
+    "new zealand": "64",
+    "ireland": "353",
+    "indonesia": "62",
+    "malaysia": "60",
+    "thailand": "66",
+    "vietnam": "84",
+    "romania": "40",
+    "czech republic": "420",
+    "czechia": "420",
+    "hungary": "36",
+    "greece": "30",
+    "bulgaria": "359",
+    "serbia": "381",
+    "croatia": "385",
+}
+
+
+def _normalize_phone_with_country(phone: Any, country: str | None) -> str | None:
+    """Normalize phone and prepend country code if missing and country is known."""
+    normalized = _normalize_phone(phone)
+    if not normalized or normalized.startswith("+") or not country:
+        return normalized
+    code = _COUNTRY_PHONE_CODES.get(country.strip().lower())
+    if not code:
+        return normalized
+    return f"+{code}{normalized}"
 
 
 def _normalize_timezone_offset(value: str) -> str | None:
@@ -696,6 +776,7 @@ class ResumeExtractedProfile(BaseModel):
     linkedin_url: str | None = None
     timezone: str | None = None
     address_city: str | None = None
+    address_state: str | None = None
     description: str | None = None
     phone: str | None = None
     website_links: list[str] = Field(default_factory=list)
@@ -880,7 +961,11 @@ class ResumeProfileExtractor:
                 linkedin_url=linkedin_url,
                 timezone=_normalize_timezone(parsed.get("timezone")),
                 address_city=_normalize_city(parsed.get("address_city")),
-                phone=_normalize_phone(parsed.get("phone")),
+                address_state=_normalize_state(parsed.get("address_state")),
+                phone=_normalize_phone_with_country(
+                    parsed.get("phone"),
+                    parsed.get("address_country"),
+                ),
                 website_links=parsed_website_links,
                 social_links=parsed_social_links,
                 address_country=_normalize_country(parsed.get("address_country")),
@@ -924,6 +1009,7 @@ class ResumeProfileExtractor:
         )
         name_match = self._extract_name(snippet)
         country = self._extract_country(snippet)
+        state = self._extract_state(snippet)
         seniority = self._extract_seniority(snippet)
         skills, skill_attrs = self._extract_skills(snippet)
         website_and_social = self._extract_website_links(snippet)
@@ -981,9 +1067,13 @@ class ResumeProfileExtractor:
             primary_roles=self._extract_roles(snippet),
             timezone=timezone,
             address_city=city,
+            address_state=state,
             github_username=github_username,
             linkedin_url=linkedin_url,
-            phone=_normalize_phone(phone_match.group(0)) if phone_match else None,
+            phone=_normalize_phone_with_country(
+                phone_match.group(0) if phone_match else None,
+                country,
+            ),
             website_links=website_links,
             social_links=social_links,
             address_country=country,
@@ -1044,6 +1134,7 @@ class ResumeProfileExtractor:
             '"github_username": string|null, "linkedin_url": string|null, '
             '"primary_roles": string[]|null, '
             '"timezone": string|null, "address_city": string|null, '
+            '"address_state": string|null, '
             '"description": string|null, '
             '"website_url_candidates": ['
             '{"url": string|null, "kind": "personal_website|social_profile|other", '
@@ -1078,8 +1169,11 @@ class ResumeProfileExtractor:
             "- for github_username return username only (no URL, no @)\n"
             "- for linkedin_url return full linkedin profile URL when available\n"
             "- infer linkedin_url and website_links from bare domains when scheme is missing\n"
-            "- for phone return digits with optional leading +\n"
+            "- for phone return digits with country code and leading + (e.g. +15551234567); if no country code in the source, infer it from address_country or address_city (e.g. United States → +1, India → +91, UK → +44)\n"
             "- if timezone is provided, normalize it to UTC offset form like UTC±HH:MM before output\n"
+            "- if address_city is known, infer address_state and address_country when not explicitly stated (e.g. San Francisco → California, United States; London → United Kingdom)\n"
+            "- if address_state is known, infer address_country when not explicitly stated (e.g. California → United States)\n"
+            "- for primary_roles, prefer known canonical roles when the input matches: developer, data scientist, product manager, program manager, designer, user research, biz dev, marketing; map variants to the closest known role (e.g. 'software developer' → 'developer', 'product management' → 'product manager')\n"
             "- infer seniority_level as one of: junior, midlevel, senior, staff\n"
             "- for description, produce 1-2 concise sentences that describe the person and their focus areas, based only on explicit resume details; otherwise null\n"
             "- keep description factual and neutral; avoid marketing/sales phrasing\n"
@@ -1293,6 +1387,19 @@ class ResumeProfileExtractor:
         )
         if match:
             normalized = _normalize_country(match.group(1))
+            if normalized:
+                return normalized
+
+        return None
+
+    @staticmethod
+    def _extract_state(resume_text: str) -> str | None:
+        match = re.search(
+            r"(?im)^(?:address\s*state|state|province)\s*[:\-]\s*(.+)$",
+            resume_text,
+        )
+        if match:
+            normalized = _normalize_state(match.group(1))
             if normalized:
                 return normalized
 

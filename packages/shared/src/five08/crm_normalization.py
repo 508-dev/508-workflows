@@ -10,12 +10,12 @@ from urllib.parse import urlsplit
 
 ROLE_NORMALIZATION_MAP: dict[str, str] = {
     "developer": "developer",
-    "data scientist": "data_scientist",
-    "program manager": "program_manager",
-    "product manager": "product_manager",
+    "data scientist": "data scientist",
+    "program manager": "program manager",
+    "product manager": "product manager",
     "designer": "designer",
-    "user research": "user_research",
-    "biz dev": "biz_dev",
+    "user research": "user research",
+    "biz dev": "biz dev",
     "marketing": "marketing",
 }
 
@@ -97,6 +97,13 @@ def normalize_country(value: Any) -> str | None:
     return normalized.title() if normalized else None
 
 
+def normalize_state(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized.title() if normalized else None
+
+
 def normalize_city(value: Any, *, strip_parenthetical: bool = False) -> str | None:
     if not isinstance(value, str):
         return None
@@ -169,12 +176,23 @@ def normalize_role(value: Any, role_map: dict[str, str] | None = None) -> str | 
     normalized = value.strip().lower()
     if not normalized:
         return None
-    mapped = (role_map or ROLE_NORMALIZATION_MAP).get(normalized)
+    # Normalize separators to spaces for consistent matching
+    normalized = re.sub(r"[-_]+", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if not normalized:
+        return None
+    effective_map = role_map or ROLE_NORMALIZATION_MAP
+    # Exact match first
+    mapped = effective_map.get(normalized)
     if mapped is not None:
         return mapped
-    normalized = "_".join(normalized.split())
-    normalized = "".join(ch for ch in normalized if ch.isalnum() or ch in {"_", "-"})
-    return normalized or None
+    # Bias towards known roles: substring match (longer keys checked first)
+    for known_key in sorted(effective_map, key=len, reverse=True):
+        if known_key in normalized:
+            return effective_map[known_key]
+    # Fallback: lowercase space-separated, alphanumeric only
+    result = "".join(ch for ch in normalized if ch.isalnum() or ch == " ")
+    return result.strip() or None
 
 
 def normalize_roles(value: Any, role_map: dict[str, str] | None = None) -> list[str]:
