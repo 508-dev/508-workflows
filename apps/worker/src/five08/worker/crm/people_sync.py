@@ -8,6 +8,7 @@ from typing import Any
 
 from five08.audit import PeopleSyncStatus, PersonRecord, upsert_person
 from five08.clients.espo import EspoAPI, EspoAPIError
+from five08.skills import normalize_skill_payload
 from five08.worker.config import settings
 
 logger = logging.getLogger(__name__)
@@ -26,16 +27,22 @@ class EspoPeopleSyncClient:
         self, *, offset: int, max_size: int
     ) -> tuple[list[dict[str, Any]], int | None]:
         """Load one page of contacts for identity sync."""
-        params: dict[str, Any] = {
-            "offset": offset,
-            "maxSize": max_size,
-            "select": (
-                "id,name,emailAddress,emailAddressData,c508Email,"
-                "cDiscordUsername,cDiscordUserId,cDiscordRoles,"
-                "cGithubUsername,githubUsername"
-            ),
-        }
-        raw = self.api.request("GET", "Contact", params)
+        select_fields = (
+            "id,name,emailAddress,emailAddressData,c508Email,"
+            "cDiscordUsername,cDiscordUserId,cDiscordRoles,cDiscordUserID,"
+            "cGithubUsername,githubUsername,type,contactType,"
+            "addressCountry,addressCity,cTimezone,cSeniority,cMemberAgreementSignedAt,"
+            f"{settings.crm_linkedin_field},skills,cSkillAttrs,resumeIds,resumeNames"
+        )
+        raw = self.api.request(
+            "GET",
+            "Contact",
+            {
+                "offset": offset,
+                "maxSize": max_size,
+                "select": select_fields,
+            },
+        )
         contacts = raw.get("list", [])
         if not isinstance(contacts, list):
             contacts = []
@@ -157,6 +164,14 @@ class PeopleSyncProcessor:
 
         discord_username = self._discord_username(raw_contact)
         discord_user_id = self._discord_user_id(raw_contact, discord_username)
+        skills, skill_attrs = self._extract_skills(raw_contact)
+
+        resume_ids = self._coerce_list(raw_contact.get("resumeIds"))
+        latest_resume_id = resume_ids[-1] if resume_ids else None
+        latest_resume_name = self._extract_latest_resume_name(
+            resume_ids=resume_ids,
+            resume_names=raw_contact.get("resumeNames"),
+        )
 
         return PersonRecord(
             crm_contact_id=contact_id,
@@ -167,8 +182,58 @@ class PeopleSyncProcessor:
             discord_username=discord_username,
             discord_roles=self._discord_roles(raw_contact.get("cDiscordRoles")),
             github_username=self._github_username(raw_contact),
+            contact_type=_text_or_none(
+                self._first_not_none(
+                    raw_contact.get("type"), raw_contact.get("contactType")
+                )
+            ),
+            is_member=self._is_member(raw_contact),
+            address_country=_text_or_none(raw_contact.get("addressCountry")),
+            address_city=_text_or_none(raw_contact.get("addressCity")),
+            timezone=_text_or_none(raw_contact.get("cTimezone")),
+            seniority=_text_or_none(raw_contact.get("cSeniority")),
+            linkedin=self._coerce_linkedin(raw_contact),
+            skills=skills,
+            skill_attrs=skill_attrs,
+            latest_resume_id=latest_resume_id,
+            latest_resume_name=latest_resume_name,
             sync_status=PeopleSyncStatus.ACTIVE,
         )
+
+    @staticmethod
+    def _first_not_none(*values: Any) -> Any | None:
+        for value in values:
+            if _text_or_none(value) is not None:
+                return value
+        return None
+
+    @staticmethod
+    def _coerce_list(value: Any) -> list[str]:
+        if isinstance(value, tuple):
+            value = list(value)
+        if not isinstance(value, list):
+            return []
+
+        normalized: list[str] = []
+        for item in value:
+            text = _text_or_none(item)
+            if text:
+                normalized.append(text)
+        return normalized
+
+    @staticmethod
+    def _extract_latest_resume_name(
+        *, resume_ids: list[str], resume_names: Any
+    ) -> str | None:
+        if not resume_ids:
+            return None
+        latest_id = resume_ids[-1]
+        if not isinstance(resume_names, dict):
+            return None
+        raw_name = resume_names.get(latest_id)
+        if raw_name is None:
+            return None
+        return _text_or_none(raw_name)
 
     def _email(self, raw_contact: dict[str, Any]) -> str | None:
         direct = _text_or_none(raw_contact.get("emailAddress"))
@@ -213,7 +278,13 @@ class PeopleSyncProcessor:
         raw_contact: dict[str, Any],
         discord_username: str | None,
     ) -> str | None:
-        for key in ("cDiscordUserId", "discordUserId", "cDiscordId"):
+        for key in (
+            "cDiscordUserId",
+            "discordUserId",
+            "cDiscordID",
+            "cDiscordId",
+            "cDiscordUserID",
+        ):
             candidate = _text_or_none(raw_contact.get(key))
             if candidate:
                 return candidate
@@ -246,11 +317,76 @@ class PeopleSyncProcessor:
         return []
 
     def _github_username(self, raw_contact: dict[str, Any]) -> str | None:
-        for key in ("cGithubUsername", "githubUsername"):
+        for key in ("cGithubUsername", "githubUsername", "cGithubUserName"):
             candidate = _text_or_none(raw_contact.get(key))
             if candidate:
                 return candidate
         return None
+
+    def _coerce_linkedin(self, raw_contact: dict[str, Any]) -> str | None:
+        configured_field = settings.crm_linkedin_field
+        for key in (configured_field, "cLinkedIn", "linkedin"):
+            value = _text_or_none(raw_contact.get(key))
+            if value:
+                return value
+        return None
+
+    def _extract_skills(
+        self, raw_contact: dict[str, Any]
+    ) -> tuple[list[str], dict[str, int]]:
+        raw_skill_attrs = raw_contact.get("cSkillAttrs")
+        skills, attrs = normalize_skill_payload(
+            raw_contact.get("skills"),
+            raw_skill_attrs,
+            disallowed=frozenset(),
+        )
+        if not skills and isinstance(raw_skill_attrs, dict):
+            for key, payload in raw_skill_attrs.items():
+                raw = _text_or_none(key)
+                if raw and isinstance(payload, dict):
+                    skills.append(raw)
+                    value = payload.get("strength")
+                    parsed = self._coerce_int(value)
+                    if parsed is not None:
+                        attrs[raw.casefold()] = max(
+                            attrs.get(raw.casefold(), 0), parsed
+                        )
+        return skills, attrs
+
+    @staticmethod
+    def _coerce_int(value: Any) -> int | None:
+        try:
+            parsed = int(value)
+        except Exception:
+            return None
+        if not 1 <= parsed <= 5:
+            return None
+        return parsed
+
+    def _is_member(self, raw_contact: dict[str, Any]) -> bool:
+        contact_type = _text_or_none(
+            self._first_not_none(
+                raw_contact.get("type"), raw_contact.get("contactType")
+            )
+        )
+        if contact_type and "member" in contact_type.casefold():
+            return True
+
+        agreement = _text_or_none(raw_contact.get("cMemberAgreementSignedAt"))
+        if agreement:
+            return True
+
+        is_member_field = raw_contact.get("isMember")
+        if isinstance(is_member_field, bool):
+            return is_member_field
+
+        if isinstance(is_member_field, str) and is_member_field.strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }:
+            return True
+        return False
 
 
 def _text_or_none(value: Any) -> str | None:
