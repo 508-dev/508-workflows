@@ -73,6 +73,22 @@ class TestMarkIdVerifiedCommand:
             await crm_cog._parse_verified_at("not-a-date")
 
     @pytest.mark.asyncio
+    async def test_search_contacts_for_mark_id_verification_delegates_to_linking(
+        self, crm_cog
+    ):
+        """`_search_contacts_for_mark_id_verification` should delegate to `_search_contact_for_linking`."""
+        expected = [{"id": "contact123"}]
+        with patch.object(
+            crm_cog,
+            "_search_contact_for_linking",
+            new=AsyncMock(return_value=expected),
+        ) as mock_search:
+            result = await crm_cog._search_contacts_for_mark_id_verification("john")
+
+        assert result == expected
+        mock_search.assert_awaited_once_with("john")
+
+    @pytest.mark.asyncio
     async def test_resolve_verified_by_from_discord_mention(
         self,
         crm_cog,

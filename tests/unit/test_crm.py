@@ -616,6 +616,20 @@ class TestCRMCog:
         assert "/5" not in embed.fields[0].value
 
     @pytest.mark.asyncio
+    async def test_search_contacts_for_view_skills_delegates_to_linking(self, crm_cog):
+        """`_search_contacts_for_view_skills` should delegate to `_search_contact_for_linking`."""
+        expected = [{"id": "contact123"}]
+        with patch.object(
+            crm_cog,
+            "_search_contact_for_linking",
+            new=AsyncMock(return_value=expected),
+        ) as mock_search:
+            result = await crm_cog._search_contacts_for_view_skills("john")
+
+        assert result == expected
+        mock_search.assert_awaited_once_with("john")
+
+    @pytest.mark.asyncio
     async def test_view_skills_multiple_contacts_requires_refine(
         self, crm_cog, mock_interaction, mock_member_role
     ):
