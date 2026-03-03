@@ -414,6 +414,17 @@ def test_extract_name_skips_resume_heading_lines_with_spacing_variant() -> None:
     assert result.name == "Jane Doe"
 
 
+def test_extract_name_skips_heading_lines_with_extra_internal_spacing() -> None:
+    """Heading labels with extra spacing should not be extracted as names."""
+    extractor = ResumeProfileExtractor(api_key=None)
+
+    result = extractor.extract(
+        "Curriculum  Vitae\nJane Doe\njane@example.com\n8 years of software experience\n"
+    )
+
+    assert result.name == "Jane Doe"
+
+
 def test_infer_seniority_regex_handles_scale_keywords() -> None:
     """Seniority inference should not crash on scale/impact keyword checks."""
     level = ResumeProfileExtractor._infer_seniority_from_resume(

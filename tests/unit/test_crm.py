@@ -2389,6 +2389,14 @@ class TestCRMCog:
         assert payload["cDiscordUsername"] == "monica"
         assert payload["cDiscordUserID"] == "999"
 
+    def test_is_valid_resume_name_candidate_rejects_heading_spacing_variants(
+        self, crm_cog
+    ):
+        """Heading-like names with spacing variants should be rejected."""
+        assert crm_cog._is_valid_resume_name_candidate("Curriculum  Vitae") is False
+        assert crm_cog._is_valid_resume_name_candidate("Resume :") is False
+        assert crm_cog._is_valid_resume_name_candidate("Jane Doe") is True
+
     def test_build_inference_lookup_summary_uses_attempt_text(self, crm_cog):
         """Test lookup summary uses attempt text when attempts are present."""
         with (

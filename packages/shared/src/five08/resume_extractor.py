@@ -70,17 +70,24 @@ LINKEDIN_PROFILE_PATTERN = re.compile(
 DEFAULT_FALLBACK_FIRST_NAME = "Resume"
 DEFAULT_FALLBACK_LAST_NAME = "Candidate"
 SINGLE_NAME_FALLBACK_LAST_NAME = "Unknown"
-_PLACEHOLDER_NAME_TOKENS = {"unknown", "n/a", "na", "none", "null", "resume candidate"}
-_NAME_HEADING_TOKENS = {
-    "resume",
-    "curriculum vitae",
-    "cv",
-    "contact",
-    "summary",
-    "profile",
-    "experience",
-    "skills",
-}
+RESUME_NAME_PLACEHOLDER_TOKENS = frozenset(
+    {"unknown", "n/a", "na", "none", "null", "resume candidate"}
+)
+RESUME_NAME_HEADING_TOKENS = frozenset(
+    {
+        "resume",
+        "curriculum vitae",
+        "cv",
+        "contact",
+        "summary",
+        "profile",
+        "experience",
+        "skills",
+    }
+)
+# Backward-compatible internal aliases.
+_PLACEHOLDER_NAME_TOKENS = RESUME_NAME_PLACEHOLDER_TOKENS
+_NAME_HEADING_TOKENS = RESUME_NAME_HEADING_TOKENS
 NAME_PREFIXES = {
     "dr",
     "mr",
@@ -98,6 +105,22 @@ NAME_SUFFIXES = {
     "iv",
     "v",
 }
+
+
+def normalize_resume_name_token(value: str) -> str:
+    """Normalize candidate heading/name tokens for robust identity checks."""
+    normalized = re.sub(r"\s+", " ", value).strip()
+    normalized = re.sub(r"\s*:\s*$", "", normalized)
+    return normalized.casefold()
+
+
+def is_reserved_resume_name_token(value: str) -> bool:
+    """Return True when a value is a non-name heading or placeholder token."""
+    normalized = normalize_resume_name_token(value)
+    return (
+        normalized in RESUME_NAME_PLACEHOLDER_TOKENS
+        or normalized in RESUME_NAME_HEADING_TOKENS
+    )
 
 
 def _bounded_confidence(value: Any, fallback: float) -> float:
@@ -590,8 +613,7 @@ def _normalize_name(value: Any) -> str | None:
     normalized = value.strip()
     if not normalized:
         return None
-    lowered = normalized.casefold().rstrip(":").strip()
-    if lowered in _PLACEHOLDER_NAME_TOKENS or lowered in _NAME_HEADING_TOKENS:
+    if is_reserved_resume_name_token(normalized):
         return None
     return normalized
 
@@ -1178,11 +1200,7 @@ class ResumeProfileExtractor:
                 continue
             if not any(char.isalpha() for char in line):
                 continue
-            normalized = line.casefold().rstrip(":").strip()
-            if (
-                normalized in _PLACEHOLDER_NAME_TOKENS
-                or normalized in _NAME_HEADING_TOKENS
-            ):
+            if is_reserved_resume_name_token(line):
                 continue
             return line
         return None
