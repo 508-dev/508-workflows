@@ -196,6 +196,24 @@ def test_apply_profile_updates_adds_discord_and_filters_email() -> None:
     assert update_payload["cDiscordUsername"] == "member#0001 (ID: 123)"
 
 
+def test_apply_profile_updates_normalizes_csv_skills_string_to_array() -> None:
+    """Apply should normalize comma-separated skill strings into array payloads."""
+    processor = ResumeProfileProcessor()
+    processor.crm = Mock()
+
+    result = processor.apply_profile_updates(
+        contact_id="contact-2",
+        updates={
+            "skills": "Python, FastAPI, React, ,JavaScript",
+        },
+    )
+
+    assert result.success is True
+    processor.crm.update_contact.assert_called_once()
+    update_payload = processor.crm.update_contact.call_args.args[1]
+    assert update_payload["skills"] == ["Python", "FastAPI", "React", "JavaScript"]
+
+
 def test_extract_profile_proposal_records_failed_run() -> None:
     """Failed extraction should still be written to the processing ledger."""
     processor = ResumeProfileProcessor()
