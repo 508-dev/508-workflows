@@ -1200,9 +1200,12 @@ class ResumeProfileProcessor:
     @staticmethod
     def _normalize_website_url(value: str) -> str | None:
         candidate = unicodedata.normalize("NFKC", value)
+        candidate = "".join(
+            char for char in candidate if unicodedata.category(char) != "Cf"
+        )
+        candidate = candidate.strip().strip(")]},.;:")
         if any(ord(ch) > 127 for ch in candidate):
             return None
-        candidate = candidate.strip().strip(")]},.;:")
         if not candidate:
             return None
 

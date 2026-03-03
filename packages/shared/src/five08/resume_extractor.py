@@ -179,7 +179,9 @@ def _normalize_name_part(value: Any) -> str | None:
     normalized = re.sub(r"\s+", " ", normalized).strip()
     if not any(char.isalpha() for char in normalized):
         return None
-    return normalized.title()
+    if normalized.isupper():
+        return normalized.title()
+    return normalized
 
 
 def _coerce_email_list(value: Any) -> list[str]:
@@ -431,10 +433,13 @@ def _normalize_role_collection(value: Any) -> list[str]:
 
 def _normalize_website_url(value: str) -> str:
     candidate = unicodedata.normalize("NFKC", value)
-    if any(ord(ch) > 127 for ch in candidate):
-        return ""
+    candidate = "".join(
+        char for char in candidate if unicodedata.category(char) != "Cf"
+    )
     candidate = candidate.strip()
     candidate = candidate.strip(")]},.;:")
+    if any(ord(ch) > 127 for ch in candidate):
+        return ""
     if not candidate:
         return ""
 
@@ -534,7 +539,8 @@ def _has_excessive_personal_path_segments(path: str) -> bool:
     stripped = path.strip("/")
     if not stripped:
         return False
-    return stripped.count("/") + 1 > MAX_PERSONAL_WEBSITE_PATH_COMPONENTS
+    segments = [part for part in stripped.split("/") if part]
+    return len(segments) > MAX_PERSONAL_WEBSITE_PATH_COMPONENTS
 
 
 def _normalize_url_candidate_kind(value: Any) -> str:
@@ -644,7 +650,7 @@ def _build_website_and_social_from_candidates(
         urls_to_consider.append(candidate_url)
 
     for candidate_url, candidate_confidence in heuristic_candidates:
-        if candidate_confidence < PERSONAL_WEBSITE_MIN_CONFIDENCE:
+        if candidate_confidence < MIDDLE_WEBSITE_POSITION_SCALE:
             continue
 
         candidate_key = candidate_url.casefold()
@@ -1610,8 +1616,7 @@ class ResumeProfileExtractor:
                 start_index=match.start(),
                 end_index=match.end(),
             )
-            if confidence >= PERSONAL_WEBSITE_MIN_CONFIDENCE:
-                matches.append((raw_url, confidence))
+            matches.append((raw_url, confidence))
 
         for match in SCHEME_URL_PATTERN.finditer(resume_text):
             confidence = 1.0 * _website_position_scale(
@@ -1619,8 +1624,7 @@ class ResumeProfileExtractor:
                 start_index=match.start(),
                 end_index=match.end(),
             )
-            if confidence >= PERSONAL_WEBSITE_MIN_CONFIDENCE:
-                matches.append((match.group(0), confidence))
+            matches.append((match.group(0), confidence))
 
         for match in BARE_DOMAIN_URL_PATTERN.finditer(resume_text):
             if match.start() > 0 and resume_text[match.start() - 1] == "@":
