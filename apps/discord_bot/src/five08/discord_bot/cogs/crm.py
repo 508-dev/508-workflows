@@ -33,6 +33,8 @@ from five08.discord_bot.utils.role_decorators import (
     require_role,
     check_user_roles_with_hierarchy,
 )
+from five08.job_match import extract_job_requirements
+from five08.candidate_search import search_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -6205,6 +6207,183 @@ class CRMCog(commands.Cog):
             await interaction.followup.send(
                 "❌ An unexpected error occurred while reprocessing the resume."
             )
+
+    @app_commands.command(
+        name="match-candidates",
+        description="Reads this thread's opening message as a job posting and returns ranked matching candidates.",
+    )
+    @require_role("Member")
+    async def match_candidates(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        """Parse the thread's starter message with OpenAI and find matching candidates ranked by fit.
+
+        Must be invoked inside a thread. The starter message is used as the job posting text.
+        The response is posted publicly in the thread.
+        """
+        if not isinstance(interaction.channel, discord.Thread):
+            await interaction.response.send_message(
+                "⚠️ This command must be used inside a thread. "
+                "Open a thread on the job posting message and run `/match-candidates` there.",
+                ephemeral=True,
+            )
+            return
+
+        thread: discord.Thread = interaction.channel
+        starter = thread.starter_message
+        if starter is None:
+            try:
+                starter = await thread.fetch_message(thread.id)
+            except Exception:
+                starter = None
+
+        if starter is None or not starter.content.strip():
+            await interaction.response.send_message(
+                "⚠️ Could not read the thread's opening message. "
+                "Make sure the thread was created from a job posting message.",
+                ephemeral=True,
+            )
+            return
+
+        posting = starter.content
+        if thread.applied_tags:
+            tag_names = ", ".join(t.name for t in thread.applied_tags)
+            posting = f"Thread tags: {tag_names}\n\n{posting}"
+
+        await interaction.response.defer(ephemeral=False)
+
+        try:
+            requirements = await asyncio.to_thread(
+                extract_job_requirements,
+                posting,
+                api_key=settings.openai_api_key,
+                base_url=settings.openai_base_url or None,
+                model=settings.openai_model,
+                webhook_url=settings.discord_logs_webhook_url,
+            )
+        except RuntimeError as exc:
+            self._audit_command(
+                interaction=interaction,
+                action="crm.match_candidates",
+                result="error",
+                metadata={"stage": "extract_requirements", "error": str(exc)},
+            )
+            await interaction.followup.send(
+                f"❌ Failed to analyze the job posting: {exc}",
+                ephemeral=True,
+            )
+            return
+
+        if not requirements.required_skills:
+            self._audit_command(
+                interaction=interaction,
+                action="crm.match_candidates",
+                result="denied",
+                metadata={"stage": "no_required_skills_extracted"},
+            )
+            await interaction.followup.send(
+                "⚠️ No required skills could be extracted from this posting. "
+                "Please include explicit skill requirements and try again.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            candidates = await asyncio.to_thread(
+                search_candidates, settings, requirements, limit=10
+            )
+        except Exception as exc:
+            logger.error("Candidate search failed: %s", exc)
+            self._audit_command(
+                interaction=interaction,
+                action="crm.match_candidates",
+                result="error",
+                metadata={"stage": "search_candidates", "error": str(exc)},
+            )
+            await interaction.followup.send(
+                "❌ Candidate search failed. Please try again later.",
+                ephemeral=True,
+            )
+            return
+
+        lines: list[str] = []
+
+        header_parts: list[str] = []
+        if requirements.title:
+            header_parts.append(f"**{requirements.title}**")
+        if requirements.required_skills:
+            header_parts.append(
+                "Skills: "
+                + ", ".join(f"`{s}`" for s in requirements.required_skills[:8])
+            )
+        if requirements.seniority:
+            header_parts.append(f"Seniority: `{requirements.seniority}`")
+        if requirements.location_type == "us_only":
+            header_parts.append("📍 US only")
+        elif requirements.raw_location_text:
+            header_parts.append(f"📍 {requirements.raw_location_text}")
+
+        lines.append("## Job Match Results")
+        if header_parts:
+            lines.append(" · ".join(header_parts))
+        lines.append(f"Found **{len(candidates)}** candidate(s).\n")
+
+        crm_base = settings.espo_base_url.rstrip("/")
+
+        for i, c in enumerate(candidates, start=1):
+            label = "**[Member]**" if c.is_member else "[Prospect]"
+            name = c.name or "Unknown"
+            email = c.email_508 or c.email or "—"
+            crm_link = f"{crm_base}/#Contact/view/{c.crm_contact_id}"
+            parts = [f"{i}. {label} {name} · [{email}](<{crm_link}>)"]
+
+            if c.linkedin:
+                parts.append(f"[LinkedIn](<{c.linkedin}>)")
+            if c.latest_resume_id and c.latest_resume_name:
+                parts.append(f"Resume: `{c.latest_resume_name}`")
+
+            skill_info: list[str] = []
+            if c.matched_required_skills:
+                skill_info.append(
+                    "✅ " + ", ".join(f"`{s}`" for s in c.matched_required_skills[:5])
+                )
+            if c.seniority:
+                skill_info.append(f"seniority: `{c.seniority}`")
+            if c.timezone:
+                skill_info.append(f"tz: `{c.timezone}`")
+            if skill_info:
+                parts.append("   " + " · ".join(skill_info))
+
+            lines.append("\n".join(parts))
+
+        # Paginate: Discord followup allows multiple sends; split on 1900-char chunks.
+        messages: list[str] = []
+        current = ""
+        for line in lines:
+            candidate_block = line + "\n"
+            if len(current) + len(candidate_block) > 1900:
+                messages.append(current.rstrip())
+                current = candidate_block
+            else:
+                current += candidate_block
+        if current.strip():
+            messages.append(current.rstrip())
+
+        for msg in messages:
+            await interaction.followup.send(msg)
+
+        self._audit_command(
+            interaction=interaction,
+            action="crm.match_candidates",
+            result="success",
+            metadata={
+                "title": requirements.title,
+                "required_skills_count": len(requirements.required_skills),
+                "preferred_skills_count": len(requirements.preferred_skills),
+                "candidates_returned": len(candidates),
+            },
+        )
 
 
 async def setup(bot: commands.Bot) -> None:
