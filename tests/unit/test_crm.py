@@ -512,6 +512,7 @@ class TestCRMCog:
         steering_role = Mock()
         steering_role.name = "Steering Committee"
         mock_interaction.user.roles = [steering_role]
+        crm_cog._audit_command = Mock()
 
         with patch.object(
             crm_cog,
@@ -525,6 +526,14 @@ class TestCRMCog:
         crm_cog.espo_api.request.assert_not_called()
         message = mock_interaction.followup.send.call_args[0][0]
         assert "❌ No contact found for: `missing`" in message
+        crm_cog._audit_command.assert_called_once()
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["action"] == "crm.assign_onboarder"
+        assert audit_kwargs["result"] == "error"
+        assert audit_kwargs["metadata"] == {
+            "contact": "missing",
+            "onboarder": "jane",
+        }
 
     @pytest.mark.asyncio
     async def test_assign_onboarder_invalid_onboarder_reference(
@@ -2281,6 +2290,7 @@ class TestCRMCog:
         link_user.discriminator = "0"
 
         created_contact = {"id": "contact123", "name": "Candidate User"}
+        crm_cog._audit_command = Mock()
 
         with (
             patch(
@@ -2354,6 +2364,111 @@ class TestCRMCog:
                 mock_upload.await_args.kwargs.get("target_scope") == "other_autocreated"
             )
             assert mock_upload.await_args.kwargs.get("contact") == created_contact
+            crm_cog._audit_command.assert_called_once()
+            audit_kwargs = crm_cog._audit_command.call_args.kwargs
+            assert audit_kwargs["action"] == "crm.upload_resume"
+            assert audit_kwargs["result"] == "error"
+            assert audit_kwargs["metadata"]["reason"] == "discord_not_linked"
+            assert audit_kwargs["metadata"]["target_scope"] == "other"
+
+    @pytest.mark.asyncio
+    async def test_upload_resume_search_term_not_found_records_error(
+        self, crm_cog, mock_interaction
+    ):
+        """Search-based resume upload should log an error when no CRM contact matches."""
+        mock_interaction.user.id = 101
+        mock_interaction.user.name = "Requester"
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+
+        resume_file = Mock()
+        resume_file.filename = "candidate.pdf"
+        resume_file.size = 1024
+        resume_file.read = AsyncMock(return_value=b"resume-bytes")
+
+        crm_cog._audit_command = Mock()
+
+        with (
+            patch(
+                "five08.discord_bot.cogs.crm.check_user_roles_with_hierarchy",
+                return_value=True,
+            ),
+            patch.object(
+                crm_cog,
+                "_search_contact_for_linking",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch.object(
+                crm_cog, "_upload_resume_attachment_to_contact", new=AsyncMock()
+            ) as mock_upload,
+            patch(
+                "five08.discord_bot.cogs.crm.settings.api_shared_secret",
+                "test-shared-secret",
+            ),
+        ):
+            await crm_cog.upload_resume.callback(
+                crm_cog,
+                mock_interaction,
+                resume_file,
+                "missing-contact",
+                False,
+                None,
+            )
+
+        mock_upload.assert_not_awaited()
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert "❌ No contact found for: `missing-contact`" in message
+        crm_cog._audit_command.assert_called_once()
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["action"] == "crm.upload_resume"
+        assert audit_kwargs["result"] == "error"
+        assert audit_kwargs["metadata"]["search_term"] == "missing-contact"
+        assert audit_kwargs["metadata"]["contact_found"] is False
+
+    @pytest.mark.asyncio
+    async def test_upload_resume_self_not_linked_records_error(
+        self, crm_cog, mock_interaction
+    ):
+        """Uploading own resume should log an error when Discord user is not linked."""
+        mock_interaction.user.id = 101
+        mock_interaction.user.name = "Member"
+        mock_interaction.user.roles = []
+
+        resume_file = Mock()
+        resume_file.filename = "candidate.pdf"
+        resume_file.size = 1024
+        resume_file.read = AsyncMock(return_value=b"resume-bytes")
+
+        crm_cog._audit_command = Mock()
+
+        with (
+            patch.object(
+                crm_cog,
+                "_find_contact_by_discord_id",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "five08.discord_bot.cogs.crm.settings.api_shared_secret",
+                "test-shared-secret",
+            ),
+        ):
+            await crm_cog.upload_resume.callback(
+                crm_cog,
+                mock_interaction,
+                resume_file,
+                None,
+                False,
+                None,
+            )
+
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert "Your Discord account is not linked to a CRM contact." in message
+        crm_cog._audit_command.assert_called_once()
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["action"] == "crm.upload_resume"
+        assert audit_kwargs["result"] == "error"
+        assert audit_kwargs["metadata"]["target_scope"] == "self"
 
     @pytest.mark.asyncio
     async def test_resume_create_contact_view_logs_create_failure(
