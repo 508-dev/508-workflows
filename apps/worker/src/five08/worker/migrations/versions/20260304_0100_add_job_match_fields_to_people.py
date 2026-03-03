@@ -50,24 +50,59 @@ def upgrade() -> None:
     op.add_column("people", sa.Column("latest_resume_id", sa.Text(), nullable=True))
     op.add_column("people", sa.Column("latest_resume_name", sa.Text(), nullable=True))
 
-    # GIN index for fast skill containment/overlap queries
-    op.create_index(
-        "idx_people_skills",
-        "people",
-        ["skills"],
-        postgresql_using="gin",
-    )
-    op.create_index("idx_people_is_member", "people", ["is_member"])
-    op.create_index("idx_people_seniority", "people", ["seniority"])
-    op.create_index("idx_people_address_country", "people", ["address_country"])
+    # GIN index for fast skill containment/overlap queries.
+    # Created concurrently to avoid write-blocking locks on the people table.
+    with op.get_context().autocommit_block():
+        op.create_index(
+            "idx_people_skills",
+            "people",
+            ["skills"],
+            postgresql_using="gin",
+            postgresql_concurrently=True,
+        )
+        op.create_index(
+            "idx_people_is_member",
+            "people",
+            ["is_member"],
+            postgresql_concurrently=True,
+        )
+        op.create_index(
+            "idx_people_seniority",
+            "people",
+            ["seniority"],
+            postgresql_concurrently=True,
+        )
+        op.create_index(
+            "idx_people_address_country",
+            "people",
+            ["address_country"],
+            postgresql_concurrently=True,
+        )
 
 
 def downgrade() -> None:
     """Remove job-match fields from the people table."""
-    op.drop_index("idx_people_address_country", table_name="people")
-    op.drop_index("idx_people_seniority", table_name="people")
-    op.drop_index("idx_people_is_member", table_name="people")
-    op.drop_index("idx_people_skills", table_name="people")
+    with op.get_context().autocommit_block():
+        op.drop_index(
+            "idx_people_address_country",
+            table_name="people",
+            postgresql_concurrently=True,
+        )
+        op.drop_index(
+            "idx_people_seniority",
+            table_name="people",
+            postgresql_concurrently=True,
+        )
+        op.drop_index(
+            "idx_people_is_member",
+            table_name="people",
+            postgresql_concurrently=True,
+        )
+        op.drop_index(
+            "idx_people_skills",
+            table_name="people",
+            postgresql_concurrently=True,
+        )
 
     op.drop_column("people", "latest_resume_name")
     op.drop_column("people", "latest_resume_id")
