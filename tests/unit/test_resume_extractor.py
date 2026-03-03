@@ -425,6 +425,17 @@ def test_extract_name_skips_heading_lines_with_extra_internal_spacing() -> None:
     assert result.name == "Jane Doe"
 
 
+def test_extract_name_case_normalizes_all_caps_name() -> None:
+    """Uppercase resume names should be normalized before exporting."""
+    extractor = ResumeProfileExtractor(api_key=None)
+
+    result = extractor.extract("WILL GUTIERREZ\nSoftware Engineer\nwill@example.com\n")
+
+    assert result.name == "Will Gutierrez"
+    assert result.first_name == "Will"
+    assert result.last_name == "Gutierrez"
+
+
 def test_infer_seniority_regex_handles_scale_keywords() -> None:
     """Seniority inference should not crash on scale/impact keyword checks."""
     level = ResumeProfileExtractor._infer_seniority_from_resume(

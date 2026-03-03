@@ -26,6 +26,7 @@ EMAIL_REGEX = r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"
 PERSONAL_WEBSITE_CONTEXT_CONFIDENCE = 0.85
 PERSONAL_WEBSITE_CONTEXT_KEYWORDS = (
     "personal website",
+    "personal blog",
     "portfolio",
     "portfolio site",
     "my website",
@@ -805,6 +806,9 @@ def _normalize_name(value: Any) -> str | None:
         return None
     if is_reserved_resume_name_token(normalized):
         return None
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if normalized == normalized.upper():
+        return normalized.title()
     return normalized
 
 
@@ -1114,9 +1118,10 @@ class ResumeProfileExtractor:
         rate_range = _normalize_scalar(source_texts.get("rate_range"))
         referred_by = _normalize_scalar(source_texts.get("referred_by"))
         first_name, last_name = self.split_name(full_name=name_match)
+        heuristic_name = _normalize_name(name_match)
 
         return ResumeExtractedProfile(
-            name=name_match,
+            name=heuristic_name,
             first_name=first_name,
             last_name=last_name,
             email=extracted_emails[0] if extracted_emails else None,
