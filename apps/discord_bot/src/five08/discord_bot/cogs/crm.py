@@ -1379,6 +1379,8 @@ class ResumeCreateContactView(discord.ui.View):
             )
         except Exception as exc:
             status_code = getattr(self.crm_cog.espo_api, "status_code", None)
+            error_detail = str(exc).strip() or "Unknown error"
+            status_note = f" (status {status_code})" if status_code else ""
             logger.exception(
                 "Failed to create contact from resume filename=%s target_scope=%s inferred_meta=%s status_code=%s payload=%s",
                 self.filename,
@@ -1403,7 +1405,7 @@ class ResumeCreateContactView(discord.ui.View):
                 metadata=audit_metadata,
             )
             await interaction.followup.send(
-                "⚠️ Could not create a contact from this resume. "
+                f"⚠️ Could not create a contact from this resume: `{error_detail}`{status_note}. "
                 "Please provide `search_term` or `link_user`.",
                 ephemeral=True,
             )
@@ -1535,6 +1537,11 @@ class CRMCog(commands.Cog):
             discord_logs_webhook_url=settings.discord_logs_webhook_url,
             discord_logs_webhook_wait=settings.discord_logs_webhook_wait,
         )
+
+    @staticmethod
+    def _configured_linkedin_field() -> str:
+        """Return the configured field for LinkedIn profile values."""
+        return str(getattr(settings, "crm_linkedin_field", "cLinkedInUrl"))
 
     def _audit_command(
         self,
@@ -3358,7 +3365,7 @@ class CRMCog(commands.Cog):
         if github_usernames:
             payload["cGitHubUsername"] = github_usernames[0]
         if linkedin_urls:
-            payload["cLinkedInUrl"] = linkedin_urls[0]
+            payload[self._configured_linkedin_field()] = linkedin_urls[0]
         phone = hints.get("phone")
         if isinstance(phone, str) and phone.strip():
             payload["phoneNumber"] = phone.strip()
@@ -3417,10 +3424,20 @@ class CRMCog(commands.Cog):
         self, *, field: str, value: str, max_size: int = 10
     ) -> list[dict[str, Any]]:
         """Search contacts using an exact field equals match."""
+        select_fields = [
+            "id",
+            "name",
+            "emailAddress",
+            "c508Email",
+            "cDiscordUsername",
+            "cGitHubUsername",
+        ]
+        if field not in select_fields:
+            select_fields.append(field)
         search_params = {
             "where": [{"type": "equals", "attribute": field, "value": value}],
             "maxSize": max_size,
-            "select": "id,name,emailAddress,c508Email,cDiscordUsername,cGitHubUsername,cLinkedInUrl",
+            "select": ",".join(select_fields),
         }
 
         response = self.espo_api.request("GET", "Contact", search_params)
@@ -3490,7 +3507,7 @@ class CRMCog(commands.Cog):
         for linkedin_url in linkedin_urls:
             attempts.append({"method": "linkedin", "value": linkedin_url})
             contacts = await self._search_contacts_by_field(
-                field="cLinkedInUrl", value=linkedin_url
+                field=self._configured_linkedin_field(), value=linkedin_url
             )
             if len(contacts) == 1:
                 return contacts[0], {
@@ -4988,7 +5005,7 @@ class CRMCog(commands.Cog):
             if linkedin is not None:
                 clean_linkedin = linkedin.strip()
                 if clean_linkedin:
-                    update_data["cLinkedInUrl"] = clean_linkedin
+                    update_data[self._configured_linkedin_field()] = clean_linkedin
                     requested_updates.append("linkedin")
 
             if rate_range is not None:
@@ -5068,9 +5085,10 @@ class CRMCog(commands.Cog):
                             inline=True,
                         )
                     if "linkedin" in requested_updates:
+                        linkedin_field = self._configured_linkedin_field()
                         embed.add_field(
                             name="🔗 LinkedIn",
-                            value=update_data["cLinkedInUrl"],
+                            value=update_data[linkedin_field],
                             inline=True,
                         )
                     if "skills" in requested_updates:
