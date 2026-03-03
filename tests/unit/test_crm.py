@@ -10,6 +10,7 @@ from five08.discord_bot.cogs.crm import (
     CRMCog,
     ResumeButtonView,
     ResumeCreateContactView,
+    ResumeUpdateConfirmationView,
     ResumeReprocessConfirmationView,
     ResumeDownloadButton,
 )
@@ -93,6 +94,85 @@ class TestCRMCog:
         result = crm_cog._check_member_role(mock_interaction)
 
         assert result is False
+
+    @pytest.mark.asyncio
+    async def test_resume_apply_confirmation_combines_skills_and_strengths(
+        self, crm_cog
+    ):
+        """Applied updates should render skills and skill attrs as one combined line."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+        )
+
+        lines = view._build_applied_updates_lines(
+            updated_fields=["skills", "cSkillAttrs", "cGitHubUsername"],
+            updated_values={
+                "skills": ["python", "redis"],
+                "cSkillAttrs": {
+                    "python": {"strength": 5},
+                    "redis": {"strength": 3},
+                },
+                "cGitHubUsername": "wumichaelm",
+            },
+        )
+
+        assert lines[0] == "**Skills**: `python (5), redis (3)`"
+        assert lines[1] == "**GitHub**: `@wumichaelm`"
+        assert len(lines) == 2
+
+    @pytest.mark.asyncio
+    async def test_resume_apply_confirmation_maps_skill_attrs_only_to_skills(
+        self, crm_cog
+    ):
+        """Updated fields should collapse cSkillAttrs-only changes into Skills label."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+        )
+
+        collapsed = view._collapse_updated_fields(["cSkillAttrs", "phoneNumber"])
+
+        assert collapsed == ["skills", "phoneNumber"]
+
+    @pytest.mark.asyncio
+    async def test_resume_apply_confirmation_caps_updated_fields_length(self, crm_cog):
+        """Updated Fields text should stay within Discord field limits."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+        )
+
+        labels = [f"field-{idx:03d}" for idx in range(400)]
+        summary = view._format_updated_fields_value(labels)
+
+        assert len(summary) <= view._EMBED_FIELD_LIMIT
+
+    @pytest.mark.asyncio
+    async def test_resume_apply_confirmation_caps_applied_updates_length(self, crm_cog):
+        """Applied updates text should stay within Discord field limits."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+        )
+
+        long_value = "x" * 500
+        lines = [f"**Field {idx}**: `{long_value}`" for idx in range(20)]
+        summary = view._format_applied_updates_value(lines)
+
+        assert len(summary) <= view._APPLIED_FIELD_TOTAL_LIMIT
 
     @pytest.mark.asyncio
     async def test_download_and_send_resume_success(self, crm_cog, mock_interaction):

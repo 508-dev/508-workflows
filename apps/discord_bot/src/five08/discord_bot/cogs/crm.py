@@ -550,6 +550,23 @@ class ResumeConfirmationView(discord.ui.View):
 class ResumeUpdateConfirmationView(discord.ui.View):
     """Confirm extracted profile updates before writing to CRM."""
 
+    _EMBED_FIELD_LIMIT = 1024
+    _APPLIED_VALUE_LIMIT = 150
+    _APPLIED_FIELD_TOTAL_LIMIT = 900
+
+    _FIELD_LABELS: dict[str, str] = {
+        "emailAddressData": "Email Addresses",
+        "cGitHubUsername": "GitHub",
+        "phoneNumber": "Phone",
+        "skills": "Skills",
+        "cSkillAttrs": "Skill Strengths",
+        "cWebsiteLink": "Website",
+        "cSocialLinks": "Social Links",
+        "cSeniority": "Seniority",
+        "cDiscordUserID": "Discord User ID",
+        "cDiscordUsername": "Discord Username",
+    }
+
     def __init__(
         self,
         *,
@@ -567,6 +584,290 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         self.contact_name = contact_name
         self.proposed_updates = proposed_updates
         self.link_discord = link_discord
+
+    @classmethod
+    def _field_label(cls, field: str) -> str:
+        linkedin_field = getattr(settings, "crm_linkedin_field", "cLinkedInUrl")
+        if field == linkedin_field:
+            return "LinkedIn"
+        return cls._FIELD_LABELS.get(field, field)
+
+    @staticmethod
+    def _truncate_embed_field(value: str, limit: int = 1024) -> str:
+        if len(value) <= limit:
+            return value
+        if limit <= 3:
+            return value[:limit]
+        return value[: limit - 3] + "..."
+
+    @staticmethod
+    def _decode_json_like_mapping(value: Any) -> dict[str, Any] | None:
+        candidate = value
+        if isinstance(candidate, str):
+            raw = candidate.strip()
+            if not raw:
+                return None
+            try:
+                candidate = json.loads(raw)
+            except Exception:
+                try:
+                    candidate = ast.literal_eval(raw)
+                except Exception:
+                    return None
+            if isinstance(candidate, str):
+                nested = candidate.strip()
+                if not nested:
+                    return None
+                try:
+                    candidate = json.loads(nested)
+                except Exception:
+                    try:
+                        candidate = ast.literal_eval(nested)
+                    except Exception:
+                        return None
+        if not isinstance(candidate, dict):
+            return None
+        return {str(key): item_value for key, item_value in candidate.items()}
+
+    @classmethod
+    def _format_field_value(cls, field: str, value: Any) -> str:
+        if value is None:
+            return "None"
+
+        if field == "cGitHubUsername":
+            username = str(value).strip().lstrip("@")
+            return f"@{username}" if username else "None"
+
+        if field == "skills":
+            if isinstance(value, str):
+                return cls._truncate_embed_field(value, cls._APPLIED_VALUE_LIMIT)
+            if isinstance(value, (list, tuple, set)):
+                items = [str(item).strip() for item in value if str(item).strip()]
+                joined = ", ".join(items) if items else "None"
+                return cls._truncate_embed_field(joined, cls._APPLIED_VALUE_LIMIT)
+
+        if field == "cSkillAttrs":
+            parsed = cls._decode_json_like_mapping(value)
+            if parsed:
+                formatted: list[str] = []
+                for raw_skill, raw_payload in parsed.items():
+                    strength_value = (
+                        raw_payload.get("strength")
+                        if isinstance(raw_payload, dict)
+                        else raw_payload
+                    )
+                    if strength_value is None:
+                        strength = 0
+                        skill = str(raw_skill).strip()
+                        if not skill:
+                            continue
+                        formatted.append(skill)
+                        continue
+                    try:
+                        strength = int(float(strength_value))
+                    except Exception:
+                        strength = 0
+                    skill = str(raw_skill).strip()
+                    if not skill:
+                        continue
+                    if 1 <= strength <= 5:
+                        formatted.append(f"{skill} ({strength})")
+                    else:
+                        formatted.append(skill)
+                joined = ", ".join(formatted) if formatted else "None"
+                return cls._truncate_embed_field(joined, cls._APPLIED_VALUE_LIMIT)
+
+        if isinstance(value, (list, tuple, set)):
+            items = [str(item).strip() for item in value if str(item).strip()]
+            joined = ", ".join(items) if items else "None"
+            return cls._truncate_embed_field(joined, cls._APPLIED_VALUE_LIMIT)
+        if isinstance(value, dict):
+            try:
+                encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
+            except Exception:
+                encoded = str(value)
+            return cls._truncate_embed_field(encoded, cls._APPLIED_VALUE_LIMIT)
+
+        text = str(value).strip()
+        return cls._truncate_embed_field(text or "None", cls._APPLIED_VALUE_LIMIT)
+
+    def _build_applied_updates_lines(
+        self,
+        *,
+        updated_fields: list[str],
+        updated_values: dict[str, Any],
+    ) -> list[str]:
+        has_skills_field = "skills" in updated_fields
+        has_skill_attrs_field = "cSkillAttrs" in updated_fields
+        lines: list[str] = []
+        if has_skills_field or has_skill_attrs_field:
+            skills_value = updated_values.get(
+                "skills", self.proposed_updates.get("skills")
+            )
+            attrs_value = updated_values.get(
+                "cSkillAttrs",
+                self.proposed_updates.get("cSkillAttrs"),
+            )
+            combined_skills = self._format_combined_skills_value(
+                skills_value=skills_value,
+                attrs_value=attrs_value,
+            )
+            truncated_combined_skills = self._truncate_embed_field(
+                combined_skills, self._APPLIED_VALUE_LIMIT
+            )
+            lines.append(f"**Skills**: `{truncated_combined_skills}`")
+
+        for field in self._collapse_updated_fields(updated_fields):
+            if field == "skills":
+                continue
+            label = self._field_label(field)
+            value = updated_values.get(field, self.proposed_updates.get(field))
+            formatted = self._format_field_value(field, value)
+            lines.append(f"**{label}**: `{formatted}`")
+        return lines
+
+    @classmethod
+    def _format_updated_fields_value(cls, labeled_fields: list[str]) -> str:
+        if not labeled_fields:
+            return "No field changes"
+
+        full = ", ".join(labeled_fields)
+        if len(full) <= cls._EMBED_FIELD_LIMIT:
+            return full
+
+        kept: list[str] = []
+        for index, field in enumerate(labeled_fields):
+            kept.append(field)
+            remaining = len(labeled_fields) - index - 1
+            suffix = f", and {remaining} more" if remaining > 0 else ""
+            candidate = ", ".join(kept) + suffix
+            if len(candidate) > cls._EMBED_FIELD_LIMIT:
+                kept.pop()
+                break
+
+        if not kept:
+            return cls._truncate_embed_field(full, cls._EMBED_FIELD_LIMIT)
+
+        remaining = len(labeled_fields) - len(kept)
+        if remaining > 0:
+            candidate = ", ".join(kept) + f", and {remaining} more"
+            return cls._truncate_embed_field(candidate, cls._EMBED_FIELD_LIMIT)
+        return cls._truncate_embed_field(", ".join(kept), cls._EMBED_FIELD_LIMIT)
+
+    @classmethod
+    def _format_applied_updates_value(cls, applied_lines: list[str]) -> str:
+        if not applied_lines:
+            return "No applied updates"
+
+        kept: list[str] = []
+        total = 0
+        for index, line in enumerate(applied_lines[:8]):
+            line_len = len(line) + (1 if kept else 0)
+            remaining = len(applied_lines[:8]) - index - 1
+            suffix = f"... and {remaining} more" if remaining > 0 else ""
+            projected = total + line_len
+            if suffix:
+                projected += len(suffix) + 1
+            if projected > cls._APPLIED_FIELD_TOTAL_LIMIT:
+                break
+            kept.append(line)
+            total += line_len
+
+        if not kept:
+            joined = "\n".join(applied_lines[:8])
+            return cls._truncate_embed_field(joined, cls._APPLIED_FIELD_TOTAL_LIMIT)
+
+        remaining = len(applied_lines[:8]) - len(kept)
+        if remaining > 0:
+            kept.append(f"... and {remaining} more")
+        joined = "\n".join(kept)
+        return cls._truncate_embed_field(joined, cls._APPLIED_FIELD_TOTAL_LIMIT)
+
+    @staticmethod
+    def _collapse_updated_fields(updated_fields: list[str]) -> list[str]:
+        """Collapse skill fields into a single logical skills entry."""
+        collapsed: list[str] = []
+        seen: set[str] = set()
+        has_skills = "skills" in updated_fields
+        has_skill_attrs = "cSkillAttrs" in updated_fields
+
+        for field in updated_fields:
+            normalized_field = field
+            if field == "cSkillAttrs":
+                if has_skills:
+                    continue
+                if has_skill_attrs:
+                    normalized_field = "skills"
+            key = normalized_field.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            collapsed.append(normalized_field)
+        return collapsed
+
+    @classmethod
+    def _format_combined_skills_value(
+        cls,
+        *,
+        skills_value: Any,
+        attrs_value: Any,
+    ) -> str:
+        skills: list[str] = []
+        if isinstance(skills_value, str):
+            skills = [item.strip() for item in skills_value.split(",") if item.strip()]
+        elif isinstance(skills_value, (list, tuple, set)):
+            skills = [str(item).strip() for item in skills_value if str(item).strip()]
+
+        parsed_attrs = cls._decode_json_like_mapping(attrs_value) or {}
+        strengths: dict[str, int] = {}
+        display_by_key: dict[str, str] = {}
+        for raw_skill, raw_payload in parsed_attrs.items():
+            skill_name = str(raw_skill).strip()
+            if not skill_name:
+                continue
+            key = skill_name.casefold()
+            display_by_key.setdefault(key, skill_name)
+            strength_value = (
+                raw_payload.get("strength")
+                if isinstance(raw_payload, dict)
+                else raw_payload
+            )
+            if strength_value is None:
+                continue
+            try:
+                strength = int(float(strength_value))
+            except Exception:
+                continue
+            if 1 <= strength <= 5:
+                strengths[key] = strength
+
+        ordered: list[str] = []
+        seen_order: set[str] = set()
+        for raw_skill in skills:
+            key = raw_skill.casefold()
+            if key in seen_order:
+                continue
+            seen_order.add(key)
+            ordered.append(raw_skill)
+            display_by_key.setdefault(key, raw_skill)
+        for key, display_name in display_by_key.items():
+            if key in seen_order:
+                continue
+            seen_order.add(key)
+            ordered.append(display_name)
+
+        if not ordered:
+            return "None"
+
+        formatted: list[str] = []
+        for skill_name in ordered:
+            key = skill_name.casefold()
+            skill_strength = strengths.get(key)
+            if skill_strength is not None:
+                formatted.append(f"{skill_name} ({skill_strength})")
+            else:
+                formatted.append(skill_name)
+        return ", ".join(formatted) if formatted else "None"
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """Allow only the original requester to confirm/cancel."""
@@ -680,11 +981,17 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         status = str(apply_result.get("status", "unknown"))
         result = apply_result.get("result")
         updated_fields: list[str] = []
+        updated_values: dict[str, Any] = {}
         link_discord_applied: bool | None = None
         if isinstance(result, dict):
             raw_fields = result.get("updated_fields")
             if isinstance(raw_fields, list):
                 updated_fields = [str(field) for field in raw_fields]
+            raw_values = result.get("updated_values")
+            if isinstance(raw_values, dict):
+                updated_values = {
+                    str(field): value for field, value in raw_values.items()
+                }
             raw_link_applied = result.get("link_discord_applied")
             if isinstance(raw_link_applied, bool):
                 link_discord_applied = raw_link_applied
@@ -789,11 +1096,25 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             description=f"Applied updates for **{self.contact_name}**.",
             color=0x00FF00,
         )
+        display_fields = self._collapse_updated_fields(updated_fields)
+        labeled_fields = [self._field_label(field) for field in display_fields]
+        updated_fields_value = self._format_updated_fields_value(labeled_fields)
         embed.add_field(
             name="Updated Fields",
-            value=", ".join(updated_fields) if updated_fields else "No field changes",
+            value=updated_fields_value,
             inline=False,
         )
+        applied_lines = self._build_applied_updates_lines(
+            updated_fields=updated_fields,
+            updated_values=updated_values,
+        )
+        if applied_lines:
+            applied_updates_value = self._format_applied_updates_value(applied_lines)
+            embed.add_field(
+                name="Applied Updates",
+                value=applied_updates_value,
+                inline=False,
+            )
         profile_url = f"{self.crm_cog.base_url}/#Contact/view/{self.contact_id}"
         embed.add_field(name="🔗 CRM Profile", value=f"[View in CRM]({profile_url})")
         _audit_apply_event(

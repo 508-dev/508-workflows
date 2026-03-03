@@ -9,24 +9,16 @@ from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
-from five08.skills import normalize_skill
+from five08.skills import (
+    DISALLOWED_RESUME_SKILLS,
+    normalize_skill_payload,
+)
 
 try:
     from openai import OpenAI as OpenAIClient
 except Exception:  # pragma: no cover
     OpenAIClient = None  # type: ignore[misc,assignment]
 
-
-DISALLOWED_SKILLS = {
-    "code review",
-    "debugging",
-    "performance optimization",
-    "testing",
-    "code quality",
-    "bug tracking",
-    "bugtracking",
-    "bug-tracking",
-}
 
 DEFAULT_SKILL_STRENGTH = 3
 EMAIL_REGEX = r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"
@@ -142,6 +134,32 @@ def _normalize_linkedin(value: Any) -> str | None:
     return candidate.rstrip("/")
 
 
+def _linkedin_profile_key(value: Any) -> str | None:
+    """Return a canonical key for LinkedIn profile identity comparison."""
+    normalized = _normalize_linkedin(value)
+    if not normalized:
+        return None
+
+    try:
+        parsed = urlsplit(normalized)
+    except Exception:
+        return None
+
+    host = (parsed.hostname or "").casefold()
+    if host.startswith("www."):
+        host = host[4:]
+    if host != "linkedin.com" and not host.endswith(".linkedin.com"):
+        return None
+
+    path = re.sub(r"/+", "/", parsed.path or "").rstrip("/")
+    if not path:
+        return None
+    profile_path = path.casefold()
+    if profile_path.startswith("/in/") or profile_path.startswith("/pub/"):
+        return profile_path
+    return None
+
+
 def _normalize_phone(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -170,8 +188,14 @@ def _normalize_website_url(value: str) -> str:
 
     if candidate.lower().startswith("www."):
         candidate = f"https://{candidate}"
-    if not candidate.startswith(("http://", "https://")):
-        return ""
+    elif not candidate.lower().startswith(("http://", "https://")):
+        # Accept scheme-less domains from resumes (for example: mysite.dev/path).
+        if not re.match(
+            r"(?i)^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?:[/?#].*)?$",
+            candidate,
+        ):
+            return ""
+        candidate = f"https://{candidate}"
 
     try:
         parsed = urlsplit(candidate)
@@ -328,92 +352,15 @@ def _normalize_skills(value: Any) -> list[str]:
     return normalized
 
 
-def _normalize_strength(value: Any) -> int | None:
-    raw: Any = value
-    if isinstance(raw, dict):
-        raw = raw.get("strength")
-    if raw is None:
-        return None
-    if isinstance(raw, str) and not raw.strip():
-        return None
-    try:
-        strength = int(float(raw))
-    except Exception:
-        return None
-    if not 1 <= strength <= 5:
-        return None
-    return strength
-
-
-def _parse_skill_with_strength(raw_skill: str) -> tuple[str, int | None]:
-    raw = raw_skill.strip()
-    match = re.match(r"^(.*)\(\s*(\d*)\s*\)\s*$", raw)
-    if match is None:
-        normalized = normalize_skill(raw)
-        if not normalized or normalized in DISALLOWED_SKILLS:
-            return "", None
-        return normalized, None
-
-    base = match.group(1).strip()
-    if not base:
-        return "", None
-    normalized = normalize_skill(base)
-    if not normalized or normalized in DISALLOWED_SKILLS:
-        return "", None
-    return normalized, _normalize_strength(match.group(2))
-
-
 def _normalize_skill_payload(
     skills_value: Any,
     skill_attrs_value: Any,
 ) -> tuple[list[str], dict[str, int]]:
-    normalized_skills: list[str] = []
-    normalized_attrs: dict[str, int] = {}
-
-    raw_skill_items = skills_value if isinstance(skills_value, list) else []
-    for raw_skill in raw_skill_items:
-        skill, strength = _parse_skill_with_strength(str(raw_skill))
-        if not skill:
-            continue
-        key = skill.casefold()
-        if key in normalized_attrs and strength is not None:
-            normalized_attrs[key] = max(normalized_attrs[key], strength)
-            continue
-
-        normalized_skills.append(skill)
-        if strength is not None:
-            normalized_attrs[key] = strength
-
-    if isinstance(skill_attrs_value, dict):
-        for raw_name, raw_payload in skill_attrs_value.items():
-            normalized = normalize_skill(str(raw_name))
-            if not normalized or normalized in DISALLOWED_SKILLS:
-                continue
-            strength = _normalize_strength(raw_payload)
-            if strength is None:
-                continue
-            key = normalized.casefold()
-            normalized_attrs[key] = max(normalized_attrs.get(key, 0), strength)
-            if not any(existing.casefold() == key for existing in normalized_skills):
-                normalized_skills.append(normalized)
-
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for raw_skill in normalized_skills:
-        skill = normalize_skill(raw_skill)
-        if not skill or skill in DISALLOWED_SKILLS:
-            continue
-        key = skill.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(skill)
-
-    return deduped, {
-        skill: normalized_attrs[skill.casefold()]
-        for skill in deduped
-        if normalized_attrs.get(skill.casefold(), 0) > 0
-    }
+    return normalize_skill_payload(
+        skills_value,
+        skill_attrs_value,
+        disallowed=DISALLOWED_RESUME_SKILLS,
+    )
 
 
 def _normalize_name(value: Any) -> str | None:
@@ -531,6 +478,14 @@ class ResumeProfileExtractor:
             parsed_website_links, parsed_social_links = _split_social_and_website_links(
                 parsed_website_links
             )
+            heuristic_links = self._extract_website_links(resume_text)
+            if heuristic_links:
+                merged_links = _normalize_website_links(
+                    [*parsed_website_links, *parsed_social_links, *heuristic_links]
+                )
+                parsed_website_links, parsed_social_links = (
+                    _split_social_and_website_links(merged_links)
+                )
             parsed_skills, parsed_skill_attrs = _normalize_skill_payload(
                 parsed.get("skills"),
                 parsed.get("skill_attrs"),
@@ -540,12 +495,27 @@ class ResumeProfileExtractor:
             if not parsed_email and parsed_emails:
                 parsed_email = parsed_emails[0]
                 parsed_emails = parsed_emails[1:]
+            linkedin_url = _normalize_linkedin(parsed.get("linkedin_url")) or (
+                self._extract_linkedin_url(resume_text)
+            )
+            linkedin_profile_key = _linkedin_profile_key(linkedin_url)
+            if linkedin_profile_key:
+                parsed_website_links = [
+                    item
+                    for item in parsed_website_links
+                    if _linkedin_profile_key(item) != linkedin_profile_key
+                ]
+                parsed_social_links = [
+                    item
+                    for item in parsed_social_links
+                    if _linkedin_profile_key(item) != linkedin_profile_key
+                ]
             return ResumeExtractedProfile(
                 name=_normalize_name(parsed.get("name")),
                 email=parsed_email,
                 additional_emails=parsed_emails,
                 github_username=_normalize_github(parsed.get("github_username")),
-                linkedin_url=_normalize_linkedin(parsed.get("linkedin_url")),
+                linkedin_url=linkedin_url,
                 phone=_normalize_phone(parsed.get("phone")),
                 website_links=parsed_website_links,
                 social_links=parsed_social_links,
@@ -583,11 +553,7 @@ class ResumeProfileExtractor:
             snippet,
             flags=re.IGNORECASE,
         )
-        linkedin_match = re.search(
-            r"(?:https?://)?(?:[\w.-]+\.)?linkedin\.com/in/[A-Za-z0-9\\-_%]+/?",
-            snippet,
-            flags=re.IGNORECASE,
-        )
+        linkedin_url = self._extract_linkedin_url(snippet)
         phone_match = re.search(
             r"(?:\+?\d[\d\s().-]{7,}\d)",
             snippet,
@@ -600,6 +566,18 @@ class ResumeProfileExtractor:
         website_links, social_links = _split_social_and_website_links(
             website_and_social
         )
+        linkedin_profile_key = _linkedin_profile_key(linkedin_url)
+        if linkedin_profile_key:
+            website_links = [
+                item
+                for item in website_links
+                if _linkedin_profile_key(item) != linkedin_profile_key
+            ]
+            social_links = [
+                item
+                for item in social_links
+                if _linkedin_profile_key(item) != linkedin_profile_key
+            ]
         availability = _normalize_scalar(source_texts.get("availability"))
         if not availability:
             availability = _normalize_scalar(source_texts.get("rate"))
@@ -613,9 +591,7 @@ class ResumeProfileExtractor:
             github_username=(
                 _normalize_github(github_match.group(1)) if github_match else None
             ),
-            linkedin_url=(
-                _normalize_linkedin(linkedin_match.group(0)) if linkedin_match else None
-            ),
+            linkedin_url=linkedin_url,
             phone=_normalize_phone(phone_match.group(0)) if phone_match else None,
             website_links=website_links,
             social_links=social_links,
@@ -686,6 +662,7 @@ class ResumeProfileExtractor:
             "- prefer explicit values from header/contact sections\n"
             "- for github_username return username only (no URL, no @)\n"
             "- for linkedin_url return full linkedin profile URL when available\n"
+            "- infer linkedin_url and website_links from bare domains when scheme is missing\n"
             "- for phone return digits with optional leading +\n"
             "- infer seniority_level as one of: junior, midlevel, senior, staff\n"
             "- map strengths from 1-5 where available; omit when unknown\n"
@@ -716,6 +693,17 @@ class ResumeProfileExtractor:
                 continue
             return line
         return None
+
+    @staticmethod
+    def _extract_linkedin_url(resume_text: str) -> str | None:
+        match = re.search(
+            r"(?:https?://)?(?:[\w.-]+\.)?linkedin\.com/in/[A-Za-z0-9_%-]+/?",
+            resume_text,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return None
+        return _normalize_linkedin(match.group(0))
 
     @staticmethod
     def _extract_country(resume_text: str) -> str | None:
@@ -837,7 +825,16 @@ class ResumeProfileExtractor:
 
     @staticmethod
     def _extract_website_links(resume_text: str) -> list[str]:
-        matches = re.findall(
-            r"https?://[^\s\]\[()\"<>]+", resume_text, flags=re.IGNORECASE
-        )
+        matches: list[str] = []
+        for match in re.finditer(
+            r"(?i)\b(?:https?://|www\.)[^\s\]\[()\"<>]+", resume_text
+        ):
+            matches.append(match.group(0))
+        for match in re.finditer(
+            r"(?i)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?:/[^\s\]\[()\"<>]*)?",
+            resume_text,
+        ):
+            if match.start() > 0 and resume_text[match.start() - 1] == "@":
+                continue
+            matches.append(match.group(0))
         return _normalize_website_links(matches)

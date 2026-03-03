@@ -644,6 +644,55 @@ def test_extract_profile_proposal_with_strength_change_only_no_skill_proposal() 
     assert not any(item.field == "skills" for item in result.proposed_changes)
 
 
+def test_extract_profile_proposal_fills_missing_strengths_for_merged_skills() -> None:
+    """Merged cSkillAttrs should include defaults for skills missing explicit strengths."""
+    processor = ResumeProfileProcessor()
+    processor.crm = Mock()
+    processor.extractor = Mock()
+    processor.skills_extractor = Mock()
+    processor.document_processor = Mock()
+    processor._record_processing_run = Mock()
+
+    processor.crm.get_contact.return_value = {
+        "emailAddress": "member@example.com",
+        "skills": ["qt", "redis"],
+        "cSkillAttrs": '{"qt":{"strength":3},"redis":{"strength":3}}',
+    }
+    processor.crm.download_attachment.return_value = b"resume-bytes"
+    processor.document_processor.extract_text.return_value = "resume text"
+    processor.document_processor.get_content_hash.return_value = "hash-21"
+    processor.extractor.extract.return_value = ResumeExtractedProfile(
+        email=None,
+        github_username=None,
+        linkedin_url=None,
+        phone=None,
+        skills=["python", "javascript", "qt", "redis"],
+        skill_attrs={"python": 5},
+        confidence=0.9,
+        source="gpt-4o-mini",
+    )
+    processor.skills_extractor.extract_skills.return_value = ExtractedSkills(
+        skills=[],
+        skill_attrs={},
+        confidence=0.8,
+        source="heuristic",
+    )
+
+    result = processor.extract_profile_proposal(
+        contact_id="contact-21",
+        attachment_id="att-21",
+        filename="resume.pdf",
+    )
+
+    assert result.success is True
+    assert result.proposed_updates["skills"] == ["qt", "redis", "python", "javascript"]
+    attrs = json.loads(result.proposed_updates["cSkillAttrs"])
+    assert attrs["qt"]["strength"] == 3
+    assert attrs["redis"]["strength"] == 3
+    assert attrs["python"]["strength"] == 5
+    assert attrs["javascript"]["strength"] == 3
+
+
 def test_apply_profile_updates_adds_discord_and_filters_email() -> None:
     """Apply should include Discord link values and prevent @508.dev email writes."""
     processor = ResumeProfileProcessor()
@@ -661,6 +710,9 @@ def test_apply_profile_updates_adds_discord_and_filters_email() -> None:
     )
 
     assert result.success is True
+    assert result.updated_values["cGitHubUsername"] == "new-gh"
+    assert result.updated_values["skills"] == ["python", "fastapi"]
+    assert result.updated_values["cDiscordUserID"] == "123"
     processor.crm.update_contact.assert_called_once()
     update_payload = processor.crm.update_contact.call_args[0][1]
     assert "emailAddress" not in update_payload
@@ -707,6 +759,25 @@ def test_apply_profile_updates_serializes_skill_attrs() -> None:
         "python": {"strength": 5},
         "react": {"strength": 3},
     }
+
+
+def test_apply_profile_updates_accepts_double_encoded_skill_attrs() -> None:
+    """Apply should parse double-encoded cSkillAttrs payloads instead of dropping them."""
+    processor = ResumeProfileProcessor()
+    processor.crm = Mock()
+
+    raw_attrs = {"python": {"strength": 5}, "react": {"strength": 4}}
+    result = processor.apply_profile_updates(
+        contact_id="contact-21",
+        updates={
+            "skills": ["Python", "React"],
+            "cSkillAttrs": json.dumps(json.dumps(raw_attrs)),
+        },
+    )
+
+    assert result.success is True
+    payload = processor.crm.update_contact.call_args[0][1]
+    assert json.loads(payload["cSkillAttrs"]) == raw_attrs
 
 
 def test_apply_profile_updates_allows_cSeniority_field() -> None:

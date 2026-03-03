@@ -108,6 +108,7 @@ class ResumeApplyResult(BaseModel):
 
     contact_id: str
     updated_fields: list[str]
+    updated_values: dict[str, Any] = Field(default_factory=dict)
     link_discord_applied: bool = False
     success: bool
     error: str | None = None
