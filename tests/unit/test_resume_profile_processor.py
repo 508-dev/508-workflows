@@ -154,8 +154,8 @@ def test_extract_profile_proposal_with_strength_change_only_no_skill_proposal() 
         confidence=0.8,
         source="gpt-4o-mini",
     )
-    processor.skills_extractor.canonicalize_skill.side_effect = (
-        lambda v: str(v).strip().lower()
+    processor.skills_extractor.canonicalize_skill.side_effect = lambda v: (
+        str(v).strip().lower()
     )
 
     result = processor.extract_profile_proposal(
