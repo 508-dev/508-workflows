@@ -551,6 +551,10 @@ class ResumeConfirmationView(discord.ui.View):
 class ResumeUpdateConfirmationView(discord.ui.View):
     """Confirm extracted profile updates before writing to CRM."""
 
+    _EMBED_FIELD_LIMIT = 1024
+    _APPLIED_VALUE_LIMIT = 150
+    _APPLIED_FIELD_TOTAL_LIMIT = 900
+
     _FIELD_LABELS: dict[str, str] = {
         "emailAddressData": "Email Addresses",
         "cGitHubUsername": "GitHub",
@@ -590,6 +594,14 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         return cls._FIELD_LABELS.get(field, field)
 
     @staticmethod
+    def _truncate_embed_field(value: str, limit: int = 1024) -> str:
+        if len(value) <= limit:
+            return value
+        if limit <= 3:
+            return value[:limit]
+        return value[: limit - 3] + "..."
+
+    @staticmethod
     def _decode_json_like_mapping(value: Any) -> dict[str, Any] | None:
         candidate = value
         if isinstance(candidate, str):
@@ -616,7 +628,7 @@ class ResumeUpdateConfirmationView(discord.ui.View):
                         return None
         if not isinstance(candidate, dict):
             return None
-        return {str(key): value for key, value in candidate.items()}
+        return {str(key): item_value for key, item_value in candidate.items()}
 
     @classmethod
     def _format_field_value(cls, field: str, value: Any) -> str:
@@ -629,10 +641,11 @@ class ResumeUpdateConfirmationView(discord.ui.View):
 
         if field == "skills":
             if isinstance(value, str):
-                return value
+                return cls._truncate_embed_field(value, cls._APPLIED_VALUE_LIMIT)
             if isinstance(value, (list, tuple, set)):
                 items = [str(item).strip() for item in value if str(item).strip()]
-                return ", ".join(items) if items else "None"
+                joined = ", ".join(items) if items else "None"
+                return cls._truncate_embed_field(joined, cls._APPLIED_VALUE_LIMIT)
 
         if field == "cSkillAttrs":
             parsed = cls._decode_json_like_mapping(value)
@@ -662,19 +675,22 @@ class ResumeUpdateConfirmationView(discord.ui.View):
                         formatted.append(f"{skill} ({strength})")
                     else:
                         formatted.append(skill)
-                return ", ".join(formatted) if formatted else "None"
+                joined = ", ".join(formatted) if formatted else "None"
+                return cls._truncate_embed_field(joined, cls._APPLIED_VALUE_LIMIT)
 
         if isinstance(value, (list, tuple, set)):
             items = [str(item).strip() for item in value if str(item).strip()]
-            return ", ".join(items) if items else "None"
+            joined = ", ".join(items) if items else "None"
+            return cls._truncate_embed_field(joined, cls._APPLIED_VALUE_LIMIT)
         if isinstance(value, dict):
             try:
-                return json.dumps(value, sort_keys=True, separators=(",", ":"))
+                encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
             except Exception:
-                return str(value)
+                encoded = str(value)
+            return cls._truncate_embed_field(encoded, cls._APPLIED_VALUE_LIMIT)
 
         text = str(value).strip()
-        return text or "None"
+        return cls._truncate_embed_field(text or "None", cls._APPLIED_VALUE_LIMIT)
 
     def _build_applied_updates_lines(
         self,
@@ -697,7 +713,10 @@ class ResumeUpdateConfirmationView(discord.ui.View):
                 skills_value=skills_value,
                 attrs_value=attrs_value,
             )
-            lines.append(f"**Skills**: `{combined_skills}`")
+            truncated_combined_skills = self._truncate_embed_field(
+                combined_skills, self._APPLIED_VALUE_LIMIT
+            )
+            lines.append(f"**Skills**: `{truncated_combined_skills}`")
 
         for field in self._collapse_updated_fields(updated_fields):
             if field == "skills":
@@ -707,6 +726,63 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             formatted = self._format_field_value(field, value)
             lines.append(f"**{label}**: `{formatted}`")
         return lines
+
+    @classmethod
+    def _format_updated_fields_value(cls, labeled_fields: list[str]) -> str:
+        if not labeled_fields:
+            return "No field changes"
+
+        full = ", ".join(labeled_fields)
+        if len(full) <= cls._EMBED_FIELD_LIMIT:
+            return full
+
+        kept: list[str] = []
+        for index, field in enumerate(labeled_fields):
+            kept.append(field)
+            remaining = len(labeled_fields) - index - 1
+            suffix = f", and {remaining} more" if remaining > 0 else ""
+            candidate = ", ".join(kept) + suffix
+            if len(candidate) > cls._EMBED_FIELD_LIMIT:
+                kept.pop()
+                break
+
+        if not kept:
+            return cls._truncate_embed_field(full, cls._EMBED_FIELD_LIMIT)
+
+        remaining = len(labeled_fields) - len(kept)
+        if remaining > 0:
+            candidate = ", ".join(kept) + f", and {remaining} more"
+            return cls._truncate_embed_field(candidate, cls._EMBED_FIELD_LIMIT)
+        return cls._truncate_embed_field(", ".join(kept), cls._EMBED_FIELD_LIMIT)
+
+    @classmethod
+    def _format_applied_updates_value(cls, applied_lines: list[str]) -> str:
+        if not applied_lines:
+            return "No applied updates"
+
+        kept: list[str] = []
+        total = 0
+        for index, line in enumerate(applied_lines[:8]):
+            line_len = len(line) + (1 if kept else 0)
+            remaining = len(applied_lines[:8]) - index - 1
+            suffix = f"... and {remaining} more" if remaining > 0 else ""
+            projected = total + line_len
+            if suffix:
+                projected += len(suffix) + 1
+            if projected > cls._APPLIED_FIELD_TOTAL_LIMIT:
+                break
+            kept.append(line)
+            total += line_len
+
+        if not kept:
+            joined = "\n".join(applied_lines[:8])
+            return cls._truncate_embed_field(joined, cls._APPLIED_FIELD_TOTAL_LIMIT)
+
+        remaining = len(applied_lines[:8]) - len(kept)
+        if remaining > 0:
+            kept.append(f"... and {remaining} more")
+        joined = "\n".join(kept)
+        return cls._truncate_embed_field(joined, cls._APPLIED_FIELD_TOTAL_LIMIT)
 
     @staticmethod
     def _collapse_updated_fields(updated_fields: list[str]) -> list[str]:
@@ -1023,9 +1099,10 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         )
         display_fields = self._collapse_updated_fields(updated_fields)
         labeled_fields = [self._field_label(field) for field in display_fields]
+        updated_fields_value = self._format_updated_fields_value(labeled_fields)
         embed.add_field(
             name="Updated Fields",
-            value=", ".join(labeled_fields) if labeled_fields else "No field changes",
+            value=updated_fields_value,
             inline=False,
         )
         applied_lines = self._build_applied_updates_lines(
@@ -1033,9 +1110,10 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             updated_values=updated_values,
         )
         if applied_lines:
+            applied_updates_value = self._format_applied_updates_value(applied_lines)
             embed.add_field(
                 name="Applied Updates",
-                value="\n".join(applied_lines[:8]),
+                value=applied_updates_value,
                 inline=False,
             )
         profile_url = f"{self.crm_cog.base_url}/#Contact/view/{self.contact_id}"

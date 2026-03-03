@@ -667,7 +667,7 @@ class ResumeProfileExtractor:
     @staticmethod
     def _extract_linkedin_url(resume_text: str) -> str | None:
         match = re.search(
-            r"(?:https?://)?(?:[\w.-]+\.)?linkedin\.com/in/[A-Za-z0-9\\-_%]+/?",
+            r"(?:https?://)?(?:[\w.-]+\.)?linkedin\.com/in/[A-Za-z0-9_%-]+/?",
             resume_text,
             flags=re.IGNORECASE,
         )

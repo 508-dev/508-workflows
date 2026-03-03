@@ -85,3 +85,12 @@ def test_extract_backfills_linkedin_and_website_when_llm_omits_them() -> None:
 
     assert result.linkedin_url == "https://linkedin.com/in/wumichaelm"
     assert "https://michaelwu.dev" in result.website_links
+
+
+def test_extract_linkedin_url_supports_hyphenated_slugs() -> None:
+    """LinkedIn profile extraction should include hyphenated slug segments."""
+    url = ResumeProfileExtractor._extract_linkedin_url(
+        "Profile: https://linkedin.com/in/wu-michael-dev/"
+    )
+
+    assert url == "https://linkedin.com/in/wu-michael-dev"
