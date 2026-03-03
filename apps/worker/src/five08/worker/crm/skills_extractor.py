@@ -49,6 +49,16 @@ COMMON_SKILLS = {
     "content marketing",
 }
 
+DISALLOWED_SKILLS = {
+    # These terms are disallowed because they are too generic to represent actionable,
+    # specific professional skill signals for resume-based CRM enrichment.
+    "code review",
+    "debugging",
+    "performance optimization",
+    "testing",
+    "code quality",
+}
+
 DEFAULT_SKILL_STRENGTH = 3
 
 
@@ -117,7 +127,7 @@ class SkillsExtractor:
         detected: set[str] = set()
         for token in token_matches:
             canonical = self._normalize_skill_name(token)
-            if canonical in COMMON_SKILLS:
+            if canonical in COMMON_SKILLS and canonical not in DISALLOWED_SKILLS:
                 detected.add(canonical)
 
         sorted_skills = sorted(detected)
@@ -179,6 +189,8 @@ class SkillsExtractor:
         normalized_skills: list[str] = []
         for skill in raw_skills:
             canonical, inline_strength = self._parse_skill_with_strength(str(skill))
+            if canonical in DISALLOWED_SKILLS:
+                continue
             if canonical:
                 normalized_skills.append(canonical)
                 if inline_strength is not None:
@@ -187,6 +199,8 @@ class SkillsExtractor:
         if isinstance(skill_attrs_value, dict):
             for raw_name, raw_attr in skill_attrs_value.items():
                 canonical = self._normalize_skill_name(str(raw_name))
+                if canonical in DISALLOWED_SKILLS:
+                    continue
                 if not canonical:
                     continue
                 strength = self._parse_strength(raw_attr)

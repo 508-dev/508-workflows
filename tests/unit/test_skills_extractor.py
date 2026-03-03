@@ -61,12 +61,49 @@ def test_normalize_extracted_payload_parses_inline_strength_suffixes() -> None:
     extractor = SkillsExtractor()
 
     result = extractor._normalize_extracted_payload(
-        skills_value=["Python (4)", "code review ()", "TypeScript"],
+        skills_value=[
+            "Python (4)",
+            "Code Review (5)",
+            "Testing (3)",
+            "Code Quality (2)",
+            "UI/UX (4)",
+            "TypeScript",
+        ],
         skill_attrs_value=None,
         confidence=0.9,
         source="model",
     )
 
-    assert result.skills == ["code review", "python", "typescript"]
+    assert result.skills == ["python", "typescript", "ui ux"]
     assert result.skill_attrs["python"].strength == 4
-    assert "code review" not in result.skill_attrs
+    assert "code review" not in result.skills
+    assert "testing" not in result.skills
+    assert "code quality" not in result.skills
+
+
+def test_normalize_extracted_payload_keeps_ab_testing_and_ui_ux() -> None:
+    """Keep technology-like and product-specific terms while dropping broad generic terms."""
+    extractor = SkillsExtractor()
+
+    result = extractor._normalize_extracted_payload(
+        skills_value=["AB Testing", "UI/UX", "database optimization", "testing"],
+        skill_attrs_value={
+            "ab testing": {"strength": 5},
+            "ui/ux": {"strength": 4},
+            "testing": {"strength": 5},
+            "database optimization": {"strength": 3},
+        },
+        confidence=0.85,
+        source="model",
+    )
+
+    assert result.skills == [
+        "ab testing",
+        "database optimization",
+        "ui ux",
+    ]
+    assert result.skill_attrs["ab testing"].strength == 5
+    assert result.skill_attrs["ui ux"].strength == 4
+    assert result.skill_attrs["database optimization"].strength == 3
+    assert "testing" not in result.skills
+    assert "testing" not in result.skill_attrs
