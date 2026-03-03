@@ -44,6 +44,85 @@ def test_extract_website_links_accepts_uppercase_scheme() -> None:
     assert any(link.casefold() == "https://example.com/path" for link in links)
 
 
+def test_extract_profile_links_route_social_urls_away_from_website() -> None:
+    """Disallowed social/technical URLs should not be stored as personal websites."""
+    extractor = ResumeProfileExtractor(api_key=None)
+    result = extractor.extract(
+        "GitHub: https://github.com/wumichaelm\n"
+        "LinkedIn: linkedin.com/in/wumichaelm\n"
+        "Personal blog: michaelwu.dev\n"
+        "Also: Node.js\n"
+    )
+
+    assert result.website_links == ["https://michaelwu.dev"]
+    assert result.github_username == "wumichaelm"
+    assert result.linkedin_url == "https://linkedin.com/in/wumichaelm"
+    assert all("node.js" not in link.casefold() for link in result.website_links)
+
+
+def test_extract_profile_backfills_website_and_social_urls_from_markdown() -> None:
+    """Markdown links should be split by website vs social and routed correctly."""
+
+    class _FakeChatCompletions:
+        @staticmethod
+        def create(**_: object) -> object:
+            return type(
+                "Response",
+                (),
+                {
+                    "choices": [
+                        type(
+                            "Choice",
+                            (),
+                            {
+                                "message": type(
+                                    "Message",
+                                    (),
+                                    {
+                                        "content": (
+                                            '{"name": null, "email": null, '
+                                            '"github_username": null, '
+                                            '"linkedin_url": null, '
+                                            '"website_url_candidates": ['
+                                            '{"url": "https://michaelwu.dev", "kind": "personal_website", "confidence": 0.96, "reason": "explicit portfolio"}, '
+                                            '{"url": "https://github.com/wumichaelm", "kind": "social_profile", "confidence": 0.99, "reason": "explicit github"}, '
+                                            '{"url": "linkedin.com/in/wumichaelm", "kind": "social_profile", "confidence": 0.99, "reason": "explicit linkedin"}, '
+                                            '{"url": "https://x.com/wumwu", "kind": "social_profile", "confidence": 0.93, "reason": "explicit twitter replacement"}, '
+                                            "], "
+                                            '"website_links": null, '
+                                            '"social_links": [], '
+                                            '"phone": null, "skills": [], '
+                                            '"skill_attrs": null, "confidence": 0.8}'
+                                        )
+                                    },
+                                )()
+                            },
+                        )()
+                    ]
+                },
+            )()
+
+    extractor = ResumeProfileExtractor(api_key="test-key")
+    extractor.client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": _FakeChatCompletions()})()},
+    )()
+    extractor.model = "fake-model"
+
+    result = extractor.extract(
+        "Portfolio: [Personal Site](https://michaelwu.dev)\n"
+        "GitHub: [repo](https://github.com/wumichaelm)\n"
+        "LinkedIn: [my profile](linkedin.com/in/wumichaelm)\n"
+        "Follow: [social](https://x.com/wumwu)\n"
+    )
+
+    assert result.website_links == ["https://michaelwu.dev"]
+    assert result.github_username == "wumichaelm"
+    assert result.linkedin_url == "https://linkedin.com/in/wumichaelm"
+    assert result.social_links == ["https://x.com/wumwu"]
+
+
 def test_extract_backfills_linkedin_and_website_when_llm_omits_them() -> None:
     """LLM mode should backfill missing links from the resume text heuristics."""
 
@@ -67,6 +146,7 @@ def test_extract_backfills_linkedin_and_website_when_llm_omits_them() -> None:
                                             '{"name": null, "email": null, '
                                             '"github_username": null, '
                                             '"linkedin_url": null, '
+                                            '"website_url_candidates": [], '
                                             '"website_links": [], '
                                             '"social_links": [], '
                                             '"phone": null, "skills": [], '
@@ -94,6 +174,61 @@ def test_extract_backfills_linkedin_and_website_when_llm_omits_them() -> None:
 
     assert result.linkedin_url == "https://linkedin.com/in/wumichaelm"
     assert "https://michaelwu.dev" in result.website_links
+
+
+def test_extract_ignores_low_confidence_website_candidate() -> None:
+    """Personal website candidates should pass a confidence threshold."""
+
+    class _FakeChatCompletions:
+        @staticmethod
+        def create(**_: object) -> object:
+            return type(
+                "Response",
+                (),
+                {
+                    "choices": [
+                        type(
+                            "Choice",
+                            (),
+                            {
+                                "message": type(
+                                    "Message",
+                                    (),
+                                    {
+                                        "content": (
+                                            '{"name": null, "email": null, '
+                                            '"github_username": null, '
+                                            '"linkedin_url": null, '
+                                            '"website_url_candidates": ['
+                                            '{"url": "https://example-personal-stub.io", '
+                                            '"kind": "personal_website", "confidence": 0.60, '
+                                            '"reason": "low confidence"}, '
+                                            "], "
+                                            '"website_links": [], '
+                                            '"social_links": [], '
+                                            '"phone": null, "skills": [], '
+                                            '"skill_attrs": null, "confidence": 0.8}'
+                                        )
+                                    },
+                                )()
+                            },
+                        )()
+                    ]
+                },
+            )()
+
+    extractor = ResumeProfileExtractor(api_key="test-key")
+    extractor.client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": _FakeChatCompletions()})()},
+    )()
+    extractor.model = "fake-model"
+
+    result = extractor.extract("Name: Michael Wu")
+
+    assert result.website_links == []
+    assert result.social_links == []
 
 
 def test_extract_linkedin_url_supports_hyphenated_slugs() -> None:
