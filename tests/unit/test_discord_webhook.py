@@ -37,6 +37,11 @@ def test_send_appends_wait_query_param() -> None:
 
     assert timeout == 1.5
     assert query["wait"] == ["true"]
+    assert (
+        request_obj.get_header("User-agent")
+        == "508-workflows-discord-webhook/1.0 (+https://508.dev)"
+    )
+    assert request_obj.get_header("Accept") == "application/json"
     assert json.loads(request_obj.data.decode("utf-8")) == {
         "content": "hello world",
         "allowed_mentions": {"parse": []},
@@ -121,7 +126,7 @@ def test_send_supports_embed_payload() -> None:
 
     assert payload["username"] == "508 Workflows"
     assert payload["embeds"] == [embed_payload]
-    assert payload["allowed_mentions"] == {"parse": []}
+    assert "allowed_mentions" not in payload
 
 
 def test_send_no_content_no_embeds_does_nothing() -> None:

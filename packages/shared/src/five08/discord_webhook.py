@@ -17,6 +17,7 @@ class DiscordWebhookLogger:
 
     _MAX_CONTENT_LENGTH = 2000
     _MAX_EMBED_COUNT = 10
+    _DEFAULT_USER_AGENT = "508-workflows-discord-webhook/1.0 (+https://508.dev)"
 
     def __init__(
         self,
@@ -58,7 +59,12 @@ class DiscordWebhookLogger:
         req = request.Request(
             self._request_url(query_params),
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                # Discord is fronted by Cloudflare and may reject default Python UAs.
+                "User-Agent": self._DEFAULT_USER_AGENT,
+                "Accept": "application/json",
+            },
             method="POST",
         )
 
@@ -133,9 +139,10 @@ class DiscordWebhookLogger:
         embeds: list[dict[str, Any]] | None,
         username: str | None,
     ) -> dict[str, Any]:
-        payload: dict[str, Any] = {"allowed_mentions": {"parse": []}}
+        payload: dict[str, Any] = {}
         if content is not None:
             payload["content"] = self._normalize_content(content)
+            payload["allowed_mentions"] = {"parse": []}
         if username:
             trimmed_username = username.strip()
             if trimmed_username:
@@ -149,7 +156,7 @@ class DiscordWebhookLogger:
             payload["embeds"] = [embed for embed in payload["embeds"] if embed]
             if not payload["embeds"]:
                 payload.pop("embeds")
-        if not content and "embeds" not in payload and not payload.get("content"):
+        if "content" not in payload and "embeds" not in payload:
             return {}
         return payload
 

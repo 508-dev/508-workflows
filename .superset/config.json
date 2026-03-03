@@ -1,0 +1,7 @@
+{
+  "setup": [
+    "uv sync",
+    "[ ! -f .env ] && cp \"$SUPERSET_ROOT_PATH/.env\" .env"
+  ],
+  "teardown": []
+}
