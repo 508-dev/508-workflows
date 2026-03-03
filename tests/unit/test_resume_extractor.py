@@ -87,7 +87,7 @@ def test_extract_profile_backfills_website_and_social_urls_from_markdown() -> No
                                             '{"url": "https://michaelwu.dev", "kind": "personal_website", "confidence": 0.96, "reason": "explicit portfolio"}, '
                                             '{"url": "https://github.com/wumichaelm", "kind": "social_profile", "confidence": 0.99, "reason": "explicit github"}, '
                                             '{"url": "linkedin.com/in/wumichaelm", "kind": "social_profile", "confidence": 0.99, "reason": "explicit linkedin"}, '
-                                            '{"url": "https://x.com/wumwu", "kind": "social_profile", "confidence": 0.93, "reason": "explicit twitter replacement"}, '
+                                            '{"url": "https://x.com/wumwu", "kind": "social_profile", "confidence": 0.93, "reason": "explicit twitter replacement"} '
                                             "], "
                                             '"website_links": null, '
                                             '"social_links": [], '
@@ -202,7 +202,7 @@ def test_extract_ignores_low_confidence_website_candidate() -> None:
                                             '"website_url_candidates": ['
                                             '{"url": "https://example-personal-stub.io", '
                                             '"kind": "personal_website", "confidence": 0.60, '
-                                            '"reason": "low confidence"}, '
+                                            '"reason": "low confidence"} '
                                             "], "
                                             '"website_links": [], '
                                             '"social_links": [], '

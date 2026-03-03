@@ -138,7 +138,7 @@ def _normalize_scalar(value: Any) -> str | None:
 def _normalize_github(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
-    candidate = value.strip()
+    candidate = value.strip().strip("/")
     if not candidate:
         return None
 
@@ -655,6 +655,8 @@ class ResumeProfileExtractor:
             parsed_url_candidates = _extract_website_url_candidates(
                 parsed.get("website_url_candidates")
             )
+            legacy_website_links = _normalize_website_links(parsed.get("website_links"))
+            legacy_social_links = _normalize_website_links(parsed.get("social_links"))
             heuristic_candidates = (
                 ResumeProfileExtractor._extract_website_link_candidates(resume_text)
             )
@@ -664,6 +666,24 @@ class ResumeProfileExtractor:
                     heuristic_candidates,
                 )
             )
+            if not parsed_url_candidates and (
+                legacy_website_links or legacy_social_links
+            ):
+                legacy_website_links, legacy_social_links = (
+                    _split_social_and_website_links(
+                        [*legacy_website_links, *legacy_social_links]
+                    )
+                )
+                parsed_website_set = {u.casefold() for u in parsed_website_links}
+                parsed_social_set = {u.casefold() for u in parsed_social_links}
+                for item in legacy_website_links:
+                    if item.casefold() not in parsed_website_set:
+                        parsed_website_set.add(item.casefold())
+                        parsed_website_links.append(item)
+                for item in legacy_social_links:
+                    if item.casefold() not in parsed_social_set:
+                        parsed_social_set.add(item.casefold())
+                        parsed_social_links.append(item)
             derived_links = [*parsed_website_links, *parsed_social_links]
             github_username = _normalize_github(parsed.get("github_username"))
             if not github_username:
@@ -880,11 +900,11 @@ class ResumeProfileExtractor:
             "- treat a candidate as personal_website only when confidence is high (>=0.85)\n"
             "- treat a candidate as social_profile when confidence is high (>=0.7)\n"
             "- route candidate urls to website_links and social_links by type and host-level validation\n"
-            "- website_links/social_links should mirror high-confidence candidates; heuristic extraction is fallback only\n"
+            "- website_links/social_links should mirror high-confidence candidates; if website_url_candidates are unavailable, use website_links/social_links and heuristics as fallback\n"
             "- prefer explicit values from header/contact sections\n"
             "- treat website_links as personal or portfolio homepage URLs only\n"
             "- do not include github.com or linkedin.com profile URLs in website_links\n"
-            "- if a URL is a social profile, place it into dedicated profile fields (github_url, linkedin_url) or social_links for cSocialLinks\n"
+            "- if a URL is a social profile, place it into dedicated profile fields (github_username, linkedin_url) or social_links for cSocialLinks\n"
             "- infer URLs from regex-like patterns in the provided text, including markdown links\n"
             "- when in doubt, omit website URLs (be conservative)\n"
             "- for github_username return username only (no URL, no @)\n"
