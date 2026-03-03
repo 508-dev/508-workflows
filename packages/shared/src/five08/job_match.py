@@ -15,7 +15,9 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Regex hints — used to pre-scan the posting and inform the LLM prompt.
-# These are NOT a standalone fallback; they're cheap signals the LLM can use.
+# They are injected as context into the user message so the LLM can weigh
+# them. A few signals (e.g. US-only detection) also act as override guards:
+# if regex is confident, it wins over a conflicting LLM value.
 # ---------------------------------------------------------------------------
 _US_ONLY_RE = re.compile(
     r"\bUS[\s\-]?only\b"

@@ -67,8 +67,8 @@ def search_candidates(
 
     Ranking priority:
     1. Members before prospects.
-    2. Location match (hard filter when us_only, else soft signal).
-    3. Timezone match (when preferred_timezones provided).
+    2. US-only location restriction when enabled (hard filter; non-US candidates excluded).
+    3. Timezone match (soft signal; 1 when candidate timezone is in preferred_timezones).
     4. Required skill count matched.
     5. Required skill strength score (sum of skill_attrs values).
     6. Preferred skill count matched.

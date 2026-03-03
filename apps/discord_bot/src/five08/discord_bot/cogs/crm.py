@@ -6210,7 +6210,7 @@ class CRMCog(commands.Cog):
 
     @app_commands.command(
         name="match-candidates",
-        description="Analyze a job posting and return ranked matching candidates from the people cache.",
+        description="Analyze a job posting and find ranked matching candidates from the people cache.",
     )
     @app_commands.describe(posting="Paste the full job posting text here")
     @require_role("Member")
@@ -6219,19 +6219,20 @@ class CRMCog(commands.Cog):
         interaction: discord.Interaction,
         posting: str,
     ) -> None:
-        """Parse a job posting with OpenAI and find matching candidates ranked by fit."""
+        """Parse a job posting with OpenAI and find matching candidates ranked by fit.
+
+        The response is posted publicly in the current channel or thread.
+        """
         await interaction.response.defer(ephemeral=False)
 
         try:
-            requirements = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: extract_job_requirements(
-                    posting,
-                    api_key=settings.openai_api_key,
-                    base_url=settings.openai_base_url or None,
-                    model=settings.openai_model,
-                    webhook_url=settings.discord_logs_webhook_url,
-                ),
+            requirements = await asyncio.to_thread(
+                extract_job_requirements,
+                posting,
+                api_key=settings.openai_api_key,
+                base_url=settings.openai_base_url or None,
+                model=settings.openai_model,
+                webhook_url=settings.discord_logs_webhook_url,
             )
         except RuntimeError as exc:
             self._audit_command(
@@ -6261,9 +6262,8 @@ class CRMCog(commands.Cog):
             return
 
         try:
-            candidates = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: search_candidates(settings, requirements, limit=10),
+            candidates = await asyncio.to_thread(
+                search_candidates, settings, requirements, limit=10
             )
         except Exception as exc:
             logger.error("Candidate search failed: %s", exc)
