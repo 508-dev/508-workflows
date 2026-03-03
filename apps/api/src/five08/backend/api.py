@@ -100,6 +100,17 @@ class DiscordLinkCreateRequest(BaseModel):
 
 _JOB_FUNCTIONS = JOB_FUNCTIONS
 
+# Backward-compatible direct handler exports expected by existing call sites/tests.
+process_webhook_event = JOB_FUNCTIONS["process_webhook_event"]
+process_contact_skills_job = JOB_FUNCTIONS["process_contact_skills_job"]
+extract_resume_profile_job = JOB_FUNCTIONS["extract_resume_profile_job"]
+apply_resume_profile_job = JOB_FUNCTIONS["apply_resume_profile_job"]
+process_intake_form_job = JOB_FUNCTIONS["process_intake_form_job"]
+process_mailbox_message_job = JOB_FUNCTIONS["process_mailbox_message_job"]
+sync_people_from_crm_job = JOB_FUNCTIONS["sync_people_from_crm_job"]
+sync_person_from_crm_job = JOB_FUNCTIONS["sync_person_from_crm_job"]
+process_docuseal_agreement_job = JOB_FUNCTIONS["process_docuseal_agreement_job"]
+
 
 def _is_authorized(request: Request) -> bool:
     """Validate shared API secret."""
