@@ -51,14 +51,15 @@ def test_seniority_score_unknown_string_returns_zero() -> None:
 
 
 # ---------------------------------------------------------------------------
-# search_candidates — early-return on empty required skills
+# search_candidates — early-return guards
 # ---------------------------------------------------------------------------
 
 
-def test_search_candidates_returns_empty_when_no_required_skills() -> None:
+def test_search_candidates_returns_empty_when_no_skills_and_no_role_types() -> None:
     reqs = JobRequirements(
         required_skills=[],
         preferred_skills=["react"],
+        discord_role_types=[],
         seniority="senior",
         location_type=None,
         preferred_timezones=[],
@@ -68,6 +69,23 @@ def test_search_candidates_returns_empty_when_no_required_skills() -> None:
     settings = MagicMock()
     result = search_candidates(settings, reqs)
     assert result == []
+
+
+def test_search_candidates_queries_db_when_only_role_types_provided() -> None:
+    """Should hit the DB (not early-return) when role_types are set but skills are empty."""
+    reqs = JobRequirements(
+        required_skills=[],
+        preferred_skills=[],
+        discord_role_types=["Full Stack"],
+    )
+    conn = _patch_db([])
+    settings = MagicMock()
+
+    with patch("five08.candidate_search.get_postgres_connection", return_value=conn):
+        result = search_candidates(settings, reqs)
+
+    assert result == []
+    conn.cursor.assert_called_once()  # DB was queried, not short-circuited
 
 
 # ---------------------------------------------------------------------------
@@ -91,10 +109,12 @@ def _make_row(**overrides: object) -> dict:
         "timezone": "America/New_York",
         "skills": ["python", "django"],
         "skill_attrs": {"python": "4"},
+        "discord_roles": [],
         "required_matched": 2,
         "required_skill_score": 5,
         "preferred_matched": 0,
         "timezone_matched": 1,
+        "discord_role_matched": 0,
     }
     base.update(overrides)
     return base
@@ -229,3 +249,93 @@ def test_search_candidates_empty_db_returns_empty_list() -> None:
         results = search_candidates(settings, reqs)
 
     assert results == []
+
+
+# ---------------------------------------------------------------------------
+# search_candidates — discord role matching
+# ---------------------------------------------------------------------------
+
+
+def test_search_candidates_populates_matched_discord_roles() -> None:
+    row = _make_row(
+        discord_roles=["Full Stack", "Backend", "Member"],
+        discord_role_matched=1,
+    )
+    conn = _patch_db([row])
+    reqs = _make_requirements(
+        required_skills=["python"],
+        discord_role_types=["Full Stack", "Frontend"],
+    )
+    settings = MagicMock()
+
+    with patch("five08.candidate_search.get_postgres_connection", return_value=conn):
+        results = search_candidates(settings, reqs)
+
+    assert len(results) == 1
+    # Only "Full Stack" overlaps with the required role types; "Backend" does not
+    assert results[0].matched_discord_roles == ["Full Stack"]
+
+
+def test_search_candidates_matched_discord_roles_empty_when_no_overlap() -> None:
+    row = _make_row(discord_roles=["Backend", "Member"])
+    conn = _patch_db([row])
+    reqs = _make_requirements(
+        required_skills=["python"],
+        discord_role_types=["Frontend"],
+    )
+    settings = MagicMock()
+
+    with patch("five08.candidate_search.get_postgres_connection", return_value=conn):
+        results = search_candidates(settings, reqs)
+
+    assert results[0].matched_discord_roles == []
+
+
+def test_search_candidates_matched_discord_roles_empty_when_null_in_db() -> None:
+    row = _make_row(discord_roles=None)
+    conn = _patch_db([row])
+    reqs = _make_requirements(
+        required_skills=["python"],
+        discord_role_types=["Full Stack"],
+    )
+    settings = MagicMock()
+
+    with patch("five08.candidate_search.get_postgres_connection", return_value=conn):
+        results = search_candidates(settings, reqs)
+
+    assert results[0].matched_discord_roles == []
+
+
+def test_search_candidates_secondary_sort_discord_roles_before_skill_score() -> None:
+    """Candidate with discord role match should rank above one with higher skill score."""
+    role_match_row = _make_row(
+        crm_contact_id="role",
+        is_member=False,
+        discord_roles=["Full Stack"],
+        discord_role_matched=1,
+        skills=["python"],
+        required_matched=1,
+        required_skill_score=1,
+    )
+    skill_score_row = _make_row(
+        crm_contact_id="skill",
+        is_member=False,
+        discord_roles=[],
+        discord_role_matched=0,
+        skills=["python", "django"],
+        required_matched=2,
+        required_skill_score=8,
+    )
+    conn = _patch_db([skill_score_row, role_match_row])
+    reqs = _make_requirements(
+        required_skills=["python"],
+        discord_role_types=["Full Stack"],
+    )
+    settings = MagicMock()
+
+    with patch("five08.candidate_search.get_postgres_connection", return_value=conn):
+        results = search_candidates(settings, reqs)
+
+    # role match should beat raw skill score in secondary sort
+    assert results[0].crm_contact_id == "role"
+    assert results[1].crm_contact_id == "skill"
