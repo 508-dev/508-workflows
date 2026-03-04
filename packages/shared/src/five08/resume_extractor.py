@@ -801,13 +801,13 @@ class ResumeProfileExtractor:
         *,
         api_key: str | None,
         base_url: str | None = None,
-        model: str = "gpt-4o-mini",
+        model: str = "gpt-5-mini",
         max_tokens: int = 800,
         snippet_chars: int = 12000,
     ) -> None:
-        self.model = model.strip() if model else "gpt-4o-mini"
+        self.model = model.strip() if model else "gpt-5-mini"
         if not self.model:
-            self.model = "gpt-4o-mini"
+            self.model = "gpt-5-mini"
         self.max_tokens = max_tokens
         self.snippet_chars = max(1000, snippet_chars)
         self.client: Any = None
@@ -1173,20 +1173,28 @@ class ResumeProfileExtractor:
             "- if timezone is provided, normalize it to UTC offset form like UTC±HH:MM before output\n"
             "- if address_city is known, infer address_state and address_country when not explicitly stated (e.g. San Francisco → California, United States; London → United Kingdom)\n"
             "- if address_state is known, infer address_country when not explicitly stated (e.g. California → United States)\n"
-            "- for primary_roles, prefer known canonical roles when the input matches: developer, data scientist, product manager, program manager, designer, user research, biz dev, marketing; map variants to the closest known role (e.g. 'software developer' → 'developer', 'product management' → 'product manager')\n"
+            "- for primary_roles, prefer known canonical roles when the input matches: developer, data scientist, product manager, program manager, designer, user research, biz dev, marketing; map variants to the closest known role (e.g. 'software developer' → 'developer', 'product management' → 'product manager'); default to 'developer' unless the resume clearly indicates a non-developer role (e.g. obvious designer, marketer, etc.)\n"
             "- infer seniority_level as one of: junior, midlevel, senior, staff\n"
+            "- use explicit job title as the primary signal when present; years of experience and impact signals are secondary\n"
+            "  - junior: titles like 'Junior Engineer', 'Associate Engineer', 'Engineer I', intern/internship, bootcamp grad with <1 year post-graduation\n"
+            "  - midlevel: titles like 'Software Engineer', 'Engineer II', 'Developer' with no seniority qualifier\n"
+            "  - senior: titles like 'Senior Engineer', 'Senior SWE', 'Engineer III', 'Lead Engineer', 'Tech Lead' (IC track)\n"
+            "  - staff: titles like 'Staff Engineer', 'Principal Engineer', 'Architect', 'Distinguished Engineer'\n"
+            "- when title is absent or ambiguous, use total professional experience (excluding education and internships):\n"
+            "  - <2 years → junior\n"
+            "  - 2-4 years → midlevel\n"
+            "  - 4-8 years → senior (lower end requires visible ownership or scope signals)\n"
+            "  - 8+ years → senior by default; staff only with evidence of cross-team scope or explicit staff-level title\n"
+            "- staff requires scope beyond a single team or project: leading technical direction for a product area, defining architecture across teams, or mentoring senior engineers\n"
+            "- when title and years conflict, prefer title (e.g. someone titled 'Senior Engineer' with 3 years → senior)\n"
+            "- visible promotions in job history (e.g. Engineer → Senior Engineer at same company) are a strong signal; use the highest level reached\n"
+            "- do not default to midlevel for ambiguous cases; if experience is clearly senior-range (5+ years with engineering output) lean senior\n"
             "- for description, produce 1-2 concise sentences that describe the person and their focus areas, based only on explicit resume details; otherwise null\n"
             "- keep description factual and neutral; avoid marketing/sales phrasing\n"
             "- map strengths from 1-5 where available; omit when unknown\n"
             "- return skills as lowercase canonical names with minimal punctuation\n"
             "- canonicalize known variants like ab testing, go to market, react native\n"
             "- never include generic/disallowed skills: code review, debugging, testing, bug tracking, code quality, performance optimization\n"
-            "- use 4-5 years with ownership and impact cues as senior\n"
-            "- use staff for 7+ years, or 5+ years with strong technical ownership/leadership\n"
-            "- weight company impact:\n"
-            "  - +1 for leadership titles (staff/lead/principal/architect)\n"
-            "  - +1 for enterprise-scale impact signals (team ownership, direct reports, cross-team work, large org terms)\n"
-            "  - when company signal is ambiguous, return conservative midlevel\n"
             "- copy availability, rate_range, and referred_by if they are provided in source text\n"
             "- use 'unknown' for unknown or ambiguous fields\n"
             "- confidence is 0-1 for overall extraction reliability\n\n"
@@ -1490,19 +1498,17 @@ class ResumeProfileExtractor:
         ):
             impact_score += 1
 
-        if years >= 7:
-            return "staff" if impact_score >= 1 else "senior"
-        if years >= 5:
-            return "senior"
+        if years >= 8:
+            return "staff" if impact_score >= 2 else "senior"
         if years >= 4:
-            return "senior" if impact_score >= 1 else "midlevel"
+            return "senior"
         if years >= 2:
             return "midlevel"
         return "junior"
 
     @staticmethod
     def _extract_years_of_experience(resume_text: str) -> int | None:
-        years = []
+        explicit_years = []
         year_patterns = [
             r"(\d{1,2})\+?\s*years?\s+of\s+(?:software\s+|engineering\s+)?experience",
             r"(?:experience|career)\s*(?:\:\s*)?(\d{1,2})\+?\s*years",
@@ -1511,26 +1517,37 @@ class ResumeProfileExtractor:
         for pattern in year_patterns:
             for match in re.finditer(pattern, resume_text, flags=re.IGNORECASE):
                 try:
-                    years.append(int(match.group(1)))
+                    explicit_years.append(int(match.group(1)))
                 except Exception:
                     pass
+
+        # Prefer explicit statements; only fall back to date ranges if none found.
+        # Date ranges include education spans which inflate the max, so we use them
+        # only as a last resort and take a conservative estimate (median rather than max).
+        if explicit_years:
+            return max(explicit_years)
 
         date_range_pattern = re.compile(
             r"\b((?:19|20)\d{2})\s*-\s*((?:19|20)\d{2}|present|current)\b",
             flags=re.IGNORECASE,
         )
         today_year = datetime.now(timezone.utc).year
+        date_years = []
         for match in date_range_pattern.finditer(resume_text):
             start_year = int(match.group(1))
             end_token = match.group(2).lower()
             end_year = (
                 today_year if end_token in {"present", "current"} else int(end_token)
             )
-            years.append(max(0, end_year - start_year))
+            span = max(0, end_year - start_year)
+            if span > 0:
+                date_years.append(span)
 
-        if not years:
+        if not date_years:
             return None
-        return max(years)
+        # Use median to reduce inflation from education or outlier date spans.
+        date_years.sort()
+        return date_years[len(date_years) // 2]
 
     @staticmethod
     def _extract_skills(resume_text: str) -> tuple[list[str], dict[str, int]]:
