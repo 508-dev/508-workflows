@@ -10,6 +10,7 @@ import ast
 import io
 import json
 import logging
+from collections import OrderedDict
 from datetime import date, datetime, timezone
 import re
 from typing import Any, Literal
@@ -59,6 +60,7 @@ ONBOARDER_FIELD_CANDIDATES = (
 EXCLUDED_ONBOARDING_STATES = frozenset({"onboarded", "waitlist", "rejected"})
 ONBOARDING_QUEUE_MAX_SIZE = 200
 ONBOARDING_QUEUE_PAGE_SIZE = 1
+AUTO_MATCH_DEDUPE_MAX = 10_000
 EspoAPI = espo.EspoAPI
 EspoAPIError = espo.EspoAPIError
 JobWatchChannel = discord.TextChannel | discord.ForumChannel
@@ -1655,7 +1657,7 @@ class CRMCog(commands.Cog):
             discord_logs_webhook_wait=settings.discord_logs_webhook_wait,
         )
         self._jobs_channels_by_guild: dict[int, set[int]] = {}
-        self._auto_matched_thread_ids: set[int] = set()
+        self._auto_matched_thread_ids: OrderedDict[int, None] = OrderedDict()
         self._auto_matched_thread_lock = asyncio.Lock()
 
     @staticmethod
@@ -1757,9 +1759,17 @@ class CRMCog(commands.Cog):
         """Deduplicate automatic matching when multiple events race."""
         async with self._auto_matched_thread_lock:
             if thread_id in self._auto_matched_thread_ids:
+                self._auto_matched_thread_ids.move_to_end(thread_id)
                 return False
-            self._auto_matched_thread_ids.add(thread_id)
+            self._auto_matched_thread_ids[thread_id] = None
+            if len(self._auto_matched_thread_ids) > AUTO_MATCH_DEDUPE_MAX:
+                self._auto_matched_thread_ids.popitem(last=False)
             return True
+
+    async def _unmark_thread_auto_matched(self, thread_id: int) -> None:
+        """Allow retry when a thread was marked but processing could not start."""
+        async with self._auto_matched_thread_lock:
+            self._auto_matched_thread_ids.pop(thread_id, None)
 
     @staticmethod
     async def _read_thread_posting(thread: discord.Thread) -> str | None:
@@ -1888,6 +1898,7 @@ class CRMCog(commands.Cog):
 
         posting = await self._read_thread_posting(thread)
         if posting is None:
+            await self._unmark_thread_auto_matched(thread.id)
             await thread.send(
                 "⚠️ Could not read this thread's opening message. "
                 "Run `/match-candidates` manually after posting details."
@@ -6581,25 +6592,43 @@ class CRMCog(commands.Cog):
             return
 
         await interaction.response.defer(ephemeral=True)
-        created = await asyncio.to_thread(
-            register_job_post_channel,
-            settings,
-            guild_id=str(guild.id),
-            channel_id=str(target_channel.id),
-        )
-        self._jobs_channels_by_guild.setdefault(guild.id, set()).add(target_channel.id)
+        try:
+            created = await asyncio.to_thread(
+                register_job_post_channel,
+                settings,
+                guild_id=str(guild.id),
+                channel_id=str(target_channel.id),
+            )
+            self._jobs_channels_by_guild.setdefault(guild.id, set()).add(
+                target_channel.id
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to register jobs channel guild=%s channel=%s: %s",
+                guild.id,
+                target_channel.id,
+                exc,
+            )
+            await interaction.followup.send(
+                "❌ Failed to register this channel. Please try again.",
+                ephemeral=True,
+            )
+            return
 
-        self._audit_command(
-            interaction=interaction,
-            action="crm.register_jobs_channel",
-            result="success",
-            metadata={
-                "guild_id": str(guild.id),
-                "channel_id": str(target_channel.id),
-                "channel_name": target_channel.name,
-                "created": created,
-            },
-        )
+        try:
+            self._audit_command(
+                interaction=interaction,
+                action="crm.register_jobs_channel",
+                result="success",
+                metadata={
+                    "guild_id": str(guild.id),
+                    "channel_id": str(target_channel.id),
+                    "channel_name": target_channel.name,
+                    "created": created,
+                },
+            )
+        except Exception as exc:
+            logger.warning("Audit write failed for crm.register_jobs_channel: %s", exc)
 
         if created:
             await interaction.followup.send(
@@ -6646,27 +6675,46 @@ class CRMCog(commands.Cog):
             return
 
         await interaction.response.defer(ephemeral=True)
-        removed = await asyncio.to_thread(
-            unregister_job_post_channel,
-            settings,
-            guild_id=str(guild.id),
-            channel_id=str(target_channel.id),
-        )
-        self._jobs_channels_by_guild.setdefault(guild.id, set()).discard(
-            target_channel.id
-        )
+        try:
+            removed = await asyncio.to_thread(
+                unregister_job_post_channel,
+                settings,
+                guild_id=str(guild.id),
+                channel_id=str(target_channel.id),
+            )
+            self._jobs_channels_by_guild.setdefault(guild.id, set()).discard(
+                target_channel.id
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to unregister jobs channel guild=%s channel=%s: %s",
+                guild.id,
+                target_channel.id,
+                exc,
+            )
+            await interaction.followup.send(
+                "❌ Failed to unregister this channel. Please try again.",
+                ephemeral=True,
+            )
+            return
 
-        self._audit_command(
-            interaction=interaction,
-            action="crm.unregister_jobs_channel",
-            result="success",
-            metadata={
-                "guild_id": str(guild.id),
-                "channel_id": str(target_channel.id),
-                "channel_name": target_channel.name,
-                "removed": removed,
-            },
-        )
+        try:
+            self._audit_command(
+                interaction=interaction,
+                action="crm.unregister_jobs_channel",
+                result="success",
+                metadata={
+                    "guild_id": str(guild.id),
+                    "channel_id": str(target_channel.id),
+                    "channel_name": target_channel.name,
+                    "removed": removed,
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "Audit write failed for crm.unregister_jobs_channel: %s",
+                exc,
+            )
 
         if removed:
             await interaction.followup.send(
@@ -6889,7 +6937,10 @@ class CRMCog(commands.Cog):
         if not self._is_jobs_channel_registered(guild.id, parent.id):
             return
 
-        if self.bot.user and thread.owner_id == self.bot.user.id:
+        owner = guild.get_member(thread.owner_id) if thread.owner_id else None
+        if owner is None or owner.bot:
+            return
+        if not check_user_roles_with_hierarchy(owner.roles, ["Member"]):
             return
 
         await self._run_auto_match_candidates_for_thread(
@@ -6900,7 +6951,13 @@ class CRMCog(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
         """Auto-create a thread for registered text-channel posts and match."""
-        if message.author.bot or message.guild is None:
+        if message.guild is None:
+            return
+        if not isinstance(message.author, discord.Member):
+            return
+        if message.author.bot:
+            return
+        if not check_user_roles_with_hierarchy(message.author.roles, ["Member"]):
             return
         if isinstance(message.channel, discord.Thread):
             return
