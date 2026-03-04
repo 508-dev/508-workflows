@@ -1499,7 +1499,7 @@ class ResumeProfileExtractor:
             impact_score += 1
 
         if years >= 8:
-            return "staff" if impact_score >= 2 else "senior"
+            return "staff" if impact_score >= 1 else "senior"
         if years >= 4:
             return "senior"
         if years >= 2:
