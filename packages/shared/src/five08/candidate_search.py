@@ -39,6 +39,7 @@ class CandidateMatch:
     matched_required_skills: list[str] = field(default_factory=list)
     matched_preferred_skills: list[str] = field(default_factory=list)
     matched_discord_roles: list[str] = field(default_factory=list)
+    match_score: float = 0.0
     required_skill_score: int = 0  # sum of strength attrs for matched required skills
     seniority_score: float = 0.0  # 1.0 exact, 0.7 one level up, 0.0 mismatch or unknown
 
@@ -65,20 +66,23 @@ def search_candidates(
     requirements: JobRequirements,
     *,
     limit: int = 10,
+    min_match_score: float = 0.0,
 ) -> list[CandidateMatch]:
     """Return ranked candidates from the people cache for the given job requirements.
 
     Ranking priority:
     1. Members before prospects.
     2. US-only location restriction when enabled (hard filter; non-US candidates excluded).
-    3. Timezone match (soft signal; 1 when candidate timezone is in preferred_timezones).
-    4. Required skill count matched.
-    5. Discord role type matched (1 if any discord role matches the required role types).
-    6. Required skill strength score (sum of skill_attrs values).
-    7. Preferred skill count matched.
-    8. Seniority score (applied in Python after the query).
+    3. Match score (weighted score from skills + CRM signals).
+    4. Timezone match (soft signal; 1 when candidate timezone is in preferred_timezones).
+    5. Required skill count matched.
+    6. Discord role type matched (1 if any discord role matches the required role types).
+    7. Required skill strength score (sum of skill_attrs values).
+    8. Preferred skill count matched.
+    9. Seniority score (applied in Python after the query).
 
     Candidates are included if they match ANY required skill OR any discord role type.
+    A minimum final match score can be requested via min_match_score.
     """
     required_skills = requirements.required_skills
     preferred_skills = requirements.preferred_skills
@@ -100,86 +104,122 @@ def search_candidates(
         WITH
           req AS (SELECT %s::text[] AS skills),
           pref AS (SELECT %s::text[] AS skills),
-          rtypes AS (SELECT %s::text[] AS types)
+          rtypes AS (SELECT %s::text[] AS types),
+          scored AS (
+            SELECT
+                p.crm_contact_id AS crm_contact_id,
+                COALESCE(p.name, dm.display_name, dm.discord_username) AS name,
+                p.email_508,
+                p.email,
+                p.linkedin,
+                p.latest_resume_id,
+                p.latest_resume_name,
+                COALESCE(p.is_member, false) AS is_member,
+                p.seniority,
+                p.address_country,
+                p.timezone,
+                COALESCE(p.skills, '{}'::text[]) AS skills,
+                COALESCE(p.skill_attrs, '{}'::jsonb) AS skill_attrs,
+                COALESCE(dm.roles, p.discord_roles, '[]'::jsonb) AS discord_roles,
+                COALESCE(p.discord_user_id, dm.discord_user_id) AS discord_user_id,
+                (p.crm_contact_id IS NOT NULL) AS has_crm_link,
+                -- How many required skills this candidate has
+                (SELECT count(*)::int
+                 FROM unnest(COALESCE(p.skills, '{}'::text[])) s
+                 WHERE s IN (SELECT unnest(skills) FROM req)
+                ) AS required_matched,
+                -- Weighted score: sum of strength attrs for matched required skills (default 1)
+                (SELECT COALESCE(
+                    SUM(
+                        LEAST(
+                            COALESCE((COALESCE(p.skill_attrs, '{}'::jsonb) ->> s)::int, 1),
+                            5
+                        )
+                    ),
+                    0
+                 )::int
+                 FROM unnest(COALESCE(p.skills, '{}'::text[])) s
+                 WHERE s IN (SELECT unnest(skills) FROM req)
+                ) AS required_skill_score,
+                -- How many preferred skills this candidate has
+                (SELECT count(*)::int
+                 FROM unnest(COALESCE(p.skills, '{}'::text[])) s
+                 WHERE s IN (SELECT unnest(skills) FROM pref)
+                ) AS preferred_matched,
+                -- Timezone match: 1 if candidate timezone is in the preferred list
+                CASE
+                  WHEN %s::text[] = '{}'::text[] THEN 0
+                  ELSE (COALESCE(p.timezone, '') = ANY(%s::text[]))::int
+                END AS timezone_matched,
+                -- Discord role match: 1 if any discord role matches the required role types
+                CASE
+                  WHEN array_length(rtypes.types, 1) IS NULL THEN 0
+                  WHEN EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements_text(
+                        COALESCE(dm.roles, p.discord_roles, '[]'::jsonb)
+                    ) r
+                    WHERE r = ANY(rtypes.types)
+                  ) THEN 1
+                  ELSE 0
+                END AS discord_role_matched
+            FROM people p
+            FULL OUTER JOIN discord_members dm ON dm.discord_user_id = p.discord_user_id
+            CROSS JOIN rtypes
+            WHERE (p.sync_status = 'active' OR p.sync_status IS NULL)
+              -- Must match at least one required skill OR one discord role type
+              AND (
+                COALESCE(p.skills, '{}'::text[]) && (SELECT skills FROM req)
+                OR EXISTS (
+                  SELECT 1
+                  FROM jsonb_array_elements_text(
+                      COALESCE(dm.roles, p.discord_roles, '[]'::jsonb)
+                  ) r
+                  WHERE r = ANY(rtypes.types)
+                )
+              )
+              -- Hard location filter when us_only
+              AND (
+                NOT %s
+                OR LOWER(COALESCE(p.address_country, '')) = ANY(%s::text[])
+              )
+          )
         SELECT
-            p.crm_contact_id AS crm_contact_id,
-            COALESCE(p.name, dm.display_name, dm.discord_username) AS name,
-            p.email_508,
-            p.email,
-            p.linkedin,
-            p.latest_resume_id,
-            p.latest_resume_name,
-            COALESCE(p.is_member, false) AS is_member,
-            p.seniority,
-            p.address_country,
-            p.timezone,
-            COALESCE(p.skills, '{}'::text[]) AS skills,
-            COALESCE(p.skill_attrs, '{}'::jsonb) AS skill_attrs,
-            COALESCE(dm.roles, p.discord_roles, '[]'::jsonb) AS discord_roles,
-            COALESCE(p.discord_user_id, dm.discord_user_id) AS discord_user_id,
-            (p.crm_contact_id IS NOT NULL) AS has_crm_link,
-            -- How many required skills this candidate has
-            (SELECT count(*)::int
-             FROM unnest(COALESCE(p.skills, '{}'::text[])) s
-             WHERE s IN (SELECT unnest(skills) FROM req)
-            ) AS required_matched,
-            -- Weighted score: sum of strength attrs for matched required skills (default 1)
-            (SELECT COALESCE(
-                SUM(
-                    LEAST(
-                        COALESCE((COALESCE(p.skill_attrs, '{}'::jsonb) ->> s)::int, 1),
-                        5
-                    )
-                ),
-                0
-             )::int
-             FROM unnest(COALESCE(p.skills, '{}'::text[])) s
-             WHERE s IN (SELECT unnest(skills) FROM req)
-            ) AS required_skill_score,
-            -- How many preferred skills this candidate has
-            (SELECT count(*)::int
-             FROM unnest(COALESCE(p.skills, '{}'::text[])) s
-             WHERE s IN (SELECT unnest(skills) FROM pref)
-            ) AS preferred_matched,
-            -- Timezone match: 1 if candidate timezone is in the preferred list
-            CASE
-              WHEN %s::text[] = '{}'::text[] THEN 0
-              ELSE (COALESCE(p.timezone, '') = ANY(%s::text[]))::int
-            END AS timezone_matched,
-            -- Discord role match: 1 if any discord role matches the required role types
-            CASE
-              WHEN array_length(rtypes.types, 1) IS NULL THEN 0
-              WHEN EXISTS (
-                SELECT 1
-                FROM jsonb_array_elements_text(
-                    COALESCE(dm.roles, p.discord_roles, '[]'::jsonb)
-                ) r
-                WHERE r = ANY(rtypes.types)
-              ) THEN 1
-              ELSE 0
-            END AS discord_role_matched
-        FROM people p
-        FULL OUTER JOIN discord_members dm ON dm.discord_user_id = p.discord_user_id
-        CROSS JOIN rtypes
-        WHERE (p.sync_status = 'active' OR p.sync_status IS NULL)
-          -- Must match at least one required skill OR one discord role type
-          AND (
-            COALESCE(p.skills, '{}'::text[]) && (SELECT skills FROM req)
-            OR EXISTS (
-              SELECT 1
-              FROM jsonb_array_elements_text(
-                  COALESCE(dm.roles, p.discord_roles, '[]'::jsonb)
-              ) r
-              WHERE r = ANY(rtypes.types)
-            )
-          )
-          -- Hard location filter when us_only
-          AND (
-            NOT %s
-            OR LOWER(COALESCE(p.address_country, '')) = ANY(%s::text[])
-          )
+            crm_contact_id,
+            name,
+            email_508,
+            email,
+            linkedin,
+            latest_resume_id,
+            latest_resume_name,
+            is_member,
+            seniority,
+            address_country,
+            timezone,
+            skills,
+            skill_attrs,
+            discord_roles,
+            discord_user_id,
+            has_crm_link,
+            required_matched,
+            required_skill_score,
+            preferred_matched,
+            timezone_matched,
+            discord_role_matched,
+            (
+              required_matched * 10
+              + required_skill_score * 2
+              + preferred_matched * 2
+              + timezone_matched * 2
+              + (discord_role_matched * 2)
+              + CASE WHEN is_member THEN 4 ELSE 0 END
+              + CASE WHEN has_crm_link THEN 6 ELSE 0 END
+            ) AS match_score
+        FROM scored
         ORDER BY
-            p.is_member DESC,
+            is_member DESC,
+            has_crm_link DESC,
+            match_score DESC,
             timezone_matched DESC,
             required_matched DESC,
             discord_role_matched DESC,
@@ -223,6 +263,8 @@ def search_candidates(
         ]
 
         sen_score = _seniority_score(row.get("seniority"), requirements.seniority)
+        base_score = float(row.get("match_score") or 0)
+        match_score = base_score + (sen_score * 3)
 
         results.append(
             CandidateMatch(
@@ -242,15 +284,21 @@ def search_candidates(
                 matched_required_skills=matched_req,
                 matched_preferred_skills=matched_pref,
                 matched_discord_roles=matched_discord,
+                match_score=match_score,
                 required_skill_score=row.get("required_skill_score") or 0,
                 seniority_score=sen_score,
             )
         )
 
+    if min_match_score > 0:
+        results = [c for c in results if c.match_score >= min_match_score]
+
     # Secondary sort: preserve primary SQL ranking, break ties with seniority alignment.
     results.sort(
         key=lambda c: (
             not c.is_member,
+            not c.has_crm_link,
+            -c.match_score,
             -len(c.matched_required_skills),
             -len(c.matched_discord_roles),
             -c.required_skill_score,
