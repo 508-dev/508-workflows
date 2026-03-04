@@ -219,6 +219,29 @@ def upsert_person(settings: SharedSettings, person: PersonRecord) -> str:
     return row["id"]
 
 
+def update_person_discord_roles(
+    settings: SharedSettings,
+    discord_user_id: str,
+    roles: list[str],
+) -> bool:
+    """Update discord_roles for a person by discord_user_id.
+
+    Only updates the discord_roles column; all other CRM-sourced fields are
+    left unchanged. Returns True if a matching record was found and updated.
+    """
+    query = """
+        UPDATE people
+        SET discord_roles = %s
+        WHERE discord_user_id = %s
+        RETURNING id::text;
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(query, (Jsonb(roles), discord_user_id))
+            row = cursor.fetchone()
+    return row is not None
+
+
 def resolve_person_id(
     settings: SharedSettings,
     *,

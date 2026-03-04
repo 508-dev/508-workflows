@@ -8,6 +8,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from five08.job_match import (
+    DISCORD_ROLES_EXCLUDE_FROM_SYNC,
+    DISCORD_SKILL_ROLE_NAMES,
     _build_prompt,
     _coerce_str_list,
     _parse_llm_response,
@@ -253,3 +255,123 @@ def test_build_prompt_includes_seniority_hint() -> None:
 def test_build_prompt_no_hints_has_no_note_lines() -> None:
     prompt = _build_prompt("text", {})
     assert "Note:" not in prompt
+
+
+def test_build_prompt_includes_all_discord_role_names() -> None:
+    prompt = _build_prompt("text", {})
+    for role in DISCORD_SKILL_ROLE_NAMES:
+        assert role in prompt, f"Expected Discord role '{role}' in prompt"
+
+
+def test_build_prompt_excludes_soft_skill_instruction() -> None:
+    prompt = _build_prompt("text", {})
+    assert "EXCLUDE soft skills" in prompt
+
+
+# ---------------------------------------------------------------------------
+# extract_job_requirements — discord_role_types
+# ---------------------------------------------------------------------------
+
+
+def _make_base_payload(**overrides: object) -> dict:
+    base = {
+        "required_skills": ["python"],
+        "preferred_skills": [],
+        "discord_role_types": [],
+        "seniority": None,
+        "location_type": None,
+        "preferred_timezones": [],
+        "raw_location_text": None,
+        "title": None,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_extract_parses_discord_role_types() -> None:
+    payload = _make_base_payload(
+        discord_role_types=["Full Stack", "Backend"],
+    )
+    with patch("openai.OpenAI") as mock_openai_cls:
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value = _make_openai_response(
+            payload
+        )
+        result = extract_job_requirements("job text", api_key="test-key")
+
+    assert result.discord_role_types == ["Full Stack", "Backend"]
+
+
+def test_extract_filters_unknown_discord_role_types() -> None:
+    payload = _make_base_payload(
+        discord_role_types=["Full Stack", "NotARole", "Wizard"],
+    )
+    with patch("openai.OpenAI") as mock_openai_cls:
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value = _make_openai_response(
+            payload
+        )
+        result = extract_job_requirements("job text", api_key="test-key")
+
+    assert result.discord_role_types == ["Full Stack"]
+
+
+def test_extract_discord_role_types_normalizes_case_and_whitespace() -> None:
+    payload = _make_base_payload(
+        discord_role_types=["full stack", "  BACKEND  ", "AI engineer"],
+    )
+    with patch("openai.OpenAI") as mock_openai_cls:
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value = _make_openai_response(
+            payload
+        )
+        result = extract_job_requirements("job text", api_key="test-key")
+
+    assert result.discord_role_types == ["Full Stack", "Backend", "AI Engineer"]
+
+
+def test_extract_discord_role_types_deduplicates() -> None:
+    payload = _make_base_payload(
+        discord_role_types=["Full Stack", "full stack", "FULL STACK"],
+    )
+    with patch("openai.OpenAI") as mock_openai_cls:
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value = _make_openai_response(
+            payload
+        )
+        result = extract_job_requirements("job text", api_key="test-key")
+
+    assert result.discord_role_types == ["Full Stack"]
+
+
+def test_extract_discord_role_types_defaults_empty_when_missing() -> None:
+    payload = _make_base_payload()
+    del payload["discord_role_types"]
+    with patch("openai.OpenAI") as mock_openai_cls:
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value = _make_openai_response(
+            payload
+        )
+        result = extract_job_requirements("job text", api_key="test-key")
+
+    assert result.discord_role_types == []
+
+
+# ---------------------------------------------------------------------------
+# DISCORD_ROLES_EXCLUDE_FROM_SYNC
+# ---------------------------------------------------------------------------
+
+
+def test_discord_roles_exclude_contains_bots_and_fixtweet() -> None:
+    assert "Bots" in DISCORD_ROLES_EXCLUDE_FROM_SYNC
+    assert "FixTweet" in DISCORD_ROLES_EXCLUDE_FROM_SYNC
+    assert "@everyone" in DISCORD_ROLES_EXCLUDE_FROM_SYNC
+
+
+def test_discord_roles_exclude_does_not_contain_member() -> None:
+    assert "Member" not in DISCORD_ROLES_EXCLUDE_FROM_SYNC

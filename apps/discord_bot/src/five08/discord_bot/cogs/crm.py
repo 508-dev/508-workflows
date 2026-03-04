@@ -33,8 +33,9 @@ from five08.discord_bot.utils.role_decorators import (
     require_role,
     check_user_roles_with_hierarchy,
 )
-from five08.job_match import extract_job_requirements
+from five08.job_match import extract_job_requirements, DISCORD_ROLES_EXCLUDE_FROM_SYNC
 from five08.candidate_search import search_candidates
+from five08.audit import update_person_discord_roles
 
 logger = logging.getLogger(__name__)
 
@@ -6312,6 +6313,10 @@ class CRMCog(commands.Cog):
         header_parts: list[str] = []
         if requirements.title:
             header_parts.append(f"**{requirements.title}**")
+        if requirements.discord_role_types:
+            header_parts.append(
+                "Role: " + ", ".join(f"`{r}`" for r in requirements.discord_role_types)
+            )
         if requirements.required_skills:
             header_parts.append(
                 "Skills: "
@@ -6348,6 +6353,10 @@ class CRMCog(commands.Cog):
                 skill_info.append(
                     "✅ " + ", ".join(f"`{s}`" for s in c.matched_required_skills[:5])
                 )
+            if c.matched_discord_roles:
+                skill_info.append(
+                    "🏷️ " + ", ".join(f"`{r}`" for r in c.matched_discord_roles)
+                )
             if c.seniority:
                 skill_info.append(f"seniority: `{c.seniority}`")
             if c.timezone:
@@ -6381,9 +6390,135 @@ class CRMCog(commands.Cog):
                 "title": requirements.title,
                 "required_skills_count": len(requirements.required_skills),
                 "preferred_skills_count": len(requirements.preferred_skills),
+                "discord_role_types": requirements.discord_role_types,
                 "candidates_returned": len(candidates),
             },
         )
+
+    async def _bulk_sync_guild_roles(
+        self, guild: discord.Guild
+    ) -> tuple[int, int, int]:
+        """Sync discord_roles for all non-bot guild members.
+
+        Returns (updated, skipped, failed). Per-member failures are logged and
+        skipped so one bad record never aborts the full run.
+        Roles in DISCORD_ROLES_EXCLUDE_FROM_SYNC (Bots, FixTweet, @everyone)
+        are excluded from the stored list.
+        """
+        updated = 0
+        skipped = 0
+        failed = 0
+        for member in guild.members:
+            if member.bot:
+                continue
+            role_names = [
+                r.name
+                for r in member.roles
+                if r.name not in DISCORD_ROLES_EXCLUDE_FROM_SYNC
+            ]
+            try:
+                did_update = await asyncio.to_thread(
+                    update_person_discord_roles,
+                    settings,
+                    str(member.id),
+                    role_names,
+                )
+            except Exception as exc:
+                failed += 1
+                logger.warning(
+                    "bulk role sync: failed for user_id=%s: %s", member.id, exc
+                )
+                continue
+            if did_update:
+                updated += 1
+            else:
+                skipped += 1
+        return updated, skipped, failed
+
+    @commands.Cog.listener()
+    async def on_ready(self) -> None:
+        """Bulk-sync all guild member roles on startup."""
+        for guild in self.bot.guilds:
+            try:
+                updated, skipped, failed = await self._bulk_sync_guild_roles(guild)
+                logger.info(
+                    "Startup discord role sync: guild=%s updated=%d skipped=%d failed=%d",
+                    guild.name,
+                    updated,
+                    skipped,
+                    failed,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Startup discord role sync failed for guild %s: %s", guild.name, exc
+                )
+
+    @app_commands.command(
+        name="sync-discord-roles",
+        description="Re-sync all server members' Discord roles into the candidate database.",
+    )
+    @require_role("Steering Committee")
+    async def sync_discord_roles(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        """Manually trigger a full guild role sync (also runs automatically on startup)."""
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message(
+                "⚠️ This command must be used inside a server.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        updated, skipped, failed = await self._bulk_sync_guild_roles(guild)
+
+        self._audit_command(
+            interaction=interaction,
+            action="crm.sync_discord_roles",
+            result="success",
+            metadata={
+                "updated": updated,
+                "skipped_no_db_match": skipped,
+                "failed": failed,
+                "total_members_scanned": updated + skipped + failed,
+            },
+        )
+
+        await interaction.followup.send(
+            f"✅ Discord role sync complete.\n"
+            f"Updated: **{updated}** · No DB match (skipped): **{skipped}** · Failed: **{failed}**",
+            ephemeral=True,
+        )
+
+    @commands.Cog.listener()
+    async def on_member_update(
+        self,
+        before: discord.Member,
+        after: discord.Member,
+    ) -> None:
+        """Automatically sync discord_roles when a member's roles change."""
+        if before.roles == after.roles:
+            return
+
+        role_names = [
+            r.name for r in after.roles if r.name not in DISCORD_ROLES_EXCLUDE_FROM_SYNC
+        ]
+
+        try:
+            await asyncio.to_thread(
+                update_person_discord_roles,
+                settings,
+                str(after.id),
+                role_names,
+            )
+        except Exception as exc:
+            logger.warning(
+                "on_member_update: failed to sync roles for user %s: %s",
+                after.id,
+                exc,
+            )
 
 
 async def setup(bot: commands.Bot) -> None:
