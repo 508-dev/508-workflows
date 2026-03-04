@@ -6395,10 +6395,19 @@ class CRMCog(commands.Cog):
             },
         )
 
-    async def _bulk_sync_guild_roles(self, guild: discord.Guild) -> tuple[int, int]:
-        """Sync discord_roles for all non-bot guild members. Returns (updated, skipped)."""
+    async def _bulk_sync_guild_roles(
+        self, guild: discord.Guild
+    ) -> tuple[int, int, int]:
+        """Sync discord_roles for all non-bot guild members.
+
+        Returns (updated, skipped, failed). Per-member failures are logged and
+        skipped so one bad record never aborts the full run.
+        Roles in DISCORD_ROLES_EXCLUDE_FROM_SYNC (Bots, FixTweet, @everyone)
+        are excluded from the stored list.
+        """
         updated = 0
         skipped = 0
+        failed = 0
         for member in guild.members:
             if member.bot:
                 continue
@@ -6407,29 +6416,37 @@ class CRMCog(commands.Cog):
                 for r in member.roles
                 if r.name not in DISCORD_ROLES_EXCLUDE_FROM_SYNC
             ]
-            did_update = await asyncio.to_thread(
-                update_person_discord_roles,
-                settings,
-                str(member.id),
-                role_names,
-            )
+            try:
+                did_update = await asyncio.to_thread(
+                    update_person_discord_roles,
+                    settings,
+                    str(member.id),
+                    role_names,
+                )
+            except Exception as exc:
+                failed += 1
+                logger.warning(
+                    "bulk role sync: failed for user_id=%s: %s", member.id, exc
+                )
+                continue
             if did_update:
                 updated += 1
             else:
                 skipped += 1
-        return updated, skipped
+        return updated, skipped, failed
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
         """Bulk-sync all guild member roles on startup."""
         for guild in self.bot.guilds:
             try:
-                updated, skipped = await self._bulk_sync_guild_roles(guild)
+                updated, skipped, failed = await self._bulk_sync_guild_roles(guild)
                 logger.info(
-                    "Startup discord role sync: guild=%s updated=%d skipped=%d",
+                    "Startup discord role sync: guild=%s updated=%d skipped=%d failed=%d",
                     guild.name,
                     updated,
                     skipped,
+                    failed,
                 )
             except Exception as exc:
                 logger.warning(
@@ -6455,7 +6472,7 @@ class CRMCog(commands.Cog):
 
         await interaction.response.defer(ephemeral=True)
 
-        updated, skipped = await self._bulk_sync_guild_roles(guild)
+        updated, skipped, failed = await self._bulk_sync_guild_roles(guild)
 
         self._audit_command(
             interaction=interaction,
@@ -6464,13 +6481,14 @@ class CRMCog(commands.Cog):
             metadata={
                 "updated": updated,
                 "skipped_no_db_match": skipped,
-                "total_members_scanned": updated + skipped,
+                "failed": failed,
+                "total_members_scanned": updated + skipped + failed,
             },
         )
 
         await interaction.followup.send(
             f"✅ Discord role sync complete.\n"
-            f"Updated: **{updated}** · No DB match (skipped): **{skipped}**",
+            f"Updated: **{updated}** · No DB match (skipped): **{skipped}** · Failed: **{failed}**",
             ephemeral=True,
         )
 

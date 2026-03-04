@@ -318,6 +318,36 @@ def test_extract_filters_unknown_discord_role_types() -> None:
     assert result.discord_role_types == ["Full Stack"]
 
 
+def test_extract_discord_role_types_normalizes_case_and_whitespace() -> None:
+    payload = _make_base_payload(
+        discord_role_types=["full stack", "  BACKEND  ", "AI engineer"],
+    )
+    with patch("openai.OpenAI") as mock_openai_cls:
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value = _make_openai_response(
+            payload
+        )
+        result = extract_job_requirements("job text", api_key="test-key")
+
+    assert result.discord_role_types == ["Full Stack", "Backend", "AI Engineer"]
+
+
+def test_extract_discord_role_types_deduplicates() -> None:
+    payload = _make_base_payload(
+        discord_role_types=["Full Stack", "full stack", "FULL STACK"],
+    )
+    with patch("openai.OpenAI") as mock_openai_cls:
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value = _make_openai_response(
+            payload
+        )
+        result = extract_job_requirements("job text", api_key="test-key")
+
+    assert result.discord_role_types == ["Full Stack"]
+
+
 def test_extract_discord_role_types_defaults_empty_when_missing() -> None:
     payload = _make_base_payload()
     del payload["discord_role_types"]
