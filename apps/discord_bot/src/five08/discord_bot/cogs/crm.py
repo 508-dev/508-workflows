@@ -6217,7 +6217,7 @@ class CRMCog(commands.Cog):
         self,
         interaction: discord.Interaction,
     ) -> None:
-        """Parse the thread's starter message with OpenAI and find matching candidates ranked by fit.
+        """Parse the thread's starter message and find matching candidates ranked by fit.
 
         Must be invoked inside a thread. The starter message is used as the job posting text.
         The response is posted publicly in the thread.
