@@ -138,15 +138,16 @@ def search_candidates(
             END AS timezone_matched,
             -- Discord role match: 1 if any discord role matches the required role types
             CASE
-              WHEN (SELECT array_length(types, 1) FROM rtypes) IS NULL THEN 0
+              WHEN array_length(rtypes.types, 1) IS NULL THEN 0
               WHEN EXISTS (
                 SELECT 1
                 FROM jsonb_array_elements_text(COALESCE(p.discord_roles, '[]'::jsonb)) r
-                WHERE r = ANY((SELECT types FROM rtypes))
+                WHERE r = ANY(rtypes.types)
               ) THEN 1
               ELSE 0
             END AS discord_role_matched
         FROM people p
+        CROSS JOIN rtypes
         WHERE p.sync_status = 'active'
           -- Must match at least one required skill OR one discord role type
           AND (
@@ -154,7 +155,7 @@ def search_candidates(
             OR EXISTS (
               SELECT 1
               FROM jsonb_array_elements_text(COALESCE(p.discord_roles, '[]'::jsonb)) r
-              WHERE r = ANY((SELECT types FROM rtypes))
+              WHERE r = ANY(rtypes.types)
             )
           )
           -- Hard location filter when us_only

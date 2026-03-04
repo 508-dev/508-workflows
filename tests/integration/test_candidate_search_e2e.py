@@ -38,7 +38,8 @@ _CREATE_PEOPLE_TABLE = """
         address_country    TEXT,
         timezone           TEXT,
         skills             TEXT[]      NOT NULL DEFAULT '{}',
-        skill_attrs        JSONB       NOT NULL DEFAULT '{}'
+        skill_attrs        JSONB       NOT NULL DEFAULT '{}',
+        discord_roles      JSONB       NOT NULL DEFAULT '[]'
     )
 """
 
@@ -61,6 +62,10 @@ def pg_settings() -> SharedSettings:
 
     with connect(_POSTGRES_TEST_URL) as conn:
         conn.execute(_CREATE_PEOPLE_TABLE)
+        conn.execute(
+            "ALTER TABLE people "
+            "ADD COLUMN IF NOT EXISTS discord_roles JSONB NOT NULL DEFAULT '[]'"
+        )
 
     settings = SharedSettings(postgres_url=_POSTGRES_TEST_URL, environment="test")
     yield settings
@@ -95,6 +100,7 @@ def _insert(
     timezone: str | None = None,
     skills: list[str] | None = None,
     skill_attrs: dict | None = None,
+    discord_roles: list[str] | None = None,
 ) -> None:
     with connect(_POSTGRES_TEST_URL) as conn:
         conn.execute(
@@ -102,8 +108,8 @@ def _insert(
             INSERT INTO people (
                 crm_contact_id, name, email, email_508,
                 is_member, sync_status, seniority,
-                address_country, timezone, skills, skill_attrs
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                address_country, timezone, skills, skill_attrs, discord_roles
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 crm_contact_id,
@@ -117,6 +123,7 @@ def _insert(
                 timezone,
                 skills or [],
                 Jsonb(skill_attrs or {}),
+                Jsonb(discord_roles or []),
             ),
         )
 
@@ -125,6 +132,7 @@ def _reqs(**overrides) -> JobRequirements:
     defaults: dict = dict(
         required_skills=["python"],
         preferred_skills=[],
+        discord_role_types=[],
         seniority=None,
         location_type=None,
         preferred_timezones=[],
@@ -288,3 +296,15 @@ class TestSearchCandidatesE2E:
         results = search_candidates(pg_db, _reqs(required_skills=["python"]))
 
         assert results == []
+
+    def test_discord_role_match_includes_candidate(self, pg_db: SharedSettings) -> None:
+        _insert(crm_contact_id="backend", discord_roles=["Backend"])
+        _insert(crm_contact_id="frontend", discord_roles=["Frontend"])
+
+        results = search_candidates(
+            pg_db, _reqs(required_skills=[], discord_role_types=["Backend"])
+        )
+
+        assert len(results) == 1
+        assert results[0].crm_contact_id == "backend"
+        assert results[0].matched_discord_roles == ["Backend"]
