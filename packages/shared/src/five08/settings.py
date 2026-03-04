@@ -1,5 +1,8 @@
 """Shared configuration settings across services."""
 
+import os
+import sys
+
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -49,6 +52,25 @@ class SharedSettings(BaseSettings):
     discord_logs_webhook_wait: bool = True
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @classmethod
+    def _skip_dotenv(cls) -> bool:
+        if os.getenv("ENVIRONMENT", "").strip().lower() == "test":
+            return True
+        return "pytest" in sys.modules
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls,
+        init_settings,
+        env_settings,
+        dotenv_settings,
+        file_secret_settings,
+    ):
+        if cls._skip_dotenv():
+            return (init_settings, env_settings, file_secret_settings)
+        return (init_settings, env_settings, dotenv_settings, file_secret_settings)
 
     @model_validator(mode="after")
     def validate_required_secrets(self) -> "SharedSettings":
