@@ -6340,8 +6340,17 @@ class CRMCog(commands.Cog):
             label = "**[Member]**" if c.is_member else "[Prospect]"
             name = c.name or "Unknown"
             email = c.email_508 or c.email or "—"
-            crm_link = f"{crm_base}/#Contact/view/{c.crm_contact_id}"
-            parts = [f"{i}. {label} {name} · [{email}](<{crm_link}>)"]
+            crm_link = (
+                f"{crm_base}/#Contact/view/{c.crm_contact_id}"
+                if c.has_crm_link and c.crm_contact_id
+                else None
+            )
+            if crm_link:
+                parts = [f"{i}. {label} {name} · [{email}](<{crm_link}>)"]
+            else:
+                parts = [f"{i}. {label} {name} · {email}"]
+                if c.discord_user_id:
+                    parts.append(f"Discord: <@{c.discord_user_id}>")
 
             if c.linkedin:
                 parts.append(f"[LinkedIn](<{c.linkedin}>)")

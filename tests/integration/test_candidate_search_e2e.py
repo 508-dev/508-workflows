@@ -47,11 +47,12 @@ _CREATE_PEOPLE_TABLE = """
 
 _CREATE_DISCORD_MEMBERS_TABLE = """
     CREATE TABLE IF NOT EXISTS discord_members (
-        discord_user_id    TEXT        PRIMARY KEY,
         guild_id           TEXT        NOT NULL,
+        discord_user_id    TEXT        NOT NULL,
         discord_username   TEXT,
         display_name       TEXT,
-        roles              JSONB       NOT NULL DEFAULT '[]'
+        roles              JSONB       NOT NULL DEFAULT '[]',
+        PRIMARY KEY (guild_id, discord_user_id)
     )
 """
 

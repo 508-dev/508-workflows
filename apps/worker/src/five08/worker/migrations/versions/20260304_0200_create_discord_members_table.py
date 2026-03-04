@@ -16,7 +16,7 @@ def upgrade() -> None:
     """Create discord_members table with updated_at trigger."""
     op.create_table(
         "discord_members",
-        sa.Column("discord_user_id", sa.Text(), nullable=False, primary_key=True),
+        sa.Column("discord_user_id", sa.Text(), nullable=False),
         sa.Column("guild_id", sa.Text(), nullable=False),
         sa.Column("discord_username", sa.Text(), nullable=True),
         sa.Column("display_name", sa.Text(), nullable=True),
@@ -25,6 +25,11 @@ def upgrade() -> None:
             postgresql.JSONB(astext_type=sa.Text()),
             nullable=False,
             server_default=sa.text("'[]'::jsonb"),
+        ),
+        sa.PrimaryKeyConstraint(
+            "guild_id",
+            "discord_user_id",
+            name="pk_discord_members",
         ),
         sa.Column(
             "created_at",

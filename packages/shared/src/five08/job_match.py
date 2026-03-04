@@ -269,15 +269,8 @@ def extract_job_requirements(
         _coerce_str_list(data.get("preferred_skills"))
     )
 
-    # Accept values from the known Discord role names list, tolerant of case/whitespace drift.
-    role_name_by_key = {name.casefold(): name for name in DISCORD_SKILL_ROLE_NAMES}
-    discord_role_types: list[str] = []
-    seen_roles: set[str] = set()
-    for raw_role in _coerce_str_list(data.get("discord_role_types")):
-        canonical = role_name_by_key.get(raw_role.strip().casefold())
-        if canonical and canonical not in seen_roles:
-            seen_roles.add(canonical)
-            discord_role_types.append(canonical)
+    # Let JobRequirements.__post_init__ apply canonicalization + dedupe consistently.
+    discord_role_types = _coerce_str_list(data.get("discord_role_types"))
 
     raw_seniority = data.get("seniority")
     normalized_seniority = (

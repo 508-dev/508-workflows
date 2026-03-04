@@ -260,7 +260,7 @@ def upsert_discord_member(
             display_name,
             roles
         ) VALUES (%s, %s, %s, %s, %s)
-        ON CONFLICT (discord_user_id) DO UPDATE
+        ON CONFLICT (guild_id, discord_user_id) DO UPDATE
         SET
             guild_id = EXCLUDED.guild_id,
             discord_username = EXCLUDED.discord_username,

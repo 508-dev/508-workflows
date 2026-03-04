@@ -23,7 +23,7 @@ _US_COUNTRY_VALUES = frozenset(
 class CandidateMatch:
     """One ranked candidate result from the people cache."""
 
-    crm_contact_id: str
+    crm_contact_id: str | None
     name: str | None
     email_508: str | None
     email: str | None
@@ -102,7 +102,7 @@ def search_candidates(
           pref AS (SELECT %s::text[] AS skills),
           rtypes AS (SELECT %s::text[] AS types)
         SELECT
-            COALESCE(p.crm_contact_id, 'discord:' || dm.discord_user_id) AS crm_contact_id,
+            p.crm_contact_id AS crm_contact_id,
             COALESCE(p.name, dm.display_name, dm.discord_username) AS name,
             p.email_508,
             p.email,
@@ -226,7 +226,7 @@ def search_candidates(
 
         results.append(
             CandidateMatch(
-                crm_contact_id=row["crm_contact_id"],
+                crm_contact_id=row.get("crm_contact_id"),
                 name=row.get("name"),
                 email_508=row.get("email_508"),
                 email=row.get("email"),
