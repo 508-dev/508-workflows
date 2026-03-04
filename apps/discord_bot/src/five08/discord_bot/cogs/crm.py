@@ -6338,7 +6338,12 @@ class CRMCog(commands.Cog):
         if starter is None or not starter.content.strip():
             metadata = {"stage": "starter_message_unavailable"}
             if fetch_error is not None:
-                metadata["error"] = str(fetch_error)
+                error_text = (
+                    str(fetch_error).replace("\r", " ").replace("\n", " ").strip()
+                )
+                if len(error_text) > 300:
+                    error_text = f"{error_text[:297]}..."
+                metadata["error"] = error_text
             self._audit_command(
                 interaction=interaction,
                 action="crm.match_candidates",
