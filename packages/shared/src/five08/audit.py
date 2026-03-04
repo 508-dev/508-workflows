@@ -242,6 +242,45 @@ def update_person_discord_roles(
     return row is not None
 
 
+def upsert_discord_member(
+    settings: SharedSettings,
+    *,
+    discord_user_id: str,
+    guild_id: str,
+    discord_username: str | None,
+    display_name: str | None,
+    roles: list[str],
+) -> None:
+    """Insert or update a discord member snapshot in the local cache."""
+    query = """
+        INSERT INTO discord_members (
+            discord_user_id,
+            guild_id,
+            discord_username,
+            display_name,
+            roles
+        ) VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (discord_user_id) DO UPDATE
+        SET
+            guild_id = EXCLUDED.guild_id,
+            discord_username = EXCLUDED.discord_username,
+            display_name = EXCLUDED.display_name,
+            roles = EXCLUDED.roles
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                query,
+                (
+                    discord_user_id,
+                    guild_id,
+                    _normalize_text(discord_username),
+                    _normalize_text(display_name),
+                    Jsonb(roles),
+                ),
+            )
+
+
 def resolve_person_id(
     settings: SharedSettings,
     *,

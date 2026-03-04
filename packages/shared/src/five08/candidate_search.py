@@ -34,6 +34,8 @@ class CandidateMatch:
     seniority: str | None
     address_country: str | None
     timezone: str | None
+    discord_user_id: str | None = None
+    has_crm_link: bool = True
     matched_required_skills: list[str] = field(default_factory=list)
     matched_preferred_skills: list[str] = field(default_factory=list)
     matched_discord_roles: list[str] = field(default_factory=list)
@@ -100,61 +102,74 @@ def search_candidates(
           pref AS (SELECT %s::text[] AS skills),
           rtypes AS (SELECT %s::text[] AS types)
         SELECT
-            p.crm_contact_id,
-            p.name,
+            COALESCE(p.crm_contact_id, 'discord:' || dm.discord_user_id) AS crm_contact_id,
+            COALESCE(p.name, dm.display_name, dm.discord_username) AS name,
             p.email_508,
             p.email,
             p.linkedin,
             p.latest_resume_id,
             p.latest_resume_name,
-            p.is_member,
+            COALESCE(p.is_member, false) AS is_member,
             p.seniority,
             p.address_country,
             p.timezone,
-            p.skills,
-            p.skill_attrs,
-            p.discord_roles,
+            COALESCE(p.skills, '{}'::text[]) AS skills,
+            COALESCE(p.skill_attrs, '{}'::jsonb) AS skill_attrs,
+            COALESCE(dm.roles, p.discord_roles, '[]'::jsonb) AS discord_roles,
+            COALESCE(p.discord_user_id, dm.discord_user_id) AS discord_user_id,
+            (p.crm_contact_id IS NOT NULL) AS has_crm_link,
             -- How many required skills this candidate has
             (SELECT count(*)::int
-             FROM unnest(p.skills) s
+             FROM unnest(COALESCE(p.skills, '{}'::text[])) s
              WHERE s IN (SELECT unnest(skills) FROM req)
             ) AS required_matched,
             -- Weighted score: sum of strength attrs for matched required skills (default 1)
             (SELECT COALESCE(
-                SUM(LEAST(COALESCE((p.skill_attrs ->> s)::int, 1), 5)), 0
+                SUM(
+                    LEAST(
+                        COALESCE((COALESCE(p.skill_attrs, '{}'::jsonb) ->> s)::int, 1),
+                        5
+                    )
+                ),
+                0
              )::int
-             FROM unnest(p.skills) s
+             FROM unnest(COALESCE(p.skills, '{}'::text[])) s
              WHERE s IN (SELECT unnest(skills) FROM req)
             ) AS required_skill_score,
             -- How many preferred skills this candidate has
             (SELECT count(*)::int
-             FROM unnest(p.skills) s
+             FROM unnest(COALESCE(p.skills, '{}'::text[])) s
              WHERE s IN (SELECT unnest(skills) FROM pref)
             ) AS preferred_matched,
             -- Timezone match: 1 if candidate timezone is in the preferred list
             CASE
               WHEN %s::text[] = '{}'::text[] THEN 0
-              ELSE (p.timezone = ANY(%s::text[]))::int
+              ELSE (COALESCE(p.timezone, '') = ANY(%s::text[]))::int
             END AS timezone_matched,
             -- Discord role match: 1 if any discord role matches the required role types
             CASE
               WHEN array_length(rtypes.types, 1) IS NULL THEN 0
               WHEN EXISTS (
                 SELECT 1
-                FROM jsonb_array_elements_text(COALESCE(p.discord_roles, '[]'::jsonb)) r
+                FROM jsonb_array_elements_text(
+                    COALESCE(dm.roles, p.discord_roles, '[]'::jsonb)
+                ) r
                 WHERE r = ANY(rtypes.types)
               ) THEN 1
               ELSE 0
             END AS discord_role_matched
         FROM people p
+        FULL OUTER JOIN discord_members dm ON dm.discord_user_id = p.discord_user_id
         CROSS JOIN rtypes
-        WHERE p.sync_status = 'active'
+        WHERE (p.sync_status = 'active' OR p.sync_status IS NULL)
           -- Must match at least one required skill OR one discord role type
           AND (
-            p.skills && (SELECT skills FROM req)
+            COALESCE(p.skills, '{}'::text[]) && (SELECT skills FROM req)
             OR EXISTS (
               SELECT 1
-              FROM jsonb_array_elements_text(COALESCE(p.discord_roles, '[]'::jsonb)) r
+              FROM jsonb_array_elements_text(
+                  COALESCE(dm.roles, p.discord_roles, '[]'::jsonb)
+              ) r
               WHERE r = ANY(rtypes.types)
             )
           )
@@ -222,6 +237,8 @@ def search_candidates(
                 seniority=row.get("seniority"),
                 address_country=row.get("address_country"),
                 timezone=row.get("timezone"),
+                discord_user_id=row.get("discord_user_id"),
+                has_crm_link=bool(row.get("has_crm_link", True)),
                 matched_required_skills=matched_req,
                 matched_preferred_skills=matched_pref,
                 matched_discord_roles=matched_discord,
