@@ -167,7 +167,7 @@ def extract_job_requirements(
                 },
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=800,
+            max_tokens=2048,
         )
     except Exception as exc:
         logger.error("OpenAI job extraction call failed: %s", exc)
