@@ -123,7 +123,7 @@ def extract_job_requirements(
     *,
     api_key: str | None,
     base_url: str | None = None,
-    model: str = "gpt-4o-mini",
+    model: str = "gpt-5-mini",
     webhook_url: str | None = None,
 ) -> JobRequirements:
     """Extract structured job requirements from a posting using OpenAI.
