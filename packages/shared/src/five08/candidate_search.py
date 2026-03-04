@@ -100,7 +100,20 @@ def search_candidates(
         WITH
           req AS (SELECT %s::text[] AS skills),
           pref AS (SELECT %s::text[] AS skills),
-          rtypes AS (SELECT %s::text[] AS types)
+          rtypes AS (SELECT %s::text[] AS types),
+          dm_agg AS (
+            SELECT
+                dm_raw.discord_user_id,
+                MAX(dm_raw.discord_username) AS discord_username,
+                MAX(dm_raw.display_name) AS display_name,
+                COALESCE(
+                    jsonb_agg(DISTINCT role) FILTER (WHERE role IS NOT NULL),
+                    '[]'::jsonb
+                ) AS roles
+            FROM discord_members dm_raw
+            LEFT JOIN LATERAL jsonb_array_elements_text(dm_raw.roles) AS role ON true
+            GROUP BY dm_raw.discord_user_id
+          )
         SELECT
             p.crm_contact_id AS crm_contact_id,
             COALESCE(p.name, dm.display_name, dm.discord_username) AS name,
@@ -159,7 +172,7 @@ def search_candidates(
               ELSE 0
             END AS discord_role_matched
         FROM people p
-        FULL OUTER JOIN discord_members dm ON dm.discord_user_id = p.discord_user_id
+        FULL OUTER JOIN dm_agg dm ON dm.discord_user_id = p.discord_user_id
         CROSS JOIN rtypes
         WHERE (p.sync_status = 'active' OR p.sync_status IS NULL)
           -- Must match at least one required skill OR one discord role type
@@ -179,7 +192,7 @@ def search_candidates(
             OR LOWER(COALESCE(p.address_country, '')) = ANY(%s::text[])
           )
         ORDER BY
-            p.is_member DESC,
+            is_member DESC,
             timezone_matched DESC,
             required_matched DESC,
             discord_role_matched DESC,

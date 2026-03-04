@@ -25,24 +25,61 @@ _POSTGRES_TEST_URL = os.environ.get(
 _CREATE_PEOPLE_TABLE = """
     CREATE TABLE IF NOT EXISTS people (
         id                 UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-        crm_contact_id     TEXT        NOT NULL UNIQUE,
+        crm_contact_id     TEXT        NOT NULL,
         name               TEXT,
         email              TEXT,
         email_508          TEXT,
         discord_user_id    TEXT,
         discord_username   TEXT,
+        discord_roles      JSONB       NOT NULL DEFAULT '[]'::jsonb,
+        github_username    TEXT,
+        sync_status        TEXT        NOT NULL DEFAULT 'active',
+        created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        contact_type       TEXT,
+        is_member          BOOLEAN     NOT NULL DEFAULT false,
+        address_country    TEXT,
+        address_city       TEXT,
+        timezone           TEXT,
+        seniority          TEXT,
         linkedin           TEXT,
+        skills             TEXT[]      NOT NULL DEFAULT '{}'::text[],
+        skill_attrs        JSONB       NOT NULL DEFAULT '{}'::jsonb,
         latest_resume_id   TEXT,
         latest_resume_name TEXT,
-        is_member          BOOLEAN     NOT NULL DEFAULT false,
-        sync_status        TEXT        NOT NULL DEFAULT 'active',
-        seniority          TEXT,
-        address_country    TEXT,
-        timezone           TEXT,
-        skills             TEXT[]      NOT NULL DEFAULT '{}',
-        skill_attrs        JSONB       NOT NULL DEFAULT '{}',
-        discord_roles      JSONB       NOT NULL DEFAULT '[]'
+        CONSTRAINT ck_people_sync_status CHECK (
+            sync_status IN ('active', 'missing_in_crm', 'conflict')
+        ),
+        CONSTRAINT uq_people_crm_contact_id UNIQUE (crm_contact_id),
+        CONSTRAINT uq_people_discord_user_id UNIQUE (discord_user_id)
     )
+"""
+
+_CREATE_PEOPLE_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_people_email ON people (email)",
+    "CREATE INDEX IF NOT EXISTS idx_people_email_508 ON people (email_508)",
+    "CREATE INDEX IF NOT EXISTS idx_people_discord_user_id ON people (discord_user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_people_skills ON people USING gin (skills)",
+    "CREATE INDEX IF NOT EXISTS idx_people_is_member ON people (is_member)",
+    "CREATE INDEX IF NOT EXISTS idx_people_seniority ON people (seniority)",
+    "CREATE INDEX IF NOT EXISTS idx_people_address_country ON people (address_country)",
+]
+
+_CREATE_PEOPLE_UPDATED_AT_FUNCTION = """
+    CREATE OR REPLACE FUNCTION people_set_updated_at_fn()
+    RETURNS TRIGGER AS $$
+    BEGIN
+        NEW.updated_at = NOW();
+        RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+"""
+
+_CREATE_PEOPLE_UPDATED_AT_TRIGGER = """
+    CREATE TRIGGER people_set_updated_at_tr
+    BEFORE UPDATE ON people
+    FOR EACH ROW
+    EXECUTE FUNCTION people_set_updated_at_fn();
 """
 
 _CREATE_DISCORD_MEMBERS_TABLE = """
@@ -51,9 +88,32 @@ _CREATE_DISCORD_MEMBERS_TABLE = """
         discord_user_id    TEXT        NOT NULL,
         discord_username   TEXT,
         display_name       TEXT,
-        roles              JSONB       NOT NULL DEFAULT '[]',
+        roles              JSONB       NOT NULL DEFAULT '[]'::jsonb,
+        created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         PRIMARY KEY (guild_id, discord_user_id)
     )
+"""
+
+_CREATE_DISCORD_MEMBERS_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_discord_members_guild_id ON discord_members (guild_id)"
+]
+
+_CREATE_DISCORD_MEMBERS_UPDATED_AT_FUNCTION = """
+    CREATE OR REPLACE FUNCTION discord_members_set_updated_at_fn()
+    RETURNS TRIGGER AS $$
+    BEGIN
+        NEW.updated_at = NOW();
+        RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+"""
+
+_CREATE_DISCORD_MEMBERS_UPDATED_AT_TRIGGER = """
+    CREATE TRIGGER discord_members_set_updated_at_tr
+    BEFORE UPDATE ON discord_members
+    FOR EACH ROW
+    EXECUTE FUNCTION discord_members_set_updated_at_fn();
 """
 
 # ---------------------------------------------------------------------------
@@ -74,15 +134,19 @@ def pg_settings() -> SharedSettings:
 
     with connect(_POSTGRES_TEST_URL) as conn:
         conn.execute(_CREATE_PEOPLE_TABLE)
-        conn.execute(
-            "ALTER TABLE people "
-            "ADD COLUMN IF NOT EXISTS discord_roles JSONB NOT NULL DEFAULT '[]'"
-        )
-        conn.execute("ALTER TABLE people ADD COLUMN IF NOT EXISTS discord_user_id TEXT")
-        conn.execute(
-            "ALTER TABLE people ADD COLUMN IF NOT EXISTS discord_username TEXT"
-        )
+        conn.execute(_CREATE_PEOPLE_UPDATED_AT_FUNCTION)
+        conn.execute("DROP TRIGGER IF EXISTS people_set_updated_at_tr ON people")
+        conn.execute(_CREATE_PEOPLE_UPDATED_AT_TRIGGER)
+        for statement in _CREATE_PEOPLE_INDEXES:
+            conn.execute(statement)
         conn.execute(_CREATE_DISCORD_MEMBERS_TABLE)
+        conn.execute(_CREATE_DISCORD_MEMBERS_UPDATED_AT_FUNCTION)
+        conn.execute(
+            "DROP TRIGGER IF EXISTS discord_members_set_updated_at_tr ON discord_members"
+        )
+        conn.execute(_CREATE_DISCORD_MEMBERS_UPDATED_AT_TRIGGER)
+        for statement in _CREATE_DISCORD_MEMBERS_INDEXES:
+            conn.execute(statement)
 
     settings = SharedSettings(postgres_url=_POSTGRES_TEST_URL, environment="test")
     yield settings
