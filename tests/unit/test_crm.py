@@ -229,9 +229,13 @@ class TestCRMCog:
         role_full_stack.name = "Full Stack"
         role_full_stack.id = 222
 
+        role_excluded = Mock()
+        role_excluded.name = "Bots"
+        role_excluded.id = 333
+
         guild = Mock()
         guild.id = 42
-        guild.roles = [role_frontend, role_full_stack]
+        guild.roles = [role_frontend, role_full_stack, role_excluded]
 
         crm_cog._refresh_role_id_cache(guild)
 

@@ -6404,7 +6404,7 @@ class CRMCog(commands.Cog):
 
         header_parts: list[str] = []
         role_mentions: list[str] = []
-        role_objects: list[discord.Role] = []
+        role_mentions_line: str | None = None
         if requirements.title:
             header_parts.append(f"**{requirements.title}**")
         if requirements.discord_role_types:
@@ -6434,22 +6434,19 @@ class CRMCog(commands.Cog):
                         role_id = role_id_map.get(role_name.casefold())
                         if role_id is not None:
                             role_mentions.append(f"<@&{role_id}>")
-                            role = interaction.guild.get_role(role_id)
-                            if role is not None:
-                                role_objects.append(role)
                         else:
                             role = discord.utils.get(
                                 interaction.guild.roles, name=role_name
                             )
                             if role is not None:
-                                role_objects.append(role)
                                 role_mentions.append(role.mention)
                             else:
                                 role_mentions.append(f"`{role_name}`")
                 else:
                     role_mentions = [f"`{r}`" for r in role_types]
 
-                header_parts.append("Discord roles: " + ", ".join(role_mentions))
+                if role_mentions:
+                    role_mentions_line = "Discord roles: " + ", ".join(role_mentions)
         if requirements.required_skills:
             header_parts.append(
                 "Skills: "
@@ -6462,10 +6459,25 @@ class CRMCog(commands.Cog):
         elif requirements.raw_location_text:
             header_parts.append(f"📍 {requirements.raw_location_text}")
 
-        lines.append("## Job Match Results")
+        header_lines: list[str] = ["## Job Match Results"]
         if header_parts:
-            lines.append(" · ".join(header_parts))
-        lines.append(f"Found **{len(candidates)}** candidate(s).\n")
+            header_lines.append(" · ".join(header_parts))
+        if role_mentions_line:
+            header_lines.append(role_mentions_line)
+        header_lines.append(f"Found **{len(candidates)}** candidate(s).")
+
+        header_message = "\n".join(header_lines)
+        if role_mentions_line:
+            await interaction.followup.send(
+                header_message,
+                allowed_mentions=discord.AllowedMentions(
+                    roles=True,
+                    users=False,
+                    everyone=False,
+                ),
+            )
+        else:
+            await interaction.followup.send(header_message)
 
         crm_base = settings.espo_base_url.rstrip("/")
         resume_options: list[tuple[str, str, str]] = []
@@ -6525,11 +6537,14 @@ class CRMCog(commands.Cog):
             messages.append(current.rstrip())
 
         for msg in messages:
-            if role_objects:
-                allowed_mentions = discord.AllowedMentions(roles=role_objects)
-                await interaction.followup.send(msg, allowed_mentions=allowed_mentions)
-            else:
-                await interaction.followup.send(msg)
+            await interaction.followup.send(
+                msg,
+                allowed_mentions=discord.AllowedMentions(
+                    roles=False,
+                    users=True,
+                    everyone=False,
+                ),
+            )
         if resume_options:
             await interaction.followup.send(
                 "Resume download:",
@@ -6606,8 +6621,11 @@ class CRMCog(commands.Cog):
         return cache
 
     def _refresh_role_id_cache(self, guild: discord.Guild) -> None:
+        excluded_names = {name.casefold() for name in DISCORD_ROLES_EXCLUDE_FROM_SYNC}
         self._get_role_id_cache()[guild.id] = {
-            role.name.casefold(): role.id for role in guild.roles
+            role.name.casefold(): role.id
+            for role in guild.roles
+            if role.name.casefold() not in excluded_names
         }
 
     @commands.Cog.listener()
