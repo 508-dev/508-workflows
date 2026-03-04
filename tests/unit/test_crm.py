@@ -213,6 +213,45 @@ class TestCRMCog:
             "❌ Failed to download resume: API Error"
         )
 
+    def test_role_id_cache_initializes_empty(self, crm_cog):
+        """Role ID cache should initialize empty on first access."""
+        cache = crm_cog._get_role_id_cache()
+
+        assert cache == {}
+
+    def test_refresh_role_id_cache_builds_casefold_map(self, crm_cog):
+        """Role ID cache should map casefolded role names to IDs."""
+        role_frontend = Mock()
+        role_frontend.name = "Frontend"
+        role_frontend.id = 111
+
+        role_full_stack = Mock()
+        role_full_stack.name = "Full Stack"
+        role_full_stack.id = 222
+
+        guild = Mock()
+        guild.id = 42
+        guild.roles = [role_frontend, role_full_stack]
+
+        crm_cog._refresh_role_id_cache(guild)
+
+        cache = crm_cog._get_role_id_cache()
+        assert cache[42] == {"frontend": 111, "full stack": 222}
+
+    @pytest.mark.asyncio
+    async def test_on_guild_role_update_refreshes_cache(self, crm_cog):
+        """Role update events should refresh the role ID cache."""
+        guild = Mock()
+        before = Mock()
+        before.guild = guild
+        after = Mock()
+        after.guild = guild
+
+        with patch.object(crm_cog, "_refresh_role_id_cache") as refresh:
+            await crm_cog.on_guild_role_update(before, after)
+
+        refresh.assert_called_once_with(guild)
+
     @pytest.mark.asyncio
     async def test_search_contacts_success(
         self, crm_cog, mock_interaction, mock_member_role

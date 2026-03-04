@@ -6403,12 +6403,39 @@ class CRMCog(commands.Cog):
         lines: list[str] = []
 
         header_parts: list[str] = []
+        role_mentions: list[str] = []
+        role_objects: list[discord.Role] = []
         if requirements.title:
             header_parts.append(f"**{requirements.title}**")
         if requirements.discord_role_types:
-            header_parts.append(
-                "Role: " + ", ".join(f"`{r}`" for r in requirements.discord_role_types)
-            )
+            if interaction.guild is not None:
+                role_id_map = self._get_role_id_cache().get(interaction.guild.id)
+                if role_id_map is None:
+                    self._refresh_role_id_cache(interaction.guild)
+                    role_id_map = self._get_role_id_cache().get(
+                        interaction.guild.id, {}
+                    )
+
+                for role_name in requirements.discord_role_types:
+                    role_id = role_id_map.get(role_name.casefold())
+                    if role_id is not None:
+                        role_mentions.append(f"<@&{role_id}>")
+                        role = interaction.guild.get_role(role_id)
+                        if role is not None:
+                            role_objects.append(role)
+                    else:
+                        role = discord.utils.get(
+                            interaction.guild.roles, name=role_name
+                        )
+                        if role is not None:
+                            role_objects.append(role)
+                            role_mentions.append(role.mention)
+                        else:
+                            role_mentions.append(f"`{role_name}`")
+            else:
+                role_mentions = [f"`{r}`" for r in requirements.discord_role_types]
+
+            header_parts.append("Discord roles: " + ", ".join(role_mentions))
         if requirements.required_skills:
             header_parts.append(
                 "Skills: "
@@ -6484,7 +6511,11 @@ class CRMCog(commands.Cog):
             messages.append(current.rstrip())
 
         for msg in messages:
-            await interaction.followup.send(msg)
+            if role_objects:
+                allowed_mentions = discord.AllowedMentions(roles=role_objects)
+                await interaction.followup.send(msg, allowed_mentions=allowed_mentions)
+            else:
+                await interaction.followup.send(msg)
         if resume_options:
             await interaction.followup.send(
                 "Resume download:",
@@ -6553,10 +6584,37 @@ class CRMCog(commands.Cog):
                 skipped += 1
         return updated, skipped, failed
 
+    def _get_role_id_cache(self) -> dict[int, dict[str, int]]:
+        cache = getattr(self, "_role_id_cache", None)
+        if cache is None:
+            cache = {}
+            setattr(self, "_role_id_cache", cache)
+        return cache
+
+    def _refresh_role_id_cache(self, guild: discord.Guild) -> None:
+        self._get_role_id_cache()[guild.id] = {
+            role.name.casefold(): role.id for role in guild.roles
+        }
+
+    @commands.Cog.listener()
+    async def on_guild_role_create(self, role: discord.Role) -> None:
+        self._refresh_role_id_cache(role.guild)
+
+    @commands.Cog.listener()
+    async def on_guild_role_delete(self, role: discord.Role) -> None:
+        self._refresh_role_id_cache(role.guild)
+
+    @commands.Cog.listener()
+    async def on_guild_role_update(
+        self, before: discord.Role, after: discord.Role
+    ) -> None:
+        self._refresh_role_id_cache(after.guild)
+
     @commands.Cog.listener()
     async def on_ready(self) -> None:
         """Bulk-sync all guild member roles on startup."""
         for guild in self.bot.guilds:
+            self._refresh_role_id_cache(guild)
             try:
                 updated, skipped, failed = await self._bulk_sync_guild_roles(guild)
                 logger.info(
