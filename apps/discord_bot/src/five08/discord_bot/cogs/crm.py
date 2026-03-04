@@ -166,6 +166,94 @@ class ResumeDownloadButton(discord.ui.Button[discord.ui.View]):
             )
 
 
+class MatchResumeSelectView(discord.ui.View):
+    """View containing a resume download select for match results."""
+
+    def __init__(self, options: list[tuple[str, str, str]]) -> None:
+        super().__init__(timeout=600)  # 10 minute timeout
+        self.add_item(MatchResumeSelect(options))
+
+
+class MatchResumeSelect(discord.ui.Select):
+    """Select menu for downloading a resume from match results."""
+
+    def __init__(self, options: list[tuple[str, str, str]]) -> None:
+        discord_options: list[discord.SelectOption] = []
+        self._resume_lookup: dict[str, str] = {}
+
+        for contact_name, resume_id, resume_name in options[:25]:
+            label = contact_name.strip() or "Unknown"
+            if len(label) > 100:
+                label = label[:97] + "..."
+            description = resume_name.strip() or "Resume"
+            if len(description) > 100:
+                description = description[:97] + "..."
+            discord_options.append(
+                discord.SelectOption(
+                    label=label,
+                    value=resume_id,
+                    description=description,
+                )
+            )
+            self._resume_lookup[resume_id] = contact_name
+
+        super().__init__(
+            placeholder="Download a resume...",
+            min_values=1,
+            max_values=1,
+            options=discord_options,
+            custom_id="match_resume_select",
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        try:
+            cog = interaction.client.get_cog("CRMCog")  # type: ignore[attr-defined]
+            if not cog:
+                await interaction.response.send_message(
+                    "❌ CRM functionality not available.", ephemeral=True
+                )
+                return
+
+            resume_id = self.values[0]
+            contact_name = self._resume_lookup.get(resume_id, "Unknown")
+
+            await interaction.response.defer(ephemeral=True)
+
+            download_ok = await cog._download_and_send_resume(
+                interaction, contact_name, resume_id
+            )
+            try:
+                cog._audit_command(
+                    interaction=interaction,
+                    action="crm.match_candidates_resume_select",
+                    result="success" if download_ok else "error",
+                    metadata={"contact_name": contact_name},
+                    resource_type="crm_contact",
+                    resource_id=resume_id,
+                )
+            except Exception as audit_exc:
+                logger.error("Audit write failed in match resume select: %s", audit_exc)
+        except Exception as exc:
+            logger.error("Unexpected error in match resume select: %s", exc)
+            if "cog" in locals() and cog:
+                try:
+                    cog._audit_command(
+                        interaction=interaction,
+                        action="crm.match_candidates_resume_select",
+                        result="error",
+                        metadata={"error": str(exc)},
+                        resource_type="discord_ui_action",
+                        resource_id=self.values[0] if self.values else None,
+                    )
+                except Exception as audit_exc:
+                    logger.error(
+                        "Audit write failed in match resume select: %s", audit_exc
+                    )
+            await interaction.followup.send(
+                "❌ An unexpected error occurred while downloading the resume."
+            )
+
+
 class ContactSelectionView(discord.ui.View):
     """View containing contact selection buttons for Discord linking."""
 
@@ -1697,9 +1785,10 @@ class CRMCog(commands.Cog):
         *,
         requirements: Any,
         candidates: list[Any],
-    ) -> list[str]:
+    ) -> tuple[list[str], list[tuple[str, str, str]]]:
         """Render job-match output into Discord-sized follow-up messages."""
         lines: list[str] = []
+        resume_options: list[tuple[str, str, str]] = []
 
         header_parts: list[str] = []
         if requirements.title:
@@ -1737,7 +1826,7 @@ class CRMCog(commands.Cog):
                 else None
             )
             if crm_link:
-                parts = [f"{i}. {label} {name} · [{email}](<{crm_link}>)"]
+                parts = [f"{i}. {label} [{name}](<{crm_link}>) · {email}"]
             else:
                 parts = [f"{i}. {label} {name} · {email}"]
                 if candidate.discord_user_id:
@@ -1747,8 +1836,14 @@ class CRMCog(commands.Cog):
                 parts.append(f"[LinkedIn](<{candidate.linkedin}>)")
             if candidate.latest_resume_id and candidate.latest_resume_name:
                 parts.append(f"Resume: `{candidate.latest_resume_name}`")
+                resume_options.append(
+                    (name, candidate.latest_resume_id, candidate.latest_resume_name)
+                )
 
             skill_info: list[str] = []
+            match_score = getattr(candidate, "match_score", None)
+            if isinstance(match_score, int | float):
+                skill_info.append(f"score: {match_score:.1f}")
             if candidate.matched_required_skills:
                 skill_info.append(
                     "✅ "
@@ -1779,7 +1874,7 @@ class CRMCog(commands.Cog):
         if current.strip():
             messages.append(current.rstrip())
 
-        return messages
+        return messages, resume_options
 
     async def _run_auto_match_candidates_for_thread(
         self,
@@ -1848,7 +1943,7 @@ class CRMCog(commands.Cog):
             )
             return
 
-        messages = self._render_match_candidates_messages(
+        messages, _ = self._render_match_candidates_messages(
             requirements=requirements,
             candidates=candidates,
         )
@@ -6656,7 +6751,11 @@ class CRMCog(commands.Cog):
 
         try:
             candidates = await asyncio.to_thread(
-                search_candidates, settings, requirements, limit=10
+                search_candidates,
+                settings,
+                requirements,
+                limit=20,
+                min_match_score=8.0,
             )
         except Exception as exc:
             logger.error("Candidate search failed: %s", exc)
@@ -6672,13 +6771,18 @@ class CRMCog(commands.Cog):
             )
             return
 
-        messages = self._render_match_candidates_messages(
+        messages, resume_options = self._render_match_candidates_messages(
             requirements=requirements,
             candidates=candidates,
         )
 
         for msg in messages:
             await interaction.followup.send(msg)
+        if resume_options:
+            await interaction.followup.send(
+                "Resume download:",
+                view=MatchResumeSelectView(resume_options),
+            )
 
         self._audit_command(
             interaction=interaction,

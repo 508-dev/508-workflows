@@ -306,8 +306,8 @@ def test_search_candidates_matched_discord_roles_empty_when_null_in_db() -> None
     assert results[0].matched_discord_roles == []
 
 
-def test_search_candidates_secondary_sort_discord_roles_before_skill_score() -> None:
-    """Candidate with discord role match should rank above one with higher skill score."""
+def test_search_candidates_secondary_sort_skill_score_over_discord_role() -> None:
+    """Candidate with stronger skill match should rank above one with only role match."""
     role_match_row = _make_row(
         crm_contact_id="role",
         is_member=False,
@@ -336,6 +336,6 @@ def test_search_candidates_secondary_sort_discord_roles_before_skill_score() -> 
     with patch("five08.candidate_search.get_postgres_connection", return_value=conn):
         results = search_candidates(settings, reqs)
 
-    # role match should beat raw skill score in secondary sort
-    assert results[0].crm_contact_id == "role"
-    assert results[1].crm_contact_id == "skill"
+    # skill match should beat role-only match in secondary sort
+    assert results[0].crm_contact_id == "skill"
+    assert results[1].crm_contact_id == "role"
