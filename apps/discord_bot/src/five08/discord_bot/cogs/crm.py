@@ -6312,6 +6312,12 @@ class CRMCog(commands.Cog):
         The response is posted publicly in the thread.
         """
         if not isinstance(interaction.channel, discord.Thread):
+            self._audit_command(
+                interaction=interaction,
+                action="crm.match_candidates",
+                result="error",
+                metadata={"stage": "not_thread"},
+            )
             await interaction.response.send_message(
                 "⚠️ This command must be used inside a thread. "
                 "Open a thread on the job posting message and run `/match-candidates` there.",
@@ -6321,13 +6327,24 @@ class CRMCog(commands.Cog):
 
         thread: discord.Thread = interaction.channel
         starter = thread.starter_message
+        fetch_error = None
         if starter is None:
             try:
                 starter = await thread.fetch_message(thread.id)
-            except Exception:
+            except Exception as exc:
+                fetch_error = exc
                 starter = None
 
         if starter is None or not starter.content.strip():
+            metadata = {"stage": "starter_message_unavailable"}
+            if fetch_error is not None:
+                metadata["error"] = str(fetch_error)
+            self._audit_command(
+                interaction=interaction,
+                action="crm.match_candidates",
+                result="error",
+                metadata=metadata,
+            )
             await interaction.response.send_message(
                 "⚠️ Could not read the thread's opening message. "
                 "Make sure the thread was created from a job posting message.",
@@ -6368,7 +6385,7 @@ class CRMCog(commands.Cog):
             self._audit_command(
                 interaction=interaction,
                 action="crm.match_candidates",
-                result="denied",
+                result="error",
                 metadata={"stage": "no_required_skills_extracted"},
             )
             await interaction.followup.send(
