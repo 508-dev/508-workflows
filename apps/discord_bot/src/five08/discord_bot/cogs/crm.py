@@ -6376,7 +6376,7 @@ class CRMCog(commands.Cog):
                 settings,
                 requirements,
                 limit=20,
-                min_match_score=12.0,
+                min_match_score=8.0,
             )
         except Exception as exc:
             logger.error("Candidate search failed: %s", exc)
