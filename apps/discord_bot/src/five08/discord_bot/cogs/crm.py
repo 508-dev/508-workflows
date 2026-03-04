@@ -6435,8 +6435,13 @@ class CRMCog(commands.Cog):
                         if role_id is not None:
                             role_mentions.append(f"<@&{role_id}>")
                         else:
-                            role = discord.utils.get(
-                                interaction.guild.roles, name=role_name
+                            role = next(
+                                (
+                                    candidate
+                                    for candidate in interaction.guild.roles
+                                    if candidate.name.casefold() == role_name.casefold()
+                                ),
+                                None,
                             )
                             if role is not None:
                                 role_mentions.append(role.mention)
@@ -6462,22 +6467,26 @@ class CRMCog(commands.Cog):
         header_lines: list[str] = ["## Job Match Results"]
         if header_parts:
             header_lines.append(" · ".join(header_parts))
-        if role_mentions_line:
-            header_lines.append(role_mentions_line)
         header_lines.append(f"Found **{len(candidates)}** candidate(s).")
 
         header_message = "\n".join(header_lines)
+        await interaction.followup.send(
+            header_message,
+            allowed_mentions=discord.AllowedMentions(
+                roles=False,
+                users=False,
+                everyone=False,
+            ),
+        )
         if role_mentions_line:
             await interaction.followup.send(
-                header_message,
+                role_mentions_line,
                 allowed_mentions=discord.AllowedMentions(
                     roles=True,
                     users=False,
                     everyone=False,
                 ),
             )
-        else:
-            await interaction.followup.send(header_message)
 
         crm_base = settings.espo_base_url.rstrip("/")
         resume_options: list[tuple[str, str, str]] = []
