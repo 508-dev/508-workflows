@@ -1184,8 +1184,8 @@ class ResumeProfileExtractor:
             "  - <2 years → junior\n"
             "  - 2-4 years → midlevel\n"
             "  - 4-8 years → senior (lower end requires visible ownership or scope signals)\n"
-            "  - 8+ years → senior by default; staff only with evidence of cross-team scope or explicit staff-level title\n"
-            "- staff requires scope beyond a single team or project: leading technical direction for a product area, defining architecture across teams, or mentoring senior engineers\n"
+            "  - 8+ years → senior by default; staff with cross-team scope, explicit staff-level title, mentoring/leading senior engineers, or 4+ years as a senior engineer\n"
+            "- staff signals: leading technical direction for a product area, defining architecture across teams, mentoring senior or mid-level engineers, or sustained tenure (4+ years) at senior level\n"
             "- when title and years conflict, prefer title (e.g. someone titled 'Senior Engineer' with 3 years → senior)\n"
             "- visible promotions in job history (e.g. Engineer → Senior Engineer at same company) are a strong signal; use the highest level reached\n"
             "- do not default to midlevel for ambiguous cases; if experience is clearly senior-range (5+ years with engineering output) lean senior\n"
@@ -1498,17 +1498,20 @@ class ResumeProfileExtractor:
         if years is None:
             return None
 
-        # Staff requires explicit cross-team/org scope, not just any leadership signal.
-        has_cross_team_scope = bool(
+        # Staff signals: cross-team scope, mentoring/leading senior engineers,
+        # or long tenure at senior level (proxy: senior title + 10+ years total).
+        has_staff_signal = bool(
             re.search(
                 r"\b(cross-functional|across teams?|multi-team|org(?:anization)?-wide|"
-                r"company-wide|product area|platform team)\b",
+                r"company-wide|product area|platform team|"
+                r"mentor(?:ing|ed)?\s+(?:senior|mid(?:level)?)\s+engineers?|"
+                r"lead(?:ing)?\s+(?:senior|mid(?:level)?)\s+engineers?)\b",
                 lower_text,
             )
-        )
+        ) or (bool(re.search(r"\bsenior\b", lower_text)) and years >= 10)
 
         if years >= 8:
-            return "staff" if has_cross_team_scope else "senior"
+            return "staff" if has_staff_signal else "senior"
         if years >= 4:
             return "senior"
         if years >= 2:
