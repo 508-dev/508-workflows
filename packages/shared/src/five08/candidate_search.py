@@ -109,19 +109,19 @@ def search_candidates(
             -- How many required skills this candidate has
             (SELECT count(*)::int
              FROM unnest(p.skills) s
-             WHERE s = ANY((SELECT skills FROM req))
+             WHERE s IN (SELECT unnest(skills) FROM req)
             ) AS required_matched,
             -- Weighted score: sum of strength attrs for matched required skills (default 1)
             (SELECT COALESCE(
                 SUM(LEAST(COALESCE((p.skill_attrs ->> s)::int, 1), 5)), 0
              )::int
              FROM unnest(p.skills) s
-             WHERE s = ANY((SELECT skills FROM req))
+             WHERE s IN (SELECT unnest(skills) FROM req)
             ) AS required_skill_score,
             -- How many preferred skills this candidate has
             (SELECT count(*)::int
              FROM unnest(p.skills) s
-             WHERE s = ANY((SELECT skills FROM pref))
+             WHERE s IN (SELECT unnest(skills) FROM pref)
             ) AS preferred_matched,
             -- Timezone match: 1 if candidate timezone is in the preferred list
             CASE
