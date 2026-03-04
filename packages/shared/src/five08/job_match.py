@@ -39,6 +39,37 @@ DISCORD_ROLES_EXCLUDE_FROM_SYNC: frozenset[str] = frozenset(
     {"Bots", "FixTweet", "@everyone"}
 )
 
+# Map known role name variants to canonical Discord skill role names.
+_DISCORD_ROLE_CANONICAL_MAP: dict[str, str] = {
+    role.casefold(): role for role in DISCORD_SKILL_ROLE_NAMES
+}
+_DISCORD_ROLE_CANONICAL_MAP.update(
+    {
+        "fullstack": "Full Stack",
+        "full-stack": "Full Stack",
+        "infra/devops": "Infra / Devops",
+        "devops": "Infra / Devops",
+        "dev ops": "Infra / Devops",
+    }
+)
+
+
+def _normalize_discord_role_types(values: list[str]) -> list[str]:
+    """Normalize and validate discord role types against the canonical list."""
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        key = raw.strip().casefold()
+        if not key:
+            continue
+        canonical = _DISCORD_ROLE_CANONICAL_MAP.get(key)
+        if not canonical or canonical in seen:
+            continue
+        seen.add(canonical)
+        normalized.append(canonical)
+    return normalized
+
+
 # ---------------------------------------------------------------------------
 # Regex hints — used to pre-scan the posting and inform the LLM prompt.
 # They are injected as context into the user message so the LLM can weigh
@@ -85,6 +116,13 @@ class JobRequirements:
     preferred_timezones: list[str] = field(default_factory=list)
     raw_location_text: str | None = None
     title: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "discord_role_types",
+            _normalize_discord_role_types(self.discord_role_types),
+        )
 
 
 def _regex_hints(text: str) -> dict[str, Any]:
