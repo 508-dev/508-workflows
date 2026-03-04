@@ -13,6 +13,32 @@ from five08.skills import normalize_skill_list
 
 logger = logging.getLogger(__name__)
 
+# Canonical Discord role names used for skill/type classification.
+# These match the actual role names in the 508.dev Discord server.
+DISCORD_SKILL_ROLE_NAMES: list[str] = [
+    "Frontend",
+    "Backend",
+    "Full Stack",
+    "AI Engineer",
+    "Blockchain",
+    "Mobile",
+    "Android",
+    "iOS",
+    "Data Scientist",
+    "Infra / Devops",
+    "Product Manager",
+    "Copywriter",
+    "Designer",
+    "Branding Specialist",
+    "Logistics Specialist",
+]
+
+# Discord roles that are administrative/location/seniority rather than skills.
+# These are synced but not used for skill-based role matching.
+DISCORD_ROLES_EXCLUDE_FROM_SYNC: frozenset[str] = frozenset(
+    {"Bots", "FixTweet", "@everyone"}
+)
+
 # ---------------------------------------------------------------------------
 # Regex hints — used to pre-scan the posting and inform the LLM prompt.
 # They are injected as context into the user message so the LLM can weigh
@@ -51,6 +77,9 @@ class JobRequirements:
 
     required_skills: list[str] = field(default_factory=list)
     preferred_skills: list[str] = field(default_factory=list)
+    # Subset of DISCORD_SKILL_ROLE_NAMES that apply to this role.
+    # Used to match candidates via their discord_roles column.
+    discord_role_types: list[str] = field(default_factory=list)
     seniority: str | None = None  # "junior" | "midlevel" | "senior" | "staff"
     location_type: str | None = None  # "us_only" | "timezone_preferred" | "remote_any"
     preferred_timezones: list[str] = field(default_factory=list)
@@ -86,12 +115,21 @@ def _build_prompt(posting_text: str, hints: dict[str, Any]) -> str:
 
     hint_block = ("\n".join(hint_lines) + "\n\n") if hint_lines else ""
 
+    role_names_str = ", ".join(f'"{r}"' for r in DISCORD_SKILL_ROLE_NAMES)
+
     return (
         f"{hint_block}"
         "Analyze the following job posting and return a JSON object with these fields:\n"
         '- "title": string or null — the job title\n'
-        '- "required_skills": array of strings — skills explicitly required\n'
-        '- "preferred_skills": array of strings — skills listed as nice-to-have or preferred\n'
+        '- "required_skills": array of strings — up to 5 most critical TECHNICAL skills, '
+        'using concise canonical names (1-3 words, e.g. "effect ts", "typescript", '
+        '"react", "postgresql", "solidity"). Order by importance. '
+        "EXCLUDE soft skills, work styles, or behavioral traits such as "
+        '"self-directed", "independent", "communication skills", "public github profile".\n'
+        '- "preferred_skills": array of strings — secondary technical skills, same format, '
+        "no soft skills\n"
+        f'- "discord_role_types": array — classify using ONLY values from: [{role_names_str}]. '
+        "Pick all that apply to this role.\n"
         '- "seniority": one of "junior", "midlevel", "senior", "staff", or null\n'
         '- "location_type": one of "us_only", "timezone_preferred", "remote_any", or null\n'
         '- "preferred_timezones": array of IANA timezone strings (e.g. "America/New_York"), '
@@ -193,6 +231,14 @@ def extract_job_requirements(
         _coerce_str_list(data.get("preferred_skills"))
     )
 
+    # Only accept values from the known Discord role names list
+    valid_role_names = set(DISCORD_SKILL_ROLE_NAMES)
+    discord_role_types = [
+        r
+        for r in _coerce_str_list(data.get("discord_role_types"))
+        if r in valid_role_names
+    ]
+
     raw_seniority = data.get("seniority")
     normalized_seniority = (
         raw_seniority.strip().lower() if isinstance(raw_seniority, str) else None
@@ -224,6 +270,7 @@ def extract_job_requirements(
     return JobRequirements(
         required_skills=required_skills,
         preferred_skills=preferred_skills,
+        discord_role_types=discord_role_types,
         seniority=seniority,
         location_type=location_type,
         preferred_timezones=preferred_timezones,

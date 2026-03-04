@@ -36,6 +36,7 @@ class CandidateMatch:
     timezone: str | None
     matched_required_skills: list[str] = field(default_factory=list)
     matched_preferred_skills: list[str] = field(default_factory=list)
+    matched_discord_roles: list[str] = field(default_factory=list)
     required_skill_score: int = 0  # sum of strength attrs for matched required skills
     seniority_score: float = 0.0  # 1.0 exact, 0.7 one level up, 0.0 mismatch or unknown
 
@@ -70,16 +71,20 @@ def search_candidates(
     2. US-only location restriction when enabled (hard filter; non-US candidates excluded).
     3. Timezone match (soft signal; 1 when candidate timezone is in preferred_timezones).
     4. Required skill count matched.
-    5. Required skill strength score (sum of skill_attrs values).
-    6. Preferred skill count matched.
-    7. Seniority score (applied in Python after the query).
+    5. Discord role type matched (1 if any discord role matches the required role types).
+    6. Required skill strength score (sum of skill_attrs values).
+    7. Preferred skill count matched.
+    8. Seniority score (applied in Python after the query).
+
+    Candidates are included if they match ANY required skill OR any discord role type.
     """
     required_skills = requirements.required_skills
     preferred_skills = requirements.preferred_skills
+    role_types = requirements.discord_role_types
 
-    if not required_skills:
+    if not required_skills and not role_types:
         logger.warning(
-            "search_candidates called with no required skills; returning empty list"
+            "search_candidates called with no required skills or role types; returning empty list"
         )
         return []
 
@@ -88,10 +93,12 @@ def search_candidates(
 
     # Build the query. We use unnest + lateral subselects so a single round-trip
     # handles scoring without pulling all rows into Python.
+    # Candidates match if they have ANY required skill OR any discord role type.
     query = """
         WITH
           req AS (SELECT %s::text[] AS skills),
-          pref AS (SELECT %s::text[] AS skills)
+          pref AS (SELECT %s::text[] AS skills),
+          rtypes AS (SELECT %s::text[] AS types)
         SELECT
             p.crm_contact_id,
             p.name,
@@ -106,6 +113,7 @@ def search_candidates(
             p.timezone,
             p.skills,
             p.skill_attrs,
+            p.discord_roles,
             -- How many required skills this candidate has
             (SELECT count(*)::int
              FROM unnest(p.skills) s
@@ -127,11 +135,28 @@ def search_candidates(
             CASE
               WHEN %s::text[] = '{}'::text[] THEN 0
               ELSE (p.timezone = ANY(%s::text[]))::int
-            END AS timezone_matched
+            END AS timezone_matched,
+            -- Discord role match: 1 if any discord role matches the required role types
+            CASE
+              WHEN (SELECT array_length(types, 1) FROM rtypes) IS NULL THEN 0
+              WHEN EXISTS (
+                SELECT 1
+                FROM jsonb_array_elements_text(COALESCE(p.discord_roles, '[]'::jsonb)) r
+                WHERE r = ANY((SELECT types FROM rtypes))
+              ) THEN 1
+              ELSE 0
+            END AS discord_role_matched
         FROM people p
         WHERE p.sync_status = 'active'
-          -- Must have at least one required skill
-          AND p.skills && (SELECT skills FROM req)
+          -- Must match at least one required skill OR one discord role type
+          AND (
+            p.skills && (SELECT skills FROM req)
+            OR EXISTS (
+              SELECT 1
+              FROM jsonb_array_elements_text(COALESCE(p.discord_roles, '[]'::jsonb)) r
+              WHERE r = ANY((SELECT types FROM rtypes))
+            )
+          )
           -- Hard location filter when us_only
           AND (
             NOT %s
@@ -141,6 +166,7 @@ def search_candidates(
             p.is_member DESC,
             timezone_matched DESC,
             required_matched DESC,
+            discord_role_matched DESC,
             required_skill_score DESC,
             preferred_matched DESC
         LIMIT %s
@@ -155,6 +181,7 @@ def search_candidates(
                 (
                     required_skills,
                     preferred_skills,
+                    role_types,
                     preferred_timezones,
                     preferred_timezones,
                     us_only,
@@ -169,9 +196,15 @@ def search_candidates(
         candidate_skills: list[str] = row.get("skills") or []
         required_set = set(required_skills)
         preferred_set = set(preferred_skills)
+        role_types_set = set(role_types)
 
         matched_req = [s for s in candidate_skills if s in required_set]
         matched_pref = [s for s in candidate_skills if s in preferred_set]
+
+        raw_discord_roles = row.get("discord_roles") or []
+        matched_discord = [
+            r for r in raw_discord_roles if isinstance(r, str) and r in role_types_set
+        ]
 
         sen_score = _seniority_score(row.get("seniority"), requirements.seniority)
 
@@ -190,6 +223,7 @@ def search_candidates(
                 timezone=row.get("timezone"),
                 matched_required_skills=matched_req,
                 matched_preferred_skills=matched_pref,
+                matched_discord_roles=matched_discord,
                 required_skill_score=row.get("required_skill_score") or 0,
                 seniority_score=sen_score,
             )
@@ -200,6 +234,7 @@ def search_candidates(
         key=lambda c: (
             not c.is_member,
             -len(c.matched_required_skills),
+            -len(c.matched_discord_roles),
             -c.required_skill_score,
             -len(c.matched_preferred_skills),
             -c.seniority_score,
