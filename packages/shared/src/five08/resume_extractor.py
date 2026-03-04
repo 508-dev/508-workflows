@@ -1476,30 +1476,39 @@ class ResumeProfileExtractor:
     @staticmethod
     def _infer_seniority_from_resume(resume_text: str) -> str | None:
         lower_text = resume_text.lower()
+
+        # Title-first: honor explicit seniority titles before falling back to years.
+        if re.search(
+            r"\b(staff engineer|principal engineer|architect|distinguished engineer)\b",
+            lower_text,
+        ):
+            return "staff"
+        if re.search(
+            r"\b(senior engineer|senior swe|engineer iii|lead engineer|tech lead)\b",
+            lower_text,
+        ):
+            return "senior"
+        if re.search(
+            r"\b(junior engineer|associate engineer|engineer i|intern(?:ship)?)\b",
+            lower_text,
+        ):
+            return "junior"
+
         years = ResumeProfileExtractor._extract_years_of_experience(resume_text)
         if years is None:
             return None
 
-        impact_score = 0
-        if re.search(
-            r"\b(staff|principal|lead engineer|principal engineer)\b", lower_text
-        ):
-            impact_score += 2
-        if re.search(
-            r"\b(architect|engineering lead|tech lead|lead dev|leading|led a team|team lead)\b",
-            lower_text,
-        ):
-            impact_score += 1
-        if re.search(
-            r"(?:\bteam of\s+\d+\b|\bmanaged\b|\bmentored\b|\bcross-functional\b|"
-            r"\benterprise\b|\bglobal\b|\bseries [abcd]\b|\b500\+?(?!\d)|\b1000\+?(?!\d)|"
-            r"\b10[0-9]{2,}\s+employees\b)",
-            lower_text,
-        ):
-            impact_score += 1
+        # Staff requires explicit cross-team/org scope, not just any leadership signal.
+        has_cross_team_scope = bool(
+            re.search(
+                r"\b(cross-functional|across teams?|multi-team|org(?:anization)?-wide|"
+                r"company-wide|product area|platform team)\b",
+                lower_text,
+            )
+        )
 
         if years >= 8:
-            return "staff" if impact_score >= 1 else "senior"
+            return "staff" if has_cross_team_scope else "senior"
         if years >= 4:
             return "senior"
         if years >= 2:
@@ -1545,9 +1554,9 @@ class ResumeProfileExtractor:
 
         if not date_years:
             return None
-        # Use median to reduce inflation from education or outlier date spans.
+        # Use conservative (lower) median to avoid inflation from education spans.
         date_years.sort()
-        return date_years[len(date_years) // 2]
+        return date_years[(len(date_years) - 1) // 2]
 
     @staticmethod
     def _extract_skills(resume_text: str) -> tuple[list[str], dict[str, int]]:

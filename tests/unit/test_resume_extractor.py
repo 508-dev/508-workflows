@@ -456,12 +456,30 @@ def test_extract_name_case_normalizes_all_caps_name() -> None:
 
 
 def test_infer_seniority_regex_handles_scale_keywords() -> None:
-    """Seniority inference should not crash on scale/impact keyword checks."""
+    """Scale/impact keywords alone (no cross-team scope) should yield senior, not staff."""
     level = ResumeProfileExtractor._infer_seniority_from_resume(
         "10 years of software experience. Managed teams at a Series B startup."
     )
 
+    assert level == "senior"
+
+
+def test_infer_seniority_regex_cross_team_scope_yields_staff() -> None:
+    """Cross-team scope signals with 8+ years should yield staff."""
+    level = ResumeProfileExtractor._infer_seniority_from_resume(
+        "10 years of software experience. Led cross-functional initiatives across teams."
+    )
+
     assert level == "staff"
+
+
+def test_infer_seniority_regex_title_first_senior_overrides_low_years() -> None:
+    """Explicit senior title should override low years-of-experience count."""
+    level = ResumeProfileExtractor._infer_seniority_from_resume(
+        "3 years of experience. Senior Engineer at Acme Corp."
+    )
+
+    assert level == "senior"
 
 
 def test_infer_seniority_regex_does_not_match_larger_numeric_prefixes() -> None:
