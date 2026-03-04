@@ -1844,7 +1844,11 @@ class CRMCog(commands.Cog):
 
             if candidate.linkedin:
                 parts.append(f"[LinkedIn](<{candidate.linkedin}>)")
-            if candidate.latest_resume_id and candidate.latest_resume_name:
+            if (
+                candidate.latest_resume_id
+                and candidate.latest_resume_name
+                and candidate.latest_resume_name != "Vladyslav_Stryzhak.pdf"
+            ):
                 parts.append(f"Resume: `{candidate.latest_resume_name}`")
                 resume_options.append(
                     (name, candidate.latest_resume_id, candidate.latest_resume_name)
