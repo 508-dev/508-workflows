@@ -1755,6 +1755,21 @@ class CRMCog(commands.Cog):
         """Return whether a channel is registered for automatic job matching."""
         return channel_id in self._jobs_channels_by_guild.get(guild_id, set())
 
+    async def _refresh_jobs_channel_cache_if_missing(self, guild_id: int) -> bool:
+        """Ensure guild cache is loaded, retrying after startup-load failures."""
+        if guild_id in self._jobs_channels_by_guild:
+            return True
+        try:
+            await self._refresh_jobs_channel_cache(guild_id)
+            return True
+        except Exception as exc:
+            logger.warning(
+                "Failed to refresh jobs-channel cache for guild=%s: %s",
+                guild_id,
+                exc,
+            )
+            return False
+
     async def _mark_thread_auto_matched(self, thread_id: int) -> bool:
         """Deduplicate automatic matching when multiple events race."""
         async with self._auto_matched_thread_lock:
@@ -1918,7 +1933,8 @@ class CRMCog(commands.Cog):
                 model=settings.openai_model,
                 webhook_url=settings.discord_logs_webhook_url,
             )
-        except RuntimeError as exc:
+        except Exception as exc:
+            await self._unmark_thread_auto_matched(thread.id)
             logger.warning(
                 "Auto match failed while extracting requirements "
                 "(guild=%s thread=%s trigger=%s): %s",
@@ -6937,6 +6953,8 @@ class CRMCog(commands.Cog):
         parent = thread.parent
         if guild is None or parent is None:
             return
+        if not await self._refresh_jobs_channel_cache_if_missing(guild.id):
+            return
 
         if not self._is_jobs_channel_registered(guild.id, parent.id):
             return
@@ -6956,6 +6974,8 @@ class CRMCog(commands.Cog):
     async def on_message(self, message: discord.Message) -> None:
         """Auto-create a thread for registered text-channel posts and match."""
         if message.guild is None:
+            return
+        if not await self._refresh_jobs_channel_cache_if_missing(message.guild.id):
             return
         if not isinstance(message.author, discord.Member):
             return
