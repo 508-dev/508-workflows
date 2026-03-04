@@ -6395,43 +6395,18 @@ class CRMCog(commands.Cog):
             },
         )
 
-    @app_commands.command(
-        name="sync-discord-roles",
-        description="Sync all server members' Discord roles into the candidate database.",
-    )
-    @require_role("Steering Committee")
-    async def sync_discord_roles(
-        self,
-        interaction: discord.Interaction,
-    ) -> None:
-        """Iterate all guild members and update their discord_roles in the people cache.
-
-        Roles named Bots, Member, FixTweet, or @everyone are excluded.
-        Only updates records where the member's Discord user ID is already in the DB.
-        """
-        guild = interaction.guild
-        if guild is None:
-            await interaction.response.send_message(
-                "⚠️ This command must be used inside a server.", ephemeral=True
-            )
-            return
-
-        await interaction.response.defer(ephemeral=True)
-
-        members = guild.members
+    async def _bulk_sync_guild_roles(self, guild: discord.Guild) -> tuple[int, int]:
+        """Sync discord_roles for all non-bot guild members. Returns (updated, skipped)."""
         updated = 0
         skipped = 0
-
-        for member in members:
+        for member in guild.members:
             if member.bot:
                 continue
-
             role_names = [
                 r.name
                 for r in member.roles
                 if r.name not in DISCORD_ROLES_EXCLUDE_FROM_SYNC
             ]
-
             did_update = await asyncio.to_thread(
                 update_person_discord_roles,
                 settings,
@@ -6442,6 +6417,45 @@ class CRMCog(commands.Cog):
                 updated += 1
             else:
                 skipped += 1
+        return updated, skipped
+
+    @commands.Cog.listener()
+    async def on_ready(self) -> None:
+        """Bulk-sync all guild member roles on startup."""
+        for guild in self.bot.guilds:
+            try:
+                updated, skipped = await self._bulk_sync_guild_roles(guild)
+                logger.info(
+                    "Startup discord role sync: guild=%s updated=%d skipped=%d",
+                    guild.name,
+                    updated,
+                    skipped,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Startup discord role sync failed for guild %s: %s", guild.name, exc
+                )
+
+    @app_commands.command(
+        name="sync-discord-roles",
+        description="Re-sync all server members' Discord roles into the candidate database.",
+    )
+    @require_role("Steering Committee")
+    async def sync_discord_roles(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        """Manually trigger a full guild role sync (also runs automatically on startup)."""
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message(
+                "⚠️ This command must be used inside a server.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        updated, skipped = await self._bulk_sync_guild_roles(guild)
 
         self._audit_command(
             interaction=interaction,
