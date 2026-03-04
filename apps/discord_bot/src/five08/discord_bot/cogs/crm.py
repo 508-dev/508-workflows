@@ -216,25 +216,33 @@ class MatchResumeSelect(discord.ui.Select):
             download_ok = await cog._download_and_send_resume(
                 interaction, contact_name, resume_id
             )
-            cog._audit_command(
-                interaction=interaction,
-                action="crm.match_candidates_resume_select",
-                result="success" if download_ok else "error",
-                metadata={"contact_name": contact_name},
-                resource_type="crm_contact",
-                resource_id=resume_id,
-            )
-        except Exception as exc:
-            logger.error("Unexpected error in match resume select: %s", exc)
-            if "cog" in locals() and cog:
+            try:
                 cog._audit_command(
                     interaction=interaction,
                     action="crm.match_candidates_resume_select",
-                    result="error",
-                    metadata={"error": str(exc)},
-                    resource_type="discord_ui_action",
-                    resource_id=self.values[0] if self.values else None,
+                    result="success" if download_ok else "error",
+                    metadata={"contact_name": contact_name},
+                    resource_type="crm_contact",
+                    resource_id=resume_id,
                 )
+            except Exception as audit_exc:
+                logger.error("Audit write failed in match resume select: %s", audit_exc)
+        except Exception as exc:
+            logger.error("Unexpected error in match resume select: %s", exc)
+            if "cog" in locals() and cog:
+                try:
+                    cog._audit_command(
+                        interaction=interaction,
+                        action="crm.match_candidates_resume_select",
+                        result="error",
+                        metadata={"error": str(exc)},
+                        resource_type="discord_ui_action",
+                        resource_id=self.values[0] if self.values else None,
+                    )
+                except Exception as audit_exc:
+                    logger.error(
+                        "Audit write failed in match resume select: %s", audit_exc
+                    )
             await interaction.followup.send(
                 "❌ An unexpected error occurred while downloading the resume."
             )

@@ -276,7 +276,25 @@ def search_candidates(
         ]
 
         sen_score = _seniority_score(row.get("seniority"), requirements.seniority)
-        base_score = float(row.get("match_score") or 0)
+        raw_match_score = row.get("match_score")
+        if raw_match_score is None:
+            required_matched = row.get("required_matched") or 0
+            required_skill_score = row.get("required_skill_score") or 0
+            preferred_matched = row.get("preferred_matched") or 0
+            timezone_matched = row.get("timezone_matched") or 0
+            discord_role_matched = row.get("discord_role_matched") or 0
+            is_member = bool(row.get("is_member"))
+            has_crm_link = bool(row.get("has_crm_link", True))
+            raw_match_score = (
+                required_matched * 10
+                + required_skill_score * 2
+                + preferred_matched * 2
+                + timezone_matched * 2
+                + (discord_role_matched * 2)
+                + (4 if is_member else 0)
+                + (6 if has_crm_link else 0)
+            )
+        base_score = float(raw_match_score or 0)
         match_score = base_score + (sen_score * 3)
 
         results.append(
