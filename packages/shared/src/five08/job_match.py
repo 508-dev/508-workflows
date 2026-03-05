@@ -39,6 +39,289 @@ DISCORD_ROLES_EXCLUDE_FROM_SYNC: frozenset[str] = frozenset(
     {"Bots", "FixTweet", "@everyone"}
 )
 
+# Locality-based Discord role names used for geographic classification.
+DISCORD_LOCALITY_ROLE_NAMES: list[str] = [
+    "Asia",
+    "Americas",
+    "Europe",
+    "USA",
+    "Taiwan",
+    "Japan",
+    "Africa",
+]
+
+# Roles that should never be suggested or applied automatically.
+DISCORD_ROLES_NEVER_SUGGEST: frozenset[str] = frozenset(
+    {"Member", "FixTweet", "Bots", "Admin", "508 Bot"}
+)
+
+# Map normalized country name → locality Discord roles to suggest.
+_COUNTRY_TO_LOCALITY_ROLES: dict[str, list[str]] = {
+    "united states": ["USA", "Americas"],
+    "usa": ["USA", "Americas"],
+    "us": ["USA", "Americas"],
+    "canada": ["Americas"],
+    "mexico": ["Americas"],
+    "brazil": ["Americas"],
+    "argentina": ["Americas"],
+    "colombia": ["Americas"],
+    "chile": ["Americas"],
+    "peru": ["Americas"],
+    "venezuela": ["Americas"],
+    "ecuador": ["Americas"],
+    "bolivia": ["Americas"],
+    "paraguay": ["Americas"],
+    "uruguay": ["Americas"],
+    "japan": ["Japan", "Asia"],
+    "taiwan": ["Taiwan", "Asia"],
+    "china": ["Asia"],
+    "south korea": ["Asia"],
+    "korea": ["Asia"],
+    "india": ["Asia"],
+    "singapore": ["Asia"],
+    "hong kong": ["Asia"],
+    "thailand": ["Asia"],
+    "vietnam": ["Asia"],
+    "indonesia": ["Asia"],
+    "malaysia": ["Asia"],
+    "philippines": ["Asia"],
+    "bangladesh": ["Asia"],
+    "pakistan": ["Asia"],
+    "nepal": ["Asia"],
+    "sri lanka": ["Asia"],
+    "myanmar": ["Asia"],
+    "cambodia": ["Asia"],
+    "laos": ["Asia"],
+    "mongolia": ["Asia"],
+    "united kingdom": ["Europe"],
+    "uk": ["Europe"],
+    "england": ["Europe"],
+    "germany": ["Europe"],
+    "france": ["Europe"],
+    "spain": ["Europe"],
+    "italy": ["Europe"],
+    "netherlands": ["Europe"],
+    "sweden": ["Europe"],
+    "norway": ["Europe"],
+    "denmark": ["Europe"],
+    "finland": ["Europe"],
+    "switzerland": ["Europe"],
+    "austria": ["Europe"],
+    "belgium": ["Europe"],
+    "portugal": ["Europe"],
+    "poland": ["Europe"],
+    "czech republic": ["Europe"],
+    "czechia": ["Europe"],
+    "romania": ["Europe"],
+    "ukraine": ["Europe"],
+    "greece": ["Europe"],
+    "ireland": ["Europe"],
+    "hungary": ["Europe"],
+    "bulgaria": ["Europe"],
+    "croatia": ["Europe"],
+    "slovakia": ["Europe"],
+    "serbia": ["Europe"],
+    "turkey": ["Europe"],
+    "russia": ["Europe"],
+    "nigeria": ["Africa"],
+    "kenya": ["Africa"],
+    "ghana": ["Africa"],
+    "south africa": ["Africa"],
+    "ethiopia": ["Africa"],
+    "egypt": ["Africa"],
+    "tanzania": ["Africa"],
+    "uganda": ["Africa"],
+    "cameroon": ["Africa"],
+    "senegal": ["Africa"],
+    "côte d'ivoire": ["Africa"],
+    "ivory coast": ["Africa"],
+    "rwanda": ["Africa"],
+    "zimbabwe": ["Africa"],
+    "zambia": ["Africa"],
+    "mozambique": ["Africa"],
+    "angola": ["Africa"],
+    "morocco": ["Africa"],
+    "tunisia": ["Africa"],
+    "algeria": ["Africa"],
+}
+
+# Map normalized skill keyword → Discord skill role name.
+# More specific keywords take priority over generic ones.
+_SKILL_TO_DISCORD_ROLE: dict[str, str] = {
+    # Frontend
+    "react": "Frontend",
+    "vue": "Frontend",
+    "angular": "Frontend",
+    "svelte": "Frontend",
+    "next.js": "Frontend",
+    "nuxt": "Frontend",
+    "html": "Frontend",
+    "css": "Frontend",
+    "sass": "Frontend",
+    "tailwind": "Frontend",
+    "webpack": "Frontend",
+    "vite": "Frontend",
+    # Backend
+    "node.js": "Backend",
+    "express": "Backend",
+    "django": "Backend",
+    "fastapi": "Backend",
+    "flask": "Backend",
+    "rails": "Backend",
+    "ruby on rails": "Backend",
+    "spring": "Backend",
+    "laravel": "Backend",
+    "graphql": "Backend",
+    "postgresql": "Backend",
+    "mysql": "Backend",
+    "mongodb": "Backend",
+    "redis": "Backend",
+    "rest api": "Backend",
+    # AI / ML
+    "machine learning": "AI Engineer",
+    "deep learning": "AI Engineer",
+    "llm": "AI Engineer",
+    "large language model": "AI Engineer",
+    "tensorflow": "AI Engineer",
+    "pytorch": "AI Engineer",
+    "transformers": "AI Engineer",
+    "nlp": "AI Engineer",
+    "computer vision": "AI Engineer",
+    "reinforcement learning": "AI Engineer",
+    "langchain": "AI Engineer",
+    "openai": "AI Engineer",
+    # Data Science
+    "data science": "Data Scientist",
+    "pandas": "Data Scientist",
+    "numpy": "Data Scientist",
+    "scikit-learn": "Data Scientist",
+    "tableau": "Data Scientist",
+    "power bi": "Data Scientist",
+    "spark": "Data Scientist",
+    "hadoop": "Data Scientist",
+    "data analysis": "Data Scientist",
+    "statistics": "Data Scientist",
+    # Blockchain
+    "solidity": "Blockchain",
+    "ethereum": "Blockchain",
+    "web3": "Blockchain",
+    "blockchain": "Blockchain",
+    "smart contract": "Blockchain",
+    "defi": "Blockchain",
+    "nft": "Blockchain",
+    "crypto": "Blockchain",
+    # Mobile (generic)
+    "react native": "Mobile",
+    "flutter": "Mobile",
+    "xamarin": "Mobile",
+    # iOS
+    "swift": "iOS",
+    "swiftui": "iOS",
+    "objective-c": "iOS",
+    # Android
+    "kotlin": "Android",
+    "android studio": "Android",
+    # Infra / DevOps
+    "kubernetes": "Infra / Devops",
+    "docker": "Infra / Devops",
+    "aws": "Infra / Devops",
+    "gcp": "Infra / Devops",
+    "google cloud": "Infra / Devops",
+    "azure": "Infra / Devops",
+    "terraform": "Infra / Devops",
+    "ansible": "Infra / Devops",
+    "ci/cd": "Infra / Devops",
+    "jenkins": "Infra / Devops",
+    "github actions": "Infra / Devops",
+    "linux": "Infra / Devops",
+    "devops": "Infra / Devops",
+    # Design
+    "figma": "Designer",
+    "sketch": "Designer",
+    "adobe xd": "Designer",
+    "photoshop": "Designer",
+    "illustrator": "Designer",
+    "indesign": "Designer",
+    "ux design": "Designer",
+    "ui design": "Designer",
+    "user experience": "Designer",
+    # Branding
+    "branding": "Branding Specialist",
+    "brand identity": "Branding Specialist",
+    "brand strategy": "Branding Specialist",
+    # Copywriting
+    "copywriting": "Copywriter",
+    "content writing": "Copywriter",
+    "technical writing": "Copywriter",
+    # Product Management
+    "product management": "Product Manager",
+    "product roadmap": "Product Manager",
+    "agile": "Product Manager",
+    "scrum": "Product Manager",
+    "jira": "Product Manager",
+    # Logistics
+    "logistics": "Logistics Specialist",
+    "supply chain": "Logistics Specialist",
+    "operations": "Logistics Specialist",
+}
+
+# Map normalized CRM role → Discord skill role name.
+_CRM_ROLE_TO_DISCORD_ROLE: dict[str, str] = {
+    "designer": "Designer",
+    "product manager": "Product Manager",
+    "data scientist": "Data Scientist",
+    "copywriter": "Copywriter",
+}
+
+
+def suggest_technical_discord_roles(
+    skills: list[str], primary_roles: list[str]
+) -> list[str]:
+    """Suggest Discord technical skill roles based on extracted resume data.
+
+    Returns a deduplicated list of canonical Discord role names from
+    DISCORD_SKILL_ROLE_NAMES that match the candidate's skills and roles.
+    """
+    suggestions: list[str] = []
+    seen: set[str] = set()
+
+    # Map CRM roles first
+    for role in primary_roles:
+        discord_role = _CRM_ROLE_TO_DISCORD_ROLE.get(role.strip().casefold())
+        if discord_role and discord_role not in seen:
+            suggestions.append(discord_role)
+            seen.add(discord_role)
+
+    # Map skills via keyword matching
+    for skill in skills:
+        skill_lower = skill.strip().casefold()
+        discord_role = _SKILL_TO_DISCORD_ROLE.get(skill_lower)
+        if discord_role and discord_role not in seen:
+            suggestions.append(discord_role)
+            seen.add(discord_role)
+        else:
+            # Try partial match for multi-word skills
+            for keyword, role_name in _SKILL_TO_DISCORD_ROLE.items():
+                if keyword in skill_lower and role_name not in seen:
+                    suggestions.append(role_name)
+                    seen.add(role_name)
+                    break
+
+    return suggestions
+
+
+def suggest_locality_discord_roles(country: str | None) -> list[str]:
+    """Suggest Discord locality roles based on extracted country.
+
+    Returns a list of canonical locality Discord role names that match
+    the candidate's country.
+    """
+    if not country:
+        return []
+    key = country.strip().casefold()
+    return list(_COUNTRY_TO_LOCALITY_ROLES.get(key, []))
+
+
 # Map known role name variants to canonical Discord skill role names.
 _DISCORD_ROLE_CANONICAL_MAP: dict[str, str] = {
     role.casefold(): role for role in DISCORD_SKILL_ROLE_NAMES

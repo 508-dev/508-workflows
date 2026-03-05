@@ -8,13 +8,17 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from five08.job_match import (
+    DISCORD_LOCALITY_ROLE_NAMES,
     DISCORD_ROLES_EXCLUDE_FROM_SYNC,
+    DISCORD_ROLES_NEVER_SUGGEST,
     DISCORD_SKILL_ROLE_NAMES,
     _build_prompt,
     _coerce_str_list,
     _parse_llm_response,
     _regex_hints,
     extract_job_requirements,
+    suggest_locality_discord_roles,
+    suggest_technical_discord_roles,
 )
 
 
@@ -375,3 +379,157 @@ def test_discord_roles_exclude_contains_bots_and_fixtweet() -> None:
 
 def test_discord_roles_exclude_does_not_contain_member() -> None:
     assert "Member" not in DISCORD_ROLES_EXCLUDE_FROM_SYNC
+
+
+# ---------------------------------------------------------------------------
+# DISCORD_ROLES_NEVER_SUGGEST
+# ---------------------------------------------------------------------------
+
+
+def test_discord_roles_never_suggest_contains_required_exclusions() -> None:
+    for role in ("Member", "FixTweet", "Bots", "Admin", "508 Bot"):
+        assert role in DISCORD_ROLES_NEVER_SUGGEST
+
+
+# ---------------------------------------------------------------------------
+# DISCORD_LOCALITY_ROLE_NAMES
+# ---------------------------------------------------------------------------
+
+
+def test_discord_locality_role_names_contains_all_regions() -> None:
+    for region in ("Asia", "Americas", "Europe", "USA", "Taiwan", "Japan", "Africa"):
+        assert region in DISCORD_LOCALITY_ROLE_NAMES
+
+
+# ---------------------------------------------------------------------------
+# suggest_locality_discord_roles
+# ---------------------------------------------------------------------------
+
+
+def test_locality_usa_returns_usa_and_americas() -> None:
+    result = suggest_locality_discord_roles("United States")
+    assert "USA" in result
+    assert "Americas" in result
+
+
+def test_locality_usa_case_insensitive() -> None:
+    assert suggest_locality_discord_roles(
+        "united states"
+    ) == suggest_locality_discord_roles("United States")
+
+
+def test_locality_japan_returns_japan_and_asia() -> None:
+    result = suggest_locality_discord_roles("Japan")
+    assert "Japan" in result
+    assert "Asia" in result
+
+
+def test_locality_taiwan_returns_taiwan_and_asia() -> None:
+    result = suggest_locality_discord_roles("Taiwan")
+    assert "Taiwan" in result
+    assert "Asia" in result
+
+
+def test_locality_canada_returns_americas_only() -> None:
+    result = suggest_locality_discord_roles("Canada")
+    assert "Americas" in result
+    assert "USA" not in result
+
+
+def test_locality_germany_returns_europe() -> None:
+    result = suggest_locality_discord_roles("Germany")
+    assert "Europe" in result
+
+
+def test_locality_nigeria_returns_africa() -> None:
+    result = suggest_locality_discord_roles("Nigeria")
+    assert "Africa" in result
+
+
+def test_locality_unknown_country_returns_empty() -> None:
+    assert suggest_locality_discord_roles("Narnia") == []
+
+
+def test_locality_none_returns_empty() -> None:
+    assert suggest_locality_discord_roles(None) == []
+
+
+def test_locality_empty_string_returns_empty() -> None:
+    assert suggest_locality_discord_roles("") == []
+
+
+# ---------------------------------------------------------------------------
+# suggest_technical_discord_roles
+# ---------------------------------------------------------------------------
+
+
+def test_technical_react_suggests_frontend() -> None:
+    result = suggest_technical_discord_roles(["React"], [])
+    assert "Frontend" in result
+
+
+def test_technical_solidity_suggests_blockchain() -> None:
+    result = suggest_technical_discord_roles(["Solidity"], [])
+    assert "Blockchain" in result
+
+
+def test_technical_kubernetes_suggests_infra() -> None:
+    result = suggest_technical_discord_roles(["Kubernetes"], [])
+    assert "Infra / Devops" in result
+
+
+def test_technical_pytorch_suggests_ai_engineer() -> None:
+    result = suggest_technical_discord_roles(["PyTorch"], [])
+    assert "AI Engineer" in result
+
+
+def test_technical_flutter_suggests_mobile() -> None:
+    result = suggest_technical_discord_roles(["Flutter"], [])
+    assert "Mobile" in result
+
+
+def test_technical_swift_suggests_ios() -> None:
+    result = suggest_technical_discord_roles(["Swift"], [])
+    assert "iOS" in result
+
+
+def test_technical_kotlin_suggests_android() -> None:
+    result = suggest_technical_discord_roles(["Kotlin"], [])
+    assert "Android" in result
+
+
+def test_technical_crm_designer_role_suggests_designer() -> None:
+    result = suggest_technical_discord_roles([], ["designer"])
+    assert "Designer" in result
+
+
+def test_technical_crm_product_manager_suggests_product_manager() -> None:
+    result = suggest_technical_discord_roles([], ["product manager"])
+    assert "Product Manager" in result
+
+
+def test_technical_crm_data_scientist_suggests_data_scientist() -> None:
+    result = suggest_technical_discord_roles([], ["data scientist"])
+    assert "Data Scientist" in result
+
+
+def test_technical_deduplicates_results() -> None:
+    # Multiple skills mapping to the same role should only appear once
+    result = suggest_technical_discord_roles(["React", "Vue", "Angular"], [])
+    assert result.count("Frontend") == 1
+
+
+def test_technical_empty_inputs_returns_empty() -> None:
+    assert suggest_technical_discord_roles([], []) == []
+
+
+def test_technical_unknown_skills_returns_empty() -> None:
+    assert suggest_technical_discord_roles(["Underwater Basket Weaving"], []) == []
+
+
+def test_technical_returns_only_canonical_role_names() -> None:
+    result = suggest_technical_discord_roles(
+        ["React", "Solidity", "Kubernetes", "Swift"], []
+    )
+    for role in result:
+        assert role in DISCORD_SKILL_ROLE_NAMES

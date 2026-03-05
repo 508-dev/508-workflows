@@ -317,6 +317,26 @@ def resolve_person_id(
     return row["id"]
 
 
+def get_discord_user_id_for_contact(
+    settings: SharedSettings,
+    crm_contact_id: str,
+) -> str | None:
+    """Return the discord_user_id linked to a CRM contact, if any."""
+    query = """
+        SELECT discord_user_id
+        FROM people
+        WHERE crm_contact_id = %s
+        LIMIT 1;
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(query, (crm_contact_id,))
+            row = cursor.fetchone()
+    if row is None:
+        return None
+    return row["discord_user_id"]
+
+
 def insert_audit_event(
     settings: SharedSettings,
     payload: AuditEventInput,
