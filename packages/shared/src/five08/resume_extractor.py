@@ -314,6 +314,20 @@ RESUME_NAME_HEADING_TOKENS = frozenset(
         "skills",
     }
 )
+UNKNOWN_FIELD_VALUE_TOKENS = frozenset(
+    {
+        "unknown",
+        "n/a",
+        "na",
+        "none",
+        "null",
+        "unspecified",
+        "not specified",
+        "tbd",
+        "remote",
+        "remote only",
+    }
+)
 # Backward-compatible internal aliases.
 _PLACEHOLDER_NAME_TOKENS = RESUME_NAME_PLACEHOLDER_TOKENS
 _NAME_HEADING_TOKENS = RESUME_NAME_HEADING_TOKENS
@@ -442,6 +456,13 @@ def _normalize_scalar(value: Any) -> str | None:
     return normalized or None
 
 
+def _is_unknown_field_value(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    normalized = re.sub(r"\s+", " ", value).strip().casefold()
+    return normalized in UNKNOWN_FIELD_VALUE_TOKENS
+
+
 def _normalize_description(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -526,14 +547,20 @@ def _normalize_phone(value: Any) -> str | None:
 
 
 def _normalize_country(value: Any) -> str | None:
+    if _is_unknown_field_value(value):
+        return None
     return shared_normalize_country(value)
 
 
 def _normalize_state(value: Any) -> str | None:
+    if _is_unknown_field_value(value):
+        return None
     return shared_normalize_state(value)
 
 
 def _normalize_city(value: Any) -> str | None:
+    if _is_unknown_field_value(value):
+        return None
     return shared_normalize_city(value, strip_parenthetical=True)
 
 
@@ -1573,8 +1600,13 @@ class ResumeProfileExtractor:
                     {
                         "role": "system",
                         "content": (
-                            "You extract candidate profile fields from resumes for a CRM. "
-                            "Return JSON only with no commentary. Be conservative: when unsure, use null."
+                            "You extract structured candidate profile fields for a CRM. "
+                            "Return JSON only with no commentary. "
+                            "Prefer explicit evidence from the provided text. "
+                            "Be conservative for contact/location/website fields, but proactive for role and seniority inference. "
+                            "For primary_roles and seniority_level, infer the best fit from titles, summary, and work history even when labels are not explicit. "
+                            "Never fabricate details or use outside knowledge. "
+                            "Assume candidates are typically technical professionals unless the resume clearly indicates otherwise."
                         ),
                     },
                     {
@@ -1678,6 +1710,22 @@ class ResumeProfileExtractor:
                     for item in parsed_social_links
                     if _linkedin_profile_key(item) != linkedin_profile_key
                 ]
+            parsed_city = _normalize_city(parsed.get("address_city"))
+            parsed_state = _normalize_state(parsed.get("address_state"))
+            parsed_country = _normalize_country(parsed.get("address_country"))
+            parsed_timezone = _normalize_timezone(parsed.get("timezone"))
+            (
+                parsed_city,
+                parsed_state,
+                parsed_country,
+                parsed_timezone,
+            ) = self._resolve_location_fields(
+                resume_text=resume_text,
+                city=parsed_city,
+                state=parsed_state,
+                country=parsed_country,
+                timezone=parsed_timezone,
+            )
             return ResumeExtractedProfile(
                 name=extracted_name,
                 first_name=extracted_first_name,
@@ -1685,21 +1733,24 @@ class ResumeProfileExtractor:
                 email=parsed_email,
                 additional_emails=parsed_emails,
                 description=_normalize_description(parsed.get("description")),
-                primary_roles=_normalize_role_collection(
-                    parsed.get("primary_roles") or parsed.get("primary_role")
+                primary_roles=(
+                    _normalize_role_collection(
+                        parsed.get("primary_roles") or parsed.get("primary_role")
+                    )
+                    or self._infer_roles_from_resume(resume_text)
                 ),
                 github_username=github_username,
                 linkedin_url=linkedin_url,
-                timezone=_normalize_timezone(parsed.get("timezone")),
-                address_city=_normalize_city(parsed.get("address_city")),
-                address_state=_normalize_state(parsed.get("address_state")),
+                timezone=parsed_timezone,
+                address_city=parsed_city,
+                address_state=parsed_state,
                 phone=_normalize_phone_with_country(
                     parsed.get("phone"),
-                    parsed.get("address_country"),
+                    parsed_country,
                 ),
                 website_links=parsed_website_links,
                 social_links=parsed_social_links,
-                address_country=_normalize_country(parsed.get("address_country")),
+                address_country=parsed_country,
                 seniority_level=(
                     _normalize_seniority(parsed.get("seniority_level"))
                     or self._infer_seniority_from_resume(resume_text)
@@ -1721,6 +1772,42 @@ class ResumeProfileExtractor:
             )
         except Exception:
             return self._heuristic_extract(source_texts)
+
+    def _resolve_location_fields(
+        self,
+        *,
+        resume_text: str,
+        city: str | None,
+        state: str | None,
+        country: str | None,
+        timezone: str | None,
+    ) -> tuple[str | None, str | None, str | None, str | None]:
+        resolved_city = city
+        resolved_state = state
+        resolved_country = country
+        resolved_timezone = timezone
+
+        explicit_city = self._extract_city(resume_text)
+        explicit_state = self._extract_state(resume_text)
+        explicit_country = self._extract_country(resume_text)
+        explicit_timezone = self._extract_timezone(resume_text)
+        header_city, header_state, header_country = self._extract_header_location(
+            resume_text
+        )
+
+        if not resolved_city:
+            resolved_city = explicit_city or header_city
+        if not resolved_state:
+            resolved_state = explicit_state or header_state
+        if not resolved_country:
+            resolved_country = explicit_country or header_country
+        if not resolved_timezone:
+            resolved_timezone = explicit_timezone or _infer_timezone_from_location(
+                country=resolved_country,
+                city=resolved_city,
+            )
+
+        return resolved_city, resolved_state, resolved_country, resolved_timezone
 
     def _heuristic_extract(
         self,
@@ -1758,6 +1845,15 @@ class ResumeProfileExtractor:
             )
         timezone = self._extract_timezone(snippet)
         city = self._extract_city(snippet)
+        header_city, header_state, header_country = self._extract_header_location(
+            snippet
+        )
+        if not city:
+            city = header_city
+        if not state:
+            state = header_state
+        if not country:
+            country = header_country
         if timezone is None:
             timezone = _infer_timezone_from_location(country=country, city=city)
         linkedin_profile_key = _linkedin_profile_key(linkedin_url)
@@ -1862,25 +1958,38 @@ class ResumeProfileExtractor:
         return (
             "Extract candidate profile fields from all provided sources.\n"
             "Return JSON with exact keys and no extras:\n"
-            '{"name": string|null, "firstName": string|null, "lastName": string|null, '
-            '"email": string|null, "additional_emails": string[]|null, '
-            '"github_username": string|null, "linkedin_url": string|null, '
-            '"primary_roles": string[]|null, '
-            '"timezone": string|null, "address_city": string|null, '
-            '"address_state": string|null, '
-            '"description": string|null, '
-            '"website_url_candidates": ['
-            '{"url": string|null, "kind": "personal_website|social_profile|other", '
-            '"confidence": number, "reason": string|null}|null], '
-            '"phone": string|null, "website_links": string[]|null, '
-            '"social_links": string[]|null, '
-            '"address_country": string|null, '
-            '"seniority_level": string|null, "availability": string|null, '
-            '"rate_range": string|null, "referred_by": string|null, '
-            '"skills": string[]|null, '
-            '"skill_attrs": {"<skill>": {"strength": 1-5}}|null, '
-            '"confidence": number}\n'
+            "{\n"
+            '  "name": string|null,\n'
+            '  "firstName": string|null,\n'
+            '  "lastName": string|null,\n'
+            '  "email": string|null,\n'
+            '  "additional_emails": string[]|null,\n'
+            '  "github_username": string|null,\n'
+            '  "linkedin_url": string|null,\n'
+            '  "primary_roles": string[]|null,\n'
+            '  "timezone": string|null,\n'
+            '  "address_city": string|null,\n'
+            '  "address_state": string|null,\n'
+            '  "description": string|null,\n'
+            '  "website_url_candidates": [\n'
+            '    {"url": string|null, "kind": "personal_website|social_profile|other", '
+            '"confidence": number, "reason": string|null}|null\n'
+            "  ],\n"
+            '  "phone": string|null,\n'
+            '  "website_links": string[]|null,\n'
+            '  "social_links": string[]|null,\n'
+            '  "address_country": string|null,\n'
+            '  "seniority_level": string|null,\n'
+            '  "availability": string|null,\n'
+            '  "rate_range": string|null,\n'
+            '  "referred_by": string|null,\n'
+            '  "skills": string[]|null,\n'
+            '  "skill_attrs": {"<skill>": {"strength": 1-5}}|null,\n'
+            '  "confidence": number\n'
+            "}\n"
             "Rules:\n"
+            "- name is the full name of the candidate as it appears on the resume\n"
+            "- firstName and lastName should be split from name\n"
             "- For each explicit website/social URL-like string in the source, emit website_url_candidates entries\n"
             "- each candidate must include a 0-1 confidence score\n"
             "- kind must be: personal_website, social_profile, or other\n"
@@ -1889,6 +1998,10 @@ class ResumeProfileExtractor:
             "- route candidate urls to website_links and social_links by type and host-level validation\n"
             '- personal_website candidates should be explicit portfolio/homepage/contact signals (for example: "portfolio", "personal website", "homepage", contact header), not technology/framework mentions\n'
             '- trust the explicit source labels and sections (for example lines like "website:", "portfolio:", "my website", "homepage") when selecting personal_website candidates\n'
+            "- section confidence ordering for personal websites: explicit website label > contact/header block > footer > body/project bullets\n"
+            "- when evaluating personal website candidates, boost confidence if domain/subdomain/path includes candidate identity tokens (first name, last name, first+last, common username handles from email/github/linkedin)\n"
+            "- candidate-owned domains or handles in header/footer are strong personal_website signals; body-only project/company links are weak signals unless explicitly labeled personal\n"
+            "- never classify employer/company/product/repository/docs links as personal_website unless the resume explicitly marks them as the candidate's own site\n"
             "- if a token can be either a technology name and a URL, default to excluding it from candidates unless context is clearly personal\n"
             "- website_links/social_links should mirror high-confidence candidates; if website_url_candidates are unavailable, use website_links/social_links and heuristics as fallback\n"
             "- prefer explicit values from header/contact sections\n"
@@ -1905,16 +2018,28 @@ class ResumeProfileExtractor:
             "- infer linkedin_url and website_links from bare domains when scheme is missing\n"
             "- for phone return digits with country code and leading + (e.g. +15551234567); if no country code in the source, infer it from address_country or address_city (e.g. United States → +1, India → +91, UK → +44)\n"
             "- if timezone is provided, normalize it to UTC offset form like UTC±HH:MM before output\n"
-            "- if timezone is null but address_city or address_country is known, infer the standard UTC offset (e.g., San Francisco/Los Angeles/Seattle → UTC-08:00, Denver → UTC-07:00, Chicago/Dallas/Houston → UTC-06:00, New York/Boston/Atlanta → UTC-05:00, London/Dublin/Lisbon → UTC+00:00, Paris/Berlin/Amsterdam/Rome/Madrid → UTC+01:00, Bucharest/Athens/Kyiv → UTC+02:00, Nairobi/Istanbul → UTC+03:00, UAE/Dubai → UTC+04:00, India/Mumbai/Bangalore → UTC+05:30, Singapore/Shanghai/Beijing → UTC+08:00, Tokyo/Seoul → UTC+09:00, Sydney/Melbourne → UTC+10:00); omit if location is ambiguous\n"
+            "- location/timezone evidence order: explicit location/timezone fields or contact header > explicit current role location > deterministic city/country mapping; otherwise null\n"
+            "- infer city/state/country only when there is explicit resume evidence or an unambiguous mapping from a known city; if ambiguous, use null\n"
+            "- if timezone is null but address_city or address_country is known or can be inferred from the resume, infer the standard UTC offset (e.g., San Francisco/Los Angeles/Seattle → UTC-08:00, Denver → UTC-07:00, Chicago/Dallas/Houston → UTC-06:00, New York/Boston/Atlanta → UTC-05:00, London/Dublin/Lisbon → UTC+00:00, Paris/Berlin/Amsterdam/Rome/Madrid → UTC+01:00, Bucharest/Athens/Kyiv → UTC+02:00, Nairobi/Istanbul → UTC+03:00, UAE/Dubai → UTC+04:00, India/Mumbai/Bangalore → UTC+05:30, Singapore/Shanghai/Beijing → UTC+08:00, Tokyo/Seoul → UTC+09:00, Sydney/Melbourne → UTC+10:00); omit if location is ambiguous\n"
+            "- if country is multi-timezone and city is missing or ambiguous, timezone must be null\n"
+            "- for location, first check the resume header/contact block; if missing, infer from the most recent job/experience entry (last position/location line)\n"
+            "- if multiple locations are listed, pick the current/primary one; if only remote/ambiguous, return null for city/state/country\n"
+            "- if location appears only in older roles and no current location is stated, return null for missing location fields\n"
+            "- do not infer location from company headquarters unless explicitly stated in the resume\n"
             "- if address_city is known, infer address_state and address_country when not explicitly stated (e.g. San Francisco → California, United States; London → United Kingdom)\n"
             "- if address_state is known, infer address_country when not explicitly stated (e.g. California → United States)\n"
-            "- for primary_roles, prefer known canonical roles when the input matches: developer, data scientist, product manager, program manager, designer, user research, biz dev, marketing; map variants to the closest known role (e.g. 'software developer' → 'developer', 'product management' → 'product manager'); default to 'developer' unless the resume clearly indicates a non-developer role (e.g. obvious designer, marketer, etc.)\n"
+            "- for primary_roles, these are job functions like developer, data scientist, product manager, program manager, designer, user research, biz dev, marketing; prefer known canonical roles when the input matches those; map variants to the closest known role (e.g. 'software developer' → 'developer', 'product management' → 'product manager'); default to 'developer' unless the resume clearly indicates a non-developer role (e.g. designer, marketer, etc.).\n"
+            "- primary_roles must not be empty when resume title/history gives a reasonable signal; infer from titles, summary, and responsibilities even if a dedicated role field is missing\n"
+            "- if multiple role signals exist, include up to 2 most relevant canonical roles, ordered by strongest evidence\n"
             "- infer seniority_level as one of: junior, midlevel, senior, staff\n"
             "- use explicit job title as the primary signal when present; years of experience and impact signals are secondary\n"
             "  - junior: titles like 'Junior Engineer', 'Associate Engineer', 'Engineer I', intern/internship, bootcamp grad with <1 year post-graduation\n"
             "  - midlevel: titles like 'Software Engineer', 'Engineer II', 'Developer' with no seniority qualifier\n"
             "  - senior: titles like 'Senior Engineer', 'Senior SWE', 'Engineer III', 'Lead Engineer', 'Tech Lead' (IC track)\n"
             "  - staff: titles like 'Staff Engineer', 'Principal Engineer', 'Architect', 'Distinguished Engineer'\n"
+            "- seniority_level should almost never be null for professional resumes; infer from title and tenure even when explicit labels are absent\n"
+            "- if explicit seniority is absent but title is a generic professional IC title (e.g., Software Engineer, Developer, Full-Stack Engineer), prefer midlevel\n"
+            "- only use null for seniority_level when the resume lacks enough professional context (e.g., student-only profile with no role history)\n"
             "- when title is absent or ambiguous, use total professional experience (excluding education and internships):\n"
             "  - <2 years → junior\n"
             "  - 2-4 years → midlevel\n"
@@ -1931,7 +2056,7 @@ class ResumeProfileExtractor:
             "- canonicalize known variants like ab testing, go to market, react native\n"
             "- never include generic/disallowed skills: code review, debugging, testing, bug tracking, code quality, performance optimization\n"
             "- copy availability, rate_range, and referred_by if they are provided in source text\n"
-            "- use 'unknown' for unknown or ambiguous fields\n"
+            "- use null for unknown or ambiguous fields; only seniority_level may be 'unknown'\n"
             "- confidence is 0-1 for overall extraction reliability\n\n"
             f"Sources:\n{snippet}"
         )
@@ -2149,6 +2274,46 @@ class ResumeProfileExtractor:
         return None
 
     @staticmethod
+    def _extract_header_location(
+        resume_text: str,
+    ) -> tuple[str | None, str | None, str | None]:
+        lines = [line.strip() for line in resume_text.splitlines() if line.strip()]
+        for line in lines[:12]:
+            lowered = line.casefold()
+            if "@" in line or "http" in lowered:
+                continue
+            if "linkedin" in lowered or "github" in lowered:
+                continue
+            if "remote" in lowered:
+                continue
+            if len(line) > 80:
+                continue
+            for segment in re.split(r"[|•·]", line):
+                candidate = re.sub(r"\([^)]*\)", "", segment).strip()
+                if not candidate:
+                    continue
+                match = re.match(
+                    r"^(?P<city>[A-Za-z][A-Za-z .'-]{1,}),\s*"
+                    r"(?P<region>[A-Za-z][A-Za-z .'-]{1,}|[A-Z]{2})"
+                    r"(?:\s+\d{5})?(?:,\s*(?P<country>[A-Za-z][A-Za-z .'-]{1,}))?$",
+                    candidate,
+                )
+                if not match:
+                    continue
+                city = _normalize_city(match.group("city"))
+                region = match.group("region") or ""
+                country = match.group("country") or ""
+                if not city:
+                    continue
+                normalized_country = _normalize_country(country) if country else None
+                if normalized_country:
+                    return city, None, normalized_country
+                normalized_state = _normalize_state(region)
+                if normalized_state:
+                    return city, normalized_state, None
+        return None, None, None
+
+    @staticmethod
     def _extract_timezone(resume_text: str) -> str | None:
         match = re.search(
             r"(?im)^(?:timezone|time\s*zone|tz)\s*[:\-]\s*(.+)$",
@@ -2206,7 +2371,66 @@ class ResumeProfileExtractor:
             resume_text,
         ):
             roles.extend(_normalize_role_collection(match.group(1)))
-        return roles
+        if roles:
+            return roles
+        return ResumeProfileExtractor._infer_roles_from_resume(resume_text)
+
+    @staticmethod
+    def _infer_roles_from_resume(resume_text: str) -> list[str]:
+        lower_text = resume_text.lower()
+        inferred: list[str] = []
+
+        def _add(role: str) -> None:
+            if role not in inferred:
+                inferred.append(role)
+
+        if re.search(
+            r"\b(product manager|product management|group product manager|gpm)\b",
+            lower_text,
+        ):
+            _add("product manager")
+        if re.search(
+            r"\b(program manager|technical program manager|tpm)\b",
+            lower_text,
+        ):
+            _add("program manager")
+        if re.search(
+            r"\b(data scientist|machine learning scientist|ml scientist)\b",
+            lower_text,
+        ):
+            _add("data scientist")
+        if re.search(
+            r"\b(product designer|ux designer|ui designer|visual designer|designer)\b",
+            lower_text,
+        ):
+            _add("designer")
+        if re.search(
+            r"\b(user researcher|ux researcher|user research)\b",
+            lower_text,
+        ):
+            _add("user research")
+        if re.search(
+            r"\b(biz dev|business development|partnerships?)\b",
+            lower_text,
+        ):
+            _add("biz dev")
+        if re.search(
+            r"\b(marketing|growth marketer|content marketer|demand generation)\b",
+            lower_text,
+        ):
+            _add("marketing")
+        if re.search(
+            r"\b("
+            r"software engineer|swe|developer|programmer|"
+            r"backend engineer|frontend engineer|full[- ]?stack engineer|"
+            r"web developer|mobile developer|devops engineer|site reliability engineer|"
+            r"machine learning engineer|data engineer"
+            r")\b",
+            lower_text,
+        ):
+            _add("developer")
+
+        return inferred
 
     @staticmethod
     def _infer_seniority_from_resume(resume_text: str) -> str | None:
@@ -2214,20 +2438,58 @@ class ResumeProfileExtractor:
 
         # Title-first: honor explicit seniority titles before falling back to years.
         if re.search(
-            r"\b(staff engineer|principal engineer|architect|distinguished engineer)\b",
+            r"\b("
+            r"staff(?:\s+\w+){0,2}\s+engineer|"
+            r"principal(?:\s+\w+){0,2}\s+engineer|"
+            r"distinguished(?:\s+\w+){0,2}\s+engineer|"
+            r"architect"
+            r")\b",
             lower_text,
         ):
             return "staff"
         if re.search(
-            r"\b(senior engineer|senior swe|engineer iii|lead engineer|tech lead)\b",
+            r"\b("
+            r"senior(?:\s+\w+){0,2}\s+engineer|"
+            r"senior\s+swe|"
+            r"sr\.?(?:\s+\w+){0,2}\s+engineer|"
+            r"engineer\s+iii|"
+            r"lead(?:\s+\w+){0,2}\s+engineer|"
+            r"tech\s+lead|"
+            r"technical\s+lead"
+            r")\b",
             lower_text,
         ):
             return "senior"
         if re.search(
-            r"\b(junior engineer|associate engineer|engineer i|intern(?:ship)?)\b",
+            r"\b("
+            r"engineer\s+ii|"
+            r"software\s+engineer\s+ii|"
+            r"mid(?:-|\s*)level(?:\s+\w+){0,2}\s+engineer|"
+            r"intermediate(?:\s+\w+){0,2}\s+engineer"
+            r")\b",
+            lower_text,
+        ):
+            return "midlevel"
+        if re.search(
+            r"\b("
+            r"junior(?:\s+\w+){0,2}\s+engineer|"
+            r"associate(?:\s+\w+){0,2}\s+engineer|"
+            r"engineer\s+i|"
+            r"intern(?:ship)?"
+            r")\b",
             lower_text,
         ):
             return "junior"
+        if re.search(
+            r"\b("
+            r"software engineer|swe|developer|programmer|"
+            r"backend engineer|frontend engineer|full[- ]?stack engineer|"
+            r"web developer|mobile developer|devops engineer|"
+            r"site reliability engineer|machine learning engineer|data engineer"
+            r")\b",
+            lower_text,
+        ):
+            return "midlevel"
 
         years = ResumeProfileExtractor._extract_years_of_experience(resume_text)
         if years is None:

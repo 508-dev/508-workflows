@@ -20,7 +20,7 @@ from five08.audit import (
     AuditSource,
     insert_audit_event,
 )
-from five08.clients.espo import EspoAPI, EspoAPIError
+from five08.clients.espo import EspoAPIError, EspoClient
 from five08.queue import get_postgres_connection
 from five08.worker.config import WorkerSettings
 from five08.worker.crm.resume_profile_processor import ResumeProfileProcessor
@@ -62,8 +62,7 @@ class ResumeMailboxProcessor:
 
     def __init__(self, settings: WorkerSettings) -> None:
         self.settings = settings
-        api_url = settings.espo_base_url.rstrip("/") + "/api/v1"
-        self.espo_api = EspoAPI(api_url, settings.espo_api_key)
+        self.espo_api = EspoClient(settings.espo_base_url, settings.espo_api_key)
         self.resume_processor = ResumeProfileProcessor()
 
     def poll_inbox(self) -> int:

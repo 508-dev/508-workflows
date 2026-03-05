@@ -13,7 +13,7 @@ from urllib.parse import urljoin, urlsplit
 
 import requests
 
-from five08.clients.espo import EspoAPI, EspoAPIError
+from five08.clients.espo import EspoAPIError, EspoClient
 from five08.crm_normalization import (
     ROLE_NORMALIZATION_MAP as DEFAULT_ROLE_NORMALIZATION_MAP,
     normalize_city,
@@ -77,12 +77,13 @@ class IntakeFormProcessor:
     """Process a Google Forms member intake submission against CRM."""
 
     def __init__(self) -> None:
-        api_url = settings.espo_base_url.rstrip("/") + "/api/v1"
-        self.api = EspoAPI(api_url, settings.espo_api_key)
+        self.api = EspoClient(settings.espo_base_url, settings.espo_api_key)
         self.document_processor = DocumentProcessor()
+        llm_api_key = settings.openai_api_key
+        llm_base_url = settings.openai_base_url
         self.resume_extractor = ResumeProfileExtractor(
-            api_key=settings.openai_api_key,
-            base_url=settings.openai_base_url,
+            api_key=llm_api_key,
+            base_url=llm_base_url,
             model=settings.resolved_resume_ai_model,
         )
         self.skills_extractor = SkillsExtractor()

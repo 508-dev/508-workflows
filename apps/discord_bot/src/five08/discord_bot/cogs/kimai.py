@@ -30,8 +30,7 @@ class KimaiCog(commands.Cog, name="Kimai"):
         """Initialize the Kimai cog."""
         self.bot = bot
         self.api = kimai.KimaiAPI(settings.kimai_base_url, settings.kimai_api_token)
-        api_url = settings.espo_base_url.rstrip("/") + "/api/v1"
-        self.espo_api = espo.EspoAPI(api_url, settings.espo_api_key)
+        self.espo_api = espo.EspoClient(settings.espo_base_url, settings.espo_api_key)
         logger.info("Kimai cog initialized")
 
     @app_commands.command(
