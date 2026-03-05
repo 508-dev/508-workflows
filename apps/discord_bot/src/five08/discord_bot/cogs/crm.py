@@ -1170,6 +1170,23 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         return value[: limit - 3] + "..."
 
     @staticmethod
+    def _is_link_like_field(field: str, label: str) -> bool:
+        key = f"{field} {label}".casefold()
+        return any(token in key for token in ("website", "social", "linkedin", "url"))
+
+    @staticmethod
+    def _normalize_preview_value(value: Any) -> str:
+        text = str(value).strip()
+        if not text:
+            return "None"
+
+        # Prevent Discord from parsing mentions in preview text.
+        text = text.replace("@everyone", "@\u200beveryone")
+        text = text.replace("@here", "@\u200bhere")
+        text = text.replace("<@", "<@\u200b")
+        return text
+
+    @staticmethod
     def _decode_json_like_mapping(value: Any) -> dict[str, Any] | None:
         candidate = value
         if isinstance(candidate, str):
@@ -1327,7 +1344,10 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             label = self._field_label(field)
             value = updated_values.get(field, self.proposed_updates.get(field))
             formatted = self._format_field_value(field, value)
-            lines.append(f"**{label}**: `{formatted}`")
+            if self._is_link_like_field(field, label):
+                lines.append(f"**{label}**: {self._normalize_preview_value(formatted)}")
+            else:
+                lines.append(f"**{label}**: `{formatted}`")
         return lines
 
     @classmethod
@@ -2991,7 +3011,11 @@ class CRMCog(commands.Cog):
                 if not isinstance(change, dict):
                     continue
                 field_name = str(change.get("field", ""))
-                label = str(change.get("label", field_name or "Field"))
+                label = (
+                    ResumeUpdateConfirmationView._field_label(field_name)
+                    if field_name
+                    else str(change.get("label", "Field"))
+                )
                 current = truncate_preview_value(
                     str(change.get("current", "None")),
                     field_name=field_name,
@@ -3012,7 +3036,14 @@ class CRMCog(commands.Cog):
                         )
                         lines.append(f"**{label}**: `{truncated_delta}`")
                         continue
-                lines.append(f"**{label}**: `{current}` → `{proposed}`")
+                if ResumeUpdateConfirmationView._is_link_like_field(field_name, label):
+                    lines.append(
+                        f"**{label}**: "
+                        f"{ResumeUpdateConfirmationView._normalize_preview_value(current)} "
+                        f"→ {ResumeUpdateConfirmationView._normalize_preview_value(proposed)}"
+                    )
+                else:
+                    lines.append(f"**{label}**: `{current}` → `{proposed}`")
             embed.add_field(
                 name="Proposed Changes",
                 value=truncate_field_value("\n".join(lines) if lines else "No changes"),
