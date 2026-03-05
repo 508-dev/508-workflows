@@ -24,7 +24,7 @@ _LOCATION_COUNTRY_HINTS: tuple[
 ] = (
     (
         re.compile(
-            r"\b(?:us|u\.s\.|usa|united states|united states of america)\b",
+            r"(?<!\w)(?:us|u\.s\.?|usa|united states|united states of america)(?!\w)",
             re.IGNORECASE,
         ),
         tuple(sorted(_US_COUNTRY_VALUES)),
@@ -32,7 +32,7 @@ _LOCATION_COUNTRY_HINTS: tuple[
     ),
     (
         re.compile(
-            r"\b(?:uk|u\.k\.|united kingdom|great britain|britain)\b",
+            r"(?<!\w)(?:uk|u\.k\.?|united kingdom|great britain|britain)(?!\w)",
             re.IGNORECASE,
         ),
         ("uk", "u.k.", "united kingdom", "great britain", "britain"),
@@ -47,7 +47,7 @@ _LOCATION_COUNTRY_HINTS: tuple[
 
 _LOCATION_REGION_HINTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
-        re.compile(r"\b(?:europe|emea|e\.u\.|eu)\b", re.IGNORECASE),
+        re.compile(r"(?<!\w)(?:europe|emea|e\.u\.?|eu)(?!\w)", re.IGNORECASE),
         "europe",
     ),
     (

@@ -5,7 +5,11 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 
-from five08.candidate_search import _seniority_score, search_candidates
+from five08.candidate_search import (
+    _build_location_hints,
+    _seniority_score,
+    search_candidates,
+)
 from five08.job_match import JobRequirements
 
 
@@ -48,6 +52,23 @@ def test_seniority_score_both_none_returns_zero() -> None:
 def test_seniority_score_unknown_string_returns_zero() -> None:
     assert _seniority_score("lead", "senior") == 0.0
     assert _seniority_score("senior", "lead") == 0.0
+
+
+def test_build_location_hints_matches_dotted_abbreviations() -> None:
+    reqs = JobRequirements(
+        raw_location_text="Open to U.S. and U.K. candidates; E.U. timezone preferred"
+    )
+
+    timezone_prefixes, country_hints, location_constrained, hints_available = (
+        _build_location_hints(reqs)
+    )
+
+    assert "america" in timezone_prefixes
+    assert "europe" in timezone_prefixes
+    assert "us" in country_hints
+    assert "uk" in country_hints
+    assert location_constrained is True
+    assert hints_available is True
 
 
 # ---------------------------------------------------------------------------
