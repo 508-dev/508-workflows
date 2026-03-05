@@ -13,7 +13,11 @@ from five08.discord_bot.cogs.crm import (
     ResumeUpdateConfirmationView,
     ResumeReprocessConfirmationView,
     ResumeDownloadButton,
+    ResumeSeniorityOverrideSelect,
+    _extract_parsed_seniority,
+    _format_seniority_label,
 )
+from five08.discord_bot.cogs import crm as crm_module
 from five08.clients.espo import EspoAPIError
 
 
@@ -173,6 +177,76 @@ class TestCRMCog:
         summary = view._format_applied_updates_value(lines)
 
         assert len(summary) <= view._APPLIED_FIELD_TOTAL_LIMIT
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("junior", "Junior"),
+            ("midlevel", "Mid-level"),
+            ("mid-level", "Mid-level"),
+            ("senior", "Senior"),
+            ("staff", "Staff"),
+            ("unknown", "Unknown"),
+            ("", "Unknown"),
+            (None, "Unknown"),
+        ],
+    )
+    def test_format_seniority_label(self, raw, expected):
+        """Seniority labels should normalize consistent display strings."""
+        assert _format_seniority_label(raw) == expected
+
+    @pytest.mark.parametrize(
+        ("payload", "expected"),
+        [
+            ({"seniority_level": "senior"}, "senior"),
+            ({"seniority_level": " unknown "}, None),
+            ({}, None),
+        ],
+    )
+    def test_extract_parsed_seniority_from_dict(self, payload, expected):
+        """Parsed seniority should be extracted when present and not unknown."""
+        assert _extract_parsed_seniority(payload) == expected
+
+    def test_extract_parsed_seniority_from_object(self):
+        """Parsed seniority should handle object attributes."""
+
+        class DummyProfile:
+            seniority_level = "midlevel"
+
+        assert _extract_parsed_seniority(DummyProfile()) == "midlevel"
+
+    @pytest.mark.asyncio
+    async def test_resume_update_view_adds_seniority_select(self, crm_cog):
+        """Resume update view should expose a seniority override dropdown."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+            parsed_seniority="senior",
+        )
+
+        assert any(
+            isinstance(child, ResumeSeniorityOverrideSelect) for child in view.children
+        )
+
+    @pytest.mark.asyncio
+    async def test_resume_update_view_sets_seniority_override(self, crm_cog):
+        """Seniority override should update the proposed CRM payload."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+            parsed_seniority="junior",
+        )
+
+        label = view._set_seniority_override("staff")
+
+        assert label == "Staff"
+        assert view.proposed_updates["cSeniority"] == "staff"
 
     @pytest.mark.asyncio
     async def test_download_and_send_resume_success(self, crm_cog, mock_interaction):
@@ -417,6 +491,284 @@ class TestCRMCog:
 
         # Verify response was sent
         mock_interaction.followup.send.assert_called_once()
+
+    def test_resolve_jobs_channel_target_prefers_thread_parent(self, crm_cog):
+        class DummyTextChannel:
+            def __init__(self, channel_id: int, name: str) -> None:
+                self.id = channel_id
+                self.name = name
+
+        class DummyThread:
+            def __init__(self, parent: DummyTextChannel) -> None:
+                self.parent = parent
+
+        parent = DummyTextChannel(456, "jobs")
+        interaction = Mock()
+        interaction.channel = DummyThread(parent)
+
+        with (
+            patch("five08.discord_bot.cogs.crm.discord.Thread", DummyThread),
+            patch("five08.discord_bot.cogs.crm.discord.TextChannel", DummyTextChannel),
+            patch("five08.discord_bot.cogs.crm.discord.ForumChannel", DummyTextChannel),
+        ):
+            target = crm_cog._resolve_jobs_channel_target(interaction, None)
+
+        assert target is parent
+
+    def test_resolve_jobs_channel_target_uses_current_channel(self, crm_cog):
+        class DummyTextChannel:
+            def __init__(self, channel_id: int, name: str) -> None:
+                self.id = channel_id
+                self.name = name
+
+        channel = DummyTextChannel(456, "jobs")
+        interaction = Mock()
+        interaction.channel = channel
+
+        with (
+            patch("five08.discord_bot.cogs.crm.discord.TextChannel", DummyTextChannel),
+            patch("five08.discord_bot.cogs.crm.discord.ForumChannel", DummyTextChannel),
+        ):
+            target = crm_cog._resolve_jobs_channel_target(interaction, None)
+
+        assert target is channel
+
+    @pytest.mark.asyncio
+    async def test_register_jobs_channel_updates_cache(self, crm_cog, mock_interaction):
+        class DummyTextChannel:
+            def __init__(self, channel_id: int, name: str) -> None:
+                self.id = channel_id
+                self.name = name
+
+        admin_role = Mock()
+        admin_role.name = "Steering Committee"
+        mock_interaction.user.roles = [admin_role]
+
+        guild = Mock()
+        guild.id = 123
+        mock_interaction.guild = guild
+        mock_interaction.channel = DummyTextChannel(456, "jobs")
+
+        to_thread = AsyncMock(return_value=True)
+        with (
+            patch("five08.discord_bot.cogs.crm.asyncio.to_thread", to_thread),
+            patch("five08.discord_bot.cogs.crm.discord.TextChannel", DummyTextChannel),
+            patch("five08.discord_bot.cogs.crm.discord.ForumChannel", DummyTextChannel),
+        ):
+            await crm_cog.register_jobs_channel.callback(
+                crm_cog, mock_interaction, None
+            )
+
+        to_thread.assert_awaited_once_with(
+            crm_module.register_job_post_channel,
+            crm_module.settings,
+            guild_id="123",
+            channel_id="456",
+        )
+        assert crm_cog._jobs_channels_by_guild[guild.id] == {456}
+
+    @pytest.mark.asyncio
+    async def test_unregister_jobs_channel_updates_cache(
+        self, crm_cog, mock_interaction
+    ):
+        class DummyTextChannel:
+            def __init__(self, channel_id: int, name: str) -> None:
+                self.id = channel_id
+                self.name = name
+
+        admin_role = Mock()
+        admin_role.name = "Steering Committee"
+        mock_interaction.user.roles = [admin_role]
+
+        guild = Mock()
+        guild.id = 123
+        mock_interaction.guild = guild
+        mock_interaction.channel = DummyTextChannel(456, "jobs")
+        crm_cog._jobs_channels_by_guild[guild.id] = {456}
+
+        to_thread = AsyncMock(return_value=True)
+        with (
+            patch("five08.discord_bot.cogs.crm.asyncio.to_thread", to_thread),
+            patch("five08.discord_bot.cogs.crm.discord.TextChannel", DummyTextChannel),
+            patch("five08.discord_bot.cogs.crm.discord.ForumChannel", DummyTextChannel),
+        ):
+            await crm_cog.unregister_jobs_channel.callback(
+                crm_cog, mock_interaction, None
+            )
+
+        to_thread.assert_awaited_once_with(
+            crm_module.unregister_job_post_channel,
+            crm_module.settings,
+            guild_id="123",
+            channel_id="456",
+        )
+        assert crm_cog._jobs_channels_by_guild[guild.id] == set()
+
+    @pytest.mark.asyncio
+    async def test_register_jobs_channel_denies_non_admin(
+        self, crm_cog, mock_interaction
+    ):
+        class DummyTextChannel:
+            def __init__(self, channel_id: int, name: str) -> None:
+                self.id = channel_id
+                self.name = name
+
+        guild = Mock()
+        guild.id = 123
+        mock_interaction.guild = guild
+        mock_interaction.channel = DummyTextChannel(456, "jobs")
+
+        to_thread = AsyncMock(return_value=True)
+        with (
+            patch("five08.discord_bot.cogs.crm.asyncio.to_thread", to_thread),
+            patch("five08.discord_bot.cogs.crm.discord.TextChannel", DummyTextChannel),
+            patch("five08.discord_bot.cogs.crm.discord.ForumChannel", DummyTextChannel),
+        ):
+            await crm_cog.register_jobs_channel.callback(
+                crm_cog, mock_interaction, None
+            )
+
+        to_thread.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unregister_jobs_channel_denies_non_admin(
+        self, crm_cog, mock_interaction
+    ):
+        class DummyTextChannel:
+            def __init__(self, channel_id: int, name: str) -> None:
+                self.id = channel_id
+                self.name = name
+
+        guild = Mock()
+        guild.id = 123
+        mock_interaction.guild = guild
+        mock_interaction.channel = DummyTextChannel(456, "jobs")
+        crm_cog._jobs_channels_by_guild[guild.id] = {456}
+
+        to_thread = AsyncMock(return_value=True)
+        with (
+            patch("five08.discord_bot.cogs.crm.asyncio.to_thread", to_thread),
+            patch("five08.discord_bot.cogs.crm.discord.TextChannel", DummyTextChannel),
+            patch("five08.discord_bot.cogs.crm.discord.ForumChannel", DummyTextChannel),
+        ):
+            await crm_cog.unregister_jobs_channel.callback(
+                crm_cog, mock_interaction, None
+            )
+
+        to_thread.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_on_message_skips_public_channel(self, crm_cog):
+        class DummyPermissions:
+            def __init__(self, view_channel: bool) -> None:
+                self.view_channel = view_channel
+
+        class DummyTextChannel:
+            def __init__(self, channel_id: int) -> None:
+                self.id = channel_id
+
+            def permissions_for(self, _role):
+                return DummyPermissions(True)
+
+        guild = Mock()
+        guild.id = 123
+        guild.default_role = Mock()
+        author = Mock()
+        author.bot = False
+        author.roles = [Mock()]
+        message = Mock()
+        message.guild = guild
+        message.author = author
+        message.channel = DummyTextChannel(456)
+        message.content = "Looking for a dev"
+        message.id = 789
+        message.create_thread = AsyncMock()
+
+        crm_cog._refresh_jobs_channel_cache_if_missing = AsyncMock(return_value=True)
+        crm_cog._is_jobs_channel_registered = Mock(return_value=True)
+        with patch(
+            "five08.discord_bot.cogs.crm.check_user_roles_with_hierarchy"
+        ) as check:
+            check.return_value = True
+            with (
+                patch(
+                    "five08.discord_bot.cogs.crm.discord.TextChannel", DummyTextChannel
+                ),
+                patch("five08.discord_bot.cogs.crm.discord.Thread", Mock),
+            ):
+                await crm_cog.on_message(message)
+
+        message.create_thread.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_on_thread_create_skips_unregistered_channel(self, crm_cog):
+        guild = Mock()
+        guild.id = 123
+        parent = Mock()
+        parent.id = 456
+        thread = Mock()
+        thread.guild = guild
+        thread.parent = parent
+        thread.owner_id = None
+
+        crm_cog._refresh_jobs_channel_cache_if_missing = AsyncMock(return_value=True)
+        crm_cog._is_jobs_channel_registered = Mock(return_value=False)
+        crm_cog._run_auto_match_candidates_for_thread = AsyncMock()
+
+        await crm_cog.on_thread_create(thread)
+
+        crm_cog._run_auto_match_candidates_for_thread.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_on_thread_create_skips_bot_owner(self, crm_cog):
+        guild = Mock()
+        guild.id = 123
+        parent = Mock()
+        parent.id = 456
+        thread = Mock()
+        thread.guild = guild
+        thread.parent = parent
+        thread.owner_id = 999
+
+        owner = Mock()
+        owner.bot = True
+        guild.get_member.return_value = owner
+
+        crm_cog._refresh_jobs_channel_cache_if_missing = AsyncMock(return_value=True)
+        crm_cog._is_jobs_channel_registered = Mock(return_value=True)
+        crm_cog._run_auto_match_candidates_for_thread = AsyncMock()
+
+        await crm_cog.on_thread_create(thread)
+
+        crm_cog._run_auto_match_candidates_for_thread.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_on_thread_create_skips_non_member(self, crm_cog):
+        guild = Mock()
+        guild.id = 123
+        parent = Mock()
+        parent.id = 456
+        thread = Mock()
+        thread.guild = guild
+        thread.parent = parent
+        thread.owner_id = 999
+
+        owner = Mock()
+        owner.bot = False
+        owner.roles = [Mock()]
+        guild.get_member.return_value = owner
+
+        crm_cog._refresh_jobs_channel_cache_if_missing = AsyncMock(return_value=True)
+        crm_cog._is_jobs_channel_registered = Mock(return_value=True)
+        crm_cog._run_auto_match_candidates_for_thread = AsyncMock()
+
+        with patch(
+            "five08.discord_bot.cogs.crm.check_user_roles_with_hierarchy"
+        ) as check:
+            check.return_value = False
+            await crm_cog.on_thread_create(thread)
+
+        crm_cog._run_auto_match_candidates_for_thread.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_search_contacts_requires_query_or_skills(
@@ -3503,6 +3855,87 @@ class TestCRMCog:
             kwargs["status_message"]
             == "🔄 Reprocessing resume and extracting profile fields now..."
         )
+
+    @pytest.mark.asyncio
+    async def test_build_match_candidates_posting_fetches_jd_links_from_text(
+        self, crm_cog
+    ):
+        """Starter text JD links should be fetched while non-JD links are skipped."""
+        starter = Mock()
+        jd_url = "https://boards.greenhouse.io/acme/jobs/12345"
+        non_jd_url = "https://example.com/about"
+        starter.content = f"We are hiring: {jd_url} and docs at {non_jd_url}"
+        starter.attachments = []
+        starter.embeds = []
+
+        with patch.object(
+            crm_cog,
+            "_fetch_match_candidates_link_text",
+            new=AsyncMock(return_value="Senior backend role"),
+        ) as fetch_mock:
+            posting, metadata = await crm_cog._build_match_candidates_posting(starter)
+
+        fetch_mock.assert_awaited_once_with(jd_url)
+        assert "Senior backend role" in posting
+        assert metadata["links_discovered"] == 2
+        assert metadata["links_fetched"] == 1
+
+    @pytest.mark.asyncio
+    async def test_build_match_candidates_posting_does_not_fetch_non_jd_links(
+        self, crm_cog
+    ):
+        """No fetch should occur when only non-JD links are present."""
+        starter = Mock()
+        starter.content = "Company info: https://example.com/about"
+        starter.attachments = []
+        starter.embeds = []
+
+        with patch.object(
+            crm_cog,
+            "_fetch_match_candidates_link_text",
+            new=AsyncMock(return_value="ignored"),
+        ) as fetch_mock:
+            posting, metadata = await crm_cog._build_match_candidates_posting(starter)
+
+        fetch_mock.assert_not_awaited()
+        assert "Referenced links:" in posting
+        assert metadata["links_discovered"] == 1
+        assert metadata["links_fetched"] == 0
+
+    @pytest.mark.asyncio
+    async def test_build_match_candidates_posting_scans_attachments_for_jd_links(
+        self, crm_cog
+    ):
+        """Attachment-extracted URLs should be treated as JD candidates."""
+        starter = Mock()
+        starter.content = ""
+        starter.attachments = [Mock(filename="job-posting.pdf")]
+        starter.embeds = []
+        attachment_text = (
+            "See full JD at https://jobs.lever.co/acme/abcde and apply there."
+        )
+
+        with (
+            patch.object(
+                crm_cog,
+                "_read_match_candidates_attachment_text",
+                new=AsyncMock(return_value=attachment_text),
+            ) as read_attachment_mock,
+            patch.object(
+                crm_cog,
+                "_fetch_match_candidates_link_text",
+                new=AsyncMock(return_value="Role details from Lever"),
+            ) as fetch_mock,
+        ):
+            posting, metadata = await crm_cog._build_match_candidates_posting(starter)
+
+        read_attachment_mock.assert_awaited_once()
+        fetch_mock.assert_awaited_once_with("https://jobs.lever.co/acme/abcde")
+        assert "Attachment job-posting.pdf" in posting
+        assert "Role details from Lever" in posting
+        assert metadata["attachments_scanned"] == 1
+        assert metadata["attachments_extracted"] == 1
+        assert metadata["links_fetched"] == 1
 
 
 class TestResumeButtonView:
