@@ -973,42 +973,13 @@ class ResumeEditSkillsModal(discord.ui.Modal, title="Edit Skills"):
             lines.append(f"{key}: {strength}")
         return lines
 
-    @staticmethod
-    def _parse_skill_lines(raw: str) -> tuple[list[str], dict[str, int]]:
-        skills: list[str] = []
-        strengths: dict[str, int] = {}
-        seen: set[str] = set()
-
-        for raw_line in raw.splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-
-            token = line
-            strength_value: int | None = None
-            if ":" in line:
-                token, raw_strength = line.rsplit(":", 1)
-                token = token.strip()
-                raw_strength = raw_strength.strip()
-                if raw_strength:
-                    try:
-                        parsed_strength = int(float(raw_strength))
-                    except (TypeError, ValueError):
-                        parsed_strength = None
-                    if parsed_strength and 1 <= parsed_strength <= 5:
-                        strength_value = parsed_strength
-
-            normalized_skill = normalize_skill(token)
-            if not normalized_skill:
-                continue
-            key = normalized_skill.casefold()
-            if key not in seen:
-                seen.add(key)
-                skills.append(normalized_skill)
-            if strength_value is not None:
-                strengths[key] = strength_value
-
-        return skills, strengths
+    def _parse_skill_lines(self, raw: str) -> tuple[list[str], dict[str, int]]:
+        line_tokens = [line.strip() for line in raw.splitlines() if line.strip()]
+        flattened = ", ".join(line_tokens)
+        parsed_skills, requested_strengths, _invalid = (
+            self.confirmation_view.crm_cog._parse_skill_updates(flattened)
+        )
+        return parsed_skills, requested_strengths
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         raw = self.skills_input.value or ""
@@ -2920,6 +2891,9 @@ class CRMCog(commands.Cog):
                         strength = int(match.group(2))
                     except ValueError:
                         strength = None
+                name = name.strip()
+                if not name:
+                    continue
                 normalized = normalize_skill(name)
                 if not normalized:
                     continue
@@ -2929,7 +2903,7 @@ class CRMCog(commands.Cog):
                     if existing_strength is None and strength is not None:
                         parsed[key] = (existing_name, strength)
                     continue
-                parsed[key] = (normalized, strength)
+                parsed[key] = (name, strength)
             return parsed
 
         def format_skill_delta(current: Any, proposed: Any) -> str:
