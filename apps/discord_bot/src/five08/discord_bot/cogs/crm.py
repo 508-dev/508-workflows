@@ -33,9 +33,19 @@ from five08.discord_bot.utils.role_decorators import (
     require_role,
     check_user_roles_with_hierarchy,
 )
-from five08.job_match import extract_job_requirements, DISCORD_ROLES_EXCLUDE_FROM_SYNC
+from five08.job_match import (
+    extract_job_requirements,
+    DISCORD_ROLES_EXCLUDE_FROM_SYNC,
+    DISCORD_ROLES_NEVER_SUGGEST,
+    suggest_technical_discord_roles,
+    suggest_locality_discord_roles,
+)
 from five08.candidate_search import search_candidates
-from five08.audit import update_person_discord_roles, upsert_discord_member
+from five08.audit import (
+    update_person_discord_roles,
+    upsert_discord_member,
+    get_discord_user_id_for_contact,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2252,6 +2262,59 @@ class CRMCog(commands.Cog):
         embed.add_field(name="🔗 CRM Profile", value=f"[View in CRM]({profile_url})")
         return embed, proposed_updates
 
+    def _build_role_suggestions_embed(
+        self,
+        *,
+        contact_name: str,
+        extracted_profile: dict[str, Any],
+        current_discord_roles: list[str] | None = None,
+    ) -> discord.Embed | None:
+        """Build a separate embed suggesting Discord roles to add based on resume data.
+
+        Only ever suggests additions — roles are never removed.
+        Never suggests roles in DISCORD_ROLES_NEVER_SUGGEST.
+        """
+        skills: list[str] = extracted_profile.get("skills") or []
+        primary_roles: list[str] = extracted_profile.get("primary_roles") or []
+        country: str | None = extracted_profile.get("address_country")
+
+        technical = suggest_technical_discord_roles(skills, primary_roles)
+        locality = suggest_locality_discord_roles(country)
+
+        # Filter roles that should never be suggested
+        technical = [r for r in technical if r not in DISCORD_ROLES_NEVER_SUGGEST]
+        locality = [r for r in locality if r not in DISCORD_ROLES_NEVER_SUGGEST]
+
+        # If we know the member's current roles, only show missing ones
+        if current_discord_roles is not None:
+            existing = set(current_discord_roles)
+            technical = [r for r in technical if r not in existing]
+            locality = [r for r in locality if r not in existing]
+
+        if not technical and not locality:
+            return None
+
+        embed = discord.Embed(
+            title="🏷️ Suggested Discord Roles",
+            description=f"Roles to **add** for **{contact_name}** based on resume — never remove existing roles.",
+            color=0x57F287,
+        )
+
+        if technical:
+            embed.add_field(
+                name="Technical",
+                value=" ".join(f"`{r}`" for r in technical),
+                inline=False,
+            )
+        if locality:
+            embed.add_field(
+                name="Locality",
+                value=" ".join(f"`{r}`" for r in locality),
+                inline=False,
+            )
+
+        return embed
+
     async def _run_resume_extract_and_preview(
         self,
         interaction: discord.Interaction,
@@ -2418,6 +2481,31 @@ class CRMCog(commands.Cog):
         )
         parsed_seniority = _extract_parsed_seniority(result.get("extracted_profile"))
 
+        # Build role suggestions embed for reprocess actions.
+        role_suggestions_embed: discord.Embed | None = None
+        if action_name == "crm.reprocess_resume":
+            extracted_profile = result.get("extracted_profile") or {}
+            current_discord_roles: list[str] | None = None
+            try:
+                discord_user_id = await asyncio.to_thread(
+                    get_discord_user_id_for_contact,
+                    settings,
+                    contact_id,
+                )
+                if discord_user_id and interaction.guild:
+                    guild_member = interaction.guild.get_member(int(discord_user_id))
+                    if guild_member:
+                        current_discord_roles = [r.name for r in guild_member.roles]
+            except Exception as exc:
+                logger.warning(
+                    "Could not look up Discord member for role suggestions: %s", exc
+                )
+            role_suggestions_embed = self._build_role_suggestions_embed(
+                contact_name=contact_name,
+                extracted_profile=extracted_profile,
+                current_discord_roles=current_discord_roles,
+            )
+
         if not proposed_updates and not link_member and not parsed_seniority:
             self._audit_command(
                 interaction=interaction,
@@ -2432,7 +2520,10 @@ class CRMCog(commands.Cog):
                 resource_type="crm_contact",
                 resource_id=str(contact_id),
             )
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            embeds = [embed]
+            if role_suggestions_embed:
+                embeds.append(role_suggestions_embed)
+            await interaction.followup.send(embeds=embeds, ephemeral=True)
             return
 
         link_discord_payload: dict[str, str] | None = None
@@ -2466,7 +2557,10 @@ class CRMCog(commands.Cog):
             resource_type="crm_contact",
             resource_id=str(contact_id),
         )
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        embeds = [embed]
+        if role_suggestions_embed:
+            embeds.append(role_suggestions_embed)
+        await interaction.followup.send(embeds=embeds, view=view, ephemeral=True)
 
     async def _download_and_send_resume(
         self, interaction: discord.Interaction, contact_name: str, resume_id: str
