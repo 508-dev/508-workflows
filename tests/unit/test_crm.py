@@ -787,7 +787,7 @@ class TestCRMCog:
 
         candidate = Mock()
         candidate.is_member = True
-        candidate.name = "Alice"
+        candidate.name = "Alice (Nickname)"
         candidate.email_508 = "alice@508.dev"
         candidate.email = None
         candidate.crm_contact_id = None
@@ -858,6 +858,8 @@ class TestCRMCog:
         candidate_call = next(
             call for call in calls if call.args and call.args[0].startswith("1. ")
         )
+        assert "Alice (Nickname)" in candidate_call.args[0]
+        assert "alice@508.dev" not in candidate_call.args[0]
         assert_mentions_disabled(candidate_call)
 
     @pytest.mark.asyncio

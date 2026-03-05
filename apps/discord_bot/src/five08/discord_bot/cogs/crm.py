@@ -2325,6 +2325,41 @@ class CRMCog(commands.Cog):
         lines.append(f"Found **{len(candidates)}** candidate(s).\n")
 
         crm_base = settings.espo_base_url.rstrip("/")
+        candidate_lines, resume_options = self._build_match_candidate_lines(
+            candidates=candidates, crm_base=crm_base
+        )
+        lines.extend(candidate_lines)
+
+        messages: list[str] = []
+        current = ""
+        for line in lines:
+            candidate_block = line + "\n"
+            while len(candidate_block) > 1900:
+                if current:
+                    messages.append(current.rstrip())
+                    current = ""
+                messages.append(candidate_block[:1900].rstrip())
+                candidate_block = candidate_block[1900:]
+            if len(current) + len(candidate_block) > 1900:
+                if current:
+                    messages.append(current.rstrip())
+                current = candidate_block
+            else:
+                current += candidate_block
+        if current.strip():
+            messages.append(current.rstrip())
+
+        return messages, resume_options
+
+    @staticmethod
+    def _build_match_candidate_lines(
+        *,
+        candidates: list[Any],
+        crm_base: str,
+    ) -> tuple[list[str], list[tuple[str, str, str]]]:
+        """Build candidate result lines and resume options for match output."""
+        lines: list[str] = []
+        resume_options: list[tuple[str, str, str]] = []
 
         for i, candidate in enumerate(candidates, start=1):
             label = "**[Member]**" if candidate.is_member else "[Prospect]"
@@ -2348,9 +2383,12 @@ class CRMCog(commands.Cog):
                 and candidate.latest_resume_name
                 and candidate.latest_resume_name not in AUTO_MATCH_EXCLUDED_RESUME_NAMES
             ):
-                parts.append(f"Resume: `{candidate.latest_resume_name}`")
+                safe_resume_name = discord.utils.escape_mentions(
+                    candidate.latest_resume_name
+                )
+                parts.append(f"Resume: `{safe_resume_name}`")
                 resume_options.append(
-                    (name, candidate.latest_resume_id, candidate.latest_resume_name)
+                    (name, candidate.latest_resume_id, safe_resume_name)
                 )
 
             skill_info: list[str] = []
@@ -2375,26 +2413,7 @@ class CRMCog(commands.Cog):
 
             lines.append("\n".join(parts))
 
-        messages: list[str] = []
-        current = ""
-        for line in lines:
-            candidate_block = line + "\n"
-            while len(candidate_block) > 1900:
-                if current:
-                    messages.append(current.rstrip())
-                    current = ""
-                messages.append(candidate_block[:1900].rstrip())
-                candidate_block = candidate_block[1900:]
-            if len(current) + len(candidate_block) > 1900:
-                if current:
-                    messages.append(current.rstrip())
-                current = candidate_block
-            else:
-                current += candidate_block
-        if current.strip():
-            messages.append(current.rstrip())
-
-        return messages, resume_options
+        return lines, resume_options
 
     async def _run_auto_match_candidates_for_thread(
         self,
@@ -2464,7 +2483,11 @@ class CRMCog(commands.Cog):
 
         try:
             candidates = await asyncio.to_thread(
-                search_candidates, settings, requirements, limit=10
+                search_candidates,
+                settings,
+                requirements,
+                guild_id=str(thread.guild.id) if thread.guild else None,
+                limit=10,
             )
         except Exception as exc:
             await self._unmark_thread_auto_matched(thread.id)
@@ -7835,6 +7858,7 @@ class CRMCog(commands.Cog):
                 search_candidates,
                 settings,
                 requirements,
+                guild_id=str(interaction.guild.id) if interaction.guild else None,
                 limit=20,
                 min_match_score=8.0,
             )
@@ -7851,8 +7875,6 @@ class CRMCog(commands.Cog):
                 ephemeral=True,
             )
             return
-
-        lines: list[str] = []
 
         header_parts: list[str] = []
         role_mentions_line: str | None = None
@@ -8073,54 +8095,10 @@ class CRMCog(commands.Cog):
             )
 
         crm_base = settings.espo_base_url.rstrip("/")
-        resume_options: list[tuple[str, str, str]] = []
-
-        for i, c in enumerate(candidates, start=1):
-            label = "**[Member]**" if c.is_member else "[Prospect]"
-            name = discord.utils.escape_mentions(c.name or "Unknown")
-            crm_link = (
-                f"{crm_base}/#Contact/view/{c.crm_contact_id}"
-                if c.has_crm_link and c.crm_contact_id
-                else None
-            )
-            if crm_link:
-                parts = [f"{i}. {label} [{name}](<{crm_link}>)"]
-            else:
-                parts = [f"{i}. {label} {name}"]
-                if c.discord_user_id:
-                    parts.append(f"Discord ID: {c.discord_user_id}")
-
-            if c.linkedin:
-                parts.append(f"[LinkedIn](<{c.linkedin}>)")
-            if (
-                c.latest_resume_id
-                and c.latest_resume_name
-                and c.latest_resume_name not in AUTO_MATCH_EXCLUDED_RESUME_NAMES
-            ):
-                safe_resume_name = discord.utils.escape_mentions(c.latest_resume_name)
-                parts.append(f"Resume: `{safe_resume_name}`")
-                resume_options.append((name, c.latest_resume_id, safe_resume_name))
-
-            skill_info: list[str] = []
-            match_score = getattr(c, "match_score", None)
-            if isinstance(match_score, (int, float)):
-                skill_info.append(f"score: {match_score:.1f}")
-            if c.matched_required_skills:
-                skill_info.append(
-                    "✅ " + ", ".join(f"`{s}`" for s in c.matched_required_skills[:5])
-                )
-            if c.matched_discord_roles:
-                skill_info.append(
-                    "🏷️ " + ", ".join(f"`{r}`" for r in c.matched_discord_roles)
-                )
-            if c.seniority:
-                skill_info.append(f"seniority: `{c.seniority}`")
-            if c.timezone:
-                skill_info.append(f"tz: `{c.timezone}`")
-            if skill_info:
-                parts.append("   " + " · ".join(skill_info))
-
-            lines.append("\n".join(parts))
+        lines, resume_options = self._build_match_candidate_lines(
+            candidates=candidates,
+            crm_base=crm_base,
+        )
 
         # Paginate: Discord followup allows multiple sends; split on 1900-char chunks.
         messages: list[str] = []
