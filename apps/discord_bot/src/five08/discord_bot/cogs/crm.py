@@ -1170,6 +1170,18 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         return value[: limit - 3] + "..."
 
     @staticmethod
+    def _is_link_like_field(field: str, label: str) -> bool:
+        key = f"{field} {label}".casefold()
+        return any(
+            token in key for token in ("website", "social", "linkedin", "github", "url")
+        )
+
+    @staticmethod
+    def _normalize_preview_value(value: Any) -> str:
+        text = str(value).strip()
+        return text if text else "None"
+
+    @staticmethod
     def _decode_json_like_mapping(value: Any) -> dict[str, Any] | None:
         candidate = value
         if isinstance(candidate, str):
@@ -1327,7 +1339,10 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             label = self._field_label(field)
             value = updated_values.get(field, self.proposed_updates.get(field))
             formatted = self._format_field_value(field, value)
-            lines.append(f"**{label}**: `{formatted}`")
+            if self._is_link_like_field(field, label):
+                lines.append(f"**{label}**: {self._normalize_preview_value(formatted)}")
+            else:
+                lines.append(f"**{label}**: `{formatted}`")
         return lines
 
     @classmethod
@@ -3012,7 +3027,20 @@ class CRMCog(commands.Cog):
                         )
                         lines.append(f"**{label}**: `{truncated_delta}`")
                         continue
-                lines.append(f"**{label}**: `{current}` → `{proposed}`")
+                if ResumeUpdateConfirmationView._is_link_like_field(field_name, label):
+                    lines.append(
+                        "**{label}**: {current} → {proposed}".format(
+                            label=label,
+                            current=ResumeUpdateConfirmationView._normalize_preview_value(
+                                current
+                            ),
+                            proposed=ResumeUpdateConfirmationView._normalize_preview_value(
+                                proposed
+                            ),
+                        )
+                    )
+                else:
+                    lines.append(f"**{label}**: `{current}` → `{proposed}`")
             embed.add_field(
                 name="Proposed Changes",
                 value=truncate_field_value("\n".join(lines) if lines else "No changes"),
