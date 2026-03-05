@@ -15,6 +15,10 @@ from five08.discord_bot.cogs.crm import (
     ReprocessResumeSelectionView,
     ResumeDownloadButton,
     ResumeSeniorityOverrideSelect,
+    ResumeEditWebsitesButton,
+    ResumeEditSocialLinksButton,
+    ResumeEditWebsitesModal,
+    ResumeEditSocialLinksModal,
     _extract_parsed_seniority,
     _format_seniority_label,
 )
@@ -248,6 +252,242 @@ class TestCRMCog:
 
         assert label == "Staff"
         assert view.proposed_updates["cSeniority"] == "staff"
+
+    def test_resume_update_view_adds_websites_button_when_websites_proposed(
+        self, crm_cog
+    ):
+        """Edit Websites button should appear when cWebsiteLink is in proposed updates."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={"cWebsiteLink": ["https://example.com"]},
+        )
+
+        assert any(
+            isinstance(child, ResumeEditWebsitesButton) for child in view.children
+        )
+
+    def test_resume_update_view_no_websites_button_without_websites(self, crm_cog):
+        """Edit Websites button should not appear when cWebsiteLink is absent."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+        )
+
+        assert not any(
+            isinstance(child, ResumeEditWebsitesButton) for child in view.children
+        )
+
+    def test_resume_update_view_adds_social_links_button_when_social_links_proposed(
+        self, crm_cog
+    ):
+        """Edit Social Links button should appear when cSocialLinks is in proposed updates."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={"cSocialLinks": ["https://linkedin.com/in/user"]},
+        )
+
+        assert any(
+            isinstance(child, ResumeEditSocialLinksButton) for child in view.children
+        )
+
+    def test_resume_update_view_no_social_links_button_without_social_links(
+        self, crm_cog
+    ):
+        """Edit Social Links button should not appear when cSocialLinks is absent."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+        )
+
+        assert not any(
+            isinstance(child, ResumeEditSocialLinksButton) for child in view.children
+        )
+
+    @pytest.mark.asyncio
+    async def test_edit_websites_modal_prepopulates_list_values(self, crm_cog):
+        """Edit Websites modal should pre-fill with proposed website list, one per line."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={
+                "cWebsiteLink": ["https://example.com", "https://blog.example.com"]
+            },
+        )
+
+        modal = ResumeEditWebsitesModal(confirmation_view=view)
+
+        assert (
+            modal.websites_input.default
+            == "https://example.com\nhttps://blog.example.com"
+        )
+
+    @pytest.mark.asyncio
+    async def test_edit_social_links_modal_prepopulates_list_values(self, crm_cog):
+        """Edit Social Links modal should pre-fill with proposed social link list."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={
+                "cSocialLinks": ["https://linkedin.com/in/user", "https://x.com/user"]
+            },
+        )
+
+        modal = ResumeEditSocialLinksModal(confirmation_view=view)
+
+        assert (
+            modal.social_links_input.default
+            == "https://linkedin.com/in/user\nhttps://x.com/user"
+        )
+
+    @pytest.mark.asyncio
+    async def test_edit_websites_modal_submit_updates_proposed(
+        self, crm_cog, mock_interaction
+    ):
+        """Submitting the Edit Websites modal should replace proposed cWebsiteLink."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={"cWebsiteLink": ["https://old.com"]},
+        )
+        modal = ResumeEditWebsitesModal(confirmation_view=view)
+        modal.websites_input._value = "https://new.com\nhttps://other.com"
+
+        await modal.on_submit(mock_interaction)
+
+        assert view.proposed_updates["cWebsiteLink"] == [
+            "https://new.com",
+            "https://other.com",
+        ]
+        mock_interaction.response.send_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_edit_social_links_modal_submit_updates_proposed(
+        self, crm_cog, mock_interaction
+    ):
+        """Submitting the Edit Social Links modal should replace proposed cSocialLinks."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={"cSocialLinks": ["https://linkedin.com/in/old"]},
+        )
+        modal = ResumeEditSocialLinksModal(confirmation_view=view)
+        modal.social_links_input._value = (
+            "https://linkedin.com/in/new\nhttps://x.com/user"
+        )
+
+        await modal.on_submit(mock_interaction)
+
+        assert view.proposed_updates["cSocialLinks"] == [
+            "https://linkedin.com/in/new",
+            "https://x.com/user",
+        ]
+        mock_interaction.response.send_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_edit_websites_modal_submit_removes_field_when_blank(
+        self, crm_cog, mock_interaction
+    ):
+        """Clearing websites in the modal should remove cWebsiteLink from proposed updates."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={"cWebsiteLink": ["https://example.com"]},
+        )
+        modal = ResumeEditWebsitesModal(confirmation_view=view)
+        modal.websites_input._value = "   \n  \n  "
+
+        await modal.on_submit(mock_interaction)
+
+        assert "cWebsiteLink" not in view.proposed_updates
+
+    @pytest.mark.asyncio
+    async def test_edit_social_links_modal_submit_removes_field_when_blank(
+        self, crm_cog, mock_interaction
+    ):
+        """Clearing social links in the modal should remove cSocialLinks from proposed updates."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={"cSocialLinks": ["https://linkedin.com/in/user"]},
+        )
+        modal = ResumeEditSocialLinksModal(confirmation_view=view)
+        modal.social_links_input._value = ""
+
+        await modal.on_submit(mock_interaction)
+
+        assert "cSocialLinks" not in view.proposed_updates
+
+    @pytest.mark.asyncio
+    async def test_edit_websites_button_callback_opens_modal(
+        self, crm_cog, mock_interaction
+    ):
+        """Edit Websites button callback should open the websites modal."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={"cWebsiteLink": ["https://example.com"]},
+        )
+        button = next(
+            child
+            for child in view.children
+            if isinstance(child, ResumeEditWebsitesButton)
+        )
+
+        await button.callback(mock_interaction)
+
+        mock_interaction.response.send_modal.assert_called_once()
+        modal_arg = mock_interaction.response.send_modal.call_args[0][0]
+        assert isinstance(modal_arg, ResumeEditWebsitesModal)
+
+    @pytest.mark.asyncio
+    async def test_edit_social_links_button_callback_opens_modal(
+        self, crm_cog, mock_interaction
+    ):
+        """Edit Social Links button callback should open the social links modal."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={"cSocialLinks": ["https://linkedin.com/in/user"]},
+        )
+        button = next(
+            child
+            for child in view.children
+            if isinstance(child, ResumeEditSocialLinksButton)
+        )
+
+        await button.callback(mock_interaction)
+
+        mock_interaction.response.send_modal.assert_called_once()
+        modal_arg = mock_interaction.response.send_modal.call_args[0][0]
+        assert isinstance(modal_arg, ResumeEditSocialLinksModal)
 
     @pytest.mark.asyncio
     async def test_download_and_send_resume_success(self, crm_cog, mock_interaction):
