@@ -2799,7 +2799,7 @@ class CRMCog(commands.Cog):
                     continue
                 field = str(item.get("field", "field"))
                 reason = str(item.get("reason", "Skipped"))
-                label = ResumeUpdateConfirmationView._FIELD_LABELS.get(field, field)
+                label = ResumeUpdateConfirmationView._field_label(field)
                 skip_lines.append(f"{label}: ({reason})")
             if skip_lines:
                 embed.add_field(
