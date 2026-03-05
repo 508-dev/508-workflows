@@ -3311,25 +3311,38 @@ class CRMCog(commands.Cog):
         )
         parsed_seniority = _extract_parsed_seniority(result.get("extracted_profile"))
 
-        # Build role suggestions embed for reprocess actions.
+        # Build role suggestions embed for reprocess actions or uploads with a linked user.
         role_suggestions_embed: discord.Embed | None = None
-        if action_name == "crm.reprocess_resume":
+        if action_name == "crm.reprocess_resume" or (
+            action_name == "crm.upload_resume" and link_member
+        ):
             extracted_profile = result.get("extracted_profile") or {}
             current_discord_roles: list[str] | None = None
-            try:
-                discord_user_id = await asyncio.to_thread(
-                    get_discord_user_id_for_contact,
-                    settings,
-                    contact_id,
-                )
-                if discord_user_id and interaction.guild:
-                    guild_member = interaction.guild.get_member(int(discord_user_id))
-                    if guild_member:
-                        current_discord_roles = [r.name for r in guild_member.roles]
-            except Exception as exc:
-                logger.warning(
-                    "Could not look up Discord member for role suggestions: %s", exc
-                )
+            if action_name == "crm.reprocess_resume":
+                try:
+                    discord_user_id = await asyncio.to_thread(
+                        get_discord_user_id_for_contact,
+                        settings,
+                        contact_id,
+                    )
+                    if discord_user_id and interaction.guild:
+                        guild_member = interaction.guild.get_member(
+                            int(discord_user_id)
+                        )
+                        if guild_member:
+                            current_discord_roles = [r.name for r in guild_member.roles]
+                except Exception as exc:
+                    logger.warning(
+                        "Could not look up Discord member for role suggestions: %s",
+                        exc,
+                    )
+            elif link_member:
+                try:
+                    current_discord_roles = [r.name for r in link_member.roles]
+                except Exception as exc:
+                    logger.warning(
+                        "Could not read linked member roles for suggestions: %s", exc
+                    )
             role_suggestions_embed = self._build_role_suggestions_embed(
                 contact_name=contact_name,
                 extracted_profile=extracted_profile,
