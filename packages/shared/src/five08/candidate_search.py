@@ -121,7 +121,7 @@ def search_candidates(
           scored AS (
             SELECT
                 p.crm_contact_id AS crm_contact_id,
-                COALESCE(p.name, dm.display_name, dm.discord_username) AS name,
+                COALESCE(dm.display_name, dm.discord_username, p.name) AS name,
                 p.email_508,
                 p.email,
                 p.linkedin,

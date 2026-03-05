@@ -2329,18 +2329,15 @@ class CRMCog(commands.Cog):
         for i, candidate in enumerate(candidates, start=1):
             label = "**[Member]**" if candidate.is_member else "[Prospect]"
             name = discord.utils.escape_mentions(candidate.name or "Unknown")
-            email = discord.utils.escape_mentions(
-                candidate.email_508 or candidate.email or "—"
-            )
             crm_link = (
                 f"{crm_base}/#Contact/view/{candidate.crm_contact_id}"
                 if candidate.has_crm_link and candidate.crm_contact_id
                 else None
             )
             if crm_link:
-                parts = [f"{i}. {label} [{name}](<{crm_link}>) · {email}"]
+                parts = [f"{i}. {label} [{name}](<{crm_link}>)"]
             else:
-                parts = [f"{i}. {label} {name} · {email}"]
+                parts = [f"{i}. {label} {name}"]
                 if candidate.discord_user_id:
                     parts.append(f"Discord ID: {candidate.discord_user_id}")
 
@@ -8081,16 +8078,15 @@ class CRMCog(commands.Cog):
         for i, c in enumerate(candidates, start=1):
             label = "**[Member]**" if c.is_member else "[Prospect]"
             name = discord.utils.escape_mentions(c.name or "Unknown")
-            email = discord.utils.escape_mentions(c.email_508 or c.email or "—")
             crm_link = (
                 f"{crm_base}/#Contact/view/{c.crm_contact_id}"
                 if c.has_crm_link and c.crm_contact_id
                 else None
             )
             if crm_link:
-                parts = [f"{i}. {label} [{name}](<{crm_link}>) · {email}"]
+                parts = [f"{i}. {label} [{name}](<{crm_link}>)"]
             else:
-                parts = [f"{i}. {label} {name} · {email}"]
+                parts = [f"{i}. {label} {name}"]
                 if c.discord_user_id:
                     parts.append(f"Discord ID: {c.discord_user_id}")
 
@@ -8416,11 +8412,14 @@ class CRMCog(commands.Cog):
         before: discord.Member,
         after: discord.Member,
     ) -> None:
-        """Automatically sync discord_roles when a member's roles change."""
-        if before.roles == after.roles:
-            return
-
+        """Automatically sync discord roles/names on member updates."""
         if after.guild is None:
+            return
+        roles_changed = before.roles != after.roles
+        name_changed = (
+            before.display_name != after.display_name or before.name != after.name
+        )
+        if not roles_changed and not name_changed:
             return
 
         role_names = [
@@ -8437,12 +8436,13 @@ class CRMCog(commands.Cog):
                 display_name=after.display_name,
                 roles=role_names,
             )
-            await asyncio.to_thread(
-                update_person_discord_roles,
-                settings,
-                str(after.id),
-                role_names,
-            )
+            if roles_changed:
+                await asyncio.to_thread(
+                    update_person_discord_roles,
+                    settings,
+                    str(after.id),
+                    role_names,
+                )
         except Exception as exc:
             logger.warning(
                 "on_member_update: failed to sync roles for user %s: %s",
