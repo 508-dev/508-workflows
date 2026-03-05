@@ -6403,8 +6403,58 @@ class CRMCog(commands.Cog):
         lines: list[str] = []
 
         header_parts: list[str] = []
-        role_mentions: list[str] = []
         role_mentions_line: str | None = None
+        locality_mentions_line: str | None = None
+        excluded_role_names = {
+            name.casefold() for name in DISCORD_ROLES_EXCLUDE_FROM_SYNC
+        }
+
+        def dedupe_role_names(role_names: list[str]) -> list[str]:
+            seen: set[str] = set()
+            deduped: list[str] = []
+            for role_name in role_names:
+                key = role_name.casefold()
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append(role_name)
+            return deduped
+
+        def build_role_mentions(role_names: list[str]) -> list[str]:
+            if not role_names:
+                return []
+            if interaction.guild is None:
+                return [f"`{r}`" for r in role_names]
+
+            role_id_map = self._get_role_id_cache().get(interaction.guild.id)
+            if role_id_map is None:
+                self._refresh_role_id_cache(interaction.guild)
+                role_id_map = self._get_role_id_cache().get(interaction.guild.id, {})
+
+            mentions: list[str] = []
+            for role_name in role_names:
+                normalized_role_name = role_name.casefold()
+                if normalized_role_name in excluded_role_names:
+                    continue
+                role_id = role_id_map.get(normalized_role_name)
+                if role_id is not None:
+                    mentions.append(f"<@&{role_id}>")
+                    continue
+                role = next(
+                    (
+                        candidate
+                        for candidate in interaction.guild.roles
+                        if candidate.name.casefold() == normalized_role_name
+                        and candidate.name.casefold() not in excluded_role_names
+                    ),
+                    None,
+                )
+                if role is not None:
+                    mentions.append(role.mention)
+                else:
+                    mentions.append(f"`{role_name}`")
+            return mentions
+
         if requirements.title:
             header_parts.append(f"**{requirements.title}**")
         if requirements.discord_role_types:
@@ -6422,44 +6472,78 @@ class CRMCog(commands.Cog):
                 if role_name.casefold() not in seniority_role_names
             ]
             if role_types:
-                excluded_role_names = {
-                    name.casefold() for name in DISCORD_ROLES_EXCLUDE_FROM_SYNC
-                }
-                if interaction.guild is not None:
-                    role_id_map = self._get_role_id_cache().get(interaction.guild.id)
-                    if role_id_map is None:
-                        self._refresh_role_id_cache(interaction.guild)
-                        role_id_map = self._get_role_id_cache().get(
-                            interaction.guild.id, {}
-                        )
-
-                    for role_name in role_types:
-                        normalized_role_name = role_name.casefold()
-                        if normalized_role_name in excluded_role_names:
-                            continue
-                        role_id = role_id_map.get(normalized_role_name)
-                        if role_id is not None:
-                            role_mentions.append(f"<@&{role_id}>")
-                        else:
-                            role = next(
-                                (
-                                    candidate
-                                    for candidate in interaction.guild.roles
-                                    if candidate.name.casefold() == normalized_role_name
-                                    and candidate.name.casefold()
-                                    not in excluded_role_names
-                                ),
-                                None,
-                            )
-                            if role is not None:
-                                role_mentions.append(role.mention)
-                            else:
-                                role_mentions.append(f"`{role_name}`")
-                else:
-                    role_mentions = [f"`{r}`" for r in role_types]
-
+                role_mentions = build_role_mentions(dedupe_role_names(role_types))
                 if role_mentions:
                     role_mentions_line = "Discord roles: " + ", ".join(role_mentions)
+
+        locality_role_names: list[str] = []
+        location_text_parts: list[str] = []
+        if requirements.raw_location_text:
+            location_text_parts.append(requirements.raw_location_text)
+        if requirements.preferred_timezones:
+            location_text_parts.extend(requirements.preferred_timezones)
+        location_text = " ".join(location_text_parts).casefold()
+
+        if requirements.location_type == "us_only" or "united states" in location_text:
+            locality_role_names.append("USA")
+        if "usa" in location_text:
+            locality_role_names.append("USA")
+        if (
+            "europe" in location_text
+            or "emea" in location_text
+            or "e.u." in location_text
+        ):
+            locality_role_names.append("Europe")
+        if (
+            "americas" in location_text
+            or "latin america" in location_text
+            or "latam" in location_text
+        ):
+            locality_role_names.append("Americas")
+        if "north america" in location_text or "south america" in location_text:
+            locality_role_names.append("Americas")
+        if (
+            "asia" in location_text
+            or "apac" in location_text
+            or "asia pacific" in location_text
+        ):
+            locality_role_names.append("Asia")
+        if "japan" in location_text:
+            locality_role_names.append("Japan")
+        if "taiwan" in location_text:
+            locality_role_names.append("Taiwan")
+        if "africa" in location_text:
+            locality_role_names.append("Africa")
+
+        if requirements.preferred_timezones:
+            for tz in requirements.preferred_timezones:
+                tz_prefix = (
+                    tz.split("/", 1)[0].casefold() if "/" in tz else tz.casefold()
+                )
+                if tz_prefix == "europe":
+                    locality_role_names.append("Europe")
+                elif tz_prefix == "america":
+                    locality_role_names.append("Americas")
+                elif tz_prefix == "asia":
+                    locality_role_names.append("Asia")
+                elif tz_prefix == "africa":
+                    locality_role_names.append("Africa")
+                if tz.casefold() == "asia/tokyo":
+                    locality_role_names.append("Japan")
+                if tz.casefold() == "asia/taipei":
+                    locality_role_names.append("Taiwan")
+
+        locality_role_names = [
+            role_name
+            for role_name in dedupe_role_names(locality_role_names)
+            if role_name.casefold() not in excluded_role_names
+        ]
+        if locality_role_names:
+            locality_mentions = build_role_mentions(locality_role_names)
+            if locality_mentions:
+                locality_mentions_line = "Locality roles: " + ", ".join(
+                    locality_mentions
+                )
         if requirements.required_skills:
             header_parts.append(
                 "Skills: "
@@ -6489,6 +6573,15 @@ class CRMCog(commands.Cog):
         if role_mentions_line:
             await interaction.followup.send(
                 role_mentions_line,
+                allowed_mentions=discord.AllowedMentions(
+                    roles=True,
+                    users=False,
+                    everyone=False,
+                ),
+            )
+        if locality_mentions_line:
+            await interaction.followup.send(
+                locality_mentions_line,
                 allowed_mentions=discord.AllowedMentions(
                     roles=True,
                     users=False,
