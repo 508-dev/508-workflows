@@ -6427,12 +6427,11 @@ class CRMCog(commands.Cog):
         header_parts: list[str] = []
         role_mentions_line: str | None = None
         locality_mentions_line: str | None = None
+        role_mentions_role_ids: list[int] = []
+        locality_mentions_role_ids: list[int] = []
         excluded_role_names = {
             name.casefold() for name in DISCORD_ROLES_EXCLUDE_FROM_SYNC
         }
-        excluded_role_names.update(
-            {"junior", "mid-level", "midlevel", "senior", "staff", "principal"}
-        )
 
         def dedupe_role_names(role_names: list[str]) -> list[str]:
             seen: set[str] = set()
@@ -6448,11 +6447,11 @@ class CRMCog(commands.Cog):
                 deduped.append(cleaned)
             return deduped
 
-        def build_role_mentions(role_names: list[str]) -> list[str]:
+        def build_role_mentions(role_names: list[str]) -> tuple[list[str], list[int]]:
             if not role_names:
-                return []
+                return [], []
             if interaction.guild is None:
-                return [f"`{r}`" for r in role_names]
+                return [f"`{r}`" for r in role_names], []
 
             role_id_map = self._get_role_id_cache().get(interaction.guild.id)
             if role_id_map is None:
@@ -6461,6 +6460,8 @@ class CRMCog(commands.Cog):
 
             mentions: list[str] = []
             seen_mentions: set[str] = set()
+            allowed_role_ids: list[int] = []
+            seen_role_ids: set[int] = set()
             for role_name in role_names:
                 normalized_role_name = role_name.casefold()
                 if normalized_role_name in excluded_role_names:
@@ -6471,6 +6472,9 @@ class CRMCog(commands.Cog):
                     if mention not in seen_mentions:
                         seen_mentions.add(mention)
                         mentions.append(mention)
+                    if role_id not in seen_role_ids:
+                        seen_role_ids.add(role_id)
+                        allowed_role_ids.append(role_id)
                     continue
                 role = next(
                     (
@@ -6485,21 +6489,25 @@ class CRMCog(commands.Cog):
                     if role.mention not in seen_mentions:
                         seen_mentions.add(role.mention)
                         mentions.append(role.mention)
+                    if role.id not in seen_role_ids:
+                        seen_role_ids.add(role.id)
+                        allowed_role_ids.append(role.id)
                 else:
                     mention = f"`{role_name}`"
                     if mention not in seen_mentions:
                         seen_mentions.add(mention)
                         mentions.append(mention)
-            return mentions
+            return mentions, allowed_role_ids
 
         if requirements.title:
             header_parts.append(f"**{requirements.title}**")
         if requirements.discord_role_types:
             role_types = dedupe_role_names(requirements.discord_role_types)
             if role_types:
-                role_mentions = build_role_mentions(role_types)
+                role_mentions, role_ids = build_role_mentions(role_types)
                 if role_mentions:
                     role_mentions_line = "Discord roles: " + ", ".join(role_mentions)
+                    role_mentions_role_ids = role_ids
 
         locality_role_names: list[str] = []
         location_text_parts: list[str] = []
@@ -6564,11 +6572,12 @@ class CRMCog(commands.Cog):
             if role_name.casefold() not in excluded_role_names
         ]
         if locality_role_names:
-            locality_mentions = build_role_mentions(locality_role_names)
+            locality_mentions, role_ids = build_role_mentions(locality_role_names)
             if locality_mentions:
                 locality_mentions_line = "Locality roles: " + ", ".join(
                     locality_mentions
                 )
+                locality_mentions_role_ids = role_ids
         if requirements.required_skills:
             header_parts.append(
                 "Skills: "
@@ -6596,22 +6605,42 @@ class CRMCog(commands.Cog):
             ),
         )
         if role_mentions_line:
+            allowed_role_mentions = (
+                discord.AllowedMentions(
+                    roles=[discord.Object(id=rid) for rid in role_mentions_role_ids],
+                    users=False,
+                    everyone=False,
+                )
+                if role_mentions_role_ids
+                else discord.AllowedMentions(
+                    roles=False,
+                    users=False,
+                    everyone=False,
+                )
+            )
             await interaction.followup.send(
                 role_mentions_line,
-                allowed_mentions=discord.AllowedMentions(
-                    roles=True,
-                    users=False,
-                    everyone=False,
-                ),
+                allowed_mentions=allowed_role_mentions,
             )
         if locality_mentions_line:
-            await interaction.followup.send(
-                locality_mentions_line,
-                allowed_mentions=discord.AllowedMentions(
-                    roles=True,
+            allowed_locality_mentions = (
+                discord.AllowedMentions(
+                    roles=[
+                        discord.Object(id=rid) for rid in locality_mentions_role_ids
+                    ],
                     users=False,
                     everyone=False,
-                ),
+                )
+                if locality_mentions_role_ids
+                else discord.AllowedMentions(
+                    roles=False,
+                    users=False,
+                    everyone=False,
+                )
+            )
+            await interaction.followup.send(
+                locality_mentions_line,
+                allowed_mentions=allowed_locality_mentions,
             )
 
         crm_base = settings.espo_base_url.rstrip("/")
@@ -6787,6 +6816,10 @@ class CRMCog(commands.Cog):
         self, before: discord.Role, after: discord.Role
     ) -> None:
         self._refresh_role_id_cache(after.guild)
+
+    @commands.Cog.listener()
+    async def on_guild_remove(self, guild: discord.Guild) -> None:
+        self._get_role_id_cache().pop(guild.id, None)
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:

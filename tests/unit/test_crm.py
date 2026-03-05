@@ -240,7 +240,11 @@ class TestCRMCog:
         guild.id = 42
         guild.roles = [role_frontend, role_full_stack, role_excluded]
 
-        crm_cog._refresh_role_id_cache(guild)
+        with patch(
+            "five08.discord_bot.cogs.crm.DISCORD_ROLES_EXCLUDE_FROM_SYNC",
+            {"Bots"},
+        ):
+            crm_cog._refresh_role_id_cache(guild)
 
         cache = crm_cog._get_role_id_cache()
         assert cache[42] == {"frontend": 111, "full stack": 222}
@@ -354,7 +358,8 @@ class TestCRMCog:
             if call.args and call.args[0].startswith("Discord roles:")
         )
         assert "<@&111>" in role_call.args[0]
-        assert role_call.kwargs["allowed_mentions"].roles is True
+        role_allowed = role_call.kwargs["allowed_mentions"]
+        assert [r.id for r in role_allowed.roles] == [111]
         assert role_call.kwargs["allowed_mentions"].users is False
         assert role_call.kwargs["allowed_mentions"].everyone is False
 
@@ -364,7 +369,8 @@ class TestCRMCog:
             if call.args and call.args[0].startswith("Locality roles:")
         )
         assert "<@&222>" in locality_call.args[0]
-        assert locality_call.kwargs["allowed_mentions"].roles is True
+        locality_allowed = locality_call.kwargs["allowed_mentions"]
+        assert [r.id for r in locality_allowed.roles] == [222]
         assert locality_call.kwargs["allowed_mentions"].users is False
         assert locality_call.kwargs["allowed_mentions"].everyone is False
 
