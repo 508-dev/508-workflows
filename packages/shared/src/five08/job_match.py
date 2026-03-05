@@ -296,16 +296,18 @@ def suggest_technical_discord_roles(
     for skill in skills:
         skill_lower = skill.strip().casefold()
         discord_role = _SKILL_TO_DISCORD_ROLE.get(skill_lower)
-        if discord_role and discord_role not in seen:
-            suggestions.append(discord_role)
-            seen.add(discord_role)
-        else:
-            # Try partial match for multi-word skills
-            for keyword, role_name in _SKILL_TO_DISCORD_ROLE.items():
-                if keyword in skill_lower and role_name not in seen:
-                    suggestions.append(role_name)
-                    seen.add(role_name)
-                    break
+        if discord_role:
+            if discord_role not in seen:
+                suggestions.append(discord_role)
+                seen.add(discord_role)
+            # Exact match found (even if already seen) — skip substring scan
+            continue
+        # Try partial match only when there is no exact match
+        for keyword, role_name in _SKILL_TO_DISCORD_ROLE.items():
+            if keyword in skill_lower and role_name not in seen:
+                suggestions.append(role_name)
+                seen.add(role_name)
+                break
 
     return suggestions
 

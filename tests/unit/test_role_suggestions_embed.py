@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import os
+from unittest.mock import Mock, patch
 
-# Set required env vars before any settings-dependent modules are imported.
+import pytest
+
 _TEST_ENV = {
     "DISCORD_BOT_TOKEN": "test_token",
     "ESPO_API_KEY": "test_api_key",
@@ -17,18 +18,15 @@ _TEST_ENV = {
     "IMAP_SERVER": "imap.test.com",
     "SMTP_SERVER": "smtp.test.com",
 }
-for _k, _v in _TEST_ENV.items():
-    os.environ.setdefault(_k, _v)
-
-from unittest.mock import Mock, patch  # noqa: E402
-
-import pytest  # noqa: E402
-
-from five08.discord_bot.cogs.crm import CRMCog  # noqa: E402
 
 
 @pytest.fixture
-def crm_cog():
+def crm_cog(monkeypatch):
+    for key, value in _TEST_ENV.items():
+        monkeypatch.setenv(key, value)
+
+    from five08.discord_bot.cogs.crm import CRMCog
+
     bot = Mock()
     bot.get_cog = Mock()
     with patch("five08.discord_bot.cogs.crm.EspoAPI"):

@@ -533,3 +533,21 @@ def test_technical_returns_only_canonical_role_names() -> None:
     )
     for role in result:
         assert role in DISCORD_SKILL_ROLE_NAMES
+
+
+def test_technical_react_native_suggests_mobile_not_frontend() -> None:
+    # Regression: "React Native" has an exact match → Mobile.
+    # The substring "react" must NOT additionally suggest Frontend.
+    result = suggest_technical_discord_roles(["React Native"], [])
+    assert "Mobile" in result
+    assert "Frontend" not in result
+
+
+def test_technical_exact_match_already_seen_skips_substring_scan() -> None:
+    # "React" is already suggested via an earlier skill; a second "react"-containing
+    # skill with an exact match should not trigger a spurious substring Frontend hit.
+    result = suggest_technical_discord_roles(["React", "React Native"], [])
+    assert "Frontend" in result
+    assert "Mobile" in result
+    assert result.count("Frontend") == 1
+    assert result.count("Mobile") == 1
