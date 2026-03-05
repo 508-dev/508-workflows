@@ -6259,7 +6259,7 @@ class CRMCog(commands.Cog):
             return False
         return any(str(item).strip() for item in resume_ids)
 
-    def _matches_bulk_resume_reprocess_filters(self, contact: dict[str, Any]) -> bool:
+    def _bulk_resume_missing_flags(self, contact: dict[str, Any]) -> dict[str, bool]:
         missing_country = self._is_blank_crm_field(contact.get("addressCountry"))
         missing_timezone = self._is_blank_crm_field(contact.get("cTimezone"))
         missing_skills = self._is_blank_crm_field(contact.get("skills"))
@@ -6269,29 +6269,31 @@ class CRMCog(commands.Cog):
             isinstance(raw_seniority, str)
             and raw_seniority.strip().lower() == "unknown"
         )
+        return {
+            "missing_country": missing_country,
+            "missing_timezone": missing_timezone,
+            "missing_skills": missing_skills,
+            "missing_roles": missing_roles,
+            "missing_seniority": missing_seniority,
+        }
+
+    def _matches_bulk_resume_reprocess_filters(self, contact: dict[str, Any]) -> bool:
+        flags = self._bulk_resume_missing_flags(contact)
         return (
-            (missing_country and missing_timezone)
-            or (missing_skills and missing_roles)
-            or missing_seniority
+            (flags["missing_country"] and flags["missing_timezone"])
+            or (flags["missing_skills"] and flags["missing_roles"])
+            or flags["missing_seniority"]
         )
 
     def _bulk_resume_missing_summary(self, contact: dict[str, Any]) -> str:
-        missing_country = self._is_blank_crm_field(contact.get("addressCountry"))
-        missing_timezone = self._is_blank_crm_field(contact.get("cTimezone"))
-        missing_skills = self._is_blank_crm_field(contact.get("skills"))
-        missing_roles = self._is_blank_crm_field(contact.get("cRoles"))
-        raw_seniority = contact.get("cSeniority")
-        missing_seniority = self._is_blank_crm_field(raw_seniority) or (
-            isinstance(raw_seniority, str)
-            and raw_seniority.strip().lower() == "unknown"
-        )
+        flags = self._bulk_resume_missing_flags(contact)
 
         reasons: list[str] = []
-        if missing_country and missing_timezone:
+        if flags["missing_country"] and flags["missing_timezone"]:
             reasons.append("missing country/timezone")
-        if missing_skills and missing_roles:
+        if flags["missing_skills"] and flags["missing_roles"]:
             reasons.append("missing skills/roles")
-        if missing_seniority:
+        if flags["missing_seniority"]:
             reasons.append("missing seniority")
         if not reasons:
             return "missing fields"
@@ -6316,7 +6318,7 @@ class CRMCog(commands.Cog):
     ) -> tuple[list[dict[str, Any]], int | None]:
         """Fetch contacts missing key resume-derived fields and with a resume on file."""
         select_fields = (
-            "id,name,emailAddress,addressCountry,cTimezone,skills,cRoles,"
+            "id,name,emailAddress,addressCountry,cTimezone,skills,cRoles,cSeniority,"
             "resumeIds,resumeNames"
         )
         where_filters = [
@@ -7689,7 +7691,7 @@ class CRMCog(commands.Cog):
     @app_commands.command(
         name="bulk-reprocess-resumes",
         description=(
-            "Find contacts missing country/timezone or skills/roles and reprocess resumes"
+            "Find contacts missing country/timezone, skills/roles, or seniority and reprocess resumes"
         ),
     )
     @app_commands.describe(
@@ -7862,7 +7864,8 @@ class CRMCog(commands.Cog):
             )
             if total is not None and total > len(contact_lookup):
                 summary = (
-                    f"Found {total} matching contacts. Showing {len(contact_lookup)}:"
+                    f"Found {total} contacts in CRM matching the filters; after "
+                    f"resume checks, showing {len(contact_lookup)}:"
                 )
 
             self._audit_command(
