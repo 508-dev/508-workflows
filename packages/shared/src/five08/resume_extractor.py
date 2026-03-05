@@ -6,7 +6,7 @@ import json
 import re
 from datetime import datetime, timezone
 from typing import Any, Mapping
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from pydantic import BaseModel, Field
 from five08.crm_normalization import (
@@ -46,18 +46,216 @@ PERSONAL_WEBSITE_CONTEXT_KEYWORDS = (
 )
 
 SOCIAL_LINK_DOMAINS = {
+    "bsky.app",
     "facebook.com",
     "fb.com",
+    "fb.me",
+    "gitlab.com",
+    "huggingface.co",
     "instagram.com",
+    "kaggle.com",
     "github.com",
     "linkedin.com",
-    "x.com",
-    "twitter.com",
+    "mastodon.social",
+    "medium.com",
+    "pinterest.com",
+    "stackoverflow.com",
+    "substack.com",
+    "telegram.me",
     "threads.net",
     "tiktok.com",
+    "t.me",
+    "twitch.tv",
+    "twitter.com",
+    "x.com",
     "youtube.com",
     "youtube-nocookie.com",
 }
+X_RESERVED_PATH_SEGMENTS = frozenset(
+    {
+        "about",
+        "compose",
+        "explore",
+        "hashtag",
+        "home",
+        "i",
+        "intent",
+        "messages",
+        "notifications",
+        "search",
+        "settings",
+        "share",
+        "tos",
+        "privacy",
+    }
+)
+INSTAGRAM_RESERVED_PATH_SEGMENTS = frozenset(
+    {
+        "about",
+        "accounts",
+        "direct",
+        "explore",
+        "p",
+        "reel",
+        "reels",
+        "stories",
+        "tv",
+    }
+)
+YOUTUBE_RESERVED_PATH_SEGMENTS = frozenset(
+    {
+        "about",
+        "feed",
+        "playlist",
+        "results",
+        "shorts",
+        "watch",
+    }
+)
+FACEBOOK_RESERVED_PATH_SEGMENTS = frozenset(
+    {
+        "about",
+        "events",
+        "groups",
+        "help",
+        "login",
+        "marketplace",
+        "pages",
+        "privacy",
+        "reel",
+        "sharer",
+        "share.php",
+        "story.php",
+        "watch",
+    }
+)
+TELEGRAM_RESERVED_PATH_SEGMENTS = frozenset(
+    {
+        "addstickers",
+        "c",
+        "joinchat",
+        "login",
+        "proxy",
+        "s",
+        "share",
+        "share/url",
+    }
+)
+THREADS_RESERVED_PATH_SEGMENTS = frozenset(
+    {
+        "about",
+        "explore",
+        "login",
+        "privacy",
+        "tos",
+    }
+)
+GITHUB_RESERVED_PATH_SEGMENTS = frozenset(
+    {
+        "about",
+        "apps",
+        "collections",
+        "contact",
+        "enterprise",
+        "events",
+        "explore",
+        "features",
+        "issues",
+        "login",
+        "marketplace",
+        "new",
+        "notifications",
+        "orgs",
+        "pricing",
+        "pulls",
+        "search",
+        "settings",
+        "sponsors",
+        "topics",
+        "trending",
+    }
+)
+PINTEREST_RESERVED_PATH_SEGMENTS = frozenset(
+    {
+        "_tools",
+        "about",
+        "business",
+        "categories",
+        "discover",
+        "explore",
+        "ideas",
+        "pin",
+        "search",
+    }
+)
+TWITCH_RESERVED_PATH_SEGMENTS = frozenset(
+    {
+        "directory",
+        "downloads",
+        "jobs",
+        "login",
+        "p",
+        "payments",
+        "search",
+        "settings",
+        "store",
+        "subscriptions",
+        "turbo",
+        "videos",
+    }
+)
+GITLAB_RESERVED_PATH_SEGMENTS = frozenset(
+    {
+        "-",
+        "admin",
+        "api",
+        "dashboard",
+        "explore",
+        "groups",
+        "help",
+        "projects",
+        "search",
+        "snippets",
+        "users",
+    }
+)
+KAGGLE_RESERVED_PATH_SEGMENTS = frozenset(
+    {
+        "code",
+        "competitions",
+        "datasets",
+        "discussions",
+        "docs",
+        "learn",
+        "models",
+        "organizations",
+        "search",
+    }
+)
+HUGGING_FACE_RESERVED_PATH_SEGMENTS = frozenset(
+    {
+        "blog",
+        "collections",
+        "datasets",
+        "docs",
+        "learn",
+        "models",
+        "organizations",
+        "spaces",
+        "tasks",
+    }
+)
+KNOWN_MASTODON_HOSTS = frozenset(
+    {
+        "fosstodon.org",
+        "hachyderm.io",
+        "mas.to",
+        "mastodon.online",
+        "mastodon.social",
+        "mastodon.world",
+        "mstdn.social",
+    }
+)
 PERSONAL_WEBSITE_DISALLOWED_HOSTS = {
     "node.js",
     "asp.net",
@@ -756,9 +954,362 @@ def _website_position_scale(
     return MIDDLE_WEBSITE_POSITION_SCALE
 
 
+def _is_top_or_bottom_position(
+    *, text_length: int, start_index: int, end_index: int
+) -> bool:
+    return (
+        _website_position_scale(
+            text_length=text_length,
+            start_index=start_index,
+            end_index=end_index,
+        )
+        == 1.0
+    )
+
+
+def _normalized_host(host: str | None) -> str:
+    if not host:
+        return ""
+    normalized = host.casefold()
+    if normalized.startswith("www."):
+        normalized = normalized[4:]
+    return normalized
+
+
+def _host_matches_domain(host: str | None, domain: str) -> bool:
+    normalized_host = _normalized_host(host)
+    return normalized_host == domain or normalized_host.endswith(f".{domain}")
+
+
+def _split_path_segments(path: str) -> list[str]:
+    normalized_path = re.sub(r"/+", "/", path or "").strip()
+    return [segment for segment in normalized_path.split("/") if segment]
+
+
+def _is_social_host_url(value: str) -> bool:
+    try:
+        host = urlsplit(value).hostname
+    except Exception:
+        return False
+    normalized_host = _normalized_host(host)
+    if not normalized_host:
+        return False
+    return any(
+        normalized_host == domain or normalized_host.endswith(f".{domain}")
+        for domain in SOCIAL_LINK_DOMAINS
+    )
+
+
+def _normalize_social_profile_url(value: str) -> str | None:
+    normalized_url = _normalize_website_url(value)
+    if not normalized_url:
+        return None
+
+    try:
+        parsed = urlsplit(normalized_url)
+    except Exception:
+        return None
+
+    host = _normalized_host(parsed.hostname)
+    if not host:
+        return None
+    path_segments = _split_path_segments(parsed.path or "")
+
+    def _canonical(path: str, *, query: str = "") -> str:
+        return parsed._replace(path=path, query=query, fragment="").geturl().rstrip("/")
+
+    if host.endswith(".medium.com") and host != "medium.com":
+        if path_segments:
+            return None
+        return _canonical("/")
+
+    if host.endswith(".substack.com") and host != "substack.com":
+        # For Substack, canonicalize to the newsletter root.
+        return _canonical("/")
+
+    if not path_segments:
+        return None
+
+    first_segment = path_segments[0].casefold()
+
+    if _host_matches_domain(host, "linkedin.com"):
+        if len(path_segments) < 2:
+            return None
+        section = first_segment
+        if section not in {"in", "pub"}:
+            return None
+        slug = path_segments[1].strip()
+        if not re.fullmatch(r"[A-Za-z0-9_%-]+", slug):
+            return None
+        if section == "in":
+            return _canonical(f"/in/{slug}")
+        pub_path = "/".join(path_segments[1:])
+        return _canonical(f"/pub/{pub_path}")
+
+    if _host_matches_domain(host, "github.com"):
+        if len(path_segments) != 1:
+            return None
+        username = path_segments[0].strip()
+        if not re.fullmatch(r"[A-Za-z0-9-]{1,39}", username):
+            return None
+        if username.casefold() in GITHUB_RESERVED_PATH_SEGMENTS:
+            return None
+        return _canonical(f"/{username}")
+
+    if _host_matches_domain(host, "x.com") or _host_matches_domain(host, "twitter.com"):
+        if len(path_segments) != 1:
+            return None
+        handle = path_segments[0].lstrip("@").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_]{1,15}", handle):
+            return None
+        if handle.casefold() in X_RESERVED_PATH_SEGMENTS:
+            return None
+        return _canonical(f"/{handle}")
+
+    if _host_matches_domain(host, "instagram.com"):
+        if len(path_segments) != 1:
+            return None
+        handle = path_segments[0].strip()
+        if not re.fullmatch(r"[A-Za-z0-9._]{1,30}", handle):
+            return None
+        if handle.casefold() in INSTAGRAM_RESERVED_PATH_SEGMENTS:
+            return None
+        return _canonical(f"/{handle}")
+
+    if _host_matches_domain(host, "threads.net"):
+        if len(path_segments) != 1:
+            return None
+        raw_handle = path_segments[0].strip()
+        if not raw_handle.startswith("@"):
+            return None
+        handle = raw_handle[1:]
+        if not re.fullmatch(r"[A-Za-z0-9._]{1,30}", handle):
+            return None
+        if handle.casefold() in THREADS_RESERVED_PATH_SEGMENTS:
+            return None
+        return _canonical(f"/@{handle}")
+
+    if _host_matches_domain(host, "tiktok.com"):
+        if len(path_segments) != 1:
+            return None
+        raw_handle = path_segments[0].strip()
+        if not raw_handle.startswith("@"):
+            return None
+        handle = raw_handle[1:]
+        if not re.fullmatch(r"[A-Za-z0-9._]{2,24}", handle):
+            return None
+        return _canonical(f"/@{handle}")
+
+    if _host_matches_domain(host, "youtube.com") or _host_matches_domain(
+        host, "youtube-nocookie.com"
+    ):
+        if len(path_segments) == 1 and path_segments[0].startswith("@"):
+            handle = path_segments[0][1:].strip()
+            if not re.fullmatch(r"[A-Za-z0-9._-]{3,30}", handle):
+                return None
+            return _canonical(f"/@{handle}")
+        if len(path_segments) == 2 and first_segment in {"c", "channel", "user"}:
+            slug = path_segments[1].strip()
+            if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", slug):
+                return None
+            return _canonical(f"/{path_segments[0]}/{slug}")
+        if first_segment in YOUTUBE_RESERVED_PATH_SEGMENTS:
+            return None
+        return None
+
+    if _host_matches_domain(host, "bsky.app"):
+        if len(path_segments) != 2 or first_segment != "profile":
+            return None
+        handle = path_segments[1].strip()
+        if not re.fullmatch(r"[A-Za-z0-9.-]+\.[A-Za-z]{2,}", handle):
+            return None
+        return _canonical(f"/profile/{handle}")
+
+    if _host_matches_domain(host, "telegram.me") or _host_matches_domain(host, "t.me"):
+        if len(path_segments) != 1:
+            return None
+        handle = path_segments[0].strip().lstrip("@")
+        if not re.fullmatch(r"[A-Za-z0-9_]{5,32}", handle):
+            return None
+        if handle.casefold() in TELEGRAM_RESERVED_PATH_SEGMENTS:
+            return None
+        return _canonical(f"/{handle}")
+
+    if _host_matches_domain(host, "pinterest.com"):
+        if len(path_segments) != 1:
+            return None
+        handle = path_segments[0].strip()
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,60}", handle):
+            return None
+        if handle.casefold() in PINTEREST_RESERVED_PATH_SEGMENTS:
+            return None
+        return _canonical(f"/{handle}")
+
+    if _host_matches_domain(host, "twitch.tv"):
+        if len(path_segments) != 1:
+            return None
+        handle = path_segments[0].strip()
+        if not re.fullmatch(r"[A-Za-z0-9_]{4,25}", handle):
+            return None
+        if handle.casefold() in TWITCH_RESERVED_PATH_SEGMENTS:
+            return None
+        return _canonical(f"/{handle}")
+
+    if _host_matches_domain(host, "gitlab.com"):
+        if len(path_segments) != 1:
+            return None
+        handle = path_segments[0].strip()
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,255}", handle):
+            return None
+        if handle.casefold() in GITLAB_RESERVED_PATH_SEGMENTS:
+            return None
+        return _canonical(f"/{handle}")
+
+    if _host_matches_domain(host, "stackoverflow.com"):
+        if first_segment == "users" and len(path_segments) >= 2:
+            user_id = path_segments[1].strip()
+            if not re.fullmatch(r"\d+", user_id):
+                return None
+            slug = path_segments[2].strip() if len(path_segments) >= 3 else ""
+            if slug and re.fullmatch(r"[A-Za-z0-9-]{1,120}", slug):
+                return _canonical(f"/users/{user_id}/{slug}")
+            return _canonical(f"/users/{user_id}")
+        if first_segment == "u" and len(path_segments) >= 2:
+            user_id = path_segments[1].strip()
+            if re.fullmatch(r"\d+", user_id):
+                return _canonical(f"/u/{user_id}")
+        return None
+
+    if _host_matches_domain(host, "kaggle.com"):
+        if len(path_segments) != 1:
+            return None
+        handle = path_segments[0].strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", handle):
+            return None
+        if handle.casefold() in KAGGLE_RESERVED_PATH_SEGMENTS:
+            return None
+        return _canonical(f"/{handle}")
+
+    if _host_matches_domain(host, "huggingface.co"):
+        if len(path_segments) != 1:
+            return None
+        handle = path_segments[0].strip()
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,96}", handle):
+            return None
+        if handle.casefold() in HUGGING_FACE_RESERVED_PATH_SEGMENTS:
+            return None
+        return _canonical(f"/{handle}")
+
+    if _host_matches_domain(host, "medium.com"):
+        if len(path_segments) != 1:
+            return None
+        raw_handle = path_segments[0].strip()
+        if not raw_handle.startswith("@"):
+            return None
+        handle = raw_handle[1:]
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", handle):
+            return None
+        return _canonical(f"/@{handle}")
+
+    if (
+        len(path_segments) == 1
+        and first_segment.startswith("@")
+        and (
+            host in KNOWN_MASTODON_HOSTS
+            or "mastodon" in host
+            or "mstdn" in host
+            or "toot" in host
+            or "pleroma" in host
+        )
+    ):
+        handle = first_segment[1:].strip()
+        if not re.fullmatch(
+            r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}(?:@[A-Za-z0-9.-]+\.[A-Za-z]{2,})?",
+            handle,
+        ):
+            return None
+        return _canonical(f"/@{handle}")
+
+    if _host_matches_domain(host, "fb.me"):
+        if len(path_segments) != 1:
+            return None
+        handle = path_segments[0].strip()
+        if not re.fullmatch(r"[A-Za-z0-9.]{1,50}", handle):
+            return None
+        return _canonical(f"/{handle}")
+
+    if _host_matches_domain(host, "facebook.com") or _host_matches_domain(
+        host, "fb.com"
+    ):
+        if first_segment == "profile.php":
+            profile_id = parse_qs(parsed.query).get("id", [None])[0]
+            if profile_id and re.fullmatch(r"[A-Za-z0-9.]+", profile_id):
+                return _canonical("/profile.php", query=f"id={profile_id}")
+            return None
+        if len(path_segments) != 1:
+            return None
+        handle = path_segments[0].strip()
+        if not re.fullmatch(r"[A-Za-z0-9.]{1,50}", handle):
+            return None
+        if handle.casefold() in FACEBOOK_RESERVED_PATH_SEGMENTS:
+            return None
+        return _canonical(f"/{handle}")
+
+    return None
+
+
+def _build_url_search_variants(url: str) -> tuple[str, ...]:
+    try:
+        parsed = urlsplit(url)
+    except Exception:
+        return (url.casefold().rstrip("/"),)
+
+    host = _normalized_host(parsed.hostname)
+    path = (parsed.path or "").rstrip("/")
+    if not host:
+        return (url.casefold().rstrip("/"),)
+
+    host_path = f"{host}{path}".rstrip("/")
+    variants = {
+        url.casefold().rstrip("/"),
+        host_path,
+        f"https://{host_path}",
+        f"http://{host_path}",
+        f"www.{host_path}",
+    }
+    return tuple(sorted((item for item in variants if item), key=len, reverse=True))
+
+
+def _is_personal_website_position_acceptable(resume_text: str, url: str) -> bool:
+    lowered_text = resume_text.casefold()
+    text_length = len(resume_text)
+    found = False
+    for token in _build_url_search_variants(url):
+        start_index = lowered_text.find(token)
+        while start_index != -1:
+            found = True
+            end_index = start_index + len(token)
+            if _is_top_or_bottom_position(
+                text_length=text_length,
+                start_index=start_index,
+                end_index=end_index,
+            ):
+                return True
+            if _has_personal_website_context(
+                resume_text=resume_text,
+                start_index=start_index,
+                end_index=end_index,
+            ):
+                return True
+            start_index = lowered_text.find(token, start_index + 1)
+    return not found
+
+
 def _build_website_and_social_from_candidates(
     llm_candidates: list[tuple[str, str, float]],
     heuristic_candidates: list[tuple[str, float]],
+    *,
+    resume_text: str,
 ) -> tuple[list[str], list[str]]:
     urls_to_consider: list[str] = []
     seen: set[str] = set()
@@ -771,6 +1322,16 @@ def _build_website_and_social_from_candidates(
             if candidate_confidence < LLM_SOCIAL_URL_MIN_CONFIDENCE:
                 continue
         elif candidate_confidence < PERSONAL_WEBSITE_MIN_CONFIDENCE:
+            continue
+
+        if (
+            candidate_kind != LLM_URL_CANDIDATE_KIND_SOCIAL
+            and not _is_social_url(candidate_url)
+            and not _is_personal_website_position_acceptable(
+                resume_text=resume_text,
+                url=candidate_url,
+            )
+        ):
             continue
 
         candidate_key = candidate_url.casefold()
@@ -793,17 +1354,7 @@ def _build_website_and_social_from_candidates(
 
 
 def _is_social_url(value: str) -> bool:
-    try:
-        host = urlsplit(value).hostname
-    except Exception:
-        return False
-    if not host:
-        return False
-    normalized_host = host.casefold().lstrip("www.")
-    return any(
-        normalized_host == domain or normalized_host.endswith(f".{domain}")
-        for domain in SOCIAL_LINK_DOMAINS
-    )
+    return _normalize_social_profile_url(value) is not None
 
 
 def _split_social_and_website_links(
@@ -820,14 +1371,17 @@ def _split_social_and_website_links(
         candidate = raw_link.strip().rstrip("/")
         if not candidate:
             continue
-        if _is_personal_website_disallowed(candidate) and not _is_social_url(candidate):
-            continue
-        if _is_social_url(candidate):
-            social_key = candidate.casefold()
+        social_profile = _normalize_social_profile_url(candidate)
+        if social_profile:
+            social_key = social_profile.casefold()
             if social_key in seen_social:
                 continue
             seen_social.add(social_key)
-            social_links.append(candidate)
+            social_links.append(social_profile)
+            continue
+        if _is_social_host_url(candidate):
+            continue
+        if _is_personal_website_disallowed(candidate):
             continue
 
         normal_key = candidate.casefold()
@@ -1063,6 +1617,7 @@ class ResumeProfileExtractor:
                 _build_website_and_social_from_candidates(
                     parsed_url_candidates,
                     heuristic_candidates,
+                    resume_text=resume_text,
                 )
             )
             if not parsed_url_candidates and (
@@ -1341,6 +1896,7 @@ class ResumeProfileExtractor:
             "- if a URL token looks like a language, framework, or package name (for example: asp.net, next.js, node.js, react.js), never emit it as a website candidate\n"
             "- do not include github.com or linkedin.com profile URLs in website_links\n"
             "- if a URL is a social profile, place it into dedicated profile fields (github_username, linkedin_url) or social_links for cSocialLinks\n"
+            "- social_links must be direct profile URLs (for example: linkedin.com/in/<slug>, x.com/<handle>, youtube.com/@<handle>, bsky.app/profile/<handle>, instagram.com/<handle>, tiktok.com/@<handle>, threads.net/@<handle>, pinterest.com/<handle>, twitch.tv/<handle>, gitlab.com/<handle>, stackoverflow.com/users/<id>/<slug>, kaggle.com/<handle>, huggingface.co/<handle>, medium.com/@<handle>, <name>.substack.com) and must exclude company/group/post/feed/watch pages\n"
             "- infer URLs from regex-like patterns in the provided text, including markdown links\n"
             "- when in doubt, omit website URLs (be conservative)\n"
             "- only assign high confidence to PERSONAL website candidates when you can verify the link is a person-owned homepage/portfolio and not a technology reference\n"
@@ -1766,7 +2322,7 @@ class ResumeProfileExtractor:
     def _extract_website_link_candidates(
         resume_text: str,
     ) -> list[tuple[str, float]]:
-        matches: list[tuple[str, float]] = []
+        matches: list[tuple[str, float, int, int]] = []
         text_length = len(resume_text)
         for match in MARKDOWN_URL_PATTERN.finditer(resume_text):
             raw_url = match.group(1).strip().strip(")]},.;:")
@@ -1777,7 +2333,7 @@ class ResumeProfileExtractor:
                 start_index=match.start(),
                 end_index=match.end(),
             )
-            matches.append((raw_url, confidence))
+            matches.append((raw_url, confidence, match.start(), match.end()))
 
         for match in SCHEME_URL_PATTERN.finditer(resume_text):
             confidence = 1.0 * _website_position_scale(
@@ -1785,7 +2341,7 @@ class ResumeProfileExtractor:
                 start_index=match.start(),
                 end_index=match.end(),
             )
-            matches.append((match.group(0), confidence))
+            matches.append((match.group(0), confidence, match.start(), match.end()))
 
         for match in BARE_DOMAIN_URL_PATTERN.finditer(resume_text):
             if match.start() > 0 and resume_text[match.start() - 1] == "@":
@@ -1806,14 +2362,26 @@ class ResumeProfileExtractor:
                 confidence = PERSONAL_WEBSITE_MIN_CONFIDENCE * position_scale
             if confidence < PERSONAL_WEBSITE_MIN_CONFIDENCE:
                 continue
-            matches.append((raw_url, confidence))
+            matches.append((raw_url, confidence, match.start(), match.end()))
 
         normalized_links: list[tuple[str, float]] = []
         seen: set[str] = set()
-        for raw_link, confidence in matches:
+        for raw_link, confidence, start_index, end_index in matches:
             normalized_link = _normalize_website_url(raw_link.strip())
             if not normalized_link:
                 continue
+            is_social = _is_social_url(normalized_link)
+            if not is_social and not _is_top_or_bottom_position(
+                text_length=text_length,
+                start_index=start_index,
+                end_index=end_index,
+            ):
+                if not _has_personal_website_context(
+                    resume_text,
+                    start_index,
+                    end_index,
+                ):
+                    continue
             normalized_key = normalized_link.casefold()
             if normalized_key in seen:
                 continue

@@ -58,6 +58,15 @@ def test_extract_website_links_includes_middle_scheme_url() -> None:
     assert "https://michaelwu.dev" in links
 
 
+def test_extract_website_links_excludes_middle_company_url_without_context() -> None:
+    """Middle 90% company-style links should be ignored unless context marks personal use."""
+    links = ResumeProfileExtractor._extract_website_links(
+        f"{'a' * 500}\nBuilt integrations with https://acme.com\n{'b' * 500}"
+    )
+
+    assert "https://acme.com" not in links
+
+
 def test_normalize_website_url_removes_zero_width_characters() -> None:
     """Unicode formatting characters should not block valid URL normalization."""
     assert (
@@ -78,8 +87,73 @@ def test_extract_profile_links_route_social_urls_away_from_website() -> None:
 
     assert result.website_links == ["https://michaelwu.dev"]
     assert result.github_username == "wumichaelm"
-    assert result.linkedin_url == "https://linkedin.com/in/wumichaelm"
+    assert result.linkedin_url is not None
+    assert result.linkedin_url.casefold().endswith("linkedin.com/in/wumichaelm")
     assert all("node.js" not in link.casefold() for link in result.website_links)
+
+
+def test_extract_social_links_only_keeps_direct_profile_urls() -> None:
+    """Social URLs should be retained only when they point to a user profile."""
+    extractor = ResumeProfileExtractor(api_key=None)
+    result = extractor.extract(
+        "https://www.youtube.com/@maimtime\n"
+        "https://youtube.com/watch?v=dQw4w9WgXcQ\n"
+        "https://x.com/asianluxetravel\n"
+        "https://x.com/home\n"
+        "https://www.linkedin.com/in/wumichaelm/\n"
+        "https://www.linkedin.com/company/acme\n"
+        "https://bsky.app/profile/michaelmwu.bsky.social\n"
+        "https://bsky.app/about\n"
+        "https://www.instagram.com/michaelmwu/\n"
+        "https://www.instagram.com/p/abc123/\n"
+        "https://fb.me/michaelmwu\n"
+        "https://telegram.me/michaelmwu\n"
+        "https://www.tiktok.com/@michaelmwu\n"
+        "https://www.tiktok.com/discover/travel\n"
+        "https://www.threads.net/@michaelmwu\n"
+        "https://www.threads.net/t/CuAbc123\n"
+        "https://www.pinterest.com/michaelmwu/\n"
+        "https://www.pinterest.com/pin/12345/\n"
+        "https://www.twitch.tv/michaelmwu\n"
+        "https://www.twitch.tv/directory\n"
+        "https://mastodon.social/@michaelmwu\n"
+        "https://mastodon.social/@michaelmwu/112233\n"
+        "https://gitlab.com/michaelmwu\n"
+        "https://gitlab.com/explore\n"
+        "https://stackoverflow.com/users/12345/michael-mwu\n"
+        "https://stackoverflow.com/questions/1/example\n"
+        "https://www.kaggle.com/michaelmwu\n"
+        "https://www.kaggle.com/competitions\n"
+        "https://huggingface.co/michaelmwu\n"
+        "https://huggingface.co/models\n"
+        "https://medium.com/@michaelmwu\n"
+        "https://medium.com/tag/python\n"
+        "https://michaelmwu.substack.com\n"
+        "https://substack.com/home\n"
+    )
+
+    assert result.linkedin_url is not None
+    assert result.linkedin_url.casefold().endswith("linkedin.com/in/wumichaelm")
+    assert result.website_links == []
+    assert result.social_links == [
+        "https://youtube.com/@maimtime",
+        "https://x.com/asianluxetravel",
+        "https://bsky.app/profile/michaelmwu.bsky.social",
+        "https://instagram.com/michaelmwu",
+        "https://fb.me/michaelmwu",
+        "https://telegram.me/michaelmwu",
+        "https://tiktok.com/@michaelmwu",
+        "https://threads.net/@michaelmwu",
+        "https://pinterest.com/michaelmwu",
+        "https://twitch.tv/michaelmwu",
+        "https://mastodon.social/@michaelmwu",
+        "https://gitlab.com/michaelmwu",
+        "https://stackoverflow.com/users/12345/michael-mwu",
+        "https://kaggle.com/michaelmwu",
+        "https://huggingface.co/michaelmwu",
+        "https://medium.com/@michaelmwu",
+        "https://michaelmwu.substack.com",
+    ]
 
 
 def test_split_name_prefers_llm_output() -> None:
