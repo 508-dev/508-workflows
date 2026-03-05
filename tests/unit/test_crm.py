@@ -3411,6 +3411,87 @@ class TestCRMCog:
             == "🔄 Reprocessing resume and extracting profile fields now..."
         )
 
+    @pytest.mark.asyncio
+    async def test_build_match_candidates_posting_fetches_jd_links_from_text(
+        self, crm_cog
+    ):
+        """Starter text JD links should be fetched while non-JD links are skipped."""
+        starter = Mock()
+        jd_url = "https://boards.greenhouse.io/acme/jobs/12345"
+        non_jd_url = "https://example.com/about"
+        starter.content = f"We are hiring: {jd_url} and docs at {non_jd_url}"
+        starter.attachments = []
+        starter.embeds = []
+
+        with patch.object(
+            crm_cog,
+            "_fetch_match_candidates_link_text",
+            new=AsyncMock(return_value="Senior backend role"),
+        ) as fetch_mock:
+            posting, metadata = await crm_cog._build_match_candidates_posting(starter)
+
+        fetch_mock.assert_awaited_once_with(jd_url)
+        assert "Senior backend role" in posting
+        assert metadata["links_discovered"] == 2
+        assert metadata["links_fetched"] == 1
+
+    @pytest.mark.asyncio
+    async def test_build_match_candidates_posting_does_not_fetch_non_jd_links(
+        self, crm_cog
+    ):
+        """No fetch should occur when only non-JD links are present."""
+        starter = Mock()
+        starter.content = "Company info: https://example.com/about"
+        starter.attachments = []
+        starter.embeds = []
+
+        with patch.object(
+            crm_cog,
+            "_fetch_match_candidates_link_text",
+            new=AsyncMock(return_value="ignored"),
+        ) as fetch_mock:
+            posting, metadata = await crm_cog._build_match_candidates_posting(starter)
+
+        fetch_mock.assert_not_awaited()
+        assert "Referenced links:" in posting
+        assert metadata["links_discovered"] == 1
+        assert metadata["links_fetched"] == 0
+
+    @pytest.mark.asyncio
+    async def test_build_match_candidates_posting_scans_attachments_for_jd_links(
+        self, crm_cog
+    ):
+        """Attachment-extracted URLs should be treated as JD candidates."""
+        starter = Mock()
+        starter.content = ""
+        starter.attachments = [Mock(filename="job-posting.pdf")]
+        starter.embeds = []
+        attachment_text = (
+            "See full JD at https://jobs.lever.co/acme/abcde and apply there."
+        )
+
+        with (
+            patch.object(
+                crm_cog,
+                "_read_match_candidates_attachment_text",
+                new=AsyncMock(return_value=attachment_text),
+            ) as read_attachment_mock,
+            patch.object(
+                crm_cog,
+                "_fetch_match_candidates_link_text",
+                new=AsyncMock(return_value="Role details from Lever"),
+            ) as fetch_mock,
+        ):
+            posting, metadata = await crm_cog._build_match_candidates_posting(starter)
+
+        read_attachment_mock.assert_awaited_once()
+        fetch_mock.assert_awaited_once_with("https://jobs.lever.co/acme/abcde")
+        assert "Attachment job-posting.pdf" in posting
+        assert "Role details from Lever" in posting
+        assert metadata["attachments_scanned"] == 1
+        assert metadata["attachments_extracted"] == 1
+        assert metadata["links_fetched"] == 1
+
 
 class TestResumeButtonView:
     """Tests for ResumeButtonView class."""

@@ -7,12 +7,14 @@ It allows team members to quickly access CRM data without leaving Discord.
 
 import asyncio
 import ast
+import html
 import io
 import json
 import logging
 from datetime import date, datetime, timezone
 import re
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import aiohttp
 import discord
@@ -64,6 +66,35 @@ ONBOARDER_FIELD_CANDIDATES = (
 EXCLUDED_ONBOARDING_STATES = frozenset({"onboarded", "waitlist", "rejected"})
 ONBOARDING_QUEUE_MAX_SIZE = 200
 ONBOARDING_QUEUE_PAGE_SIZE = 1
+MATCH_CANDIDATES_MAX_ATTACHMENT_SCAN = 5
+MATCH_CANDIDATES_MAX_LINK_SCAN = 3
+MATCH_CANDIDATES_MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
+MATCH_CANDIDATES_MAX_ATTACHMENT_TEXT_CHARS = 10000
+MATCH_CANDIDATES_MAX_LINK_TEXT_CHARS = 12000
+MATCH_CANDIDATES_MAX_POSTING_CHARS = 36000
+MATCH_CANDIDATES_SUPPORTED_ATTACHMENT_EXTENSIONS = frozenset(
+    {".txt", ".md", ".pdf", ".doc", ".docx", ".html", ".htm", ".rtf"}
+)
+MATCH_CANDIDATES_URL_PATTERN = re.compile(r"(?i)\bhttps?://[^\s<>()\[\]\"']+")
+MATCH_CANDIDATES_JD_URL_HINTS = (
+    "job",
+    "jobs",
+    "jd",
+    "job-description",
+    "position",
+    "role",
+    "career",
+    "careers",
+    "hiring",
+    "greenhouse.io",
+    "lever.co",
+    "ashbyhq.com",
+    "workable.com",
+    "smartrecruiters.com",
+    "linkedin.com/jobs",
+    "docs.google.com/document",
+    "notion.site",
+)
 EspoAPI = espo.EspoAPI
 EspoAPIError = espo.EspoAPIError
 
@@ -3584,6 +3615,196 @@ class CRMCog(commands.Cog):
             return extracted_text
         return file_content.decode("utf-8", errors="ignore")
 
+    @staticmethod
+    def _extract_urls_from_text(text: str) -> list[str]:
+        if not text:
+            return []
+        urls: list[str] = []
+        seen: set[str] = set()
+        for raw in MATCH_CANDIDATES_URL_PATTERN.findall(text):
+            normalized = raw.rstrip(".,);]>")
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            urls.append(normalized)
+        return urls
+
+    @staticmethod
+    def _is_probable_jd_url(url: str) -> bool:
+        lowered = url.casefold()
+        return any(hint in lowered for hint in MATCH_CANDIDATES_JD_URL_HINTS)
+
+    @staticmethod
+    def _strip_html_to_text(raw_html: str) -> str:
+        without_scripts = re.sub(
+            r"(?is)<(script|style|noscript).*?>.*?</\1>",
+            " ",
+            raw_html,
+        )
+        text_only = re.sub(r"(?s)<[^>]+>", " ", without_scripts)
+        unescaped = html.unescape(text_only)
+        return re.sub(r"\s+", " ", unescaped).strip()
+
+    async def _read_match_candidates_attachment_text(
+        self, attachment: discord.Attachment
+    ) -> str | None:
+        filename = attachment.filename or ""
+        extension = self._resume_file_extension(filename)
+        content_type = (attachment.content_type or "").strip().lower()
+        is_supported_type = (
+            extension in MATCH_CANDIDATES_SUPPORTED_ATTACHMENT_EXTENSIONS
+            or content_type.startswith("text/")
+        )
+        if not is_supported_type:
+            return None
+        if attachment.size and attachment.size > MATCH_CANDIDATES_MAX_ATTACHMENT_BYTES:
+            logger.info(
+                "Skipping oversized match-candidates attachment filename=%s size=%s",
+                filename,
+                attachment.size,
+            )
+            return None
+
+        try:
+            file_content = await attachment.read()
+        except Exception as exc:
+            logger.warning(
+                "Failed reading match-candidates attachment filename=%s error=%s",
+                filename,
+                exc,
+            )
+            return None
+
+        extracted = self._extract_resume_text(file_content, filename=filename).strip()
+        if not extracted:
+            return None
+        if len(extracted) > MATCH_CANDIDATES_MAX_ATTACHMENT_TEXT_CHARS:
+            return (
+                extracted[:MATCH_CANDIDATES_MAX_ATTACHMENT_TEXT_CHARS].rstrip()
+                + "\n[attachment text truncated]"
+            )
+        return extracted
+
+    async def _fetch_match_candidates_link_text(self, url: str) -> str | None:
+        timeout = aiohttp.ClientTimeout(total=12)
+        headers = {"User-Agent": "508-job-match/1.0"}
+        try:
+            async with aiohttp.ClientSession(
+                timeout=timeout, headers=headers
+            ) as session:
+                async with session.get(url, allow_redirects=True) as response:
+                    if response.status >= 400:
+                        return None
+                    content_type = (
+                        response.headers.get("Content-Type", "")
+                        .split(";")[0]
+                        .strip()
+                        .lower()
+                    )
+                    final_url = str(response.url)
+                    raw = await response.read()
+        except Exception as exc:
+            logger.info("Failed fetching JD link url=%s error=%s", url, exc)
+            return None
+
+        if not raw:
+            return None
+
+        lower_final = final_url.casefold()
+        if content_type == "application/pdf" or lower_final.endswith(".pdf"):
+            text = self._extract_resume_text(raw, filename="linked_jd.pdf")
+        elif content_type in {"text/plain", "text/markdown"}:
+            text = raw.decode("utf-8", errors="ignore")
+        else:
+            text = self._strip_html_to_text(raw.decode("utf-8", errors="ignore"))
+
+        cleaned = re.sub(r"\s+", " ", text).strip()
+        if not cleaned:
+            return None
+        if len(cleaned) > MATCH_CANDIDATES_MAX_LINK_TEXT_CHARS:
+            return cleaned[:MATCH_CANDIDATES_MAX_LINK_TEXT_CHARS].rstrip()
+        return cleaned
+
+    async def _build_match_candidates_posting(
+        self, starter: discord.Message
+    ) -> tuple[str, dict[str, Any]]:
+        base_text = starter.content.strip()
+        attachment_chunks: list[str] = []
+        attachment_urls: list[str] = []
+        scanned_attachments = 0
+
+        for attachment in starter.attachments[:MATCH_CANDIDATES_MAX_ATTACHMENT_SCAN]:
+            scanned_attachments += 1
+            extracted = await self._read_match_candidates_attachment_text(attachment)
+            if not extracted:
+                continue
+            display_name = attachment.filename or "attachment"
+            attachment_chunks.append(f"Attachment {display_name}:\n{extracted}")
+            attachment_urls.extend(self._extract_urls_from_text(extracted))
+
+        candidate_urls: list[str] = []
+        candidate_urls.extend(self._extract_urls_from_text(base_text))
+        candidate_urls.extend(attachment_urls)
+        for embed in starter.embeds:
+            if embed.url:
+                candidate_urls.append(embed.url)
+
+        deduped_urls: list[str] = []
+        seen_urls: set[str] = set()
+        for raw_url in candidate_urls:
+            parsed = urlsplit(raw_url)
+            if not parsed.scheme or not parsed.netloc:
+                continue
+            normalized = raw_url.strip()
+            if not normalized or normalized in seen_urls:
+                continue
+            seen_urls.add(normalized)
+            deduped_urls.append(normalized)
+
+        likely_jd_urls = [u for u in deduped_urls if self._is_probable_jd_url(u)]
+        urls_to_fetch = likely_jd_urls[:MATCH_CANDIDATES_MAX_LINK_SCAN]
+
+        fetched_link_chunks: list[str] = []
+        fetched_links: list[str] = []
+        for url in urls_to_fetch:
+            link_text = await self._fetch_match_candidates_link_text(url)
+            if not link_text:
+                continue
+            fetched_links.append(url)
+            fetched_link_chunks.append(f"Source {url}:\n{link_text}")
+
+        sections: list[str] = []
+        if base_text:
+            sections.append(base_text)
+        if attachment_chunks:
+            sections.append(
+                "Attached job description documents (extracted text):\n\n"
+                + "\n\n".join(attachment_chunks)
+            )
+        if deduped_urls:
+            sections.append("Referenced links:\n" + "\n".join(deduped_urls))
+        if fetched_link_chunks:
+            sections.append(
+                "Referenced job description pages (extracted text):\n\n"
+                + "\n\n".join(fetched_link_chunks)
+            )
+
+        posting = "\n\n".join(part for part in sections if part.strip()).strip()
+        if len(posting) > MATCH_CANDIDATES_MAX_POSTING_CHARS:
+            posting = (
+                posting[:MATCH_CANDIDATES_MAX_POSTING_CHARS].rstrip() + "\n[truncated]"
+            )
+
+        metadata = {
+            "starter_has_text": bool(base_text),
+            "attachments_seen": len(starter.attachments),
+            "attachments_scanned": scanned_attachments,
+            "attachments_extracted": len(attachment_chunks),
+            "links_discovered": len(deduped_urls),
+            "links_fetched": len(fetched_links),
+        }
+        return posting, metadata
+
     def _extract_resume_contact_hints(
         self,
         file_content: bytes,
@@ -6507,7 +6728,7 @@ class CRMCog(commands.Cog):
 
     @app_commands.command(
         name="match-candidates",
-        description="Reads this thread's opening message as a job posting and returns ranked matching candidates.",
+        description="Reads this thread's opening message, attachments, and JD links, then returns ranked matching candidates.",
     )
     @require_role("Member")
     async def match_candidates(
@@ -6543,7 +6764,7 @@ class CRMCog(commands.Cog):
                 fetch_error = exc
                 starter = None
 
-        if starter is None or not starter.content.strip():
+        if starter is None:
             metadata = {"stage": "starter_message_unavailable"}
             if fetch_error is not None:
                 error_text = (
@@ -6565,7 +6786,24 @@ class CRMCog(commands.Cog):
             )
             return
 
-        posting = starter.content
+        posting, posting_metadata = await self._build_match_candidates_posting(starter)
+        if not posting.strip():
+            self._audit_command(
+                interaction=interaction,
+                action="crm.match_candidates",
+                result="error",
+                metadata={
+                    "stage": "starter_message_empty_after_scan",
+                    **posting_metadata,
+                },
+            )
+            await interaction.response.send_message(
+                "⚠️ Could not extract a job description from the thread opener, "
+                "its attachments, or linked pages.",
+                ephemeral=True,
+            )
+            return
+
         if thread.applied_tags:
             tag_names = ", ".join(t.name for t in thread.applied_tags)
             posting = f"Thread tags: {tag_names}\n\n{posting}"
@@ -6735,6 +6973,7 @@ class CRMCog(commands.Cog):
                 "preferred_skills_count": len(requirements.preferred_skills),
                 "discord_role_types": requirements.discord_role_types,
                 "candidates_returned": len(candidates),
+                **posting_metadata,
             },
         )
 
