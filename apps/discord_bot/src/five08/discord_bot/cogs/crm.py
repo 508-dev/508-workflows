@@ -24,7 +24,7 @@ from discord.ext import commands
 
 from five08.discord_bot.config import settings
 from five08.clients import espo
-from five08.skills import normalize_skill_list
+from five08.skills import normalize_skill, normalize_skill_list
 from five08.resume_extractor import (
     ResumeExtractedProfile,
     ResumeProfileExtractor,
@@ -928,6 +928,131 @@ class ResumeEditSocialLinksModal(discord.ui.Modal, title="Edit Social Links"):
         )
 
 
+class ResumeEditSkillsModal(discord.ui.Modal, title="Edit Skills"):
+    """Modal for editing proposed skills before confirmation."""
+
+    skills_input: discord.ui.TextInput = discord.ui.TextInput(
+        label="Skills (one per line, optional :strength)",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=1000,
+    )
+
+    def __init__(self, *, confirmation_view: "ResumeUpdateConfirmationView") -> None:
+        super().__init__()
+        self.confirmation_view = confirmation_view
+        default_lines = self._build_default_lines()
+        self.skills_input.default = "\n".join(default_lines)
+
+    def _build_default_lines(self) -> list[str]:
+        skills = self.confirmation_view._normalize_skills_value(
+            self.confirmation_view.proposed_updates.get("skills")
+        )
+        strengths = self.confirmation_view._parse_skill_strengths(
+            self.confirmation_view.proposed_updates.get("cSkillAttrs")
+        )
+        lines: list[str] = []
+        seen: set[str] = set()
+        for skill in skills:
+            key = skill.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            strength = strengths.get(key)
+            if strength is not None:
+                lines.append(f"{skill}: {strength}")
+            else:
+                lines.append(skill)
+        for key, strength in strengths.items():
+            if key in seen:
+                continue
+            lines.append(f"{key}: {strength}")
+        return lines
+
+    @staticmethod
+    def _parse_skill_lines(raw: str) -> tuple[list[str], dict[str, int]]:
+        skills: list[str] = []
+        strengths: dict[str, int] = {}
+        seen: set[str] = set()
+
+        for raw_line in raw.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            token = line
+            strength_value: int | None = None
+            if ":" in line:
+                token, raw_strength = line.rsplit(":", 1)
+                token = token.strip()
+                raw_strength = raw_strength.strip()
+                if raw_strength:
+                    try:
+                        parsed_strength = int(float(raw_strength))
+                    except (TypeError, ValueError):
+                        parsed_strength = None
+                    if parsed_strength and 1 <= parsed_strength <= 5:
+                        strength_value = parsed_strength
+
+            normalized_skill = normalize_skill(token)
+            if not normalized_skill:
+                continue
+            key = normalized_skill.casefold()
+            if key not in seen:
+                seen.add(key)
+                skills.append(normalized_skill)
+            if strength_value is not None:
+                strengths[key] = strength_value
+
+        return skills, strengths
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        raw = self.skills_input.value or ""
+        requested_skills, requested_strengths = self._parse_skill_lines(raw)
+
+        if not requested_skills and not requested_strengths:
+            self.confirmation_view.proposed_updates.pop("skills", None)
+            self.confirmation_view.proposed_updates.pop("cSkillAttrs", None)
+            await interaction.response.send_message(
+                "✅ Skills updates cleared. Click **Confirm Updates** to apply.",
+                ephemeral=True,
+            )
+            return
+
+        final_skills = requested_skills
+
+        current_strengths = self.confirmation_view._parse_skill_strengths(
+            self.confirmation_view.proposed_updates.get("cSkillAttrs")
+        )
+        final_strengths: dict[str, int] = {}
+        for skill in final_skills:
+            key = skill.casefold()
+            strength = requested_strengths.get(key)
+            if strength is None:
+                strength = current_strengths.get(key)
+            if strength is not None:
+                final_strengths[key] = strength
+
+        if final_skills:
+            self.confirmation_view.proposed_updates["skills"] = final_skills
+        else:
+            self.confirmation_view.proposed_updates.pop("skills", None)
+
+        if final_strengths:
+            self.confirmation_view.proposed_updates["cSkillAttrs"] = (
+                self.confirmation_view.crm_cog._serialize_skill_attrs(final_strengths)
+            )
+        else:
+            self.confirmation_view.proposed_updates.pop("cSkillAttrs", None)
+
+        count = len(final_skills)
+        await interaction.response.send_message(
+            f"✅ Skills updated to {count} skill{'s' if count != 1 else ''}. "
+            "Click **Confirm Updates** to apply.",
+            ephemeral=True,
+        )
+
+
 class ResumeEditWebsitesButton(discord.ui.Button["ResumeUpdateConfirmationView"]):
     """Button that opens the Edit Websites modal."""
 
@@ -969,6 +1094,28 @@ class ResumeEditSocialLinksButton(discord.ui.Button["ResumeUpdateConfirmationVie
             return
         await interaction.response.send_modal(
             ResumeEditSocialLinksModal(confirmation_view=view)
+        )
+
+
+class ResumeEditSkillsButton(discord.ui.Button["ResumeUpdateConfirmationView"]):
+    """Button that opens the Edit Skills modal."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            label="Edit Skills",
+            style=discord.ButtonStyle.secondary,
+            custom_id="resume_edit_skills",
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if not isinstance(view, ResumeUpdateConfirmationView):
+            await interaction.response.send_message(
+                "❌ Unable to edit skills.", ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(
+            ResumeEditSkillsModal(confirmation_view=view)
         )
 
 
@@ -1024,6 +1171,8 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             self.add_item(ResumeEditWebsitesButton())
         if proposed_updates.get("cSocialLinks"):
             self.add_item(ResumeEditSocialLinksButton())
+        if proposed_updates.get("skills") or proposed_updates.get("cSkillAttrs"):
+            self.add_item(ResumeEditSkillsButton())
 
     def _set_seniority_override(self, value: str) -> str:
         self.seniority_override = value
@@ -1135,6 +1284,41 @@ class ResumeUpdateConfirmationView(discord.ui.View):
 
         text = str(value).strip()
         return cls._truncate_embed_field(text or "None", cls._APPLIED_VALUE_LIMIT)
+
+    @staticmethod
+    def _normalize_skills_value(value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            raw_skills = [item.strip() for item in value.split(",") if item.strip()]
+        elif isinstance(value, (list, tuple, set)):
+            raw_skills = [str(item).strip() for item in value if str(item).strip()]
+        else:
+            raw_skills = []
+        return normalize_skill_list(raw_skills)
+
+    @classmethod
+    def _parse_skill_strengths(cls, value: Any) -> dict[str, int]:
+        parsed = cls._decode_json_like_mapping(value) or {}
+        strengths: dict[str, int] = {}
+        for raw_skill, raw_payload in parsed.items():
+            skill = str(raw_skill).strip()
+            if not skill:
+                continue
+            strength_value = (
+                raw_payload.get("strength")
+                if isinstance(raw_payload, dict)
+                else raw_payload
+            )
+            if strength_value is None:
+                continue
+            try:
+                strength = int(float(strength_value))
+            except Exception:
+                continue
+            if 1 <= strength <= 5:
+                strengths[skill.casefold()] = strength
+        return strengths
 
     def _build_applied_updates_lines(
         self,
@@ -2714,6 +2898,79 @@ class CRMCog(commands.Cog):
         ) -> str:
             return ResumeUpdateConfirmationView._truncate_embed_field(value, limit)
 
+        def parse_skill_snapshot(value: Any) -> dict[str, tuple[str, int | None]]:
+            if value is None:
+                return {}
+            text = str(value).strip()
+            if not text or text.casefold() == "none":
+                return {}
+            tokens = [item.strip() for item in text.split(",") if item.strip()]
+            parsed: dict[str, tuple[str, int | None]] = {}
+            for token in tokens:
+                name = token
+                strength: int | None = None
+                match = re.match(r"^(.*)\((\d+)\)$", token)
+                if match:
+                    name = match.group(1).strip()
+                    try:
+                        strength = int(match.group(2))
+                    except ValueError:
+                        strength = None
+                normalized = normalize_skill(name)
+                if not normalized:
+                    continue
+                key = normalized.casefold()
+                if key in parsed:
+                    existing_name, existing_strength = parsed[key]
+                    if existing_strength is None and strength is not None:
+                        parsed[key] = (existing_name, strength)
+                    continue
+                parsed[key] = (normalized, strength)
+            return parsed
+
+        def format_skill_delta(current: Any, proposed: Any) -> str:
+            current_map = parse_skill_snapshot(current)
+            proposed_map = parse_skill_snapshot(proposed)
+
+            added: list[str] = []
+            removed: list[str] = []
+            strength_updates: list[str] = []
+
+            for key, (name, strength) in proposed_map.items():
+                if key not in current_map:
+                    if strength is not None:
+                        added.append(f"{name} ({strength})")
+                    else:
+                        added.append(name)
+
+            for key, (name, strength) in current_map.items():
+                if key not in proposed_map:
+                    if strength is not None:
+                        removed.append(f"{name} ({strength})")
+                    else:
+                        removed.append(name)
+
+            for key, (name, strength) in proposed_map.items():
+                if key not in current_map:
+                    continue
+                current_strength = current_map[key][1]
+                if current_strength == strength:
+                    continue
+                if current_strength is None and strength is None:
+                    continue
+                before = str(current_strength) if current_strength is not None else "?"
+                after = str(strength) if strength is not None else "?"
+                strength_updates.append(f"{name} ({before}->{after})")
+
+            parts: list[str] = []
+            if added:
+                parts.append(f"Added: {', '.join(added)}")
+            if strength_updates:
+                parts.append(f"Strengths: {', '.join(strength_updates)}")
+            if removed:
+                parts.append(f"Removed: {', '.join(removed)}")
+            return "; ".join(parts)
+
         proposed_updates_raw = result.get("proposed_updates")
         proposed_updates: dict[str, Any] = {}
         if isinstance(proposed_updates_raw, dict):
@@ -2755,6 +3012,16 @@ class CRMCog(commands.Cog):
                     field_name=field_name,
                     label=label,
                 )
+                if field_name == "skills":
+                    delta = format_skill_delta(
+                        change.get("current"), change.get("proposed")
+                    )
+                    if delta:
+                        truncated_delta = truncate_preview_value(
+                            delta, field_name=field_name, label=label
+                        )
+                        lines.append(f"**{label}**: `{truncated_delta}`")
+                        continue
                 lines.append(f"**{label}**: `{current}` → `{proposed}`")
             embed.add_field(
                 name="Proposed Changes",
