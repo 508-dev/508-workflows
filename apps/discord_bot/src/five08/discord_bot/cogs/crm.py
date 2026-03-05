@@ -1927,6 +1927,20 @@ class CRMCog(commands.Cog):
         if not await self._mark_thread_auto_matched(thread.id):
             return
 
+        parent_channel = thread.parent
+        guild = thread.guild
+        if guild is not None and parent_channel is not None:
+            if parent_channel.permissions_for(guild.default_role).view_channel:
+                logger.warning(
+                    "Skipping auto-match publish in publicly visible channel "
+                    "(guild=%s channel=%s thread=%s)",
+                    guild.id,
+                    parent_channel.id,
+                    thread.id,
+                )
+                await self._unmark_thread_auto_matched(thread.id)
+                return
+
         posting = await self._read_thread_posting(thread)
         if posting is None:
             await self._unmark_thread_auto_matched(thread.id)
@@ -1987,19 +2001,6 @@ class CRMCog(commands.Cog):
                 "Run `/match-candidates` manually in this thread."
             )
             return
-
-        parent_channel = thread.parent
-        guild = thread.guild
-        if guild is not None and parent_channel is not None:
-            if parent_channel.permissions_for(guild.default_role).view_channel:
-                logger.warning(
-                    "Skipping auto-match publish in publicly visible channel "
-                    "(guild=%s channel=%s thread=%s)",
-                    guild.id,
-                    parent_channel.id,
-                    thread.id,
-                )
-                return
 
         messages, _ = self._render_match_candidates_messages(
             requirements=requirements,
@@ -7132,6 +7133,15 @@ class CRMCog(commands.Cog):
         if not isinstance(message.channel, discord.TextChannel):
             return
         if not self._is_jobs_channel_registered(message.guild.id, message.channel.id):
+            return
+        if message.channel.permissions_for(message.guild.default_role).view_channel:
+            logger.warning(
+                "Skipping auto-thread in publicly visible channel "
+                "(guild=%s channel=%s message=%s)",
+                message.guild.id,
+                message.channel.id,
+                message.id,
+            )
             return
         if not message.content.strip():
             return
