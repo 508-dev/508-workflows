@@ -61,6 +61,8 @@ EXCLUDED_ONBOARDING_STATES = frozenset({"onboarded", "waitlist", "rejected"})
 ONBOARDING_QUEUE_MAX_SIZE = 200
 ONBOARDING_QUEUE_PAGE_SIZE = 1
 AUTO_MATCH_DEDUPE_MAX = 10_000
+# Exclude known-bad resume artifact from auto-match rendering.
+AUTO_MATCH_EXCLUDED_RESUME_NAMES = frozenset({"Vladyslav_Stryzhak.pdf"})
 EspoAPI = espo.EspoAPI
 EspoAPIError = espo.EspoAPIError
 JobWatchChannel = discord.TextChannel | discord.ForumChannel
@@ -1862,7 +1864,7 @@ class CRMCog(commands.Cog):
             if (
                 candidate.latest_resume_id
                 and candidate.latest_resume_name
-                and candidate.latest_resume_name != "Vladyslav_Stryzhak.pdf"
+                and candidate.latest_resume_name not in AUTO_MATCH_EXCLUDED_RESUME_NAMES
             ):
                 parts.append(f"Resume: `{candidate.latest_resume_name}`")
                 resume_options.append(
@@ -1950,6 +1952,7 @@ class CRMCog(commands.Cog):
             return
 
         if not requirements.required_skills:
+            await self._unmark_thread_auto_matched(thread.id)
             await thread.send(
                 "⚠️ No required skills could be extracted automatically. "
                 "Run `/match-candidates` manually after updating the posting."
@@ -1961,6 +1964,7 @@ class CRMCog(commands.Cog):
                 search_candidates, settings, requirements, limit=10
             )
         except Exception as exc:
+            await self._unmark_thread_auto_matched(thread.id)
             logger.warning(
                 "Auto candidate search failed (guild=%s thread=%s trigger=%s): %s",
                 thread.guild.id if thread.guild else "unknown",
@@ -1973,6 +1977,19 @@ class CRMCog(commands.Cog):
                 "Run `/match-candidates` manually in this thread."
             )
             return
+
+        parent_channel = thread.parent
+        guild = thread.guild
+        if guild is not None and parent_channel is not None:
+            if parent_channel.permissions_for(guild.default_role).view_channel:
+                logger.warning(
+                    "Skipping auto-match publish in publicly visible channel "
+                    "(guild=%s channel=%s thread=%s)",
+                    guild.id,
+                    parent_channel.id,
+                    thread.id,
+                )
+                return
 
         messages, _ = self._render_match_candidates_messages(
             requirements=requirements,
