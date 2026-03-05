@@ -804,6 +804,17 @@ def test_extract_header_location_supports_city_country() -> None:
     assert country == "France"
 
 
+def test_extract_header_location_supports_city_state_two_part() -> None:
+    """Header parsing should keep state for two-part city/state headers."""
+    city, state, country = ResumeProfileExtractor._extract_header_location(
+        "Jane Doe\nSan Francisco, CA\njane@example.com"
+    )
+
+    assert city == "San Francisco"
+    assert state == "Ca"
+    assert country is None
+
+
 def test_extract_header_location_preserves_state_when_country_present() -> None:
     """Header parsing should keep state when both state and country are present."""
     city, state, country = ResumeProfileExtractor._extract_header_location(
