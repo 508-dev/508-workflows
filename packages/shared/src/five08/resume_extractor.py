@@ -424,7 +424,6 @@ def _normalize_timezone(value: Any) -> str | None:
 
 _COUNTRY_TIMEZONE: dict[str, str] = {
     # Americas
-    "mexico": "UTC-06:00",
     "colombia": "UTC-05:00",
     "ecuador": "UTC-05:00",
     "peru": "UTC-05:00",
@@ -432,7 +431,6 @@ _COUNTRY_TIMEZONE: dict[str, str] = {
     "bolivia": "UTC-04:00",
     "chile": "UTC-04:00",
     "paraguay": "UTC-04:00",
-    "brazil": "UTC-03:00",
     "argentina": "UTC-03:00",
     "uruguay": "UTC-03:00",
     # Europe
@@ -486,7 +484,6 @@ _COUNTRY_TIMEZONE: dict[str, str] = {
     "saudi arabia": "UTC+03:00",
     "iraq": "UTC+03:00",
     "turkey": "UTC+03:00",
-    "russia": "UTC+03:00",
     "iran": "UTC+03:30",
     "uae": "UTC+04:00",
     "united arab emirates": "UTC+04:00",
@@ -505,7 +502,6 @@ _COUNTRY_TIMEZONE: dict[str, str] = {
     "vietnam": "UTC+07:00",
     "cambodia": "UTC+07:00",
     "laos": "UTC+07:00",
-    "indonesia": "UTC+07:00",
     "china": "UTC+08:00",
     "singapore": "UTC+08:00",
     "malaysia": "UTC+08:00",
@@ -516,17 +512,87 @@ _COUNTRY_TIMEZONE: dict[str, str] = {
     "japan": "UTC+09:00",
     "south korea": "UTC+09:00",
     "korea": "UTC+09:00",
-    "australia": "UTC+10:00",
     "new zealand": "UTC+12:00",
+}
+
+# Countries that span multiple timezones — skip rather than guess wrong.
+_AMBIGUOUS_COUNTRY_TIMEZONE: frozenset[str] = frozenset(
+    {
+        "united states",
+        "usa",
+        "us",
+        "canada",
+        "mexico",
+        "brazil",
+        "australia",
+        "russia",
+        "indonesia",
+    }
+)
+
+_CITY_TIMEZONE: dict[str, str] = {
+    # US Pacific
+    "san francisco": "UTC-08:00",
+    "los angeles": "UTC-08:00",
+    "seattle": "UTC-08:00",
+    "portland": "UTC-08:00",
+    "san jose": "UTC-08:00",
+    "san diego": "UTC-08:00",
+    # US Mountain
+    "denver": "UTC-07:00",
+    "phoenix": "UTC-07:00",
+    "salt lake city": "UTC-07:00",
+    # US Central
+    "chicago": "UTC-06:00",
+    "dallas": "UTC-06:00",
+    "houston": "UTC-06:00",
+    "austin": "UTC-06:00",
+    "minneapolis": "UTC-06:00",
+    # US Eastern
+    "new york": "UTC-05:00",
+    "boston": "UTC-05:00",
+    "atlanta": "UTC-05:00",
+    "miami": "UTC-05:00",
+    "washington": "UTC-05:00",
+    "philadelphia": "UTC-05:00",
+    # Canada
+    "toronto": "UTC-05:00",
+    "montreal": "UTC-05:00",
+    "vancouver": "UTC-08:00",
+    "calgary": "UTC-07:00",
+    # Mexico
+    "mexico city": "UTC-06:00",
+    "guadalajara": "UTC-06:00",
+    "tijuana": "UTC-08:00",
+    # Brazil
+    "sao paulo": "UTC-03:00",
+    "são paulo": "UTC-03:00",
+    "rio de janeiro": "UTC-03:00",
+    # Australia
+    "sydney": "UTC+10:00",
+    "melbourne": "UTC+10:00",
+    "brisbane": "UTC+10:00",
+    "perth": "UTC+08:00",
+    # Russia
+    "moscow": "UTC+03:00",
+    "saint petersburg": "UTC+03:00",
+    "st. petersburg": "UTC+03:00",
 }
 
 
 def _infer_timezone_from_location(
     *, country: str | None, city: str | None = None
 ) -> str | None:
-    """Best-effort UTC offset from country name (heuristic fallback only)."""
+    """Best-effort UTC offset from city or country (heuristic fallback only)."""
+    if city:
+        city_tz = _CITY_TIMEZONE.get(city.strip().lower())
+        if city_tz:
+            return city_tz
     if country:
-        tz = _COUNTRY_TIMEZONE.get(country.strip().lower())
+        country_key = country.strip().lower()
+        if country_key in _AMBIGUOUS_COUNTRY_TIMEZONE:
+            return None
+        tz = _COUNTRY_TIMEZONE.get(country_key)
         if tz:
             return tz
     return None
@@ -1283,7 +1349,7 @@ class ResumeProfileExtractor:
             "- infer linkedin_url and website_links from bare domains when scheme is missing\n"
             "- for phone return digits with country code and leading + (e.g. +15551234567); if no country code in the source, infer it from address_country or address_city (e.g. United States → +1, India → +91, UK → +44)\n"
             "- if timezone is provided, normalize it to UTC offset form like UTC±HH:MM before output\n"
-            "- if timezone is null but address_city or address_country is known, infer the standard UTC offset (e.g., San Francisco/Los Angeles/Seattle → UTC-08:00, Denver → UTC-07:00, Chicago/Dallas/Houston → UTC-06:00, New York/Boston/Atlanta → UTC-05:00, London/Dublin/Lisbon → UTC+00:00, Paris/Berlin/Amsterdam/Rome/Madrid → UTC+01:00, Nairobi/Istanbul/Kyiv → UTC+03:00, UAE/Dubai → UTC+04:00, India/Mumbai/Bangalore → UTC+05:30, Singapore/Shanghai/Beijing → UTC+08:00, Tokyo/Seoul → UTC+09:00, Sydney/Melbourne → UTC+10:00); omit if location is ambiguous\n"
+            "- if timezone is null but address_city or address_country is known, infer the standard UTC offset (e.g., San Francisco/Los Angeles/Seattle → UTC-08:00, Denver → UTC-07:00, Chicago/Dallas/Houston → UTC-06:00, New York/Boston/Atlanta → UTC-05:00, London/Dublin/Lisbon → UTC+00:00, Paris/Berlin/Amsterdam/Rome/Madrid → UTC+01:00, Bucharest/Athens/Kyiv → UTC+02:00, Nairobi/Istanbul → UTC+03:00, UAE/Dubai → UTC+04:00, India/Mumbai/Bangalore → UTC+05:30, Singapore/Shanghai/Beijing → UTC+08:00, Tokyo/Seoul → UTC+09:00, Sydney/Melbourne → UTC+10:00); omit if location is ambiguous\n"
             "- if address_city is known, infer address_state and address_country when not explicitly stated (e.g. San Francisco → California, United States; London → United Kingdom)\n"
             "- if address_state is known, infer address_country when not explicitly stated (e.g. California → United States)\n"
             "- for primary_roles, prefer known canonical roles when the input matches: developer, data scientist, product manager, program manager, designer, user research, biz dev, marketing; map variants to the closest known role (e.g. 'software developer' → 'developer', 'product management' → 'product manager'); default to 'developer' unless the resume clearly indicates a non-developer role (e.g. obvious designer, marketer, etc.)\n"
