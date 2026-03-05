@@ -3,6 +3,7 @@
 from unittest.mock import Mock, patch
 
 from five08.resume_extractor import _coerce_email_list
+from five08.resume_extractor import _infer_timezone_from_location
 from five08.resume_extractor import _normalize_name_part
 from five08.resume_extractor import _normalize_website_url
 from five08.resume_extractor import ResumeProfileExtractor
@@ -495,3 +496,50 @@ def test_normalize_name_part_preserves_non_uppercase_casing() -> None:
     """Only all-caps names should be title-cased; mixed-case names stay unchanged."""
     assert _normalize_name_part("McDonald") == "McDonald"
     assert _normalize_name_part("mcdonald") == "mcdonald"
+
+
+def test_infer_timezone_known_country() -> None:
+    assert _infer_timezone_from_location(country="India") == "UTC+05:30"
+
+
+def test_infer_timezone_unknown_country_returns_none() -> None:
+    assert _infer_timezone_from_location(country="Atlantis") is None
+
+
+def test_infer_timezone_none_country_returns_none() -> None:
+    assert _infer_timezone_from_location(country=None) is None
+
+
+def test_infer_timezone_case_insensitive() -> None:
+    assert _infer_timezone_from_location(country="INDIA") == "UTC+05:30"
+    assert _infer_timezone_from_location(country="india") == "UTC+05:30"
+
+
+def test_infer_timezone_ambiguous_country_returns_none() -> None:
+    assert _infer_timezone_from_location(country="Brazil") is None
+    assert _infer_timezone_from_location(country="Australia") is None
+    assert _infer_timezone_from_location(country="Russia") is None
+
+
+def test_infer_timezone_city_takes_precedence_over_country() -> None:
+    # San Francisco (UTC-8) in ambiguous country USA should still resolve.
+    assert (
+        _infer_timezone_from_location(country="United States", city="San Francisco")
+        == "UTC-08:00"
+    )
+
+
+def test_infer_timezone_city_resolves_ambiguous_country() -> None:
+    assert (
+        _infer_timezone_from_location(country="Australia", city="Sydney") == "UTC+10:00"
+    )
+    assert (
+        _infer_timezone_from_location(country="Australia", city="Perth") == "UTC+08:00"
+    )
+
+
+def test_infer_timezone_unknown_city_falls_back_to_country() -> None:
+    assert (
+        _infer_timezone_from_location(country="Japan", city="Unknown City")
+        == "UTC+09:00"
+    )
