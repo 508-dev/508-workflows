@@ -1990,8 +1990,10 @@ class CRMCog(commands.Cog):
 
         for i, candidate in enumerate(candidates, start=1):
             label = "**[Member]**" if candidate.is_member else "[Prospect]"
-            name = candidate.name or "Unknown"
-            email = candidate.email_508 or candidate.email or "—"
+            name = discord.utils.escape_mentions(candidate.name or "Unknown")
+            email = discord.utils.escape_mentions(
+                candidate.email_508 or candidate.email or "—"
+            )
             crm_link = (
                 f"{crm_base}/#Contact/view/{candidate.crm_contact_id}"
                 if candidate.has_crm_link and candidate.crm_contact_id
@@ -2002,7 +2004,7 @@ class CRMCog(commands.Cog):
             else:
                 parts = [f"{i}. {label} {name} · {email}"]
                 if candidate.discord_user_id:
-                    parts.append(f"Discord: <@{candidate.discord_user_id}>")
+                    parts.append(f"Discord ID: {candidate.discord_user_id}")
 
             if candidate.linkedin:
                 parts.append(f"[LinkedIn](<{candidate.linkedin}>)")
@@ -2042,8 +2044,15 @@ class CRMCog(commands.Cog):
         current = ""
         for line in lines:
             candidate_block = line + "\n"
+            while len(candidate_block) > 1900:
+                if current:
+                    messages.append(current.rstrip())
+                    current = ""
+                messages.append(candidate_block[:1900].rstrip())
+                candidate_block = candidate_block[1900:]
             if len(current) + len(candidate_block) > 1900:
-                messages.append(current.rstrip())
+                if current:
+                    messages.append(current.rstrip())
                 current = candidate_block
             else:
                 current += candidate_block
@@ -2141,8 +2150,11 @@ class CRMCog(commands.Cog):
             requirements=requirements,
             candidates=candidates,
         )
+        safe_mentions = discord.AllowedMentions(
+            roles=False, users=False, everyone=False
+        )
         for msg in messages:
-            await thread.send(msg)
+            await thread.send(msg, allowed_mentions=safe_mentions)
 
     def _backend_headers(self) -> dict[str, str]:
         """Build auth headers for internal backend API calls."""
@@ -7573,7 +7585,7 @@ class CRMCog(commands.Cog):
             else:
                 parts = [f"{i}. {label} {name} · {email}"]
                 if c.discord_user_id:
-                    parts.append(f"Discord: <@{c.discord_user_id}>")
+                    parts.append(f"Discord ID: {c.discord_user_id}")
 
             if c.linkedin:
                 parts.append(f"[LinkedIn](<{c.linkedin}>)")
