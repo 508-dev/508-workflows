@@ -1177,7 +1177,14 @@ class ResumeUpdateConfirmationView(discord.ui.View):
     @staticmethod
     def _normalize_preview_value(value: Any) -> str:
         text = str(value).strip()
-        return text if text else "None"
+        if not text:
+            return "None"
+
+        # Prevent Discord from parsing mentions in preview text.
+        text = text.replace("@everyone", "@\u200beveryone")
+        text = text.replace("@here", "@\u200bhere")
+        text = text.replace("<@", "<@\u200b")
+        return text
 
     @staticmethod
     def _decode_json_like_mapping(value: Any) -> dict[str, Any] | None:
@@ -3004,7 +3011,11 @@ class CRMCog(commands.Cog):
                 if not isinstance(change, dict):
                     continue
                 field_name = str(change.get("field", ""))
-                label = str(change.get("label", field_name or "Field"))
+                label = (
+                    ResumeUpdateConfirmationView._field_label(field_name)
+                    if field_name
+                    else str(change.get("label", "Field"))
+                )
                 current = truncate_preview_value(
                     str(change.get("current", "None")),
                     field_name=field_name,
@@ -3027,15 +3038,9 @@ class CRMCog(commands.Cog):
                         continue
                 if ResumeUpdateConfirmationView._is_link_like_field(field_name, label):
                     lines.append(
-                        "**{label}**: {current} → {proposed}".format(
-                            label=label,
-                            current=ResumeUpdateConfirmationView._normalize_preview_value(
-                                current
-                            ),
-                            proposed=ResumeUpdateConfirmationView._normalize_preview_value(
-                                proposed
-                            ),
-                        )
+                        f"**{label}**: "
+                        f"{ResumeUpdateConfirmationView._normalize_preview_value(current)} "
+                        f"→ {ResumeUpdateConfirmationView._normalize_preview_value(proposed)}"
                     )
                 else:
                     lines.append(f"**{label}**: `{current}` → `{proposed}`")
