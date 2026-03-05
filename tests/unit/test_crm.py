@@ -253,7 +253,8 @@ class TestCRMCog:
         assert label == "Staff"
         assert view.proposed_updates["cSeniority"] == "staff"
 
-    def test_resume_update_view_adds_websites_button_when_websites_proposed(
+    @pytest.mark.asyncio
+    async def test_resume_update_view_adds_websites_button_when_websites_proposed(
         self, crm_cog
     ):
         """Edit Websites button should appear when cWebsiteLink is in proposed updates."""
@@ -269,7 +270,10 @@ class TestCRMCog:
             isinstance(child, ResumeEditWebsitesButton) for child in view.children
         )
 
-    def test_resume_update_view_no_websites_button_without_websites(self, crm_cog):
+    @pytest.mark.asyncio
+    async def test_resume_update_view_no_websites_button_without_websites(
+        self, crm_cog
+    ):
         """Edit Websites button should not appear when cWebsiteLink is absent."""
         view = ResumeUpdateConfirmationView(
             crm_cog=crm_cog,
@@ -283,7 +287,8 @@ class TestCRMCog:
             isinstance(child, ResumeEditWebsitesButton) for child in view.children
         )
 
-    def test_resume_update_view_adds_social_links_button_when_social_links_proposed(
+    @pytest.mark.asyncio
+    async def test_resume_update_view_adds_social_links_button_when_social_links_proposed(
         self, crm_cog
     ):
         """Edit Social Links button should appear when cSocialLinks is in proposed updates."""
@@ -299,7 +304,8 @@ class TestCRMCog:
             isinstance(child, ResumeEditSocialLinksButton) for child in view.children
         )
 
-    def test_resume_update_view_no_social_links_button_without_social_links(
+    @pytest.mark.asyncio
+    async def test_resume_update_view_no_social_links_button_without_social_links(
         self, crm_cog
     ):
         """Edit Social Links button should not appear when cSocialLinks is absent."""
