@@ -506,6 +506,74 @@ class MarkIdVerifiedSelectionView(discord.ui.View):
         self.add_item(button)
 
 
+class ReprocessResumeSelectionButton(discord.ui.Button["ReprocessResumeSelectionView"]):
+    """Button for selecting a contact to reprocess a resume."""
+
+    def __init__(self, contact: dict[str, Any], requester_id: int) -> None:
+        contact_name = contact.get("name", "Unknown")
+        label = contact_name[:80] if len(contact_name) > 80 else contact_name
+        super().__init__(style=discord.ButtonStyle.primary, label=label, emoji="🔄")
+        self.contact = contact
+        self.requester_id = requester_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        try:
+            if not self.view:
+                await interaction.response.send_message("❌ View not found.")
+                return
+            if interaction.user.id != self.requester_id:
+                await interaction.response.send_message(
+                    "❌ Only the command requester can confirm this action.",
+                    ephemeral=True,
+                )
+                return
+
+            await interaction.response.defer(ephemeral=True)
+            await self.view.crm_cog._prompt_reprocess_resume_confirmation(
+                interaction=interaction,
+                contact=self.contact,
+                search_term=self.view.search_term,
+            )
+
+            for item in self.view.children:
+                if isinstance(item, discord.ui.Button):
+                    item.disabled = True
+
+            if interaction.message:
+                try:
+                    await interaction.message.edit(view=self.view)
+                except discord.NotFound:
+                    pass
+                except discord.HTTPException as exc:
+                    logger.warning(
+                        "Failed to update reprocess resume selection view: %s", exc
+                    )
+        except Exception as exc:
+            logger.error("Error in reprocess resume selection callback: %s", exc)
+            await interaction.followup.send(
+                "❌ An error occurred while reprocessing the resume."
+            )
+
+
+class ReprocessResumeSelectionView(discord.ui.View):
+    """View containing contact selection buttons for resume reprocessing."""
+
+    def __init__(self, crm_cog: "CRMCog", requester_id: int, search_term: str) -> None:
+        super().__init__(timeout=300)  # 5 minute timeout
+        self.crm_cog = crm_cog
+        self.requester_id = requester_id
+        self.search_term = search_term
+
+    def add_contact_button(self, contact: dict[str, Any]) -> None:
+        """Add a contact selection button."""
+        if len(self.children) >= 5:
+            return
+        button = ReprocessResumeSelectionButton(
+            contact=contact, requester_id=self.requester_id
+        )
+        self.add_item(button)
+
+
 class MarkIdVerifiedOverwriteConfirmationView(discord.ui.View):
     """View for confirming overwrite of existing ID verification values."""
 
@@ -1472,18 +1540,6 @@ class ResumeReprocessConfirmationView(discord.ui.View):
         button: discord.ui.Button["ResumeReprocessConfirmationView"],
     ) -> None:
         """Cancel the reprocess request."""
-        self.crm_cog._audit_command(
-            interaction=interaction,
-            action="crm.reprocess_resume",
-            result="denied",
-            metadata={
-                "contact_id": self.contact_id,
-                "contact_name": self.contact_name,
-                "stage": "reprocess_cancelled",
-            },
-            resource_type="crm_contact",
-            resource_id=self.contact_id,
-        )
         await interaction.response.send_message(
             "Reprocess cancelled. No changes were made.",
             ephemeral=True,
@@ -2817,19 +2873,20 @@ class CRMCog(commands.Cog):
             )
 
         if not proposed_updates and not link_member and not parsed_seniority:
-            self._audit_command(
-                interaction=interaction,
-                action=action_name,
-                result="success",
-                metadata={
-                    "filename": filename,
-                    "attachment_id": attachment_id,
-                    "job_id": job_id,
-                    "stage": "preview_no_changes",
-                },
-                resource_type="crm_contact",
-                resource_id=str(contact_id),
-            )
+            if action_name != "crm.reprocess_resume":
+                self._audit_command(
+                    interaction=interaction,
+                    action=action_name,
+                    result="success",
+                    metadata={
+                        "filename": filename,
+                        "attachment_id": attachment_id,
+                        "job_id": job_id,
+                        "stage": "preview_no_changes",
+                    },
+                    resource_type="crm_contact",
+                    resource_id=str(contact_id),
+                )
             embeds = [embed]
             if role_suggestions_embed:
                 embeds.append(role_suggestions_embed)
@@ -2852,21 +2909,22 @@ class CRMCog(commands.Cog):
             link_discord=link_discord_payload,
             parsed_seniority=parsed_seniority,
         )
-        self._audit_command(
-            interaction=interaction,
-            action=action_name,
-            result="success",
-            metadata={
-                "filename": filename,
-                "attachment_id": attachment_id,
-                "job_id": job_id,
-                "stage": "preview_ready",
-                "proposed_updates_count": len(proposed_updates),
-                "link_member_requested": bool(link_member),
-            },
-            resource_type="crm_contact",
-            resource_id=str(contact_id),
-        )
+        if action_name != "crm.reprocess_resume":
+            self._audit_command(
+                interaction=interaction,
+                action=action_name,
+                result="success",
+                metadata={
+                    "filename": filename,
+                    "attachment_id": attachment_id,
+                    "job_id": job_id,
+                    "stage": "preview_ready",
+                    "proposed_updates_count": len(proposed_updates),
+                    "link_member_requested": bool(link_member),
+                },
+                resource_type="crm_contact",
+                resource_id=str(contact_id),
+            )
         embeds = [embed]
         if role_suggestions_embed:
             embeds.append(role_suggestions_embed)
@@ -4960,6 +5018,47 @@ class CRMCog(commands.Cog):
 
         await interaction.followup.send(embed=embed, view=view)
 
+    async def _show_reprocess_resume_contact_choices(
+        self,
+        interaction: discord.Interaction,
+        search_term: str,
+        contacts: list[dict[str, Any]],
+    ) -> None:
+        """Show contact choices when multiple candidates are found for reprocessing."""
+        embed = discord.Embed(
+            title="🔍 Multiple Contacts Found",
+            description=(
+                f"Found {len(contacts)} contacts for `{search_term}`. "
+                "Select the correct person to reprocess their resume."
+            ),
+            color=0xFFA500,
+        )
+
+        view = ReprocessResumeSelectionView(
+            crm_cog=self,
+            requester_id=interaction.user.id,
+            search_term=search_term,
+        )
+
+        for i, contact in enumerate(contacts[:5], 1):
+            name = contact.get("name", "Unknown")
+            email = contact.get("emailAddress", "No email")
+            email_508 = contact.get("c508Email", "No 508 email")
+            contact_id = contact.get("id", "")
+            contact_info = (
+                f"📧 {email}\n🏢 508 Email: {email_508}\n🆔 ID: `{contact_id}`"
+            )
+            embed.add_field(name=f"{i}. {name}", value=contact_info, inline=True)
+            view.add_contact_button(contact)
+
+        embed.add_field(
+            name="💡 Tip",
+            value="Select the contact button to continue, or rerun with a more specific term.",
+            inline=False,
+        )
+
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
     @app_commands.command(
         name="mark-id-verified",
         description="Mark a contact as ID verified (Admin only).",
@@ -5508,6 +5607,66 @@ class CRMCog(commands.Cog):
                 filename = filename_value.strip()
 
         return attachment_id, filename
+
+    async def _prompt_reprocess_resume_confirmation(
+        self,
+        interaction: discord.Interaction,
+        contact: dict[str, Any],
+        search_term: str,
+    ) -> None:
+        """Prompt for confirmation to reprocess the selected contact's resume."""
+        contact_id = str(contact.get("id", ""))
+        if not contact_id:
+            self._audit_command(
+                interaction=interaction,
+                action="crm.reprocess_resume",
+                result="error",
+                metadata={
+                    "search_term": search_term,
+                    "reason": "contact_id_missing",
+                },
+            )
+            await interaction.followup.send("❌ Contact ID not found.")
+            return
+
+        contact_name = str(contact.get("name", "Unknown"))
+        (
+            attachment_id,
+            filename,
+        ) = await self._get_latest_resume_attachment_for_contact(contact_id)
+        if not attachment_id:
+            self._audit_command(
+                interaction=interaction,
+                action="crm.reprocess_resume",
+                result="denied",
+                metadata={
+                    "search_term": search_term,
+                    "contact_id": contact_id,
+                    "contact_name": contact_name,
+                    "stage": "no_resume_on_file",
+                },
+                resource_type="crm_contact",
+                resource_id=contact_id,
+            )
+            await interaction.followup.send(
+                f"❌ No resume found for `{contact_name}`. Upload a resume first."
+            )
+            return
+
+        display_filename = filename or "latest resume"
+        view = ResumeReprocessConfirmationView(
+            crm_cog=self,
+            interaction=interaction,
+            contact_id=contact_id,
+            contact_name=contact_name,
+            attachment_id=attachment_id,
+            filename=display_filename,
+        )
+        await interaction.followup.send(
+            f"⚠️ Reprocess resume `{display_filename}` for `{contact_name}`?",
+            view=view,
+            ephemeral=True,
+        )
 
     @app_commands.command(
         name="view-skills",
@@ -6703,91 +6862,18 @@ class CRMCog(commands.Cog):
                 return
 
             if len(contacts) > 1:
-                self._audit_command(
+                await self._show_reprocess_resume_contact_choices(
                     interaction=interaction,
-                    action="crm.reprocess_resume",
-                    result="denied",
-                    metadata={
-                        "search_term": search_term,
-                        "contact_found": False,
-                        "target_scope": "other",
-                        "reason": "multiple_contacts",
-                    },
-                )
-                await interaction.followup.send(
-                    f"⚠️ Multiple contacts found for `{search_term}`. "
-                    "Please be more specific or use the contact ID."
+                    search_term=search_term,
+                    contacts=contacts,
                 )
                 return
 
             contact = contacts[0]
-            contact_id = str(contact.get("id", ""))
-            if not contact_id:
-                self._audit_command(
-                    interaction=interaction,
-                    action="crm.reprocess_resume",
-                    result="error",
-                    metadata={
-                        "search_term": search_term,
-                        "reason": "contact_id_missing",
-                    },
-                )
-                await interaction.followup.send("❌ Contact ID not found.")
-                return
-
-            contact_name = str(contact.get("name", "Unknown"))
-            (
-                attachment_id,
-                filename,
-            ) = await self._get_latest_resume_attachment_for_contact(contact_id)
-            if not attachment_id:
-                self._audit_command(
-                    interaction=interaction,
-                    action="crm.reprocess_resume",
-                    result="denied",
-                    metadata={
-                        "search_term": search_term,
-                        "contact_id": contact_id,
-                        "contact_name": contact_name,
-                        "stage": "no_resume_on_file",
-                    },
-                    resource_type="crm_contact",
-                    resource_id=contact_id,
-                )
-                await interaction.followup.send(
-                    f"❌ No resume found for `{contact_name}`. Upload a resume first."
-                )
-                return
-
-            self._audit_command(
+            await self._prompt_reprocess_resume_confirmation(
                 interaction=interaction,
-                action="crm.reprocess_resume",
-                result="success",
-                metadata={
-                    "search_term": search_term,
-                    "contact_id": contact_id,
-                    "contact_name": contact_name,
-                    "attachment_id": attachment_id,
-                    "filename": filename,
-                    "stage": "reprocess_confirmation_prompt",
-                },
-                resource_type="crm_contact",
-                resource_id=contact_id,
-            )
-
-            display_filename = filename or "latest resume"
-            view = ResumeReprocessConfirmationView(
-                crm_cog=self,
-                interaction=interaction,
-                contact_id=contact_id,
-                contact_name=contact_name,
-                attachment_id=attachment_id,
-                filename=display_filename,
-            )
-            await interaction.followup.send(
-                f"⚠️ Reprocess resume `{display_filename}` for `{contact_name}`?",
-                view=view,
-                ephemeral=True,
+                contact=contact,
+                search_term=search_term,
             )
         except Exception as e:
             logger.error("Unexpected error in reprocess_resume: %s", e)

@@ -12,6 +12,7 @@ from five08.discord_bot.cogs.crm import (
     ResumeCreateContactView,
     ResumeUpdateConfirmationView,
     ResumeReprocessConfirmationView,
+    ReprocessResumeSelectionView,
     ResumeDownloadButton,
     ResumeSeniorityOverrideSelect,
     _extract_parsed_seniority,
@@ -3561,10 +3562,10 @@ class TestCRMCog:
         )
 
     @pytest.mark.asyncio
-    async def test_reprocess_resume_rejects_multiple_contacts(
+    async def test_reprocess_resume_shows_multiple_contacts_selector(
         self, crm_cog, mock_interaction
     ):
-        """Error when multiple contacts match the reprocess search term."""
+        """Show selection view when multiple contacts match the reprocess search term."""
         mock_interaction.user.id = 101
         with (
             patch(
@@ -3588,8 +3589,10 @@ class TestCRMCog:
         ):
             await crm_cog.reprocess_resume.callback(crm_cog, mock_interaction, "john")
 
-        message = mock_interaction.followup.send.call_args.args[0]
-        assert "Multiple contacts found for `john`" in message
+        mock_interaction.followup.send.assert_called_once()
+        followup_kwargs = mock_interaction.followup.send.call_args.kwargs
+        assert "view" in followup_kwargs
+        assert isinstance(followup_kwargs["view"], ReprocessResumeSelectionView)
 
     @pytest.mark.asyncio
     async def test_reprocess_resume_no_resume_found(self, crm_cog, mock_interaction):
