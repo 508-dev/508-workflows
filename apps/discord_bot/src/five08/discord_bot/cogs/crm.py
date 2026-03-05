@@ -2561,6 +2561,36 @@ class CRMCog(commands.Cog):
         link_member: discord.Member | None,
     ) -> tuple[discord.Embed, dict[str, Any]]:
         """Render backend extraction result as a Discord preview embed."""
+
+        def preview_value_limit(field_name: str, label: str) -> int:
+            key = f"{field_name} {label}".casefold()
+            if "seniority" in key:
+                return 60
+            if "skill" in key:
+                return 120
+            if any(
+                token in key for token in ("website", "social", "linkedin", "github")
+            ):
+                return 120
+            if "url" in key:
+                return 140
+            return 200
+
+        def truncate_preview_value(
+            value: str,
+            *,
+            field_name: str = "",
+            label: str = "",
+        ) -> str:
+            limit = preview_value_limit(field_name, label)
+            return ResumeUpdateConfirmationView._truncate_embed_field(value, limit)
+
+        def truncate_field_value(
+            value: str,
+            limit: int = ResumeUpdateConfirmationView._EMBED_FIELD_LIMIT,
+        ) -> str:
+            return ResumeUpdateConfirmationView._truncate_embed_field(value, limit)
+
         proposed_updates_raw = result.get("proposed_updates")
         proposed_updates: dict[str, Any] = {}
         if isinstance(proposed_updates_raw, dict):
@@ -2590,13 +2620,22 @@ class CRMCog(commands.Cog):
             for change in changes[:8]:
                 if not isinstance(change, dict):
                     continue
-                label = str(change.get("label", change.get("field", "Field")))
-                current = str(change.get("current", "None"))
-                proposed = str(change.get("proposed", ""))
+                field_name = str(change.get("field", ""))
+                label = str(change.get("label", field_name or "Field"))
+                current = truncate_preview_value(
+                    str(change.get("current", "None")),
+                    field_name=field_name,
+                    label=label,
+                )
+                proposed = truncate_preview_value(
+                    str(change.get("proposed", "")),
+                    field_name=field_name,
+                    label=label,
+                )
                 lines.append(f"**{label}**: `{current}` → `{proposed}`")
             embed.add_field(
                 name="Proposed Changes",
-                value="\n".join(lines) if lines else "No changes",
+                value=truncate_field_value("\n".join(lines) if lines else "No changes"),
                 inline=False,
             )
         else:
@@ -2610,7 +2649,11 @@ class CRMCog(commands.Cog):
             formatted_skills = ", ".join(str(skill) for skill in new_skills[:25])
             embed.add_field(
                 name="New Skills",
-                value=formatted_skills,
+                value=truncate_field_value(
+                    ResumeUpdateConfirmationView._truncate_embed_field(
+                        formatted_skills, preview_value_limit("skills", "skills")
+                    )
+                ),
                 inline=False,
             )
 
@@ -2621,12 +2664,16 @@ class CRMCog(commands.Cog):
                     continue
                 field = str(item.get("field", "field"))
                 reason = str(item.get("reason", "Skipped"))
-                value = str(item.get("value", ""))
+                value = truncate_preview_value(
+                    str(item.get("value", "")),
+                    field_name=field,
+                    label=field,
+                )
                 skip_lines.append(f"`{field}`: `{value}` ({reason})")
             if skip_lines:
                 embed.add_field(
                     name="Skipped",
-                    value="\n".join(skip_lines),
+                    value=truncate_field_value("\n".join(skip_lines)),
                     inline=False,
                 )
 
@@ -2636,7 +2683,9 @@ class CRMCog(commands.Cog):
             if confidence is not None or source:
                 embed.add_field(
                     name="Extraction",
-                    value=f"Source: `{source or 'unknown'}` | Confidence: `{confidence}`",
+                    value=truncate_field_value(
+                        f"Source: `{source or 'unknown'}` | Confidence: `{confidence}`"
+                    ),
                     inline=False,
                 )
 
@@ -2644,14 +2693,18 @@ class CRMCog(commands.Cog):
         if parsed_seniority:
             embed.add_field(
                 name="Parsed Seniority",
-                value=f"`{_format_seniority_label(parsed_seniority)}`",
+                value=truncate_field_value(
+                    f"`{_format_seniority_label(parsed_seniority)}`"
+                ),
                 inline=True,
             )
 
         if link_member:
             embed.add_field(
                 name="Discord Link",
-                value=f"Will link contact to {link_member.mention}",
+                value=truncate_field_value(
+                    f"Will link contact to {link_member.mention}"
+                ),
                 inline=False,
             )
 
@@ -2700,13 +2753,17 @@ class CRMCog(commands.Cog):
         if technical:
             embed.add_field(
                 name="Technical",
-                value=" ".join(f"`{r}`" for r in technical),
+                value=ResumeUpdateConfirmationView._truncate_embed_field(
+                    " ".join(f"`{r}`" for r in technical)
+                ),
                 inline=False,
             )
         if locality:
             embed.add_field(
                 name="Locality",
-                value=" ".join(f"`{r}`" for r in locality),
+                value=ResumeUpdateConfirmationView._truncate_embed_field(
+                    " ".join(f"`{r}`" for r in locality)
+                ),
                 inline=False,
             )
 
