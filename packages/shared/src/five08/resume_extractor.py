@@ -2305,10 +2305,19 @@ class ResumeProfileExtractor:
                 country = match.group("country") or ""
                 if not city:
                     continue
-                normalized_country = _normalize_country(country) if country else None
-                if normalized_country:
-                    return city, None, normalized_country
                 normalized_state = _normalize_state(region)
+                normalized_country = _normalize_country(country) if country else None
+                if not normalized_country and not normalized_state:
+                    normalized_country = _normalize_country(region)
+                elif not normalized_country:
+                    inferred_country_from_region = _normalize_country(region)
+                    if inferred_country_from_region and not re.fullmatch(
+                        r"[A-Z]{2}", region.strip()
+                    ):
+                        normalized_country = inferred_country_from_region
+                        normalized_state = None
+                if normalized_country:
+                    return city, normalized_state, normalized_country
                 if normalized_state:
                     return city, normalized_state, None
         return None, None, None

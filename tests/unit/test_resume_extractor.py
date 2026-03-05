@@ -791,3 +791,25 @@ def test_infer_timezone_unknown_city_falls_back_to_country() -> None:
         _infer_timezone_from_location(country="Japan", city="Unknown City")
         == "UTC+09:00"
     )
+
+
+def test_extract_header_location_supports_city_country() -> None:
+    """Header parsing should treat two-part city/country strings as valid."""
+    city, state, country = ResumeProfileExtractor._extract_header_location(
+        "Jane Doe\nParis, France\njane@example.com"
+    )
+
+    assert city == "Paris"
+    assert state is None
+    assert country == "France"
+
+
+def test_extract_header_location_preserves_state_when_country_present() -> None:
+    """Header parsing should keep state when both state and country are present."""
+    city, state, country = ResumeProfileExtractor._extract_header_location(
+        "Jane Doe\nSan Francisco, CA, United States\njane@example.com"
+    )
+
+    assert city == "San Francisco"
+    assert state == "Ca"
+    assert country == "United States"

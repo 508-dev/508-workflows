@@ -146,9 +146,9 @@ class ResumeProfileProcessor:
                 skipped=skipped,
             )
             self._collect_change(
-                crm_field="cLinkedIn",
+                crm_field=settings.crm_linkedin_field,
                 label="LinkedIn",
-                current=contact.get("cLinkedIn"),
+                current=contact.get(settings.crm_linkedin_field),
                 proposed=extracted.linkedin_url,
                 proposed_updates=proposed_updates,
                 proposed_changes=proposed_changes,
@@ -488,7 +488,7 @@ class ResumeProfileProcessor:
             allowed_fields = {
                 "emailAddressData",
                 "cGitHubUsername",
-                "cLinkedIn",
+                settings.crm_linkedin_field,
                 "cSeniority",
                 "addressCountry",
                 "cTimezone",
