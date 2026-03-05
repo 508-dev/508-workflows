@@ -13,6 +13,12 @@ class _CursorStub:
         self._rows = rows or []
         self.executed = []
 
+    def __enter__(self) -> "_CursorStub":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+        return None
+
     def execute(self, query: str, params: tuple) -> None:
         self.executed.append((query, params))
 

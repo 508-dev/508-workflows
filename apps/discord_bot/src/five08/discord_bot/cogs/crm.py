@@ -1873,7 +1873,7 @@ class CRMCog(commands.Cog):
 
             skill_info: list[str] = []
             match_score = getattr(candidate, "match_score", None)
-            if isinstance(match_score, int | float):
+            if isinstance(match_score, (int, float)):
                 skill_info.append(f"score: {match_score:.1f}")
             if candidate.matched_required_skills:
                 skill_info.append(
