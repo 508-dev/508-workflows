@@ -2799,12 +2799,8 @@ class CRMCog(commands.Cog):
                     continue
                 field = str(item.get("field", "field"))
                 reason = str(item.get("reason", "Skipped"))
-                value = truncate_preview_value(
-                    str(item.get("value", "")),
-                    field_name=field,
-                    label=field,
-                )
-                skip_lines.append(f"`{field}`: `{value}` ({reason})")
+                label = ResumeUpdateConfirmationView._field_label(field)
+                skip_lines.append(f"{label}: ({reason})")
             if skip_lines:
                 embed.add_field(
                     name="Skipped",
@@ -2827,7 +2823,7 @@ class CRMCog(commands.Cog):
         parsed_seniority = _extract_parsed_seniority(extracted_profile)
         if parsed_seniority:
             embed.add_field(
-                name="Parsed Seniority",
+                name="Seniority",
                 value=truncate_field_value(
                     f"`{_format_seniority_label(parsed_seniority)}`"
                 ),

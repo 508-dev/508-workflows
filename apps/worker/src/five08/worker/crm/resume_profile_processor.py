@@ -243,7 +243,7 @@ class ResumeProfileProcessor:
                     and current_seniority != "unknown"
                     and value != current_seniority
                 ),
-                blocked_reason="Existing seniority is preserved unless unknown",
+                blocked_reason="Existing seniority preserved",
             )
             if new_skills:
                 proposed_updates["skills"] = merged_skills
