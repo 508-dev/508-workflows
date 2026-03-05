@@ -301,6 +301,10 @@ class TestCRMCog:
                 self.id = channel_id
                 self.name = name
 
+        admin_role = Mock()
+        admin_role.name = "Steering Committee"
+        mock_interaction.user.roles = [admin_role]
+
         guild = Mock()
         guild.id = 123
         mock_interaction.guild = guild
@@ -333,6 +337,10 @@ class TestCRMCog:
                 self.id = channel_id
                 self.name = name
 
+        admin_role = Mock()
+        admin_role.name = "Steering Committee"
+        mock_interaction.user.roles = [admin_role]
+
         guild = Mock()
         guild.id = 123
         mock_interaction.guild = guild
@@ -356,6 +364,59 @@ class TestCRMCog:
             channel_id="456",
         )
         assert crm_cog._jobs_channels_by_guild[guild.id] == set()
+
+    @pytest.mark.asyncio
+    async def test_register_jobs_channel_denies_non_admin(
+        self, crm_cog, mock_interaction
+    ):
+        class DummyTextChannel:
+            def __init__(self, channel_id: int, name: str) -> None:
+                self.id = channel_id
+                self.name = name
+
+        guild = Mock()
+        guild.id = 123
+        mock_interaction.guild = guild
+        mock_interaction.channel = DummyTextChannel(456, "jobs")
+
+        to_thread = AsyncMock(return_value=True)
+        with (
+            patch("five08.discord_bot.cogs.crm.asyncio.to_thread", to_thread),
+            patch("five08.discord_bot.cogs.crm.discord.TextChannel", DummyTextChannel),
+            patch("five08.discord_bot.cogs.crm.discord.ForumChannel", DummyTextChannel),
+        ):
+            await crm_cog.register_jobs_channel.callback(
+                crm_cog, mock_interaction, None
+            )
+
+        to_thread.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unregister_jobs_channel_denies_non_admin(
+        self, crm_cog, mock_interaction
+    ):
+        class DummyTextChannel:
+            def __init__(self, channel_id: int, name: str) -> None:
+                self.id = channel_id
+                self.name = name
+
+        guild = Mock()
+        guild.id = 123
+        mock_interaction.guild = guild
+        mock_interaction.channel = DummyTextChannel(456, "jobs")
+        crm_cog._jobs_channels_by_guild[guild.id] = {456}
+
+        to_thread = AsyncMock(return_value=True)
+        with (
+            patch("five08.discord_bot.cogs.crm.asyncio.to_thread", to_thread),
+            patch("five08.discord_bot.cogs.crm.discord.TextChannel", DummyTextChannel),
+            patch("five08.discord_bot.cogs.crm.discord.ForumChannel", DummyTextChannel),
+        ):
+            await crm_cog.unregister_jobs_channel.callback(
+                crm_cog, mock_interaction, None
+            )
+
+        to_thread.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_on_message_skips_public_channel(self, crm_cog):
