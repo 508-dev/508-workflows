@@ -7612,8 +7612,15 @@ class CRMCog(commands.Cog):
         current = ""
         for line in lines:
             candidate_block = line + "\n"
+            while len(candidate_block) > 1900:
+                if current:
+                    messages.append(current.rstrip())
+                    current = ""
+                messages.append(candidate_block[:1900].rstrip())
+                candidate_block = candidate_block[1900:]
             if len(current) + len(candidate_block) > 1900:
-                messages.append(current.rstrip())
+                if current:
+                    messages.append(current.rstrip())
                 current = candidate_block
             else:
                 current += candidate_block
