@@ -51,11 +51,9 @@ class ResumeProfileProcessor:
 
     def __init__(self) -> None:
         self.crm = EspoClient(settings.espo_base_url, settings.espo_api_key)
-        llm_api_key = settings.openai_api_key
-        llm_base_url = settings.openai_base_url
         self.extractor = ResumeProfileExtractor(
-            api_key=llm_api_key,
-            base_url=llm_base_url,
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
             model=settings.resolved_resume_ai_model,
         )
         self.skills_extractor = SkillsExtractor()
