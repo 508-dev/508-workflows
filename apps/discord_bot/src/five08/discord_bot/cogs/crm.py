@@ -67,6 +67,43 @@ def _configured_linkedin_field_from_settings() -> str:
     return "cLinkedIn"
 
 
+def _format_seniority_label(value: str | None) -> str:
+    if value is None:
+        return "Unknown"
+    normalized = str(value).strip().lower().replace("_", "-")
+    if not normalized:
+        return "Unknown"
+    labels = {
+        "junior": "Junior",
+        "midlevel": "Mid-level",
+        "mid-level": "Mid-level",
+        "senior": "Senior",
+        "staff": "Staff",
+        "unknown": "Unknown",
+    }
+    if normalized in labels:
+        return labels[normalized]
+    if normalized == "midlevel":
+        normalized = "mid-level"
+    return normalized.title()
+
+
+def _extract_parsed_seniority(extracted_profile: Any) -> str | None:
+    raw_value: Any = None
+    if isinstance(extracted_profile, dict):
+        raw_value = extracted_profile.get("seniority_level")
+    else:
+        raw_value = getattr(extracted_profile, "seniority_level", None)
+    if raw_value is None:
+        return None
+    normalized = str(raw_value).strip()
+    if not normalized:
+        return None
+    if normalized.lower() == "unknown":
+        return None
+    return normalized
+
+
 class ResumeButtonView(discord.ui.View):
     """View containing resume download buttons for contact search results."""
 
@@ -652,6 +689,43 @@ class ResumeConfirmationView(discord.ui.View):
             pass
 
 
+class ResumeSeniorityOverrideSelect(discord.ui.Select):
+    """Select menu for overriding parsed seniority level."""
+
+    def __init__(self, *, parsed_seniority: str) -> None:
+        parsed_label = _format_seniority_label(parsed_seniority)
+        options = [
+            discord.SelectOption(label="Junior", value="junior"),
+            discord.SelectOption(label="Mid-level", value="midlevel"),
+            discord.SelectOption(label="Senior", value="senior"),
+            discord.SelectOption(label="Staff", value="staff"),
+        ]
+        super().__init__(
+            placeholder=f"Override seniority (parsed: {parsed_label})",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="resume_seniority_override",
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if not isinstance(view, ResumeUpdateConfirmationView):
+            await interaction.response.send_message(
+                "❌ Unable to update seniority override.",
+                ephemeral=True,
+            )
+            return
+
+        selected = self.values[0]
+        formatted = view._set_seniority_override(selected)
+        await interaction.response.send_message(
+            f"✅ Seniority override set to `{formatted}`. "
+            "Click Confirm Updates to apply.",
+            ephemeral=True,
+        )
+
+
 class ResumeUpdateConfirmationView(discord.ui.View):
     """Confirm extracted profile updates before writing to CRM."""
 
@@ -681,6 +755,7 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         contact_name: str,
         proposed_updates: dict[str, Any],
         link_discord: dict[str, str] | None = None,
+        parsed_seniority: str | None = None,
     ) -> None:
         super().__init__(timeout=300)
         self.crm_cog = crm_cog
@@ -689,6 +764,20 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         self.contact_name = contact_name
         self.proposed_updates = proposed_updates
         self.link_discord = link_discord
+        self.parsed_seniority = parsed_seniority
+        self.seniority_override: str | None = None
+
+        if parsed_seniority:
+            self.add_item(
+                ResumeSeniorityOverrideSelect(
+                    parsed_seniority=parsed_seniority,
+                )
+            )
+
+    def _set_seniority_override(self, value: str) -> str:
+        self.seniority_override = value
+        self.proposed_updates["cSeniority"] = value
+        return _format_seniority_label(value)
 
     @classmethod
     def _field_label(cls, field: str) -> str:
@@ -992,6 +1081,12 @@ class ResumeUpdateConfirmationView(discord.ui.View):
     ) -> None:
         """Apply confirmed updates through the worker."""
         await interaction.response.defer(thinking=True, ephemeral=True)
+        if not self.proposed_updates and not self.link_discord:
+            await interaction.followup.send(
+                "No updates selected yet. Use the seniority override dropdown or cancel.",
+                ephemeral=True,
+            )
+            return
 
         def _audit_apply_event(result: str, metadata: dict[str, Any]) -> None:
             try:
@@ -2140,6 +2235,14 @@ class CRMCog(commands.Cog):
                     inline=False,
                 )
 
+        parsed_seniority = _extract_parsed_seniority(extracted_profile)
+        if parsed_seniority:
+            embed.add_field(
+                name="Parsed Seniority",
+                value=f"`{_format_seniority_label(parsed_seniority)}`",
+                inline=True,
+            )
+
         if link_member:
             embed.add_field(
                 name="Discord Link",
@@ -2315,8 +2418,9 @@ class CRMCog(commands.Cog):
             result=result,
             link_member=link_member,
         )
+        parsed_seniority = _extract_parsed_seniority(result.get("extracted_profile"))
 
-        if not proposed_updates and not link_member:
+        if not proposed_updates and not link_member and not parsed_seniority:
             self._audit_command(
                 interaction=interaction,
                 action=action_name,
@@ -2347,6 +2451,7 @@ class CRMCog(commands.Cog):
             contact_name=contact_name,
             proposed_updates=proposed_updates,
             link_discord=link_discord_payload,
+            parsed_seniority=parsed_seniority,
         )
         self._audit_command(
             interaction=interaction,

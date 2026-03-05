@@ -13,6 +13,9 @@ from five08.discord_bot.cogs.crm import (
     ResumeUpdateConfirmationView,
     ResumeReprocessConfirmationView,
     ResumeDownloadButton,
+    ResumeSeniorityOverrideSelect,
+    _extract_parsed_seniority,
+    _format_seniority_label,
 )
 from five08.clients.espo import EspoAPIError
 
@@ -173,6 +176,74 @@ class TestCRMCog:
         summary = view._format_applied_updates_value(lines)
 
         assert len(summary) <= view._APPLIED_FIELD_TOTAL_LIMIT
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("junior", "Junior"),
+            ("midlevel", "Mid-level"),
+            ("mid-level", "Mid-level"),
+            ("senior", "Senior"),
+            ("staff", "Staff"),
+            ("unknown", "Unknown"),
+            ("", "Unknown"),
+            (None, "Unknown"),
+        ],
+    )
+    def test_format_seniority_label(self, raw, expected):
+        """Seniority labels should normalize consistent display strings."""
+        assert _format_seniority_label(raw) == expected
+
+    @pytest.mark.parametrize(
+        ("payload", "expected"),
+        [
+            ({"seniority_level": "senior"}, "senior"),
+            ({"seniority_level": " unknown "}, None),
+            ({}, None),
+        ],
+    )
+    def test_extract_parsed_seniority_from_dict(self, payload, expected):
+        """Parsed seniority should be extracted when present and not unknown."""
+        assert _extract_parsed_seniority(payload) == expected
+
+    def test_extract_parsed_seniority_from_object(self):
+        """Parsed seniority should handle object attributes."""
+
+        class DummyProfile:
+            seniority_level = "midlevel"
+
+        assert _extract_parsed_seniority(DummyProfile()) == "midlevel"
+
+    def test_resume_update_view_adds_seniority_select(self, crm_cog):
+        """Resume update view should expose a seniority override dropdown."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+            parsed_seniority="senior",
+        )
+
+        assert any(
+            isinstance(child, ResumeSeniorityOverrideSelect) for child in view.children
+        )
+
+    def test_resume_update_view_sets_seniority_override(self, crm_cog):
+        """Seniority override should update the proposed CRM payload."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+            parsed_seniority="junior",
+        )
+
+        label = view._set_seniority_override("staff")
+
+        assert label == "Staff"
+        assert view.proposed_updates["cSeniority"] == "staff"
 
     @pytest.mark.asyncio
     async def test_download_and_send_resume_success(self, crm_cog, mock_interaction):
