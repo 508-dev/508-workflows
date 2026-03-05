@@ -6779,6 +6779,12 @@ class CRMCog(commands.Cog):
         The response is posted publicly in the thread.
         """
         if not isinstance(interaction.channel, discord.Thread):
+            self._audit_command(
+                interaction=interaction,
+                action="crm.match_candidates",
+                result="error",
+                metadata={"stage": "not_thread"},
+            )
             await interaction.response.send_message(
                 "⚠️ This command must be used inside a thread. "
                 "Open a thread on the job posting message and run `/match-candidates` there.",
@@ -6787,14 +6793,41 @@ class CRMCog(commands.Cog):
             return
 
         thread: discord.Thread = interaction.channel
-        posting = await self._read_thread_posting(thread)
-        if posting is None:
+        starter = thread.starter_message
+        fetch_error = None
+        if starter is None:
+            try:
+                starter = await thread.fetch_message(thread.id)
+            except Exception as exc:
+                fetch_error = exc
+                starter = None
+
+        if starter is None or not starter.content.strip():
+            metadata = {"stage": "starter_message_unavailable"}
+            if fetch_error is not None:
+                error_text = (
+                    str(fetch_error).replace("\r", " ").replace("\n", " ").strip()
+                )
+                if len(error_text) > 300:
+                    error_text = f"{error_text[:297]}..."
+                metadata["error"] = error_text
+            self._audit_command(
+                interaction=interaction,
+                action="crm.match_candidates",
+                result="error",
+                metadata=metadata,
+            )
             await interaction.response.send_message(
                 "⚠️ Could not read the thread's opening message. "
                 "Make sure the thread was created from a job posting message.",
                 ephemeral=True,
             )
             return
+
+        posting = starter.content
+        if thread.applied_tags:
+            tag_names = ", ".join(t.name for t in thread.applied_tags)
+            posting = f"Thread tags: {tag_names}\n\n{posting}"
 
         await interaction.response.defer(ephemeral=False)
 
@@ -6824,7 +6857,7 @@ class CRMCog(commands.Cog):
             self._audit_command(
                 interaction=interaction,
                 action="crm.match_candidates",
-                result="denied",
+                result="error",
                 metadata={"stage": "no_required_skills_extracted"},
             )
             await interaction.followup.send(
