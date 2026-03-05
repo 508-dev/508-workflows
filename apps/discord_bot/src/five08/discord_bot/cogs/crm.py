@@ -6597,8 +6597,8 @@ class CRMCog(commands.Cog):
 
         for i, c in enumerate(candidates, start=1):
             label = "**[Member]**" if c.is_member else "[Prospect]"
-            name = c.name or "Unknown"
-            email = c.email_508 or c.email or "—"
+            name = discord.utils.escape_mentions(c.name or "Unknown")
+            email = discord.utils.escape_mentions(c.email_508 or c.email or "—")
             crm_link = (
                 f"{crm_base}/#Contact/view/{c.crm_contact_id}"
                 if c.has_crm_link and c.crm_contact_id
@@ -6614,8 +6614,9 @@ class CRMCog(commands.Cog):
             if c.linkedin:
                 parts.append(f"[LinkedIn](<{c.linkedin}>)")
             if c.latest_resume_id and c.latest_resume_name:
-                parts.append(f"Resume: `{c.latest_resume_name}`")
-                resume_options.append((name, c.latest_resume_id, c.latest_resume_name))
+                safe_resume_name = discord.utils.escape_mentions(c.latest_resume_name)
+                parts.append(f"Resume: `{safe_resume_name}`")
+                resume_options.append((name, c.latest_resume_id, safe_resume_name))
 
             skill_info: list[str] = []
             skill_info.append(f"score: {c.match_score:.1f}")
@@ -6654,7 +6655,7 @@ class CRMCog(commands.Cog):
                 msg,
                 allowed_mentions=discord.AllowedMentions(
                     roles=False,
-                    users=True,
+                    users=False,
                     everyone=False,
                 ),
             )
@@ -6735,11 +6736,17 @@ class CRMCog(commands.Cog):
 
     def _refresh_role_id_cache(self, guild: discord.Guild) -> None:
         excluded_names = {name.casefold() for name in DISCORD_ROLES_EXCLUDE_FROM_SYNC}
-        self._get_role_id_cache()[guild.id] = {
-            role.name.casefold(): role.id
-            for role in guild.roles
-            if role.name.casefold() not in excluded_names
-        }
+        role_id_map: dict[str, int] = {}
+        sorted_roles = sorted(
+            guild.roles,
+            key=lambda role: (-getattr(role, "position", 0), role.id),
+        )
+        for role in sorted_roles:
+            normalized_name = role.name.casefold()
+            if normalized_name in excluded_names or normalized_name in role_id_map:
+                continue
+            role_id_map[normalized_name] = role.id
+        self._get_role_id_cache()[guild.id] = role_id_map
 
     @commands.Cog.listener()
     async def on_guild_role_create(self, role: discord.Role) -> None:
