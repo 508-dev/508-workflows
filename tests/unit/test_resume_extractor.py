@@ -713,6 +713,15 @@ def test_infer_seniority_regex_defaults_generic_engineer_title_to_midlevel() -> 
     assert level == "midlevel"
 
 
+def test_infer_seniority_generic_engineer_uses_years_for_upgrade() -> None:
+    """Generic engineer title should still allow years-based promotion."""
+    level = ResumeProfileExtractor._infer_seniority_from_resume(
+        "Software Engineer\n10 years of software experience"
+    )
+
+    assert level == "senior"
+
+
 def test_infer_seniority_regex_does_not_match_larger_numeric_prefixes() -> None:
     """Standalone 500/1000 tokens should not trigger from larger numbers like 5000."""
     level = ResumeProfileExtractor._infer_seniority_from_resume(
@@ -738,6 +747,16 @@ def test_extract_roles_falls_back_to_title_inference_non_developer() -> None:
     )
 
     assert "program manager" in roles
+
+
+def test_extract_roles_ignores_collaboration_narrative_false_positive() -> None:
+    """Narrative collaborator mentions should not infer candidate role."""
+    roles = ResumeProfileExtractor._infer_roles_from_resume(
+        "Partnered with product managers and designers to deliver features."
+    )
+
+    assert "product manager" not in roles
+    assert "designer" not in roles
 
 
 def test_normalize_name_part_preserves_non_uppercase_casing() -> None:
@@ -824,3 +843,14 @@ def test_extract_header_location_preserves_state_when_country_present() -> None:
     assert city == "San Francisco"
     assert state == "Ca"
     assert country == "United States"
+
+
+def test_extract_header_location_keeps_state_for_city_state_only() -> None:
+    """City + spelled-out state should stay state, not be promoted to country."""
+    city, state, country = ResumeProfileExtractor._extract_header_location(
+        "Jane Doe\nAtlanta, Georgia\njane@example.com"
+    )
+
+    assert city == "Atlanta"
+    assert state == "Georgia"
+    assert country is None

@@ -358,6 +358,61 @@ NAME_SUFFIXES = {
     "iv",
     "v",
 }
+US_STATE_NAMES = frozenset(
+    {
+        "alabama",
+        "alaska",
+        "arizona",
+        "arkansas",
+        "california",
+        "colorado",
+        "connecticut",
+        "delaware",
+        "district of columbia",
+        "florida",
+        "georgia",
+        "hawaii",
+        "idaho",
+        "illinois",
+        "indiana",
+        "iowa",
+        "kansas",
+        "kentucky",
+        "louisiana",
+        "maine",
+        "maryland",
+        "massachusetts",
+        "michigan",
+        "minnesota",
+        "mississippi",
+        "missouri",
+        "montana",
+        "nebraska",
+        "nevada",
+        "new hampshire",
+        "new jersey",
+        "new mexico",
+        "new york",
+        "north carolina",
+        "north dakota",
+        "ohio",
+        "oklahoma",
+        "oregon",
+        "pennsylvania",
+        "rhode island",
+        "south carolina",
+        "south dakota",
+        "tennessee",
+        "texas",
+        "utah",
+        "vermont",
+        "virginia",
+        "washington",
+        "west virginia",
+        "wisconsin",
+        "wyoming",
+    }
+)
 
 
 def normalize_resume_name_token(value: str) -> str:
@@ -645,6 +700,15 @@ def _normalize_timezone_offset(value: str) -> str | None:
 
 def _normalize_timezone(value: Any) -> str | None:
     return shared_normalize_timezone(value)
+
+
+def _looks_like_state_region(value: str) -> bool:
+    normalized = value.strip().casefold()
+    if not normalized:
+        return False
+    if normalized in US_STATE_NAMES:
+        return True
+    return bool(re.fullmatch(r"[A-Z]{2}", value.strip()))
 
 
 _COUNTRY_TIMEZONE: dict[str, str] = {
@@ -2311,9 +2375,19 @@ class ResumeProfileExtractor:
                     normalized_country = _normalize_country(region)
                 elif not normalized_country:
                     inferred_country_from_region = _normalize_country(region)
-                    if inferred_country_from_region and not re.fullmatch(
-                        r"[A-Z]{2}", region.strip()
+                    if (
+                        inferred_country_from_region
+                        and normalized_state is None
+                        and not _looks_like_state_region(region)
                     ):
+                        normalized_country = inferred_country_from_region
+                if (
+                    normalized_country is None
+                    and normalized_state is not None
+                    and not _looks_like_state_region(region)
+                ):
+                    inferred_country_from_region = _normalize_country(region)
+                    if inferred_country_from_region:
                         normalized_country = inferred_country_from_region
                         normalized_state = None
                 if normalized_country:
@@ -2386,7 +2460,35 @@ class ResumeProfileExtractor:
 
     @staticmethod
     def _infer_roles_from_resume(resume_text: str) -> list[str]:
-        lower_text = resume_text.lower()
+        scoped_lines: list[str] = []
+        for raw_line in resume_text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if len(line) > 120:
+                continue
+            lowered = line.lower()
+            if "@" in lowered or "http" in lowered:
+                continue
+            if re.match(
+                r"^(partnered|collaborated|worked with|supported|helped|assisted)\b",
+                lowered,
+            ):
+                continue
+            if re.search(
+                r"\b("
+                r"engineer|developer|scientist|designer|researcher|"
+                r"manager|architect|programmer|lead|director|consultant|"
+                r"specialist|strategist|analyst|owner"
+                r")\b",
+                lowered,
+            ):
+                scoped_lines.append(lowered)
+                continue
+            if re.search(r"\b(at|@)\b", lowered):
+                scoped_lines.append(lowered)
+
+        lower_text = "\n".join(scoped_lines) if scoped_lines else resume_text.lower()
         inferred: list[str] = []
 
         def _add(role: str) -> None:
@@ -2489,20 +2591,21 @@ class ResumeProfileExtractor:
             lower_text,
         ):
             return "junior"
-        if re.search(
-            r"\b("
-            r"software engineer|swe|developer|programmer|"
-            r"backend engineer|frontend engineer|full[- ]?stack engineer|"
-            r"web developer|mobile developer|devops engineer|"
-            r"site reliability engineer|machine learning engineer|data engineer"
-            r")\b",
-            lower_text,
-        ):
-            return "midlevel"
+        generic_engineer_title = bool(
+            re.search(
+                r"\b("
+                r"software engineer|swe|developer|programmer|"
+                r"backend engineer|frontend engineer|full[- ]?stack engineer|"
+                r"web developer|mobile developer|devops engineer|"
+                r"site reliability engineer|machine learning engineer|data engineer"
+                r")\b",
+                lower_text,
+            )
+        )
 
         years = ResumeProfileExtractor._extract_years_of_experience(resume_text)
         if years is None:
-            return None
+            return "midlevel" if generic_engineer_title else None
 
         # Staff signals: cross-team scope, mentoring/leading senior engineers,
         # or long tenure at senior level (proxy: senior title + 10+ years total).
@@ -2522,7 +2625,7 @@ class ResumeProfileExtractor:
             return "senior"
         if years >= 2:
             return "midlevel"
-        return "junior"
+        return "midlevel" if generic_engineer_title else "junior"
 
     @staticmethod
     def _extract_years_of_experience(resume_text: str) -> int | None:
