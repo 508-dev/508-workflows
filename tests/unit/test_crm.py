@@ -224,14 +224,17 @@ class TestCRMCog:
         role_frontend = Mock()
         role_frontend.name = "Frontend"
         role_frontend.id = 111
+        role_frontend.position = 3
 
         role_full_stack = Mock()
         role_full_stack.name = "Full Stack"
         role_full_stack.id = 222
+        role_full_stack.position = 2
 
         role_excluded = Mock()
         role_excluded.name = "Bots"
         role_excluded.id = 333
+        role_excluded.position = 1
 
         guild = Mock()
         guild.id = 42
