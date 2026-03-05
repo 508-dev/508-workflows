@@ -6408,6 +6408,9 @@ class CRMCog(commands.Cog):
         excluded_role_names = {
             name.casefold() for name in DISCORD_ROLES_EXCLUDE_FROM_SYNC
         }
+        excluded_role_names.update(
+            {"junior", "mid-level", "midlevel", "senior", "staff", "principal"}
+        )
 
         def dedupe_role_names(role_names: list[str]) -> list[str]:
             seen: set[str] = set()
@@ -6470,27 +6473,7 @@ class CRMCog(commands.Cog):
         if requirements.title:
             header_parts.append(f"**{requirements.title}**")
         if requirements.discord_role_types:
-            seniority_role_names = {
-                "junior",
-                "mid-level",
-                "midlevel",
-                "senior",
-                "staff",
-                "principal",
-            }
-            role_types: list[str] = []
-            seen_role_types: set[str] = set()
-            for raw_role_name in requirements.discord_role_types:
-                cleaned_role_name = raw_role_name.strip()
-                if not cleaned_role_name:
-                    continue
-                normalized_role_name = cleaned_role_name.casefold()
-                if normalized_role_name in seniority_role_names:
-                    continue
-                if normalized_role_name in seen_role_types:
-                    continue
-                seen_role_types.add(normalized_role_name)
-                role_types.append(cleaned_role_name)
+            role_types = dedupe_role_names(requirements.discord_role_types)
             if role_types:
                 role_mentions = build_role_mentions(role_types)
                 if role_mentions:
