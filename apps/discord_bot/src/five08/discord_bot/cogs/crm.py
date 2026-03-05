@@ -1172,9 +1172,7 @@ class ResumeUpdateConfirmationView(discord.ui.View):
     @staticmethod
     def _is_link_like_field(field: str, label: str) -> bool:
         key = f"{field} {label}".casefold()
-        return any(
-            token in key for token in ("website", "social", "linkedin", "github", "url")
-        )
+        return any(token in key for token in ("website", "social", "linkedin", "url"))
 
     @staticmethod
     def _normalize_preview_value(value: Any) -> str:
