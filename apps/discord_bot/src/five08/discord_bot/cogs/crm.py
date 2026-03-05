@@ -854,6 +854,124 @@ class ResumeSeniorityOverrideSelect(discord.ui.Select):
         )
 
 
+class ResumeEditWebsitesModal(discord.ui.Modal, title="Edit Websites"):
+    """Modal for editing proposed website links before confirmation."""
+
+    websites_input: discord.ui.TextInput = discord.ui.TextInput(
+        label="Websites (one per line)",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=1000,
+    )
+
+    def __init__(self, *, confirmation_view: "ResumeUpdateConfirmationView") -> None:
+        super().__init__()
+        self.confirmation_view = confirmation_view
+        current = confirmation_view.proposed_updates.get("cWebsiteLink", [])
+        if isinstance(current, list):
+            default = "\n".join(str(u) for u in current if str(u).strip())
+        elif isinstance(current, str):
+            default = current.strip()
+        else:
+            default = ""
+        self.websites_input.default = default
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        raw = self.websites_input.value or ""
+        links = [line.strip() for line in raw.splitlines() if line.strip()]
+        if links:
+            self.confirmation_view.proposed_updates["cWebsiteLink"] = links
+        else:
+            self.confirmation_view.proposed_updates.pop("cWebsiteLink", None)
+        count = len(links)
+        await interaction.response.send_message(
+            f"✅ Websites updated to {count} link{'s' if count != 1 else ''}. "
+            "Click **Confirm Updates** to apply.",
+            ephemeral=True,
+        )
+
+
+class ResumeEditSocialLinksModal(discord.ui.Modal, title="Edit Social Links"):
+    """Modal for editing proposed social links before confirmation."""
+
+    social_links_input: discord.ui.TextInput = discord.ui.TextInput(
+        label="Social Links (one per line)",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=1000,
+    )
+
+    def __init__(self, *, confirmation_view: "ResumeUpdateConfirmationView") -> None:
+        super().__init__()
+        self.confirmation_view = confirmation_view
+        current = confirmation_view.proposed_updates.get("cSocialLinks", [])
+        if isinstance(current, list):
+            default = "\n".join(str(u) for u in current if str(u).strip())
+        elif isinstance(current, str):
+            default = current.strip()
+        else:
+            default = ""
+        self.social_links_input.default = default
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        raw = self.social_links_input.value or ""
+        links = [line.strip() for line in raw.splitlines() if line.strip()]
+        if links:
+            self.confirmation_view.proposed_updates["cSocialLinks"] = links
+        else:
+            self.confirmation_view.proposed_updates.pop("cSocialLinks", None)
+        count = len(links)
+        await interaction.response.send_message(
+            f"✅ Social links updated to {count} link{'s' if count != 1 else ''}. "
+            "Click **Confirm Updates** to apply.",
+            ephemeral=True,
+        )
+
+
+class ResumeEditWebsitesButton(discord.ui.Button["ResumeUpdateConfirmationView"]):
+    """Button that opens the Edit Websites modal."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            label="Edit Websites",
+            style=discord.ButtonStyle.secondary,
+            custom_id="resume_edit_websites",
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if not isinstance(view, ResumeUpdateConfirmationView):
+            await interaction.response.send_message(
+                "❌ Unable to edit websites.", ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(
+            ResumeEditWebsitesModal(confirmation_view=view)
+        )
+
+
+class ResumeEditSocialLinksButton(discord.ui.Button["ResumeUpdateConfirmationView"]):
+    """Button that opens the Edit Social Links modal."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            label="Edit Social Links",
+            style=discord.ButtonStyle.secondary,
+            custom_id="resume_edit_social_links",
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if not isinstance(view, ResumeUpdateConfirmationView):
+            await interaction.response.send_message(
+                "❌ Unable to edit social links.", ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(
+            ResumeEditSocialLinksModal(confirmation_view=view)
+        )
+
+
 class ResumeUpdateConfirmationView(discord.ui.View):
     """Confirm extracted profile updates before writing to CRM."""
 
@@ -901,6 +1019,11 @@ class ResumeUpdateConfirmationView(discord.ui.View):
                     parsed_seniority=parsed_seniority,
                 )
             )
+
+        if proposed_updates.get("cWebsiteLink"):
+            self.add_item(ResumeEditWebsitesButton())
+        if proposed_updates.get("cSocialLinks"):
+            self.add_item(ResumeEditSocialLinksButton())
 
     def _set_seniority_override(self, value: str) -> str:
         self.seniority_override = value
