@@ -6413,11 +6413,14 @@ class CRMCog(commands.Cog):
             seen: set[str] = set()
             deduped: list[str] = []
             for role_name in role_names:
-                key = role_name.casefold()
+                cleaned = role_name.strip()
+                if not cleaned:
+                    continue
+                key = cleaned.casefold()
                 if key in seen:
                     continue
                 seen.add(key)
-                deduped.append(role_name)
+                deduped.append(cleaned)
             return deduped
 
         def build_role_mentions(role_names: list[str]) -> list[str]:
@@ -6432,13 +6435,17 @@ class CRMCog(commands.Cog):
                 role_id_map = self._get_role_id_cache().get(interaction.guild.id, {})
 
             mentions: list[str] = []
+            seen_mentions: set[str] = set()
             for role_name in role_names:
                 normalized_role_name = role_name.casefold()
                 if normalized_role_name in excluded_role_names:
                     continue
                 role_id = role_id_map.get(normalized_role_name)
                 if role_id is not None:
-                    mentions.append(f"<@&{role_id}>")
+                    mention = f"<@&{role_id}>"
+                    if mention not in seen_mentions:
+                        seen_mentions.add(mention)
+                        mentions.append(mention)
                     continue
                 role = next(
                     (
@@ -6450,9 +6457,14 @@ class CRMCog(commands.Cog):
                     None,
                 )
                 if role is not None:
-                    mentions.append(role.mention)
+                    if role.mention not in seen_mentions:
+                        seen_mentions.add(role.mention)
+                        mentions.append(role.mention)
                 else:
-                    mentions.append(f"`{role_name}`")
+                    mention = f"`{role_name}`"
+                    if mention not in seen_mentions:
+                        seen_mentions.add(mention)
+                        mentions.append(mention)
             return mentions
 
         if requirements.title:
@@ -6466,13 +6478,21 @@ class CRMCog(commands.Cog):
                 "staff",
                 "principal",
             }
-            role_types = [
-                role_name
-                for role_name in requirements.discord_role_types
-                if role_name.casefold() not in seniority_role_names
-            ]
+            role_types: list[str] = []
+            seen_role_types: set[str] = set()
+            for raw_role_name in requirements.discord_role_types:
+                cleaned_role_name = raw_role_name.strip()
+                if not cleaned_role_name:
+                    continue
+                normalized_role_name = cleaned_role_name.casefold()
+                if normalized_role_name in seniority_role_names:
+                    continue
+                if normalized_role_name in seen_role_types:
+                    continue
+                seen_role_types.add(normalized_role_name)
+                role_types.append(cleaned_role_name)
             if role_types:
-                role_mentions = build_role_mentions(dedupe_role_names(role_types))
+                role_mentions = build_role_mentions(role_types)
                 if role_mentions:
                     role_mentions_line = "Discord roles: " + ", ".join(role_mentions)
 
