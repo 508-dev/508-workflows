@@ -6422,6 +6422,9 @@ class CRMCog(commands.Cog):
                 if role_name.casefold() not in seniority_role_names
             ]
             if role_types:
+                excluded_role_names = {
+                    name.casefold() for name in DISCORD_ROLES_EXCLUDE_FROM_SYNC
+                }
                 if interaction.guild is not None:
                     role_id_map = self._get_role_id_cache().get(interaction.guild.id)
                     if role_id_map is None:
@@ -6431,7 +6434,10 @@ class CRMCog(commands.Cog):
                         )
 
                     for role_name in role_types:
-                        role_id = role_id_map.get(role_name.casefold())
+                        normalized_role_name = role_name.casefold()
+                        if normalized_role_name in excluded_role_names:
+                            continue
+                        role_id = role_id_map.get(normalized_role_name)
                         if role_id is not None:
                             role_mentions.append(f"<@&{role_id}>")
                         else:
@@ -6439,7 +6445,9 @@ class CRMCog(commands.Cog):
                                 (
                                     candidate
                                     for candidate in interaction.guild.roles
-                                    if candidate.name.casefold() == role_name.casefold()
+                                    if candidate.name.casefold() == normalized_role_name
+                                    and candidate.name.casefold()
+                                    not in excluded_role_names
                                 ),
                                 None,
                             )
