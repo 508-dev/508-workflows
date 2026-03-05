@@ -552,6 +552,55 @@ class TestCRMCog:
         assert "skills" not in view.proposed_updates
         assert "cSkillAttrs" not in view.proposed_updates
 
+    def test_resume_preview_skills_delta_added_removed_and_strengths(self, crm_cog):
+        """Skills preview should summarize added/removed/strength changes."""
+        embed, _ = crm_cog._build_resume_preview_embed(
+            contact_id="contact-1",
+            contact_name="Test User",
+            result={
+                "proposed_changes": [
+                    {
+                        "field": "skills",
+                        "label": "Skills",
+                        "current": "python (3), go (2)",
+                        "proposed": "python (4), rust (5)",
+                    }
+                ]
+            },
+            link_member=None,
+        )
+
+        proposed_field = next(
+            field for field in embed.fields if field.name == "Proposed Changes"
+        )
+        assert "Added: rust (5)" in proposed_field.value
+        assert "Strengths: python (3->4)" in proposed_field.value
+        assert "Removed: go (2)" in proposed_field.value
+
+    def test_resume_preview_skills_delta_noop_falls_back_to_full_line(self, crm_cog):
+        """Skills preview should fall back to current → proposed when no delta."""
+        embed, _ = crm_cog._build_resume_preview_embed(
+            contact_id="contact-1",
+            contact_name="Test User",
+            result={
+                "proposed_changes": [
+                    {
+                        "field": "skills",
+                        "label": "Skills",
+                        "current": "python (3), go (2)",
+                        "proposed": "python (3), go (2)",
+                    }
+                ]
+            },
+            link_member=None,
+        )
+
+        proposed_field = next(
+            field for field in embed.fields if field.name == "Proposed Changes"
+        )
+        assert "python (3), go (2)" in proposed_field.value
+        assert "→" in proposed_field.value
+
     @pytest.mark.asyncio
     async def test_edit_websites_button_callback_opens_modal(
         self, crm_cog, mock_interaction
