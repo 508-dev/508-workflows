@@ -6242,6 +6242,148 @@ class CRMCog(commands.Cog):
             contacts = await self._search_contact_for_linking(f"{search_term}@508.dev")
         return contacts
 
+    def _is_blank_crm_field(self, value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, str):
+            return not value.strip()
+        if isinstance(value, list):
+            return not [item for item in value if str(item).strip()]
+        if isinstance(value, dict):
+            return not value
+        return False
+
+    def _contact_has_resume(self, contact: dict[str, Any]) -> bool:
+        resume_ids = contact.get("resumeIds")
+        if not isinstance(resume_ids, list):
+            return False
+        return any(str(item).strip() for item in resume_ids)
+
+    def _matches_bulk_resume_reprocess_filters(self, contact: dict[str, Any]) -> bool:
+        missing_country = self._is_blank_crm_field(contact.get("addressCountry"))
+        missing_timezone = self._is_blank_crm_field(contact.get("cTimezone"))
+        missing_skills = self._is_blank_crm_field(contact.get("skills"))
+        missing_roles = self._is_blank_crm_field(contact.get("cRoles"))
+        raw_seniority = contact.get("cSeniority")
+        missing_seniority = self._is_blank_crm_field(raw_seniority) or (
+            isinstance(raw_seniority, str)
+            and raw_seniority.strip().lower() == "unknown"
+        )
+        return (
+            (missing_country and missing_timezone)
+            or (missing_skills and missing_roles)
+            or missing_seniority
+        )
+
+    def _bulk_resume_missing_summary(self, contact: dict[str, Any]) -> str:
+        missing_country = self._is_blank_crm_field(contact.get("addressCountry"))
+        missing_timezone = self._is_blank_crm_field(contact.get("cTimezone"))
+        missing_skills = self._is_blank_crm_field(contact.get("skills"))
+        missing_roles = self._is_blank_crm_field(contact.get("cRoles"))
+        raw_seniority = contact.get("cSeniority")
+        missing_seniority = self._is_blank_crm_field(raw_seniority) or (
+            isinstance(raw_seniority, str)
+            and raw_seniority.strip().lower() == "unknown"
+        )
+
+        reasons: list[str] = []
+        if missing_country and missing_timezone:
+            reasons.append("missing country/timezone")
+        if missing_skills and missing_roles:
+            reasons.append("missing skills/roles")
+        if missing_seniority:
+            reasons.append("missing seniority")
+        if not reasons:
+            return "missing fields"
+        return " and ".join(reasons)
+
+    def _extract_latest_resume_name_from_contact(
+        self, contact: dict[str, Any]
+    ) -> str | None:
+        resume_ids = contact.get("resumeIds")
+        if not isinstance(resume_ids, list) or not resume_ids:
+            return None
+        attachment_id = str(resume_ids[-1])
+        resume_names = contact.get("resumeNames")
+        if isinstance(resume_names, dict):
+            filename_value = resume_names.get(attachment_id)
+            if isinstance(filename_value, str) and filename_value.strip():
+                return filename_value.strip()
+        return None
+
+    async def _search_contacts_for_bulk_resume_reprocess(
+        self, *, limit: int, offset: int
+    ) -> tuple[list[dict[str, Any]], int | None]:
+        """Fetch contacts missing key resume-derived fields and with a resume on file."""
+        select_fields = (
+            "id,name,emailAddress,addressCountry,cTimezone,skills,cRoles,"
+            "resumeIds,resumeNames"
+        )
+        where_filters = [
+            {
+                "type": "or",
+                "value": [
+                    {
+                        "type": "and",
+                        "value": [
+                            {"type": "isEmpty", "attribute": "addressCountry"},
+                            {"type": "isEmpty", "attribute": "cTimezone"},
+                        ],
+                    },
+                    {
+                        "type": "and",
+                        "value": [
+                            {"type": "isEmpty", "attribute": "skills"},
+                            {"type": "isEmpty", "attribute": "cRoles"},
+                        ],
+                    },
+                    {
+                        "type": "or",
+                        "value": [
+                            {"type": "isEmpty", "attribute": "cSeniority"},
+                            {
+                                "type": "equals",
+                                "attribute": "cSeniority",
+                                "value": "unknown",
+                            },
+                        ],
+                    },
+                ],
+            }
+        ]
+        try:
+            result = self.espo_api.request(
+                "GET",
+                "Contact",
+                {
+                    "where": where_filters,
+                    "maxSize": limit,
+                    "offset": offset,
+                    "select": select_fields,
+                    "orderBy": "modifiedAt",
+                    "order": "desc",
+                },
+            )
+        except Exception as exc:
+            logger.error("Bulk resume reprocess search failed: %s", exc)
+            return [], None
+
+        contacts_raw = result.get("list", [])
+        contacts = contacts_raw if isinstance(contacts_raw, list) else []
+        filtered: list[dict[str, Any]] = []
+        for contact in contacts:
+            if not isinstance(contact, dict):
+                continue
+            if not self._contact_has_resume(contact):
+                continue
+            if not self._matches_bulk_resume_reprocess_filters(contact):
+                continue
+            filtered.append(contact)
+
+        total_raw = result.get("total")
+        total = total_raw if isinstance(total_raw, int) else None
+        return filtered, total
+
     async def _get_latest_resume_attachment_for_contact(
         self, contact_id: str
     ) -> tuple[str | None, str | None]:
@@ -7542,6 +7684,214 @@ class CRMCog(commands.Cog):
             )
             await interaction.followup.send(
                 "❌ An unexpected error occurred while reprocessing the resume."
+            )
+
+    @app_commands.command(
+        name="bulk-reprocess-resumes",
+        description=(
+            "Find contacts missing country/timezone or skills/roles and reprocess resumes"
+        ),
+    )
+    @app_commands.describe(
+        max_results="Max results to list (1-25)",
+        offset="Skip this many matching contacts",
+    )
+    async def bulk_reprocess_resumes(
+        self,
+        interaction: discord.Interaction,
+        max_results: int = 25,
+        offset: int = 0,
+    ) -> None:
+        """List contacts missing key resume-derived fields for reprocessing."""
+        try:
+            await interaction.response.defer(ephemeral=True)
+
+            if not settings.api_shared_secret:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.bulk_reprocess_resumes",
+                    result="error",
+                    metadata={
+                        "reason": "api_shared_secret_missing",
+                    },
+                )
+                await interaction.followup.send(
+                    "API_SHARED_SECRET is not configured for backend API access."
+                )
+                return
+
+            is_steering = hasattr(
+                interaction.user, "roles"
+            ) and check_user_roles_with_hierarchy(
+                interaction.user.roles, ["Steering Committee"]
+            )
+            if not is_steering:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.bulk_reprocess_resumes",
+                    result="denied",
+                    metadata={
+                        "reason": "missing_required_role",
+                    },
+                )
+                await interaction.followup.send(
+                    "You must have Steering Committee role or higher to run this."
+                )
+                return
+
+            clamped_limit = max(1, min(int(max_results or 0), 25))
+            clamped_offset = max(0, int(offset or 0))
+            contacts, total = await self._search_contacts_for_bulk_resume_reprocess(
+                limit=clamped_limit,
+                offset=clamped_offset,
+            )
+
+            if not contacts:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.bulk_reprocess_resumes",
+                    result="success",
+                    metadata={
+                        "results": 0,
+                        "offset": clamped_offset,
+                        "limit": clamped_limit,
+                    },
+                )
+                await interaction.followup.send(
+                    "No contacts found with missing country/timezone or skills/roles "
+                    "and a resume on file."
+                )
+                return
+
+            if len(contacts) == 1:
+                await self._prompt_reprocess_resume_confirmation(
+                    interaction=interaction,
+                    contact=contacts[0],
+                    search_term="bulk_missing_fields",
+                )
+                return
+
+            contact_lookup: dict[str, dict[str, Any]] = {}
+            lines: list[str] = []
+            for contact in contacts:
+                contact_id = str(contact.get("id", "")).strip()
+                if not contact_id:
+                    continue
+                contact_lookup[contact_id] = contact
+                name = str(contact.get("name") or "Unknown")
+                reason = self._bulk_resume_missing_summary(contact)
+                resume_name = self._extract_latest_resume_name_from_contact(contact)
+                resume_label = resume_name or "latest resume"
+                lines.append(
+                    f"- {name} ({contact_id}) - {reason}; resume: {resume_label}"
+                )
+
+            def _truncate(value: str, limit: int) -> str:
+                if len(value) <= limit:
+                    return value
+                return value[: limit - 3].rstrip() + "..."
+
+            class BulkResumeReprocessSelect(discord.ui.Select):
+                def __init__(
+                    self,
+                    crm_cog: Any,
+                    options: list[dict[str, Any]],
+                    contact_lookup: dict[str, dict[str, Any]],
+                ) -> None:
+                    self.crm_cog = crm_cog
+                    self.contact_lookup = contact_lookup
+                    select_options: list[discord.SelectOption] = []
+                    for item in options:
+                        item_id = str(item.get("id", "")).strip()
+                        if not item_id:
+                            continue
+                        label = str(item.get("name") or item_id)
+                        label = _truncate(label, 100)
+                        description = _truncate(
+                            self.crm_cog._bulk_resume_missing_summary(item),
+                            100,
+                        )
+                        select_options.append(
+                            discord.SelectOption(
+                                label=label,
+                                value=item_id,
+                                description=description,
+                            )
+                        )
+                    super().__init__(
+                        placeholder="Select a contact to reprocess",
+                        min_values=1,
+                        max_values=1,
+                        options=select_options,
+                    )
+
+                async def callback(self, interaction: discord.Interaction) -> None:
+                    contact_id = self.values[0]
+                    contact = self.contact_lookup.get(contact_id)
+                    if not contact:
+                        await interaction.response.send_message(
+                            "Selected contact not found. Re-run the command.",
+                            ephemeral=True,
+                        )
+                        return
+                    await interaction.response.defer(ephemeral=True)
+                    await self.crm_cog._prompt_reprocess_resume_confirmation(
+                        interaction=interaction,
+                        contact=contact,
+                        search_term="bulk_missing_fields",
+                    )
+
+            class BulkResumeReprocessSelectView(discord.ui.View):
+                def __init__(
+                    self,
+                    crm_cog: Any,
+                    options: list[dict[str, Any]],
+                ) -> None:
+                    super().__init__(timeout=600)
+                    self.add_item(
+                        BulkResumeReprocessSelect(
+                            crm_cog=crm_cog,
+                            options=options,
+                            contact_lookup=contact_lookup,
+                        )
+                    )
+
+            summary = (
+                f"Found {len(contact_lookup)} contacts with missing fields. "
+                "Select one to reprocess:"
+            )
+            if total is not None and total > len(contact_lookup):
+                summary = (
+                    f"Found {total} matching contacts. Showing {len(contact_lookup)}:"
+                )
+
+            self._audit_command(
+                interaction=interaction,
+                action="crm.bulk_reprocess_resumes",
+                result="success",
+                metadata={
+                    "results": len(contact_lookup),
+                    "offset": clamped_offset,
+                    "limit": clamped_limit,
+                },
+            )
+            await interaction.followup.send(
+                summary + "\n" + "\n".join(lines),
+                view=BulkResumeReprocessSelectView(self, contacts),
+                ephemeral=True,
+            )
+        except Exception as exc:
+            logger.error("Unexpected error in bulk_reprocess_resumes: %s", exc)
+            self._audit_command(
+                interaction=interaction,
+                action="crm.bulk_reprocess_resumes",
+                result="error",
+                metadata={
+                    "error": str(exc),
+                },
+            )
+            await interaction.followup.send(
+                "An unexpected error occurred while loading bulk resume results."
             )
 
     @app_commands.command(
