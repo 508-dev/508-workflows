@@ -942,7 +942,11 @@ class ResumeEditSkillsModal(discord.ui.Modal, title="Edit Skills"):
         super().__init__()
         self.confirmation_view = confirmation_view
         default_lines = self._build_default_lines()
-        self.skills_input.default = "\n".join(default_lines)
+        default_text = "\n".join(default_lines)
+        max_length = self.skills_input.max_length
+        if max_length:
+            default_text = default_text[:max_length]
+        self.skills_input.default = default_text
 
     def _build_default_lines(self) -> list[str]:
         skills = self.confirmation_view._normalize_skills_value(
@@ -1302,8 +1306,8 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         parsed = cls._decode_json_like_mapping(value) or {}
         strengths: dict[str, int] = {}
         for raw_skill, raw_payload in parsed.items():
-            skill = str(raw_skill).strip()
-            if not skill:
+            normalized_skill = normalize_skill(str(raw_skill))
+            if not normalized_skill:
                 continue
             strength_value = (
                 raw_payload.get("strength")
@@ -1317,7 +1321,7 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             except Exception:
                 continue
             if 1 <= strength <= 5:
-                strengths[skill.casefold()] = strength
+                strengths[normalized_skill.casefold()] = strength
         return strengths
 
     def _build_applied_updates_lines(
