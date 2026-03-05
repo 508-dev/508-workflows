@@ -83,8 +83,6 @@ def _format_seniority_label(value: str | None) -> str:
     }
     if normalized in labels:
         return labels[normalized]
-    if normalized == "midlevel":
-        normalized = "mid-level"
     return normalized.title()
 
 

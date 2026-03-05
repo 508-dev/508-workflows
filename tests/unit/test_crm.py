@@ -214,7 +214,8 @@ class TestCRMCog:
 
         assert _extract_parsed_seniority(DummyProfile()) == "midlevel"
 
-    def test_resume_update_view_adds_seniority_select(self, crm_cog):
+    @pytest.mark.asyncio
+    async def test_resume_update_view_adds_seniority_select(self, crm_cog):
         """Resume update view should expose a seniority override dropdown."""
         view = ResumeUpdateConfirmationView(
             crm_cog=crm_cog,
@@ -229,7 +230,8 @@ class TestCRMCog:
             isinstance(child, ResumeSeniorityOverrideSelect) for child in view.children
         )
 
-    def test_resume_update_view_sets_seniority_override(self, crm_cog):
+    @pytest.mark.asyncio
+    async def test_resume_update_view_sets_seniority_override(self, crm_cog):
         """Seniority override should update the proposed CRM payload."""
         view = ResumeUpdateConfirmationView(
             crm_cog=crm_cog,
