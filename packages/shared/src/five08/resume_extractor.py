@@ -422,6 +422,116 @@ def _normalize_timezone(value: Any) -> str | None:
     return shared_normalize_timezone(value)
 
 
+_COUNTRY_TIMEZONE: dict[str, str] = {
+    # Americas
+    "mexico": "UTC-06:00",
+    "colombia": "UTC-05:00",
+    "ecuador": "UTC-05:00",
+    "peru": "UTC-05:00",
+    "venezuela": "UTC-04:00",
+    "bolivia": "UTC-04:00",
+    "chile": "UTC-04:00",
+    "paraguay": "UTC-04:00",
+    "brazil": "UTC-03:00",
+    "argentina": "UTC-03:00",
+    "uruguay": "UTC-03:00",
+    # Europe
+    "united kingdom": "UTC+00:00",
+    "uk": "UTC+00:00",
+    "ireland": "UTC+00:00",
+    "portugal": "UTC+00:00",
+    "ghana": "UTC+00:00",
+    "senegal": "UTC+00:00",
+    "ivory coast": "UTC+00:00",
+    "germany": "UTC+01:00",
+    "france": "UTC+01:00",
+    "netherlands": "UTC+01:00",
+    "belgium": "UTC+01:00",
+    "spain": "UTC+01:00",
+    "italy": "UTC+01:00",
+    "sweden": "UTC+01:00",
+    "norway": "UTC+01:00",
+    "denmark": "UTC+01:00",
+    "switzerland": "UTC+01:00",
+    "austria": "UTC+01:00",
+    "poland": "UTC+01:00",
+    "czech republic": "UTC+01:00",
+    "czechia": "UTC+01:00",
+    "hungary": "UTC+01:00",
+    "croatia": "UTC+01:00",
+    "serbia": "UTC+01:00",
+    "nigeria": "UTC+01:00",
+    "cameroon": "UTC+01:00",
+    "morocco": "UTC+01:00",
+    "algeria": "UTC+01:00",
+    "tunisia": "UTC+01:00",
+    "romania": "UTC+02:00",
+    "bulgaria": "UTC+02:00",
+    "ukraine": "UTC+02:00",
+    "greece": "UTC+02:00",
+    "finland": "UTC+02:00",
+    "estonia": "UTC+02:00",
+    "latvia": "UTC+02:00",
+    "lithuania": "UTC+02:00",
+    "south africa": "UTC+02:00",
+    "israel": "UTC+02:00",
+    "egypt": "UTC+02:00",
+    "zimbabwe": "UTC+02:00",
+    "zambia": "UTC+02:00",
+    "rwanda": "UTC+02:00",
+    "kenya": "UTC+03:00",
+    "tanzania": "UTC+03:00",
+    "ethiopia": "UTC+03:00",
+    "uganda": "UTC+03:00",
+    "saudi arabia": "UTC+03:00",
+    "iraq": "UTC+03:00",
+    "turkey": "UTC+03:00",
+    "russia": "UTC+03:00",
+    "iran": "UTC+03:30",
+    "uae": "UTC+04:00",
+    "united arab emirates": "UTC+04:00",
+    "azerbaijan": "UTC+04:00",
+    "georgia": "UTC+04:00",
+    "armenia": "UTC+04:00",
+    "afghanistan": "UTC+04:30",
+    "pakistan": "UTC+05:00",
+    "uzbekistan": "UTC+05:00",
+    "india": "UTC+05:30",
+    "sri lanka": "UTC+05:30",
+    "nepal": "UTC+05:45",
+    "bangladesh": "UTC+06:00",
+    "myanmar": "UTC+06:30",
+    "thailand": "UTC+07:00",
+    "vietnam": "UTC+07:00",
+    "cambodia": "UTC+07:00",
+    "laos": "UTC+07:00",
+    "indonesia": "UTC+07:00",
+    "china": "UTC+08:00",
+    "singapore": "UTC+08:00",
+    "malaysia": "UTC+08:00",
+    "philippines": "UTC+08:00",
+    "taiwan": "UTC+08:00",
+    "hong kong": "UTC+08:00",
+    "mongolia": "UTC+08:00",
+    "japan": "UTC+09:00",
+    "south korea": "UTC+09:00",
+    "korea": "UTC+09:00",
+    "australia": "UTC+10:00",
+    "new zealand": "UTC+12:00",
+}
+
+
+def _infer_timezone_from_location(
+    *, country: str | None, city: str | None = None
+) -> str | None:
+    """Best-effort UTC offset from country name (heuristic fallback only)."""
+    if country:
+        tz = _COUNTRY_TIMEZONE.get(country.strip().lower())
+        if tz:
+            return tz
+    return None
+
+
 def _normalize_role(value: Any) -> str | None:
     return shared_normalize_role(value, ROLE_NORMALIZATION_MAP)
 
@@ -1027,6 +1137,8 @@ class ResumeProfileExtractor:
             )
         timezone = self._extract_timezone(snippet)
         city = self._extract_city(snippet)
+        if timezone is None:
+            timezone = _infer_timezone_from_location(country=country, city=city)
         linkedin_profile_key = _linkedin_profile_key(linkedin_url)
         if linkedin_profile_key:
             website_links = [
@@ -1171,6 +1283,7 @@ class ResumeProfileExtractor:
             "- infer linkedin_url and website_links from bare domains when scheme is missing\n"
             "- for phone return digits with country code and leading + (e.g. +15551234567); if no country code in the source, infer it from address_country or address_city (e.g. United States → +1, India → +91, UK → +44)\n"
             "- if timezone is provided, normalize it to UTC offset form like UTC±HH:MM before output\n"
+            "- if timezone is null but address_city or address_country is known, infer the standard UTC offset (e.g., San Francisco/Los Angeles/Seattle → UTC-08:00, Denver → UTC-07:00, Chicago/Dallas/Houston → UTC-06:00, New York/Boston/Atlanta → UTC-05:00, London/Dublin/Lisbon → UTC+00:00, Paris/Berlin/Amsterdam/Rome/Madrid → UTC+01:00, Nairobi/Istanbul/Kyiv → UTC+03:00, UAE/Dubai → UTC+04:00, India/Mumbai/Bangalore → UTC+05:30, Singapore/Shanghai/Beijing → UTC+08:00, Tokyo/Seoul → UTC+09:00, Sydney/Melbourne → UTC+10:00); omit if location is ambiguous\n"
             "- if address_city is known, infer address_state and address_country when not explicitly stated (e.g. San Francisco → California, United States; London → United Kingdom)\n"
             "- if address_state is known, infer address_country when not explicitly stated (e.g. California → United States)\n"
             "- for primary_roles, prefer known canonical roles when the input matches: developer, data scientist, product manager, program manager, designer, user research, biz dev, marketing; map variants to the closest known role (e.g. 'software developer' → 'developer', 'product management' → 'product manager'); default to 'developer' unless the resume clearly indicates a non-developer role (e.g. obvious designer, marketer, etc.)\n"
