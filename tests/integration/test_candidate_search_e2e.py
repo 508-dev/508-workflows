@@ -384,6 +384,42 @@ class TestSearchCandidatesE2E:
 
         assert results[0].crm_contact_id == "tz_match"
 
+    def test_location_mismatch_is_demoted_when_posting_has_location(
+        self, pg_db: SharedSettings
+    ) -> None:
+        _insert(
+            crm_contact_id="us_match",
+            skills=["python"],
+            timezone="America/New_York",
+            address_country="US",
+        )
+        _insert(
+            crm_contact_id="unknown_location",
+            skills=["python"],
+            timezone=None,
+            address_country=None,
+        )
+        _insert(
+            crm_contact_id="wrong_location",
+            skills=["python"],
+            timezone="Europe/Berlin",
+            address_country="Germany",
+        )
+
+        results = search_candidates(
+            pg_db,
+            _reqs(
+                required_skills=["python"],
+                location_type="timezone_preferred",
+                preferred_timezones=["America/New_York"],
+                raw_location_text="United States only",
+            ),
+        )
+
+        ids = [r.crm_contact_id for r in results]
+        assert ids[0] == "us_match"
+        assert ids[-1] == "wrong_location"
+
     def test_limit_respected(self, pg_db: SharedSettings) -> None:
         for i in range(5):
             _insert(crm_contact_id=f"c{i}", skills=["python"])

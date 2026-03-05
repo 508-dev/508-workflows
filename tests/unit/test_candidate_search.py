@@ -115,6 +115,7 @@ def _make_row(**overrides: object) -> dict:
         "preferred_matched": 0,
         "timezone_matched": 1,
         "discord_role_matched": 0,
+        "location_signal": 0,
     }
     base.update(overrides)
     return base
@@ -339,3 +340,32 @@ def test_search_candidates_secondary_sort_skill_score_over_discord_role() -> Non
     # skill match should beat role-only match in secondary sort
     assert results[0].crm_contact_id == "skill"
     assert results[1].crm_contact_id == "role"
+
+
+def test_search_candidates_secondary_sort_location_signal_over_match_score() -> None:
+    """Explicit location mismatches should rank below location-compatible candidates."""
+    location_match_row = _make_row(
+        crm_contact_id="match",
+        is_member=False,
+        match_score=22,
+        location_signal=2,
+    )
+    location_mismatch_row = _make_row(
+        crm_contact_id="mismatch",
+        is_member=False,
+        match_score=40,
+        location_signal=-4,
+    )
+    conn = _patch_db([location_mismatch_row, location_match_row])
+    reqs = _make_requirements(
+        required_skills=["python"],
+        raw_location_text="United States",
+        preferred_timezones=["America/New_York"],
+    )
+    settings = MagicMock()
+
+    with patch("five08.candidate_search.get_postgres_connection", return_value=conn):
+        results = search_candidates(settings, reqs)
+
+    assert results[0].crm_contact_id == "match"
+    assert results[1].crm_contact_id == "mismatch"
