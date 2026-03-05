@@ -26,6 +26,11 @@ _SUCCESS_RESULTS: Final[frozenset[str]] = frozenset(
     {"success", "ok", "created", "queued", "succeeded"}
 )
 _WARNING_RESULTS: Final[frozenset[str]] = frozenset({"retrying", "warning"})
+_WEBHOOK_EXCLUDED_ACTIONS: Final[frozenset[str]] = frozenset(
+    {
+        "crm.match_candidates",
+    }
+)
 _NON_MUTATING_COMMAND_ACTIONS: Final[frozenset[str]] = frozenset(
     {
         "crm.resume_download_button",
@@ -184,8 +189,14 @@ class DiscordAuditLogger:
     def _send_event_sync(self, event_payload: dict[str, Any]) -> None:
         if self.enabled:
             self._send_audit_event_sync(event_payload)
-        if self.webhook_enabled:
+        if self.webhook_enabled and self._should_log_webhook_event(event_payload):
             self._send_webhook_event(event_payload)
+
+    def _should_log_webhook_event(self, event_payload: dict[str, Any]) -> bool:
+        action = str(event_payload.get("action", "")).strip().lower()
+        if action in _WEBHOOK_EXCLUDED_ACTIONS:
+            return False
+        return True
 
     def _send_audit_event_sync(self, event_payload: dict[str, Any]) -> None:
         if not self.enabled:
