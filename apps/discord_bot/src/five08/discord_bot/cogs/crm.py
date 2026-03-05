@@ -112,6 +112,14 @@ def _extract_parsed_seniority(extracted_profile: Any) -> str | None:
     return normalized
 
 
+def _truncate_component_placeholder(value: str, *, limit: int = 150) -> str:
+    if len(value) <= limit:
+        return value
+    if limit <= 3:
+        return value[:limit]
+    return value[: limit - 3] + "..."
+
+
 class ResumeButtonView(discord.ui.View):
     """View containing resume download buttons for contact search results."""
 
@@ -536,7 +544,7 @@ class MarkIdVerifiedOverwriteConfirmationView(discord.ui.View):
             allow_overwrite=True,
         )
         for item in self.children:
-            if isinstance(item, discord.ui.Button):
+            if isinstance(item, (discord.ui.Button, discord.ui.Select)):
                 item.disabled = True
 
         if interaction.message:
@@ -557,7 +565,7 @@ class MarkIdVerifiedOverwriteConfirmationView(discord.ui.View):
             ephemeral=True,
         )
         for item in self.children:
-            if isinstance(item, discord.ui.Button):
+            if isinstance(item, (discord.ui.Button, discord.ui.Select)):
                 item.disabled = True
 
         if interaction.message:
@@ -702,6 +710,9 @@ class ResumeSeniorityOverrideSelect(discord.ui.Select):
 
     def __init__(self, *, parsed_seniority: str) -> None:
         parsed_label = _format_seniority_label(parsed_seniority)
+        placeholder = _truncate_component_placeholder(
+            f"Override seniority (parsed: {parsed_label})"
+        )
         options = [
             discord.SelectOption(label="Junior", value="junior"),
             discord.SelectOption(label="Mid-level", value="midlevel"),
@@ -709,7 +720,7 @@ class ResumeSeniorityOverrideSelect(discord.ui.Select):
             discord.SelectOption(label="Staff", value="staff"),
         ]
         super().__init__(
-            placeholder=f"Override seniority (parsed: {parsed_label})",
+            placeholder=placeholder,
             min_values=1,
             max_values=1,
             options=options,
