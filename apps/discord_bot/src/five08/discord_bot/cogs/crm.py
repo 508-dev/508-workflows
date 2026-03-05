@@ -10,6 +10,7 @@ import ast
 import io
 import json
 import logging
+from collections import OrderedDict
 from datetime import date, datetime, timezone
 import re
 from typing import Any, Literal
@@ -46,6 +47,11 @@ from five08.audit import (
     upsert_discord_member,
     get_discord_user_id_for_contact,
 )
+from five08.job_channels import (
+    list_registered_job_post_channels,
+    register_job_post_channel,
+    unregister_job_post_channel,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +70,12 @@ ONBOARDER_FIELD_CANDIDATES = (
 EXCLUDED_ONBOARDING_STATES = frozenset({"onboarded", "waitlist", "rejected"})
 ONBOARDING_QUEUE_MAX_SIZE = 200
 ONBOARDING_QUEUE_PAGE_SIZE = 1
+AUTO_MATCH_DEDUPE_MAX = 10_000
+# Exclude known-bad resume artifact from auto-match rendering.
+AUTO_MATCH_EXCLUDED_RESUME_NAMES = frozenset({"Vladyslav_Stryzhak.pdf"})
 EspoAPI = espo.EspoAPI
 EspoAPIError = espo.EspoAPIError
+JobWatchChannel = discord.TextChannel | discord.ForumChannel
 
 
 def _configured_linkedin_field_from_settings() -> str:
@@ -1762,6 +1772,9 @@ class CRMCog(commands.Cog):
             discord_logs_webhook_url=settings.discord_logs_webhook_url,
             discord_logs_webhook_wait=settings.discord_logs_webhook_wait,
         )
+        self._jobs_channels_by_guild: dict[int, set[int]] = {}
+        self._auto_matched_thread_ids: OrderedDict[int, None] = OrderedDict()
+        self._auto_matched_thread_lock = asyncio.Lock()
 
     @staticmethod
     def _configured_linkedin_field() -> str:
@@ -1813,6 +1826,292 @@ class CRMCog(commands.Cog):
             resource_type=resource_type,
             resource_id=resource_id,
         )
+
+    @staticmethod
+    def _resolve_jobs_channel_target(
+        interaction: discord.Interaction,
+        channel: JobWatchChannel | None,
+    ) -> JobWatchChannel | None:
+        """Resolve explicit/implicit channel target for job-post registration."""
+        if channel is not None:
+            return channel
+
+        current = interaction.channel
+        if isinstance(current, (discord.TextChannel, discord.ForumChannel)):
+            return current
+
+        if isinstance(current, discord.Thread) and isinstance(
+            current.parent, (discord.TextChannel, discord.ForumChannel)
+        ):
+            return current.parent
+
+        return None
+
+    async def _refresh_jobs_channel_cache(self, guild_id: int) -> set[int]:
+        """Load registered job-post channels for one guild from Postgres."""
+        raw_ids = await asyncio.to_thread(
+            list_registered_job_post_channels,
+            settings,
+            guild_id=str(guild_id),
+        )
+        parsed_ids: set[int] = set()
+        for raw_id in raw_ids:
+            try:
+                parsed_ids.add(int(raw_id))
+            except ValueError:
+                logger.warning(
+                    "Skipping invalid job_post_channels row guild_id=%s channel_id=%s",
+                    guild_id,
+                    raw_id,
+                )
+        self._jobs_channels_by_guild[guild_id] = parsed_ids
+        return parsed_ids
+
+    def _is_jobs_channel_registered(self, guild_id: int, channel_id: int) -> bool:
+        """Return whether a channel is registered for automatic job matching."""
+        return channel_id in self._jobs_channels_by_guild.get(guild_id, set())
+
+    async def _refresh_jobs_channel_cache_if_missing(self, guild_id: int) -> bool:
+        """Ensure guild cache is loaded, retrying after startup-load failures."""
+        if guild_id in self._jobs_channels_by_guild:
+            return True
+        try:
+            await self._refresh_jobs_channel_cache(guild_id)
+            return True
+        except Exception as exc:
+            logger.warning(
+                "Failed to refresh jobs-channel cache for guild=%s: %s",
+                guild_id,
+                exc,
+            )
+            return False
+
+    async def _mark_thread_auto_matched(self, thread_id: int) -> bool:
+        """Deduplicate automatic matching when multiple events race."""
+        async with self._auto_matched_thread_lock:
+            if thread_id in self._auto_matched_thread_ids:
+                self._auto_matched_thread_ids.move_to_end(thread_id)
+                return False
+            self._auto_matched_thread_ids[thread_id] = None
+            if len(self._auto_matched_thread_ids) > AUTO_MATCH_DEDUPE_MAX:
+                self._auto_matched_thread_ids.popitem(last=False)
+            return True
+
+    async def _unmark_thread_auto_matched(self, thread_id: int) -> None:
+        """Allow retry when a thread was marked but processing could not start."""
+        async with self._auto_matched_thread_lock:
+            self._auto_matched_thread_ids.pop(thread_id, None)
+
+    @staticmethod
+    async def _read_thread_posting(thread: discord.Thread) -> str | None:
+        """Read starter message content for a job thread, including forum tags."""
+        starter = thread.starter_message
+        if starter is None:
+            try:
+                starter = await thread.fetch_message(thread.id)
+            except Exception:
+                starter = None
+
+        if starter is None or not starter.content.strip():
+            return None
+
+        posting = starter.content
+        if thread.applied_tags:
+            tag_names = ", ".join(t.name for t in thread.applied_tags)
+            posting = f"Thread tags: {tag_names}\n\n{posting}"
+        return posting
+
+    def _render_match_candidates_messages(
+        self,
+        *,
+        requirements: Any,
+        candidates: list[Any],
+    ) -> tuple[list[str], list[tuple[str, str, str]]]:
+        """Render job-match output into Discord-sized follow-up messages."""
+        lines: list[str] = []
+        resume_options: list[tuple[str, str, str]] = []
+
+        header_parts: list[str] = []
+        if requirements.title:
+            header_parts.append(f"**{requirements.title}**")
+        if requirements.discord_role_types:
+            header_parts.append(
+                "Role: " + ", ".join(f"`{r}`" for r in requirements.discord_role_types)
+            )
+        if requirements.required_skills:
+            header_parts.append(
+                "Skills: "
+                + ", ".join(f"`{s}`" for s in requirements.required_skills[:8])
+            )
+        if requirements.seniority:
+            header_parts.append(f"Seniority: `{requirements.seniority}`")
+        if requirements.location_type == "us_only":
+            header_parts.append("📍 US only")
+        elif requirements.raw_location_text:
+            header_parts.append(f"📍 {requirements.raw_location_text}")
+
+        lines.append("## Job Match Results")
+        if header_parts:
+            lines.append(" · ".join(header_parts))
+        lines.append(f"Found **{len(candidates)}** candidate(s).\n")
+
+        crm_base = settings.espo_base_url.rstrip("/")
+
+        for i, candidate in enumerate(candidates, start=1):
+            label = "**[Member]**" if candidate.is_member else "[Prospect]"
+            name = candidate.name or "Unknown"
+            email = candidate.email_508 or candidate.email or "—"
+            crm_link = (
+                f"{crm_base}/#Contact/view/{candidate.crm_contact_id}"
+                if candidate.has_crm_link and candidate.crm_contact_id
+                else None
+            )
+            if crm_link:
+                parts = [f"{i}. {label} [{name}](<{crm_link}>) · {email}"]
+            else:
+                parts = [f"{i}. {label} {name} · {email}"]
+                if candidate.discord_user_id:
+                    parts.append(f"Discord: <@{candidate.discord_user_id}>")
+
+            if candidate.linkedin:
+                parts.append(f"[LinkedIn](<{candidate.linkedin}>)")
+            if (
+                candidate.latest_resume_id
+                and candidate.latest_resume_name
+                and candidate.latest_resume_name not in AUTO_MATCH_EXCLUDED_RESUME_NAMES
+            ):
+                parts.append(f"Resume: `{candidate.latest_resume_name}`")
+                resume_options.append(
+                    (name, candidate.latest_resume_id, candidate.latest_resume_name)
+                )
+
+            skill_info: list[str] = []
+            match_score = getattr(candidate, "match_score", None)
+            if isinstance(match_score, (int, float)):
+                skill_info.append(f"score: {match_score:.1f}")
+            if candidate.matched_required_skills:
+                skill_info.append(
+                    "✅ "
+                    + ", ".join(f"`{s}`" for s in candidate.matched_required_skills[:5])
+                )
+            if candidate.matched_discord_roles:
+                skill_info.append(
+                    "🏷️ " + ", ".join(f"`{r}`" for r in candidate.matched_discord_roles)
+                )
+            if candidate.seniority:
+                skill_info.append(f"seniority: `{candidate.seniority}`")
+            if candidate.timezone:
+                skill_info.append(f"tz: `{candidate.timezone}`")
+            if skill_info:
+                parts.append("   " + " · ".join(skill_info))
+
+            lines.append("\n".join(parts))
+
+        messages: list[str] = []
+        current = ""
+        for line in lines:
+            candidate_block = line + "\n"
+            if len(current) + len(candidate_block) > 1900:
+                messages.append(current.rstrip())
+                current = candidate_block
+            else:
+                current += candidate_block
+        if current.strip():
+            messages.append(current.rstrip())
+
+        return messages, resume_options
+
+    async def _run_auto_match_candidates_for_thread(
+        self,
+        *,
+        thread: discord.Thread,
+        trigger: Literal["thread_create", "message_create"],
+    ) -> None:
+        """Best-effort automatic matching for a newly created job thread."""
+        if not await self._mark_thread_auto_matched(thread.id):
+            return
+
+        parent_channel = thread.parent
+        guild = thread.guild
+        if guild is not None and parent_channel is not None:
+            if parent_channel.permissions_for(guild.default_role).view_channel:
+                logger.warning(
+                    "Skipping auto-match publish in publicly visible channel "
+                    "(guild=%s channel=%s thread=%s)",
+                    guild.id,
+                    parent_channel.id,
+                    thread.id,
+                )
+                await self._unmark_thread_auto_matched(thread.id)
+                return
+
+        posting = await self._read_thread_posting(thread)
+        if posting is None:
+            await self._unmark_thread_auto_matched(thread.id)
+            await thread.send(
+                "⚠️ Could not read this thread's opening message. "
+                "Run `/match-candidates` manually after posting details."
+            )
+            return
+
+        try:
+            requirements = await asyncio.to_thread(
+                extract_job_requirements,
+                posting,
+                api_key=settings.openai_api_key,
+                base_url=settings.openai_base_url or None,
+                model=settings.openai_model,
+                webhook_url=settings.discord_logs_webhook_url,
+            )
+        except Exception as exc:
+            await self._unmark_thread_auto_matched(thread.id)
+            logger.warning(
+                "Auto match failed while extracting requirements "
+                "(guild=%s thread=%s trigger=%s): %s",
+                thread.guild.id if thread.guild else "unknown",
+                thread.id,
+                trigger,
+                exc,
+            )
+            await thread.send(
+                "⚠️ Failed to analyze this posting automatically. "
+                "Run `/match-candidates` manually in this thread."
+            )
+            return
+
+        if not requirements.required_skills:
+            await self._unmark_thread_auto_matched(thread.id)
+            await thread.send(
+                "⚠️ No required skills could be extracted automatically. "
+                "Run `/match-candidates` manually after updating the posting."
+            )
+            return
+
+        try:
+            candidates = await asyncio.to_thread(
+                search_candidates, settings, requirements, limit=10
+            )
+        except Exception as exc:
+            await self._unmark_thread_auto_matched(thread.id)
+            logger.warning(
+                "Auto candidate search failed (guild=%s thread=%s trigger=%s): %s",
+                thread.guild.id if thread.guild else "unknown",
+                thread.id,
+                trigger,
+                exc,
+            )
+            await thread.send(
+                "⚠️ Automatic candidate search failed. "
+                "Run `/match-candidates` manually in this thread."
+            )
+            return
+
+        messages, _ = self._render_match_candidates_messages(
+            requirements=requirements,
+            candidates=candidates,
+        )
+        for msg in messages:
+            await thread.send(msg)
 
     def _backend_headers(self) -> dict[str, str]:
         """Build auth headers for internal backend API calls."""
@@ -6506,6 +6805,175 @@ class CRMCog(commands.Cog):
             )
 
     @app_commands.command(
+        name="register-jobs-channel",
+        description="Register a text/forum channel for automatic job-post matching.",
+    )
+    @app_commands.describe(
+        channel=(
+            "Channel to watch. Defaults to current channel "
+            "(or current thread's parent channel)."
+        )
+    )
+    @require_role("Steering Committee")
+    async def register_jobs_channel(
+        self,
+        interaction: discord.Interaction,
+        channel: JobWatchChannel | None = None,
+    ) -> None:
+        """Register a channel that triggers automatic candidate matching."""
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message(
+                "⚠️ This command must be used inside a server.",
+                ephemeral=True,
+            )
+            return
+
+        target_channel = self._resolve_jobs_channel_target(interaction, channel)
+        if target_channel is None:
+            await interaction.response.send_message(
+                "⚠️ Choose a text/forum channel or run this in one.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            created = await asyncio.to_thread(
+                register_job_post_channel,
+                settings,
+                guild_id=str(guild.id),
+                channel_id=str(target_channel.id),
+            )
+            self._jobs_channels_by_guild.setdefault(guild.id, set()).add(
+                target_channel.id
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to register jobs channel guild=%s channel=%s: %s",
+                guild.id,
+                target_channel.id,
+                exc,
+            )
+            await interaction.followup.send(
+                "❌ Failed to register this channel. Please try again.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            self._audit_command(
+                interaction=interaction,
+                action="crm.register_jobs_channel",
+                result="success",
+                metadata={
+                    "guild_id": str(guild.id),
+                    "channel_id": str(target_channel.id),
+                    "channel_name": target_channel.name,
+                    "created": created,
+                },
+            )
+        except Exception as exc:
+            logger.warning("Audit write failed for crm.register_jobs_channel: %s", exc)
+
+        if created:
+            await interaction.followup.send(
+                f"✅ Registered <#{target_channel.id}> for automatic job matching.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                f"ℹ️ <#{target_channel.id}> is already registered.",
+                ephemeral=True,
+            )
+
+    @app_commands.command(
+        name="unregister-jobs-channel",
+        description="Stop automatic job-post matching for a text/forum channel.",
+    )
+    @app_commands.describe(
+        channel=(
+            "Channel to stop watching. Defaults to current channel "
+            "(or current thread's parent channel)."
+        )
+    )
+    @require_role("Steering Committee")
+    async def unregister_jobs_channel(
+        self,
+        interaction: discord.Interaction,
+        channel: JobWatchChannel | None = None,
+    ) -> None:
+        """Unregister a channel from automatic candidate matching."""
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message(
+                "⚠️ This command must be used inside a server.",
+                ephemeral=True,
+            )
+            return
+
+        target_channel = self._resolve_jobs_channel_target(interaction, channel)
+        if target_channel is None:
+            await interaction.response.send_message(
+                "⚠️ Choose a text/forum channel or run this in one.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            removed = await asyncio.to_thread(
+                unregister_job_post_channel,
+                settings,
+                guild_id=str(guild.id),
+                channel_id=str(target_channel.id),
+            )
+            self._jobs_channels_by_guild.setdefault(guild.id, set()).discard(
+                target_channel.id
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to unregister jobs channel guild=%s channel=%s: %s",
+                guild.id,
+                target_channel.id,
+                exc,
+            )
+            await interaction.followup.send(
+                "❌ Failed to unregister this channel. Please try again.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            self._audit_command(
+                interaction=interaction,
+                action="crm.unregister_jobs_channel",
+                result="success",
+                metadata={
+                    "guild_id": str(guild.id),
+                    "channel_id": str(target_channel.id),
+                    "channel_name": target_channel.name,
+                    "removed": removed,
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "Audit write failed for crm.unregister_jobs_channel: %s",
+                exc,
+            )
+
+        if removed:
+            await interaction.followup.send(
+                f"✅ Unregistered <#{target_channel.id}> from automatic job matching.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                f"ℹ️ <#{target_channel.id}> was not registered.",
+                ephemeral=True,
+            )
+
+    @app_commands.command(
         name="match-candidates",
         description="Reads this thread's opening message as a job posting and returns ranked matching candidates.",
     )
@@ -6630,92 +7098,10 @@ class CRMCog(commands.Cog):
             )
             return
 
-        lines: list[str] = []
-
-        header_parts: list[str] = []
-        if requirements.title:
-            header_parts.append(f"**{requirements.title}**")
-        if requirements.discord_role_types:
-            header_parts.append(
-                "Role: " + ", ".join(f"`{r}`" for r in requirements.discord_role_types)
-            )
-        if requirements.required_skills:
-            header_parts.append(
-                "Skills: "
-                + ", ".join(f"`{s}`" for s in requirements.required_skills[:8])
-            )
-        if requirements.seniority:
-            header_parts.append(f"Seniority: `{requirements.seniority}`")
-        if requirements.location_type == "us_only":
-            header_parts.append("📍 US only")
-        elif requirements.raw_location_text:
-            header_parts.append(f"📍 {requirements.raw_location_text}")
-
-        lines.append("## Job Match Results")
-        if header_parts:
-            lines.append(" · ".join(header_parts))
-        lines.append(f"Found **{len(candidates)}** candidate(s).\n")
-
-        crm_base = settings.espo_base_url.rstrip("/")
-        resume_options: list[tuple[str, str, str]] = []
-
-        for i, c in enumerate(candidates, start=1):
-            label = "**[Member]**" if c.is_member else "[Prospect]"
-            name = c.name or "Unknown"
-            email = c.email_508 or c.email or "—"
-            crm_link = (
-                f"{crm_base}/#Contact/view/{c.crm_contact_id}"
-                if c.has_crm_link and c.crm_contact_id
-                else None
-            )
-            if crm_link:
-                parts = [f"{i}. {label} [{name}](<{crm_link}>) · {email}"]
-            else:
-                parts = [f"{i}. {label} {name} · {email}"]
-                if c.discord_user_id:
-                    parts.append(f"Discord: <@{c.discord_user_id}>")
-
-            if c.linkedin:
-                parts.append(f"[LinkedIn](<{c.linkedin}>)")
-            if (
-                c.latest_resume_id
-                and c.latest_resume_name
-                and c.latest_resume_name != "Vladyslav_Stryzhak.pdf"
-            ):
-                parts.append(f"Resume: `{c.latest_resume_name}`")
-                resume_options.append((name, c.latest_resume_id, c.latest_resume_name))
-
-            skill_info: list[str] = []
-            skill_info.append(f"score: {c.match_score:.1f}")
-            if c.matched_required_skills:
-                skill_info.append(
-                    "✅ " + ", ".join(f"`{s}`" for s in c.matched_required_skills[:5])
-                )
-            if c.matched_discord_roles:
-                skill_info.append(
-                    "🏷️ " + ", ".join(f"`{r}`" for r in c.matched_discord_roles)
-                )
-            if c.seniority:
-                skill_info.append(f"seniority: `{c.seniority}`")
-            if c.timezone:
-                skill_info.append(f"tz: `{c.timezone}`")
-            if skill_info:
-                parts.append("   " + " · ".join(skill_info))
-
-            lines.append("\n".join(parts))
-
-        # Paginate: Discord followup allows multiple sends; split on 1900-char chunks.
-        messages: list[str] = []
-        current = ""
-        for line in lines:
-            candidate_block = line + "\n"
-            if len(current) + len(candidate_block) > 1900:
-                messages.append(current.rstrip())
-                current = candidate_block
-            else:
-                current += candidate_block
-        if current.strip():
-            messages.append(current.rstrip())
+        messages, resume_options = self._render_match_candidates_messages(
+            requirements=requirements,
+            candidates=candidates,
+        )
 
         for msg in messages:
             await interaction.followup.send(msg)
@@ -6792,6 +7178,20 @@ class CRMCog(commands.Cog):
         """Bulk-sync all guild member roles on startup."""
         for guild in self.bot.guilds:
             try:
+                channel_ids = await self._refresh_jobs_channel_cache(guild.id)
+                logger.info(
+                    "Loaded %d registered jobs channel(s) for guild=%s",
+                    len(channel_ids),
+                    guild.name,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed loading jobs channel registrations for guild %s: %s",
+                    guild.name,
+                    exc,
+                )
+
+            try:
                 updated, skipped, failed = await self._bulk_sync_guild_roles(guild)
                 logger.info(
                     "Startup discord role sync: guild=%s updated=%d skipped=%d failed=%d",
@@ -6804,6 +7204,81 @@ class CRMCog(commands.Cog):
                 logger.warning(
                     "Startup discord role sync failed for guild %s: %s", guild.name, exc
                 )
+
+    @commands.Cog.listener()
+    async def on_thread_create(self, thread: discord.Thread) -> None:
+        """Auto-run matching for new threads in registered channels."""
+        guild = thread.guild
+        parent = thread.parent
+        if guild is None or parent is None:
+            return
+        if not await self._refresh_jobs_channel_cache_if_missing(guild.id):
+            return
+
+        if not self._is_jobs_channel_registered(guild.id, parent.id):
+            return
+
+        owner = guild.get_member(thread.owner_id) if thread.owner_id else None
+        if owner is None or owner.bot:
+            return
+        if not check_user_roles_with_hierarchy(owner.roles, ["Member"]):
+            return
+
+        await self._run_auto_match_candidates_for_thread(
+            thread=thread,
+            trigger="thread_create",
+        )
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        """Auto-create a thread for registered text-channel posts and match."""
+        if message.guild is None:
+            return
+        if not await self._refresh_jobs_channel_cache_if_missing(message.guild.id):
+            return
+        if not isinstance(message.author, discord.Member):
+            return
+        if message.author.bot:
+            return
+        if not check_user_roles_with_hierarchy(message.author.roles, ["Member"]):
+            return
+        if isinstance(message.channel, discord.Thread):
+            return
+        if not isinstance(message.channel, discord.TextChannel):
+            return
+        if not self._is_jobs_channel_registered(message.guild.id, message.channel.id):
+            return
+        if message.channel.permissions_for(message.guild.default_role).view_channel:
+            logger.warning(
+                "Skipping auto-thread in publicly visible channel "
+                "(guild=%s channel=%s message=%s)",
+                message.guild.id,
+                message.channel.id,
+                message.id,
+            )
+            return
+        if not message.content.strip():
+            return
+
+        first_line = message.content.strip().splitlines()[0]
+        thread_name = first_line[:80] if first_line else f"job-post-{message.id}"
+
+        try:
+            thread = await message.create_thread(name=thread_name)
+        except discord.HTTPException as exc:
+            logger.warning(
+                "Failed to create auto-match thread (guild=%s channel=%s message=%s): %s",
+                message.guild.id,
+                message.channel.id,
+                message.id,
+                exc,
+            )
+            return
+
+        await self._run_auto_match_candidates_for_thread(
+            thread=thread,
+            trigger="message_create",
+        )
 
     @app_commands.command(
         name="sync-discord-roles",
