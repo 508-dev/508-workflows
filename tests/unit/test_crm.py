@@ -339,7 +339,7 @@ class TestCRMCog:
 
     @pytest.mark.asyncio
     async def test_match_candidates_sends_role_and_locality_mentions(
-        self, crm_cog, mock_interaction
+        self, crm_cog, mock_interaction, mock_member_role
     ):
         """Match candidates should emit role/locality mention lines safely."""
         role_frontend = Mock()
@@ -359,12 +359,20 @@ class TestCRMCog:
         mock_interaction.guild = guild
         mock_interaction.user.id = 999
         mock_interaction.user.name = "Requester"
-        mock_interaction.user.roles = [Mock(name="Member")]
+        mock_interaction.user.roles = [mock_member_role]
+
+        starter_msg = Mock()
+        starter_msg.content = "Example job"
+        starter_msg.attachments = []
+        starter_msg.embeds = []
 
         class DummyThread:
-            pass
+            id = 123
+            applied_tags = []
 
-        mock_interaction.channel = DummyThread()
+        thread_instance = DummyThread()
+        thread_instance.starter_message = starter_msg
+        mock_interaction.channel = thread_instance
 
         requirements = Mock()
         requirements.title = "Frontend Engineer"
@@ -411,9 +419,7 @@ class TestCRMCog:
             patch("five08.discord_bot.cogs.crm.discord.Thread", DummyThread),
             patch.object(crm_cog, "_audit_command"),
         ):
-            await crm_cog.match_candidates.callback(
-                crm_cog, mock_interaction, "Example job"
-            )
+            await crm_cog.match_candidates.callback(crm_cog, mock_interaction)
 
         def assert_mentions_disabled(call):
             allowed = call.kwargs["allowed_mentions"]

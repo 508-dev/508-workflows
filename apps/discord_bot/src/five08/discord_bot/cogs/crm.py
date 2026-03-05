@@ -7390,15 +7390,14 @@ class CRMCog(commands.Cog):
                         seen_role_ids.add(role_id)
                         allowed_role_ids.append(role_id)
                     continue
-                role = next(
-                    (
-                        candidate
-                        for candidate in interaction.guild.roles
-                        if candidate.name.casefold() == normalized_role_name
-                        and candidate.name.casefold() not in excluded_role_names
-                    ),
-                    None,
-                )
+                role = None
+                for guild_role in interaction.guild.roles:
+                    guild_role_name = guild_role.name.casefold()
+                    if guild_role_name in excluded_role_names:
+                        continue
+                    if guild_role_name == normalized_role_name:
+                        role = guild_role
+                        break
                 if role is not None:
                     if role.mention not in seen_mentions:
                         seen_mentions.add(role.mention)
