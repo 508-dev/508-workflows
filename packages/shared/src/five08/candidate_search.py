@@ -33,7 +33,7 @@ _LOCATION_COUNTRY_HINTS: tuple[
 ] = (
     (
         re.compile(
-            r"(?<!\w)(?:(?-i:U\.?S\.?)|usa|united states|united states of america)(?!\w)",
+            r"(?<!\w)(?:(?-i:U\.?S(?:\.?A\.?)?)|usa|united states|united states of america)(?!\w)",
             re.IGNORECASE,
         ),
         tuple(sorted(_US_COUNTRY_VALUES)),
