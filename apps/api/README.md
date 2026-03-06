@@ -46,7 +46,7 @@ Discord deep-link identity policy:
 - `DISCORD_ADMIN_ROLES` controls who can mint/use Discord deep links (`Admin,Owner` recommended).
 - `OIDC_ADMIN_GROUPS` controls normal OIDC dashboard admin membership (`authentik Admins` recommended).
 - `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=true` (default): Discord deep links also require OIDC admin group + OIDC email linked to Discord admin identity.
-- `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=false`: bootstrap mode; Discord deep links skip OIDC group/email-link checks after successful OIDC authentication.
+- `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=false`: Discord deep links create a Discord-backed admin session directly after re-validating active CRM membership + Discord admin role, without forcing an OIDC roundtrip.
 
 ### Known handler wiring expectation
 

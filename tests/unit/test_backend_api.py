@@ -813,7 +813,7 @@ def test_auth_callback_discord_link_can_skip_oidc_identity_checks(
     assert audit_payload.metadata["discord_link_identity_checks_enforced"] is False
 
 
-def test_auth_discord_link_redirect_skips_session_identity_checks_when_disabled(
+def test_auth_discord_link_redirect_creates_discord_session_when_disabled(
     monkeypatch: pytest.MonkeyPatch,
     client: TestClient,
 ) -> None:
@@ -827,32 +827,40 @@ def test_auth_discord_link_redirect_skips_session_identity_checks_when_disabled(
             next_path="/dashboard",
         )
     )
+    store.save_session = AsyncMock()
     store.delete_discord_link = AsyncMock()
-
-    session = api.AuthSession(
-        subject="authentik-user-5",
-        email=None,
-        display_name="Bootstrap User",
-        groups=["Member"],
-        is_admin=False,
-        id_token="id-token-5",
-        expires_at=4_102_444_800,
+    verifier = Mock()
+    verifier.resolve_admin_identity = AsyncMock(
+        return_value=Mock(
+            discord_user_id="123456789",
+            email="admin@508.dev",
+            display_name="Discord Admin",
+        )
     )
 
     with (
         patch("five08.backend.api._auth_store_from_app", return_value=store),
         patch(
-            "five08.backend.api._current_session", return_value=("session-5", session)
+            "five08.backend.api._discord_admin_verifier_from_app",
+            return_value=verifier,
         ),
+        patch("five08.backend.api._http_client_from_app", return_value=Mock()),
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
     ):
         response = client.get("/auth/discord/link/link-1", follow_redirects=False)
 
     assert response.status_code == 302
-    assert (
-        response.headers["location"]
-        == "/auth/login?next=%2Fdashboard&discord_link_token=link-1"
-    )
-    store.delete_discord_link.assert_not_awaited()
+    assert response.headers["location"] == "/dashboard"
+    store.delete_discord_link.assert_awaited_once_with("link-1")
+    saved_session = store.save_session.call_args.kwargs["payload"]
+    assert saved_session.subject == "123456789"
+    assert saved_session.actor_provider == api.ActorProvider.DISCORD.value
+    assert saved_session.email == "admin@508.dev"
+    audit_payload = mock_insert.call_args.args[1]
+    assert audit_payload.actor_provider == api.ActorProvider.DISCORD
+    assert audit_payload.actor_subject == "123456789"
+    assert audit_payload.metadata is not None
+    assert audit_payload.metadata["discord_link_identity_checks_enforced"] is False
 
 
 def test_auth_logout_writes_logout_audit(client: TestClient) -> None:

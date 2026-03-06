@@ -12,7 +12,6 @@ from discord.ext import commands
 
 from five08.discord_bot.config import settings
 from five08.discord_bot.utils.audit import DiscordAuditLogger
-from five08.discord_bot.utils.role_decorators import require_role
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +39,20 @@ class AdminLoginCog(commands.Cog):
             "X-API-Secret": settings.api_shared_secret,
             "Content-Type": "application/json",
         }
+
+    @staticmethod
+    def _user_can_request_login_link(interaction: discord.Interaction) -> bool:
+        member_roles = getattr(interaction.user, "roles", None)
+        if member_roles is None:
+            return False
+
+        allowed_role_names = settings.discord_admin_role_names
+        user_role_names = {
+            role.name.casefold()
+            for role in member_roles
+            if isinstance(role.name, str) and role.name.strip()
+        }
+        return bool(user_role_names & allowed_role_names)
 
     async def _create_login_link(self, *, discord_user_id: str) -> tuple[str, int]:
         payload = {"discord_user_id": discord_user_id}
@@ -96,9 +109,20 @@ class AdminLoginCog(commands.Cog):
         name="login",
         description="Get a one-time admin dashboard login link.",
     )
-    @require_role("Admin")
     async def login(self, interaction: discord.Interaction) -> None:
         """Create and return a one-time dashboard login URL."""
+        if not self._user_can_request_login_link(interaction):
+            self._audit(
+                interaction=interaction,
+                result="denied",
+                metadata={"reason": "discord_user_not_admin"},
+            )
+            await interaction.response.send_message(
+                "❌ You are not allowed to create an admin dashboard login link.",
+                ephemeral=True,
+            )
+            return
+
         await interaction.response.defer(ephemeral=True)
 
         try:
