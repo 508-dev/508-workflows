@@ -37,6 +37,7 @@ from five08.discord_bot.utils.role_decorators import (
     check_user_roles_with_hierarchy,
 )
 from five08.job_match import (
+    JobRequirements,
     extract_job_requirements,
     DISCORD_ROLES_EXCLUDE_FROM_SYNC,
     DISCORD_ROLES_NEVER_SUGGEST,
@@ -2312,7 +2313,7 @@ class CRMCog(commands.Cog):
     def _build_job_match_header_and_mentions(
         self,
         *,
-        requirements: Any,
+        requirements: JobRequirements,
         candidates_count: int,
         guild: discord.Guild | None,
     ) -> tuple[list[str], str | None, list[int], str | None, list[int]]:
@@ -2559,24 +2560,7 @@ class CRMCog(commands.Cog):
         )
         lines.extend(candidate_lines)
 
-        messages: list[str] = []
-        current = ""
-        for line in lines:
-            candidate_block = line + "\n"
-            while len(candidate_block) > 1900:
-                if current:
-                    messages.append(current.rstrip())
-                    current = ""
-                messages.append(candidate_block[:1900].rstrip())
-                candidate_block = candidate_block[1900:]
-            if len(current) + len(candidate_block) > 1900:
-                if current:
-                    messages.append(current.rstrip())
-                current = candidate_block
-            else:
-                current += candidate_block
-        if current.strip():
-            messages.append(current.rstrip())
+        messages = self._paginate_match_lines(lines)
 
         return messages, resume_options
 
@@ -2750,10 +2734,11 @@ class CRMCog(commands.Cog):
             users=False,
             everyone=False,
         )
-        await thread.send(
-            "\n".join(header_lines),
-            allowed_mentions=safe_mentions,
-        )
+        for chunk in self._paginate_match_lines(header_lines):
+            await thread.send(
+                chunk,
+                allowed_mentions=safe_mentions,
+            )
         if role_mentions_line:
             allowed_role_mentions = (
                 discord.AllowedMentions(
@@ -2764,10 +2749,11 @@ class CRMCog(commands.Cog):
                 if role_mentions_role_ids
                 else safe_mentions
             )
-            await thread.send(
-                role_mentions_line,
-                allowed_mentions=allowed_role_mentions,
-            )
+            for chunk in self._paginate_match_lines([role_mentions_line]):
+                await thread.send(
+                    chunk,
+                    allowed_mentions=allowed_role_mentions,
+                )
         if locality_mentions_line:
             allowed_locality_mentions = (
                 discord.AllowedMentions(
@@ -2780,10 +2766,11 @@ class CRMCog(commands.Cog):
                 if locality_mentions_role_ids
                 else safe_mentions
             )
-            await thread.send(
-                locality_mentions_line,
-                allowed_mentions=allowed_locality_mentions,
-            )
+            for chunk in self._paginate_match_lines([locality_mentions_line]):
+                await thread.send(
+                    chunk,
+                    allowed_mentions=allowed_locality_mentions,
+                )
 
         crm_base = settings.espo_base_url.rstrip("/")
         lines, resume_options = self._build_match_candidate_lines(
@@ -8550,15 +8537,15 @@ class CRMCog(commands.Cog):
             guild=interaction.guild,
         )
 
-        header_message = "\n".join(header_lines)
-        await interaction.followup.send(
-            header_message,
-            allowed_mentions=discord.AllowedMentions(
-                roles=False,
-                users=False,
-                everyone=False,
-            ),
-        )
+        for chunk in self._paginate_match_lines(header_lines):
+            await interaction.followup.send(
+                chunk,
+                allowed_mentions=discord.AllowedMentions(
+                    roles=False,
+                    users=False,
+                    everyone=False,
+                ),
+            )
         if role_mentions_line:
             allowed_role_mentions = (
                 discord.AllowedMentions(
@@ -8573,10 +8560,11 @@ class CRMCog(commands.Cog):
                     everyone=False,
                 )
             )
-            await interaction.followup.send(
-                role_mentions_line,
-                allowed_mentions=allowed_role_mentions,
-            )
+            for chunk in self._paginate_match_lines([role_mentions_line]):
+                await interaction.followup.send(
+                    chunk,
+                    allowed_mentions=allowed_role_mentions,
+                )
         if locality_mentions_line:
             allowed_locality_mentions = (
                 discord.AllowedMentions(
@@ -8593,10 +8581,11 @@ class CRMCog(commands.Cog):
                     everyone=False,
                 )
             )
-            await interaction.followup.send(
-                locality_mentions_line,
-                allowed_mentions=allowed_locality_mentions,
-            )
+            for chunk in self._paginate_match_lines([locality_mentions_line]):
+                await interaction.followup.send(
+                    chunk,
+                    allowed_mentions=allowed_locality_mentions,
+                )
 
         crm_base = settings.espo_base_url.rstrip("/")
         lines, resume_options = self._build_match_candidate_lines(
