@@ -2216,6 +2216,29 @@ class CRMCog(commands.Cog):
             resource_id=resource_id,
         )
 
+    def _audit_command_safe(
+        self,
+        *,
+        interaction: discord.Interaction,
+        action: str,
+        result: str,
+        metadata: dict[str, Any] | None = None,
+        resource_type: str | None = "discord_command",
+        resource_id: str | None = None,
+    ) -> None:
+        """Keep command flows alive if audit logging fails unexpectedly."""
+        try:
+            self._audit_command(
+                interaction=interaction,
+                action=action,
+                result=result,
+                metadata=metadata,
+                resource_type=resource_type,
+                resource_id=resource_id,
+            )
+        except Exception:
+            logger.warning("Audit logging failed for action=%s", action, exc_info=True)
+
     @staticmethod
     def _resolve_jobs_channel_target(
         interaction: discord.Interaction,
@@ -6954,7 +6977,7 @@ class CRMCog(commands.Cog):
             await interaction.response.defer(ephemeral=True)
 
             has_updates = any(
-                bool(value)
+                value.strip() if isinstance(value, str) else bool(value)
                 for value in (
                     github,
                     linkedin,
@@ -7156,7 +7179,7 @@ class CRMCog(commands.Cog):
                     update_data["cDesiredHours"] = parsed_hours
                     requested_updates.append("desired_hours")
                 elif desired_hours.strip():
-                    self._audit_command(
+                    self._audit_command_safe(
                         interaction=interaction,
                         action="crm.update_contact",
                         result="denied",
@@ -7172,12 +7195,34 @@ class CRMCog(commands.Cog):
                     return
 
             if website is not None:
-                website_links = self._parse_website_links(website)
+                website_links, invalid_website_tokens = self._parse_website_links(
+                    website
+                )
+                if invalid_website_tokens:
+                    invalid_message = ", ".join(
+                        f"`{item}`" for item in invalid_website_tokens
+                    )
+                    self._audit_command_safe(
+                        interaction=interaction,
+                        action="crm.update_contact",
+                        result="denied",
+                        metadata={
+                            "search_term": search_term,
+                            "reason": "invalid_website_links",
+                            "website": website,
+                            "invalid_website_tokens": invalid_website_tokens,
+                        },
+                    )
+                    await interaction.followup.send(
+                        f"❌ Invalid website entries: {invalid_message}. "
+                        "Provide comma-separated URLs (e.g. `https://example.com, github.com/name`)."
+                    )
+                    return
                 if website_links:
                     update_data["cWebsiteLink"] = website_links
                     requested_updates.append("website")
                 elif website.strip():
-                    self._audit_command(
+                    self._audit_command_safe(
                         interaction=interaction,
                         action="crm.update_contact",
                         result="denied",
@@ -7198,7 +7243,7 @@ class CRMCog(commands.Cog):
                     update_data.update(location_updates)
                     requested_updates.append("location")
                 elif location.strip():
-                    self._audit_command(
+                    self._audit_command_safe(
                         interaction=interaction,
                         action="crm.update_contact",
                         result="denied",
@@ -7448,23 +7493,154 @@ class CRMCog(commands.Cog):
             return None
         return f"{low}-{high}"
 
-    def _parse_website_links(self, website: str) -> list[str]:
+    _LOCATION_COUNTRY_ALIASES = {
+        "us": "United States",
+        "usa": "United States",
+        "united states": "United States",
+        "united states of america": "United States",
+        "uk": "United Kingdom",
+        "united kingdom": "United Kingdom",
+        "england": "United Kingdom",
+        "scotland": "United Kingdom",
+        "wales": "United Kingdom",
+        "uae": "United Arab Emirates",
+        "united arab emirates": "United Arab Emirates",
+    }
+    _LOCATION_US_STATES = {
+        "AL": "Alabama",
+        "AK": "Alaska",
+        "AZ": "Arizona",
+        "AR": "Arkansas",
+        "CA": "California",
+        "CO": "Colorado",
+        "CT": "Connecticut",
+        "DE": "Delaware",
+        "FL": "Florida",
+        "GA": "Georgia",
+        "HI": "Hawaii",
+        "ID": "Idaho",
+        "IL": "Illinois",
+        "IN": "Indiana",
+        "IA": "Iowa",
+        "KS": "Kansas",
+        "KY": "Kentucky",
+        "LA": "Louisiana",
+        "ME": "Maine",
+        "MD": "Maryland",
+        "MA": "Massachusetts",
+        "MI": "Michigan",
+        "MN": "Minnesota",
+        "MS": "Mississippi",
+        "MO": "Missouri",
+        "MT": "Montana",
+        "NE": "Nebraska",
+        "NV": "Nevada",
+        "NH": "New Hampshire",
+        "NJ": "New Jersey",
+        "NM": "New Mexico",
+        "NY": "New York",
+        "NC": "North Carolina",
+        "ND": "North Dakota",
+        "OH": "Ohio",
+        "OK": "Oklahoma",
+        "OR": "Oregon",
+        "PA": "Pennsylvania",
+        "RI": "Rhode Island",
+        "SC": "South Carolina",
+        "SD": "South Dakota",
+        "TN": "Tennessee",
+        "TX": "Texas",
+        "UT": "Utah",
+        "VT": "Vermont",
+        "VA": "Virginia",
+        "WA": "Washington",
+        "WV": "West Virginia",
+        "WI": "Wisconsin",
+        "WY": "Wyoming",
+        "DC": "District Of Columbia",
+    }
+    _LOCATION_STATE_NAMES = set(map(str.lower, _LOCATION_US_STATES.values()))
+    _LOCATION_TIMEZONE_ABBREV_MAP = {
+        "UTC": "UTC+00:00",
+        "GMT": "UTC+00:00",
+        "PST": "UTC-08:00",
+        "PDT": "UTC-07:00",
+        "MST": "UTC-07:00",
+        "MDT": "UTC-06:00",
+        "CST": "UTC-06:00",
+        "CDT": "UTC-05:00",
+        "EST": "UTC-05:00",
+        "EDT": "UTC-04:00",
+        "CET": "UTC+01:00",
+        "EET": "UTC+02:00",
+        "IST": "UTC+05:30",
+        "SGT": "UTC+08:00",
+        "HKT": "UTC+08:00",
+        "JST": "UTC+09:00",
+        "KST": "UTC+09:00",
+        "AEST": "UTC+10:00",
+        "AEDT": "UTC+11:00",
+    }
+    _LOCATION_CITY_TIMEZONE_HINTS = {
+        "san francisco": "UTC-08:00",
+        "los angeles": "UTC-08:00",
+        "seattle": "UTC-08:00",
+        "denver": "UTC-07:00",
+        "phoenix": "UTC-07:00",
+        "chicago": "UTC-06:00",
+        "dallas": "UTC-06:00",
+        "houston": "UTC-06:00",
+        "austin": "UTC-06:00",
+        "new york": "UTC-05:00",
+        "boston": "UTC-05:00",
+        "atlanta": "UTC-05:00",
+        "washington": "UTC-05:00",
+        "london": "UTC+00:00",
+        "dublin": "UTC+00:00",
+        "lisbon": "UTC+00:00",
+        "paris": "UTC+01:00",
+        "berlin": "UTC+01:00",
+        "amsterdam": "UTC+01:00",
+        "rome": "UTC+01:00",
+        "madrid": "UTC+01:00",
+        "bucharest": "UTC+02:00",
+        "athens": "UTC+02:00",
+        "kyiv": "UTC+02:00",
+        "nairobi": "UTC+03:00",
+        "istanbul": "UTC+03:00",
+        "dubai": "UTC+04:00",
+        "mumbai": "UTC+05:30",
+        "bangalore": "UTC+05:30",
+        "bengaluru": "UTC+05:30",
+        "delhi": "UTC+05:30",
+        "singapore": "UTC+08:00",
+        "shanghai": "UTC+08:00",
+        "beijing": "UTC+08:00",
+        "tokyo": "UTC+09:00",
+        "seoul": "UTC+09:00",
+        "sydney": "UTC+10:00",
+        "melbourne": "UTC+10:00",
+    }
+
+    def _parse_website_links(self, website: str) -> tuple[list[str], list[str]]:
         from five08.crm_normalization import normalize_website_url
 
         links: list[str] = []
+        invalid_tokens: list[str] = []
         seen: set[str] = set()
         for raw in website.split(","):
             candidate = raw.strip()
             if not candidate:
                 continue
             normalized = normalize_website_url(candidate)
-            if not normalized and "://" not in candidate and "." in candidate:
-                normalized = normalize_website_url(f"https://{candidate}")
-            if not normalized or normalized in seen:
+            if not normalized:
+                invalid_tokens.append(candidate)
+                continue
+            if normalized in seen:
                 continue
             links.append(normalized)
             seen.add(normalized)
-        return links
+        return links, invalid_tokens
 
     def _parse_location_input(self, location: str) -> dict[str, str]:
         import re
@@ -7480,162 +7656,29 @@ class CRMCog(commands.Cog):
         if not raw:
             return {}
 
-        country_aliases = {
-            "us": "United States",
-            "usa": "United States",
-            "u.s.": "United States",
-            "u.s": "United States",
-            "united states": "United States",
-            "united states of america": "United States",
-            "uk": "United Kingdom",
-            "u.k.": "United Kingdom",
-            "united kingdom": "United Kingdom",
-            "england": "United Kingdom",
-            "scotland": "United Kingdom",
-            "wales": "United Kingdom",
-            "uae": "United Arab Emirates",
-            "u.a.e.": "United Arab Emirates",
-            "united arab emirates": "United Arab Emirates",
-        }
-        us_states = {
-            "AL": "Alabama",
-            "AK": "Alaska",
-            "AZ": "Arizona",
-            "AR": "Arkansas",
-            "CA": "California",
-            "CO": "Colorado",
-            "CT": "Connecticut",
-            "DE": "Delaware",
-            "FL": "Florida",
-            "GA": "Georgia",
-            "HI": "Hawaii",
-            "ID": "Idaho",
-            "IL": "Illinois",
-            "IN": "Indiana",
-            "IA": "Iowa",
-            "KS": "Kansas",
-            "KY": "Kentucky",
-            "LA": "Louisiana",
-            "ME": "Maine",
-            "MD": "Maryland",
-            "MA": "Massachusetts",
-            "MI": "Michigan",
-            "MN": "Minnesota",
-            "MS": "Mississippi",
-            "MO": "Missouri",
-            "MT": "Montana",
-            "NE": "Nebraska",
-            "NV": "Nevada",
-            "NH": "New Hampshire",
-            "NJ": "New Jersey",
-            "NM": "New Mexico",
-            "NY": "New York",
-            "NC": "North Carolina",
-            "ND": "North Dakota",
-            "OH": "Ohio",
-            "OK": "Oklahoma",
-            "OR": "Oregon",
-            "PA": "Pennsylvania",
-            "RI": "Rhode Island",
-            "SC": "South Carolina",
-            "SD": "South Dakota",
-            "TN": "Tennessee",
-            "TX": "Texas",
-            "UT": "Utah",
-            "VT": "Vermont",
-            "VA": "Virginia",
-            "WA": "Washington",
-            "WV": "West Virginia",
-            "WI": "Wisconsin",
-            "WY": "Wyoming",
-            "DC": "District Of Columbia",
-        }
-        state_names = {value.lower() for value in us_states.values()}
-        tz_abbrev_map = {
-            "UTC": "UTC+00:00",
-            "GMT": "UTC+00:00",
-            "PST": "UTC-08:00",
-            "PDT": "UTC-07:00",
-            "MST": "UTC-07:00",
-            "MDT": "UTC-06:00",
-            "CST": "UTC-06:00",
-            "CDT": "UTC-05:00",
-            "EST": "UTC-05:00",
-            "EDT": "UTC-04:00",
-            "CET": "UTC+01:00",
-            "EET": "UTC+02:00",
-            "IST": "UTC+05:30",
-            "SGT": "UTC+08:00",
-            "HKT": "UTC+08:00",
-            "JST": "UTC+09:00",
-            "KST": "UTC+09:00",
-            "AEST": "UTC+10:00",
-            "AEDT": "UTC+11:00",
-        }
-        city_tz_hints = {
-            "san francisco": "UTC-08:00",
-            "los angeles": "UTC-08:00",
-            "seattle": "UTC-08:00",
-            "denver": "UTC-07:00",
-            "phoenix": "UTC-07:00",
-            "chicago": "UTC-06:00",
-            "dallas": "UTC-06:00",
-            "houston": "UTC-06:00",
-            "austin": "UTC-06:00",
-            "new york": "UTC-05:00",
-            "boston": "UTC-05:00",
-            "atlanta": "UTC-05:00",
-            "washington": "UTC-05:00",
-            "london": "UTC+00:00",
-            "dublin": "UTC+00:00",
-            "lisbon": "UTC+00:00",
-            "paris": "UTC+01:00",
-            "berlin": "UTC+01:00",
-            "amsterdam": "UTC+01:00",
-            "rome": "UTC+01:00",
-            "madrid": "UTC+01:00",
-            "bucharest": "UTC+02:00",
-            "athens": "UTC+02:00",
-            "kyiv": "UTC+02:00",
-            "nairobi": "UTC+03:00",
-            "istanbul": "UTC+03:00",
-            "dubai": "UTC+04:00",
-            "mumbai": "UTC+05:30",
-            "bangalore": "UTC+05:30",
-            "bengaluru": "UTC+05:30",
-            "delhi": "UTC+05:30",
-            "singapore": "UTC+08:00",
-            "shanghai": "UTC+08:00",
-            "beijing": "UTC+08:00",
-            "tokyo": "UTC+09:00",
-            "seoul": "UTC+09:00",
-            "sydney": "UTC+10:00",
-            "melbourne": "UTC+10:00",
-        }
-
         def normalize_country_token(token: str) -> str | None:
             key = re.sub(r"[.]", "", token.strip().lower())
             if not key:
                 return None
-            if key in country_aliases:
-                return country_aliases[key]
+            if key in self._LOCATION_COUNTRY_ALIASES:
+                return self._LOCATION_COUNTRY_ALIASES[key]
             return normalize_country(token)
 
         def is_country_token(token: str) -> bool:
             key = re.sub(r"[.]", "", token.strip().lower())
-            return key in country_aliases
+            return key in self._LOCATION_COUNTRY_ALIASES
 
         def normalize_state_token(token: str) -> str | None:
             key = token.strip().upper()
-            if key in us_states:
-                return us_states[key]
+            if key in self._LOCATION_US_STATES:
+                return self._LOCATION_US_STATES[key]
             return normalize_state(token)
 
         def is_state_token(token: str) -> bool:
             key = token.strip().upper()
-            if key in us_states:
+            if key in self._LOCATION_US_STATES:
                 return True
-            return token.strip().lower() in state_names
+            return token.strip().lower() in self._LOCATION_STATE_NAMES
 
         def parse_timezone_candidate(value: str) -> str | None:
             cleaned = value.strip()
@@ -7645,7 +7688,7 @@ class CRMCog(commands.Cog):
             if normalized:
                 return normalized
             abbrev = cleaned.upper()
-            return tz_abbrev_map.get(abbrev)
+            return self._LOCATION_TIMEZONE_ABBREV_MAP.get(abbrev)
 
         timezone: str | None = None
         remainder = raw
@@ -7673,10 +7716,15 @@ class CRMCog(commands.Cog):
 
         if len(segments) == 1:
             token = segments[0]
-            if is_country_token(token):
-                country = normalize_country_token(token)
+            normalized_state = normalize_state_token(token)
+            if normalized_state:
+                state = normalized_state
             else:
-                city = normalize_city(token)
+                normalized_country = normalize_country_token(token)
+                if normalized_country:
+                    country = normalized_country
+                else:
+                    city = normalize_city(token)
         elif len(segments) == 2:
             token0 = segments[0]
             token1 = segments[1]
@@ -7690,7 +7738,7 @@ class CRMCog(commands.Cog):
             elif is_state_token(token1):
                 city = normalize_city(token0)
                 state = normalize_state_token(token1)
-                if token1.strip().upper() in us_states:
+                if token1.strip().upper() in self._LOCATION_US_STATES:
                     country = "United States"
             else:
                 city = normalize_city(token0)
@@ -7700,16 +7748,13 @@ class CRMCog(commands.Cog):
             state_token = segments[-2]
             country_token = segments[-1]
             state = normalize_state_token(state_token)
-            if is_country_token(country_token):
-                country = normalize_country_token(country_token)
-            else:
-                country = normalize_country_token(country_token)
+            country = normalize_country_token(country_token)
             if not country and is_country_token(state_token):
                 country = normalize_country_token(state_token)
                 state = None
 
         if not timezone and city:
-            timezone = city_tz_hints.get(city.lower())
+            timezone = self._LOCATION_CITY_TIMEZONE_HINTS.get(city.lower())
 
         updates: dict[str, str] = {}
         if city:

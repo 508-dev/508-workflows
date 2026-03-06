@@ -2848,17 +2848,17 @@ class TestCRMCog:
             await crm_cog.update_contact.callback(
                 crm_cog,
                 mock_interaction,
-                location="New York, NY, USA, UTC-05:00",
+                location="Austin, TX, USA, UTC-06:00",
                 desired_hours="25",
                 website="example.com, https://github.com/test",
             )
 
         update_call = crm_cog.espo_api.request.call_args
         update_payload = update_call[0][2]
-        assert update_payload["addressCity"] == "New York"
-        assert update_payload["addressState"] == "New York"
+        assert update_payload["addressCity"] == "Austin"
+        assert update_payload["addressState"] == "Texas"
         assert update_payload["addressCountry"] == "United States"
-        assert update_payload["cTimezone"] == "UTC-05:00"
+        assert update_payload["cTimezone"] == "UTC-06:00"
         assert update_payload["cDesiredHours"] == "25"
         assert isinstance(update_payload["cWebsiteLink"], list)
         assert any("example.com" in link for link in update_payload["cWebsiteLink"])
