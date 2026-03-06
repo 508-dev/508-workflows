@@ -28,6 +28,7 @@ from five08.discord_bot.cogs.crm import (
 )
 from five08.discord_bot.cogs import crm as crm_module
 from five08.clients.espo import EspoAPIError
+from five08.job_match import JobRequirements
 
 
 class TestCRMCog:
@@ -87,6 +88,92 @@ class TestCRMCog:
         cog = CRMCog(mock_bot)
         assert cog.bot == mock_bot
         assert cog.espo_api is not None
+
+    def test_build_job_match_header_and_mentions_guild_none(self, crm_cog):
+        """Header/mention builder should return backticks when guild is None."""
+        requirements = JobRequirements(
+            required_skills=["python"],
+            preferred_skills=[],
+            discord_role_types=["Full Stack"],
+            seniority=None,
+            location_type=None,
+            preferred_timezones=["Asia/Tokyo"],
+            raw_location_text="Japan or Asia",
+            title="Full Stack Engineer",
+        )
+
+        (
+            header_lines,
+            role_line,
+            role_ids,
+            locality_line,
+            locality_ids,
+        ) = crm_cog._build_job_match_header_and_mentions(
+            requirements=requirements,
+            candidates_count=3,
+            guild=None,
+        )
+
+        assert header_lines[0] == "## Job Match Results"
+        assert "Full Stack Engineer" in header_lines[1]
+        assert "Skills: `python`" in header_lines[1]
+        assert header_lines[-1] == "Found **3** candidate(s)."
+        assert role_line == "Discord roles: `Full Stack`"
+        assert role_ids == []
+        assert locality_line == "Locality roles: `Asia`, `Japan`"
+        assert locality_ids == []
+
+    def test_build_job_match_header_and_mentions_with_guild(self, crm_cog):
+        """Header/mention builder should resolve real role mentions with a guild."""
+        full_stack_role = Mock()
+        full_stack_role.name = "Full Stack"
+        full_stack_role.id = 111
+        full_stack_role.position = 2
+        full_stack_role.mention = "<@&111>"
+
+        asia_role = Mock()
+        asia_role.name = "Asia"
+        asia_role.id = 222
+        asia_role.position = 1
+        asia_role.mention = "<@&222>"
+
+        japan_role = Mock()
+        japan_role.name = "Japan"
+        japan_role.id = 333
+        japan_role.position = 0
+        japan_role.mention = "<@&333>"
+
+        guild = Mock()
+        guild.id = 99
+        guild.roles = [full_stack_role, asia_role, japan_role]
+
+        requirements = JobRequirements(
+            required_skills=[],
+            preferred_skills=[],
+            discord_role_types=["Full Stack"],
+            seniority=None,
+            location_type=None,
+            preferred_timezones=["Asia/Tokyo"],
+            raw_location_text="Japan",
+            title=None,
+        )
+
+        (
+            _header_lines,
+            role_line,
+            role_ids,
+            locality_line,
+            locality_ids,
+        ) = crm_cog._build_job_match_header_and_mentions(
+            requirements=requirements,
+            candidates_count=1,
+            guild=guild,
+        )
+
+        assert role_line == "Discord roles: <@&111>"
+        assert role_ids == [111]
+        assert locality_line == "Locality roles: <@&222>, <@&333>"
+        assert locality_ids == [222, 333]
 
     def test_check_member_role_with_member(
         self, crm_cog, mock_interaction, mock_member_role
