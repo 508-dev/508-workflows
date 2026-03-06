@@ -22,7 +22,9 @@ def test_docuseal_processor_marks_member_agreement_signed_timestamp() -> None:
     expected_email = "member@508.dev"
     expected_masked = mask_email(expected_email)
 
-    with patch("five08.worker.crm.docuseal_processor.EspoAPI", return_value=mock_api):
+    with patch(
+        "five08.worker.crm.docuseal_processor.EspoClient", return_value=mock_api
+    ):
         processor = DocusealAgreementProcessor()
         result = processor.process_agreement(
             email=expected_email,
@@ -51,7 +53,9 @@ def test_docuseal_processor_normalizes_completed_at_to_utc_timestamp() -> None:
         {"updated": True},
     ]
 
-    with patch("five08.worker.crm.docuseal_processor.EspoAPI", return_value=mock_api):
+    with patch(
+        "five08.worker.crm.docuseal_processor.EspoClient", return_value=mock_api
+    ):
         processor = DocusealAgreementProcessor()
         result = processor.process_agreement(
             email="member@508.dev",
@@ -72,7 +76,9 @@ def test_docuseal_processor_raises_on_invalid_completed_at() -> None:
         {"list": [{"id": "contact-1"}]},
     ]
 
-    with patch("five08.worker.crm.docuseal_processor.EspoAPI", return_value=mock_api):
+    with patch(
+        "five08.worker.crm.docuseal_processor.EspoClient", return_value=mock_api
+    ):
         processor = DocusealAgreementProcessor()
         with pytest.raises(DocusealAgreementNonRetryableError) as exc_info:
             processor.process_agreement(
@@ -90,7 +96,9 @@ def test_docuseal_processor_returns_contact_not_found_when_missing_contact() -> 
     mock_api = Mock()
     mock_api.request.return_value = {"list": []}
 
-    with patch("five08.worker.crm.docuseal_processor.EspoAPI", return_value=mock_api):
+    with patch(
+        "five08.worker.crm.docuseal_processor.EspoClient", return_value=mock_api
+    ):
         processor = DocusealAgreementProcessor()
         result = processor.process_agreement(
             email="missing@508.dev",
@@ -110,7 +118,9 @@ def test_docuseal_processor_raises_on_search_failure() -> None:
     mock_api = Mock()
     mock_api.request.side_effect = EspoAPIError("CRM unavailable")
 
-    with patch("five08.worker.crm.docuseal_processor.EspoAPI", return_value=mock_api):
+    with patch(
+        "five08.worker.crm.docuseal_processor.EspoClient", return_value=mock_api
+    ):
         processor = DocusealAgreementProcessor()
         with pytest.raises(DocusealAgreementProcessingError) as exc_info:
             processor.process_agreement(
@@ -134,7 +144,9 @@ def test_docuseal_processor_raises_on_update_failure() -> None:
         EspoAPIError("write failed"),
     ]
 
-    with patch("five08.worker.crm.docuseal_processor.EspoAPI", return_value=mock_api):
+    with patch(
+        "five08.worker.crm.docuseal_processor.EspoClient", return_value=mock_api
+    ):
         processor = DocusealAgreementProcessor()
         with pytest.raises(DocusealAgreementProcessingError) as exc_info:
             processor.process_agreement(

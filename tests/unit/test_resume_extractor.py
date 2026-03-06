@@ -460,6 +460,126 @@ def test_extract_ignores_low_confidence_website_candidate() -> None:
     assert result.social_links == []
 
 
+def test_extract_llm_location_unknown_values_normalize_to_none() -> None:
+    """Location placeholders from model output should not persist as literal values."""
+
+    class _FakeChatCompletions:
+        @staticmethod
+        def create(**_: object) -> object:
+            return type(
+                "Response",
+                (),
+                {
+                    "choices": [
+                        type(
+                            "Choice",
+                            (),
+                            {
+                                "message": type(
+                                    "Message",
+                                    (),
+                                    {
+                                        "content": (
+                                            '{"name": null, "email": null, '
+                                            '"github_username": null, '
+                                            '"linkedin_url": null, '
+                                            '"address_city": "unknown", '
+                                            '"address_state": "N/A", '
+                                            '"address_country": "none", '
+                                            '"timezone": "unknown", '
+                                            '"website_url_candidates": [], '
+                                            '"website_links": [], '
+                                            '"social_links": [], '
+                                            '"phone": null, "skills": [], '
+                                            '"skill_attrs": null, "confidence": 0.8}'
+                                        )
+                                    },
+                                )()
+                            },
+                        )()
+                    ]
+                },
+            )()
+
+    extractor = ResumeProfileExtractor(api_key="test-key")
+    extractor.client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": _FakeChatCompletions()})()},
+    )()
+    extractor.model = "fake-model"
+
+    result = extractor.extract("Jane Doe\njane@example.com\nSenior Engineer\n")
+
+    assert result.address_city is None
+    assert result.address_state is None
+    assert result.address_country is None
+    assert result.timezone is None
+
+
+def test_extract_llm_backfills_location_and_timezone_from_resume_text() -> None:
+    """LLM mode should backfill explicit location fields and infer timezone."""
+
+    class _FakeChatCompletions:
+        @staticmethod
+        def create(**_: object) -> object:
+            return type(
+                "Response",
+                (),
+                {
+                    "choices": [
+                        type(
+                            "Choice",
+                            (),
+                            {
+                                "message": type(
+                                    "Message",
+                                    (),
+                                    {
+                                        "content": (
+                                            '{"name": null, "email": null, '
+                                            '"github_username": null, '
+                                            '"linkedin_url": null, '
+                                            '"address_city": null, '
+                                            '"address_state": null, '
+                                            '"address_country": null, '
+                                            '"timezone": null, '
+                                            '"website_url_candidates": [], '
+                                            '"website_links": [], '
+                                            '"social_links": [], '
+                                            '"phone": null, "skills": [], '
+                                            '"skill_attrs": null, "confidence": 0.8}'
+                                        )
+                                    },
+                                )()
+                            },
+                        )()
+                    ]
+                },
+            )()
+
+    extractor = ResumeProfileExtractor(api_key="test-key")
+    extractor.client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": _FakeChatCompletions()})()},
+    )()
+    extractor.model = "fake-model"
+
+    result = extractor.extract(
+        "Jane Doe\n"
+        "Address City: San Francisco\n"
+        "Address State: California\n"
+        "Address Country: United States\n"
+        "jane@example.com\n"
+    )
+
+    assert result.address_city == "San Francisco"
+    assert result.address_state == "California"
+    assert result.address_country == "United States"
+    assert result.timezone == "UTC-08:00"
+
+
 def test_extract_linkedin_url_supports_hyphenated_slugs() -> None:
     """LinkedIn profile extraction should include hyphenated slug segments."""
     url = ResumeProfileExtractor._extract_linkedin_url(
@@ -557,6 +677,51 @@ def test_infer_seniority_regex_title_first_senior_overrides_low_years() -> None:
     assert level == "senior"
 
 
+def test_infer_seniority_regex_matches_senior_software_engineer_variant() -> None:
+    """Title variants like 'Senior Software Engineer' should map to senior."""
+    level = ResumeProfileExtractor._infer_seniority_from_resume(
+        "Senior Software Engineer at Acme"
+    )
+
+    assert level == "senior"
+
+
+def test_infer_seniority_regex_matches_engineer_ii_as_midlevel() -> None:
+    """Engineer II titles should map to midlevel even without years text."""
+    level = ResumeProfileExtractor._infer_seniority_from_resume(
+        "Software Engineer II, Platform"
+    )
+
+    assert level == "midlevel"
+
+
+def test_infer_seniority_regex_matches_principal_software_engineer_variant() -> None:
+    """Principal Software Engineer variants should map to staff."""
+    level = ResumeProfileExtractor._infer_seniority_from_resume(
+        "Principal Software Engineer"
+    )
+
+    assert level == "staff"
+
+
+def test_infer_seniority_regex_defaults_generic_engineer_title_to_midlevel() -> None:
+    """Generic engineer/developer titles without qualifiers should map to midlevel."""
+    level = ResumeProfileExtractor._infer_seniority_from_resume(
+        "Software Engineer at Acme Corp"
+    )
+
+    assert level == "midlevel"
+
+
+def test_infer_seniority_generic_engineer_uses_years_for_upgrade() -> None:
+    """Generic engineer title should still allow years-based promotion."""
+    level = ResumeProfileExtractor._infer_seniority_from_resume(
+        "Software Engineer\n10 years of software experience"
+    )
+
+    assert level == "senior"
+
+
 def test_infer_seniority_regex_does_not_match_larger_numeric_prefixes() -> None:
     """Standalone 500/1000 tokens should not trigger from larger numbers like 5000."""
     level = ResumeProfileExtractor._infer_seniority_from_resume(
@@ -564,6 +729,34 @@ def test_infer_seniority_regex_does_not_match_larger_numeric_prefixes() -> None:
     )
 
     assert level == "senior"
+
+
+def test_extract_roles_falls_back_to_title_inference_developer() -> None:
+    """Role extraction should infer developer from common engineering titles."""
+    roles = ResumeProfileExtractor._extract_roles(
+        "Experience\nSenior Software Engineer at Acme\nBuilt APIs"
+    )
+
+    assert "developer" in roles
+
+
+def test_extract_roles_falls_back_to_title_inference_non_developer() -> None:
+    """Role extraction should infer non-developer roles from title keywords."""
+    roles = ResumeProfileExtractor._extract_roles(
+        "Work History\nTechnical Program Manager at Example Inc"
+    )
+
+    assert "program manager" in roles
+
+
+def test_extract_roles_ignores_collaboration_narrative_false_positive() -> None:
+    """Narrative collaborator mentions should not infer candidate role."""
+    roles = ResumeProfileExtractor._infer_roles_from_resume(
+        "Partnered with product managers and designers to deliver features."
+    )
+
+    assert "product manager" not in roles
+    assert "designer" not in roles
 
 
 def test_normalize_name_part_preserves_non_uppercase_casing() -> None:
@@ -617,3 +810,47 @@ def test_infer_timezone_unknown_city_falls_back_to_country() -> None:
         _infer_timezone_from_location(country="Japan", city="Unknown City")
         == "UTC+09:00"
     )
+
+
+def test_extract_header_location_supports_city_country() -> None:
+    """Header parsing should treat two-part city/country strings as valid."""
+    city, state, country = ResumeProfileExtractor._extract_header_location(
+        "Jane Doe\nParis, France\njane@example.com"
+    )
+
+    assert city == "Paris"
+    assert state is None
+    assert country == "France"
+
+
+def test_extract_header_location_supports_city_state_two_part() -> None:
+    """Header parsing should keep state for two-part city/state headers."""
+    city, state, country = ResumeProfileExtractor._extract_header_location(
+        "Jane Doe\nSan Francisco, CA\njane@example.com"
+    )
+
+    assert city == "San Francisco"
+    assert state == "Ca"
+    assert country is None
+
+
+def test_extract_header_location_preserves_state_when_country_present() -> None:
+    """Header parsing should keep state when both state and country are present."""
+    city, state, country = ResumeProfileExtractor._extract_header_location(
+        "Jane Doe\nSan Francisco, CA, United States\njane@example.com"
+    )
+
+    assert city == "San Francisco"
+    assert state == "Ca"
+    assert country == "United States"
+
+
+def test_extract_header_location_keeps_state_for_city_state_only() -> None:
+    """City + spelled-out state should stay state, not be promoted to country."""
+    city, state, country = ResumeProfileExtractor._extract_header_location(
+        "Jane Doe\nAtlanta, Georgia\njane@example.com"
+    )
+
+    assert city == "Atlanta"
+    assert state == "Georgia"
+    assert country is None

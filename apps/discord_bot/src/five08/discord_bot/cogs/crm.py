@@ -104,7 +104,8 @@ MATCH_CANDIDATES_JD_URL_HINTS = (
 AUTO_MATCH_DEDUPE_MAX = 10_000
 # Exclude known-bad resume artifact from auto-match rendering.
 AUTO_MATCH_EXCLUDED_RESUME_NAMES = frozenset({"Vladyslav_Stryzhak.pdf"})
-EspoAPI = espo.EspoAPI
+EspoClient = espo.EspoClient
+EspoAPI = EspoClient
 EspoAPIError = espo.EspoAPIError
 JobWatchChannel = discord.TextChannel | discord.ForumChannel
 
@@ -2141,9 +2142,7 @@ class CRMCog(commands.Cog):
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        # Construct API URL from base URL
-        api_url = settings.espo_base_url.rstrip("/") + "/api/v1"
-        self.espo_api = EspoAPI(api_url, settings.espo_api_key)
+        self.espo_api = EspoClient(settings.espo_base_url, settings.espo_api_key)
         # Store base URL for profile links
         self.base_url = settings.espo_base_url.rstrip("/")
         self.resume_extractor = ResumeProfileExtractor(
