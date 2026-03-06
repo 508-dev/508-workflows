@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from five08.candidate_search import (
     _build_location_hints,
+    _normalize_preferred_timezones,
     _seniority_score,
     search_candidates,
 )
@@ -83,6 +84,13 @@ def test_build_location_hints_strips_preferred_timezones() -> None:
     assert hints_available is True
 
 
+def test_normalize_preferred_timezones_trims_and_filters() -> None:
+    normalized = _normalize_preferred_timezones(
+        [" America/New_York ", "", "  ", "Europe/Berlin"]
+    )
+    assert normalized == ["America/New_York", "Europe/Berlin"]
+
+
 # ---------------------------------------------------------------------------
 # search_candidates — early-return guards
 # ---------------------------------------------------------------------------
@@ -119,6 +127,22 @@ def test_search_candidates_queries_db_when_only_role_types_provided() -> None:
 
     assert result == []
     conn.cursor.assert_called_once()  # DB was queried, not short-circuited
+
+
+def test_search_candidates_binds_trimmed_exact_timezones() -> None:
+    row = _make_row(timezone="America/New_York")
+    conn = _patch_db([row])
+    reqs = _make_requirements(
+        required_skills=["python"],
+        preferred_timezones=[" America/New_York ", " "],
+    )
+    settings = MagicMock()
+
+    with patch("five08.candidate_search.get_postgres_connection", return_value=conn):
+        search_candidates(settings, reqs)
+
+    execute_params = conn.cursor.return_value.execute.call_args[0][1]
+    assert execute_params[3] == ["America/New_York"]
 
 
 # ---------------------------------------------------------------------------

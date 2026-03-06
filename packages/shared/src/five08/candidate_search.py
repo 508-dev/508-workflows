@@ -108,15 +108,19 @@ def _seniority_score(candidate: str | None, required: str | None) -> float:
     return 0.0
 
 
+def _normalize_preferred_timezones(timezones: list[str] | None) -> list[str]:
+    return [
+        tz.strip() for tz in (timezones or []) if isinstance(tz, str) and tz.strip()
+    ]
+
+
 def _build_location_hints(
     requirements: JobRequirements,
 ) -> tuple[list[str], list[str], bool, bool]:
     """Build location hints used for soft ranking penalties."""
-    preferred_timezones = [
-        tz.strip()
-        for tz in (requirements.preferred_timezones or [])
-        if isinstance(tz, str) and tz.strip()
-    ]
+    preferred_timezones = _normalize_preferred_timezones(
+        requirements.preferred_timezones
+    )
     location_text = (requirements.raw_location_text or "").strip()
 
     timezone_prefixes = {tz.split("/", 1)[0].casefold() for tz in preferred_timezones}
@@ -187,7 +191,9 @@ def search_candidates(
         return []
 
     us_only = requirements.location_type == "us_only"
-    preferred_timezones = requirements.preferred_timezones or []
+    preferred_timezones = _normalize_preferred_timezones(
+        requirements.preferred_timezones
+    )
     (
         location_timezone_prefix_hints,
         location_country_hints,
@@ -287,12 +293,14 @@ def search_candidates(
                   WHEN NOT loc.constrained OR NOT loc.hints_available THEN 0
                   WHEN loc.exact_timezones <> '{}'::text[]
                     AND COALESCE(p.timezone, '') = ANY(loc.exact_timezones) THEN 3
-                  WHEN loc.timezone_prefixes <> '{}'::text[]
-                    AND split_part(LOWER(COALESCE(p.timezone, '')), '/', 1)
-                        = ANY(loc.timezone_prefixes) THEN 2
                   WHEN loc.countries <> '{}'::text[]
                     AND LOWER(COALESCE(p.address_country, '')) = ANY(loc.countries)
                     THEN 2
+                  WHEN loc.countries <> '{}'::text[]
+                    AND COALESCE(p.address_country, '') <> '' THEN -4
+                  WHEN loc.timezone_prefixes <> '{}'::text[]
+                    AND split_part(LOWER(COALESCE(p.timezone, '')), '/', 1)
+                        = ANY(loc.timezone_prefixes) THEN 2
                   WHEN COALESCE(p.timezone, '') = ''
                     AND COALESCE(p.address_country, '') = '' THEN -1
                   ELSE -4

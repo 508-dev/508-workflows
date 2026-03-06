@@ -420,6 +420,33 @@ class TestSearchCandidatesE2E:
         assert ids[0] == "us_match"
         assert ids[-1] == "wrong_location"
 
+    def test_country_mismatch_is_not_boosted_by_timezone_prefix(
+        self, pg_db: SharedSettings
+    ) -> None:
+        _insert(
+            crm_contact_id="us_match",
+            skills=["python"],
+            timezone="America/New_York",
+            address_country="US",
+            skill_attrs={"python": "1"},
+        )
+        _insert(
+            crm_contact_id="canada_mismatch",
+            skills=["python"],
+            timezone="America/Toronto",
+            address_country="Canada",
+            skill_attrs={"python": "5"},
+        )
+
+        results = search_candidates(
+            pg_db,
+            _reqs(required_skills=["python"], raw_location_text="United States"),
+        )
+
+        ids = [r.crm_contact_id for r in results]
+        assert ids[0] == "us_match"
+        assert ids[-1] == "canada_mismatch"
+
     def test_limit_respected(self, pg_db: SharedSettings) -> None:
         for i in range(5):
             _insert(crm_contact_id=f"c{i}", skills=["python"])
