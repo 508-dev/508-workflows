@@ -2520,50 +2520,6 @@ class CRMCog(commands.Cog):
             messages.append(current.rstrip())
         return messages
 
-    def _render_match_candidates_messages(
-        self,
-        *,
-        requirements: Any,
-        candidates: list[Any],
-    ) -> tuple[list[str], list[tuple[str, str, str]]]:
-        """Render job-match output into Discord-sized follow-up messages."""
-        lines: list[str] = []
-        resume_options: list[tuple[str, str, str]] = []
-
-        header_parts: list[str] = []
-        if requirements.title:
-            header_parts.append(f"**{requirements.title}**")
-        if requirements.discord_role_types:
-            header_parts.append(
-                "Role: " + ", ".join(f"`{r}`" for r in requirements.discord_role_types)
-            )
-        if requirements.required_skills:
-            header_parts.append(
-                "Skills: "
-                + ", ".join(f"`{s}`" for s in requirements.required_skills[:8])
-            )
-        if requirements.seniority:
-            header_parts.append(f"Seniority: `{requirements.seniority}`")
-        if requirements.location_type == "us_only":
-            header_parts.append("📍 US only")
-        elif requirements.raw_location_text:
-            header_parts.append(f"📍 {requirements.raw_location_text}")
-
-        lines.append("## Job Match Results")
-        if header_parts:
-            lines.append(" · ".join(header_parts))
-        lines.append(f"Found **{len(candidates)}** candidate(s).\n")
-
-        crm_base = settings.espo_base_url.rstrip("/")
-        candidate_lines, resume_options = self._build_match_candidate_lines(
-            candidates=candidates, crm_base=crm_base
-        )
-        lines.extend(candidate_lines)
-
-        messages = self._paginate_match_lines(lines)
-
-        return messages, resume_options
-
     @staticmethod
     def _build_match_candidate_lines(
         *,
