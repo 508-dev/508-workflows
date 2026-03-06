@@ -112,14 +112,14 @@ def _build_location_hints(
     requirements: JobRequirements,
 ) -> tuple[list[str], list[str], bool, bool]:
     """Build location hints used for soft ranking penalties."""
-    preferred_timezones = requirements.preferred_timezones or []
+    preferred_timezones = [
+        tz.strip()
+        for tz in (requirements.preferred_timezones or [])
+        if isinstance(tz, str) and tz.strip()
+    ]
     location_text = (requirements.raw_location_text or "").strip()
 
-    timezone_prefixes = {
-        tz.split("/", 1)[0].casefold()
-        for tz in preferred_timezones
-        if isinstance(tz, str) and tz.strip()
-    }
+    timezone_prefixes = {tz.split("/", 1)[0].casefold() for tz in preferred_timezones}
     country_hints: set[str] = set()
 
     if requirements.location_type == "us_only":

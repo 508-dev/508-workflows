@@ -71,6 +71,18 @@ def test_build_location_hints_matches_dotted_abbreviations() -> None:
     assert hints_available is True
 
 
+def test_build_location_hints_strips_preferred_timezones() -> None:
+    reqs = JobRequirements(preferred_timezones=[" America/New_York ", "  "])
+
+    timezone_prefixes, _, location_constrained, hints_available = _build_location_hints(
+        reqs
+    )
+
+    assert timezone_prefixes == ["america"]
+    assert location_constrained is True
+    assert hints_available is True
+
+
 # ---------------------------------------------------------------------------
 # search_candidates — early-return guards
 # ---------------------------------------------------------------------------
