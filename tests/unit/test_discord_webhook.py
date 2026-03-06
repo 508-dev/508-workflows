@@ -37,6 +37,11 @@ def test_send_appends_wait_query_param() -> None:
 
     assert timeout == 1.5
     assert query["wait"] == ["true"]
+    assert (
+        request_obj.get_header("User-agent")
+        == "508-workflows-discord-webhook/1.0 (+https://508.dev)"
+    )
+    assert request_obj.get_header("Accept") == "application/json"
     assert json.loads(request_obj.data.decode("utf-8")) == {
         "content": "hello world",
         "allowed_mentions": {"parse": []},
@@ -61,7 +66,7 @@ def test_send_preserves_existing_wait_query_param() -> None:
     assert query["wait"] == ["false"]
 
 
-def test_send_ignores_non_wait_query_params() -> None:
+def test_send_preserves_non_wait_query_params() -> None:
     logger = DiscordWebhookLogger(
         "https://discord.com/api/webhooks/1/token?thread_id=123&with_components=true",
     )
@@ -77,8 +82,8 @@ def test_send_ignores_non_wait_query_params() -> None:
     query = parse_qs(parsed.query)
 
     assert query["wait"] == ["true"]
-    assert "thread_id" not in query
-    assert "with_components" not in query
+    assert query["thread_id"] == ["123"]
+    assert query["with_components"] == ["true"]
 
 
 def test_send_truncates_long_content() -> None:

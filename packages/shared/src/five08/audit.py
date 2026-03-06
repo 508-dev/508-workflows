@@ -57,6 +57,17 @@ class PersonRecord:
     discord_username: str | None = None
     discord_roles: list[str] | None = None
     github_username: str | None = None
+    contact_type: str | None = None
+    is_member: bool = False
+    address_country: str | None = None
+    address_city: str | None = None
+    timezone: str | None = None
+    seniority: str | None = None
+    linkedin: str | None = None
+    skills: list[str] | None = None
+    skill_attrs: dict[str, int] | None = None
+    latest_resume_id: str | None = None
+    latest_resume_name: str | None = None
     sync_status: PeopleSyncStatus = PeopleSyncStatus.ACTIVE
 
 
@@ -92,6 +103,13 @@ def _normalize_email(value: str | None) -> str | None:
     return normalized or None
 
 
+def _normalize_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
 def normalize_actor_subject(provider: ActorProvider, subject: str) -> str:
     """Normalize actor subject values for stable lookups."""
     normalized = subject.strip()
@@ -119,8 +137,25 @@ def upsert_person(settings: SharedSettings, person: PersonRecord) -> str:
             discord_username,
             discord_roles,
             github_username,
+            contact_type,
+            is_member,
+            address_country,
+            address_city,
+            timezone,
+            seniority,
+            linkedin,
+            skills,
+            skill_attrs,
+            latest_resume_id,
+            latest_resume_name,
             sync_status
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ) VALUES (
+            %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s,
+            %s
+        )
         ON CONFLICT (crm_contact_id) DO UPDATE
         SET
             name = EXCLUDED.name,
@@ -130,10 +165,23 @@ def upsert_person(settings: SharedSettings, person: PersonRecord) -> str:
             discord_username = EXCLUDED.discord_username,
             discord_roles = EXCLUDED.discord_roles,
             github_username = EXCLUDED.github_username,
+            contact_type = EXCLUDED.contact_type,
+            is_member = EXCLUDED.is_member,
+            address_country = EXCLUDED.address_country,
+            address_city = EXCLUDED.address_city,
+            timezone = EXCLUDED.timezone,
+            seniority = EXCLUDED.seniority,
+            linkedin = EXCLUDED.linkedin,
+            skills = EXCLUDED.skills,
+            skill_attrs = EXCLUDED.skill_attrs,
+            latest_resume_id = EXCLUDED.latest_resume_id,
+            latest_resume_name = EXCLUDED.latest_resume_name,
             sync_status = EXCLUDED.sync_status
         RETURNING id::text;
     """
     roles = person.discord_roles or []
+    skills = person.skills or []
+    skill_attrs = person.skill_attrs or {}
 
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
@@ -149,6 +197,17 @@ def upsert_person(settings: SharedSettings, person: PersonRecord) -> str:
                     person.discord_username,
                     Jsonb(roles),
                     person.github_username,
+                    _normalize_text(person.contact_type),
+                    person.is_member,
+                    _normalize_text(person.address_country),
+                    _normalize_text(person.address_city),
+                    _normalize_text(person.timezone),
+                    _normalize_text(person.seniority),
+                    _normalize_text(person.linkedin),
+                    skills,
+                    Jsonb(skill_attrs),
+                    _normalize_text(person.latest_resume_id),
+                    _normalize_text(person.latest_resume_name),
                     person.sync_status.value,
                 ),
             )
@@ -158,6 +217,68 @@ def upsert_person(settings: SharedSettings, person: PersonRecord) -> str:
         raise RuntimeError("Failed to upsert person record")
 
     return row["id"]
+
+
+def update_person_discord_roles(
+    settings: SharedSettings,
+    discord_user_id: str,
+    roles: list[str],
+) -> bool:
+    """Update discord_roles for a person by discord_user_id.
+
+    Only updates the discord_roles column; all other CRM-sourced fields are
+    left unchanged. Returns True if a matching record was found and updated.
+    """
+    query = """
+        UPDATE people
+        SET discord_roles = %s
+        WHERE discord_user_id = %s
+        RETURNING id::text;
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(query, (Jsonb(roles), discord_user_id))
+            row = cursor.fetchone()
+    return row is not None
+
+
+def upsert_discord_member(
+    settings: SharedSettings,
+    *,
+    discord_user_id: str,
+    guild_id: str,
+    discord_username: str | None,
+    display_name: str | None,
+    roles: list[str],
+) -> None:
+    """Insert or update a discord member snapshot in the local cache."""
+    query = """
+        INSERT INTO discord_members (
+            discord_user_id,
+            guild_id,
+            discord_username,
+            display_name,
+            roles
+        ) VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (guild_id, discord_user_id) DO UPDATE
+        SET
+            guild_id = EXCLUDED.guild_id,
+            discord_username = EXCLUDED.discord_username,
+            display_name = EXCLUDED.display_name,
+            roles = EXCLUDED.roles
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                query,
+                (
+                    discord_user_id,
+                    guild_id,
+                    _normalize_text(discord_username),
+                    _normalize_text(display_name),
+                    Jsonb(roles),
+                ),
+            )
 
 
 def resolve_person_id(
@@ -194,6 +315,26 @@ def resolve_person_id(
     if row is None:
         return None
     return row["id"]
+
+
+def get_discord_user_id_for_contact(
+    settings: SharedSettings,
+    crm_contact_id: str,
+) -> str | None:
+    """Return the discord_user_id linked to a CRM contact, if any."""
+    query = """
+        SELECT discord_user_id
+        FROM people
+        WHERE crm_contact_id = %s
+        LIMIT 1;
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(query, (crm_contact_id,))
+            row = cursor.fetchone()
+    if row is None:
+        return None
+    return row["discord_user_id"]
 
 
 def insert_audit_event(

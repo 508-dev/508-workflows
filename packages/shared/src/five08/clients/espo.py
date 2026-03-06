@@ -38,9 +38,10 @@ def http_build_query(data: Any) -> str:
 
 
 class EspoAPI:
-    def __init__(self, url: str, api_key: str) -> None:
+    def __init__(self, url: str, api_key: str, timeout_seconds: float = 20.0) -> None:
         self.url = url
         self.api_key = api_key
+        self.timeout_seconds = timeout_seconds
         self.status_code: int | None = None
 
     def request(
@@ -55,16 +56,30 @@ class EspoAPI:
 
         url = self.normalize_url(action)
 
-        if method in ["POST", "PATCH", "PUT"]:
-            response = requests.request(method, url, headers=headers, json=params)
-        else:
-            if params:
-                url = url + "?" + http_build_query(params)
-            response = requests.request(method, url, headers=headers)
+        try:
+            if method in ["POST", "PATCH", "PUT"]:
+                response = requests.request(
+                    method,
+                    url,
+                    headers=headers,
+                    json=params,
+                    timeout=self.timeout_seconds,
+                )
+            else:
+                if params:
+                    url = url + "?" + http_build_query(params)
+                response = requests.request(
+                    method,
+                    url,
+                    headers=headers,
+                    timeout=self.timeout_seconds,
+                )
+        except requests.RequestException as exc:
+            raise EspoAPIError(f"HTTP request failed: {exc}") from exc
 
         self.status_code = response.status_code
 
-        if self.status_code != 200:
+        if not 200 <= self.status_code < 300:
             reason = self.parse_reason(response.headers)
             raise EspoAPIError(
                 f"Wrong request, status code is {response.status_code}, reason is {reason}"
@@ -72,7 +87,7 @@ class EspoAPI:
 
         data = response.content
         if not data:
-            raise EspoAPIError("Wrong request, content response is empty")
+            return {}
 
         json_data = response.json()
         if not isinstance(json_data, dict):
@@ -90,11 +105,14 @@ class EspoAPI:
         if params:
             url = url + "?" + http_build_query(params)
 
-        response = requests.get(url, headers=headers)
+        try:
+            response = requests.get(url, headers=headers, timeout=self.timeout_seconds)
+        except requests.RequestException as exc:
+            raise EspoAPIError(f"HTTP request failed: {exc}") from exc
 
         self.status_code = response.status_code
 
-        if self.status_code != 200:
+        if not 200 <= self.status_code < 300:
             reason = self.parse_reason(response.headers)
             raise EspoAPIError(
                 f"Wrong request, status code is {response.status_code}, reason is {reason}"
@@ -146,3 +164,62 @@ class EspoAPI:
             return "Unknown Error"
 
         return str(headers["X-Status-Reason"])
+
+
+def _normalize_api_base_url(base_url: str) -> str:
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/api/v1"):
+        return normalized
+    return f"{normalized}/api/v1"
+
+
+class EspoClient:
+    """Convenience wrapper around EspoAPI with normalized API base URL."""
+
+    def __init__(
+        self, base_url: str, api_key: str, timeout_seconds: float = 20.0
+    ) -> None:
+        api_url = _normalize_api_base_url(base_url)
+        self.api = EspoAPI(api_url, api_key, timeout_seconds)
+
+    @property
+    def status_code(self) -> int | None:
+        return self.api.status_code
+
+    def request(
+        self, method: str, action: str, params: Dict[str, Any] | None = None
+    ) -> Dict[str, Any]:
+        return self.api.request(method, action, params)
+
+    def download_file(self, action: str, params: Dict[str, Any] | None = None) -> bytes:
+        return self.api.download_file(action, params)
+
+    def upload_file(
+        self,
+        file_content: bytes,
+        filename: str,
+        related_type: str = "Contact",
+        related_id: str = "",
+        field: str = "resume",
+    ) -> Dict[str, Any]:
+        return self.api.upload_file(
+            file_content,
+            filename,
+            related_type=related_type,
+            related_id=related_id,
+            field=field,
+        )
+
+    def get_contact(self, contact_id: str) -> Dict[str, Any]:
+        return self.request("GET", f"Contact/{contact_id}")
+
+    def update_contact(
+        self, contact_id: str, updates: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        return self.request("PUT", f"Contact/{contact_id}", updates)
+
+    def list_contacts(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        return self.request("GET", "Contact", params)
+
+    def download_attachment(self, attachment_id: str) -> bytes:
+        return self.download_file(f"Attachment/file/{attachment_id}")

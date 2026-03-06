@@ -39,7 +39,7 @@ This document captures Discord bot behavior, permissions, and slash command usag
   - Args:
     - `search_term` (required): Email, 508 username, or name.
     - `verified_by` (required): Verifier 508 username or Discord mention.
-    - `id_type` (required): ID type used (example: `passport`, `driver's license`).
+    - `id_type` (optional): ID type used (example: `passport`, `driver's license`).
     - `verified_at` (optional): Date verified (defaults to today).
   - CRM fields updated:
     - `cIdVerifiedAt` ← `verified_at`

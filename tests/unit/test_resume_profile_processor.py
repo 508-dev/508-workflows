@@ -24,7 +24,7 @@ def test_extract_profile_proposal_filters_508_email() -> None:
     processor.crm.get_contact.return_value = {
         "emailAddress": "member@example.com",
         "cGitHubUsername": "old-gh",
-        "cLinkedInUrl": "https://linkedin.com/in/old",
+        "cLinkedIn": "https://linkedin.com/in/old",
         "phoneNumber": "1234567890",
     }
     processor.crm.download_attachment.return_value = b"resume-bytes"
@@ -57,7 +57,7 @@ def test_extract_profile_proposal_filters_508_email() -> None:
     assert result.success is True
     assert "emailAddress" not in result.proposed_updates
     assert result.proposed_updates["cGitHubUsername"] == "new-gh"
-    assert result.proposed_updates["cLinkedInUrl"] == "https://linkedin.com/in/new"
+    assert result.proposed_updates["cLinkedIn"] == "https://linkedin.com/in/new"
     assert result.proposed_updates["phoneNumber"] == "14155551234"
     assert result.proposed_updates["skills"] == ["python", "fastapi"]
     assert result.new_skills == ["python", "fastapi"]
@@ -298,10 +298,7 @@ def test_extract_profile_proposal_includes_seniority_update() -> None:
         str(v).strip().lower()
     )
 
-    processor.crm.get_contact.return_value = {
-        "emailAddress": "member@example.com",
-        "cSeniority": "junior",
-    }
+    processor.crm.get_contact.return_value = {"emailAddress": "member@example.com"}
     processor.crm.download_attachment.return_value = b"resume-bytes"
     processor.document_processor.extract_text.return_value = "resume text"
     processor.document_processor.get_content_hash.return_value = "hash-4"
@@ -329,6 +326,54 @@ def test_extract_profile_proposal_includes_seniority_update() -> None:
 
     assert result.success is True
     assert result.proposed_updates["cSeniority"] == "senior"
+
+
+def test_extract_profile_proposal_preserves_existing_seniority() -> None:
+    """Existing non-unknown seniority should not be overwritten."""
+    processor = ResumeProfileProcessor()
+    processor.crm = Mock()
+    processor.extractor = Mock()
+    processor.skills_extractor = Mock()
+    processor.document_processor = Mock()
+    processor._record_processing_run = Mock()
+    processor.skills_extractor.canonicalize_skill.side_effect = lambda v: (
+        str(v).strip().lower()
+    )
+
+    processor.crm.get_contact.return_value = {
+        "emailAddress": "member@example.com",
+        "cSeniority": "Senior",
+    }
+    processor.crm.download_attachment.return_value = b"resume-bytes"
+    processor.document_processor.extract_text.return_value = "resume text"
+    processor.document_processor.get_content_hash.return_value = "hash-6"
+    processor.extractor.extract.return_value = ResumeExtractedProfile(
+        email=None,
+        github_username=None,
+        linkedin_url=None,
+        phone=None,
+        seniority_level="Junior",
+        confidence=0.9,
+        source="gpt-4o-mini",
+    )
+    processor.skills_extractor.extract_skills.return_value = ExtractedSkills(
+        skills=[],
+        skill_attrs={},
+        confidence=0.8,
+        source="gpt-4o-mini",
+    )
+
+    result = processor.extract_profile_proposal(
+        contact_id="contact-7",
+        attachment_id="att-7",
+        filename="resume.pdf",
+    )
+
+    assert result.success is True
+    assert "cSeniority" not in result.proposed_updates
+    assert any(
+        item.field == "cSeniority" and item.value == "junior" for item in result.skipped
+    )
 
 
 def test_extract_profile_proposal_maps_principal_to_staff() -> None:
@@ -415,6 +460,58 @@ def test_extract_profile_proposal_normalizes_unknown_seniority_to_unknown() -> N
 
     assert result.success is True
     assert result.proposed_updates["cSeniority"] == "unknown"
+
+
+def test_extract_profile_proposal_uses_configured_linkedin_field(
+    monkeypatch: object,
+) -> None:
+    """LinkedIn proposal should respect configurable CRM field mapping."""
+    processor = ResumeProfileProcessor()
+    processor.crm = Mock()
+    processor.extractor = Mock()
+    processor.skills_extractor = Mock()
+    processor.document_processor = Mock()
+    processor._record_processing_run = Mock()
+    processor.skills_extractor.canonicalize_skill.side_effect = lambda v: (
+        str(v).strip().lower()
+    )
+
+    monkeypatch.setattr(
+        "five08.worker.crm.resume_profile_processor.settings.crm_linkedin_field",
+        "cLinkedInProfile",
+    )
+
+    processor.crm.get_contact.return_value = {
+        "emailAddress": "member@example.com",
+        "cLinkedInProfile": "https://linkedin.com/in/old",
+    }
+    processor.crm.download_attachment.return_value = b"resume-bytes"
+    processor.document_processor.extract_text.return_value = "resume text"
+    processor.document_processor.get_content_hash.return_value = "hash-linkedin-config"
+    processor.extractor.extract.return_value = ResumeExtractedProfile(
+        email=None,
+        github_username=None,
+        linkedin_url="https://linkedin.com/in/new",
+        phone=None,
+        confidence=0.9,
+        source="gpt-4o-mini",
+    )
+    processor.skills_extractor.extract_skills.return_value = ExtractedSkills(
+        skills=[],
+        skill_attrs={},
+        confidence=0.8,
+        source="gpt-4o-mini",
+    )
+
+    result = processor.extract_profile_proposal(
+        contact_id="contact-linkedin",
+        attachment_id="att-linkedin",
+        filename="resume.pdf",
+    )
+
+    assert result.success is True
+    assert result.proposed_updates["cLinkedInProfile"] == "https://linkedin.com/in/new"
+    assert "cLinkedIn" not in result.proposed_updates
 
 
 def test_apply_profile_updates_appends_resume_email_as_primary_emailAddressData() -> (
@@ -808,6 +905,29 @@ def test_apply_profile_updates_normalizes_unknown_seniority_to_unknown() -> None
     assert result.success is True
     payload = processor.crm.update_contact.call_args[0][1]
     assert payload["cSeniority"] == "unknown"
+
+
+def test_apply_profile_updates_allows_configured_linkedin_field(
+    monkeypatch: object,
+) -> None:
+    """Apply should accept LinkedIn updates using configured CRM field name."""
+    processor = ResumeProfileProcessor()
+    processor.crm = Mock()
+
+    monkeypatch.setattr(
+        "five08.worker.crm.resume_profile_processor.settings.crm_linkedin_field",
+        "cLinkedInProfile",
+    )
+
+    result = processor.apply_profile_updates(
+        contact_id="contact-linkedin",
+        updates={"cLinkedInProfile": "https://linkedin.com/in/new"},
+    )
+
+    assert result.success is True
+    payload = processor.crm.update_contact.call_args[0][1]
+    assert payload["cLinkedInProfile"] == "https://linkedin.com/in/new"
+    assert "cLinkedIn" not in payload
 
 
 def test_apply_profile_updates_normalizes_skill_aliases_for_api_payload() -> None:

@@ -17,6 +17,7 @@ class DiscordWebhookLogger:
 
     _MAX_CONTENT_LENGTH = 2000
     _MAX_EMBED_COUNT = 10
+    _DEFAULT_USER_AGENT = "508-workflows-discord-webhook/1.0 (+https://508.dev)"
 
     def __init__(
         self,
@@ -58,7 +59,12 @@ class DiscordWebhookLogger:
         req = request.Request(
             self._request_url(query_params),
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                # Discord is fronted by Cloudflare and may reject default Python UAs.
+                "User-Agent": self._DEFAULT_USER_AGENT,
+                "Accept": "application/json",
+            },
             method="POST",
         )
 
@@ -149,18 +155,14 @@ class DiscordWebhookLogger:
             payload["embeds"] = [embed for embed in payload["embeds"] if embed]
             if not payload["embeds"]:
                 payload.pop("embeds")
-        if not content and "embeds" not in payload and not payload.get("content"):
+        if "content" not in payload and "embeds" not in payload:
             return {}
         return payload
 
     def _request_query_params(self) -> dict[str, str]:
-        """Build webhook query params while enforcing text-only message behavior."""
+        """Build webhook query params while preserving caller-supplied values."""
         parsed = urlparse(self.webhook_url)
-        query_params = {
-            key: value
-            for key, value in parse_qsl(parsed.query, keep_blank_values=True)
-            if key == "wait"
-        }
+        query_params = dict(parse_qsl(parsed.query, keep_blank_values=True))
         if self.wait_for_response and "wait" not in query_params:
             query_params["wait"] = "true"
         return query_params

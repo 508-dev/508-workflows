@@ -3,15 +3,26 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import re
+import socket
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import requests
 
-from five08.clients.espo import EspoAPI, EspoAPIError
+from five08.clients.espo import EspoAPIError, EspoClient
+from five08.crm_normalization import (
+    ROLE_NORMALIZATION_MAP as DEFAULT_ROLE_NORMALIZATION_MAP,
+    normalize_city,
+    normalize_role,
+    normalize_roles,
+    normalize_seniority,
+    normalize_timezone,
+    normalize_website_url,
+)
 from five08.resume_extractor import ResumeProfileExtractor
 from five08.worker.config import settings
 from five08.worker.crm.document_processor import DocumentProcessor
@@ -21,6 +32,7 @@ from five08.worker.masking import mask_email
 import logging
 
 logger = logging.getLogger(__name__)
+IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 
 DESCRIPTION_SECTIONS = {
     "primary_skills_interests": "Primary skills and interests",
@@ -33,6 +45,8 @@ FIELD_MAP = {
     "linkedin_url": settings.crm_linkedin_field,
     "github_username": "cGitHubUsername",
     "address_country": "addressCountry",
+    "address_city": "addressCity",
+    "timezone": "cTimezone",
     "primary_role": "cRoles",
     "availability": "cAvailableTimes",
     "rate_range": "cRateRange",
@@ -56,36 +70,14 @@ SKILL_PROFICIENCY_TO_LABEL = {
     "skill_proficiency_internal_business_development": "internal business development",
 }
 
-SENIORITY_MAP = {
-    "junior": "junior",
-    "mid-level": "midlevel",
-    "midlevel": "midlevel",
-    "senior": "senior",
-    "principal": "staff",
-    "principal engineer": "staff",
-    "staff": "staff",
-    "staff and beyond": "staff",
-    "staff+": "staff",
-}
-
-
-ROLE_NORMALIZATION_MAP: dict[str, str] = {
-    "developer": "developer",
-    "data scientist": "data_scientist",
-    "program manager": "program_manager",
-    "designer": "designer",
-    "user research": "user_research",
-    "biz dev": "biz_dev",
-    "marketing": "marketing",
-}
+ROLE_NORMALIZATION_MAP: dict[str, str] = dict(DEFAULT_ROLE_NORMALIZATION_MAP)
 
 
 class IntakeFormProcessor:
     """Process a Google Forms member intake submission against CRM."""
 
     def __init__(self) -> None:
-        api_url = settings.espo_base_url.rstrip("/") + "/api/v1"
-        self.api = EspoAPI(api_url, settings.espo_api_key)
+        self.api = EspoClient(settings.espo_base_url, settings.espo_api_key)
         self.document_processor = DocumentProcessor()
         self.resume_extractor = ResumeProfileExtractor(
             api_key=settings.openai_api_key,
@@ -400,9 +392,7 @@ class IntakeFormProcessor:
             return {}
 
         try:
-            response = requests.get(resume_url, timeout=20)
-            response.raise_for_status()
-            content = response.content
+            content = self._download_resume_content(resume_url)
         except Exception as exc:
             logger.warning("Failed to download resume_url=%s error=%s", resume_url, exc)
             return {}
@@ -434,6 +424,12 @@ class IntakeFormProcessor:
             profile_phone = self._normalize_text(extracted_profile.phone)
             profile_github = self._normalize_text(extracted_profile.github_username)
             profile_linkedin = self._normalize_text(extracted_profile.linkedin_url)
+            profile_timezone = self._normalize_timezone(
+                getattr(extracted_profile, "timezone", None)
+            )
+            profile_city = self._normalize_city(
+                getattr(extracted_profile, "address_city", None)
+            )
             profile_availability = self._normalize_text(
                 getattr(extracted_profile, "availability", None)
             )
@@ -443,18 +439,35 @@ class IntakeFormProcessor:
             profile_referred_by = self._normalize_text(
                 getattr(extracted_profile, "referred_by", None)
             )
+            profile_description = self._normalize_text(
+                getattr(extracted_profile, "description", None)
+            )
             if profile_phone:
                 updates["phoneNumber"] = profile_phone
             if profile_github:
                 updates["cGitHubUsername"] = profile_github
             if profile_linkedin:
                 updates[settings.crm_linkedin_field] = profile_linkedin
+            if profile_timezone:
+                updates.setdefault("cTimezone", profile_timezone)
+            if profile_city:
+                updates.setdefault("addressCity", profile_city)
+            profile_country = self._normalize_text(extracted_profile.address_country)
+            if profile_country:
+                updates.setdefault("addressCountry", profile_country)
+            profile_roles = self._parse_roles(
+                getattr(extracted_profile, "primary_roles", [])
+            )
+            if profile_roles:
+                updates.setdefault("cRoles", profile_roles)
             if profile_availability:
                 updates.setdefault("cAvailableTimes", profile_availability)
             if profile_rate_range:
                 updates.setdefault("cRateRange", profile_rate_range)
             if profile_referred_by:
                 updates.setdefault("cReferredBy", profile_referred_by)
+            if profile_description:
+                updates.setdefault("description", profile_description)
             profile_attrs = self._parse_profile_skill_attrs(extracted_profile)
             if profile_attrs:
                 updates["cSkillAttrs"] = json.dumps(profile_attrs)
@@ -473,6 +486,143 @@ class IntakeFormProcessor:
             logger.warning("Resume profile extraction failed: %s", exc)
         return updates
 
+    def _download_resume_content(self, resume_url: str) -> bytes:
+        """Fetch a resume URL with SSRF guardrails and bounded redirect handling."""
+        current_url = resume_url
+        max_redirects = max(0, settings.intake_resume_max_redirects)
+        timeout_seconds = max(1.0, settings.intake_resume_fetch_timeout_seconds)
+        # Maximum allowed file size in bytes, enforced during download to avoid DoS.
+        max_bytes = int(settings.max_file_size_mb * 1024 * 1024)
+
+        for _ in range(max_redirects + 1):
+            validation_error = self._validate_resume_url(current_url)
+            if validation_error:
+                raise ValueError(validation_error)
+
+            with requests.get(
+                current_url,
+                timeout=timeout_seconds,
+                allow_redirects=False,
+                stream=True,
+            ) as response:
+                if response.status_code in {301, 302, 303, 307, 308}:
+                    redirect_to = response.headers.get("Location")
+                    if not redirect_to:
+                        raise ValueError("Resume URL redirect missing Location header")
+                    current_url = urljoin(current_url, redirect_to)
+                    continue
+
+                response.raise_for_status()
+
+                # Check Content-Length header early if present to fail fast.
+                if max_bytes > 0:
+                    content_length = response.headers.get("Content-Length")
+                    if content_length:
+                        try:
+                            content_len_bytes = int(content_length)
+                        except (ValueError, TypeError):
+                            # Malformed Content-Length; fall through to streaming check.
+                            pass
+                        else:
+                            if content_len_bytes > max_bytes:
+                                raise ValueError(
+                                    "Resume file exceeds maximum allowed size."
+                                )
+
+                # Stream the response body and enforce size limit while downloading.
+                data = bytearray()
+                for chunk in response.iter_content(chunk_size=8192):
+                    if not chunk:
+                        continue
+                    data.extend(chunk)
+                    if max_bytes > 0 and len(data) > max_bytes:
+                        raise ValueError("Resume file exceeds maximum allowed size.")
+
+                return bytes(data)
+
+        raise ValueError("Resume URL exceeded max redirect limit")
+
+    def _validate_resume_url(self, candidate_url: str) -> str | None:
+        """Return validation error string when URL should not be fetched."""
+        try:
+            parsed = urlsplit(candidate_url)
+        except Exception:
+            return "Resume URL is invalid."
+
+        if parsed.scheme.lower() != "https":
+            return "Resume URL must use https."
+
+        if parsed.username or parsed.password:
+            return "Resume URL must not include credentials."
+
+        host = (parsed.hostname or "").strip().lower().rstrip(".")
+        if not host:
+            return "Resume URL must include a hostname."
+
+        if not self._is_allowed_resume_host(host):
+            return "Resume URL host is not in the configured allowlist."
+
+        if not self._hostname_resolves_publicly(host):
+            return "Resume URL host resolves to a non-public address."
+
+        return None
+
+    def _is_allowed_resume_host(self, host: str) -> bool:
+        allowed_hosts = settings.intake_resume_allowed_hostnames
+        if not allowed_hosts:
+            return True
+        return any(
+            host == allowed_host or host.endswith(f".{allowed_host}")
+            for allowed_host in allowed_hosts
+        )
+
+    def _hostname_resolves_publicly(self, host: str) -> bool:
+        if host in {"localhost", "localhost.localdomain"}:
+            return False
+
+        ip_literal = self._parse_ip_literal(host)
+        if ip_literal is not None:
+            return self._is_public_ip(ip_literal)
+
+        try:
+            addr_infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+        except socket.gaierror:
+            return False
+        except Exception:
+            return False
+
+        resolved_ips: set[IPAddress] = set()
+        for _, _, _, _, sockaddr in addr_infos:
+            if not sockaddr:
+                continue
+            ip_text = str(sockaddr[0]).strip()
+            parsed_ip = self._parse_ip_literal(ip_text)
+            if parsed_ip is None:
+                continue
+            resolved_ips.add(parsed_ip)
+
+        if not resolved_ips:
+            return False
+        return all(self._is_public_ip(parsed_ip) for parsed_ip in resolved_ips)
+
+    @staticmethod
+    def _parse_ip_literal(value: str) -> IPAddress | None:
+        try:
+            return ipaddress.ip_address(value)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _is_public_ip(value: IPAddress) -> bool:
+        return not (
+            value.is_private
+            or value.is_loopback
+            or value.is_link_local
+            or value.is_multicast
+            or value.is_reserved
+            or value.is_unspecified
+        )
+
     def _parse_profile_website_links(self, links: Any) -> list[str]:
         if not isinstance(links, list):
             return []
@@ -481,10 +631,8 @@ class IntakeFormProcessor:
         for raw_link in links:
             if not isinstance(raw_link, str):
                 continue
-            candidate = raw_link.strip().rstrip("/").strip(")]},.;:")
+            candidate = normalize_website_url(raw_link, allow_scheme_less=False)
             if not candidate:
-                continue
-            if not candidate.startswith(("http://", "https://")):
                 continue
             key = candidate.casefold()
             if key in seen:
@@ -501,10 +649,8 @@ class IntakeFormProcessor:
         for raw_link in links:
             if not isinstance(raw_link, str):
                 continue
-            candidate = raw_link.strip().rstrip("/").strip(")]},.;:")
+            candidate = normalize_website_url(raw_link, allow_scheme_less=False)
             if not candidate:
-                continue
-            if not candidate.startswith(("http://", "https://")):
                 continue
             key = candidate.casefold()
             if key in seen:
@@ -576,28 +722,19 @@ class IntakeFormProcessor:
         return parsed
 
     def _normalize_seniority(self, value: Any) -> str | None:
-        normalized = self._normalize_text(value)
-        if not normalized:
-            return None
-
-        normalized = normalized.lower().replace("_", "-").strip()
-        if normalized in SENIORITY_MAP:
-            return SENIORITY_MAP[normalized]
-        if "staff" in normalized:
-            return "staff"
-        if "senior" in normalized:
-            return "senior"
-        if "mid" in normalized:
-            return "midlevel"
-        if "junior" in normalized:
-            return "junior"
-        return "unknown"
+        return normalize_seniority(value, empty_as_unknown=False)
 
     def _normalize_text(self, value: object) -> str | None:
         if not isinstance(value, str):
             return None
         normalized = value.strip()
         return normalized or None
+
+    def _normalize_timezone(self, value: object) -> str | None:
+        return normalize_timezone(value)
+
+    def _normalize_city(self, value: object) -> str | None:
+        return normalize_city(value, strip_parenthetical=False)
 
     def _normalize_github_username(self, value: object) -> str | None:
         normalized = self._normalize_text(value)
@@ -649,32 +786,12 @@ class IntakeFormProcessor:
         return []
 
     def _normalize_role(self, value: str) -> str | None:
-        normalized = self._normalize_text(value)
-        if normalized is None:
-            return None
-
-        lowered = normalized.lower().strip()
-        mapped = ROLE_NORMALIZATION_MAP.get(lowered)
-        if mapped is not None:
-            return mapped
-
-        normalized_role = "_".join(lowered.split())
-        normalized_role = "".join(
-            ch for ch in normalized_role if ch.isalnum() or ch in {"_", "-"}
-        )
-        return normalized_role or None
+        return normalize_role(value, ROLE_NORMALIZATION_MAP)
 
     def _parse_roles(self, roles: Any) -> list[str]:
-        parsed = self._normalize_collection(roles)
-        normalized: list[str] = []
-        seen: set[str] = set()
-        for role in parsed:
-            normalized_role = self._normalize_role(role)
-            if normalized_role is None or normalized_role in seen:
-                continue
-            seen.add(normalized_role)
-            normalized.append(normalized_role)
-        return normalized
+        return normalize_roles(
+            self._normalize_collection(roles), ROLE_NORMALIZATION_MAP
+        )
 
     def _filename_from_url(self, url: str) -> str | None:
         path = urlsplit(url).path.strip()

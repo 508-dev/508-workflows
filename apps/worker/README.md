@@ -14,7 +14,7 @@ Defaults:
 
 - Base URL:
   - Outside Docker: `http://localhost:8090`
-  - Inside Docker: `http://backend-api:8090`
+  - Inside Docker: `http://api:8090`
   - Override: `$WORKER_API_BASE_URL`
 - API secret: `$API_SHARED_SECRET` (sent as `X-API-Secret`)
 - Timeout: `10.0` seconds
@@ -66,6 +66,33 @@ curl -X GET "http://localhost:8090/jobs/<job_id>" \
 ```bash
 curl -X POST "http://localhost:8090/jobs/<job_id>/rerun" \
   -H "X-API-Secret: $API_SHARED_SECRET"
+```
+
+### Discord webhook smoke test
+
+Run this from a worker container to validate webhook delivery and payload shape:
+
+```bash
+docker compose exec worker uv run --package worker python - <<'PY'
+from five08.discord_webhook import DiscordWebhookLogger
+
+DiscordWebhookLogger(
+    webhook_url="https://discord.com/api/webhooks/<WEBHOOK_ID>/<WEBHOOK_TOKEN>"
+).send(
+    username="508 Workflows",
+    embeds=[
+        {
+            "title": "Test Alert",
+            "description": "Something happened.",
+            "color": 15158332,
+            "fields": [
+                {"name": "Environment", "value": "production", "inline": True},
+                {"name": "Service", "value": "api", "inline": True},
+            ],
+        }
+    ],
+)
+PY
 ```
 
 ## Backend API Endpoints

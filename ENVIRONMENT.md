@@ -9,7 +9,6 @@ Use `.env.example` as the source of defaults.
 - `API_SHARED_SECRET` (required for protected endpoints)
 - `MINIO_ROOT_PASSWORD` (required in non-local environments)
 - `DISCORD_BOT_TOKEN` (Discord bot runtime)
-- `CHANNEL_ID` (Discord channel for command outputs)
 
 ## Core Runtime (Bot + Worker)
 
@@ -95,7 +94,7 @@ Use `.env.example` as the source of defaults.
 
 ## Worker Consumer
 
-- `Optional`: `WORKER_NAME` (default: `integrations-worker`)
+- `Optional`: `WORKER_NAME` (default: `worker`)
 - `Required`: `WORKER_QUEUE_NAMES` (default: `jobs.default`)
 - `Required` (single queue): only one queue value is currently supported. Configure one name only, without commas, to keep worker actor registration and consumer consumption aligned.
 - `Optional`: `WORKER_BURST` (default: `false`)
@@ -106,7 +105,7 @@ Use `.env.example` as the source of defaults.
 - `Optional`: `CRM_SYNC_INTERVAL_SECONDS` (default: `900`)
 - `Optional`: `CRM_SYNC_PAGE_SIZE` (default: `200`)
 - `Optional`: `CHECK_EMAIL_WAIT` (default: `2`; minutes between mailbox polls)
-- `Optional`: `CRM_LINKEDIN_FIELD` (default: `cLinkedInUrl`)
+- `Optional`: `CRM_LINKEDIN_FIELD` (default: `cLinkedIn`)
 - `Optional`: `MAX_ATTACHMENTS_PER_CONTACT` (default: `3`)
 - `Optional`: `MAX_FILE_SIZE_MB` (default: `10`)
 - `Optional`: `ALLOWED_FILE_TYPES` (default: `pdf,doc,docx,txt`)
@@ -116,6 +115,9 @@ Use `.env.example` as the source of defaults.
 - `Optional`: `RESUME_AI_MODEL` (default: `gpt-4o-mini`; use plain names like `gpt-4o-mini`, OpenRouter gets auto-prefixed to `openai/<model>`)
 - `Optional`: `OPENAI_MODEL` (default: `gpt-4o-mini`; fallback/legacy model setting)
 - `Optional`: `RESUME_EXTRACTOR_VERSION` (default: `v1`; used in resume processing idempotency/ledger keys)
+- `Optional`: `INTAKE_RESUME_FETCH_TIMEOUT_SECONDS` (default: `20.0`; timeout for intake resume URL downloads)
+- `Optional`: `INTAKE_RESUME_MAX_REDIRECTS` (default: `3`; max redirects followed for intake resume URL downloads)
+- `Optional`: `INTAKE_RESUME_ALLOWED_HOSTS` (default: empty; optional comma-separated host allowlist for intake resume URL downloads)
 - `Optional`: `EMAIL_RESUME_INTAKE_ENABLED` (default: `false`; enables worker-side mailbox resume processing loop)
 - `Optional`: `EMAIL_RESUME_ALLOWED_EXTENSIONS` (default: `pdf,doc,docx`)
 - `Optional`: `EMAIL_RESUME_MAX_FILE_SIZE_MB` (default: `10`)

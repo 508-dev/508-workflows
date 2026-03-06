@@ -2,9 +2,11 @@
 Unit tests for CRM cog functionality.
 """
 
-import pytest
-from unittest.mock import Mock, AsyncMock, patch
+import json
+from unittest.mock import AsyncMock, Mock, patch
+
 import discord
+import pytest
 
 from five08.discord_bot.cogs.crm import (
     CRMCog,
@@ -12,9 +14,21 @@ from five08.discord_bot.cogs.crm import (
     ResumeCreateContactView,
     ResumeUpdateConfirmationView,
     ResumeReprocessConfirmationView,
+    ReprocessResumeSelectionView,
     ResumeDownloadButton,
+    ResumeSeniorityOverrideSelect,
+    ResumeEditWebsitesButton,
+    ResumeEditSocialLinksButton,
+    ResumeEditWebsitesModal,
+    ResumeEditSocialLinksModal,
+    ResumeEditSkillsButton,
+    ResumeEditSkillsModal,
+    _extract_parsed_seniority,
+    _format_seniority_label,
 )
+from five08.discord_bot.cogs import crm as crm_module
 from five08.clients.espo import EspoAPIError
+from five08.job_match import JobRequirements
 
 
 class TestCRMCog:
@@ -74,6 +88,92 @@ class TestCRMCog:
         cog = CRMCog(mock_bot)
         assert cog.bot == mock_bot
         assert cog.espo_api is not None
+
+    def test_build_job_match_header_and_mentions_guild_none(self, crm_cog):
+        """Header/mention builder should return backticks when guild is None."""
+        requirements = JobRequirements(
+            required_skills=["python"],
+            preferred_skills=[],
+            discord_role_types=["Full Stack"],
+            seniority=None,
+            location_type=None,
+            preferred_timezones=["Asia/Tokyo"],
+            raw_location_text="Japan or Asia",
+            title="Full Stack Engineer",
+        )
+
+        (
+            header_lines,
+            role_line,
+            role_ids,
+            locality_line,
+            locality_ids,
+        ) = crm_cog._build_job_match_header_and_mentions(
+            requirements=requirements,
+            candidates_count=3,
+            guild=None,
+        )
+
+        assert header_lines[0] == "## Job Match Results"
+        assert "Full Stack Engineer" in header_lines[1]
+        assert "Skills: `python`" in header_lines[1]
+        assert header_lines[-1] == "Found **3** candidate(s)."
+        assert role_line == "Discord roles: `Full Stack`"
+        assert role_ids == []
+        assert locality_line == "Locality roles: `Asia`, `Japan`"
+        assert locality_ids == []
+
+    def test_build_job_match_header_and_mentions_with_guild(self, crm_cog):
+        """Header/mention builder should resolve real role mentions with a guild."""
+        full_stack_role = Mock()
+        full_stack_role.name = "Full Stack"
+        full_stack_role.id = 111
+        full_stack_role.position = 2
+        full_stack_role.mention = "<@&111>"
+
+        asia_role = Mock()
+        asia_role.name = "Asia"
+        asia_role.id = 222
+        asia_role.position = 1
+        asia_role.mention = "<@&222>"
+
+        japan_role = Mock()
+        japan_role.name = "Japan"
+        japan_role.id = 333
+        japan_role.position = 0
+        japan_role.mention = "<@&333>"
+
+        guild = Mock()
+        guild.id = 99
+        guild.roles = [full_stack_role, asia_role, japan_role]
+
+        requirements = JobRequirements(
+            required_skills=[],
+            preferred_skills=[],
+            discord_role_types=["Full Stack"],
+            seniority=None,
+            location_type=None,
+            preferred_timezones=["Asia/Tokyo"],
+            raw_location_text="Japan",
+            title=None,
+        )
+
+        (
+            _header_lines,
+            role_line,
+            role_ids,
+            locality_line,
+            locality_ids,
+        ) = crm_cog._build_job_match_header_and_mentions(
+            requirements=requirements,
+            candidates_count=1,
+            guild=guild,
+        )
+
+        assert role_line == "Discord roles: <@&111>"
+        assert role_ids == [111]
+        assert locality_line == "Locality roles: <@&222>, <@&333>"
+        assert locality_ids == [222, 333]
 
     def test_check_member_role_with_member(
         self, crm_cog, mock_interaction, mock_member_role
@@ -174,6 +274,468 @@ class TestCRMCog:
 
         assert len(summary) <= view._APPLIED_FIELD_TOTAL_LIMIT
 
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("junior", "Junior"),
+            ("midlevel", "Mid-level"),
+            ("mid-level", "Mid-level"),
+            ("senior", "Senior"),
+            ("staff", "Staff"),
+            ("unknown", "Unknown"),
+            ("", "Unknown"),
+            (None, "Unknown"),
+        ],
+    )
+    def test_format_seniority_label(self, raw, expected):
+        """Seniority labels should normalize consistent display strings."""
+        assert _format_seniority_label(raw) == expected
+
+    @pytest.mark.parametrize(
+        ("payload", "expected"),
+        [
+            ({"seniority_level": "senior"}, "senior"),
+            ({"seniority_level": " unknown "}, None),
+            ({}, None),
+        ],
+    )
+    def test_extract_parsed_seniority_from_dict(self, payload, expected):
+        """Parsed seniority should be extracted when present and not unknown."""
+        assert _extract_parsed_seniority(payload) == expected
+
+    def test_extract_parsed_seniority_from_object(self):
+        """Parsed seniority should handle object attributes."""
+
+        class DummyProfile:
+            seniority_level = "midlevel"
+
+        assert _extract_parsed_seniority(DummyProfile()) == "midlevel"
+
+    @pytest.mark.asyncio
+    async def test_resume_update_view_adds_seniority_select(self, crm_cog):
+        """Resume update view should expose a seniority override dropdown."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+            parsed_seniority="senior",
+        )
+
+        assert any(
+            isinstance(child, ResumeSeniorityOverrideSelect) for child in view.children
+        )
+
+    @pytest.mark.asyncio
+    async def test_resume_update_view_sets_seniority_override(self, crm_cog):
+        """Seniority override should update the proposed CRM payload."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+            parsed_seniority="junior",
+        )
+
+        label = view._set_seniority_override("staff")
+
+        assert label == "Staff"
+        assert view.proposed_updates["cSeniority"] == "staff"
+
+    @pytest.mark.asyncio
+    async def test_resume_update_view_adds_websites_button_when_websites_proposed(
+        self, crm_cog
+    ):
+        """Edit Websites button should appear when cWebsiteLink is in proposed updates."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={"cWebsiteLink": ["https://example.com"]},
+        )
+
+        assert any(
+            isinstance(child, ResumeEditWebsitesButton) for child in view.children
+        )
+
+    @pytest.mark.asyncio
+    async def test_resume_update_view_no_websites_button_without_websites(
+        self, crm_cog
+    ):
+        """Edit Websites button should not appear when cWebsiteLink is absent."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+        )
+
+        assert not any(
+            isinstance(child, ResumeEditWebsitesButton) for child in view.children
+        )
+
+    @pytest.mark.asyncio
+    async def test_resume_update_view_adds_social_links_button_when_social_links_proposed(
+        self, crm_cog
+    ):
+        """Edit Social Links button should appear when cSocialLinks is in proposed updates."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={"cSocialLinks": ["https://linkedin.com/in/user"]},
+        )
+
+        assert any(
+            isinstance(child, ResumeEditSocialLinksButton) for child in view.children
+        )
+
+    @pytest.mark.asyncio
+    async def test_resume_update_view_no_social_links_button_without_social_links(
+        self, crm_cog
+    ):
+        """Edit Social Links button should not appear when cSocialLinks is absent."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+        )
+
+        assert not any(
+            isinstance(child, ResumeEditSocialLinksButton) for child in view.children
+        )
+
+    @pytest.mark.asyncio
+    async def test_resume_update_view_adds_skills_button_when_skills_proposed(
+        self, crm_cog
+    ):
+        """Edit Skills button should appear when skills are in proposed updates."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={"skills": ["python"]},
+        )
+
+        assert any(isinstance(child, ResumeEditSkillsButton) for child in view.children)
+
+    @pytest.mark.asyncio
+    async def test_resume_update_view_no_skills_button_without_skills(self, crm_cog):
+        """Edit Skills button should not appear when skills are absent."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+        )
+
+        assert not any(
+            isinstance(child, ResumeEditSkillsButton) for child in view.children
+        )
+
+    @pytest.mark.asyncio
+    async def test_edit_websites_modal_prepopulates_list_values(self, crm_cog):
+        """Edit Websites modal should pre-fill with proposed website list, one per line."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={
+                "cWebsiteLink": ["https://example.com", "https://blog.example.com"]
+            },
+        )
+
+        modal = ResumeEditWebsitesModal(confirmation_view=view)
+
+        assert (
+            modal.websites_input.default
+            == "https://example.com\nhttps://blog.example.com"
+        )
+
+    @pytest.mark.asyncio
+    async def test_edit_social_links_modal_prepopulates_list_values(self, crm_cog):
+        """Edit Social Links modal should pre-fill with proposed social link list."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={
+                "cSocialLinks": ["https://linkedin.com/in/user", "https://x.com/user"]
+            },
+        )
+
+        modal = ResumeEditSocialLinksModal(confirmation_view=view)
+
+        assert (
+            modal.social_links_input.default
+            == "https://linkedin.com/in/user\nhttps://x.com/user"
+        )
+
+    @pytest.mark.asyncio
+    async def test_edit_skills_modal_prepopulates_list_values(self, crm_cog):
+        """Edit Skills modal should pre-fill with proposed skills + strengths."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={
+                "skills": ["python", "go", "rust"],
+                "cSkillAttrs": {"python": {"strength": 5}, "rust": {"strength": 4}},
+            },
+        )
+
+        modal = ResumeEditSkillsModal(confirmation_view=view)
+
+        assert modal.skills_input.default == "python: 5\ngo\nrust: 4"
+
+    @pytest.mark.asyncio
+    async def test_edit_websites_modal_submit_updates_proposed(
+        self, crm_cog, mock_interaction
+    ):
+        """Submitting the Edit Websites modal should replace proposed cWebsiteLink."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={"cWebsiteLink": ["https://old.com"]},
+        )
+        modal = ResumeEditWebsitesModal(confirmation_view=view)
+        modal.websites_input._value = "https://new.com\nhttps://other.com"
+
+        await modal.on_submit(mock_interaction)
+
+        assert view.proposed_updates["cWebsiteLink"] == [
+            "https://new.com",
+            "https://other.com",
+        ]
+        mock_interaction.response.send_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_edit_social_links_modal_submit_updates_proposed(
+        self, crm_cog, mock_interaction
+    ):
+        """Submitting the Edit Social Links modal should replace proposed cSocialLinks."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={"cSocialLinks": ["https://linkedin.com/in/old"]},
+        )
+        modal = ResumeEditSocialLinksModal(confirmation_view=view)
+        modal.social_links_input._value = (
+            "https://linkedin.com/in/new\nhttps://x.com/user"
+        )
+
+        await modal.on_submit(mock_interaction)
+
+        assert view.proposed_updates["cSocialLinks"] == [
+            "https://linkedin.com/in/new",
+            "https://x.com/user",
+        ]
+        mock_interaction.response.send_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_edit_skills_modal_submit_updates_proposed(
+        self, crm_cog, mock_interaction
+    ):
+        """Submitting the Edit Skills modal should update skills and strengths."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={
+                "skills": ["python", "go", "rust"],
+                "cSkillAttrs": json.dumps(
+                    {"python": {"strength": 2}, "rust": {"strength": 4}}
+                ),
+            },
+        )
+        modal = ResumeEditSkillsModal(confirmation_view=view)
+        modal.skills_input._value = "python: 5\nrust"
+
+        await modal.on_submit(mock_interaction)
+
+        assert view.proposed_updates["skills"] == ["python", "rust"]
+        parsed_attrs = json.loads(view.proposed_updates["cSkillAttrs"])
+        assert parsed_attrs == {
+            "python": {"strength": 5},
+            "rust": {"strength": 4},
+        }
+        mock_interaction.response.send_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_edit_websites_modal_submit_removes_field_when_blank(
+        self, crm_cog, mock_interaction
+    ):
+        """Clearing websites in the modal should remove cWebsiteLink from proposed updates."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={"cWebsiteLink": ["https://example.com"]},
+        )
+        modal = ResumeEditWebsitesModal(confirmation_view=view)
+        modal.websites_input._value = "   \n  \n  "
+
+        await modal.on_submit(mock_interaction)
+
+        assert "cWebsiteLink" not in view.proposed_updates
+
+    @pytest.mark.asyncio
+    async def test_edit_social_links_modal_submit_removes_field_when_blank(
+        self, crm_cog, mock_interaction
+    ):
+        """Clearing social links in the modal should remove cSocialLinks from proposed updates."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={"cSocialLinks": ["https://linkedin.com/in/user"]},
+        )
+        modal = ResumeEditSocialLinksModal(confirmation_view=view)
+        modal.social_links_input._value = ""
+
+        await modal.on_submit(mock_interaction)
+
+        assert "cSocialLinks" not in view.proposed_updates
+
+    @pytest.mark.asyncio
+    async def test_edit_skills_modal_submit_removes_fields_when_blank(
+        self, crm_cog, mock_interaction
+    ):
+        """Clearing skills in the modal should remove skill updates."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={
+                "skills": ["python", "go"],
+                "cSkillAttrs": {"python": {"strength": 5}},
+            },
+        )
+        modal = ResumeEditSkillsModal(confirmation_view=view)
+        modal.skills_input._value = "   \n  \n  "
+
+        await modal.on_submit(mock_interaction)
+
+        assert "skills" not in view.proposed_updates
+        assert "cSkillAttrs" not in view.proposed_updates
+
+    def test_resume_preview_skills_delta_added_removed_and_strengths(self, crm_cog):
+        """Skills preview should summarize added/removed/strength changes."""
+        embed, _ = crm_cog._build_resume_preview_embed(
+            contact_id="contact-1",
+            contact_name="Test User",
+            result={
+                "proposed_changes": [
+                    {
+                        "field": "skills",
+                        "label": "Skills",
+                        "current": "python (3), go (2)",
+                        "proposed": "python (4), rust (5)",
+                    }
+                ]
+            },
+            link_member=None,
+        )
+
+        proposed_field = next(
+            field for field in embed.fields if field.name == "Proposed Changes"
+        )
+        assert "Added: rust (5)" in proposed_field.value
+        assert "Strengths: python (3->4)" in proposed_field.value
+        assert "Removed: go (2)" in proposed_field.value
+
+    def test_resume_preview_skills_delta_noop_falls_back_to_full_line(self, crm_cog):
+        """Skills preview should fall back to current → proposed when no delta."""
+        embed, _ = crm_cog._build_resume_preview_embed(
+            contact_id="contact-1",
+            contact_name="Test User",
+            result={
+                "proposed_changes": [
+                    {
+                        "field": "skills",
+                        "label": "Skills",
+                        "current": "python (3), go (2)",
+                        "proposed": "python (3), go (2)",
+                    }
+                ]
+            },
+            link_member=None,
+        )
+
+        proposed_field = next(
+            field for field in embed.fields if field.name == "Proposed Changes"
+        )
+        assert "python (3), go (2)" in proposed_field.value
+        assert "→" in proposed_field.value
+
+    @pytest.mark.asyncio
+    async def test_edit_websites_button_callback_opens_modal(
+        self, crm_cog, mock_interaction
+    ):
+        """Edit Websites button callback should open the websites modal."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={"cWebsiteLink": ["https://example.com"]},
+        )
+        button = next(
+            child
+            for child in view.children
+            if isinstance(child, ResumeEditWebsitesButton)
+        )
+
+        await button.callback(mock_interaction)
+
+        mock_interaction.response.send_modal.assert_called_once()
+        modal_arg = mock_interaction.response.send_modal.call_args[0][0]
+        assert isinstance(modal_arg, ResumeEditWebsitesModal)
+
+    @pytest.mark.asyncio
+    async def test_edit_social_links_button_callback_opens_modal(
+        self, crm_cog, mock_interaction
+    ):
+        """Edit Social Links button callback should open the social links modal."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={"cSocialLinks": ["https://linkedin.com/in/user"]},
+        )
+        button = next(
+            child
+            for child in view.children
+            if isinstance(child, ResumeEditSocialLinksButton)
+        )
+
+        await button.callback(mock_interaction)
+
+        mock_interaction.response.send_modal.assert_called_once()
+        modal_arg = mock_interaction.response.send_modal.call_args[0][0]
+        assert isinstance(modal_arg, ResumeEditSocialLinksModal)
+
     @pytest.mark.asyncio
     async def test_download_and_send_resume_success(self, crm_cog, mock_interaction):
         """Test successful resume download and send."""
@@ -213,6 +775,180 @@ class TestCRMCog:
             "❌ Failed to download resume: API Error"
         )
 
+    def test_role_id_cache_initializes_empty(self, crm_cog):
+        """Role ID cache should initialize empty on first access."""
+        cache = crm_cog._get_role_id_cache()
+
+        assert cache == {}
+
+    def test_refresh_role_id_cache_builds_casefold_map(self, crm_cog):
+        """Role ID cache should map casefolded role names to IDs."""
+        role_frontend = Mock()
+        role_frontend.name = "Frontend"
+        role_frontend.id = 111
+        role_frontend.position = 3
+
+        role_full_stack = Mock()
+        role_full_stack.name = "Full Stack"
+        role_full_stack.id = 222
+        role_full_stack.position = 2
+
+        role_excluded = Mock()
+        role_excluded.name = "Bots"
+        role_excluded.id = 333
+        role_excluded.position = 1
+
+        guild = Mock()
+        guild.id = 42
+        guild.roles = [role_frontend, role_full_stack, role_excluded]
+
+        with patch(
+            "five08.discord_bot.cogs.crm.DISCORD_ROLES_EXCLUDE_FROM_SYNC",
+            {"Bots"},
+        ):
+            crm_cog._refresh_role_id_cache(guild)
+
+        cache = crm_cog._get_role_id_cache()
+        assert cache[42] == {"frontend": 111, "full stack": 222}
+
+    @pytest.mark.asyncio
+    async def test_on_guild_role_update_refreshes_cache(self, crm_cog):
+        """Role update events should refresh the role ID cache."""
+        guild = Mock()
+        before = Mock()
+        before.guild = guild
+        after = Mock()
+        after.guild = guild
+
+        with patch.object(crm_cog, "_refresh_role_id_cache") as refresh:
+            await crm_cog.on_guild_role_update(before, after)
+
+        refresh.assert_called_once_with(guild)
+
+    @pytest.mark.asyncio
+    async def test_match_candidates_sends_role_and_locality_mentions(
+        self, crm_cog, mock_interaction, mock_member_role
+    ):
+        """Match candidates should emit role/locality mention lines safely."""
+        role_frontend = Mock()
+        role_frontend.name = "Frontend"
+        role_frontend.id = 111
+        role_frontend.position = 3
+
+        role_usa = Mock()
+        role_usa.name = "USA"
+        role_usa.id = 222
+        role_usa.position = 2
+
+        guild = Mock()
+        guild.id = 55
+        guild.roles = [role_frontend, role_usa]
+
+        mock_interaction.guild = guild
+        mock_interaction.user.id = 999
+        mock_interaction.user.name = "Requester"
+        mock_interaction.user.roles = [mock_member_role]
+
+        starter_msg = Mock()
+        starter_msg.content = "Example job"
+        starter_msg.attachments = []
+        starter_msg.embeds = []
+
+        class DummyThread:
+            id = 123
+            applied_tags = []
+
+        thread_instance = DummyThread()
+        thread_instance.starter_message = starter_msg
+        mock_interaction.channel = thread_instance
+
+        requirements = Mock()
+        requirements.title = "Frontend Engineer"
+        requirements.discord_role_types = [" Frontend ", "Senior"]
+        requirements.raw_location_text = "USA"
+        requirements.preferred_timezones = []
+        requirements.location_type = "us_only"
+        requirements.required_skills = ["python"]
+        requirements.preferred_skills = []
+        requirements.seniority = "Senior"
+
+        candidate = Mock()
+        candidate.is_member = True
+        candidate.name = "Alice (Nickname)"
+        candidate.email_508 = "alice@508.dev"
+        candidate.email = None
+        candidate.crm_contact_id = None
+        candidate.has_crm_link = False
+        candidate.discord_user_id = 12345
+        candidate.linkedin = None
+        candidate.latest_resume_id = None
+        candidate.latest_resume_name = None
+        candidate.match_score = 9.2
+        candidate.matched_required_skills = ["python"]
+        candidate.matched_discord_roles = ["Frontend"]
+        candidate.seniority = "Senior"
+        candidate.timezone = "America/New_York"
+
+        crm_cog._refresh_role_id_cache(guild)
+
+        with (
+            patch(
+                "five08.discord_bot.cogs.crm.extract_job_requirements",
+                return_value=requirements,
+            ),
+            patch(
+                "five08.discord_bot.cogs.crm.search_candidates",
+                return_value=[candidate],
+            ),
+            patch(
+                "five08.discord_bot.cogs.crm.settings.espo_base_url",
+                "https://crm.example.com",
+            ),
+            patch("five08.discord_bot.cogs.crm.discord.Thread", DummyThread),
+            patch.object(crm_cog, "_audit_command"),
+        ):
+            await crm_cog.match_candidates.callback(crm_cog, mock_interaction)
+
+        def assert_mentions_disabled(call):
+            allowed = call.kwargs["allowed_mentions"]
+            assert allowed.roles is False
+            assert allowed.users is False
+            assert allowed.everyone is False
+
+        calls = mock_interaction.followup.send.call_args_list
+        header_call = calls[0]
+        assert header_call.args[0].startswith("## Job Match Results")
+        assert_mentions_disabled(header_call)
+
+        role_call = next(
+            call
+            for call in calls
+            if call.args and call.args[0].startswith("Discord roles:")
+        )
+        assert "<@&111>" in role_call.args[0]
+        role_allowed = role_call.kwargs["allowed_mentions"]
+        assert [r.id for r in role_allowed.roles] == [111]
+        assert role_call.kwargs["allowed_mentions"].users is False
+        assert role_call.kwargs["allowed_mentions"].everyone is False
+
+        locality_call = next(
+            call
+            for call in calls
+            if call.args and call.args[0].startswith("Locality roles:")
+        )
+        assert "<@&222>" in locality_call.args[0]
+        locality_allowed = locality_call.kwargs["allowed_mentions"]
+        assert [r.id for r in locality_allowed.roles] == [222]
+        assert locality_call.kwargs["allowed_mentions"].users is False
+        assert locality_call.kwargs["allowed_mentions"].everyone is False
+
+        candidate_call = next(
+            call for call in calls if call.args and call.args[0].startswith("1. ")
+        )
+        assert "Alice (Nickname)" in candidate_call.args[0]
+        assert "alice@508.dev" not in candidate_call.args[0]
+        assert_mentions_disabled(candidate_call)
+
     @pytest.mark.asyncio
     async def test_search_contacts_success(
         self, crm_cog, mock_interaction, mock_member_role
@@ -251,6 +987,284 @@ class TestCRMCog:
 
         # Verify response was sent
         mock_interaction.followup.send.assert_called_once()
+
+    def test_resolve_jobs_channel_target_prefers_thread_parent(self, crm_cog):
+        class DummyTextChannel:
+            def __init__(self, channel_id: int, name: str) -> None:
+                self.id = channel_id
+                self.name = name
+
+        class DummyThread:
+            def __init__(self, parent: DummyTextChannel) -> None:
+                self.parent = parent
+
+        parent = DummyTextChannel(456, "jobs")
+        interaction = Mock()
+        interaction.channel = DummyThread(parent)
+
+        with (
+            patch("five08.discord_bot.cogs.crm.discord.Thread", DummyThread),
+            patch("five08.discord_bot.cogs.crm.discord.TextChannel", DummyTextChannel),
+            patch("five08.discord_bot.cogs.crm.discord.ForumChannel", DummyTextChannel),
+        ):
+            target = crm_cog._resolve_jobs_channel_target(interaction, None)
+
+        assert target is parent
+
+    def test_resolve_jobs_channel_target_uses_current_channel(self, crm_cog):
+        class DummyTextChannel:
+            def __init__(self, channel_id: int, name: str) -> None:
+                self.id = channel_id
+                self.name = name
+
+        channel = DummyTextChannel(456, "jobs")
+        interaction = Mock()
+        interaction.channel = channel
+
+        with (
+            patch("five08.discord_bot.cogs.crm.discord.TextChannel", DummyTextChannel),
+            patch("five08.discord_bot.cogs.crm.discord.ForumChannel", DummyTextChannel),
+        ):
+            target = crm_cog._resolve_jobs_channel_target(interaction, None)
+
+        assert target is channel
+
+    @pytest.mark.asyncio
+    async def test_register_jobs_channel_updates_cache(self, crm_cog, mock_interaction):
+        class DummyTextChannel:
+            def __init__(self, channel_id: int, name: str) -> None:
+                self.id = channel_id
+                self.name = name
+
+        admin_role = Mock()
+        admin_role.name = "Steering Committee"
+        mock_interaction.user.roles = [admin_role]
+
+        guild = Mock()
+        guild.id = 123
+        mock_interaction.guild = guild
+        mock_interaction.channel = DummyTextChannel(456, "jobs")
+
+        to_thread = AsyncMock(return_value=True)
+        with (
+            patch("five08.discord_bot.cogs.crm.asyncio.to_thread", to_thread),
+            patch("five08.discord_bot.cogs.crm.discord.TextChannel", DummyTextChannel),
+            patch("five08.discord_bot.cogs.crm.discord.ForumChannel", DummyTextChannel),
+        ):
+            await crm_cog.register_jobs_channel.callback(
+                crm_cog, mock_interaction, None
+            )
+
+        to_thread.assert_awaited_once_with(
+            crm_module.register_job_post_channel,
+            crm_module.settings,
+            guild_id="123",
+            channel_id="456",
+        )
+        assert crm_cog._jobs_channels_by_guild[guild.id] == {456}
+
+    @pytest.mark.asyncio
+    async def test_unregister_jobs_channel_updates_cache(
+        self, crm_cog, mock_interaction
+    ):
+        class DummyTextChannel:
+            def __init__(self, channel_id: int, name: str) -> None:
+                self.id = channel_id
+                self.name = name
+
+        admin_role = Mock()
+        admin_role.name = "Steering Committee"
+        mock_interaction.user.roles = [admin_role]
+
+        guild = Mock()
+        guild.id = 123
+        mock_interaction.guild = guild
+        mock_interaction.channel = DummyTextChannel(456, "jobs")
+        crm_cog._jobs_channels_by_guild[guild.id] = {456}
+
+        to_thread = AsyncMock(return_value=True)
+        with (
+            patch("five08.discord_bot.cogs.crm.asyncio.to_thread", to_thread),
+            patch("five08.discord_bot.cogs.crm.discord.TextChannel", DummyTextChannel),
+            patch("five08.discord_bot.cogs.crm.discord.ForumChannel", DummyTextChannel),
+        ):
+            await crm_cog.unregister_jobs_channel.callback(
+                crm_cog, mock_interaction, None
+            )
+
+        to_thread.assert_awaited_once_with(
+            crm_module.unregister_job_post_channel,
+            crm_module.settings,
+            guild_id="123",
+            channel_id="456",
+        )
+        assert crm_cog._jobs_channels_by_guild[guild.id] == set()
+
+    @pytest.mark.asyncio
+    async def test_register_jobs_channel_denies_non_admin(
+        self, crm_cog, mock_interaction
+    ):
+        class DummyTextChannel:
+            def __init__(self, channel_id: int, name: str) -> None:
+                self.id = channel_id
+                self.name = name
+
+        guild = Mock()
+        guild.id = 123
+        mock_interaction.guild = guild
+        mock_interaction.channel = DummyTextChannel(456, "jobs")
+
+        to_thread = AsyncMock(return_value=True)
+        with (
+            patch("five08.discord_bot.cogs.crm.asyncio.to_thread", to_thread),
+            patch("five08.discord_bot.cogs.crm.discord.TextChannel", DummyTextChannel),
+            patch("five08.discord_bot.cogs.crm.discord.ForumChannel", DummyTextChannel),
+        ):
+            await crm_cog.register_jobs_channel.callback(
+                crm_cog, mock_interaction, None
+            )
+
+        to_thread.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unregister_jobs_channel_denies_non_admin(
+        self, crm_cog, mock_interaction
+    ):
+        class DummyTextChannel:
+            def __init__(self, channel_id: int, name: str) -> None:
+                self.id = channel_id
+                self.name = name
+
+        guild = Mock()
+        guild.id = 123
+        mock_interaction.guild = guild
+        mock_interaction.channel = DummyTextChannel(456, "jobs")
+        crm_cog._jobs_channels_by_guild[guild.id] = {456}
+
+        to_thread = AsyncMock(return_value=True)
+        with (
+            patch("five08.discord_bot.cogs.crm.asyncio.to_thread", to_thread),
+            patch("five08.discord_bot.cogs.crm.discord.TextChannel", DummyTextChannel),
+            patch("five08.discord_bot.cogs.crm.discord.ForumChannel", DummyTextChannel),
+        ):
+            await crm_cog.unregister_jobs_channel.callback(
+                crm_cog, mock_interaction, None
+            )
+
+        to_thread.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_on_message_skips_public_channel(self, crm_cog):
+        class DummyPermissions:
+            def __init__(self, view_channel: bool) -> None:
+                self.view_channel = view_channel
+
+        class DummyTextChannel:
+            def __init__(self, channel_id: int) -> None:
+                self.id = channel_id
+
+            def permissions_for(self, _role):
+                return DummyPermissions(True)
+
+        guild = Mock()
+        guild.id = 123
+        guild.default_role = Mock()
+        author = Mock()
+        author.bot = False
+        author.roles = [Mock()]
+        message = Mock()
+        message.guild = guild
+        message.author = author
+        message.channel = DummyTextChannel(456)
+        message.content = "Looking for a dev"
+        message.id = 789
+        message.create_thread = AsyncMock()
+
+        crm_cog._refresh_jobs_channel_cache_if_missing = AsyncMock(return_value=True)
+        crm_cog._is_jobs_channel_registered = Mock(return_value=True)
+        with patch(
+            "five08.discord_bot.cogs.crm.check_user_roles_with_hierarchy"
+        ) as check:
+            check.return_value = True
+            with (
+                patch(
+                    "five08.discord_bot.cogs.crm.discord.TextChannel", DummyTextChannel
+                ),
+                patch("five08.discord_bot.cogs.crm.discord.Thread", Mock),
+            ):
+                await crm_cog.on_message(message)
+
+        message.create_thread.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_on_thread_create_skips_unregistered_channel(self, crm_cog):
+        guild = Mock()
+        guild.id = 123
+        parent = Mock()
+        parent.id = 456
+        thread = Mock()
+        thread.guild = guild
+        thread.parent = parent
+        thread.owner_id = None
+
+        crm_cog._refresh_jobs_channel_cache_if_missing = AsyncMock(return_value=True)
+        crm_cog._is_jobs_channel_registered = Mock(return_value=False)
+        crm_cog._run_auto_match_candidates_for_thread = AsyncMock()
+
+        await crm_cog.on_thread_create(thread)
+
+        crm_cog._run_auto_match_candidates_for_thread.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_on_thread_create_skips_bot_owner(self, crm_cog):
+        guild = Mock()
+        guild.id = 123
+        parent = Mock()
+        parent.id = 456
+        thread = Mock()
+        thread.guild = guild
+        thread.parent = parent
+        thread.owner_id = 999
+
+        owner = Mock()
+        owner.bot = True
+        guild.get_member.return_value = owner
+
+        crm_cog._refresh_jobs_channel_cache_if_missing = AsyncMock(return_value=True)
+        crm_cog._is_jobs_channel_registered = Mock(return_value=True)
+        crm_cog._run_auto_match_candidates_for_thread = AsyncMock()
+
+        await crm_cog.on_thread_create(thread)
+
+        crm_cog._run_auto_match_candidates_for_thread.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_on_thread_create_skips_non_member(self, crm_cog):
+        guild = Mock()
+        guild.id = 123
+        parent = Mock()
+        parent.id = 456
+        thread = Mock()
+        thread.guild = guild
+        thread.parent = parent
+        thread.owner_id = 999
+
+        owner = Mock()
+        owner.bot = False
+        owner.roles = [Mock()]
+        guild.get_member.return_value = owner
+
+        crm_cog._refresh_jobs_channel_cache_if_missing = AsyncMock(return_value=True)
+        crm_cog._is_jobs_channel_registered = Mock(return_value=True)
+        crm_cog._run_auto_match_candidates_for_thread = AsyncMock()
+
+        with patch(
+            "five08.discord_bot.cogs.crm.check_user_roles_with_hierarchy"
+        ) as check:
+            check.return_value = False
+            await crm_cog.on_thread_create(thread)
+
+        crm_cog._run_auto_match_candidates_for_thread.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_search_contacts_requires_query_or_skills(
@@ -486,6 +1500,7 @@ class TestCRMCog:
         steering_role = Mock()
         steering_role.name = "Steering Committee"
         mock_interaction.user.roles = [steering_role]
+        crm_cog._audit_command = Mock()
 
         with patch.object(
             crm_cog,
@@ -505,6 +1520,15 @@ class TestCRMCog:
         embed = mock_interaction.followup.send.call_args[1]["embed"]
         assert embed.title == "⚠️ Multiple Contacts Found"
         assert len(embed.fields) == 2
+        crm_cog._audit_command.assert_called_once()
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["action"] == "crm.assign_onboarder"
+        assert audit_kwargs["result"] == "error"
+        assert audit_kwargs["metadata"] == {
+            "contact": "john",
+            "onboarder": "jane",
+            "contacts_found": 2,
+        }
 
     @pytest.mark.asyncio
     async def test_assign_onboarder_missing_contact(self, crm_cog, mock_interaction):
@@ -512,6 +1536,7 @@ class TestCRMCog:
         steering_role = Mock()
         steering_role.name = "Steering Committee"
         mock_interaction.user.roles = [steering_role]
+        crm_cog._audit_command = Mock()
 
         with patch.object(
             crm_cog,
@@ -525,6 +1550,14 @@ class TestCRMCog:
         crm_cog.espo_api.request.assert_not_called()
         message = mock_interaction.followup.send.call_args[0][0]
         assert "❌ No contact found for: `missing`" in message
+        crm_cog._audit_command.assert_called_once()
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["action"] == "crm.assign_onboarder"
+        assert audit_kwargs["result"] == "error"
+        assert audit_kwargs["metadata"] == {
+            "contact": "missing",
+            "onboarder": "jane",
+        }
 
     @pytest.mark.asyncio
     async def test_assign_onboarder_invalid_onboarder_reference(
@@ -534,6 +1567,7 @@ class TestCRMCog:
         steering_role = Mock()
         steering_role.name = "Steering Committee"
         mock_interaction.user.roles = [steering_role]
+        crm_cog._audit_command = Mock()
 
         with patch.object(
             crm_cog,
@@ -547,6 +1581,54 @@ class TestCRMCog:
         crm_cog.espo_api.request.assert_not_called()
         message = mock_interaction.followup.send.call_args[0][0]
         assert "Could not resolve a valid 508 onboarder username." in message
+        crm_cog._audit_command.assert_called_once()
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["action"] == "crm.assign_onboarder"
+        assert audit_kwargs["result"] == "error"
+        assert audit_kwargs["metadata"] == {
+            "contact": "john",
+            "onboarder": "<@987654321>",
+        }
+
+    @pytest.mark.asyncio
+    async def test_assign_onboarder_missing_onboarder_field_records_error(
+        self, crm_cog, mock_interaction
+    ):
+        """Contacts without an onboarder field should return an actionable error."""
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+        crm_cog._audit_command = Mock()
+
+        with patch.object(
+            crm_cog,
+            "_search_contact_for_linking",
+            new=AsyncMock(return_value=[{"id": "contact123", "name": "John Doe"}]),
+        ):
+            crm_cog.espo_api.request.return_value = {
+                "id": "contact123",
+                "name": "John Doe",
+            }
+            await crm_cog.assign_onboarder.callback(
+                crm_cog, mock_interaction, "john", "jane"
+            )
+
+        crm_cog.espo_api.request.assert_called_once_with("GET", "Contact/contact123")
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert (
+            "Could not locate a known onboarder field for this CRM contact." in message
+        )
+        crm_cog._audit_command.assert_called_once()
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["action"] == "crm.assign_onboarder"
+        assert audit_kwargs["result"] == "error"
+        assert audit_kwargs["metadata"] == {
+            "contact_id": "contact123",
+            "onboarder": "jane",
+            "reason": "missing_onboarder_field",
+        }
+        assert audit_kwargs["resource_type"] == "crm_contact"
+        assert audit_kwargs["resource_id"] == "contact123"
 
     @pytest.mark.asyncio
     async def test_assign_onboarder_handles_espo_api_error(
@@ -603,20 +1685,39 @@ class TestCRMCog:
         await crm_cog.view_onboarding_queue.callback(crm_cog, mock_interaction)
 
         crm_cog.espo_api.request.assert_called_once_with(
-            "GET", "Contact", {"maxSize": 200}
+            "GET",
+            "Contact",
+            {
+                "maxSize": 200,
+                "select": (
+                    "id,name,emailAddress,cDiscordUsername,cDiscordUserID,"
+                    "cOnboardingState,cOnboardingStatus,cOnboarding,"
+                    "cOnboarder,cOnboardingCoordinator,cOnboardingUpdatedAt"
+                ),
+            },
         )
 
-        embed = mock_interaction.followup.send.call_args[1]["embed"]
+        send_kwargs = mock_interaction.followup.send.call_args[1]
+        assert "embed" in send_kwargs
+        assert "view" in send_kwargs
+        embed = send_kwargs["embed"]
         names = [field.name for field in embed.fields]
         values = [field.value for field in embed.fields]
-        assert any("Alice" in n for n in names)
-        assert any("Eli" in n for n in names)
-        assert not any("Bob" in n for n in names)
-        assert not any("Cara" in n for n in names)
-        assert not any("Drew" in n for n in names)
-        assert any("📌 Onboarding Status: pending" in value for value in values)
-        assert any("📌 Onboarding Status: Unknown" in value for value in values)
-        assert any("🧑‍💼 Onboarder: mentorA" in value for value in values)
+        assert any("Contact: Alice" in name for name in names)
+        assert all("Contact: Eli" not in name for name in names)
+        assert any("📧 **Email:** No email" in value for value in values)
+        assert any("💬 **Linked Discord:** No Discord" in value for value in values)
+        assert any("🧑‍💼 **cOnboarder:** mentorA" in value for value in values)
+        assert any("📌 **cOnboardingState:** pending" in value for value in values)
+        assert any("🔗 [View in CRM](" in value for value in values)
+
+        view = send_kwargs["view"]
+        queue_rows = getattr(view, "queue_rows", None)
+        assert queue_rows is not None
+        queued_names = {row.get("name") for row in queue_rows}
+        assert queued_names == {"Alice", "Eli"}
+        for row in queue_rows:
+            assert row.get("status") not in {"onboarded", "waitlist", "rejected"}
 
     @pytest.mark.asyncio
     async def test_view_onboarding_queue_empty_when_only_excluded(
@@ -638,7 +1739,16 @@ class TestCRMCog:
         await crm_cog.view_onboarding_queue.callback(crm_cog, mock_interaction)
 
         crm_cog.espo_api.request.assert_called_once_with(
-            "GET", "Contact", {"maxSize": 200}
+            "GET",
+            "Contact",
+            {
+                "maxSize": 200,
+                "select": (
+                    "id,name,emailAddress,cDiscordUsername,cDiscordUserID,"
+                    "cOnboardingState,cOnboardingStatus,cOnboarding,"
+                    "cOnboarder,cOnboardingCoordinator,cOnboardingUpdatedAt"
+                ),
+            },
         )
         message = mock_interaction.followup.send.call_args[0][0]
         assert "✅ No contacts found in onboarding queue." in message
@@ -657,6 +1767,105 @@ class TestCRMCog:
 
         message = mock_interaction.followup.send.call_args[0][0]
         assert "❌ CRM API error: Queue service down" in message
+
+    @pytest.mark.asyncio
+    async def test_view_onboarding_queue_uses_pagination_for_large_queues(
+        self, crm_cog, mock_interaction
+    ):
+        """Large queues should be returned as paginated embeds."""
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+
+        long_name_suffix = "X" * 120
+        long_email_suffix = "y" * 80
+        crm_cog.espo_api.request.return_value = {
+            "list": [
+                {
+                    "id": f"c{i}",
+                    "name": f"Contact {i} {long_name_suffix}",
+                    "emailAddress": f"user{i}@{long_email_suffix}.example.com",
+                    "type": "Member",
+                    "c508Email": f"member{i}@508.dev",
+                    "cDiscordUsername": f"member{i}#1234",
+                    "cOnboardingState": "pending",
+                    "cOnboarder": f"mentor{i}",
+                }
+                for i in range(1, 26)
+            ]
+        }
+
+        await crm_cog.view_onboarding_queue.callback(crm_cog, mock_interaction)
+
+        assert mock_interaction.followup.send.call_count == 1
+        send_kwargs = mock_interaction.followup.send.call_args[1]
+        assert "embed" in send_kwargs
+        assert "view" in send_kwargs
+        assert send_kwargs["view"].total_pages > 1
+
+    def test_format_onboarding_updated_at_normalizes_timezone(self, crm_cog):
+        """Timestamps should be normalized consistently for display."""
+        assert crm_cog._format_onboarding_updated_at(0) == "1970-01-01 00:00 UTC"
+        assert (
+            crm_cog._format_onboarding_updated_at("2026-03-03T12:00:00-05:00")
+            == "2026-03-03 17:00 UTC"
+        )
+        assert crm_cog._format_onboarding_updated_at("2026-03-03T12:00:00") == (
+            "2026-03-03 12:00"
+        )
+        assert crm_cog._format_onboarding_updated_at("2026-03-03T00:00:00Z") == (
+            "2026-03-03"
+        )
+
+    @pytest.mark.asyncio
+    async def test_resume_create_contact_view_cancel_path(
+        self, crm_cog, mock_interaction
+    ):
+        """Canceling contact creation should not create a contact."""
+        original_interaction = Mock()
+        original_interaction.user = Mock(id=101)
+
+        mock_interaction.user.id = 101
+        mock_interaction.response = AsyncMock()
+        mock_interaction.response.send_message = AsyncMock()
+        mock_interaction.followup = AsyncMock()
+        mock_interaction.followup.send = AsyncMock()
+        mock_interaction.message = AsyncMock()
+        mock_interaction.message.edit = AsyncMock()
+
+        crm_cog._audit_command = Mock()
+
+        view = ResumeCreateContactView(
+            crm_cog=crm_cog,
+            interaction=original_interaction,
+            file_content=b"resume-bytes",
+            filename="candidate.pdf",
+            file_size=1024,
+            search_term=None,
+            overwrite=False,
+            link_user=None,
+            inferred_contact_meta={"reason": "no_matching_contact"},
+            target_scope="resume_inferred",
+        )
+
+        cancel_button = next(
+            child
+            for child in view.children
+            if isinstance(child, discord.ui.Button) and child.label == "Cancel"
+        )
+
+        await cancel_button.callback(mock_interaction)
+
+        crm_cog.espo_api.request.assert_not_called()
+        crm_cog._audit_command.assert_called_once()
+        mock_interaction.response.send_message.assert_called_once_with(
+            "Contact creation cancelled. No changes were made.",
+            ephemeral=True,
+        )
+        assert all(
+            isinstance(item, discord.ui.Button) and item.disabled
+            for item in view.children
+        )
 
     @pytest.mark.asyncio
     async def test_view_skills_self_uses_structured_attrs(
@@ -684,8 +1893,8 @@ class TestCRMCog:
         embed = call_args[1]["embed"]
         assert embed.title == "🛠️ CRM Skills"
         assert "Skills for **John Doe**" in embed.description
-        assert "`go` (5/5)" in embed.fields[0].value
-        assert "`python` (4/5)" in embed.fields[0].value
+        assert "go (5)" in embed.fields[0].value
+        assert "python (4)" in embed.fields[0].value
 
     @pytest.mark.asyncio
     async def test_view_skills_falls_back_to_skills_when_attrs_unrecoverable(
@@ -710,8 +1919,8 @@ class TestCRMCog:
         mock_interaction.followup.send.assert_called_once()
         call_args = mock_interaction.followup.send.call_args
         embed = call_args[1]["embed"]
-        assert "`python`" in embed.fields[0].value
-        assert "`sql`" in embed.fields[0].value
+        assert "python" in embed.fields[0].value
+        assert "sql" in embed.fields[0].value
         assert "/5" not in embed.fields[0].value
 
     @pytest.mark.asyncio
@@ -1452,6 +2661,33 @@ class TestCRMCog:
         } in where_filters
 
     @pytest.mark.asyncio
+    async def test_search_contacts_by_field_includes_requested_field_and_excludes_default(
+        self, crm_cog
+    ):
+        """Search-by-field includes the requested field and excludes the default."""
+        crm_cog.espo_api.request.return_value = {"list": []}
+
+        with patch.object(
+            crm_cog, "_configured_linkedin_field", return_value="cLinkedIn"
+        ) as configured_field:
+            configured_linkedin_field = crm_cog._configured_linkedin_field()
+            await crm_cog._search_contacts_by_field(
+                field=configured_linkedin_field, value="https://linkedin.com/in/test"
+            )
+
+        call = crm_cog.espo_api.request.call_args
+        assert call.args[0] == "GET"
+        assert call.args[1] == "Contact"
+        params = call.args[2]
+        configured_field.assert_called_once()
+        assert params["where"][0]["attribute"] == configured_linkedin_field
+        assert params["where"][0]["value"] == "https://linkedin.com/in/test"
+        assert params["where"][0]["type"] == "equals"
+        select_fields = params["select"].split(",")
+        assert configured_linkedin_field in select_fields
+        assert "cLinkedInUrl" not in select_fields
+
+    @pytest.mark.asyncio
     async def test_crm_status_success(self, crm_cog, mock_interaction):
         """Test successful CRM status check."""
         crm_cog.espo_api.request.return_value = {"user": {"name": "Test User"}}
@@ -1580,7 +2816,7 @@ class TestCRMCog:
         assert update_call[0][1] == "Contact/contact123"
         update_payload = update_call[0][2]
         assert update_payload["cGitHubUsername"] == "myusername"
-        assert update_payload["cLinkedInUrl"] == "https://linkedin.com/in/test"
+        assert update_payload["cLinkedIn"] == "https://linkedin.com/in/test"
         assert update_payload["rateRange"] == "120k-150k"
         assert update_payload["skills"] == "python, amazon web services"
         assert '"python":{"strength":4}' in update_payload["cSkillAttrs"]
@@ -1711,6 +2947,45 @@ class TestCRMCog:
         crm_cog.espo_api.request.assert_not_called()
         message = mock_interaction.followup.send.call_args[0][0]
         assert "Provide at least one of" in message
+
+    @pytest.mark.asyncio
+    async def test_update_contact_uses_configured_linkedin_field(
+        self, crm_cog, mock_interaction
+    ):
+        """Configured LinkedIn custom field should flow through update payload and embed."""
+        mock_interaction.user.id = 123456789
+
+        with (
+            patch.object(
+                crm_cog, "_configured_linkedin_field", return_value="cLinkedIn"
+            ),
+            patch.object(
+                crm_cog,
+                "_find_contact_by_discord_id",
+                new=AsyncMock(return_value={"id": "contact123", "name": "Test User"}),
+            ),
+        ):
+            crm_cog.espo_api.request.return_value = {"id": "contact123"}
+
+            await crm_cog.update_contact.callback(
+                crm_cog,
+                mock_interaction,
+                linkedin="https://www.linkedin.com/in/test-user/",
+            )
+
+        assert mock_interaction.followup.send.call_count == 1
+        call = crm_cog.espo_api.request.call_args
+        assert call.args[0] == "PUT"
+        assert call.args[1] == "Contact/contact123"
+        assert call.args[2] == {"cLinkedIn": "https://www.linkedin.com/in/test-user/"}
+
+        send_kwargs = mock_interaction.followup.send.call_args.kwargs
+        linkedin_value = next(
+            field.value
+            for field in send_kwargs["embed"].fields
+            if field.name == "🔗 LinkedIn"
+        )
+        assert linkedin_value == "https://www.linkedin.com/in/test-user/"
 
     @pytest.mark.asyncio
     async def test_update_contact_self_not_linked(self, crm_cog, mock_interaction):
@@ -2006,7 +3281,11 @@ class TestCRMCog:
             ),
         ):
             payload = crm_cog._build_resume_create_contact_payload(b"resume")
+            assert payload["type"] == "Prospect"
+            assert payload["name"] == "Person Example"
             assert payload["emailAddress"] == "person@example.com"
+            assert payload["firstName"] == "Person"
+            assert payload["lastName"] == "Example"
             assert "c508Email" not in payload
 
         with (
@@ -2024,8 +3303,256 @@ class TestCRMCog:
             ),
         ):
             payload = crm_cog._build_resume_create_contact_payload(b"resume")
+            assert payload["type"] == "Prospect"
+            assert payload["name"] == "Person 508"
             assert payload["c508Email"] == "person@508.dev"
+            assert payload["firstName"] == "Person"
+            assert payload["lastName"] == "Unknown"
             assert "emailAddress" not in payload
+
+    def test_build_resume_create_contact_payload_populates_prospect_details(
+        self, crm_cog
+    ):
+        """Test creating prospect payload includes richer parsed fields."""
+        with (
+            patch.object(
+                crm_cog,
+                "_extract_resume_contact_hints",
+                return_value={
+                    "emails": ["jane@example.com"],
+                    "github_usernames": ["janedoe"],
+                    "linkedin_urls": ["https://linkedin.com/in/janedoe"],
+                    "phone": "+1 555-0100",
+                    "address_country": "Canada",
+                    "seniority_level": "senior",
+                    "skills": ["Python", " fastapi ", ""],
+                },
+            ),
+            patch.object(crm_cog, "_extract_resume_name_hint", return_value="Jane Doe"),
+        ):
+            payload = crm_cog._build_resume_create_contact_payload(b"resume")
+            assert payload["type"] == "Prospect"
+            assert payload["name"] == "Jane Doe"
+            assert payload["emailAddress"] == "jane@example.com"
+            assert payload["cGitHubUsername"] == "janedoe"
+            assert payload["cLinkedIn"] == "https://linkedin.com/in/janedoe"
+            assert payload["phoneNumber"] == "+1 555-0100"
+            assert payload["addressCountry"] == "Canada"
+            assert payload["cSeniority"] == "senior"
+            assert payload["skills"] == "Python, fastapi"
+            assert payload["firstName"] == "Jane"
+            assert payload["lastName"] == "Doe"
+
+    def test_build_resume_create_contact_payload_single_name_uses_unknown_last(
+        self, crm_cog
+    ):
+        """Single token names should include a placeholder lastName."""
+        with (
+            patch.object(
+                crm_cog,
+                "_extract_resume_contact_hints",
+                return_value={
+                    "emails": ["single@example.com"],
+                    "github_usernames": [],
+                    "linkedin_urls": [],
+                },
+            ),
+            patch.object(crm_cog, "_extract_resume_name_hint", return_value="Cher"),
+        ):
+            payload = crm_cog._build_resume_create_contact_payload(b"resume")
+
+        assert payload["type"] == "Prospect"
+        assert payload["name"] == "Cher"
+        assert payload["firstName"] == "Cher"
+        assert payload["lastName"] == "Unknown"
+        assert payload["emailAddress"] == "single@example.com"
+
+    def test_build_contact_payload_for_link_user_overwrites_stale_name_fields(
+        self, crm_cog
+    ):
+        """Link-user fallback should regenerate first/last names from Discord display name."""
+        user = Mock()
+        user.display_name = "Monica Geller"
+        user.name = "monica"
+        user.id = 999
+
+        with (
+            patch.object(
+                crm_cog,
+                "_build_resume_create_contact_payload",
+                return_value={
+                    "name": "Resume Candidate",
+                    "firstName": "Candidate",
+                    "lastName": "User",
+                },
+            ),
+            patch.object(
+                crm_cog,
+                "_fallback_contact_name_for_discord_user",
+                return_value="Monica Geller",
+            ),
+        ):
+            payload = crm_cog._build_contact_payload_for_link_user(
+                user=user,
+                file_content=b"resume",
+            )
+
+        assert payload["name"] == "Monica Geller"
+        assert payload["firstName"] == "Monica"
+        assert payload["lastName"] == "Geller"
+        assert payload["cDiscordUsername"] == "monica"
+        assert payload["cDiscordUserID"] == "999"
+
+    def test_is_valid_resume_name_candidate_rejects_heading_spacing_variants(
+        self, crm_cog
+    ):
+        """Heading-like names with spacing variants should be rejected."""
+        assert crm_cog._is_valid_resume_name_candidate("Curriculum  Vitae") is False
+        assert crm_cog._is_valid_resume_name_candidate("Resume :") is False
+        assert crm_cog._is_valid_resume_name_candidate("Jane Doe") is True
+
+    def test_build_inference_lookup_summary_uses_attempt_text(self, crm_cog):
+        """Test lookup summary uses attempt text when attempts are present."""
+        with (
+            patch.object(
+                crm_cog,
+                "_format_inferred_attempts",
+                return_value="`jane@example.com`, `janedoe`",
+            ),
+            patch.object(crm_cog, "_extract_resume_contact_hints") as extract_hints,
+        ):
+            summary = crm_cog._build_inference_lookup_summary(
+                file_content=b"resume",
+                attempts=[
+                    {"method": "email", "value": "jane@example.com"},
+                    {"method": "github", "value": "janedoe"},
+                ],
+            )
+
+            assert summary == "\nTried contact lookups: `jane@example.com`, `janedoe`"
+            extract_hints.assert_not_called()
+
+    def test_build_inference_lookup_summary_falls_back_to_parsed_identifiers(
+        self, crm_cog
+    ):
+        """Test lookup summary fallback uses parsed identifiers with cleanup."""
+        with (
+            patch.object(crm_cog, "_format_inferred_attempts", return_value=""),
+            patch.object(
+                crm_cog,
+                "_extract_resume_contact_hints",
+                return_value={
+                    "emails": [
+                        " jane@example.com ",
+                        "jane@example.com",
+                        "",
+                        " second@example.com ",
+                        "second@example.com",
+                    ],
+                    "github_usernames": [" janedoe ", "janedoe", " "],
+                    "linkedin_urls": [
+                        "https://linkedin.com/in/jane",
+                        "https://linkedin.com/in/jane",
+                    ],
+                },
+            ),
+        ):
+            summary = crm_cog._build_inference_lookup_summary(
+                file_content=b"resume", attempts=[]
+            )
+
+            assert (
+                summary
+                == "\nParsed resume identifiers: "
+                + "emails: `jane@example.com`, `second@example.com`; "
+                + "github usernames: `janedoe`; linkedin URLs: `https://linkedin.com/in/jane`"
+            )
+
+    def test_build_inference_lookup_summary_with_non_dict_hints(self, crm_cog):
+        """Test non-dict parsed contact hints produce empty summary safely."""
+        with (
+            patch.object(crm_cog, "_format_inferred_attempts", return_value=""),
+            patch.object(crm_cog, "_extract_resume_contact_hints", return_value=None),
+        ):
+            summary = crm_cog._build_inference_lookup_summary(
+                file_content=b"resume", attempts=[]
+            )
+
+            assert summary == ""
+
+    def test_build_resume_parsed_identity_summary_includes_name_and_email(
+        self, crm_cog
+    ):
+        """Parsed name and email are included in resume identity summary."""
+        with patch.object(
+            crm_cog,
+            "_extract_resume_contact_hints",
+            return_value={
+                "name": "Jane Doe",
+                "emails": ["jane@example.com", "ignored@alt.example"],
+            },
+        ):
+            summary = crm_cog._build_resume_parsed_identity_summary(
+                file_content=b"resume"
+            )
+
+            assert (
+                summary
+                == "\nParsed contact details: name=`Jane Doe`, email=`jane@example.com`"
+            )
+
+    def test_build_resume_parsed_identity_summary_ignores_heading_name(self, crm_cog):
+        """Heading-like parsed names should fall back to heuristic name extraction."""
+        with (
+            patch.object(
+                crm_cog,
+                "_extract_resume_contact_hints",
+                return_value={
+                    "name": "Resume:",
+                    "emails": ["jane@example.com"],
+                },
+            ),
+            patch.object(
+                crm_cog,
+                "_extract_resume_name_fallback",
+                return_value="Jane Doe",
+            ) as fallback_name,
+        ):
+            summary = crm_cog._build_resume_parsed_identity_summary(
+                file_content=b"resume",
+                filename="candidate.pdf",
+            )
+
+        fallback_name.assert_called_once_with(b"resume", filename="candidate.pdf")
+        assert (
+            summary
+            == "\nParsed contact details: name=`Jane Doe`, email=`jane@example.com`"
+        )
+
+    def test_extract_resume_profile_uses_filename_aware_text_extraction(self, crm_cog):
+        """Profile extraction should use filename-aware document text extraction."""
+        profile = Mock()
+        with (
+            patch.object(
+                crm_cog,
+                "_extract_resume_text",
+                return_value="Jane Doe\njane@example.com",
+            ) as extract_text,
+            patch.object(
+                crm_cog.resume_extractor, "extract", return_value=profile
+            ) as extract_profile,
+        ):
+            result = crm_cog._extract_resume_profile(
+                b"%PDF-binary",
+                filename="candidate.pdf",
+            )
+
+        assert result is profile
+        extract_text.assert_called_once_with(
+            b"%PDF-binary",
+            filename="candidate.pdf",
+        )
+        extract_profile.assert_called_once_with("Jane Doe\njane@example.com")
 
     @pytest.mark.asyncio
     async def test_upload_resume_link_user_shows_confirm_then_creates_contact(
@@ -2050,6 +3577,7 @@ class TestCRMCog:
         link_user.discriminator = "0"
 
         created_contact = {"id": "contact123", "name": "Candidate User"}
+        crm_cog._audit_command = Mock()
 
         with (
             patch(
@@ -2114,6 +3642,8 @@ class TestCRMCog:
                 "Contact",
                 {
                     "name": "Candidate User",
+                    "firstName": "Candidate",
+                    "lastName": "User",
                     "cDiscordUsername": "candidateuser",
                     "cDiscordUserID": "202",
                 },
@@ -2123,6 +3653,374 @@ class TestCRMCog:
                 mock_upload.await_args.kwargs.get("target_scope") == "other_autocreated"
             )
             assert mock_upload.await_args.kwargs.get("contact") == created_contact
+            crm_cog._audit_command.assert_called_once()
+            audit_kwargs = crm_cog._audit_command.call_args.kwargs
+            assert audit_kwargs["action"] == "crm.upload_resume"
+            assert audit_kwargs["result"] == "error"
+            assert audit_kwargs["metadata"]["reason"] == "discord_not_linked"
+            assert audit_kwargs["metadata"]["target_scope"] == "other"
+
+    @pytest.mark.asyncio
+    async def test_upload_resume_search_term_not_found_records_error(
+        self, crm_cog, mock_interaction
+    ):
+        """Search-based resume upload should log an error when no CRM contact matches."""
+        mock_interaction.user.id = 101
+        mock_interaction.user.name = "Requester"
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+
+        resume_file = Mock()
+        resume_file.filename = "candidate.pdf"
+        resume_file.size = 1024
+        resume_file.read = AsyncMock(return_value=b"resume-bytes")
+
+        crm_cog._audit_command = Mock()
+
+        with (
+            patch(
+                "five08.discord_bot.cogs.crm.check_user_roles_with_hierarchy",
+                return_value=True,
+            ),
+            patch.object(
+                crm_cog,
+                "_search_contact_for_linking",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch.object(
+                crm_cog, "_upload_resume_attachment_to_contact", new=AsyncMock()
+            ) as mock_upload,
+            patch(
+                "five08.discord_bot.cogs.crm.settings.api_shared_secret",
+                "test-shared-secret",
+            ),
+        ):
+            await crm_cog.upload_resume.callback(
+                crm_cog,
+                mock_interaction,
+                resume_file,
+                "missing-contact",
+                False,
+                None,
+            )
+
+        mock_upload.assert_not_awaited()
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert "❌ No contact found for: `missing-contact`" in message
+        crm_cog._audit_command.assert_called_once()
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["action"] == "crm.upload_resume"
+        assert audit_kwargs["result"] == "error"
+        assert audit_kwargs["metadata"]["search_term"] == "missing-contact"
+        assert audit_kwargs["metadata"]["contact_found"] is False
+
+    @pytest.mark.asyncio
+    async def test_upload_resume_self_not_linked_records_error(
+        self, crm_cog, mock_interaction
+    ):
+        """Uploading own resume should log an error when Discord user is not linked."""
+        mock_interaction.user.id = 101
+        mock_interaction.user.name = "Member"
+        mock_interaction.user.roles = []
+
+        resume_file = Mock()
+        resume_file.filename = "candidate.pdf"
+        resume_file.size = 1024
+        resume_file.read = AsyncMock(return_value=b"resume-bytes")
+
+        crm_cog._audit_command = Mock()
+
+        with (
+            patch.object(
+                crm_cog,
+                "_find_contact_by_discord_id",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "five08.discord_bot.cogs.crm.settings.api_shared_secret",
+                "test-shared-secret",
+            ),
+        ):
+            await crm_cog.upload_resume.callback(
+                crm_cog,
+                mock_interaction,
+                resume_file,
+                None,
+                False,
+                None,
+            )
+
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert "Your Discord account is not linked to a CRM contact." in message
+        crm_cog._audit_command.assert_called_once()
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["action"] == "crm.upload_resume"
+        assert audit_kwargs["result"] == "error"
+        assert audit_kwargs["metadata"]["target_scope"] == "self"
+
+    @pytest.mark.asyncio
+    async def test_upload_resume_invalid_file_type_records_error(
+        self, crm_cog, mock_interaction
+    ):
+        """Uploading non-PDF/DOC/DOCX/TXT files should be recorded as an error."""
+        mock_interaction.user.id = 101
+
+        resume_file = Mock()
+        resume_file.filename = "image.png"
+        resume_file.size = 1024
+
+        crm_cog._audit_command = Mock()
+
+        with patch(
+            "five08.discord_bot.cogs.crm.settings.api_shared_secret",
+            "test-shared-secret",
+        ):
+            await crm_cog.upload_resume.callback(
+                crm_cog,
+                mock_interaction,
+                resume_file,
+                None,
+                False,
+                None,
+            )
+
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert (
+            "Invalid file type. Please upload a PDF, DOC, DOCX, or TXT file." in message
+        )
+        crm_cog._audit_command.assert_called_once()
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["action"] == "crm.upload_resume"
+        assert audit_kwargs["result"] == "error"
+        assert audit_kwargs["metadata"] == {
+            "filename": "image.png",
+            "reason": "invalid_file_type",
+        }
+
+    @pytest.mark.asyncio
+    async def test_upload_resume_file_too_large_records_error(
+        self, crm_cog, mock_interaction
+    ):
+        """Uploading a resume above 10MB should be recorded as an error."""
+        mock_interaction.user.id = 101
+
+        resume_file = Mock()
+        resume_file.filename = "resume.pdf"
+        resume_file.size = 10 * 1024 * 1024 + 1
+
+        crm_cog._audit_command = Mock()
+
+        with patch(
+            "five08.discord_bot.cogs.crm.settings.api_shared_secret",
+            "test-shared-secret",
+        ):
+            await crm_cog.upload_resume.callback(
+                crm_cog,
+                mock_interaction,
+                resume_file,
+                None,
+                False,
+                None,
+            )
+
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert "File too large. Maximum size is 10MB." in message
+        crm_cog._audit_command.assert_called_once()
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["action"] == "crm.upload_resume"
+        assert audit_kwargs["result"] == "error"
+        assert audit_kwargs["metadata"] == {
+            "filename": "resume.pdf",
+            "size_bytes": 10485761,
+            "reason": "file_too_large",
+        }
+
+    @pytest.mark.asyncio
+    async def test_upload_resume_search_term_multiple_matches_records_error(
+        self, crm_cog, mock_interaction
+    ):
+        """Search-based uploads should require a unique match."""
+        mock_interaction.user.id = 101
+        mock_interaction.user.name = "Requester"
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+
+        resume_file = Mock()
+        resume_file.filename = "candidate.pdf"
+        resume_file.size = 1024
+        resume_file.read = AsyncMock(return_value=b"resume-bytes")
+
+        crm_cog._audit_command = Mock()
+
+        with (
+            patch(
+                "five08.discord_bot.cogs.crm.check_user_roles_with_hierarchy",
+                return_value=True,
+            ),
+            patch.object(
+                crm_cog,
+                "_search_contact_for_linking",
+                new=AsyncMock(
+                    return_value=[{"id": "contact123"}, {"id": "contact456"}]
+                ),
+            ),
+            patch.object(
+                crm_cog,
+                "_upload_resume_attachment_to_contact",
+                new=AsyncMock(),
+            ) as mock_upload,
+            patch(
+                "five08.discord_bot.cogs.crm.settings.api_shared_secret",
+                "test-shared-secret",
+            ),
+        ):
+            await crm_cog.upload_resume.callback(
+                crm_cog,
+                mock_interaction,
+                resume_file,
+                "john",
+                False,
+                None,
+            )
+
+        mock_upload.assert_not_awaited()
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert "⚠️ Multiple contacts found for `john`." in message
+        crm_cog._audit_command.assert_called_once()
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["action"] == "crm.upload_resume"
+        assert audit_kwargs["result"] == "error"
+        assert audit_kwargs["metadata"] == {
+            "search_term": "john",
+            "filename": "candidate.pdf",
+            "contact_found": False,
+            "target_scope": "other",
+            "reason": "multiple_contacts",
+        }
+
+    @pytest.mark.asyncio
+    async def test_upload_resume_inferred_multiple_matches_records_error(
+        self, crm_cog, mock_interaction
+    ):
+        """Resume inference returning multiple matches should be logged as an error."""
+        mock_interaction.user.id = 101
+        mock_interaction.user.name = "Operator"
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+
+        resume_file = Mock()
+        resume_file.filename = "candidate.pdf"
+        resume_file.size = 1024
+        resume_file.read = AsyncMock(return_value=b"resume-bytes")
+
+        crm_cog._audit_command = Mock()
+
+        with (
+            patch(
+                "five08.discord_bot.cogs.crm.check_user_roles_with_hierarchy",
+                return_value=True,
+            ),
+            patch.object(
+                crm_cog,
+                "_infer_contact_from_resume",
+                new=AsyncMock(
+                    return_value=(
+                        None,
+                        {"reason": "multiple_matches", "value": "jane@example.com"},
+                    )
+                ),
+            ),
+            patch(
+                "five08.discord_bot.cogs.crm.settings.api_shared_secret",
+                "test-shared-secret",
+            ),
+        ):
+            await crm_cog.upload_resume.callback(
+                crm_cog,
+                mock_interaction,
+                resume_file,
+                None,
+                False,
+                None,
+            )
+
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert (
+            "⚠️ Multiple contacts match `jane@example.com` from the resume." in message
+        )
+        crm_cog._audit_command.assert_called_once()
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["action"] == "crm.upload_resume"
+        assert audit_kwargs["result"] == "error"
+        assert audit_kwargs["metadata"] == {
+            "filename": "candidate.pdf",
+            "target_scope": "resume_inferred",
+            "reason": "multiple_matches",
+            "inferred_value": "jane@example.com",
+        }
+
+    @pytest.mark.asyncio
+    async def test_upload_resume_no_matching_inferred_contact_shows_name_and_email(
+        self, crm_cog, mock_interaction
+    ):
+        """No-match inference should show parsed name/email for the candidate."""
+        mock_interaction.user.id = 101
+        mock_interaction.user.name = "Requester"
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+
+        resume_file = Mock()
+        resume_file.filename = "candidate.pdf"
+        resume_file.size = 1024
+        resume_file.read = AsyncMock(return_value=b"resume-bytes")
+
+        with (
+            patch.object(
+                crm_cog,
+                "_infer_contact_from_resume",
+                new=AsyncMock(return_value=(None, {"reason": "no_matching_contact"})),
+            ),
+            patch.object(
+                crm_cog,
+                "_build_resume_parsed_identity_summary",
+                return_value=(
+                    "\nParsed contact details: name=`Jane Doe`, email=`jane@example.com`"
+                ),
+            ),
+            patch.object(
+                crm_cog,
+                "_find_contact_by_discord_id",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "five08.discord_bot.cogs.crm.check_user_roles_with_hierarchy",
+                return_value=True,
+            ),
+            patch(
+                "five08.discord_bot.cogs.crm.settings.api_shared_secret",
+                "test-shared-secret",
+            ),
+        ):
+            await crm_cog.upload_resume.callback(
+                crm_cog,
+                mock_interaction,
+                resume_file,
+                None,
+                False,
+                None,
+            )
+
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert "⚠️ Could not find a unique contact from this resume." in message
+        assert (
+            "Parsed contact details: name=`Jane Doe`, email=`jane@example.com`"
+            in message
+        )
+        assert "view" in mock_interaction.followup.send.call_args.kwargs
 
     @pytest.mark.asyncio
     async def test_resume_create_contact_view_logs_create_failure(
@@ -2180,8 +4078,76 @@ class TestCRMCog:
         audit_metadata = crm_cog._audit_command.call_args.kwargs["metadata"]
         assert audit_metadata["reason"] == "contact_create_failed"
         assert audit_metadata["status_code"] == 422
-        assert audit_metadata["create_payload_keys"] == ["emailAddress", "name"]
+        assert audit_metadata["create_payload_keys"] == [
+            "emailAddress",
+            "firstName",
+            "lastName",
+            "name",
+        ]
         mock_interaction.followup.send.assert_called_once()
+        failure_message = mock_interaction.followup.send.call_args.args[0]
+        assert (
+            "Could not create a contact from this resume: `validation failed` (status 422)."
+            in failure_message
+        )
+        assert "Please provide `search_term` or `link_user`." in failure_message
+
+    @pytest.mark.asyncio
+    async def test_resume_create_contact_view_sanitizes_long_error_details(
+        self, crm_cog, mock_interaction
+    ):
+        """Very long/unsafe error details are sanitized before being sent to Discord."""
+        raw_error = "validation\x00failed\nwith\tcontrol\nchars\r and `backticks` " + (
+            "x" * 2500
+        )
+        mock_interaction.user.id = 123
+        mock_interaction.user.name = "Requester"
+        mock_interaction.message = None
+        mock_interaction.response = AsyncMock()
+        mock_interaction.response.defer = AsyncMock()
+        mock_interaction.followup = AsyncMock()
+        mock_interaction.followup.send = AsyncMock()
+
+        crm_cog._audit_command = Mock()
+        crm_cog._build_resume_create_contact_payload = Mock(
+            return_value={
+                "name": "Resume Candidate",
+                "emailAddress": "person@example.com",
+            }
+        )
+        crm_cog.espo_api.status_code = 422
+        crm_cog.espo_api.request.side_effect = Exception(raw_error)
+
+        view = ResumeCreateContactView(
+            crm_cog=crm_cog,
+            interaction=mock_interaction,
+            file_content=b"resume-bytes",
+            filename="candidate.pdf",
+            file_size=1024,
+            search_term=None,
+            overwrite=False,
+            link_user=None,
+            inferred_contact_meta={"reason": "no_matching_contact"},
+            target_scope="resume_inferred",
+        )
+
+        create_button = next(
+            child
+            for child in view.children
+            if isinstance(child, discord.ui.Button) and child.label == "Create Contact"
+        )
+
+        await create_button.callback(mock_interaction)
+
+        failure_message = mock_interaction.followup.send.call_args.args[0]
+        sanitized = crm_cog._sanitize_error_message_for_discord(raw_error)
+        assert sanitized in failure_message
+        assert "`backticks`" not in failure_message
+        assert "\x00" not in failure_message
+        assert "\r" not in failure_message
+        assert "\n" not in failure_message
+        assert "\t" not in failure_message
+        assert len(sanitized) <= 1900
 
     @pytest.mark.asyncio
     async def test_reprocess_resume_shows_confirmation(self, crm_cog, mock_interaction):
@@ -2257,10 +4223,10 @@ class TestCRMCog:
         )
 
     @pytest.mark.asyncio
-    async def test_reprocess_resume_rejects_multiple_contacts(
+    async def test_reprocess_resume_shows_multiple_contacts_selector(
         self, crm_cog, mock_interaction
     ):
-        """Error when multiple contacts match the reprocess search term."""
+        """Show selection view when multiple contacts match the reprocess search term."""
         mock_interaction.user.id = 101
         with (
             patch(
@@ -2284,8 +4250,10 @@ class TestCRMCog:
         ):
             await crm_cog.reprocess_resume.callback(crm_cog, mock_interaction, "john")
 
-        message = mock_interaction.followup.send.call_args.args[0]
-        assert "Multiple contacts found for `john`" in message
+        mock_interaction.followup.send.assert_called_once()
+        followup_kwargs = mock_interaction.followup.send.call_args.kwargs
+        assert "view" in followup_kwargs
+        assert isinstance(followup_kwargs["view"], ReprocessResumeSelectionView)
 
     @pytest.mark.asyncio
     async def test_reprocess_resume_no_resume_found(self, crm_cog, mock_interaction):
@@ -2385,6 +4353,87 @@ class TestCRMCog:
             kwargs["status_message"]
             == "🔄 Reprocessing resume and extracting profile fields now..."
         )
+
+    @pytest.mark.asyncio
+    async def test_build_match_candidates_posting_fetches_jd_links_from_text(
+        self, crm_cog
+    ):
+        """Starter text JD links should be fetched while non-JD links are skipped."""
+        starter = Mock()
+        jd_url = "https://boards.greenhouse.io/acme/jobs/12345"
+        non_jd_url = "https://example.com/about"
+        starter.content = f"We are hiring: {jd_url} and docs at {non_jd_url}"
+        starter.attachments = []
+        starter.embeds = []
+
+        with patch.object(
+            crm_cog,
+            "_fetch_match_candidates_link_text",
+            new=AsyncMock(return_value="Senior backend role"),
+        ) as fetch_mock:
+            posting, metadata = await crm_cog._build_match_candidates_posting(starter)
+
+        fetch_mock.assert_awaited_once_with(jd_url)
+        assert "Senior backend role" in posting
+        assert metadata["links_discovered"] == 2
+        assert metadata["links_fetched"] == 1
+
+    @pytest.mark.asyncio
+    async def test_build_match_candidates_posting_does_not_fetch_non_jd_links(
+        self, crm_cog
+    ):
+        """No fetch should occur when only non-JD links are present."""
+        starter = Mock()
+        starter.content = "Company info: https://example.com/about"
+        starter.attachments = []
+        starter.embeds = []
+
+        with patch.object(
+            crm_cog,
+            "_fetch_match_candidates_link_text",
+            new=AsyncMock(return_value="ignored"),
+        ) as fetch_mock:
+            posting, metadata = await crm_cog._build_match_candidates_posting(starter)
+
+        fetch_mock.assert_not_awaited()
+        assert "Referenced links:" in posting
+        assert metadata["links_discovered"] == 1
+        assert metadata["links_fetched"] == 0
+
+    @pytest.mark.asyncio
+    async def test_build_match_candidates_posting_scans_attachments_for_jd_links(
+        self, crm_cog
+    ):
+        """Attachment-extracted URLs should be treated as JD candidates."""
+        starter = Mock()
+        starter.content = ""
+        starter.attachments = [Mock(filename="job-posting.pdf")]
+        starter.embeds = []
+        attachment_text = (
+            "See full JD at https://jobs.lever.co/acme/abcde and apply there."
+        )
+
+        with (
+            patch.object(
+                crm_cog,
+                "_read_match_candidates_attachment_text",
+                new=AsyncMock(return_value=attachment_text),
+            ) as read_attachment_mock,
+            patch.object(
+                crm_cog,
+                "_fetch_match_candidates_link_text",
+                new=AsyncMock(return_value="Role details from Lever"),
+            ) as fetch_mock,
+        ):
+            posting, metadata = await crm_cog._build_match_candidates_posting(starter)
+
+        read_attachment_mock.assert_awaited_once()
+        fetch_mock.assert_awaited_once_with("https://jobs.lever.co/acme/abcde")
+        assert "Attachment job-posting.pdf" in posting
+        assert "Role details from Lever" in posting
+        assert metadata["attachments_scanned"] == 1
+        assert metadata["attachments_extracted"] == 1
+        assert metadata["links_fetched"] == 1
 
 
 class TestResumeButtonView:

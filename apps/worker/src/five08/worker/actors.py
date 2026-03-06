@@ -50,6 +50,7 @@ _JOB_WEBHOOK_LOGGER = DiscordWebhookLogger(
 
 _QUEUE_NAME = settings.worker_queue_name
 _HANDLERS = JOB_FUNCTIONS
+_SYNC_PEOPLE_JOB_NAME: Final[str] = "sync_people_from_crm_job"
 
 
 def _job_attempt_display(attempts: int) -> int:
@@ -70,6 +71,12 @@ def _summarize_job_result(result: Any) -> str:
         return f"dict(keys={_truncate(keys, 120)})"
     text = str(result)
     return _truncate(text, 120)
+
+
+def _should_log_job_event(*, event_type: str, job_type: str) -> bool:
+    if job_type != _SYNC_PEOPLE_JOB_NAME:
+        return True
+    return event_type not in {"started", "retrying", "succeeded"}
 
 
 def _log_job_event(
@@ -189,15 +196,16 @@ def _schedule_retry(job: JobRecord, attempts: int, *, error: str) -> None:
         run_after=retry_at,
         last_error=error,
     )
-    _log_job_event(
-        event_type="retrying",
-        job_id=job_id,
-        job_type=job.type,
-        attempts=attempts,
-        max_attempts=job.max_attempts,
-        worker_name=settings.worker_name,
-        error=error,
-    )
+    if _should_log_job_event(event_type="retrying", job_type=job.type):
+        _log_job_event(
+            event_type="retrying",
+            job_id=job_id,
+            job_type=job.type,
+            attempts=attempts,
+            max_attempts=job.max_attempts,
+            worker_name=settings.worker_name,
+            error=error,
+        )
     execute_job.send_with_options(args=(job_id,), delay=delay_seconds * 1000)
 
 
@@ -234,14 +242,15 @@ def _run_job(job_id: str) -> None:
         return
 
     mark_job_running(settings, job_id, worker_name=settings.worker_name)
-    _log_job_event(
-        event_type="started",
-        job_id=job.id,
-        job_type=job.type,
-        attempts=_job_attempt_display(job.attempts),
-        max_attempts=job.max_attempts,
-        worker_name=settings.worker_name,
-    )
+    if _should_log_job_event(event_type="started", job_type=job.type):
+        _log_job_event(
+            event_type="started",
+            job_id=job.id,
+            job_type=job.type,
+            attempts=_job_attempt_display(job.attempts),
+            max_attempts=job.max_attempts,
+            worker_name=settings.worker_name,
+        )
 
     try:
         args, kwargs = _extract_call_args(job)
@@ -253,15 +262,16 @@ def _run_job(job_id: str) -> None:
             base_payload=job.payload,
         )
         logger.info("Completed job_id=%s type=%s", job_id, job.type)
-        _log_job_event(
-            event_type="succeeded",
-            job_id=job.id,
-            job_type=job.type,
-            attempts=_job_attempt_display(job.attempts),
-            max_attempts=job.max_attempts,
-            worker_name=settings.worker_name,
-            result=result,
-        )
+        if _should_log_job_event(event_type="succeeded", job_type=job.type):
+            _log_job_event(
+                event_type="succeeded",
+                job_id=job.id,
+                job_type=job.type,
+                attempts=_job_attempt_display(job.attempts),
+                max_attempts=job.max_attempts,
+                worker_name=settings.worker_name,
+                result=result,
+            )
     except DocusealAgreementNonRetryableError as exc:
         next_attempt = job.attempts + 1
         error = f"{type(exc).__name__}: {exc}"

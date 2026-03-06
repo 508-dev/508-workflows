@@ -5,13 +5,22 @@ from __future__ import annotations
 import ast
 import json
 import logging
-import re
 from collections.abc import Callable
 from datetime import datetime, timezone
-from urllib.parse import urlsplit
 from typing import Any
 
-from five08.clients.espo import EspoAPI, EspoAPIError
+from five08.clients.espo import EspoAPIError, EspoClient
+from five08.crm_normalization import (
+    ROLE_NORMALIZATION_MAP,
+    normalize_city,
+    normalize_country,
+    normalize_role,
+    normalize_roles,
+    normalize_state,
+    normalize_seniority,
+    normalize_timezone,
+    normalize_website_url,
+)
 from five08.skills import (
     DISALLOWED_RESUME_SKILLS,
     normalize_skill,
@@ -37,28 +46,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_SKILL_STRENGTH = 3
 
 
-class ResumeEspoClient:
-    """Minimal EspoCRM client wrapper for resume profile flows."""
-
-    def __init__(self) -> None:
-        api_url = settings.espo_base_url.rstrip("/") + "/api/v1"
-        self.api = EspoAPI(api_url, settings.espo_api_key)
-
-    def get_contact(self, contact_id: str) -> dict[str, Any]:
-        return self.api.request("GET", f"Contact/{contact_id}")
-
-    def download_attachment(self, attachment_id: str) -> bytes:
-        return self.api.download_file(f"Attachment/file/{attachment_id}")
-
-    def update_contact(self, contact_id: str, updates: dict[str, Any]) -> None:
-        self.api.request("PUT", f"Contact/{contact_id}", updates)
-
-
 class ResumeProfileProcessor:
     """End-to-end extraction and apply operations for uploaded resumes."""
 
     def __init__(self) -> None:
-        self.crm = ResumeEspoClient()
+        self.crm = EspoClient(settings.espo_base_url, settings.espo_api_key)
         self.extractor = ResumeProfileExtractor(
             api_key=settings.openai_api_key,
             base_url=settings.openai_base_url,
@@ -170,13 +162,81 @@ class ResumeProfileProcessor:
                 skipped=skipped,
             )
             self._collect_change(
-                crm_field="cSeniority",
-                label="Seniority",
-                current=self._normalize_seniority(contact.get("cSeniority")),
-                proposed=self._normalize_seniority(extracted.seniority_level),
+                crm_field="addressCountry",
+                label="Country",
+                current=contact.get("addressCountry"),
+                proposed=self._normalize_country(extracted.address_country),
                 proposed_updates=proposed_updates,
                 proposed_changes=proposed_changes,
                 skipped=skipped,
+            )
+            self._collect_change(
+                crm_field="cTimezone",
+                label="Timezone",
+                current=contact.get("cTimezone"),
+                proposed=self._normalize_timezone(extracted.timezone),
+                proposed_updates=proposed_updates,
+                proposed_changes=proposed_changes,
+                skipped=skipped,
+            )
+            self._collect_change(
+                crm_field="addressCity",
+                label="City",
+                current=contact.get("addressCity"),
+                proposed=self._normalize_city(extracted.address_city),
+                proposed_updates=proposed_updates,
+                proposed_changes=proposed_changes,
+                skipped=skipped,
+            )
+            self._collect_change(
+                crm_field="addressState",
+                label="State",
+                current=contact.get("addressState"),
+                proposed=self._normalize_state(extracted.address_state),
+                proposed_updates=proposed_updates,
+                proposed_changes=proposed_changes,
+                skipped=skipped,
+            )
+            self._collect_change(
+                crm_field="description",
+                label="Description",
+                current=contact.get("description"),
+                proposed=extracted.description.strip()
+                if extracted.description
+                else None,
+                proposed_updates=proposed_updates,
+                proposed_changes=proposed_changes,
+                skipped=skipped,
+            )
+            extracted_roles = self._normalize_roles(extracted.primary_roles)
+            existing_roles = self._normalize_roles(contact.get("cRoles"))
+            if extracted_roles and sorted(extracted_roles) != sorted(existing_roles):
+                proposed_updates["cRoles"] = extracted_roles
+                proposed_changes.append(
+                    ResumeFieldChange(
+                        field="cRoles",
+                        label="Roles",
+                        current=", ".join(existing_roles),
+                        proposed=", ".join(extracted_roles),
+                        reason="Extracted from uploaded resume",
+                    )
+                )
+            current_seniority = self._normalize_seniority(contact.get("cSeniority"))
+            proposed_seniority = self._normalize_seniority(extracted.seniority_level)
+            self._collect_change(
+                crm_field="cSeniority",
+                label="Seniority",
+                current=current_seniority,
+                proposed=proposed_seniority,
+                proposed_updates=proposed_updates,
+                proposed_changes=proposed_changes,
+                skipped=skipped,
+                is_blocked=lambda value: bool(
+                    current_seniority
+                    and current_seniority != "unknown"
+                    and value != current_seniority
+                ),
+                blocked_reason="Existing seniority preserved",
             )
             if new_skills:
                 proposed_updates["skills"] = merged_skills
@@ -392,13 +452,49 @@ class ResumeProfileProcessor:
                 )
                 if not normalized_updates["cSeniority"]:
                     normalized_updates.pop("cSeniority", None)
+            if "cRoles" in normalized_updates:
+                normalized_roles = self._normalize_roles(normalized_updates["cRoles"])
+                if normalized_roles:
+                    normalized_updates["cRoles"] = normalized_roles
+                else:
+                    normalized_updates.pop("cRoles", None)
+            if "cTimezone" in normalized_updates:
+                normalized_tz = self._normalize_timezone(
+                    normalized_updates.get("cTimezone")
+                )
+                if normalized_tz:
+                    normalized_updates["cTimezone"] = normalized_tz
+                else:
+                    normalized_updates.pop("cTimezone", None)
+            if "addressCity" in normalized_updates:
+                normalized_city = self._normalize_city(
+                    normalized_updates.get("addressCity")
+                )
+                if normalized_city:
+                    normalized_updates["addressCity"] = normalized_city
+                else:
+                    normalized_updates.pop("addressCity", None)
+            if "addressState" in normalized_updates:
+                normalized_state = self._normalize_state(
+                    normalized_updates.get("addressState")
+                )
+                if normalized_state:
+                    normalized_updates["addressState"] = normalized_state
+                else:
+                    normalized_updates.pop("addressState", None)
 
             allowed_fields = {
                 "emailAddressData",
                 "cGitHubUsername",
                 settings.crm_linkedin_field,
                 "cSeniority",
+                "addressCountry",
+                "cTimezone",
+                "addressCity",
+                "addressState",
+                "description",
                 "phoneNumber",
+                "cRoles",
                 "skills",
                 "cSkillAttrs",
                 "cWebsiteLink",
@@ -686,47 +782,31 @@ class ResumeProfileProcessor:
 
     @staticmethod
     def _normalize_seniority(value: Any) -> str | None:
-        if not isinstance(value, str):
-            return None
-        normalized = value.strip().lower().replace("_", "-")
-        if not normalized:
-            return "unknown"
-        if normalized in {
-            "jr",
-            "junior",
-            "intern",
-            "internship",
-            "entry",
-            "entry-level",
-            "entry level",
-        }:
-            return "junior"
-        if normalized in {"mid", "mid-level", "midlevel", "intermediate"}:
-            return "midlevel"
-        if normalized in {
-            "senior",
-            "sr",
-            "sr. engineer",
-            "senior engineer",
-            "lead",
-            "lead engineer",
-            "lead engineer/tech lead",
-            "tech lead",
-        }:
-            return "senior"
-        if normalized in {
-            "staff",
-            "staff+",
-            "staff and beyond",
-            "principal",
-            "principal engineer",
-        }:
-            return "staff"
-        if "lead " in normalized and "engineer" in normalized:
-            return "senior"
-        if normalized.startswith("lead "):
-            return "senior"
-        return "unknown"
+        return normalize_seniority(value, empty_as_unknown=True)
+
+    @staticmethod
+    def _normalize_country(value: Any) -> str | None:
+        return normalize_country(value)
+
+    @staticmethod
+    def _normalize_city(value: Any) -> str | None:
+        return normalize_city(value, strip_parenthetical=False)
+
+    @staticmethod
+    def _normalize_state(value: Any) -> str | None:
+        return normalize_state(value)
+
+    @staticmethod
+    def _normalize_timezone(value: Any) -> str | None:
+        return normalize_timezone(value)
+
+    @staticmethod
+    def _normalize_role(value: Any) -> str | None:
+        return normalize_role(value, ROLE_NORMALIZATION_MAP)
+
+    @staticmethod
+    def _normalize_roles(value: Any) -> list[str]:
+        return normalize_roles(value, ROLE_NORMALIZATION_MAP)
 
     def _format_skills_with_strength(
         self,
@@ -1004,48 +1084,7 @@ class ResumeProfileProcessor:
 
     @staticmethod
     def _normalize_website_url(value: str) -> str | None:
-        candidate = value.strip().strip(")]},.;:")
-        if not candidate:
-            return None
-
-        if candidate.lower().startswith("www."):
-            candidate = f"https://{candidate}"
-        elif not candidate.startswith(("http://", "https://")):
-            if not re.match(
-                r"(?i)^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?:[/?#].*)?$",
-                candidate,
-            ):
-                return None
-            candidate = f"https://{candidate}"
-
-        try:
-            parsed = urlsplit(candidate)
-        except Exception:
-            return None
-
-        if "@" in parsed.netloc:
-            return None
-
-        host = parsed.hostname or ""
-        if host.lower().startswith("www."):
-            host = host[4:]
-        if not host:
-            return None
-
-        normalized_netloc = parsed.netloc
-        lower_netloc = parsed.netloc.lower()
-        if lower_netloc.startswith("www."):
-            normalized_netloc = parsed.netloc[4:]
-        elif host and lower_netloc.startswith(f"www.{host}"):
-            normalized_netloc = parsed.netloc.replace(parsed.netloc[:4], "", 1)
-
-        parsed = parsed._replace(netloc=normalized_netloc)
-        normalized = parsed.geturl().rstrip("/")
-        if normalized.startswith("https://www."):
-            normalized = normalized.replace("https://www.", "https://", 1)
-        elif normalized.startswith("http://www."):
-            normalized = normalized.replace("http://www.", "http://", 1)
-        return normalized
+        return normalize_website_url(value, allow_scheme_less=True)
 
     def _normalize_email_address(self, value: Any) -> str | None:
         if not isinstance(value, str):

@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock, Mock, patch
 
+import pytest
+
 from five08.resume_extractor import ResumeExtractedProfile
 from five08.worker.crm.intake_form_processor import IntakeFormProcessor
 
@@ -147,9 +149,9 @@ def test_build_intake_updates_normalizes_primary_role() -> None:
 
     assert updates["cRoles"] == [
         "developer",
-        "data_scientist",
-        "biz_dev",
-        "staff_engineering",
+        "data scientist",
+        "biz dev",
+        "staff engineering",
     ]
 
 
@@ -176,12 +178,20 @@ def test_build_resume_updates_includes_website_links_as_url_multiple() -> None:
         skill_attrs={},
     )
     response = Mock()
+    response.status_code = 200
     response.content = b"resume-bytes"
     response.raise_for_status = Mock()
+    response.headers = {}
+    response.iter_content = Mock(return_value=[b"resume-bytes"])
+    response.__enter__ = Mock(return_value=response)
+    response.__exit__ = Mock(return_value=None)
 
-    with patch(
-        "five08.worker.crm.intake_form_processor.requests.get",
-        return_value=response,
+    with (
+        patch(
+            "five08.worker.crm.intake_form_processor.requests.get",
+            return_value=response,
+        ),
+        patch.object(processor, "_hostname_resolves_publicly", return_value=True),
     ):
         updates = processor._build_resume_updates(
             {
@@ -216,12 +226,20 @@ def test_build_resume_updates_uses_extracted_profile_fields_for_form_fields() ->
         skill_attrs={},
     )
     response = Mock()
+    response.status_code = 200
     response.content = b"resume-bytes"
     response.raise_for_status = Mock()
+    response.headers = {}
+    response.iter_content = Mock(return_value=[b"resume-bytes"])
+    response.__enter__ = Mock(return_value=response)
+    response.__exit__ = Mock(return_value=None)
 
-    with patch(
-        "five08.worker.crm.intake_form_processor.requests.get",
-        return_value=response,
+    with (
+        patch(
+            "five08.worker.crm.intake_form_processor.requests.get",
+            return_value=response,
+        ),
+        patch.object(processor, "_hostname_resolves_publicly", return_value=True),
     ):
         updates = processor._build_resume_updates(
             {
@@ -232,3 +250,157 @@ def test_build_resume_updates_uses_extracted_profile_fields_for_form_fields() ->
     assert updates["cAvailableTimes"] == "10-15 hours/week"
     assert updates["cRateRange"] == "$80 - $120"
     assert updates["cReferredBy"] == "Referral Source"
+
+
+def test_build_resume_updates_rejects_non_https_resume_url() -> None:
+    processor = IntakeFormProcessor()
+
+    with patch("five08.worker.crm.intake_form_processor.requests.get") as mock_get:
+        updates = processor._build_resume_updates(
+            {
+                "resume_url": "http://example.com/resume.pdf",
+            }
+        )
+
+    assert updates == {}
+    mock_get.assert_not_called()
+
+
+def test_build_resume_updates_rejects_private_ip_resume_url() -> None:
+    processor = IntakeFormProcessor()
+
+    with patch("five08.worker.crm.intake_form_processor.requests.get") as mock_get:
+        updates = processor._build_resume_updates(
+            {
+                "resume_url": "https://127.0.0.1/resume.pdf",
+            }
+        )
+
+    assert updates == {}
+    mock_get.assert_not_called()
+
+
+def test_build_resume_updates_rejects_resume_host_outside_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processor = IntakeFormProcessor()
+    monkeypatch.setattr(
+        "five08.worker.crm.intake_form_processor.settings.intake_resume_allowed_hosts",
+        "allowed.example",
+    )
+
+    with patch("five08.worker.crm.intake_form_processor.requests.get") as mock_get:
+        updates = processor._build_resume_updates(
+            {
+                "resume_url": "https://blocked.example/resume.pdf",
+            }
+        )
+
+    assert updates == {}
+    mock_get.assert_not_called()
+
+
+def test_download_resume_content_follows_redirects_within_limit() -> None:
+    """Resume download should follow redirects up to the configured limit."""
+    processor = IntakeFormProcessor()
+
+    # Mock responses: first redirect, second redirect, then final content
+    redirect_1 = Mock()
+    redirect_1.status_code = 302
+    redirect_1.headers = {"Location": "https://cdn.example.com/resume-v2.pdf"}
+    redirect_1.__enter__ = Mock(return_value=redirect_1)
+    redirect_1.__exit__ = Mock(return_value=None)
+
+    redirect_2 = Mock()
+    redirect_2.status_code = 302
+    redirect_2.headers = {"Location": "https://cdn.example.com/resume-final.pdf"}
+    redirect_2.__enter__ = Mock(return_value=redirect_2)
+    redirect_2.__exit__ = Mock(return_value=None)
+
+    final = Mock()
+    final.status_code = 200
+    final.raise_for_status = Mock()
+    final.iter_content = Mock(return_value=[b"resume", b"data"])
+    final.__enter__ = Mock(return_value=final)
+    final.__exit__ = Mock(return_value=None)
+
+    with (
+        patch(
+            "five08.worker.crm.intake_form_processor.requests.get",
+            side_effect=[redirect_1, redirect_2, final],
+        ),
+        patch.object(processor, "_hostname_resolves_publicly", return_value=True),
+    ):
+        content = processor._download_resume_content("https://example.com/resume.pdf")
+
+    assert content == b"resumedata"
+
+
+def test_download_resume_content_exceeds_max_redirects() -> None:
+    """Resume download should fail when exceeding max redirect limit."""
+    processor = IntakeFormProcessor()
+
+    # Create redirect responses
+    redirect = Mock()
+    redirect.status_code = 302
+    redirect.headers = {"Location": "https://example.com/redirect-1"}
+    redirect.__enter__ = Mock(return_value=redirect)
+    redirect.__exit__ = Mock(return_value=None)
+
+    with (
+        patch(
+            "five08.worker.crm.intake_form_processor.requests.get",
+            return_value=redirect,
+        ),
+        patch.object(processor, "_hostname_resolves_publicly", return_value=True),
+        pytest.raises(ValueError, match="exceeded max redirect limit"),
+    ):
+        processor._download_resume_content("https://example.com/resume.pdf")
+
+
+def test_download_resume_content_enforces_file_size_limit() -> None:
+    """Resume download should stop when file exceeds size limit."""
+    processor = IntakeFormProcessor()
+
+    # Mock a response that exceeds the size limit
+    response = Mock()
+    response.status_code = 200
+    response.raise_for_status = Mock()
+    response.headers = {}
+    response.iter_content = Mock(
+        return_value=[b"x" * 5 * 1024 * 1024, b"y" * 6 * 1024 * 1024]  # 5MB + 6MB
+    )
+    response.__enter__ = Mock(return_value=response)
+    response.__exit__ = Mock(return_value=None)
+
+    with (
+        patch(
+            "five08.worker.crm.intake_form_processor.requests.get",
+            return_value=response,
+        ),
+        patch.object(processor, "_hostname_resolves_publicly", return_value=True),
+        pytest.raises(ValueError, match="exceeds maximum allowed size"),
+    ):
+        processor._download_resume_content("https://example.com/resume.pdf")
+
+
+def test_download_resume_content_checks_content_length_header() -> None:
+    """Resume download should fail early if Content-Length exceeds limit."""
+    processor = IntakeFormProcessor()
+
+    response = Mock()
+    response.status_code = 200
+    response.headers = {"Content-Length": str(20 * 1024 * 1024)}  # 20MB
+    response.raise_for_status = Mock()
+    response.__enter__ = Mock(return_value=response)
+    response.__exit__ = Mock(return_value=None)
+
+    with (
+        patch(
+            "five08.worker.crm.intake_form_processor.requests.get",
+            return_value=response,
+        ),
+        patch.object(processor, "_hostname_resolves_publicly", return_value=True),
+        pytest.raises(ValueError, match="exceeds maximum allowed size"),
+    ):
+        processor._download_resume_content("https://example.com/resume.pdf")

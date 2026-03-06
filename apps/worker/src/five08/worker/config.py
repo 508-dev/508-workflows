@@ -2,7 +2,7 @@
 
 from urllib.parse import urlparse
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from five08.settings import SharedSettings
 
@@ -16,14 +16,14 @@ class WorkerSettings(SharedSettings):
 
     espo_base_url: str
     espo_api_key: str
-    crm_linkedin_field: str = "cLinkedInUrl"
+    crm_linkedin_field: str = "cLinkedIn"
     crm_intake_completed_field: str = ""
     google_forms_allowed_form_ids: str = ""
 
     openai_api_key: str | None = None
     openai_base_url: str | None = None
-    openai_model: str = "gpt-4o-mini"
-    resume_ai_model: str = "gpt-4o-mini"
+    openai_model: str = "gpt-5-mini"
+    resume_ai_model: str = "gpt-5-mini"
     resume_extractor_version: str = "v1"
     docuseal_member_agreement_template_id: int | None = None
 
@@ -55,6 +55,9 @@ class WorkerSettings(SharedSettings):
     email_password: str | None = None
     imap_server: str | None = None
     imap_timeout_seconds: float = 10.0
+    intake_resume_fetch_timeout_seconds: float = Field(default=20.0, gt=0)
+    intake_resume_max_redirects: int = Field(default=3, ge=0)
+    intake_resume_allowed_hosts: str = ""
     email_resume_allowed_extensions: str = "pdf,doc,docx"
     email_resume_max_file_size_mb: int = 10
     email_require_sender_auth_headers: bool = True
@@ -152,13 +155,23 @@ class WorkerSettings(SharedSettings):
         }
 
     @property
+    def intake_resume_allowed_hostnames(self) -> set[str]:
+        """Optional host allowlist for intake resume URL fetches."""
+        normalized_hosts: set[str] = set()
+        for raw_host in self.intake_resume_allowed_hosts.split(","):
+            host = raw_host.strip().lower().strip(".")
+            if host:
+                normalized_hosts.add(host)
+        return normalized_hosts
+
+    @property
     def resolved_resume_ai_model(self) -> str:
         """Resolve provider-specific resume model name (e.g. OpenRouter prefixes)."""
         candidate = self.resume_ai_model.strip()
         if not candidate:
             candidate = self.openai_model.strip()
         if not candidate:
-            return "gpt-4o-mini"
+            return "gpt-5-mini"
 
         # Keep explicit provider prefixes intact.
         if "/" in candidate:

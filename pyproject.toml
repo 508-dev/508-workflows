@@ -49,6 +49,9 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 asyncio_mode = "auto"
 addopts = "--tb=short --strict-markers"
+markers = [
+    "e2e: end-to-end tests requiring a live PostgreSQL connection",
+]
 
 [tool.coverage.run]
 source = ["five08"]
