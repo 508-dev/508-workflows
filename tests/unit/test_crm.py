@@ -2828,6 +2828,95 @@ class TestCRMCog:
         )
 
     @pytest.mark.asyncio
+    async def test_update_contact_success_updates_location_hours_website(
+        self, crm_cog, mock_interaction
+    ):
+        """Update location, desired hours, and website links for self."""
+        mock_interaction.user.id = 123456789
+        target_contact = {
+            "id": "contact123",
+            "name": "Test User",
+        }
+
+        with patch.object(
+            crm_cog,
+            "_find_contact_by_discord_id",
+            new=AsyncMock(return_value=target_contact),
+        ):
+            crm_cog.espo_api.request.return_value = {"id": "contact123"}
+
+            await crm_cog.update_contact.callback(
+                crm_cog,
+                mock_interaction,
+                location="New York, NY, USA, UTC-05:00",
+                desired_hours="25",
+                website="example.com, https://github.com/test",
+            )
+
+        update_call = crm_cog.espo_api.request.call_args
+        update_payload = update_call[0][2]
+        assert update_payload["addressCity"] == "New York"
+        assert update_payload["addressState"] == "New York"
+        assert update_payload["addressCountry"] == "United States"
+        assert update_payload["cTimezone"] == "UTC-05:00"
+        assert update_payload["cDesiredHours"] == "25"
+        assert isinstance(update_payload["cWebsiteLink"], list)
+        assert any("example.com" in link for link in update_payload["cWebsiteLink"])
+        assert any("github.com/test" in link for link in update_payload["cWebsiteLink"])
+
+    @pytest.mark.asyncio
+    async def test_update_contact_parses_state_country_location(
+        self, crm_cog, mock_interaction
+    ):
+        """Parse State, Country without forcing a city."""
+        mock_interaction.user.id = 123456789
+        target_contact = {
+            "id": "contact123",
+            "name": "Test User",
+        }
+
+        with patch.object(
+            crm_cog,
+            "_find_contact_by_discord_id",
+            new=AsyncMock(return_value=target_contact),
+        ):
+            crm_cog.espo_api.request.return_value = {"id": "contact123"}
+
+            await crm_cog.update_contact.callback(
+                crm_cog,
+                mock_interaction,
+                location="California, United States",
+            )
+
+        update_call = crm_cog.espo_api.request.call_args
+        update_payload = update_call[0][2]
+        assert update_payload["addressState"] == "California"
+        assert update_payload["addressCountry"] == "United States"
+        assert "addressCity" not in update_payload
+
+    @pytest.mark.asyncio
+    async def test_update_contact_rejects_invalid_desired_hours(
+        self, crm_cog, mock_interaction
+    ):
+        """Reject desired hours outside the allowed range."""
+        mock_interaction.user.id = 123456789
+
+        with patch.object(
+            crm_cog,
+            "_find_contact_by_discord_id",
+            new=AsyncMock(return_value={"id": "contact123", "name": "Test User"}),
+        ):
+            await crm_cog.update_contact.callback(
+                crm_cog,
+                mock_interaction,
+                desired_hours="70",
+            )
+
+        crm_cog.espo_api.request.assert_not_called()
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert "Invalid desired_hours" in message
+
+    @pytest.mark.asyncio
     async def test_update_contact_permission_denied_for_other_without_steering(
         self, crm_cog, mock_interaction, mock_member_role
     ):
