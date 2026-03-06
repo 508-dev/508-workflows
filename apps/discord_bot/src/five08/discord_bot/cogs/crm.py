@@ -2786,13 +2786,18 @@ class CRMCog(commands.Cog):
             )
 
         crm_base = settings.espo_base_url.rstrip("/")
-        lines, _ = self._build_match_candidate_lines(
+        lines, resume_options = self._build_match_candidate_lines(
             candidates=candidates,
             crm_base=crm_base,
         )
         messages = self._paginate_match_lines(lines)
         for msg in messages:
             await thread.send(msg, allowed_mentions=safe_mentions)
+        if resume_options:
+            await thread.send(
+                "Resume download:",
+                view=MatchResumeSelectView(resume_options),
+            )
 
     def _backend_headers(self) -> dict[str, str]:
         """Build auth headers for internal backend API calls."""
