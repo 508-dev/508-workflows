@@ -120,7 +120,7 @@ class TestCRMCog:
         assert header_lines[-1] == "Found **3** candidate(s)."
         assert role_line == "Discord roles: `Full Stack`"
         assert role_ids == []
-        assert locality_line == "Locality roles: `Asia`, `Japan`"
+        assert locality_line == "Locality: `Asia`, `Japan`"
         assert locality_ids == []
 
     def test_build_job_match_header_and_mentions_with_guild(self, crm_cog):
@@ -172,7 +172,7 @@ class TestCRMCog:
 
         assert role_line == "Discord roles: <@&111>"
         assert role_ids == [111]
-        assert locality_line == "Locality roles: <@&222>, <@&333>"
+        assert locality_line == "Locality: <@&222>, <@&333>"
         assert locality_ids == [222, 333]
 
     def test_check_member_role_with_member(
@@ -932,9 +932,7 @@ class TestCRMCog:
         assert role_call.kwargs["allowed_mentions"].everyone is False
 
         locality_call = next(
-            call
-            for call in calls
-            if call.args and call.args[0].startswith("Locality roles:")
+            call for call in calls if call.args and call.args[0].startswith("Locality:")
         )
         assert "<@&222>" in locality_call.args[0]
         locality_allowed = locality_call.kwargs["allowed_mentions"]
