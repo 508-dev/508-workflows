@@ -88,7 +88,7 @@ class SharedSettings(BaseSettings):
         return self.environment
 
     @property
-    def sentry_release(self) -> None:
+    def sentry_release(self) -> str | None:
         """Sentry release is not runtime-configurable."""
         return None
 

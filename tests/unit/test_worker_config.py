@@ -175,5 +175,33 @@ def test_fixed_worker_defaults_ignore_legacy_env_vars(
     assert settings.oidc_jwks_cache_seconds == 300
     assert settings.auth_state_ttl_seconds == 600
     assert settings.auth_session_ttl_seconds == 28800
-    assert settings.auth_cookie_secure is False
     assert settings.auth_cookie_samesite == "lax"
+
+
+def test_auth_cookie_secure_is_false_for_local_even_if_legacy_env_is_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTH_COOKIE_SECURE", "true")
+
+    settings = WorkerSettings(
+        environment="local",
+        espo_base_url="https://crm.test.com",
+        espo_api_key="test-key",
+    )
+
+    assert settings.auth_cookie_secure is False
+
+
+def test_auth_cookie_secure_is_true_for_non_local_even_if_legacy_env_is_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTH_COOKIE_SECURE", "false")
+
+    settings = WorkerSettings(
+        environment="production",
+        espo_base_url="https://crm.test.com",
+        espo_api_key="test-key",
+        minio_root_password="secret",
+    )
+
+    assert settings.auth_cookie_secure is True

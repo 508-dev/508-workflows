@@ -172,8 +172,9 @@ class WorkerSettings(SharedSettings):
 
     @property
     def auth_cookie_secure(self) -> bool:
-        """Cookie security follows the current local-first deployment defaults."""
-        return False
+        """Use secure cookies outside local/dev/test environments."""
+        env = self.environment.strip().lower()
+        return env not in {"local", "dev", "development", "test"}
 
     @property
     def auth_cookie_samesite(self) -> str:

@@ -74,7 +74,7 @@ Use `.env.example` as the source of defaults.
 - `Optional`: `AUTH_SESSION_COOKIE_NAME` (default: `five08_session`)
 - `Optional`: `DASHBOARD_DEFAULT_PATH` (default: `/dashboard`)
 - `Optional`: `DASHBOARD_PUBLIC_BASE_URL` (base URL for generated deep links)
-- Note: auth cookies are fixed to `secure=false` and `SameSite=Lax`.
+- Note: auth cookies always use `SameSite=Lax`; `secure` is enabled automatically outside local/dev/test environments.
 
 ## Discord Admin Deep-Link Validation
 

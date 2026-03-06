@@ -157,7 +157,7 @@ Use `.env.example` as the source of truth for defaults.
 - `Optional`: `AUTH_SESSION_COOKIE_NAME` (default: `five08_session`)
 - `Optional`: `DASHBOARD_DEFAULT_PATH` (default: `/dashboard`)
 - `Optional`: `DASHBOARD_PUBLIC_BASE_URL` (base URL for generated deep links)
-- Note: OIDC timeout/cache/session timings and auth cookie policy are fixed in code.
+- Note: OIDC timeout/cache/session timings are fixed in code; auth cookies always use `SameSite=Lax` and enable `secure` automatically outside local/dev/test environments.
 
 ### Discord Admin Deep-Link Validation
 

@@ -12,7 +12,8 @@ class Settings(SharedSettings):
     """
     Bot configuration settings with environment variable support.
 
-    All settings can be overridden via environment variables.
+    Most settings can be overridden via environment variables.
+    Fixed platform limits remain in code.
     Required settings must be provided via environment variables or .env file.
     """
 
