@@ -2078,6 +2078,29 @@ class CRMCog(commands.Cog):
             resource_id=resource_id,
         )
 
+    def _audit_command_safe(
+        self,
+        *,
+        interaction: discord.Interaction,
+        action: str,
+        result: str,
+        metadata: dict[str, Any] | None = None,
+        resource_type: str | None = "discord_command",
+        resource_id: str | None = None,
+    ) -> None:
+        """Keep command flows alive if audit logging fails unexpectedly."""
+        try:
+            self._audit_command(
+                interaction=interaction,
+                action=action,
+                result=result,
+                metadata=metadata,
+                resource_type=resource_type,
+                resource_id=resource_id,
+            )
+        except Exception:
+            logger.warning("Audit logging failed for action=%s", action, exc_info=True)
+
     def _backend_headers(self) -> dict[str, str]:
         """Build auth headers for internal backend API calls."""
         if not settings.api_shared_secret:
@@ -6068,13 +6091,16 @@ class CRMCog(commands.Cog):
 
     @app_commands.command(
         name="update-contact",
-        description="Update CRM contact fields (github, linkedin, skills, rate range, and resume)",
+        description="Update CRM contact fields (github, linkedin, skills, rate range, location, desired hours, websites, and resume)",
     )
     @app_commands.describe(
         github="GitHub username to set",
         linkedin="LinkedIn profile URL to set",
         skills="Comma-separated skills; supports `skill:4` for strength",
         rate_range="Rate range text to set",
+        desired_hours="Desired weekly hours (e.g. 0-60 or 40)",
+        website="Comma-separated website links to set",
+        location="Location to parse (city, state, country, timezone)",
         resume="Resume file to upload and analyze",
         overwrite="Replace existing resumes instead of appending",
         search_term="Email, name, or contact ID (optional). Omit to update your own contact.",
@@ -6086,6 +6112,9 @@ class CRMCog(commands.Cog):
         linkedin: str | None = None,
         skills: str | None = None,
         rate_range: str | None = None,
+        desired_hours: str | None = None,
+        website: str | None = None,
+        location: str | None = None,
         resume: discord.Attachment | None = None,
         overwrite: bool = False,
         search_term: str | None = None,
@@ -6095,7 +6124,16 @@ class CRMCog(commands.Cog):
             await interaction.response.defer(ephemeral=True)
 
             has_updates = any(
-                bool(value) for value in (github, linkedin, skills, rate_range)
+                value.strip() if isinstance(value, str) else bool(value)
+                for value in (
+                    github,
+                    linkedin,
+                    skills,
+                    rate_range,
+                    desired_hours,
+                    website,
+                    location,
+                )
             )
             if not has_updates and resume is None:
                 self._audit_command(
@@ -6105,7 +6143,8 @@ class CRMCog(commands.Cog):
                     metadata={"reason": "no_update_fields"},
                 )
                 await interaction.followup.send(
-                    "❌ Provide at least one of `github`, `linkedin`, `skills`, `rate_range`, or `resume`."
+                    "❌ Provide at least one of `github`, `linkedin`, `skills`, `rate_range`, "
+                    "`desired_hours`, `website`, `location`, or `resume`."
                 )
                 return
 
@@ -6260,7 +6299,7 @@ class CRMCog(commands.Cog):
                 return
 
             contact_name = target_contact.get("name", "Unknown")
-            update_data: dict[str, str] = {}
+            update_data: dict[str, object] = {}
             requested_updates: list[str] = []
 
             if github is not None:
@@ -6280,6 +6319,91 @@ class CRMCog(commands.Cog):
                 if clean_rate_range:
                     update_data["rateRange"] = clean_rate_range
                     requested_updates.append("rate_range")
+
+            if desired_hours is not None:
+                parsed_hours = self._parse_desired_hours(desired_hours)
+                if parsed_hours:
+                    update_data["cDesiredHours"] = parsed_hours
+                    requested_updates.append("desired_hours")
+                elif desired_hours.strip():
+                    self._audit_command_safe(
+                        interaction=interaction,
+                        action="crm.update_contact",
+                        result="denied",
+                        metadata={
+                            "search_term": search_term,
+                            "reason": "invalid_desired_hours",
+                            "desired_hours": desired_hours,
+                        },
+                    )
+                    await interaction.followup.send(
+                        "❌ Invalid desired_hours. Use a number between 0-60 or a range like `0-60`."
+                    )
+                    return
+
+            if website is not None:
+                website_links, invalid_website_tokens = self._parse_website_links(
+                    website
+                )
+                if invalid_website_tokens:
+                    invalid_message = ", ".join(
+                        f"`{item}`" for item in invalid_website_tokens
+                    )
+                    self._audit_command_safe(
+                        interaction=interaction,
+                        action="crm.update_contact",
+                        result="denied",
+                        metadata={
+                            "search_term": search_term,
+                            "reason": "invalid_website_links",
+                            "website": website,
+                            "invalid_website_tokens": invalid_website_tokens,
+                        },
+                    )
+                    await interaction.followup.send(
+                        f"❌ Invalid website entries: {invalid_message}. "
+                        "Provide comma-separated URLs (e.g. `https://example.com, github.com/name`)."
+                    )
+                    return
+                if website_links:
+                    update_data["cWebsiteLink"] = website_links
+                    requested_updates.append("website")
+                elif website.strip():
+                    self._audit_command_safe(
+                        interaction=interaction,
+                        action="crm.update_contact",
+                        result="denied",
+                        metadata={
+                            "search_term": search_term,
+                            "reason": "invalid_website_links",
+                            "website": website,
+                        },
+                    )
+                    await interaction.followup.send(
+                        "❌ Invalid website list. Provide comma-separated URLs (e.g. `https://example.com, github.com/name`)."
+                    )
+                    return
+
+            if location is not None:
+                location_updates = self._parse_location_input(location)
+                if location_updates:
+                    update_data.update(location_updates)
+                    requested_updates.append("location")
+                elif location.strip():
+                    self._audit_command_safe(
+                        interaction=interaction,
+                        action="crm.update_contact",
+                        result="denied",
+                        metadata={
+                            "search_term": search_term,
+                            "reason": "invalid_location",
+                            "location": location,
+                        },
+                    )
+                    await interaction.followup.send(
+                        "❌ Unable to parse location. Try `City, State, Country` and optionally include `UTC-05:00` or `PST`."
+                    )
+                    return
 
             if skills is not None:
                 parsed_skills, requested_strengths, invalid_skills = (
@@ -6368,6 +6492,50 @@ class CRMCog(commands.Cog):
                             value=update_data["rateRange"],
                             inline=True,
                         )
+                    if "desired_hours" in requested_updates:
+                        embed.add_field(
+                            name="⏱️ Desired Hours",
+                            value=update_data["cDesiredHours"],
+                            inline=True,
+                        )
+                    if "website" in requested_updates:
+                        website_links_value = update_data.get("cWebsiteLink")
+                        if isinstance(website_links_value, list):
+                            website_value = ", ".join(
+                                str(link) for link in website_links_value if link
+                            )
+                        elif website_links_value:
+                            website_value = str(website_links_value)
+                        else:
+                            website_value = "N/A"
+                        embed.add_field(
+                            name="🌐 Website",
+                            value=website_value,
+                            inline=False,
+                        )
+                    if "location" in requested_updates:
+                        location_parts = [
+                            str(value)
+                            for value in (
+                                update_data.get("addressCity"),
+                                update_data.get("addressState"),
+                                update_data.get("addressCountry"),
+                            )
+                            if value
+                        ]
+                        location_value = ", ".join(location_parts)
+                        timezone_value = update_data.get("cTimezone")
+                        if timezone_value:
+                            location_value = (
+                                f"{location_value} (Timezone: {timezone_value})"
+                                if location_value
+                                else f"Timezone: {timezone_value}"
+                            )
+                        embed.add_field(
+                            name="📍 Location",
+                            value=location_value or "N/A",
+                            inline=False,
+                        )
                     embed.add_field(
                         name="🔎 Updated Fields",
                         value=", ".join(requested_updates),
@@ -6449,6 +6617,303 @@ class CRMCog(commands.Cog):
             await interaction.followup.send(
                 "❌ An unexpected error occurred while updating the contact."
             )
+
+    def _parse_desired_hours(self, desired_hours: str) -> str | None:
+        import re
+
+        raw = desired_hours.strip()
+        if not raw:
+            return None
+
+        normalized = raw.replace(" to ", "-")
+        match = re.match(r"^\s*(\d{1,2})(?:\s*-\s*(\d{1,2}))?\s*$", normalized)
+        if match is None:
+            return None
+
+        low = int(match.group(1))
+        high = int(match.group(2)) if match.group(2) else None
+        if high is None:
+            return str(low) if 0 <= low <= 60 else None
+        if low > high:
+            return None
+        if not (0 <= low <= 60 and 0 <= high <= 60):
+            return None
+        return f"{low}-{high}"
+
+    _LOCATION_COUNTRY_ALIASES = {
+        "us": "United States",
+        "usa": "United States",
+        "united states": "United States",
+        "united states of america": "United States",
+        "uk": "United Kingdom",
+        "united kingdom": "United Kingdom",
+        "england": "United Kingdom",
+        "scotland": "United Kingdom",
+        "wales": "United Kingdom",
+        "uae": "United Arab Emirates",
+        "united arab emirates": "United Arab Emirates",
+    }
+    _LOCATION_US_STATES = {
+        "AL": "Alabama",
+        "AK": "Alaska",
+        "AZ": "Arizona",
+        "AR": "Arkansas",
+        "CA": "California",
+        "CO": "Colorado",
+        "CT": "Connecticut",
+        "DE": "Delaware",
+        "FL": "Florida",
+        "GA": "Georgia",
+        "HI": "Hawaii",
+        "ID": "Idaho",
+        "IL": "Illinois",
+        "IN": "Indiana",
+        "IA": "Iowa",
+        "KS": "Kansas",
+        "KY": "Kentucky",
+        "LA": "Louisiana",
+        "ME": "Maine",
+        "MD": "Maryland",
+        "MA": "Massachusetts",
+        "MI": "Michigan",
+        "MN": "Minnesota",
+        "MS": "Mississippi",
+        "MO": "Missouri",
+        "MT": "Montana",
+        "NE": "Nebraska",
+        "NV": "Nevada",
+        "NH": "New Hampshire",
+        "NJ": "New Jersey",
+        "NM": "New Mexico",
+        "NY": "New York",
+        "NC": "North Carolina",
+        "ND": "North Dakota",
+        "OH": "Ohio",
+        "OK": "Oklahoma",
+        "OR": "Oregon",
+        "PA": "Pennsylvania",
+        "RI": "Rhode Island",
+        "SC": "South Carolina",
+        "SD": "South Dakota",
+        "TN": "Tennessee",
+        "TX": "Texas",
+        "UT": "Utah",
+        "VT": "Vermont",
+        "VA": "Virginia",
+        "WA": "Washington",
+        "WV": "West Virginia",
+        "WI": "Wisconsin",
+        "WY": "Wyoming",
+        "DC": "District Of Columbia",
+    }
+    _LOCATION_STATE_NAMES = set(map(str.lower, _LOCATION_US_STATES.values()))
+    _LOCATION_TIMEZONE_ABBREV_MAP = {
+        "UTC": "UTC+00:00",
+        "GMT": "UTC+00:00",
+        "PST": "UTC-08:00",
+        "PDT": "UTC-07:00",
+        "MST": "UTC-07:00",
+        "MDT": "UTC-06:00",
+        "CST": "UTC-06:00",
+        "CDT": "UTC-05:00",
+        "EST": "UTC-05:00",
+        "EDT": "UTC-04:00",
+        "CET": "UTC+01:00",
+        "EET": "UTC+02:00",
+        "IST": "UTC+05:30",
+        "SGT": "UTC+08:00",
+        "HKT": "UTC+08:00",
+        "JST": "UTC+09:00",
+        "KST": "UTC+09:00",
+        "AEST": "UTC+10:00",
+        "AEDT": "UTC+11:00",
+    }
+    _LOCATION_CITY_TIMEZONE_HINTS = {
+        "san francisco": "UTC-08:00",
+        "los angeles": "UTC-08:00",
+        "seattle": "UTC-08:00",
+        "denver": "UTC-07:00",
+        "phoenix": "UTC-07:00",
+        "chicago": "UTC-06:00",
+        "dallas": "UTC-06:00",
+        "houston": "UTC-06:00",
+        "austin": "UTC-06:00",
+        "new york": "UTC-05:00",
+        "boston": "UTC-05:00",
+        "atlanta": "UTC-05:00",
+        "washington": "UTC-05:00",
+        "london": "UTC+00:00",
+        "dublin": "UTC+00:00",
+        "lisbon": "UTC+00:00",
+        "paris": "UTC+01:00",
+        "berlin": "UTC+01:00",
+        "amsterdam": "UTC+01:00",
+        "rome": "UTC+01:00",
+        "madrid": "UTC+01:00",
+        "bucharest": "UTC+02:00",
+        "athens": "UTC+02:00",
+        "kyiv": "UTC+02:00",
+        "nairobi": "UTC+03:00",
+        "istanbul": "UTC+03:00",
+        "dubai": "UTC+04:00",
+        "mumbai": "UTC+05:30",
+        "bangalore": "UTC+05:30",
+        "bengaluru": "UTC+05:30",
+        "delhi": "UTC+05:30",
+        "singapore": "UTC+08:00",
+        "shanghai": "UTC+08:00",
+        "beijing": "UTC+08:00",
+        "tokyo": "UTC+09:00",
+        "seoul": "UTC+09:00",
+        "sydney": "UTC+10:00",
+        "melbourne": "UTC+10:00",
+    }
+
+    def _parse_website_links(self, website: str) -> tuple[list[str], list[str]]:
+        from five08.crm_normalization import normalize_website_url
+
+        links: list[str] = []
+        invalid_tokens: list[str] = []
+        seen: set[str] = set()
+        for raw in website.split(","):
+            candidate = raw.strip()
+            if not candidate:
+                continue
+            normalized = normalize_website_url(candidate)
+            if not normalized:
+                invalid_tokens.append(candidate)
+                continue
+            if normalized in seen:
+                continue
+            links.append(normalized)
+            seen.add(normalized)
+        return links, invalid_tokens
+
+    def _parse_location_input(self, location: str) -> dict[str, str]:
+        import re
+
+        from five08.crm_normalization import (
+            normalize_city,
+            normalize_country,
+            normalize_state,
+            normalize_timezone,
+        )
+
+        raw = location.strip()
+        if not raw:
+            return {}
+
+        def normalize_country_token(token: str) -> str | None:
+            key = re.sub(r"[.]", "", token.strip().lower())
+            if not key:
+                return None
+            if key in self._LOCATION_COUNTRY_ALIASES:
+                return self._LOCATION_COUNTRY_ALIASES[key]
+            return normalize_country(token)
+
+        def is_country_token(token: str) -> bool:
+            key = re.sub(r"[.]", "", token.strip().lower())
+            return key in self._LOCATION_COUNTRY_ALIASES
+
+        def normalize_state_token(token: str) -> str | None:
+            key = token.strip().upper()
+            if key in self._LOCATION_US_STATES:
+                return self._LOCATION_US_STATES[key]
+            return normalize_state(token)
+
+        def is_state_token(token: str) -> bool:
+            key = token.strip().upper()
+            if key in self._LOCATION_US_STATES:
+                return True
+            return token.strip().lower() in self._LOCATION_STATE_NAMES
+
+        def parse_timezone_candidate(value: str) -> str | None:
+            cleaned = value.strip()
+            if not cleaned:
+                return None
+            normalized = normalize_timezone(cleaned)
+            if normalized:
+                return normalized
+            abbrev = cleaned.upper()
+            return self._LOCATION_TIMEZONE_ABBREV_MAP.get(abbrev)
+
+        timezone: str | None = None
+        remainder = raw
+        paren_match = re.search(r"\(([^)]+)\)", remainder)
+        if paren_match:
+            tz_candidate = parse_timezone_candidate(paren_match.group(1))
+            if tz_candidate:
+                timezone = tz_candidate
+                remainder = (
+                    remainder[: paren_match.start()] + remainder[paren_match.end() :]
+                ).strip()
+
+        segments = [
+            segment.strip() for segment in remainder.split(",") if segment.strip()
+        ]
+        if segments:
+            tz_candidate = parse_timezone_candidate(segments[-1])
+            if tz_candidate:
+                timezone = tz_candidate
+                segments = segments[:-1]
+
+        city: str | None = None
+        state: str | None = None
+        country: str | None = None
+
+        if len(segments) == 1:
+            token = segments[0]
+            normalized_state = normalize_state_token(token)
+            if normalized_state:
+                state = normalized_state
+            else:
+                normalized_country = normalize_country_token(token)
+                if normalized_country:
+                    country = normalized_country
+                else:
+                    city = normalize_city(token)
+        elif len(segments) == 2:
+            token0 = segments[0]
+            token1 = segments[1]
+            if is_country_token(token1):
+                if is_state_token(token0):
+                    state = normalize_state_token(token0)
+                    country = normalize_country_token(token1)
+                else:
+                    city = normalize_city(token0)
+                    country = normalize_country_token(token1)
+            elif is_state_token(token1):
+                city = normalize_city(token0)
+                state = normalize_state_token(token1)
+                if token1.strip().upper() in self._LOCATION_US_STATES:
+                    country = "United States"
+            else:
+                city = normalize_city(token0)
+                country = normalize_country_token(token1)
+        elif len(segments) >= 3:
+            city = normalize_city(", ".join(segments[:-2]))
+            state_token = segments[-2]
+            country_token = segments[-1]
+            state = normalize_state_token(state_token)
+            country = normalize_country_token(country_token)
+            if not country and is_country_token(state_token):
+                country = normalize_country_token(state_token)
+                state = None
+
+        if not timezone and city:
+            timezone = self._LOCATION_CITY_TIMEZONE_HINTS.get(city.lower())
+
+        updates: dict[str, str] = {}
+        if city:
+            updates["addressCity"] = city
+        if state:
+            updates["addressState"] = state
+        if country:
+            updates["addressCountry"] = country
+        if timezone:
+            updates["cTimezone"] = timezone
+
+        return updates
 
     async def _check_existing_resume(
         self, contact_id: str, filename: str, filesize: int

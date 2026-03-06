@@ -19,6 +19,7 @@ class Settings(SharedSettings):
     discord_bot_token: str
 
     discord_sendmsg_character_limit: int = 2000
+    discord_admin_roles: str = "Admin,Owner"
 
     # Healthcheck Configuration
     healthcheck_port: int = 3000
@@ -39,6 +40,12 @@ class Settings(SharedSettings):
     # Kimai time tracking settings
     kimai_base_url: str
     kimai_api_token: str
+
+    @property
+    def discord_admin_role_names(self) -> set[str]:
+        """Lower-cased configured Discord admin role names."""
+        values = [item.strip() for item in self.discord_admin_roles.split(",")]
+        return {value.casefold() for value in values if value}
 
 
 settings = Settings()  # type: ignore[call-arg]

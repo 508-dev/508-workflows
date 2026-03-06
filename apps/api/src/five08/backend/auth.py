@@ -59,6 +59,7 @@ class AuthSession:
     is_admin: bool
     id_token: str
     expires_at: int
+    actor_provider: str = "admin_sso"
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,15 @@ class DiscordLinkGrant:
 
     discord_user_id: str
     next_path: str
+
+
+@dataclass(frozen=True)
+class DiscordAdminIdentity:
+    """Resolved CRM-backed Discord admin identity details."""
+
+    discord_user_id: str
+    email: str | None
+    display_name: str | None
 
 
 class RedisAuthStore:
@@ -126,6 +136,7 @@ class RedisAuthStore:
                 is_admin=bool(value.get("is_admin", False)),
                 id_token=str(value["id_token"]),
                 expires_at=int(value["expires_at"]),
+                actor_provider=str(value.get("actor_provider") or "admin_sso"),
             )
         except Exception:
             logger.warning("Invalid auth session payload in Redis")
@@ -468,7 +479,7 @@ def is_admin_from_groups(
 
 
 class DiscordAdminVerifier:
-    """Resolve whether a Discord user is admin from people cache with API fallback."""
+    """Resolve whether a Discord user is an active CRM-backed Discord admin."""
 
     def __init__(self, settings: WorkerSettings) -> None:
         self.settings = settings
@@ -479,15 +490,41 @@ class DiscordAdminVerifier:
         discord_user_id: str,
         http_client: httpx.AsyncClient,
     ) -> bool:
-        if await asyncio.to_thread(
-            self._is_admin_from_people_db,
-            discord_user_id,
-        ):
-            return True
-
-        return await self._is_admin_from_discord_api(
+        identity = await self.resolve_admin_identity(
             discord_user_id=discord_user_id,
             http_client=http_client,
+        )
+        return identity is not None
+
+    async def resolve_admin_identity(
+        self,
+        *,
+        discord_user_id: str,
+        http_client: httpx.AsyncClient,
+    ) -> DiscordAdminIdentity | None:
+        """Return CRM-backed identity details when the Discord user is an admin."""
+        person = await asyncio.to_thread(
+            self._get_active_person_record,
+            discord_user_id,
+        )
+        if person is None:
+            return None
+
+        if not self._has_admin_role(person.get("discord_roles")):
+            is_live_admin = await self._is_admin_from_discord_api(
+                discord_user_id=discord_user_id,
+                http_client=http_client,
+            )
+            if not is_live_admin:
+                return None
+
+        email = _to_optional_str(person.get("email_508")) or _to_optional_str(
+            person.get("email")
+        )
+        return DiscordAdminIdentity(
+            discord_user_id=discord_user_id,
+            email=email,
+            display_name=_to_optional_str(person.get("name")),
         )
 
     async def is_admin_email_for_discord_user(
@@ -495,37 +532,53 @@ class DiscordAdminVerifier:
         *,
         email: str,
         discord_user_id: str,
+        http_client: httpx.AsyncClient | None = None,
     ) -> bool:
         """Check if OIDC email maps to an active admin row for this Discord user."""
         normalized_email = email.strip().lower()
         if not normalized_email:
             return False
 
-        return await asyncio.to_thread(
-            self._is_admin_email_for_discord_user_sync,
-            normalized_email,
+        person = await asyncio.to_thread(
+            self._get_active_person_record,
             discord_user_id,
+            normalized_email,
+        )
+        if person is None:
+            return False
+        if not self._email_matches_person(person, normalized_email):
+            return False
+        if self._has_admin_role(person.get("discord_roles")):
+            return True
+        if http_client is None:
+            return False
+        return await self._is_admin_from_discord_api(
+            discord_user_id=discord_user_id,
+            http_client=http_client,
         )
 
-    def _is_admin_from_people_db(self, discord_user_id: str) -> bool:
-        role_names = self.settings.discord_admin_role_names
+    def _get_active_person_record(
+        self,
+        discord_user_id: str,
+        normalized_email: str | None = None,
+    ) -> dict[str, Any] | None:
         query = """
-            SELECT discord_roles
+            SELECT name, email, email_508, discord_roles
             FROM people
             WHERE sync_status = 'active' AND discord_user_id = %s
-            LIMIT 1;
         """
+        params: list[str] = [discord_user_id]
+        if normalized_email is not None:
+            query += " AND (lower(email) = %s OR lower(email_508) = %s)"
+            params.extend([normalized_email, normalized_email])
+        query += " LIMIT 1;"
+
         with get_postgres_connection(self.settings) as conn:
             with conn.cursor(row_factory=dict_row) as cursor:
-                cursor.execute(query, (discord_user_id,))
+                cursor.execute(query, tuple(params))
                 row = cursor.fetchone()
 
-        if row is None:
-            return False
-
-        raw_roles = row.get("discord_roles")
-        parsed_roles = {role.casefold() for role in _to_string_list(raw_roles)}
-        return bool(parsed_roles & role_names)
+        return row
 
     async def _is_admin_from_discord_api(
         self,
@@ -586,31 +639,17 @@ class DiscordAdminVerifier:
 
         return bool(member_role_names & role_names)
 
-    def _is_admin_email_for_discord_user_sync(
-        self,
-        email: str,
-        discord_user_id: str,
-    ) -> bool:
+    def _has_admin_role(self, raw_roles: object) -> bool:
         role_names = self.settings.discord_admin_role_names
-        query = """
-            SELECT discord_roles
-            FROM people
-            WHERE sync_status = 'active'
-              AND discord_user_id = %s
-              AND (lower(email) = %s OR lower(email_508) = %s)
-            LIMIT 1;
-        """
-        with get_postgres_connection(self.settings) as conn:
-            with conn.cursor(row_factory=dict_row) as cursor:
-                cursor.execute(query, (discord_user_id, email, email))
-                row = cursor.fetchone()
-
-        if row is None:
-            return False
-
-        raw_roles = row.get("discord_roles")
         parsed_roles = {role.casefold() for role in _to_string_list(raw_roles)}
         return bool(parsed_roles & role_names)
+
+    @staticmethod
+    def _email_matches_person(person: dict[str, Any], email: str) -> bool:
+        return email in {
+            (_to_optional_str(person.get("email")) or "").lower(),
+            (_to_optional_str(person.get("email_508")) or "").lower(),
+        }
 
 
 def _to_optional_str(value: object) -> str | None:
