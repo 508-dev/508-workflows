@@ -2599,7 +2599,6 @@ class CRMCog(commands.Cog):
                 safe_resume_name = discord.utils.escape_mentions(
                     candidate.latest_resume_name
                 )
-                parts.append(f"Resume: `{safe_resume_name}`")
                 resume_options.append(
                     (name, candidate.latest_resume_id, safe_resume_name)
                 )
