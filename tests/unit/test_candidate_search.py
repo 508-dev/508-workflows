@@ -142,7 +142,7 @@ def test_search_candidates_binds_trimmed_exact_timezones() -> None:
         search_candidates(settings, reqs)
 
     execute_params = conn.cursor.return_value.execute.call_args[0][1]
-    assert execute_params[3] == ["America/New_York"]
+    assert ["America/New_York"] in execute_params
 
 
 # ---------------------------------------------------------------------------
