@@ -218,14 +218,6 @@ def search_candidates(
           req AS (SELECT %s::text[] AS skills),
           pref AS (SELECT %s::text[] AS skills),
           rtypes AS (SELECT %s::text[] AS types),
-          loc AS (
-            SELECT
-                %s::text[] AS exact_timezones,
-                %s::text[] AS timezone_prefixes,
-                %s::text[] AS countries,
-                %s::boolean AS constrained,
-                %s::boolean AS hints_available
-          ),
           dm_agg AS (
             SELECT
                 dm_raw.discord_user_id,
@@ -239,6 +231,14 @@ def search_candidates(
             LEFT JOIN LATERAL jsonb_array_elements_text(dm_raw.roles) AS role ON true
             WHERE (%s::text IS NULL OR dm_raw.guild_id = %s)
             GROUP BY dm_raw.discord_user_id
+          ),
+          loc AS (
+            SELECT
+                %s::text[] AS exact_timezones,
+                %s::text[] AS timezone_prefixes,
+                %s::text[] AS countries,
+                %s::boolean AS constrained,
+                %s::boolean AS hints_available
           ),
           scored AS (
             SELECT
@@ -399,13 +399,13 @@ def search_candidates(
                     required_skills,
                     preferred_skills,
                     role_types,
+                    guild_id,
+                    guild_id,
                     preferred_timezones,
                     location_timezone_prefix_hints,
                     location_country_hints,
                     location_constrained,
                     location_hints_available,
-                    guild_id,
-                    guild_id,
                     us_only,
                     us_values,
                     limit,
