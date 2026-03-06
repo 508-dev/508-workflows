@@ -130,6 +130,8 @@ def _build_location_hints(
     """Build location hints used for soft ranking penalties."""
     location_text = (requirements.raw_location_text or "").strip()
 
+    # Job postings usually describe geography in free-form prose, so we derive
+    # broad country and timezone-prefix hints before handing the constraints to SQL.
     timezone_prefixes = {tz.split("/", 1)[0].casefold() for tz in preferred_timezones}
     country_hints: set[str] = set()
 
@@ -175,15 +177,14 @@ def search_candidates(
 
     Ranking priority:
     1. Members before prospects.
-    2. US-only location restriction when enabled (hard filter; non-US candidates excluded).
-    3. Location signal when posting has location constraints (explicit mismatch demoted).
-    4. Match score (weighted score from skills + CRM/location signals).
-    5. Timezone match (soft signal; 1 when candidate timezone is in preferred_timezones).
-    6. Required skill count matched.
-    7. Discord role type matched (1 if any discord role matches the required role types).
-    8. Required skill strength score (sum of skill_attrs values).
-    9. Preferred skill count matched.
-    10. Seniority score (applied in Python after the query).
+    2. Location signal when posting has location constraints (explicit mismatch demoted).
+    3. Match score (weighted score from skills + CRM/location signals).
+    4. Timezone match (soft signal; 1 when candidate timezone is in preferred_timezones).
+    5. Required skill count matched.
+    6. Discord role type matched (1 if any discord role matches the required role types).
+    7. Required skill strength score (sum of skill_attrs values).
+    8. Preferred skill count matched.
+    9. Seniority score (applied in Python after the query).
 
     Candidates are included if they match ANY required skill OR any discord role type.
     A minimum final match score can be requested via min_match_score.
@@ -210,9 +211,8 @@ def search_candidates(
         location_hints_available,
     ) = _build_location_hints(requirements, preferred_timezones)
 
-    # Build the query. We use unnest + lateral subselects so a single round-trip
-    # handles scoring without pulling all rows into Python.
-    # Candidates match if they have ANY required skill OR any discord role type.
+    # SQL does the broad filtering and most of the scoring in one round-trip.
+    # Python only adds seniority alignment and the final tie-break sort afterwards.
     query = """
         WITH
           req AS (SELECT %s::text[] AS skills),
@@ -431,6 +431,8 @@ def search_candidates(
         sen_score = _seniority_score(row.get("seniority"), requirements.seniority)
         raw_match_score = row.get("match_score")
         if raw_match_score is None:
+            # Keep the final Python pass resilient if the selected SQL columns ever
+            # drift; this mirrors the SQL scoring formula rather than failing closed.
             required_matched = row.get("required_matched") or 0
             required_skill_score = row.get("required_skill_score") or 0
             preferred_matched = row.get("preferred_matched") or 0
