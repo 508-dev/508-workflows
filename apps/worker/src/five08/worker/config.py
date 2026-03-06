@@ -2,13 +2,16 @@
 
 from urllib.parse import urlparse
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, PrivateAttr, field_validator, model_validator
 
 from five08.settings import SharedSettings
 
 
 class WorkerSettings(SharedSettings):
     """Worker-specific settings layered on top of shared stack settings."""
+
+    _crm_linkedin_field: str = PrivateAttr(default="cLinkedIn")
+    _crm_intake_completed_field: str = PrivateAttr(default="")
 
     worker_name: str = "worker"
     worker_queue_names: str = "jobs.default"
@@ -130,12 +133,22 @@ class WorkerSettings(SharedSettings):
     @property
     def crm_linkedin_field(self) -> str:
         """Resume/profile sync always writes LinkedIn URLs to the canonical CRM field."""
-        return "cLinkedIn"
+        return self._crm_linkedin_field
+
+    @crm_linkedin_field.setter
+    def crm_linkedin_field(self, value: str) -> None:
+        """Allow controlled runtime overrides without reintroducing env loading."""
+        self._crm_linkedin_field = value
 
     @property
     def crm_intake_completed_field(self) -> str:
         """Intake completion field remains intentionally unset until explicitly adopted."""
-        return ""
+        return self._crm_intake_completed_field
+
+    @crm_intake_completed_field.setter
+    def crm_intake_completed_field(self, value: str) -> None:
+        """Allow tests to override the unset intake-completed mapping when needed."""
+        self._crm_intake_completed_field = value
 
     @property
     def oidc_http_timeout_seconds(self) -> float:
