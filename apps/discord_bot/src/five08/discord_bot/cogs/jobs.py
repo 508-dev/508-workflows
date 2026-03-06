@@ -9,7 +9,7 @@ import logging
 import re
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Awaitable, Callable, Literal
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -70,7 +70,7 @@ MATCH_CANDIDATES_JD_URL_HINTS = (
 AUTO_MATCH_DEDUPE_MAX = 10_000
 # Exclude known-bad resume artifact from auto-match rendering.
 AUTO_MATCH_EXCLUDED_RESUME_NAMES = frozenset({"Vladyslav_Stryzhak.pdf"})
-JobWatchChannel = discord.TextChannel | discord.ForumChannel
+JobWatchChannel = discord.ForumChannel
 
 
 class MatchResumeSelectView(discord.ui.View):
@@ -176,7 +176,7 @@ class ThreadPost:
     but only prepend tag names at the last moment so the raw text stays reusable.
     """
 
-    content: str
+    starter: discord.Message
     tags: list[str]
 
 
@@ -200,11 +200,11 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             return channel
 
         current = interaction.channel
-        if isinstance(current, (discord.TextChannel, discord.ForumChannel)):
+        if isinstance(current, discord.ForumChannel):
             return current
 
         if isinstance(current, discord.Thread) and isinstance(
-            current.parent, (discord.TextChannel, discord.ForumChannel)
+            current.parent, discord.ForumChannel
         ):
             return current.parent
 
@@ -275,11 +275,11 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             except Exception:
                 starter = None
 
-        if starter is None or not starter.content.strip():
+        if starter is None:
             return None
 
         tags = [t.name for t in thread.applied_tags] if thread.applied_tags else []
-        return ThreadPost(content=starter.content, tags=tags)
+        return ThreadPost(starter=starter, tags=tags)
 
     def _build_job_match_header_and_mentions(
         self,
@@ -801,6 +801,74 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         }
         return posting, metadata
 
+    async def _publish_match_results(
+        self,
+        *,
+        send: Callable[..., Awaitable[Any]],
+        requirements: JobRequirements,
+        candidates: list[Any],
+        guild: discord.Guild | None,
+    ) -> None:
+        """Send the formatted match output for both manual and automatic runs."""
+        (
+            header_lines,
+            role_mentions_line,
+            role_mentions_role_ids,
+            locality_mentions_line,
+            locality_mentions_role_ids,
+        ) = self._build_job_match_header_and_mentions(
+            requirements=requirements,
+            candidates_count=len(candidates),
+            guild=guild,
+        )
+
+        safe_mentions = discord.AllowedMentions(
+            roles=False,
+            users=False,
+            everyone=False,
+        )
+        for chunk in self._paginate_match_lines(header_lines):
+            await send(chunk, allowed_mentions=safe_mentions)
+        if role_mentions_line:
+            allowed_role_mentions = (
+                discord.AllowedMentions(
+                    roles=[discord.Object(id=rid) for rid in role_mentions_role_ids],
+                    users=False,
+                    everyone=False,
+                )
+                if role_mentions_role_ids
+                else safe_mentions
+            )
+            for chunk in self._paginate_match_lines([role_mentions_line]):
+                await send(chunk, allowed_mentions=allowed_role_mentions)
+        if locality_mentions_line:
+            allowed_locality_mentions = (
+                discord.AllowedMentions(
+                    roles=[
+                        discord.Object(id=rid) for rid in locality_mentions_role_ids
+                    ],
+                    users=False,
+                    everyone=False,
+                )
+                if locality_mentions_role_ids
+                else safe_mentions
+            )
+            for chunk in self._paginate_match_lines([locality_mentions_line]):
+                await send(chunk, allowed_mentions=allowed_locality_mentions)
+
+        crm_base = settings.espo_base_url.rstrip("/")
+        lines, resume_options = self._build_match_candidate_lines(
+            candidates=candidates,
+            crm_base=crm_base,
+        )
+        for msg in self._paginate_match_lines(lines):
+            await send(msg, allowed_mentions=safe_mentions)
+        if resume_options:
+            await send(
+                "Resume download:",
+                view=MatchResumeSelectView(resume_options),
+            )
+
     async def _run_auto_match_candidates_for_thread(
         self,
         *,
@@ -824,7 +892,17 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
-        posting = post.content
+        posting, _posting_metadata = await self._build_match_candidates_posting(
+            post.starter
+        )
+        if not posting.strip():
+            await self._unmark_thread_auto_matched(thread.id)
+            await thread.send(
+                "⚠️ Could not extract a job description from this forum post. "
+                "Run `/match-candidates` manually after adding details, attachments, or links."
+            )
+            return
+
         if post.tags:
             tag_names = ", ".join(post.tags)
             posting = f"Thread tags: {tag_names}\n\n{posting}"
@@ -885,74 +963,12 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
-        (
-            header_lines,
-            role_mentions_line,
-            role_mentions_role_ids,
-            locality_mentions_line,
-            locality_mentions_role_ids,
-        ) = self._build_job_match_header_and_mentions(
+        await self._publish_match_results(
+            send=thread.send,
             requirements=requirements,
-            candidates_count=len(candidates),
+            candidates=candidates,
             guild=guild,
         )
-
-        safe_mentions = discord.AllowedMentions(
-            roles=False,
-            users=False,
-            everyone=False,
-        )
-        for chunk in self._paginate_match_lines(header_lines):
-            await thread.send(
-                chunk,
-                allowed_mentions=safe_mentions,
-            )
-        if role_mentions_line:
-            allowed_role_mentions = (
-                discord.AllowedMentions(
-                    roles=[discord.Object(id=rid) for rid in role_mentions_role_ids],
-                    users=False,
-                    everyone=False,
-                )
-                if role_mentions_role_ids
-                else safe_mentions
-            )
-            for chunk in self._paginate_match_lines([role_mentions_line]):
-                await thread.send(
-                    chunk,
-                    allowed_mentions=allowed_role_mentions,
-                )
-        if locality_mentions_line:
-            allowed_locality_mentions = (
-                discord.AllowedMentions(
-                    roles=[
-                        discord.Object(id=rid) for rid in locality_mentions_role_ids
-                    ],
-                    users=False,
-                    everyone=False,
-                )
-                if locality_mentions_role_ids
-                else safe_mentions
-            )
-            for chunk in self._paginate_match_lines([locality_mentions_line]):
-                await thread.send(
-                    chunk,
-                    allowed_mentions=allowed_locality_mentions,
-                )
-
-        crm_base = settings.espo_base_url.rstrip("/")
-        lines, resume_options = self._build_match_candidate_lines(
-            candidates=candidates,
-            crm_base=crm_base,
-        )
-        messages = self._paginate_match_lines(lines)
-        for msg in messages:
-            await thread.send(msg, allowed_mentions=safe_mentions)
-        if resume_options:
-            await thread.send(
-                "Resume download:",
-                view=MatchResumeSelectView(resume_options),
-            )
 
     async def _bulk_sync_guild_roles(
         self, guild: discord.Guild
@@ -1077,10 +1093,10 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
 
     @commands.Cog.listener()
     async def on_thread_create(self, thread: discord.Thread) -> None:
-        """Auto-run matching for new threads in registered channels."""
+        """Auto-run matching for new forum posts in registered forum channels."""
         guild = thread.guild
         parent = thread.parent
-        if guild is None or parent is None:
+        if guild is None or not isinstance(parent, discord.ForumChannel):
             return
         if not await self._refresh_jobs_channel_cache_if_missing(guild.id):
             return
@@ -1099,66 +1115,12 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             trigger="thread_create",
         )
 
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message) -> None:
-        """Auto-create a thread for registered text-channel posts and match."""
-        if message.guild is None:
-            return
-        if not await self._refresh_jobs_channel_cache_if_missing(message.guild.id):
-            return
-        if not isinstance(message.author, discord.Member):
-            return
-        if message.author.bot:
-            return
-        if not check_user_roles_with_hierarchy(message.author.roles, ["Member"]):
-            return
-        if isinstance(message.channel, discord.Thread):
-            return
-        if not isinstance(message.channel, discord.TextChannel):
-            return
-        if not self._is_jobs_channel_registered(message.guild.id, message.channel.id):
-            return
-        if message.channel.permissions_for(message.guild.default_role).view_channel:
-            logger.warning(
-                "Skipping auto-thread in publicly visible channel "
-                "(guild=%s channel=%s message=%s)",
-                message.guild.id,
-                message.channel.id,
-                message.id,
-            )
-            return
-        if not message.content.strip():
-            return
-
-        first_line = message.content.strip().splitlines()[0]
-        thread_name = first_line[:80] if first_line else f"job-post-{message.id}"
-
-        try:
-            thread = await message.create_thread(name=thread_name)
-        except discord.HTTPException as exc:
-            logger.warning(
-                "Failed to create auto-match thread (guild=%s channel=%s message=%s): %s",
-                message.guild.id,
-                message.channel.id,
-                message.id,
-                exc,
-            )
-            return
-
-        await self._run_auto_match_candidates_for_thread(
-            thread=thread,
-            trigger="message_create",
-        )
-
     @app_commands.command(
         name="register-jobs-channel",
-        description="Register a text/forum channel for automatic job-post matching.",
+        description="Register a forum channel for automatic job-post matching.",
     )
     @app_commands.describe(
-        channel=(
-            "Channel to watch. Defaults to current channel "
-            "(or current thread's parent channel)."
-        )
+        channel="Forum channel to watch. Defaults to the current forum or its post thread."
     )
     @require_role("Steering Committee")
     async def register_jobs_channel(
@@ -1166,7 +1128,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         interaction: discord.Interaction,
         channel: JobWatchChannel | None = None,
     ) -> None:
-        """Register a channel that triggers automatic candidate matching."""
+        """Register a forum channel that triggers automatic candidate matching."""
         guild = interaction.guild
         if guild is None:
             await interaction.response.send_message(
@@ -1178,7 +1140,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         target_channel = self._resolve_jobs_channel_target(interaction, channel)
         if target_channel is None:
             await interaction.response.send_message(
-                "⚠️ Choose a text/forum channel or run this in one.",
+                "⚠️ Choose a forum channel or run this inside one of its post threads.",
                 ephemeral=True,
             )
             return
@@ -1235,13 +1197,10 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
 
     @app_commands.command(
         name="unregister-jobs-channel",
-        description="Stop automatic job-post matching for a text/forum channel.",
+        description="Stop automatic job-post matching for a forum channel.",
     )
     @app_commands.describe(
-        channel=(
-            "Channel to stop watching. Defaults to current channel "
-            "(or current thread's parent channel)."
-        )
+        channel="Forum channel to stop watching. Defaults to the current forum or its post thread."
     )
     @require_role("Steering Committee")
     async def unregister_jobs_channel(
@@ -1249,7 +1208,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         interaction: discord.Interaction,
         channel: JobWatchChannel | None = None,
     ) -> None:
-        """Unregister a channel from automatic candidate matching."""
+        """Unregister a forum channel from automatic candidate matching."""
         guild = interaction.guild
         if guild is None:
             await interaction.response.send_message(
@@ -1261,7 +1220,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         target_channel = self._resolve_jobs_channel_target(interaction, channel)
         if target_channel is None:
             await interaction.response.send_message(
-                "⚠️ Choose a text/forum channel or run this in one.",
+                "⚠️ Choose a forum channel or run this inside one of its post threads.",
                 ephemeral=True,
             )
             return
@@ -1333,7 +1292,9 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         Must be invoked inside a thread. The starter message is used as the job posting text.
         The response is posted publicly in the thread.
         """
-        if not isinstance(interaction.channel, discord.Thread):
+        if not isinstance(interaction.channel, discord.Thread) or not isinstance(
+            interaction.channel.parent, discord.ForumChannel
+        ):
             self._audit_command(
                 interaction=interaction,
                 action="crm.match_candidates",
@@ -1341,8 +1302,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 metadata={"stage": "not_thread"},
             )
             await interaction.response.send_message(
-                "⚠️ This command must be used inside a thread. "
-                "Open a thread on the job posting message and run `/match-candidates` there.",
+                "⚠️ This command must be used inside a forum post thread.",
                 ephemeral=True,
             )
             return
@@ -1462,77 +1422,12 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
-        (
-            header_lines,
-            role_mentions_line,
-            role_mentions_role_ids,
-            locality_mentions_line,
-            locality_mentions_role_ids,
-        ) = self._build_job_match_header_and_mentions(
+        await self._publish_match_results(
+            send=interaction.followup.send,
             requirements=requirements,
-            candidates_count=len(candidates),
+            candidates=candidates,
             guild=interaction.guild,
         )
-
-        safe_mentions = discord.AllowedMentions(
-            roles=False,
-            users=False,
-            everyone=False,
-        )
-        for chunk in self._paginate_match_lines(header_lines):
-            await interaction.followup.send(
-                chunk,
-                allowed_mentions=safe_mentions,
-            )
-        if role_mentions_line:
-            allowed_role_mentions = (
-                discord.AllowedMentions(
-                    roles=[discord.Object(id=rid) for rid in role_mentions_role_ids],
-                    users=False,
-                    everyone=False,
-                )
-                if role_mentions_role_ids
-                else safe_mentions
-            )
-            for chunk in self._paginate_match_lines([role_mentions_line]):
-                await interaction.followup.send(
-                    chunk,
-                    allowed_mentions=allowed_role_mentions,
-                )
-        if locality_mentions_line:
-            allowed_locality_mentions = (
-                discord.AllowedMentions(
-                    roles=[
-                        discord.Object(id=rid) for rid in locality_mentions_role_ids
-                    ],
-                    users=False,
-                    everyone=False,
-                )
-                if locality_mentions_role_ids
-                else safe_mentions
-            )
-            for chunk in self._paginate_match_lines([locality_mentions_line]):
-                await interaction.followup.send(
-                    chunk,
-                    allowed_mentions=allowed_locality_mentions,
-                )
-
-        crm_base = settings.espo_base_url.rstrip("/")
-        lines, resume_options = self._build_match_candidate_lines(
-            candidates=candidates,
-            crm_base=crm_base,
-        )
-        messages = self._paginate_match_lines(lines)
-        for msg in messages:
-            await interaction.followup.send(
-                msg,
-                allowed_mentions=safe_mentions,
-            )
-        if resume_options:
-            await interaction.followup.send(
-                "Resume download:",
-                view=MatchResumeSelectView(resume_options),
-            )
 
         self._audit_command(
             interaction=interaction,
