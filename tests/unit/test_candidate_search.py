@@ -89,6 +89,18 @@ def test_build_location_hints_matches_usa_dotted_abbreviation() -> None:
     assert hints_available is True
 
 
+def test_build_location_hints_includes_uk_without_trailing_dot_alias() -> None:
+    reqs = JobRequirements(raw_location_text="Remote in U.K")
+
+    _, country_hints, location_constrained, hints_available = _build_location_hints(
+        reqs, _normalize_preferred_timezones(reqs.preferred_timezones)
+    )
+
+    assert "u.k" in country_hints
+    assert location_constrained is True
+    assert hints_available is True
+
+
 def test_build_location_hints_strips_preferred_timezones() -> None:
     reqs = JobRequirements(preferred_timezones=[" America/New_York ", "  "])
 
@@ -168,13 +180,9 @@ def test_search_candidates_binds_trimmed_exact_timezones() -> None:
     with patch("five08.candidate_search.get_postgres_connection", return_value=conn):
         search_candidates(settings, reqs)
 
-    execute_query = conn.cursor.return_value.execute.call_args[0][0]
     execute_params = conn.cursor.return_value.execute.call_args[0][1]
-    exact_timezones_slot = (
-        execute_query.split("AS exact_timezones", 1)[0].count("%s") - 1
-    )
-    assert exact_timezones_slot >= 0
-    assert execute_params[exact_timezones_slot] == ["America/New_York"]
+    # Fixed SQL param order: exact_timezones is the 6th bind parameter.
+    assert execute_params[5] == ["America/New_York"]
 
 
 # ---------------------------------------------------------------------------

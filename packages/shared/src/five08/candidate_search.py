@@ -44,7 +44,7 @@ _LOCATION_COUNTRY_HINTS: tuple[
             r"(?<!\w)(?:uk|u\.k\.?|united kingdom|great britain|britain)(?!\w)",
             re.IGNORECASE,
         ),
-        ("uk", "u.k.", "united kingdom", "great britain", "britain"),
+        ("uk", "u.k", "u.k.", "united kingdom", "great britain", "britain"),
         "europe",
     ),
     (re.compile(r"\bcanada\b", re.IGNORECASE), ("canada",), "america"),
