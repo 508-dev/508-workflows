@@ -21,11 +21,6 @@ class SharedSettings(BaseSettings):
     log_level: str = "INFO"
 
     sentry_dsn: str | None = None
-    sentry_environment: str | None = None
-    sentry_release: str | None = None
-    sentry_sample_rate: float = 1.0
-    sentry_traces_sample_rate: float = 0.0
-    sentry_profiles_sample_rate: float = 0.0
     sentry_send_default_pii: bool = False
     sentry_debug: bool = False
 
@@ -87,24 +82,30 @@ class SharedSettings(BaseSettings):
             )
         return self
 
-    @model_validator(mode="after")
-    def validate_sentry_rates(self) -> "SharedSettings":
-        """Validate optional Sentry sampling rates."""
-        if not 0.0 <= self.sentry_sample_rate <= 1.0:
-            raise ValueError("SENTRY_SAMPLE_RATE must be between 0.0 and 1.0")
-        if not 0.0 <= self.sentry_traces_sample_rate <= 1.0:
-            raise ValueError("SENTRY_TRACES_SAMPLE_RATE must be between 0.0 and 1.0")
-        if not 0.0 <= self.sentry_profiles_sample_rate <= 1.0:
-            raise ValueError("SENTRY_PROFILES_SAMPLE_RATE must be between 0.0 and 1.0")
-        return self
-
     @property
     def sentry_environment_name(self) -> str:
-        """Sentry environment falls back to ENVIRONMENT."""
-        configured = (self.sentry_environment or "").strip()
-        if configured:
-            return configured
+        """Sentry environment always follows the app runtime environment."""
         return self.environment
+
+    @property
+    def sentry_release(self) -> None:
+        """Sentry release is not runtime-configurable."""
+        return None
+
+    @property
+    def sentry_sample_rate(self) -> float:
+        """Sentry event sampling stays enabled when Sentry is configured."""
+        return 1.0
+
+    @property
+    def sentry_traces_sample_rate(self) -> float:
+        """Tracing is disabled until the project explicitly needs it."""
+        return 0.0
+
+    @property
+    def sentry_profiles_sample_rate(self) -> float:
+        """Profiling is disabled until the project explicitly needs it."""
+        return 0.0
 
     @property
     def minio_access_key(self) -> str:

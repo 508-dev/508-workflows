@@ -16,8 +16,6 @@ class WorkerSettings(SharedSettings):
 
     espo_base_url: str
     espo_api_key: str
-    crm_linkedin_field: str = "cLinkedIn"
-    crm_intake_completed_field: str = ""
     google_forms_allowed_form_ids: str = ""
 
     openai_api_key: str | None = None
@@ -29,7 +27,6 @@ class WorkerSettings(SharedSettings):
 
     max_file_size_mb: int = 10
     allowed_file_types: str = "pdf,doc,docx,txt"
-    resume_keywords: str = "resume,cv,curriculum"
     max_attachments_per_contact: int = 3
     crm_sync_enabled: bool = True
     crm_sync_interval_seconds: int = 900
@@ -69,13 +66,7 @@ class WorkerSettings(SharedSettings):
     oidc_admin_groups: str = "Admin,Owner,Steering Committee"
     oidc_callback_path: str = "/auth/callback"
     oidc_redirect_base_url: str | None = None
-    oidc_http_timeout_seconds: float = 8.0
-    oidc_jwks_cache_seconds: int = 300
-    auth_state_ttl_seconds: int = 600
-    auth_session_ttl_seconds: int = 28800
     auth_session_cookie_name: str = "five08_session"
-    auth_cookie_secure: bool = False
-    auth_cookie_samesite: str = "lax"
     dashboard_default_path: str = "/dashboard"
     dashboard_public_base_url: str | None = None
     discord_bot_token: str | None = None
@@ -113,15 +104,6 @@ class WorkerSettings(SharedSettings):
             )
         return self
 
-    @model_validator(mode="after")
-    def validate_auth_cookie_samesite(self) -> "WorkerSettings":
-        """Normalize and validate cookie SameSite policy."""
-        normalized = self.auth_cookie_samesite.strip().lower()
-        if normalized not in {"lax", "strict", "none"}:
-            raise ValueError("AUTH_COOKIE_SAMESITE must be one of: lax, strict, none")
-        self.auth_cookie_samesite = normalized
-        return self
-
     @field_validator("docuseal_member_agreement_template_id", mode="before")
     @classmethod
     def _normalize_docuseal_member_agreement_template_id(
@@ -145,11 +127,51 @@ class WorkerSettings(SharedSettings):
         return {ext.strip().lower() for ext in self.allowed_file_types.split(",")}
 
     @property
+    def crm_linkedin_field(self) -> str:
+        """Resume/profile sync always writes LinkedIn URLs to the canonical CRM field."""
+        return "cLinkedIn"
+
+    @property
+    def crm_intake_completed_field(self) -> str:
+        """Intake completion field remains intentionally unset until explicitly adopted."""
+        return ""
+
+    @property
+    def oidc_http_timeout_seconds(self) -> float:
+        """Keep OIDC network calls bounded with a fixed timeout."""
+        return 8.0
+
+    @property
+    def oidc_jwks_cache_seconds(self) -> int:
+        """Cache OIDC signing keys briefly to avoid repeated JWKS fetches."""
+        return 300
+
+    @property
+    def auth_state_ttl_seconds(self) -> int:
+        """Short-lived state tokens reduce replay risk during login."""
+        return 600
+
+    @property
+    def auth_session_ttl_seconds(self) -> int:
+        """Dashboard sessions expire after one workday."""
+        return 28800
+
+    @property
+    def auth_cookie_secure(self) -> bool:
+        """Cookie security follows the current local-first deployment defaults."""
+        return False
+
+    @property
+    def auth_cookie_samesite(self) -> str:
+        """Auth session cookies use SameSite=Lax."""
+        return "lax"
+
+    @property
     def parsed_resume_keywords(self) -> set[str]:
         """Keywords used to identify resume-like attachments."""
         return {
             keyword.strip().lower()
-            for keyword in self.resume_keywords.split(",")
+            for keyword in ("resume,cv,curriculum").split(",")
             if keyword.strip()
         }
 

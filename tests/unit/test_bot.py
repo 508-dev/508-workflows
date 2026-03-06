@@ -8,6 +8,7 @@ from pathlib import Path
 import discord
 
 from five08.discord_bot.bot import Bot508, create_bot, settings
+from five08.discord_bot.config import Settings
 
 
 class TestBot508:
@@ -123,3 +124,12 @@ class TestBot508:
                 await bot.on_ready()
 
                 assert "ready for 508.dev" in caplog.text
+
+    def test_discord_message_limit_is_not_env_configurable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("DISCORD_SENDMSG_CHARACTER_LIMIT", "500")
+
+        config = Settings()
+
+        assert config.discord_sendmsg_character_limit == 2000

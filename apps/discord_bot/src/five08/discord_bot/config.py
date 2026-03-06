@@ -18,8 +18,6 @@ class Settings(SharedSettings):
 
     discord_bot_token: str
 
-    discord_sendmsg_character_limit: int = 2000
-
     # Healthcheck Configuration
     healthcheck_port: int = 3000
 
@@ -39,6 +37,11 @@ class Settings(SharedSettings):
     # Kimai time tracking settings
     kimai_base_url: str
     kimai_api_token: str
+
+    @property
+    def discord_sendmsg_character_limit(self) -> int:
+        """Discord message splitting should follow the platform limit."""
+        return 2000
 
 
 settings = Settings()  # type: ignore[call-arg]
