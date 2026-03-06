@@ -167,6 +167,7 @@ def search_candidates(
     settings: SharedSettings,
     requirements: JobRequirements,
     *,
+    guild_id: str | None = None,
     limit: int = 10,
     min_match_score: float = 0.0,
 ) -> list[CandidateMatch]:
@@ -186,6 +187,7 @@ def search_candidates(
 
     Candidates are included if they match ANY required skill OR any discord role type.
     A minimum final match score can be requested via min_match_score.
+    When guild_id is provided, discord member snapshots are scoped to that guild.
     """
     required_skills = requirements.required_skills
     preferred_skills = requirements.preferred_skills
@@ -235,6 +237,7 @@ def search_candidates(
                 ) AS roles
             FROM discord_members dm_raw
             LEFT JOIN LATERAL jsonb_array_elements_text(dm_raw.roles) AS role ON true
+            WHERE (%s::text IS NULL OR dm_raw.guild_id = %s)
             GROUP BY dm_raw.discord_user_id
           ),
           scored AS (
@@ -401,6 +404,8 @@ def search_candidates(
                     location_country_hints,
                     location_constrained,
                     location_hints_available,
+                    guild_id,
+                    guild_id,
                     us_only,
                     us_values,
                     limit,
