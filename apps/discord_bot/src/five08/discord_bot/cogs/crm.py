@@ -28,7 +28,7 @@ from five08.resume_extractor import (
     is_reserved_resume_name_token,
     normalize_resume_name_token,
 )
-from five08.discord_bot.utils.audit import DiscordAuditLogger
+from five08.discord_bot.utils.audit import DiscordAuditCogMixin
 from five08.discord_bot.utils.role_decorators import (
     require_role,
     check_user_roles_with_hierarchy,
@@ -2003,7 +2003,7 @@ class OnboardingQueuePagerView(discord.ui.View):
         await interaction.response.edit_message(embed=self._build_embed(), view=self)
 
 
-class CRMCog(commands.Cog):
+class CRMCog(DiscordAuditCogMixin, commands.Cog):
     """CRM integration cog for EspoCRM operations."""
 
     def __init__(self, bot: commands.Bot) -> None:
@@ -2019,13 +2019,7 @@ class CRMCog(commands.Cog):
         self._resume_profile_cache: (
             tuple[tuple[int, str], ResumeExtractedProfile] | None
         ) = None
-        self.audit_logger = DiscordAuditLogger(
-            base_url=settings.audit_api_base_url,
-            shared_secret=settings.api_shared_secret,
-            timeout_seconds=settings.audit_api_timeout_seconds,
-            discord_logs_webhook_url=settings.discord_logs_webhook_url,
-            discord_logs_webhook_wait=settings.discord_logs_webhook_wait,
-        )
+        self._init_audit_logger()
 
     @staticmethod
     def _configured_linkedin_field() -> str:
@@ -2057,49 +2051,6 @@ class CRMCog(commands.Cog):
             return text[:max_length]
 
         return text[: max_length - 1].rstrip() + "…"
-
-    def _audit_command(
-        self,
-        *,
-        interaction: discord.Interaction,
-        action: str,
-        result: str,
-        metadata: dict[str, Any] | None = None,
-        resource_type: str | None = "discord_command",
-        resource_id: str | None = None,
-    ) -> None:
-        """Queue a best-effort audit write for CRM command activity."""
-        self.audit_logger.log_command(
-            interaction=interaction,
-            action=action,
-            result=result,
-            metadata=metadata,
-            resource_type=resource_type,
-            resource_id=resource_id,
-        )
-
-    def _audit_command_safe(
-        self,
-        *,
-        interaction: discord.Interaction,
-        action: str,
-        result: str,
-        metadata: dict[str, Any] | None = None,
-        resource_type: str | None = "discord_command",
-        resource_id: str | None = None,
-    ) -> None:
-        """Keep command flows alive if audit logging fails unexpectedly."""
-        try:
-            self._audit_command(
-                interaction=interaction,
-                action=action,
-                result=result,
-                metadata=metadata,
-                resource_type=resource_type,
-                resource_id=resource_id,
-            )
-        except Exception:
-            logger.warning("Audit logging failed for action=%s", action, exc_info=True)
 
     def _backend_headers(self) -> dict[str, str]:
         """Build auth headers for internal backend API calls."""

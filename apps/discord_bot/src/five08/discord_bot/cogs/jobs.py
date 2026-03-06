@@ -20,7 +20,7 @@ from discord.ext import commands
 from five08.audit import update_person_discord_roles, upsert_discord_member
 from five08.candidate_search import search_candidates
 from five08.discord_bot.config import settings
-from five08.discord_bot.utils.audit import DiscordAuditLogger
+from five08.discord_bot.utils.audit import DiscordAuditCogMixin
 from five08.discord_bot.utils.role_decorators import (
     check_user_roles_with_hierarchy,
     require_role,
@@ -180,41 +180,15 @@ class ThreadPost:
     tags: list[str]
 
 
-class JobsCog(commands.Cog):
+class JobsCog(DiscordAuditCogMixin, commands.Cog):
     """Job posting and candidate matching workflows."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        self.audit_logger = DiscordAuditLogger(
-            base_url=settings.audit_api_base_url,
-            shared_secret=settings.api_shared_secret,
-            timeout_seconds=settings.audit_api_timeout_seconds,
-            discord_logs_webhook_url=settings.discord_logs_webhook_url,
-            discord_logs_webhook_wait=settings.discord_logs_webhook_wait,
-        )
+        self._init_audit_logger()
         self._jobs_channels_by_guild: dict[int, set[int]] = {}
         self._auto_matched_thread_ids: OrderedDict[int, None] = OrderedDict()
         self._auto_matched_thread_lock = asyncio.Lock()
-
-    def _audit_command(
-        self,
-        *,
-        interaction: discord.Interaction,
-        action: str,
-        result: str,
-        metadata: dict[str, Any] | None = None,
-        resource_type: str | None = "discord_command",
-        resource_id: str | None = None,
-    ) -> None:
-        """Queue a best-effort audit write for jobs command activity."""
-        self.audit_logger.log_command(
-            interaction=interaction,
-            action=action,
-            result=result,
-            metadata=metadata,
-            resource_type=resource_type,
-            resource_id=resource_id,
-        )
 
     @staticmethod
     def _resolve_jobs_channel_target(
@@ -466,9 +440,7 @@ class JobsCog(commands.Cog):
         if locality_role_names:
             locality_mentions, role_ids = build_role_mentions(locality_role_names)
             if locality_mentions:
-                locality_mentions_line = "Locality roles: " + ", ".join(
-                    locality_mentions
-                )
+                locality_mentions_line = "Locality: " + ", ".join(locality_mentions)
                 locality_mentions_role_ids = role_ids
 
         if requirements.required_skills:
