@@ -86,6 +86,16 @@ def test_build_location_hints_strips_preferred_timezones() -> None:
     assert hints_available is True
 
 
+def test_build_location_hints_does_not_match_pronoun_us() -> None:
+    reqs = JobRequirements(raw_location_text="Contact us for details")
+
+    _, country_hints, _, _ = _build_location_hints(
+        reqs, _normalize_preferred_timezones(reqs.preferred_timezones)
+    )
+
+    assert "us" not in country_hints
+
+
 def test_normalize_preferred_timezones_trims_and_filters() -> None:
     normalized = _normalize_preferred_timezones(
         [" America/New_York ", "", "  ", "Europe/Berlin"]
@@ -143,8 +153,13 @@ def test_search_candidates_binds_trimmed_exact_timezones() -> None:
     with patch("five08.candidate_search.get_postgres_connection", return_value=conn):
         search_candidates(settings, reqs)
 
+    execute_query = conn.cursor.return_value.execute.call_args[0][0]
     execute_params = conn.cursor.return_value.execute.call_args[0][1]
-    assert ["America/New_York"] in execute_params
+    exact_timezones_slot = (
+        execute_query.split("AS exact_timezones", 1)[0].count("%s") - 1
+    )
+    assert exact_timezones_slot >= 0
+    assert execute_params[exact_timezones_slot] == ["America/New_York"]
 
 
 # ---------------------------------------------------------------------------

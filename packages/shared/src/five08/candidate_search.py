@@ -16,7 +16,16 @@ logger = logging.getLogger(__name__)
 
 # US country strings we accept as-is (lowercased for comparison)
 _US_COUNTRY_VALUES = frozenset(
-    {"us", "usa", "united states", "united states of america"}
+    {
+        "us",
+        "u.s",
+        "u.s.",
+        "usa",
+        "u.s.a",
+        "u.s.a.",
+        "united states",
+        "united states of america",
+    }
 )
 
 _LOCATION_COUNTRY_HINTS: tuple[
@@ -24,7 +33,7 @@ _LOCATION_COUNTRY_HINTS: tuple[
 ] = (
     (
         re.compile(
-            r"(?<!\w)(?:us|u\.s\.?|usa|united states|united states of america)(?!\w)",
+            r"(?<!\w)(?:(?-i:U\.?S\.?)|usa|united states|united states of america)(?!\w)",
             re.IGNORECASE,
         ),
         tuple(sorted(_US_COUNTRY_VALUES)),
@@ -306,7 +315,7 @@ def search_candidates(
                         = ANY(loc.timezone_prefixes) THEN 2
                   WHEN COALESCE(p.timezone, '') = ''
                     AND COALESCE(p.address_country, '') = '' THEN -1
-                  ELSE -4
+                  ELSE 0
                 END AS location_signal
             FROM people p
             FULL OUTER JOIN dm_agg dm ON dm.discord_user_id = p.discord_user_id

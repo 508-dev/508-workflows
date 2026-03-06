@@ -324,6 +324,10 @@ class TestSearchCandidatesE2E:
         self, pg_db: SharedSettings
     ) -> None:
         _insert(crm_contact_id="usa", skills=["python"], address_country="USA")
+        _insert(crm_contact_id="u_s_dotted", skills=["python"], address_country="U.S.")
+        _insert(
+            crm_contact_id="u_s_a_dotted", skills=["python"], address_country="U.S.A."
+        )
         _insert(
             crm_contact_id="united_states",
             skills=["python"],
@@ -336,6 +340,8 @@ class TestSearchCandidatesE2E:
 
         ids = [r.crm_contact_id for r in results]
         assert "usa" in ids
+        assert "u_s_dotted" in ids
+        assert "u_s_a_dotted" in ids
         assert "united_states" in ids
 
     def test_more_required_skills_matched_ranks_higher(
