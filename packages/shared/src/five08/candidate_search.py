@@ -116,11 +116,9 @@ def _normalize_preferred_timezones(timezones: list[str] | None) -> list[str]:
 
 def _build_location_hints(
     requirements: JobRequirements,
+    preferred_timezones: list[str],
 ) -> tuple[list[str], list[str], bool, bool]:
     """Build location hints used for soft ranking penalties."""
-    preferred_timezones = _normalize_preferred_timezones(
-        requirements.preferred_timezones
-    )
     location_text = (requirements.raw_location_text or "").strip()
 
     timezone_prefixes = {tz.split("/", 1)[0].casefold() for tz in preferred_timezones}
@@ -199,7 +197,7 @@ def search_candidates(
         location_country_hints,
         location_constrained,
         location_hints_available,
-    ) = _build_location_hints(requirements)
+    ) = _build_location_hints(requirements, preferred_timezones)
 
     # Build the query. We use unnest + lateral subselects so a single round-trip
     # handles scoring without pulling all rows into Python.
@@ -292,7 +290,12 @@ def search_candidates(
                 CASE
                   WHEN NOT loc.constrained OR NOT loc.hints_available THEN 0
                   WHEN loc.exact_timezones <> '{}'::text[]
-                    AND COALESCE(p.timezone, '') = ANY(loc.exact_timezones) THEN 3
+                    AND COALESCE(p.timezone, '') = ANY(loc.exact_timezones)
+                    AND (
+                      loc.countries = '{}'::text[]
+                      OR COALESCE(p.address_country, '') = ''
+                      OR LOWER(COALESCE(p.address_country, '')) = ANY(loc.countries)
+                    ) THEN 3
                   WHEN loc.countries <> '{}'::text[]
                     AND LOWER(COALESCE(p.address_country, '')) = ANY(loc.countries)
                     THEN 2
