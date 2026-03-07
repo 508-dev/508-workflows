@@ -11,23 +11,17 @@ from discord import app_commands
 from discord.ext import commands
 
 from five08.discord_bot.config import settings
-from five08.discord_bot.utils.audit import DiscordAuditLogger
+from five08.discord_bot.utils.audit import DiscordAuditCogMixin
 
 logger = logging.getLogger(__name__)
 
 
-class AdminLoginCog(commands.Cog):
+class AdminLoginCog(DiscordAuditCogMixin, commands.Cog):
     """Mint one-time dashboard login links for Discord admins."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        self.audit_logger = DiscordAuditLogger(
-            base_url=settings.audit_api_base_url,
-            shared_secret=settings.api_shared_secret,
-            timeout_seconds=settings.audit_api_timeout_seconds,
-            discord_logs_webhook_url=settings.discord_logs_webhook_url,
-            discord_logs_webhook_wait=settings.discord_logs_webhook_wait,
-        )
+        self._init_audit_logger()
 
     def _backend_url(self, path: str) -> str:
         return f"{settings.backend_api_base_url.rstrip('/')}{path}"
@@ -96,7 +90,7 @@ class AdminLoginCog(commands.Cog):
         result: str,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        self.audit_logger.log_command(
+        self._audit_command(
             interaction=interaction,
             action="auth.login_link.create",
             result=result,
