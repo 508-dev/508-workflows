@@ -1126,7 +1126,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
     async def register_jobs_channel(
         self,
         interaction: discord.Interaction,
-        channel: JobWatchChannel | None = None,
+        channel: discord.ForumChannel | None = None,
     ) -> None:
         """Register a forum channel that triggers automatic candidate matching."""
         guild = interaction.guild
@@ -1206,7 +1206,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
     async def unregister_jobs_channel(
         self,
         interaction: discord.Interaction,
-        channel: JobWatchChannel | None = None,
+        channel: discord.ForumChannel | None = None,
     ) -> None:
         """Unregister a forum channel from automatic candidate matching."""
         guild = interaction.guild
