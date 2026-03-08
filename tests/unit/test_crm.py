@@ -521,10 +521,10 @@ class TestCRMCog:
         )
 
     @pytest.mark.asyncio
-    async def test_resume_update_view_no_location_button_without_location(
+    async def test_resume_update_view_adds_location_button_without_location(
         self, crm_cog
     ):
-        """Edit Location button should not appear when location fields are absent."""
+        """Edit Location button should still appear when location fields are absent."""
         view = ResumeUpdateConfirmationView(
             crm_cog=crm_cog,
             requester_id=123,
@@ -533,7 +533,7 @@ class TestCRMCog:
             proposed_updates={},
         )
 
-        assert not any(
+        assert any(
             isinstance(child, ResumeEditLocationButton) for child in view.children
         )
 
@@ -690,6 +690,26 @@ class TestCRMCog:
         assert view.proposed_updates["addressState"] == "Kaohsiung City"
         assert view.proposed_updates["addressCountry"] == "Taiwan"
         assert view.proposed_updates["cTimezone"] == "UTC+08:00"
+        mock_interaction.response.send_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_edit_location_modal_accepts_timezone_abbreviations(
+        self, crm_cog, mock_interaction
+    ):
+        """Timezone abbreviations should match the parser behavior used elsewhere."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+        )
+        modal = ResumeEditLocationModal(confirmation_view=view)
+        modal.timezone_input._value = "PST"
+
+        await modal.on_submit(mock_interaction)
+
+        assert view.proposed_updates["cTimezone"] == "UTC-08:00"
         mock_interaction.response.send_message.assert_called_once()
 
     @pytest.mark.asyncio

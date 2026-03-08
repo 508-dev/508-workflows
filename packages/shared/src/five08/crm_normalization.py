@@ -87,6 +87,50 @@ _US_STATE_ABBREVIATIONS: dict[str, str] = {
 _US_STATE_NAMES: dict[str, str] = {
     value.casefold(): value for value in _US_STATE_ABBREVIATIONS.values()
 }
+_CANADA_PROVINCE_ABBREVIATIONS: dict[str, str] = {
+    "AB": "Alberta",
+    "BC": "British Columbia",
+    "MB": "Manitoba",
+    "NB": "New Brunswick",
+    "NL": "Newfoundland And Labrador",
+    "NS": "Nova Scotia",
+    "NT": "Northwest Territories",
+    "NU": "Nunavut",
+    "ON": "Ontario",
+    "PE": "Prince Edward Island",
+    "QC": "Quebec",
+    "SK": "Saskatchewan",
+    "YT": "Yukon",
+}
+_CANADA_PROVINCE_NAMES: dict[str, str] = {
+    value.casefold(): value for value in _CANADA_PROVINCE_ABBREVIATIONS.values()
+}
+_LOCATION_STOPWORDS = frozenset(
+    {
+        "account",
+        "accounts",
+        "api",
+        "backend",
+        "creation",
+        "developer",
+        "development",
+        "django",
+        "engineer",
+        "engineering",
+        "frontend",
+        "fullstack",
+        "handles",
+        "intern",
+        "internship",
+        "javascript",
+        "management",
+        "manager",
+        "python",
+        "react",
+        "senior",
+        "software",
+    }
+)
 _CANONICAL_COUNTRY_NAMES: tuple[str, ...] = (
     "Afghanistan",
     "Albania",
@@ -136,6 +180,7 @@ _CANONICAL_COUNTRY_NAMES: tuple[str, ...] = (
     "Djibouti",
     "Dominica",
     "Dominican Republic",
+    "Democratic Republic Of The Congo",
     "Ecuador",
     "Egypt",
     "El Salvador",
@@ -229,6 +274,7 @@ _CANONICAL_COUNTRY_NAMES: tuple[str, ...] = (
     "Portugal",
     "Qatar",
     "Romania",
+    "Republic Of The Congo",
     "Russia",
     "Rwanda",
     "Saint Kitts And Nevis",
@@ -284,15 +330,17 @@ _CANONICAL_COUNTRY_NAMES: tuple[str, ...] = (
     "Zambia",
     "Zimbabwe",
 )
-_COUNTRY_CANONICAL_MAP: dict[str, str] = {
-    value.casefold(): value for value in _CANONICAL_COUNTRY_NAMES
-}
-_COUNTRY_ALIASES: dict[str, str] = {
+_RAW_COUNTRY_ALIASES: dict[str, str] = {
     "america": "United States",
     "britain": "United Kingdom",
     "cote d ivoire": "Ivory Coast",
     "cote d'ivoire": "Ivory Coast",
+    "congo brazzaville": "Republic Of The Congo",
+    "congo drc": "Democratic Republic Of The Congo",
+    "congo kinshasa": "Democratic Republic Of The Congo",
     "czechia": "Czech Republic",
+    "democratic republic of congo": "Democratic Republic Of The Congo",
+    "democratic republic of the congo": "Democratic Republic Of The Congo",
     "england": "United Kingdom",
     "great britain": "United Kingdom",
     "holland": "Netherlands",
@@ -322,7 +370,22 @@ def _normalize_location_text(value: str) -> str:
 
 
 def _location_lookup_key(value: str) -> str:
-    return re.sub(r"[.]", "", _normalize_location_text(value).casefold())
+    normalized = _normalize_location_text(value)
+    normalized = normalized.replace("’", "'").replace("‘", "'")
+    normalized = unicodedata.normalize("NFKD", normalized)
+    normalized = "".join(
+        ch for ch in normalized if not unicodedata.combining(ch)
+    ).casefold()
+    collapsed = "".join(ch if ch.isalnum() else " " for ch in normalized)
+    return re.sub(r"\s+", " ", collapsed).strip()
+
+
+_COUNTRY_CANONICAL_MAP: dict[str, str] = {
+    _location_lookup_key(value): value for value in _CANONICAL_COUNTRY_NAMES
+}
+_COUNTRY_ALIASES: dict[str, str] = {
+    _location_lookup_key(key): value for key, value in _RAW_COUNTRY_ALIASES.items()
+}
 
 
 def _is_plausible_location_phrase(
@@ -333,8 +396,13 @@ def _is_plausible_location_phrase(
 ) -> bool:
     if not value or len(value) > max_length:
         return False
-    word_count = len(re.findall(r"[^\W\d_][^\W\d_'-]*", value, flags=re.UNICODE))
-    if word_count == 0 or word_count > max_words:
+    tokens = [
+        token.casefold()
+        for token in re.findall(r"[^\W\d_][^\W\d_'-]*", value, flags=re.UNICODE)
+    ]
+    if not tokens or len(tokens) > max_words:
+        return False
+    if any(token in _LOCATION_STOPWORDS for token in tokens):
         return False
     for ch in value:
         if ch.isalpha() or ch in {" ", "-", "'", ".", "(", ")"}:
@@ -411,12 +479,15 @@ def normalize_country(value: Any) -> str | None:
     normalized = _normalize_location_text(value)
     if not normalized:
         return None
+    lookup_key = _location_lookup_key(normalized)
+    if not lookup_key:
+        return None
 
-    alias = _COUNTRY_ALIASES.get(_location_lookup_key(normalized))
+    alias = _COUNTRY_ALIASES.get(lookup_key)
     if alias:
         return alias
 
-    return _COUNTRY_CANONICAL_MAP.get(normalized.casefold())
+    return _COUNTRY_CANONICAL_MAP.get(lookup_key)
 
 
 def normalize_state(value: Any) -> str | None:
@@ -434,7 +505,15 @@ def normalize_state(value: Any) -> str | None:
     if canonical_us_state:
         return canonical_us_state
 
-    if not _is_plausible_location_phrase(normalized, max_words=5, max_length=50):
+    canada_province = _CANADA_PROVINCE_ABBREVIATIONS.get(normalized.upper())
+    if canada_province:
+        return canada_province
+
+    canonical_canada_province = _CANADA_PROVINCE_NAMES.get(normalized.casefold())
+    if canonical_canada_province:
+        return canonical_canada_province
+
+    if not _is_plausible_location_phrase(normalized, max_words=4, max_length=40):
         return None
 
     letter_count = sum(1 for ch in normalized if ch.isalpha())
@@ -455,7 +534,10 @@ def normalize_city(value: Any, *, strip_parenthetical: bool = False) -> str | No
     normalized = normalized.split(",")[0].strip()
     if not normalized:
         return None
-    if not _is_plausible_location_phrase(normalized, max_words=5, max_length=60):
+    if not _is_plausible_location_phrase(normalized, max_words=4, max_length=40):
+        return None
+    letter_count = sum(1 for ch in normalized if ch.isalpha())
+    if letter_count <= 2:
         return None
     return _title_case_location(normalized)
 

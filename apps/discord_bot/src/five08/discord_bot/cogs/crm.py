@@ -952,6 +952,10 @@ class ResumeEditLocationModal(discord.ui.Modal, title="Edit Location"):
         state = normalize_state(raw_state) if raw_state else None
         country = normalize_country(raw_country) if raw_country else None
         timezone = normalize_timezone(raw_timezone) if raw_timezone else None
+        if raw_timezone and not timezone:
+            timezone = self.confirmation_view.crm_cog._LOCATION_TIMEZONE_ABBREV_MAP.get(
+                raw_timezone.upper()
+            )
 
         invalid_fields: list[str] = []
         if raw_city and not city:
@@ -1150,8 +1154,7 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             self.add_item(ResumeEditSocialLinksButton())
         if proposed_updates.get("skills") or proposed_updates.get("cSkillAttrs"):
             self.add_item(ResumeEditSkillsButton())
-        if self._has_location_updates(proposed_updates):
-            self.add_item(ResumeEditLocationButton())
+        self.add_item(ResumeEditLocationButton())
 
     def _set_seniority_override(self, value: str) -> str:
         self.seniority_override = value
