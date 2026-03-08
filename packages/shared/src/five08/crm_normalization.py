@@ -318,7 +318,7 @@ _COUNTRY_ALIASES: dict[str, str] = {
 
 
 def _normalize_location_text(value: str) -> str:
-    return re.sub(r"\s+", " ", value).strip(" ,")
+    return re.sub(r"\s+", " ", value).strip(" ,.")
 
 
 def _location_lookup_key(value: str) -> str:
@@ -437,8 +437,8 @@ def normalize_state(value: Any) -> str | None:
     if not _is_plausible_location_phrase(normalized, max_words=5, max_length=50):
         return None
 
-    letters_only = re.sub(r"[^A-Za-z]", "", normalized)
-    if len(letters_only) <= 2:
+    letter_count = sum(1 for ch in normalized if ch.isalpha())
+    if letter_count <= 2:
         return None
 
     return _title_case_location(normalized)

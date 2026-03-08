@@ -50,6 +50,7 @@ def test_normalize_website_url_respects_disallowed_host_predicate() -> None:
 def test_normalize_country_and_city() -> None:
     assert normalize_country(" united states ") == "United States"
     assert normalize_country("Taiwan") == "Taiwan"
+    assert normalize_country("Taiwan.") == "Taiwan"
     assert normalize_country("Kaohsiung City") is None
     assert normalize_city("  new york, ny  ") == "New York"
     assert (
@@ -58,6 +59,7 @@ def test_normalize_country_and_city() -> None:
     )
     assert normalize_state("CA") == "California"
     assert normalize_state("Kaohsiung City") == "Kaohsiung City"
+    assert normalize_state("台北市") == "台北市"
     assert normalize_state("Js") is None
     assert (
         normalize_city("San Francisco (Bay Area)", strip_parenthetical=True)
