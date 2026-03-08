@@ -717,6 +717,8 @@ def _normalize_phone_with_country(phone: Any, country: str | None) -> str | None
     code = _COUNTRY_PHONE_CODES.get(country.strip().lower())
     if not code:
         return normalized
+    if code == "1" and len(normalized) == 11 and normalized.startswith("1"):
+        return f"+{normalized}"
     return f"+{code}{normalized}"
 
 
@@ -891,6 +893,20 @@ _CITY_TIMEZONE: dict[str, str] = {
     "st. petersburg": "UTC+03:00",
 }
 
+_STATE_TIMEZONE: dict[str, str] = {
+    "california": "UTC-08:00",
+    "washington": "UTC-08:00",
+    "arizona": "UTC-07:00",
+    "colorado": "UTC-07:00",
+    "utah": "UTC-07:00",
+    "illinois": "UTC-06:00",
+    "minnesota": "UTC-06:00",
+    "new york": "UTC-05:00",
+    "massachusetts": "UTC-05:00",
+    "georgia": "UTC-05:00",
+    "pennsylvania": "UTC-05:00",
+    "district of columbia": "UTC-05:00",
+}
 _CITY_REGION_HINTS: dict[str, tuple[str | None, str | None]] = {
     "san francisco": ("California", "United States"),
     "los angeles": ("California", "United States"),
@@ -1016,13 +1032,17 @@ def _candidate_location_fragments(line: str) -> list[str]:
 
 
 def _infer_timezone_from_location(
-    *, country: str | None, city: str | None = None
+    *, country: str | None, state: str | None = None, city: str | None = None
 ) -> str | None:
     """Best-effort UTC offset from city or country (heuristic fallback only)."""
     if city:
         city_tz = _CITY_TIMEZONE.get(city.strip().lower())
         if city_tz:
             return city_tz
+    if state:
+        state_tz = _STATE_TIMEZONE.get(state.strip().lower())
+        if state_tz:
+            return state_tz
     if country:
         country_key = country.strip().lower()
         if country_key in _AMBIGUOUS_COUNTRY_TIMEZONE:
@@ -1030,6 +1050,15 @@ def _infer_timezone_from_location(
         tz = _COUNTRY_TIMEZONE.get(country_key)
         if tz:
             return tz
+    return None
+
+
+def _infer_country_from_state(state: str | None) -> str | None:
+    if not state:
+        return None
+    normalized_state = _normalize_state(state)
+    if normalized_state and normalized_state.casefold() in US_STATE_NAMES:
+        return "United States"
     return None
 
 
@@ -1969,6 +1998,10 @@ class ResumeProfileExtractor:
                 timezone=parsed_timezone,
                 current_location_raw=parsed_current_location_raw,
             )
+            parsed_phone = _normalize_phone_with_country(
+                parsed.get("phone"),
+                parsed_country,
+            )
             return ResumeExtractedProfile(
                 name=extracted_name,
                 first_name=extracted_first_name,
@@ -1992,10 +2025,7 @@ class ResumeProfileExtractor:
                 timezone=parsed_timezone,
                 address_city=parsed_city,
                 address_state=parsed_state,
-                phone=_normalize_phone_with_country(
-                    parsed.get("phone"),
-                    parsed_country,
-                ),
+                phone=parsed_phone,
                 website_links=parsed_website_links,
                 social_links=parsed_social_links,
                 address_country=parsed_country,
@@ -2103,9 +2133,12 @@ class ResumeProfileExtractor:
             )
         ):
             resolved_state = normalized_inferred_state
+        if not resolved_country:
+            resolved_country = _infer_country_from_state(resolved_state)
         if not resolved_timezone:
             resolved_timezone = explicit_timezone or _infer_timezone_from_location(
                 country=resolved_country,
+                state=resolved_state,
                 city=resolved_city,
             )
 
@@ -2169,6 +2202,10 @@ class ResumeProfileExtractor:
             country=country,
             timezone=self._extract_timezone(snippet),
         )
+        phone = _normalize_phone_with_country(
+            phone_match.group(0) if phone_match else None,
+            country,
+        )
         linkedin_profile_key = _linkedin_profile_key(linkedin_url)
         if linkedin_profile_key:
             website_links = [
@@ -2212,10 +2249,7 @@ class ResumeProfileExtractor:
             address_state=state,
             github_username=github_username,
             linkedin_url=linkedin_url,
-            phone=_normalize_phone_with_country(
-                phone_match.group(0) if phone_match else None,
-                country,
-            ),
+            phone=phone,
             website_links=website_links,
             social_links=social_links,
             address_country=country,

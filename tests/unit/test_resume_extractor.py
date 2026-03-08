@@ -7,6 +7,7 @@ import pytest
 from five08.resume_extractor import _coerce_email_list
 from five08.resume_extractor import _infer_timezone_from_location
 from five08.resume_extractor import _normalize_name_part
+from five08.resume_extractor import _normalize_phone_with_country
 from five08.resume_extractor import _normalize_website_url
 from five08.resume_extractor import ResumeProfileExtractor
 
@@ -1030,6 +1031,47 @@ def test_normalize_name_part_preserves_non_uppercase_casing() -> None:
     assert _normalize_name_part("mcdonald") == "mcdonald"
 
 
+def test_resolve_location_fields_parses_inline_state_and_infers_country() -> None:
+    extractor = ResumeProfileExtractor(api_key=None)
+
+    city, state, country, timezone = extractor._resolve_location_fields(
+        resume_text="",
+        city=None,
+        state=None,
+        country=None,
+        timezone=None,
+        current_location_raw="San Jose, CA",
+    )
+
+    assert city == "San Jose"
+    assert state == "California"
+    assert country == "United States"
+    assert timezone == "UTC-08:00"
+
+
+def test_resolve_location_fields_keeps_explicit_country() -> None:
+    extractor = ResumeProfileExtractor(api_key=None)
+
+    city, state, country, timezone = extractor._resolve_location_fields(
+        resume_text="",
+        city="San Jose",
+        state="California",
+        country="Canada",
+        timezone=None,
+    )
+
+    assert city == "San Jose"
+    assert state == "California"
+    assert country == "Canada"
+    assert timezone == "UTC-08:00"
+
+
+def test_normalize_phone_with_country_keeps_existing_nanp_prefix() -> None:
+    assert (
+        _normalize_phone_with_country("16505211960", "United States") == "+16505211960"
+    )
+
+
 def test_infer_timezone_known_country() -> None:
     assert _infer_timezone_from_location(country="India") == "UTC+05:30"
 
@@ -1058,6 +1100,24 @@ def test_infer_timezone_city_takes_precedence_over_country() -> None:
     assert (
         _infer_timezone_from_location(country="United States", city="San Francisco")
         == "UTC-08:00"
+    )
+
+
+def test_infer_timezone_known_state() -> None:
+    assert (
+        _infer_timezone_from_location(country="United States", state="California")
+        == "UTC-08:00"
+    )
+
+
+def test_infer_timezone_city_takes_precedence_over_state() -> None:
+    assert (
+        _infer_timezone_from_location(
+            country="United States",
+            state="California",
+            city="New York",
+        )
+        == "UTC-05:00"
     )
 
 

@@ -493,6 +493,14 @@ def normalize_country(value: Any) -> str | None:
 def normalize_state(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
+    compact_abbreviation = re.sub(r"[^A-Za-z]", "", value).upper()
+    if compact_abbreviation:
+        us_state = _US_STATE_ABBREVIATIONS.get(compact_abbreviation)
+        if us_state:
+            return us_state
+        canada_province = _CANADA_PROVINCE_ABBREVIATIONS.get(compact_abbreviation)
+        if canada_province:
+            return canada_province
     normalized = _normalize_location_text(value)
     if not normalized:
         return None

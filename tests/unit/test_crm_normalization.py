@@ -64,8 +64,10 @@ def test_normalize_country_and_city() -> None:
         is None
     )
     assert normalize_state("CA") == "California"
+    assert normalize_state(" C.A. ") == "California"
     assert normalize_state("BC") == "British Columbia"
     assert normalize_state("Ontario") == "Ontario"
+    assert normalize_state("  ny  ") == "New York"
     assert normalize_state("Kaohsiung City") == "Kaohsiung City"
     assert normalize_state("台北市") == "台北市"
     assert normalize_state("JavaScript") is None
