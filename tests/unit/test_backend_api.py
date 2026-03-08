@@ -209,7 +209,9 @@ def test_resume_extract_handler_enqueues_job(
     assert payload["contact_id"] == "c-1"
     assert payload["attachment_id"] == "a-1"
     call_kwargs = mock_enqueue.call_args.kwargs
-    assert call_kwargs["idempotency_key"] == "resume-extract:c-1:a-1:v7:gpt-test"
+    assert call_kwargs["idempotency_key"].startswith(
+        "resume-extract:c-1:a-1:v7:gpt-test:"
+    )
 
 
 def test_resume_apply_handler_enqueues_job(

@@ -1130,6 +1130,19 @@ def test_extract_header_location_supports_city_region_without_country() -> None:
     assert country is None
 
 
+def test_extract_header_location_ignores_unicode_bullet_trailing_text() -> None:
+    """Header parsing should recover location before OCR-style bullet text."""
+    city, state, country = ResumeProfileExtractor._extract_header_location(
+        "Jane Doe\n"
+        "Toronto, Ontario ○ A Python Django API handles account creation and management, and applies\n"
+        "jane@example.com"
+    )
+
+    assert city == "Toronto"
+    assert state == "Ontario"
+    assert country is None
+
+
 def test_extract_location_uses_current_role_location_when_header_missing() -> None:
     """Current-role location lines should backfill address fields and timezone."""
     extractor = ResumeProfileExtractor(api_key=None)

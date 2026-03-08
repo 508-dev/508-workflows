@@ -619,9 +619,10 @@ async def resume_extract_handler(request: Request) -> JSONResponse:
 
     queue = request.app.state.queue
     model_name = _resume_extract_model_name()
+    manual_nonce = datetime.now(tz=timezone.utc).isoformat()
     idempotency_key = (
         f"resume-extract:{payload.contact_id}:{payload.attachment_id}:"
-        f"{settings.resume_extractor_version}:{model_name}"
+        f"{settings.resume_extractor_version}:{model_name}:{manual_nonce}"
     )
     job = await asyncio.to_thread(
         enqueue_job,
