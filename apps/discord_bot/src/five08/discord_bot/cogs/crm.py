@@ -1102,7 +1102,9 @@ class ResumeUpdateConfirmationView(discord.ui.View):
     _APPLIED_FIELD_TOTAL_LIMIT = 900
 
     _FIELD_LABELS: dict[str, str] = {
-        "emailAddressData": "Email Addresses",
+        "emailAddress": "Email Address",
+        "emailAddressData": "Email Address",
+        "cRoles": "Roles",
         "cGitHubUsername": "GitHub",
         "phoneNumber": "Phone",
         "skills": "Skills",
@@ -1258,9 +1260,140 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         return {str(key): item_value for key, item_value in candidate.items()}
 
     @classmethod
+    def _parse_json_like_sequence(cls, value: Any) -> list[Any] | None:
+        if not isinstance(value, str):
+            return None
+        raw = value.strip()
+        if not raw:
+            return None
+        if raw[0] not in "[({" or raw[-1] not in "])}":
+            return None
+        for parser in (json.loads, ast.literal_eval):
+            try:
+                candidate = parser(raw)
+            except Exception:
+                continue
+            if isinstance(candidate, (list, tuple, set)):
+                return list(candidate)
+            if isinstance(candidate, dict):
+                return list(candidate.keys())
+        return None
+
+    @classmethod
+    def _format_roles_value(cls, value: Any) -> str:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        values: list[Any]
+
+        if isinstance(value, str):
+            parsed = cls._parse_json_like_sequence(value)
+            if parsed is not None:
+                values = parsed
+            else:
+                raw_values = [item.strip() for item in value.split(",") if item.strip()]
+                values = raw_values
+        elif value is None:
+            return "None"
+        elif isinstance(value, dict):
+            values = list(value.keys())
+        elif isinstance(value, (list, tuple, set)):
+            values = list(value)
+        else:
+            values = [value]
+
+        for role in values:
+            text = str(role).strip()
+            if not text:
+                continue
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(text)
+        return ", ".join(normalized) if normalized else "None"
+
+    @classmethod
+    def _format_email_addresses_value(cls, value: Any) -> str:
+        if value is None:
+            return "None"
+
+        items: list[Any]
+        if isinstance(value, (list, tuple, set)):
+            items = list(value)
+        elif isinstance(value, dict):
+            items = [value]
+        elif isinstance(value, str):
+            parsed = cls._parse_json_like_sequence(value)
+            if parsed is not None:
+                items = parsed
+            else:
+                items = [value]
+        else:
+            items = [value]
+
+        if not items:
+            return "None"
+
+        ordered: list[tuple[str, bool]] = []
+        seen: set[str] = set()
+        for item in items:
+            email: str | None = None
+            is_primary = False
+            if isinstance(item, dict):
+                email = (
+                    item.get("emailAddress")
+                    or item.get("email")
+                    or item.get("email_address")
+                )
+                if not email:
+                    lower_email = item.get("lower")
+                    if isinstance(lower_email, str):
+                        email = lower_email
+                raw_primary = item.get("primary", False)
+                if isinstance(raw_primary, str):
+                    is_primary = raw_primary.strip().casefold() in {
+                        "true",
+                        "1",
+                        "yes",
+                        "y",
+                    }
+                else:
+                    is_primary = bool(raw_primary)
+            else:
+                email = str(item).strip() if item is not None else None
+
+            if not email:
+                continue
+            normalized = email.strip()
+            key = normalized.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            ordered.append((normalized, is_primary))
+
+        if not ordered:
+            return "None"
+
+        ordered.sort(key=lambda item: (not item[1],))
+        values = [value for value, _ in ordered]
+        if len(values) == 1:
+            return values[0]
+        return f"[{', '.join(values)}]"
+
+    @classmethod
     def _format_field_value(cls, field: str, value: Any) -> str:
         if value is None:
             return "None"
+
+        if field in {"emailAddress", "emailAddressData"}:
+            return cls._truncate_embed_field(
+                cls._format_email_addresses_value(value), cls._APPLIED_VALUE_LIMIT
+            )
+
+        if field == "cRoles":
+            return cls._truncate_embed_field(
+                cls._format_roles_value(value), cls._APPLIED_VALUE_LIMIT
+            )
 
         if field == "cGitHubUsername":
             username = str(value).strip().lstrip("@")
@@ -2782,12 +2915,16 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     else str(change.get("label", "Field"))
                 )
                 current = truncate_preview_value(
-                    str(change.get("current", "None")),
+                    ResumeUpdateConfirmationView._format_field_value(
+                        field_name, change.get("current", "None")
+                    ),
                     field_name=field_name,
                     label=label,
                 )
                 proposed = truncate_preview_value(
-                    str(change.get("proposed", "")),
+                    ResumeUpdateConfirmationView._format_field_value(
+                        field_name, change.get("proposed", "")
+                    ),
                     field_name=field_name,
                     label=label,
                 )
