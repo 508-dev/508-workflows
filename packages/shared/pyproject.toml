@@ -7,6 +7,7 @@ dependencies = [
     "pydantic~=2.10",
     "pydantic-settings~=2.8",
     "pymupdf>=1.26.5",
+    "python-docx>=1.2.0",
     "psycopg[binary]>=3.2.5",
     "redis>=6.4.0",
     "sentry-sdk>=2.30.0",

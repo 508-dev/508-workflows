@@ -27,23 +27,34 @@ def extract_document_text(content: bytes, *, filename: str | None) -> str:
 
 
 def _extract_docx_text(content: bytes) -> str:
-    from docx import Document
+    try:
+        from docx import Document
+    except ModuleNotFoundError as exc:
+        raise ValueError(
+            "python-docx is required to extract text from .docx files; "
+            "please install the 'python-docx' package."
+        ) from exc
 
-    document = Document(io.BytesIO(content))
-    chunks: list[str] = []
+    try:
+        document = Document(io.BytesIO(content))
+        chunks: list[str] = []
 
-    for paragraph in document.paragraphs:
-        text = paragraph.text.strip()
-        if text:
-            chunks.append(text)
+        for paragraph in document.paragraphs:
+            text = paragraph.text.strip()
+            if text:
+                chunks.append(text)
 
-    for table in document.tables:
-        for row in table.rows:
-            row_cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
-            if row_cells:
-                chunks.append(" | ".join(row_cells))
+        for table in document.tables:
+            for row in table.rows:
+                row_cells = [
+                    cell.text.strip() for cell in row.cells if cell.text.strip()
+                ]
+                if row_cells:
+                    chunks.append(" | ".join(row_cells))
 
-    return "\n".join(chunks)
+        return "\n".join(chunks)
+    except Exception as exc:
+        raise ValueError("Failed to extract text from DOCX document.") from exc
 
 
 def _extract_doc_text(content: bytes) -> str:

@@ -652,6 +652,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pymupdf" },
+    { name = "python-docx" },
     { name = "redis" },
     { name = "sentry-sdk" },
 ]
@@ -662,6 +663,7 @@ requires-dist = [
     { name = "pydantic", specifier = "~=2.10" },
     { name = "pydantic-settings", specifier = "~=2.8" },
     { name = "pymupdf", specifier = ">=1.26.5" },
+    { name = "python-docx", specifier = ">=1.2.0" },
     { name = "redis", specifier = ">=6.4.0" },
     { name = "sentry-sdk", specifier = ">=2.30.0" },
 ]
