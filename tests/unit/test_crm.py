@@ -694,6 +694,71 @@ class TestCRMCog:
         assert "python (3), go (2)" in proposed_field.value
         assert "→" in proposed_field.value
 
+    def test_resume_preview_embed_includes_debug_field(self, crm_cog):
+        """Preview embeds should point operators at the raw extraction payload."""
+        embed, _ = crm_cog._build_resume_preview_embed(
+            contact_id="contact-1",
+            contact_name="Test User",
+            result={
+                "proposed_changes": [],
+                "extracted_profile": {
+                    "source": "gpt-5-mini",
+                    "confidence": 0.83,
+                    "raw_llm_output": '{"address_city":"Berlin"}',
+                    "raw_llm_json": {"address_city": "Berlin"},
+                    "llm_fallback_reason": "ValueError: normalized with fallback",
+                    "current_title": "Founding Engineer",
+                    "recent_titles": ["Founding Engineer", "Software Engineer"],
+                    "current_location_raw": "Berlin, Germany",
+                    "current_location_source": "current_role",
+                    "current_location_evidence": (
+                        "Founding Engineer | Berlin, Germany | 2024-Present"
+                    ),
+                    "role_rationale": "Engineering titles indicate a developer profile.",
+                },
+            },
+            link_member=None,
+        )
+
+        debug_field = next(field for field in embed.fields if field.name == "Debug")
+        assert "resume-extract-debug.json" in debug_field.value
+        assert "Fallback:" in debug_field.value
+        evidence_field = next(
+            field for field in embed.fields if field.name == "Inference Evidence"
+        )
+        assert "Founding Engineer" in evidence_field.value
+        assert "Berlin, Germany" in evidence_field.value
+        assert "current role" in evidence_field.value
+        assert "developer profile" in evidence_field.value
+
+    def test_build_resume_extract_debug_file_serializes_raw_payload(self, crm_cog):
+        """The debug attachment should include raw and normalized extraction payloads."""
+        debug_file = crm_cog._build_resume_extract_debug_file(
+            contact_id="contact-1",
+            contact_name="Test User",
+            attachment_id="att-1",
+            filename="resume.pdf",
+            result={
+                "success": True,
+                "proposed_updates": {"addressCountry": "Germany"},
+                "proposed_changes": [{"field": "addressCountry"}],
+                "extracted_profile": {
+                    "source": "gpt-5-mini",
+                    "confidence": 0.83,
+                    "raw_llm_output": '{"address_city":"Berlin"}',
+                    "raw_llm_json": {"address_city": "Berlin"},
+                    "address_city": "Berlin",
+                    "address_country": "Germany",
+                },
+            },
+        )
+
+        payload = json.loads(debug_file.fp.getvalue().decode("utf-8"))
+        assert debug_file.filename == "resume-extract-debug.json"
+        assert payload["raw_llm_output"] == '{"address_city":"Berlin"}'
+        assert payload["raw_llm_json"]["address_city"] == "Berlin"
+        assert payload["normalized_extracted_profile"]["address_country"] == "Germany"
+
     @pytest.mark.asyncio
     async def test_edit_websites_button_callback_opens_modal(
         self, crm_cog, mock_interaction
