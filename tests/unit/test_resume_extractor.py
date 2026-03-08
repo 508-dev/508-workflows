@@ -934,6 +934,15 @@ def test_extract_roles_infers_generic_engineering_titles_as_developer() -> None:
     assert "developer" in roles
 
 
+def test_extract_roles_does_not_treat_non_software_engineer_as_developer() -> None:
+    """Non-software engineer titles should not default into the developer bucket."""
+    roles = ResumeProfileExtractor._extract_roles(
+        "Experience\nMechanical Engineer at Example Inc\nDesigned HVAC systems"
+    )
+
+    assert "developer" not in roles
+
+
 def test_extract_roles_ignores_collaboration_narrative_false_positive() -> None:
     """Narrative collaborator mentions should not infer candidate role."""
     roles = ResumeProfileExtractor._infer_roles_from_resume(
@@ -1058,3 +1067,15 @@ def test_extract_location_uses_current_role_location_when_header_missing() -> No
     assert result.address_state is None
     assert result.address_country == "Germany"
     assert result.timezone == "UTC+01:00"
+
+
+def test_extract_does_not_backfill_ambiguous_city_without_country() -> None:
+    """City-only hints should not invent state/country/timezone for ambiguous cities."""
+    extractor = ResumeProfileExtractor(api_key=None)
+
+    result = extractor.extract("Jane Doe\nAddress City: Portland\n")
+
+    assert result.address_city == "Portland"
+    assert result.address_state is None
+    assert result.address_country is None
+    assert result.timezone is None

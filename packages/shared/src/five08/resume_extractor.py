@@ -850,8 +850,6 @@ _CITY_TIMEZONE: dict[str, str] = {
     "san francisco": "UTC-08:00",
     "los angeles": "UTC-08:00",
     "seattle": "UTC-08:00",
-    "portland": "UTC-08:00",
-    "san jose": "UTC-08:00",
     "san diego": "UTC-08:00",
     # US Mountain
     "denver": "UTC-07:00",
@@ -868,7 +866,6 @@ _CITY_TIMEZONE: dict[str, str] = {
     "boston": "UTC-05:00",
     "atlanta": "UTC-05:00",
     "miami": "UTC-05:00",
-    "washington": "UTC-05:00",
     "philadelphia": "UTC-05:00",
     # Canada
     "toronto": "UTC-05:00",
@@ -898,8 +895,6 @@ _CITY_REGION_HINTS: dict[str, tuple[str | None, str | None]] = {
     "san francisco": ("California", "United States"),
     "los angeles": ("California", "United States"),
     "seattle": ("Washington", "United States"),
-    "portland": ("Oregon", "United States"),
-    "san jose": ("California", "United States"),
     "san diego": ("California", "United States"),
     "denver": ("Colorado", "United States"),
     "phoenix": ("Arizona", "United States"),
@@ -913,7 +908,6 @@ _CITY_REGION_HINTS: dict[str, tuple[str | None, str | None]] = {
     "boston": ("Massachusetts", "United States"),
     "atlanta": ("Georgia", "United States"),
     "miami": ("Florida", "United States"),
-    "washington": ("District Of Columbia", "United States"),
     "philadelphia": ("Pennsylvania", "United States"),
     "toronto": ("Ontario", "Canada"),
     "montreal": ("Quebec", "Canada"),
@@ -2086,11 +2080,25 @@ class ResumeProfileExtractor:
                 or current_country
             )
 
-        inferred_state, inferred_country = _infer_region_from_city(resolved_city)
-        if not resolved_state and inferred_state:
-            resolved_state = inferred_state
-        if not resolved_country and inferred_country:
-            resolved_country = inferred_country
+        if resolved_city:
+            inferred_state, inferred_country = _infer_region_from_city(resolved_city)
+        else:
+            inferred_state, inferred_country = (None, None)
+
+        normalized_resolved_country = _normalize_country(resolved_country)
+        normalized_inferred_country = _normalize_country(inferred_country)
+        normalized_inferred_state = _normalize_state(inferred_state)
+
+        if (
+            not resolved_state
+            and normalized_resolved_country
+            and normalized_inferred_state
+            and (
+                normalized_inferred_country is None
+                or normalized_inferred_country == normalized_resolved_country
+            )
+        ):
+            resolved_state = normalized_inferred_state
         if not resolved_timezone:
             resolved_timezone = explicit_timezone or _infer_timezone_from_location(
                 country=resolved_country,
@@ -2798,7 +2806,7 @@ class ResumeProfileExtractor:
             r"founding engineer|solutions engineer|qa engineer|test engineer|"
             r"application engineer|software consultant|full[- ]?stack developer|"
             r"frontend developer|backend developer|mobile engineer|ios engineer|"
-            r"android engineer|\bengineer\b"
+            r"android engineer"
             r")\b",
             lower_text,
         ):
