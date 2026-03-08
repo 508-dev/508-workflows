@@ -3,7 +3,7 @@
 import logging
 from typing import Any
 
-from five08.clients.espo import EspoAPI, EspoAPIError
+from five08.clients.espo import EspoAPIError, EspoClient
 from five08.skills import normalize_skill
 from five08.worker.config import settings
 from five08.worker.crm.document_processor import DocumentProcessor
@@ -17,8 +17,7 @@ class EspoCRMClient:
     """Contact-centric Espo helper backed by shared five08 client."""
 
     def __init__(self) -> None:
-        api_url = settings.espo_base_url.rstrip("/") + "/api/v1"
-        self.api = EspoAPI(api_url, settings.espo_api_key)
+        self.api = EspoClient(settings.espo_base_url, settings.espo_api_key)
         self.skills_extractor = SkillsExtractor()
 
     def get_contact(self, contact_id: str) -> ContactData:

@@ -7,15 +7,13 @@ It allows team members to quickly access CRM data without leaving Discord.
 
 import asyncio
 import ast
-import html
 import io
 import json
 import logging
-from collections import OrderedDict
 from datetime import date, datetime, timezone
 import re
 from typing import Any, Literal
-from urllib.parse import urlsplit
+from uuid import uuid4
 
 import aiohttp
 import discord
@@ -24,35 +22,25 @@ from discord.ext import commands
 
 from five08.discord_bot.config import settings
 from five08.clients import espo
-from five08.skills import normalize_skill_list
+from five08.skills import normalize_skill, normalize_skill_list
 from five08.resume_extractor import (
     ResumeExtractedProfile,
     ResumeProfileExtractor,
     is_reserved_resume_name_token,
     normalize_resume_name_token,
 )
-from five08.discord_bot.utils.audit import DiscordAuditLogger
+from five08.discord_bot.utils.audit import DiscordAuditCogMixin
 from five08.discord_bot.utils.role_decorators import (
     require_role,
     check_user_roles_with_hierarchy,
 )
 from five08.job_match import (
-    extract_job_requirements,
-    DISCORD_ROLES_EXCLUDE_FROM_SYNC,
     DISCORD_ROLES_NEVER_SUGGEST,
     suggest_technical_discord_roles,
     suggest_locality_discord_roles,
 )
-from five08.candidate_search import search_candidates
 from five08.audit import (
-    update_person_discord_roles,
-    upsert_discord_member,
     get_discord_user_id_for_contact,
-)
-from five08.job_channels import (
-    list_registered_job_post_channels,
-    register_job_post_channel,
-    unregister_job_post_channel,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,41 +60,9 @@ ONBOARDER_FIELD_CANDIDATES = (
 EXCLUDED_ONBOARDING_STATES = frozenset({"onboarded", "waitlist", "rejected"})
 ONBOARDING_QUEUE_MAX_SIZE = 200
 ONBOARDING_QUEUE_PAGE_SIZE = 1
-MATCH_CANDIDATES_MAX_ATTACHMENT_SCAN = 5
-MATCH_CANDIDATES_MAX_LINK_SCAN = 3
-MATCH_CANDIDATES_MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
-MATCH_CANDIDATES_MAX_ATTACHMENT_TEXT_CHARS = 10000
-MATCH_CANDIDATES_MAX_LINK_TEXT_CHARS = 12000
-MATCH_CANDIDATES_MAX_POSTING_CHARS = 36000
-MATCH_CANDIDATES_SUPPORTED_ATTACHMENT_EXTENSIONS = frozenset(
-    {".txt", ".md", ".pdf", ".doc", ".docx", ".html", ".htm", ".rtf"}
-)
-MATCH_CANDIDATES_URL_PATTERN = re.compile(r"(?i)\bhttps?://[^\s<>()\[\]\"']+")
-MATCH_CANDIDATES_JD_URL_HINTS = (
-    "job",
-    "jobs",
-    "jd",
-    "job-description",
-    "position",
-    "role",
-    "career",
-    "careers",
-    "hiring",
-    "greenhouse.io",
-    "lever.co",
-    "ashbyhq.com",
-    "workable.com",
-    "smartrecruiters.com",
-    "linkedin.com/jobs",
-    "docs.google.com/document",
-    "notion.site",
-)
-AUTO_MATCH_DEDUPE_MAX = 10_000
-# Exclude known-bad resume artifact from auto-match rendering.
-AUTO_MATCH_EXCLUDED_RESUME_NAMES = frozenset({"Vladyslav_Stryzhak.pdf"})
-EspoAPI = espo.EspoAPI
+EspoClient = espo.EspoClient
+EspoAPI = EspoClient
 EspoAPIError = espo.EspoAPIError
-JobWatchChannel = discord.TextChannel | discord.ForumChannel
 
 
 def _configured_linkedin_field_from_settings() -> str:
@@ -249,94 +205,6 @@ class ResumeDownloadButton(discord.ui.Button[discord.ui.View]):
                     resource_type="discord_ui_action",
                     resource_id=self.resume_id,
                 )
-            await interaction.followup.send(
-                "❌ An unexpected error occurred while downloading the resume."
-            )
-
-
-class MatchResumeSelectView(discord.ui.View):
-    """View containing a resume download select for match results."""
-
-    def __init__(self, options: list[tuple[str, str, str]]) -> None:
-        super().__init__(timeout=600)  # 10 minute timeout
-        self.add_item(MatchResumeSelect(options))
-
-
-class MatchResumeSelect(discord.ui.Select):
-    """Select menu for downloading a resume from match results."""
-
-    def __init__(self, options: list[tuple[str, str, str]]) -> None:
-        discord_options: list[discord.SelectOption] = []
-        self._resume_lookup: dict[str, str] = {}
-
-        for contact_name, resume_id, resume_name in options[:25]:
-            label = contact_name.strip() or "Unknown"
-            if len(label) > 100:
-                label = label[:97] + "..."
-            description = resume_name.strip() or "Resume"
-            if len(description) > 100:
-                description = description[:97] + "..."
-            discord_options.append(
-                discord.SelectOption(
-                    label=label,
-                    value=resume_id,
-                    description=description,
-                )
-            )
-            self._resume_lookup[resume_id] = contact_name
-
-        super().__init__(
-            placeholder="Download a resume...",
-            min_values=1,
-            max_values=1,
-            options=discord_options,
-            custom_id="match_resume_select",
-        )
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        try:
-            cog = interaction.client.get_cog("CRMCog")  # type: ignore[attr-defined]
-            if not cog:
-                await interaction.response.send_message(
-                    "❌ CRM functionality not available.", ephemeral=True
-                )
-                return
-
-            resume_id = self.values[0]
-            contact_name = self._resume_lookup.get(resume_id, "Unknown")
-
-            await interaction.response.defer(ephemeral=True)
-
-            download_ok = await cog._download_and_send_resume(
-                interaction, contact_name, resume_id
-            )
-            try:
-                cog._audit_command(
-                    interaction=interaction,
-                    action="crm.match_candidates_resume_select",
-                    result="success" if download_ok else "error",
-                    metadata={"contact_name": contact_name},
-                    resource_type="crm_contact",
-                    resource_id=resume_id,
-                )
-            except Exception as audit_exc:
-                logger.error("Audit write failed in match resume select: %s", audit_exc)
-        except Exception as exc:
-            logger.error("Unexpected error in match resume select: %s", exc)
-            if "cog" in locals() and cog:
-                try:
-                    cog._audit_command(
-                        interaction=interaction,
-                        action="crm.match_candidates_resume_select",
-                        result="error",
-                        metadata={"error": str(exc)},
-                        resource_type="discord_ui_action",
-                        resource_id=self.values[0] if self.values else None,
-                    )
-                except Exception as audit_exc:
-                    logger.error(
-                        "Audit write failed in match resume select: %s", audit_exc
-                    )
             await interaction.followup.send(
                 "❌ An unexpected error occurred while downloading the resume."
             )
@@ -928,6 +796,215 @@ class ResumeEditSocialLinksModal(discord.ui.Modal, title="Edit Social Links"):
         )
 
 
+class ResumeEditSkillsModal(discord.ui.Modal, title="Edit Skills"):
+    """Modal for editing proposed skills before confirmation."""
+
+    skills_input: discord.ui.TextInput = discord.ui.TextInput(
+        label="Skills (one per line, optional :strength)",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=1000,
+    )
+
+    def __init__(self, *, confirmation_view: "ResumeUpdateConfirmationView") -> None:
+        super().__init__()
+        self.confirmation_view = confirmation_view
+        default_lines = self._build_default_lines()
+        default_text = "\n".join(default_lines)
+        max_length = self.skills_input.max_length
+        if max_length:
+            default_text = default_text[:max_length]
+        self.skills_input.default = default_text
+
+    def _build_default_lines(self) -> list[str]:
+        skills = self.confirmation_view._normalize_skills_value(
+            self.confirmation_view.proposed_updates.get("skills")
+        )
+        strengths = self.confirmation_view._parse_skill_strengths(
+            self.confirmation_view.proposed_updates.get("cSkillAttrs")
+        )
+        lines: list[str] = []
+        seen: set[str] = set()
+        for skill in skills:
+            key = skill.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            strength = strengths.get(key)
+            if strength is not None:
+                lines.append(f"{skill}: {strength}")
+            else:
+                lines.append(skill)
+        for key, strength in strengths.items():
+            if key in seen:
+                continue
+            lines.append(f"{key}: {strength}")
+        return lines
+
+    def _parse_skill_lines(self, raw: str) -> tuple[list[str], dict[str, int]]:
+        line_tokens = [line.strip() for line in raw.splitlines() if line.strip()]
+        flattened = ", ".join(line_tokens)
+        parsed_skills, requested_strengths, _invalid = (
+            self.confirmation_view.crm_cog._parse_skill_updates(flattened)
+        )
+        return parsed_skills, requested_strengths
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        raw = self.skills_input.value or ""
+        requested_skills, requested_strengths = self._parse_skill_lines(raw)
+
+        if not requested_skills and not requested_strengths:
+            self.confirmation_view.proposed_updates.pop("skills", None)
+            self.confirmation_view.proposed_updates.pop("cSkillAttrs", None)
+            await interaction.response.send_message(
+                "✅ Skills updates cleared. Click **Confirm Updates** to apply.",
+                ephemeral=True,
+            )
+            return
+
+        final_skills = requested_skills
+
+        current_strengths = self.confirmation_view._parse_skill_strengths(
+            self.confirmation_view.proposed_updates.get("cSkillAttrs")
+        )
+        final_strengths: dict[str, int] = {}
+        for skill in final_skills:
+            key = skill.casefold()
+            strength = requested_strengths.get(key)
+            if strength is None:
+                strength = current_strengths.get(key)
+            if strength is not None:
+                final_strengths[key] = strength
+
+        if final_skills:
+            self.confirmation_view.proposed_updates["skills"] = final_skills
+        else:
+            self.confirmation_view.proposed_updates.pop("skills", None)
+
+        if final_strengths:
+            self.confirmation_view.proposed_updates["cSkillAttrs"] = (
+                self.confirmation_view.crm_cog._serialize_skill_attrs(final_strengths)
+            )
+        else:
+            self.confirmation_view.proposed_updates.pop("cSkillAttrs", None)
+
+        count = len(final_skills)
+        await interaction.response.send_message(
+            f"✅ Skills updated to {count} skill{'s' if count != 1 else ''}. "
+            "Click **Confirm Updates** to apply.",
+            ephemeral=True,
+        )
+
+
+class ResumeEditLocationModal(discord.ui.Modal, title="Edit Location"):
+    """Modal for editing proposed location fields before confirmation."""
+
+    city_input: discord.ui.TextInput = discord.ui.TextInput(
+        label="City",
+        required=False,
+        max_length=100,
+    )
+    state_input: discord.ui.TextInput = discord.ui.TextInput(
+        label="State / Region",
+        required=False,
+        max_length=100,
+    )
+    country_input: discord.ui.TextInput = discord.ui.TextInput(
+        label="Country",
+        required=False,
+        max_length=100,
+    )
+    timezone_input: discord.ui.TextInput = discord.ui.TextInput(
+        label="Timezone",
+        required=False,
+        max_length=100,
+    )
+
+    def __init__(self, *, confirmation_view: "ResumeUpdateConfirmationView") -> None:
+        super().__init__()
+        self.confirmation_view = confirmation_view
+        self.city_input.default = str(
+            confirmation_view.proposed_updates.get("addressCity") or ""
+        ).strip()
+        self.state_input.default = str(
+            confirmation_view.proposed_updates.get("addressState") or ""
+        ).strip()
+        self.country_input.default = str(
+            confirmation_view.proposed_updates.get("addressCountry") or ""
+        ).strip()
+        self.timezone_input.default = str(
+            confirmation_view.proposed_updates.get("cTimezone") or ""
+        ).strip()
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        from five08.crm_normalization import (
+            normalize_city,
+            normalize_country,
+            normalize_state,
+            normalize_timezone,
+        )
+
+        raw_city = (self.city_input.value or "").strip()
+        raw_state = (self.state_input.value or "").strip()
+        raw_country = (self.country_input.value or "").strip()
+        raw_timezone = (self.timezone_input.value or "").strip()
+
+        city = normalize_city(raw_city) if raw_city else None
+        state = normalize_state(raw_state) if raw_state else None
+        country = normalize_country(raw_country) if raw_country else None
+        timezone = normalize_timezone(raw_timezone) if raw_timezone else None
+        if raw_timezone and not timezone:
+            timezone = self.confirmation_view.crm_cog._LOCATION_TIMEZONE_ABBREV_MAP.get(
+                raw_timezone.upper()
+            )
+
+        invalid_fields: list[str] = []
+        if raw_city and not city:
+            invalid_fields.append("City")
+        if raw_state and not state:
+            invalid_fields.append("State / Region")
+        if raw_country and not country:
+            invalid_fields.append("Country")
+        if raw_timezone and not timezone:
+            invalid_fields.append("Timezone")
+
+        if invalid_fields:
+            invalid_list = ", ".join(f"`{field}`" for field in invalid_fields)
+            await interaction.response.send_message(
+                f"❌ Invalid location fields: {invalid_list}.",
+                ephemeral=True,
+            )
+            return
+
+        updates = self.confirmation_view.proposed_updates
+        if city:
+            updates["addressCity"] = city
+        else:
+            updates.pop("addressCity", None)
+        if state:
+            updates["addressState"] = state
+        else:
+            updates.pop("addressState", None)
+        if country:
+            updates["addressCountry"] = country
+        else:
+            updates.pop("addressCountry", None)
+        if timezone:
+            updates["cTimezone"] = timezone
+        else:
+            updates.pop("cTimezone", None)
+
+        summary = self.confirmation_view._format_location_summary(updates)
+        if summary == "None":
+            message = "✅ Location updates cleared. Click **Confirm Updates** to apply."
+        else:
+            message = (
+                f"✅ Location updated to `{summary}`. "
+                "Click **Confirm Updates** to apply."
+            )
+        await interaction.response.send_message(message, ephemeral=True)
+
+
 class ResumeEditWebsitesButton(discord.ui.Button["ResumeUpdateConfirmationView"]):
     """Button that opens the Edit Websites modal."""
 
@@ -972,6 +1049,50 @@ class ResumeEditSocialLinksButton(discord.ui.Button["ResumeUpdateConfirmationVie
         )
 
 
+class ResumeEditSkillsButton(discord.ui.Button["ResumeUpdateConfirmationView"]):
+    """Button that opens the Edit Skills modal."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            label="Edit Skills",
+            style=discord.ButtonStyle.secondary,
+            custom_id="resume_edit_skills",
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if not isinstance(view, ResumeUpdateConfirmationView):
+            await interaction.response.send_message(
+                "❌ Unable to edit skills.", ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(
+            ResumeEditSkillsModal(confirmation_view=view)
+        )
+
+
+class ResumeEditLocationButton(discord.ui.Button["ResumeUpdateConfirmationView"]):
+    """Button that opens the Edit Location modal."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            label="Edit Location",
+            style=discord.ButtonStyle.secondary,
+            custom_id="resume_edit_location",
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if not isinstance(view, ResumeUpdateConfirmationView):
+            await interaction.response.send_message(
+                "❌ Unable to edit location.", ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(
+            ResumeEditLocationModal(confirmation_view=view)
+        )
+
+
 class ResumeUpdateConfirmationView(discord.ui.View):
     """Confirm extracted profile updates before writing to CRM."""
 
@@ -988,9 +1109,17 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         "cWebsiteLink": "Website",
         "cSocialLinks": "Social Links",
         "cSeniority": "Seniority",
+        "addressCity": "City",
+        "addressState": "State",
+        "addressCountry": "Country",
+        "cTimezone": "Timezone",
+        "location": "Location",
         "cDiscordUserID": "Discord User ID",
         "cDiscordUsername": "Discord Username",
     }
+    _LOCATION_FIELDS = frozenset(
+        {"addressCity", "addressState", "addressCountry", "cTimezone"}
+    )
 
     def __init__(
         self,
@@ -1024,11 +1153,47 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             self.add_item(ResumeEditWebsitesButton())
         if proposed_updates.get("cSocialLinks"):
             self.add_item(ResumeEditSocialLinksButton())
+        if proposed_updates.get("skills") or proposed_updates.get("cSkillAttrs"):
+            self.add_item(ResumeEditSkillsButton())
+        self.add_item(ResumeEditLocationButton())
 
     def _set_seniority_override(self, value: str) -> str:
         self.seniority_override = value
         self.proposed_updates["cSeniority"] = value
         return _format_seniority_label(value)
+
+    @classmethod
+    def _is_location_field(cls, field: str) -> bool:
+        return field in cls._LOCATION_FIELDS
+
+    @classmethod
+    def _has_location_updates(cls, values: dict[str, Any]) -> bool:
+        return any(values.get(field) for field in cls._LOCATION_FIELDS)
+
+    @staticmethod
+    def _location_component(value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text or text.casefold() in {"none", "null"}:
+            return None
+        return text
+
+    @classmethod
+    def _format_location_summary(cls, values: dict[str, Any]) -> str:
+        city = cls._location_component(values.get("addressCity"))
+        state = cls._location_component(values.get("addressState"))
+        country = cls._location_component(values.get("addressCountry"))
+        timezone = cls._location_component(values.get("cTimezone"))
+        location_parts = [part for part in (city, state, country) if part]
+        location_value = ", ".join(location_parts)
+        if timezone:
+            return (
+                f"{location_value} (Timezone: {timezone})"
+                if location_value
+                else f"Timezone: {timezone}"
+            )
+        return location_value or "None"
 
     @classmethod
     def _field_label(cls, field: str) -> str:
@@ -1044,6 +1209,23 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         if limit <= 3:
             return value[:limit]
         return value[: limit - 3] + "..."
+
+    @staticmethod
+    def _is_link_like_field(field: str, label: str) -> bool:
+        key = f"{field} {label}".casefold()
+        return any(token in key for token in ("website", "social", "linkedin", "url"))
+
+    @staticmethod
+    def _normalize_preview_value(value: Any) -> str:
+        text = str(value).strip()
+        if not text:
+            return "None"
+
+        # Prevent Discord from parsing mentions in preview text.
+        text = text.replace("@everyone", "@\u200beveryone")
+        text = text.replace("@here", "@\u200bhere")
+        text = text.replace("<@", "<@\u200b")
+        return text
 
     @staticmethod
     def _decode_json_like_mapping(value: Any) -> dict[str, Any] | None:
@@ -1136,6 +1318,41 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         text = str(value).strip()
         return cls._truncate_embed_field(text or "None", cls._APPLIED_VALUE_LIMIT)
 
+    @staticmethod
+    def _normalize_skills_value(value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            raw_skills = [item.strip() for item in value.split(",") if item.strip()]
+        elif isinstance(value, (list, tuple, set)):
+            raw_skills = [str(item).strip() for item in value if str(item).strip()]
+        else:
+            raw_skills = []
+        return normalize_skill_list(raw_skills)
+
+    @classmethod
+    def _parse_skill_strengths(cls, value: Any) -> dict[str, int]:
+        parsed = cls._decode_json_like_mapping(value) or {}
+        strengths: dict[str, int] = {}
+        for raw_skill, raw_payload in parsed.items():
+            normalized_skill = normalize_skill(str(raw_skill))
+            if not normalized_skill:
+                continue
+            strength_value = (
+                raw_payload.get("strength")
+                if isinstance(raw_payload, dict)
+                else raw_payload
+            )
+            if strength_value is None:
+                continue
+            try:
+                strength = int(float(strength_value))
+            except Exception:
+                continue
+            if 1 <= strength <= 5:
+                strengths[normalized_skill.casefold()] = strength
+        return strengths
+
     def _build_applied_updates_lines(
         self,
         *,
@@ -1162,13 +1379,25 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             )
             lines.append(f"**Skills**: `{truncated_combined_skills}`")
 
+        if any(self._is_location_field(field) for field in updated_fields):
+            location_values = {
+                field: updated_values.get(field, self.proposed_updates.get(field))
+                for field in self._LOCATION_FIELDS
+            }
+            lines.append(
+                f"**Location**: `{self._format_location_summary(location_values)}`"
+            )
+
         for field in self._collapse_updated_fields(updated_fields):
-            if field == "skills":
+            if field in {"skills", "location"}:
                 continue
             label = self._field_label(field)
             value = updated_values.get(field, self.proposed_updates.get(field))
             formatted = self._format_field_value(field, value)
-            lines.append(f"**{label}**: `{formatted}`")
+            if self._is_link_like_field(field, label):
+                lines.append(f"**{label}**: {self._normalize_preview_value(formatted)}")
+            else:
+                lines.append(f"**{label}**: `{formatted}`")
         return lines
 
     @classmethod
@@ -1228,13 +1457,14 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         joined = "\n".join(kept)
         return cls._truncate_embed_field(joined, cls._APPLIED_FIELD_TOTAL_LIMIT)
 
-    @staticmethod
-    def _collapse_updated_fields(updated_fields: list[str]) -> list[str]:
+    @classmethod
+    def _collapse_updated_fields(cls, updated_fields: list[str]) -> list[str]:
         """Collapse skill fields into a single logical skills entry."""
         collapsed: list[str] = []
         seen: set[str] = set()
         has_skills = "skills" in updated_fields
         has_skill_attrs = "cSkillAttrs" in updated_fields
+        has_location = any(field in cls._LOCATION_FIELDS for field in updated_fields)
 
         for field in updated_fields:
             normalized_field = field
@@ -1243,6 +1473,9 @@ class ResumeUpdateConfirmationView(discord.ui.View):
                     continue
                 if has_skill_attrs:
                     normalized_field = "skills"
+            elif field in cls._LOCATION_FIELDS:
+                if has_location:
+                    normalized_field = "location"
             key = normalized_field.casefold()
             if key in seen:
                 continue
@@ -1957,14 +2190,12 @@ class OnboardingQueuePagerView(discord.ui.View):
         await interaction.response.edit_message(embed=self._build_embed(), view=self)
 
 
-class CRMCog(commands.Cog):
+class CRMCog(DiscordAuditCogMixin, commands.Cog):
     """CRM integration cog for EspoCRM operations."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        # Construct API URL from base URL
-        api_url = settings.espo_base_url.rstrip("/") + "/api/v1"
-        self.espo_api = EspoAPI(api_url, settings.espo_api_key)
+        self.espo_api = EspoClient(settings.espo_base_url, settings.espo_api_key)
         # Store base URL for profile links
         self.base_url = settings.espo_base_url.rstrip("/")
         self.resume_extractor = ResumeProfileExtractor(
@@ -1975,16 +2206,7 @@ class CRMCog(commands.Cog):
         self._resume_profile_cache: (
             tuple[tuple[int, str], ResumeExtractedProfile] | None
         ) = None
-        self.audit_logger = DiscordAuditLogger(
-            base_url=settings.audit_api_base_url,
-            shared_secret=settings.api_shared_secret,
-            timeout_seconds=settings.audit_api_timeout_seconds,
-            discord_logs_webhook_url=settings.discord_logs_webhook_url,
-            discord_logs_webhook_wait=settings.discord_logs_webhook_wait,
-        )
-        self._jobs_channels_by_guild: dict[int, set[int]] = {}
-        self._auto_matched_thread_ids: OrderedDict[int, None] = OrderedDict()
-        self._auto_matched_thread_lock = asyncio.Lock()
+        self._init_audit_logger()
 
     @staticmethod
     def _configured_linkedin_field() -> str:
@@ -2016,324 +2238,6 @@ class CRMCog(commands.Cog):
             return text[:max_length]
 
         return text[: max_length - 1].rstrip() + "…"
-
-    def _audit_command(
-        self,
-        *,
-        interaction: discord.Interaction,
-        action: str,
-        result: str,
-        metadata: dict[str, Any] | None = None,
-        resource_type: str | None = "discord_command",
-        resource_id: str | None = None,
-    ) -> None:
-        """Queue a best-effort audit write for CRM command activity."""
-        self.audit_logger.log_command(
-            interaction=interaction,
-            action=action,
-            result=result,
-            metadata=metadata,
-            resource_type=resource_type,
-            resource_id=resource_id,
-        )
-
-    @staticmethod
-    def _resolve_jobs_channel_target(
-        interaction: discord.Interaction,
-        channel: JobWatchChannel | None,
-    ) -> JobWatchChannel | None:
-        """Resolve explicit/implicit channel target for job-post registration."""
-        if channel is not None:
-            return channel
-
-        current = interaction.channel
-        if isinstance(current, (discord.TextChannel, discord.ForumChannel)):
-            return current
-
-        if isinstance(current, discord.Thread) and isinstance(
-            current.parent, (discord.TextChannel, discord.ForumChannel)
-        ):
-            return current.parent
-
-        return None
-
-    async def _refresh_jobs_channel_cache(self, guild_id: int) -> set[int]:
-        """Load registered job-post channels for one guild from Postgres."""
-        raw_ids = await asyncio.to_thread(
-            list_registered_job_post_channels,
-            settings,
-            guild_id=str(guild_id),
-        )
-        parsed_ids: set[int] = set()
-        for raw_id in raw_ids:
-            try:
-                parsed_ids.add(int(raw_id))
-            except ValueError:
-                logger.warning(
-                    "Skipping invalid job_post_channels row guild_id=%s channel_id=%s",
-                    guild_id,
-                    raw_id,
-                )
-        self._jobs_channels_by_guild[guild_id] = parsed_ids
-        return parsed_ids
-
-    def _is_jobs_channel_registered(self, guild_id: int, channel_id: int) -> bool:
-        """Return whether a channel is registered for automatic job matching."""
-        return channel_id in self._jobs_channels_by_guild.get(guild_id, set())
-
-    async def _refresh_jobs_channel_cache_if_missing(self, guild_id: int) -> bool:
-        """Ensure guild cache is loaded, retrying after startup-load failures."""
-        if guild_id in self._jobs_channels_by_guild:
-            return True
-        try:
-            await self._refresh_jobs_channel_cache(guild_id)
-            return True
-        except Exception as exc:
-            logger.warning(
-                "Failed to refresh jobs-channel cache for guild=%s: %s",
-                guild_id,
-                exc,
-            )
-            return False
-
-    async def _mark_thread_auto_matched(self, thread_id: int) -> bool:
-        """Deduplicate automatic matching when multiple events race."""
-        async with self._auto_matched_thread_lock:
-            if thread_id in self._auto_matched_thread_ids:
-                self._auto_matched_thread_ids.move_to_end(thread_id)
-                return False
-            self._auto_matched_thread_ids[thread_id] = None
-            if len(self._auto_matched_thread_ids) > AUTO_MATCH_DEDUPE_MAX:
-                self._auto_matched_thread_ids.popitem(last=False)
-            return True
-
-    async def _unmark_thread_auto_matched(self, thread_id: int) -> None:
-        """Allow retry when a thread was marked but processing could not start."""
-        async with self._auto_matched_thread_lock:
-            self._auto_matched_thread_ids.pop(thread_id, None)
-
-    @staticmethod
-    async def _read_thread_posting(thread: discord.Thread) -> str | None:
-        """Read starter message content for a job thread, including forum tags."""
-        starter = thread.starter_message
-        if starter is None:
-            try:
-                starter = await thread.fetch_message(thread.id)
-            except Exception:
-                starter = None
-
-        if starter is None or not starter.content.strip():
-            return None
-
-        posting = starter.content
-        if thread.applied_tags:
-            tag_names = ", ".join(t.name for t in thread.applied_tags)
-            posting = f"Thread tags: {tag_names}\n\n{posting}"
-        return posting
-
-    def _render_match_candidates_messages(
-        self,
-        *,
-        requirements: Any,
-        candidates: list[Any],
-    ) -> tuple[list[str], list[tuple[str, str, str]]]:
-        """Render job-match output into Discord-sized follow-up messages."""
-        lines: list[str] = []
-        resume_options: list[tuple[str, str, str]] = []
-
-        header_parts: list[str] = []
-        if requirements.title:
-            header_parts.append(f"**{requirements.title}**")
-        if requirements.discord_role_types:
-            header_parts.append(
-                "Role: " + ", ".join(f"`{r}`" for r in requirements.discord_role_types)
-            )
-        if requirements.required_skills:
-            header_parts.append(
-                "Skills: "
-                + ", ".join(f"`{s}`" for s in requirements.required_skills[:8])
-            )
-        if requirements.seniority:
-            header_parts.append(f"Seniority: `{requirements.seniority}`")
-        if requirements.location_type == "us_only":
-            header_parts.append("📍 US only")
-        elif requirements.raw_location_text:
-            header_parts.append(f"📍 {requirements.raw_location_text}")
-
-        lines.append("## Job Match Results")
-        if header_parts:
-            lines.append(" · ".join(header_parts))
-        lines.append(f"Found **{len(candidates)}** candidate(s).\n")
-
-        crm_base = settings.espo_base_url.rstrip("/")
-
-        for i, candidate in enumerate(candidates, start=1):
-            label = "**[Member]**" if candidate.is_member else "[Prospect]"
-            name = discord.utils.escape_mentions(candidate.name or "Unknown")
-            email = discord.utils.escape_mentions(
-                candidate.email_508 or candidate.email or "—"
-            )
-            crm_link = (
-                f"{crm_base}/#Contact/view/{candidate.crm_contact_id}"
-                if candidate.has_crm_link and candidate.crm_contact_id
-                else None
-            )
-            if crm_link:
-                parts = [f"{i}. {label} [{name}](<{crm_link}>) · {email}"]
-            else:
-                parts = [f"{i}. {label} {name} · {email}"]
-                if candidate.discord_user_id:
-                    parts.append(f"Discord ID: {candidate.discord_user_id}")
-
-            if candidate.linkedin:
-                parts.append(f"[LinkedIn](<{candidate.linkedin}>)")
-            if (
-                candidate.latest_resume_id
-                and candidate.latest_resume_name
-                and candidate.latest_resume_name not in AUTO_MATCH_EXCLUDED_RESUME_NAMES
-            ):
-                parts.append(f"Resume: `{candidate.latest_resume_name}`")
-                resume_options.append(
-                    (name, candidate.latest_resume_id, candidate.latest_resume_name)
-                )
-
-            skill_info: list[str] = []
-            match_score = getattr(candidate, "match_score", None)
-            if isinstance(match_score, (int, float)):
-                skill_info.append(f"score: {match_score:.1f}")
-            if candidate.matched_required_skills:
-                skill_info.append(
-                    "✅ "
-                    + ", ".join(f"`{s}`" for s in candidate.matched_required_skills[:5])
-                )
-            if candidate.matched_discord_roles:
-                skill_info.append(
-                    "🏷️ " + ", ".join(f"`{r}`" for r in candidate.matched_discord_roles)
-                )
-            if candidate.seniority:
-                skill_info.append(f"seniority: `{candidate.seniority}`")
-            if candidate.timezone:
-                skill_info.append(f"tz: `{candidate.timezone}`")
-            if skill_info:
-                parts.append("   " + " · ".join(skill_info))
-
-            lines.append("\n".join(parts))
-
-        messages: list[str] = []
-        current = ""
-        for line in lines:
-            candidate_block = line + "\n"
-            while len(candidate_block) > 1900:
-                if current:
-                    messages.append(current.rstrip())
-                    current = ""
-                messages.append(candidate_block[:1900].rstrip())
-                candidate_block = candidate_block[1900:]
-            if len(current) + len(candidate_block) > 1900:
-                if current:
-                    messages.append(current.rstrip())
-                current = candidate_block
-            else:
-                current += candidate_block
-        if current.strip():
-            messages.append(current.rstrip())
-
-        return messages, resume_options
-
-    async def _run_auto_match_candidates_for_thread(
-        self,
-        *,
-        thread: discord.Thread,
-        trigger: Literal["thread_create", "message_create"],
-    ) -> None:
-        """Best-effort automatic matching for a newly created job thread."""
-        if not await self._mark_thread_auto_matched(thread.id):
-            return
-
-        parent_channel = thread.parent
-        guild = thread.guild
-        if guild is not None and parent_channel is not None:
-            if parent_channel.permissions_for(guild.default_role).view_channel:
-                logger.warning(
-                    "Skipping auto-match publish in publicly visible channel "
-                    "(guild=%s channel=%s thread=%s)",
-                    guild.id,
-                    parent_channel.id,
-                    thread.id,
-                )
-                await self._unmark_thread_auto_matched(thread.id)
-                return
-
-        posting = await self._read_thread_posting(thread)
-        if posting is None:
-            await self._unmark_thread_auto_matched(thread.id)
-            await thread.send(
-                "⚠️ Could not read this thread's opening message. "
-                "Run `/match-candidates` manually after posting details."
-            )
-            return
-
-        try:
-            requirements = await asyncio.to_thread(
-                extract_job_requirements,
-                posting,
-                api_key=settings.openai_api_key,
-                base_url=settings.openai_base_url or None,
-                model=settings.openai_model,
-                webhook_url=settings.discord_logs_webhook_url,
-            )
-        except Exception as exc:
-            await self._unmark_thread_auto_matched(thread.id)
-            logger.warning(
-                "Auto match failed while extracting requirements "
-                "(guild=%s thread=%s trigger=%s): %s",
-                thread.guild.id if thread.guild else "unknown",
-                thread.id,
-                trigger,
-                exc,
-            )
-            await thread.send(
-                "⚠️ Failed to analyze this posting automatically. "
-                "Run `/match-candidates` manually in this thread."
-            )
-            return
-
-        if not requirements.required_skills:
-            await self._unmark_thread_auto_matched(thread.id)
-            await thread.send(
-                "⚠️ No required skills could be extracted automatically. "
-                "Run `/match-candidates` manually after updating the posting."
-            )
-            return
-
-        try:
-            candidates = await asyncio.to_thread(
-                search_candidates, settings, requirements, limit=10
-            )
-        except Exception as exc:
-            await self._unmark_thread_auto_matched(thread.id)
-            logger.warning(
-                "Auto candidate search failed (guild=%s thread=%s trigger=%s): %s",
-                thread.guild.id if thread.guild else "unknown",
-                thread.id,
-                trigger,
-                exc,
-            )
-            await thread.send(
-                "⚠️ Automatic candidate search failed. "
-                "Run `/match-candidates` manually in this thread."
-            )
-            return
-
-        messages, _ = self._render_match_candidates_messages(
-            requirements=requirements,
-            candidates=candidates,
-        )
-        safe_mentions = discord.AllowedMentions(
-            roles=False, users=False, everyone=False
-        )
-        for msg in messages:
-            await thread.send(msg, allowed_mentions=safe_mentions)
 
     def _backend_headers(self) -> dict[str, str]:
         """Build auth headers for internal backend API calls."""
@@ -2379,13 +2283,20 @@ class CRMCog(commands.Cog):
         return f"{settings.backend_api_base_url.rstrip('/')}{path}"
 
     async def _enqueue_resume_extract_job(
-        self, *, contact_id: str, attachment_id: str, filename: str
+        self,
+        *,
+        contact_id: str,
+        attachment_id: str,
+        filename: str,
+        refresh_token: str | None = None,
     ) -> str:
         payload = {
             "contact_id": contact_id,
             "attachment_id": attachment_id,
             "filename": filename,
         }
+        if refresh_token:
+            payload["refresh_token"] = refresh_token
         data = await self._backend_request_json(
             "POST",
             "/jobs/resume-extract",
@@ -2726,6 +2637,82 @@ class CRMCog(commands.Cog):
         ) -> str:
             return ResumeUpdateConfirmationView._truncate_embed_field(value, limit)
 
+        def parse_skill_snapshot(value: Any) -> dict[str, tuple[str, int | None]]:
+            if value is None:
+                return {}
+            text = str(value).strip()
+            if not text or text.casefold() == "none":
+                return {}
+            tokens = [item.strip() for item in text.split(",") if item.strip()]
+            parsed: dict[str, tuple[str, int | None]] = {}
+            for token in tokens:
+                name = token
+                strength: int | None = None
+                match = re.match(r"^(.*)\((\d+)\)$", token)
+                if match:
+                    name = match.group(1).strip()
+                    try:
+                        strength = int(match.group(2))
+                    except ValueError:
+                        strength = None
+                name = name.strip()
+                if not name:
+                    continue
+                normalized = normalize_skill(name)
+                if not normalized:
+                    continue
+                key = normalized.casefold()
+                if key in parsed:
+                    existing_name, existing_strength = parsed[key]
+                    if existing_strength is None and strength is not None:
+                        parsed[key] = (existing_name, strength)
+                    continue
+                parsed[key] = (name, strength)
+            return parsed
+
+        def format_skill_delta(current: Any, proposed: Any) -> str:
+            current_map = parse_skill_snapshot(current)
+            proposed_map = parse_skill_snapshot(proposed)
+
+            added: list[str] = []
+            removed: list[str] = []
+            strength_updates: list[str] = []
+
+            for key, (name, strength) in proposed_map.items():
+                if key not in current_map:
+                    if strength is not None:
+                        added.append(f"{name} ({strength})")
+                    else:
+                        added.append(name)
+
+            for key, (name, strength) in current_map.items():
+                if key not in proposed_map:
+                    if strength is not None:
+                        removed.append(f"{name} ({strength})")
+                    else:
+                        removed.append(name)
+
+            for key, (name, strength) in proposed_map.items():
+                if key not in current_map:
+                    continue
+                current_strength = current_map[key][1]
+                if current_strength == strength:
+                    continue
+                if current_strength is None and strength is None:
+                    continue
+                before = str(current_strength) if current_strength is not None else "?"
+                after = str(strength) if strength is not None else "?"
+                strength_updates.append(f"{name} ({before}->{after})")
+
+            parts: list[str] = []
+            if added:
+                parts.append(f"Added: {', '.join(added)}")
+            if strength_updates:
+                parts.append(f"Strengths: {', '.join(strength_updates)}")
+            if removed:
+                parts.append(f"Removed: {', '.join(removed)}")
+            return "; ".join(parts)
+
         proposed_updates_raw = result.get("proposed_updates")
         proposed_updates: dict[str, Any] = {}
         if isinstance(proposed_updates_raw, dict):
@@ -2752,11 +2739,47 @@ class CRMCog(commands.Cog):
 
         if isinstance(changes, list) and changes:
             lines: list[str] = []
-            for change in changes[:8]:
+            location_current: dict[str, Any] = {}
+            location_proposed: dict[str, Any] = {}
+            non_location_changes: list[dict[str, Any]] = []
+            for change in changes:
                 if not isinstance(change, dict):
                     continue
                 field_name = str(change.get("field", ""))
-                label = str(change.get("label", field_name or "Field"))
+                if ResumeUpdateConfirmationView._is_location_field(field_name):
+                    location_current[field_name] = change.get("current")
+                    location_proposed[field_name] = change.get("proposed")
+                    continue
+                non_location_changes.append(change)
+
+            if location_current or location_proposed:
+                current_location = truncate_preview_value(
+                    ResumeUpdateConfirmationView._format_location_summary(
+                        location_current
+                    ),
+                    field_name="location",
+                    label="Location",
+                )
+                proposed_location = truncate_preview_value(
+                    ResumeUpdateConfirmationView._format_location_summary(
+                        location_proposed
+                    ),
+                    field_name="location",
+                    label="Location",
+                )
+                lines.append(
+                    f"**Location**: `{current_location}` → `{proposed_location}`"
+                )
+
+            for change in non_location_changes[:8]:
+                if not isinstance(change, dict):
+                    continue
+                field_name = str(change.get("field", ""))
+                label = (
+                    ResumeUpdateConfirmationView._field_label(field_name)
+                    if field_name
+                    else str(change.get("label", "Field"))
+                )
                 current = truncate_preview_value(
                     str(change.get("current", "None")),
                     field_name=field_name,
@@ -2767,7 +2790,24 @@ class CRMCog(commands.Cog):
                     field_name=field_name,
                     label=label,
                 )
-                lines.append(f"**{label}**: `{current}` → `{proposed}`")
+                if field_name == "skills":
+                    delta = format_skill_delta(
+                        change.get("current"), change.get("proposed")
+                    )
+                    if delta:
+                        truncated_delta = truncate_preview_value(
+                            delta, field_name=field_name, label=label
+                        )
+                        lines.append(f"**{label}**: `{truncated_delta}`")
+                        continue
+                if ResumeUpdateConfirmationView._is_link_like_field(field_name, label):
+                    lines.append(
+                        f"**{label}**: "
+                        f"{ResumeUpdateConfirmationView._normalize_preview_value(current)} "
+                        f"→ {ResumeUpdateConfirmationView._normalize_preview_value(proposed)}"
+                    )
+                else:
+                    lines.append(f"**{label}**: `{current}` → `{proposed}`")
             embed.add_field(
                 name="Proposed Changes",
                 value=truncate_field_value("\n".join(lines) if lines else "No changes"),
@@ -2799,12 +2839,8 @@ class CRMCog(commands.Cog):
                     continue
                 field = str(item.get("field", "field"))
                 reason = str(item.get("reason", "Skipped"))
-                value = truncate_preview_value(
-                    str(item.get("value", "")),
-                    field_name=field,
-                    label=field,
-                )
-                skip_lines.append(f"`{field}`: `{value}` ({reason})")
+                label = ResumeUpdateConfirmationView._field_label(field)
+                skip_lines.append(f"{label}: ({reason})")
             if skip_lines:
                 embed.add_field(
                     name="Skipped",
@@ -2823,11 +2859,78 @@ class CRMCog(commands.Cog):
                     ),
                     inline=False,
                 )
+            raw_llm_output = extracted_profile.get("raw_llm_output")
+            raw_llm_json = extracted_profile.get("raw_llm_json")
+            llm_fallback_reason = extracted_profile.get("llm_fallback_reason")
+            if raw_llm_output or raw_llm_json or llm_fallback_reason:
+                debug_value = (
+                    "Attached raw extraction payload: `resume-extract-debug.json`"
+                )
+                if llm_fallback_reason:
+                    debug_value += "\n" + truncate_field_value(
+                        f"Fallback: {llm_fallback_reason}",
+                        limit=180,
+                    )
+                embed.add_field(
+                    name="Debug",
+                    value=truncate_field_value(debug_value),
+                    inline=False,
+                )
+            evidence_lines: list[str] = []
+            current_title = str(extracted_profile.get("current_title") or "").strip()
+            if current_title:
+                evidence_lines.append(
+                    f"Title: `{truncate_preview_value(current_title, label='title')}`"
+                )
+            recent_titles = extracted_profile.get("recent_titles")
+            if isinstance(recent_titles, list) and recent_titles:
+                formatted_recent_titles = ", ".join(
+                    str(item).strip() for item in recent_titles[:3] if str(item).strip()
+                )
+                if formatted_recent_titles:
+                    evidence_lines.append(
+                        "Recent titles: "
+                        f"`{truncate_preview_value(formatted_recent_titles, label='title')}`"
+                    )
+            current_location_raw = str(
+                extracted_profile.get("current_location_raw") or ""
+            ).strip()
+            current_location_source = str(
+                extracted_profile.get("current_location_source") or ""
+            ).strip()
+            if current_location_raw:
+                location_line = (
+                    "Current base: "
+                    f"`{truncate_preview_value(current_location_raw, label='location')}`"
+                )
+                if current_location_source:
+                    location_line += f" ({current_location_source.replace('_', ' ')})"
+                evidence_lines.append(location_line)
+            current_location_evidence = str(
+                extracted_profile.get("current_location_evidence") or ""
+            ).strip()
+            if current_location_evidence:
+                evidence_lines.append(
+                    "Location evidence: "
+                    f"`{truncate_preview_value(current_location_evidence, label='location evidence')}`"
+                )
+            role_rationale = str(extracted_profile.get("role_rationale") or "").strip()
+            if role_rationale:
+                evidence_lines.append(
+                    "Role rationale: "
+                    f"`{truncate_preview_value(role_rationale, label='role rationale')}`"
+                )
+            if evidence_lines:
+                embed.add_field(
+                    name="Inference Evidence",
+                    value=truncate_field_value("\n".join(evidence_lines)),
+                    inline=False,
+                )
 
         parsed_seniority = _extract_parsed_seniority(extracted_profile)
         if parsed_seniority:
             embed.add_field(
-                name="Parsed Seniority",
+                name="Seniority",
                 value=truncate_field_value(
                     f"`{_format_seniority_label(parsed_seniority)}`"
                 ),
@@ -2846,6 +2949,49 @@ class CRMCog(commands.Cog):
         profile_url = f"{self.base_url}/#Contact/view/{contact_id}"
         embed.add_field(name="🔗 CRM Profile", value=f"[View in CRM]({profile_url})")
         return embed, proposed_updates
+
+    @staticmethod
+    def _build_resume_extract_debug_file(
+        *,
+        contact_id: str,
+        contact_name: str,
+        attachment_id: str,
+        filename: str,
+        result: dict[str, Any],
+    ) -> discord.File:
+        extracted_profile = result.get("extracted_profile")
+        profile_payload = (
+            dict(extracted_profile) if isinstance(extracted_profile, dict) else {}
+        )
+        debug_payload = {
+            "contact_id": contact_id,
+            "contact_name": contact_name,
+            "attachment_id": attachment_id,
+            "filename": filename,
+            "success": bool(result.get("success", False)),
+            "source": profile_payload.get("source"),
+            "confidence": profile_payload.get("confidence"),
+            "llm_fallback_reason": profile_payload.get("llm_fallback_reason"),
+            "raw_llm_output": profile_payload.get("raw_llm_output"),
+            "raw_llm_json": profile_payload.get("raw_llm_json"),
+            "normalized_extracted_profile": {
+                key: value
+                for key, value in profile_payload.items()
+                if key not in {"raw_llm_output", "raw_llm_json"}
+            },
+            "proposed_updates": result.get("proposed_updates") or {},
+            "proposed_changes": result.get("proposed_changes") or [],
+        }
+        payload_bytes = json.dumps(
+            debug_payload,
+            indent=2,
+            sort_keys=True,
+            default=str,
+        ).encode("utf-8")
+        return discord.File(
+            io.BytesIO(payload_bytes),
+            filename="resume-extract-debug.json",
+        )
 
     def _build_role_suggestions_embed(
         self,
@@ -2921,11 +3067,13 @@ class CRMCog(commands.Cog):
         status_text = (
             status_message or "📥 Resume uploaded. Extracting profile fields now..."
         )
+        refresh_token = uuid4().hex if action_name == "crm.reprocess_resume" else None
         try:
             job_id = await self._enqueue_resume_extract_job(
                 contact_id=contact_id,
                 attachment_id=attachment_id,
                 filename=filename,
+                refresh_token=refresh_token,
             )
         except Exception as exc:
             logger.error("Failed to enqueue resume extract job: %s", exc)
@@ -3041,6 +3189,14 @@ class CRMCog(commands.Cog):
             )
             return
 
+        debug_file = self._build_resume_extract_debug_file(
+            contact_id=contact_id,
+            contact_name=contact_name,
+            attachment_id=attachment_id,
+            filename=filename,
+            result=result,
+        )
+
         if not result.get("success", False):
             self._audit_command(
                 interaction=interaction,
@@ -3058,6 +3214,7 @@ class CRMCog(commands.Cog):
             )
             await interaction.followup.send(
                 f"❌ Resume extraction failed: {result.get('error') or 'Unknown error'}",
+                file=debug_file,
                 ephemeral=True,
             )
             return
@@ -3070,25 +3227,38 @@ class CRMCog(commands.Cog):
         )
         parsed_seniority = _extract_parsed_seniority(result.get("extracted_profile"))
 
-        # Build role suggestions embed for reprocess actions.
+        # Build role suggestions embed for reprocess actions or uploads with a linked user.
         role_suggestions_embed: discord.Embed | None = None
-        if action_name == "crm.reprocess_resume":
+        if action_name == "crm.reprocess_resume" or (
+            action_name == "crm.upload_resume" and link_member
+        ):
             extracted_profile = result.get("extracted_profile") or {}
             current_discord_roles: list[str] | None = None
-            try:
-                discord_user_id = await asyncio.to_thread(
-                    get_discord_user_id_for_contact,
-                    settings,
-                    contact_id,
-                )
-                if discord_user_id and interaction.guild:
-                    guild_member = interaction.guild.get_member(int(discord_user_id))
-                    if guild_member:
-                        current_discord_roles = [r.name for r in guild_member.roles]
-            except Exception as exc:
-                logger.warning(
-                    "Could not look up Discord member for role suggestions: %s", exc
-                )
+            if action_name == "crm.reprocess_resume":
+                try:
+                    discord_user_id = await asyncio.to_thread(
+                        get_discord_user_id_for_contact,
+                        settings,
+                        contact_id,
+                    )
+                    if discord_user_id and interaction.guild:
+                        guild_member = interaction.guild.get_member(
+                            int(discord_user_id)
+                        )
+                        if guild_member:
+                            current_discord_roles = [r.name for r in guild_member.roles]
+                except Exception as exc:
+                    logger.warning(
+                        "Could not look up Discord member for role suggestions: %s",
+                        exc,
+                    )
+            elif link_member:
+                try:
+                    current_discord_roles = [r.name for r in link_member.roles]
+                except Exception as exc:
+                    logger.warning(
+                        "Could not read linked member roles for suggestions: %s", exc
+                    )
             role_suggestions_embed = self._build_role_suggestions_embed(
                 contact_name=contact_name,
                 extracted_profile=extracted_profile,
@@ -3113,7 +3283,11 @@ class CRMCog(commands.Cog):
             embeds = [embed]
             if role_suggestions_embed:
                 embeds.append(role_suggestions_embed)
-            await interaction.followup.send(embeds=embeds, ephemeral=True)
+            await interaction.followup.send(
+                embeds=embeds,
+                file=debug_file,
+                ephemeral=True,
+            )
             return
 
         link_discord_payload: dict[str, str] | None = None
@@ -3151,7 +3325,12 @@ class CRMCog(commands.Cog):
         embeds = [embed]
         if role_suggestions_embed:
             embeds.append(role_suggestions_embed)
-        await interaction.followup.send(embeds=embeds, view=view, ephemeral=True)
+        await interaction.followup.send(
+            embeds=embeds,
+            file=debug_file,
+            view=view,
+            ephemeral=True,
+        )
 
     async def _download_and_send_resume(
         self, interaction: discord.Interaction, contact_name: str, resume_id: str
@@ -4163,196 +4342,6 @@ class CRMCog(commands.Cog):
         if extracted_text:
             return extracted_text
         return file_content.decode("utf-8", errors="ignore")
-
-    @staticmethod
-    def _extract_urls_from_text(text: str) -> list[str]:
-        if not text:
-            return []
-        urls: list[str] = []
-        seen: set[str] = set()
-        for raw in MATCH_CANDIDATES_URL_PATTERN.findall(text):
-            normalized = raw.rstrip(".,);]>")
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            urls.append(normalized)
-        return urls
-
-    @staticmethod
-    def _is_probable_jd_url(url: str) -> bool:
-        lowered = url.casefold()
-        return any(hint in lowered for hint in MATCH_CANDIDATES_JD_URL_HINTS)
-
-    @staticmethod
-    def _strip_html_to_text(raw_html: str) -> str:
-        without_scripts = re.sub(
-            r"(?is)<(script|style|noscript).*?>.*?</\1>",
-            " ",
-            raw_html,
-        )
-        text_only = re.sub(r"(?s)<[^>]+>", " ", without_scripts)
-        unescaped = html.unescape(text_only)
-        return re.sub(r"\s+", " ", unescaped).strip()
-
-    async def _read_match_candidates_attachment_text(
-        self, attachment: discord.Attachment
-    ) -> str | None:
-        filename = attachment.filename or ""
-        extension = self._resume_file_extension(filename)
-        content_type = (attachment.content_type or "").strip().lower()
-        is_supported_type = (
-            extension in MATCH_CANDIDATES_SUPPORTED_ATTACHMENT_EXTENSIONS
-            or content_type.startswith("text/")
-        )
-        if not is_supported_type:
-            return None
-        if attachment.size and attachment.size > MATCH_CANDIDATES_MAX_ATTACHMENT_BYTES:
-            logger.info(
-                "Skipping oversized match-candidates attachment filename=%s size=%s",
-                filename,
-                attachment.size,
-            )
-            return None
-
-        try:
-            file_content = await attachment.read()
-        except Exception as exc:
-            logger.warning(
-                "Failed reading match-candidates attachment filename=%s error=%s",
-                filename,
-                exc,
-            )
-            return None
-
-        extracted = self._extract_resume_text(file_content, filename=filename).strip()
-        if not extracted:
-            return None
-        if len(extracted) > MATCH_CANDIDATES_MAX_ATTACHMENT_TEXT_CHARS:
-            return (
-                extracted[:MATCH_CANDIDATES_MAX_ATTACHMENT_TEXT_CHARS].rstrip()
-                + "\n[attachment text truncated]"
-            )
-        return extracted
-
-    async def _fetch_match_candidates_link_text(self, url: str) -> str | None:
-        timeout = aiohttp.ClientTimeout(total=12)
-        headers = {"User-Agent": "508-job-match/1.0"}
-        try:
-            async with aiohttp.ClientSession(
-                timeout=timeout, headers=headers
-            ) as session:
-                async with session.get(url, allow_redirects=True) as response:
-                    if response.status >= 400:
-                        return None
-                    content_type = (
-                        response.headers.get("Content-Type", "")
-                        .split(";")[0]
-                        .strip()
-                        .lower()
-                    )
-                    final_url = str(response.url)
-                    raw = await response.read()
-        except Exception as exc:
-            logger.info("Failed fetching JD link url=%s error=%s", url, exc)
-            return None
-
-        if not raw:
-            return None
-
-        lower_final = final_url.casefold()
-        if content_type == "application/pdf" or lower_final.endswith(".pdf"):
-            text = self._extract_resume_text(raw, filename="linked_jd.pdf")
-        elif content_type in {"text/plain", "text/markdown"}:
-            text = raw.decode("utf-8", errors="ignore")
-        else:
-            text = self._strip_html_to_text(raw.decode("utf-8", errors="ignore"))
-
-        cleaned = re.sub(r"\s+", " ", text).strip()
-        if not cleaned:
-            return None
-        if len(cleaned) > MATCH_CANDIDATES_MAX_LINK_TEXT_CHARS:
-            return cleaned[:MATCH_CANDIDATES_MAX_LINK_TEXT_CHARS].rstrip()
-        return cleaned
-
-    async def _build_match_candidates_posting(
-        self, starter: discord.Message
-    ) -> tuple[str, dict[str, Any]]:
-        base_text = starter.content.strip()
-        attachment_chunks: list[str] = []
-        attachment_urls: list[str] = []
-        scanned_attachments = 0
-
-        for attachment in starter.attachments[:MATCH_CANDIDATES_MAX_ATTACHMENT_SCAN]:
-            scanned_attachments += 1
-            extracted = await self._read_match_candidates_attachment_text(attachment)
-            if not extracted:
-                continue
-            display_name = attachment.filename or "attachment"
-            attachment_chunks.append(f"Attachment {display_name}:\n{extracted}")
-            attachment_urls.extend(self._extract_urls_from_text(extracted))
-
-        candidate_urls: list[str] = []
-        candidate_urls.extend(self._extract_urls_from_text(base_text))
-        candidate_urls.extend(attachment_urls)
-        for embed in starter.embeds:
-            if embed.url:
-                candidate_urls.append(embed.url)
-
-        deduped_urls: list[str] = []
-        seen_urls: set[str] = set()
-        for raw_url in candidate_urls:
-            parsed = urlsplit(raw_url)
-            if not parsed.scheme or not parsed.netloc:
-                continue
-            normalized = raw_url.strip()
-            if not normalized or normalized in seen_urls:
-                continue
-            seen_urls.add(normalized)
-            deduped_urls.append(normalized)
-
-        likely_jd_urls = [u for u in deduped_urls if self._is_probable_jd_url(u)]
-        urls_to_fetch = likely_jd_urls[:MATCH_CANDIDATES_MAX_LINK_SCAN]
-
-        fetched_link_chunks: list[str] = []
-        fetched_links: list[str] = []
-        for url in urls_to_fetch:
-            link_text = await self._fetch_match_candidates_link_text(url)
-            if not link_text:
-                continue
-            fetched_links.append(url)
-            fetched_link_chunks.append(f"Source {url}:\n{link_text}")
-
-        sections: list[str] = []
-        if base_text:
-            sections.append(base_text)
-        if attachment_chunks:
-            sections.append(
-                "Attached job description documents (extracted text):\n\n"
-                + "\n\n".join(attachment_chunks)
-            )
-        if deduped_urls:
-            sections.append("Referenced links:\n" + "\n".join(deduped_urls))
-        if fetched_link_chunks:
-            sections.append(
-                "Referenced job description pages (extracted text):\n\n"
-                + "\n\n".join(fetched_link_chunks)
-            )
-
-        posting = "\n\n".join(part for part in sections if part.strip()).strip()
-        if len(posting) > MATCH_CANDIDATES_MAX_POSTING_CHARS:
-            posting = (
-                posting[:MATCH_CANDIDATES_MAX_POSTING_CHARS].rstrip() + "\n[truncated]"
-            )
-
-        metadata = {
-            "starter_has_text": bool(base_text),
-            "attachments_seen": len(starter.attachments),
-            "attachments_scanned": scanned_attachments,
-            "attachments_extracted": len(attachment_chunks),
-            "links_discovered": len(deduped_urls),
-            "links_fetched": len(fetched_links),
-        }
-        return posting, metadata
 
     def _extract_resume_contact_hints(
         self,
@@ -6001,6 +5990,150 @@ class CRMCog(commands.Cog):
             contacts = await self._search_contact_for_linking(f"{search_term}@508.dev")
         return contacts
 
+    def _is_blank_crm_field(self, value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, str):
+            return not value.strip()
+        if isinstance(value, list):
+            return not [item for item in value if str(item).strip()]
+        if isinstance(value, dict):
+            return not value
+        return False
+
+    def _contact_has_resume(self, contact: dict[str, Any]) -> bool:
+        resume_ids = contact.get("resumeIds")
+        if not isinstance(resume_ids, list):
+            return False
+        return any(str(item).strip() for item in resume_ids)
+
+    def _bulk_resume_missing_flags(self, contact: dict[str, Any]) -> dict[str, bool]:
+        missing_country = self._is_blank_crm_field(contact.get("addressCountry"))
+        missing_timezone = self._is_blank_crm_field(contact.get("cTimezone"))
+        missing_skills = self._is_blank_crm_field(contact.get("skills"))
+        missing_roles = self._is_blank_crm_field(contact.get("cRoles"))
+        raw_seniority = contact.get("cSeniority")
+        missing_seniority = self._is_blank_crm_field(raw_seniority) or (
+            isinstance(raw_seniority, str)
+            and raw_seniority.strip().lower() == "unknown"
+        )
+        return {
+            "missing_country": missing_country,
+            "missing_timezone": missing_timezone,
+            "missing_skills": missing_skills,
+            "missing_roles": missing_roles,
+            "missing_seniority": missing_seniority,
+        }
+
+    def _matches_bulk_resume_reprocess_filters(self, contact: dict[str, Any]) -> bool:
+        flags = self._bulk_resume_missing_flags(contact)
+        return (
+            (flags["missing_country"] and flags["missing_timezone"])
+            or (flags["missing_skills"] and flags["missing_roles"])
+            or flags["missing_seniority"]
+        )
+
+    def _bulk_resume_missing_summary(self, contact: dict[str, Any]) -> str:
+        flags = self._bulk_resume_missing_flags(contact)
+
+        reasons: list[str] = []
+        if flags["missing_country"] and flags["missing_timezone"]:
+            reasons.append("missing country/timezone")
+        if flags["missing_skills"] and flags["missing_roles"]:
+            reasons.append("missing skills/roles")
+        if flags["missing_seniority"]:
+            reasons.append("missing seniority")
+        if not reasons:
+            return "missing fields"
+        return " and ".join(reasons)
+
+    def _extract_latest_resume_name_from_contact(
+        self, contact: dict[str, Any]
+    ) -> str | None:
+        resume_ids = contact.get("resumeIds")
+        if not isinstance(resume_ids, list) or not resume_ids:
+            return None
+        attachment_id = str(resume_ids[-1])
+        resume_names = contact.get("resumeNames")
+        if isinstance(resume_names, dict):
+            filename_value = resume_names.get(attachment_id)
+            if isinstance(filename_value, str) and filename_value.strip():
+                return filename_value.strip()
+        return None
+
+    async def _search_contacts_for_bulk_resume_reprocess(
+        self, *, limit: int, offset: int
+    ) -> tuple[list[dict[str, Any]], int | None]:
+        """Fetch contacts missing key resume-derived fields and with a resume on file."""
+        select_fields = (
+            "id,name,emailAddress,addressCountry,cTimezone,skills,cRoles,cSeniority,"
+            "resumeIds,resumeNames"
+        )
+        where_filters = [
+            {
+                "type": "or",
+                "value": [
+                    {
+                        "type": "and",
+                        "value": [
+                            {"type": "isEmpty", "attribute": "addressCountry"},
+                            {"type": "isEmpty", "attribute": "cTimezone"},
+                        ],
+                    },
+                    {
+                        "type": "and",
+                        "value": [
+                            {"type": "isEmpty", "attribute": "skills"},
+                            {"type": "isEmpty", "attribute": "cRoles"},
+                        ],
+                    },
+                    {
+                        "type": "or",
+                        "value": [
+                            {"type": "isEmpty", "attribute": "cSeniority"},
+                            {
+                                "type": "equals",
+                                "attribute": "cSeniority",
+                                "value": "unknown",
+                            },
+                        ],
+                    },
+                ],
+            }
+        ]
+        try:
+            result = self.espo_api.request(
+                "GET",
+                "Contact",
+                {
+                    "where": where_filters,
+                    "maxSize": limit,
+                    "offset": offset,
+                    "select": select_fields,
+                    "orderBy": "modifiedAt",
+                    "order": "desc",
+                },
+            )
+        except Exception as exc:
+            logger.error("Bulk resume reprocess search failed: %s", exc)
+            return [], None
+
+        contacts_raw = result.get("list", [])
+        contacts = contacts_raw if isinstance(contacts_raw, list) else []
+        filtered: list[dict[str, Any]] = []
+        for contact in contacts:
+            if not isinstance(contact, dict):
+                continue
+            if not self._contact_has_resume(contact):
+                continue
+            if not self._matches_bulk_resume_reprocess_filters(contact):
+                continue
+            filtered.append(contact)
+
+        total_raw = result.get("total")
+        total = total_raw if isinstance(total_raw, int) else None
+        return filtered, total
+
     async def _get_latest_resume_attachment_for_contact(
         self, contact_id: str
     ) -> tuple[str | None, str | None]:
@@ -6265,13 +6398,16 @@ class CRMCog(commands.Cog):
 
     @app_commands.command(
         name="update-contact",
-        description="Update CRM contact fields (github, linkedin, skills, rate range, and resume)",
+        description="Update CRM contact fields (github, linkedin, skills, rate range, location, desired hours, websites, and resume)",
     )
     @app_commands.describe(
         github="GitHub username to set",
         linkedin="LinkedIn profile URL to set",
         skills="Comma-separated skills; supports `skill:4` for strength",
         rate_range="Rate range text to set",
+        desired_hours="Desired weekly hours (e.g. 0-60 or 40)",
+        website="Comma-separated website links to set",
+        location="Location to parse (city, state, country, timezone)",
         resume="Resume file to upload and analyze",
         overwrite="Replace existing resumes instead of appending",
         search_term="Email, name, or contact ID (optional). Omit to update your own contact.",
@@ -6283,6 +6419,9 @@ class CRMCog(commands.Cog):
         linkedin: str | None = None,
         skills: str | None = None,
         rate_range: str | None = None,
+        desired_hours: str | None = None,
+        website: str | None = None,
+        location: str | None = None,
         resume: discord.Attachment | None = None,
         overwrite: bool = False,
         search_term: str | None = None,
@@ -6292,7 +6431,16 @@ class CRMCog(commands.Cog):
             await interaction.response.defer(ephemeral=True)
 
             has_updates = any(
-                bool(value) for value in (github, linkedin, skills, rate_range)
+                value.strip() if isinstance(value, str) else bool(value)
+                for value in (
+                    github,
+                    linkedin,
+                    skills,
+                    rate_range,
+                    desired_hours,
+                    website,
+                    location,
+                )
             )
             if not has_updates and resume is None:
                 self._audit_command(
@@ -6302,7 +6450,8 @@ class CRMCog(commands.Cog):
                     metadata={"reason": "no_update_fields"},
                 )
                 await interaction.followup.send(
-                    "❌ Provide at least one of `github`, `linkedin`, `skills`, `rate_range`, or `resume`."
+                    "❌ Provide at least one of `github`, `linkedin`, `skills`, `rate_range`, "
+                    "`desired_hours`, `website`, `location`, or `resume`."
                 )
                 return
 
@@ -6457,7 +6606,7 @@ class CRMCog(commands.Cog):
                 return
 
             contact_name = target_contact.get("name", "Unknown")
-            update_data: dict[str, str] = {}
+            update_data: dict[str, object] = {}
             requested_updates: list[str] = []
 
             if github is not None:
@@ -6477,6 +6626,91 @@ class CRMCog(commands.Cog):
                 if clean_rate_range:
                     update_data["rateRange"] = clean_rate_range
                     requested_updates.append("rate_range")
+
+            if desired_hours is not None:
+                parsed_hours = self._parse_desired_hours(desired_hours)
+                if parsed_hours:
+                    update_data["cDesiredHours"] = parsed_hours
+                    requested_updates.append("desired_hours")
+                elif desired_hours.strip():
+                    self._audit_command_safe(
+                        interaction=interaction,
+                        action="crm.update_contact",
+                        result="denied",
+                        metadata={
+                            "search_term": search_term,
+                            "reason": "invalid_desired_hours",
+                            "desired_hours": desired_hours,
+                        },
+                    )
+                    await interaction.followup.send(
+                        "❌ Invalid desired_hours. Use a number between 0-60 or a range like `0-60`."
+                    )
+                    return
+
+            if website is not None:
+                website_links, invalid_website_tokens = self._parse_website_links(
+                    website
+                )
+                if invalid_website_tokens:
+                    invalid_message = ", ".join(
+                        f"`{item}`" for item in invalid_website_tokens
+                    )
+                    self._audit_command_safe(
+                        interaction=interaction,
+                        action="crm.update_contact",
+                        result="denied",
+                        metadata={
+                            "search_term": search_term,
+                            "reason": "invalid_website_links",
+                            "website": website,
+                            "invalid_website_tokens": invalid_website_tokens,
+                        },
+                    )
+                    await interaction.followup.send(
+                        f"❌ Invalid website entries: {invalid_message}. "
+                        "Provide comma-separated URLs (e.g. `https://example.com, github.com/name`)."
+                    )
+                    return
+                if website_links:
+                    update_data["cWebsiteLink"] = website_links
+                    requested_updates.append("website")
+                elif website.strip():
+                    self._audit_command_safe(
+                        interaction=interaction,
+                        action="crm.update_contact",
+                        result="denied",
+                        metadata={
+                            "search_term": search_term,
+                            "reason": "invalid_website_links",
+                            "website": website,
+                        },
+                    )
+                    await interaction.followup.send(
+                        "❌ Invalid website list. Provide comma-separated URLs (e.g. `https://example.com, github.com/name`)."
+                    )
+                    return
+
+            if location is not None:
+                location_updates = self._parse_location_input(location)
+                if location_updates:
+                    update_data.update(location_updates)
+                    requested_updates.append("location")
+                elif location.strip():
+                    self._audit_command_safe(
+                        interaction=interaction,
+                        action="crm.update_contact",
+                        result="denied",
+                        metadata={
+                            "search_term": search_term,
+                            "reason": "invalid_location",
+                            "location": location,
+                        },
+                    )
+                    await interaction.followup.send(
+                        "❌ Unable to parse location. Try `City, State, Country` and optionally include `UTC-05:00` or `PST`."
+                    )
+                    return
 
             if skills is not None:
                 parsed_skills, requested_strengths, invalid_skills = (
@@ -6565,6 +6799,50 @@ class CRMCog(commands.Cog):
                             value=update_data["rateRange"],
                             inline=True,
                         )
+                    if "desired_hours" in requested_updates:
+                        embed.add_field(
+                            name="⏱️ Desired Hours",
+                            value=update_data["cDesiredHours"],
+                            inline=True,
+                        )
+                    if "website" in requested_updates:
+                        website_links_value = update_data.get("cWebsiteLink")
+                        if isinstance(website_links_value, list):
+                            website_value = ", ".join(
+                                str(link) for link in website_links_value if link
+                            )
+                        elif website_links_value:
+                            website_value = str(website_links_value)
+                        else:
+                            website_value = "N/A"
+                        embed.add_field(
+                            name="🌐 Website",
+                            value=website_value,
+                            inline=False,
+                        )
+                    if "location" in requested_updates:
+                        location_parts = [
+                            str(value)
+                            for value in (
+                                update_data.get("addressCity"),
+                                update_data.get("addressState"),
+                                update_data.get("addressCountry"),
+                            )
+                            if value
+                        ]
+                        location_value = ", ".join(location_parts)
+                        timezone_value = update_data.get("cTimezone")
+                        if timezone_value:
+                            location_value = (
+                                f"{location_value} (Timezone: {timezone_value})"
+                                if location_value
+                                else f"Timezone: {timezone_value}"
+                            )
+                        embed.add_field(
+                            name="📍 Location",
+                            value=location_value or "N/A",
+                            inline=False,
+                        )
                     embed.add_field(
                         name="🔎 Updated Fields",
                         value=", ".join(requested_updates),
@@ -6646,6 +6924,305 @@ class CRMCog(commands.Cog):
             await interaction.followup.send(
                 "❌ An unexpected error occurred while updating the contact."
             )
+
+    def _parse_desired_hours(self, desired_hours: str) -> str | None:
+        import re
+
+        raw = desired_hours.strip()
+        if not raw:
+            return None
+
+        normalized = raw.replace(" to ", "-")
+        match = re.match(r"^\s*(\d{1,2})(?:\s*-\s*(\d{1,2}))?\s*$", normalized)
+        if match is None:
+            return None
+
+        low = int(match.group(1))
+        high = int(match.group(2)) if match.group(2) else None
+        if high is None:
+            return str(low) if 0 <= low <= 60 else None
+        if low > high:
+            return None
+        if not (0 <= low <= 60 and 0 <= high <= 60):
+            return None
+        return f"{low}-{high}"
+
+    _LOCATION_COUNTRY_ALIASES = {
+        "us": "United States",
+        "usa": "United States",
+        "united states": "United States",
+        "united states of america": "United States",
+        "uk": "United Kingdom",
+        "united kingdom": "United Kingdom",
+        "england": "United Kingdom",
+        "scotland": "United Kingdom",
+        "wales": "United Kingdom",
+        "uae": "United Arab Emirates",
+        "united arab emirates": "United Arab Emirates",
+    }
+    _LOCATION_US_STATES = {
+        "AL": "Alabama",
+        "AK": "Alaska",
+        "AZ": "Arizona",
+        "AR": "Arkansas",
+        "CA": "California",
+        "CO": "Colorado",
+        "CT": "Connecticut",
+        "DE": "Delaware",
+        "FL": "Florida",
+        "GA": "Georgia",
+        "HI": "Hawaii",
+        "ID": "Idaho",
+        "IL": "Illinois",
+        "IN": "Indiana",
+        "IA": "Iowa",
+        "KS": "Kansas",
+        "KY": "Kentucky",
+        "LA": "Louisiana",
+        "ME": "Maine",
+        "MD": "Maryland",
+        "MA": "Massachusetts",
+        "MI": "Michigan",
+        "MN": "Minnesota",
+        "MS": "Mississippi",
+        "MO": "Missouri",
+        "MT": "Montana",
+        "NE": "Nebraska",
+        "NV": "Nevada",
+        "NH": "New Hampshire",
+        "NJ": "New Jersey",
+        "NM": "New Mexico",
+        "NY": "New York",
+        "NC": "North Carolina",
+        "ND": "North Dakota",
+        "OH": "Ohio",
+        "OK": "Oklahoma",
+        "OR": "Oregon",
+        "PA": "Pennsylvania",
+        "RI": "Rhode Island",
+        "SC": "South Carolina",
+        "SD": "South Dakota",
+        "TN": "Tennessee",
+        "TX": "Texas",
+        "UT": "Utah",
+        "VT": "Vermont",
+        "VA": "Virginia",
+        "WA": "Washington",
+        "WV": "West Virginia",
+        "WI": "Wisconsin",
+        "WY": "Wyoming",
+        "DC": "District Of Columbia",
+    }
+    _LOCATION_STATE_NAMES = set(map(str.lower, _LOCATION_US_STATES.values()))
+    _LOCATION_TIMEZONE_ABBREV_MAP = {
+        "UTC": "UTC+00:00",
+        "GMT": "UTC+00:00",
+        "PST": "UTC-08:00",
+        "PDT": "UTC-07:00",
+        "MST": "UTC-07:00",
+        "MDT": "UTC-06:00",
+        "CST": "UTC-06:00",
+        "CDT": "UTC-05:00",
+        "EST": "UTC-05:00",
+        "EDT": "UTC-04:00",
+        "CET": "UTC+01:00",
+        "EET": "UTC+02:00",
+        "IST": "UTC+05:30",
+        "SGT": "UTC+08:00",
+        "HKT": "UTC+08:00",
+        "JST": "UTC+09:00",
+        "KST": "UTC+09:00",
+        "AEST": "UTC+10:00",
+        "AEDT": "UTC+11:00",
+    }
+    _LOCATION_CITY_TIMEZONE_HINTS = {
+        "san francisco": "UTC-08:00",
+        "los angeles": "UTC-08:00",
+        "seattle": "UTC-08:00",
+        "denver": "UTC-07:00",
+        "phoenix": "UTC-07:00",
+        "chicago": "UTC-06:00",
+        "dallas": "UTC-06:00",
+        "houston": "UTC-06:00",
+        "austin": "UTC-06:00",
+        "new york": "UTC-05:00",
+        "boston": "UTC-05:00",
+        "atlanta": "UTC-05:00",
+        "washington": "UTC-05:00",
+        "london": "UTC+00:00",
+        "dublin": "UTC+00:00",
+        "lisbon": "UTC+00:00",
+        "paris": "UTC+01:00",
+        "berlin": "UTC+01:00",
+        "amsterdam": "UTC+01:00",
+        "rome": "UTC+01:00",
+        "madrid": "UTC+01:00",
+        "bucharest": "UTC+02:00",
+        "athens": "UTC+02:00",
+        "kyiv": "UTC+02:00",
+        "nairobi": "UTC+03:00",
+        "istanbul": "UTC+03:00",
+        "dubai": "UTC+04:00",
+        "mumbai": "UTC+05:30",
+        "bangalore": "UTC+05:30",
+        "bengaluru": "UTC+05:30",
+        "delhi": "UTC+05:30",
+        "singapore": "UTC+08:00",
+        "shanghai": "UTC+08:00",
+        "beijing": "UTC+08:00",
+        "tokyo": "UTC+09:00",
+        "seoul": "UTC+09:00",
+        "sydney": "UTC+10:00",
+        "melbourne": "UTC+10:00",
+    }
+
+    def _parse_website_links(self, website: str) -> tuple[list[str], list[str]]:
+        from five08.crm_normalization import normalize_website_url
+
+        links: list[str] = []
+        invalid_tokens: list[str] = []
+        seen: set[str] = set()
+        for raw in website.split(","):
+            candidate = raw.strip()
+            if not candidate:
+                continue
+            normalized = normalize_website_url(candidate)
+            if not normalized:
+                invalid_tokens.append(candidate)
+                continue
+            if normalized in seen:
+                continue
+            links.append(normalized)
+            seen.add(normalized)
+        return links, invalid_tokens
+
+    def _parse_location_input(self, location: str) -> dict[str, str]:
+        import re
+
+        from five08.crm_normalization import (
+            normalize_city,
+            normalize_country,
+            normalize_state,
+            normalize_timezone,
+        )
+
+        raw = location.strip()
+        if not raw:
+            return {}
+
+        def normalize_country_token(token: str) -> str | None:
+            key = re.sub(r"[.]", "", token.strip().lower())
+            if not key:
+                return None
+            if key in self._LOCATION_COUNTRY_ALIASES:
+                return self._LOCATION_COUNTRY_ALIASES[key]
+            return normalize_country(token)
+
+        def is_country_token(token: str) -> bool:
+            key = re.sub(r"[.]", "", token.strip().lower())
+            return key in self._LOCATION_COUNTRY_ALIASES
+
+        def normalize_state_token(token: str) -> str | None:
+            key = token.strip().upper()
+            if key in self._LOCATION_US_STATES:
+                return self._LOCATION_US_STATES[key]
+            return normalize_state(token)
+
+        def is_state_token(token: str) -> bool:
+            key = token.strip().upper()
+            if key in self._LOCATION_US_STATES:
+                return True
+            return token.strip().lower() in self._LOCATION_STATE_NAMES
+
+        def parse_timezone_candidate(value: str) -> str | None:
+            cleaned = value.strip()
+            if not cleaned:
+                return None
+            normalized = normalize_timezone(cleaned)
+            if normalized:
+                return normalized
+            abbrev = cleaned.upper()
+            return self._LOCATION_TIMEZONE_ABBREV_MAP.get(abbrev)
+
+        timezone: str | None = None
+        remainder = raw
+        paren_match = re.search(r"\(([^)]+)\)", remainder)
+        if paren_match:
+            tz_candidate = parse_timezone_candidate(paren_match.group(1))
+            if tz_candidate:
+                timezone = tz_candidate
+                remainder = (
+                    remainder[: paren_match.start()] + remainder[paren_match.end() :]
+                ).strip()
+
+        segments = [
+            segment.strip() for segment in remainder.split(",") if segment.strip()
+        ]
+        if segments:
+            tz_candidate = parse_timezone_candidate(segments[-1])
+            if tz_candidate:
+                timezone = tz_candidate
+                segments = segments[:-1]
+
+        city: str | None = None
+        state: str | None = None
+        country: str | None = None
+
+        if len(segments) == 1:
+            token = segments[0]
+            normalized_state = normalize_state_token(token)
+            if normalized_state:
+                state = normalized_state
+            else:
+                normalized_country = normalize_country_token(token)
+                if normalized_country:
+                    country = normalized_country
+                else:
+                    city = normalize_city(token)
+        elif len(segments) == 2:
+            token0 = segments[0]
+            token1 = segments[1]
+            if is_country_token(token1):
+                if is_state_token(token0):
+                    state = normalize_state_token(token0)
+                    country = normalize_country_token(token1)
+                else:
+                    city = normalize_city(token0)
+                    country = normalize_country_token(token1)
+            elif is_state_token(token1):
+                city = normalize_city(token0)
+                state = normalize_state_token(token1)
+                if token1.strip().upper() in self._LOCATION_US_STATES:
+                    country = "United States"
+            else:
+                city = normalize_city(token0)
+                country = normalize_country_token(token1)
+                if not country:
+                    state = normalize_state_token(token1)
+        elif len(segments) >= 3:
+            city = normalize_city(", ".join(segments[:-2]))
+            state_token = segments[-2]
+            country_token = segments[-1]
+            state = normalize_state_token(state_token)
+            country = normalize_country_token(country_token)
+            if not country and is_country_token(state_token):
+                country = normalize_country_token(state_token)
+                state = None
+
+        if not timezone and city:
+            timezone = self._LOCATION_CITY_TIMEZONE_HINTS.get(city.lower())
+
+        updates: dict[str, str] = {}
+        if city:
+            updates["addressCity"] = city
+        if state:
+            updates["addressState"] = state
+        if country:
+            updates["addressCountry"] = country
+        if timezone:
+            updates["cTimezone"] = timezone
+
+        return updates
 
     async def _check_existing_resume(
         self, contact_id: str, filename: str, filesize: int
@@ -7304,909 +7881,212 @@ class CRMCog(commands.Cog):
             )
 
     @app_commands.command(
-        name="register-jobs-channel",
-        description="Register a text/forum channel for automatic job-post matching.",
+        name="bulk-reprocess-resumes",
+        description=(
+            "Find contacts missing country/timezone, skills/roles, or seniority and reprocess resumes"
+        ),
     )
     @app_commands.describe(
-        channel=(
-            "Channel to watch. Defaults to current channel "
-            "(or current thread's parent channel)."
-        )
+        max_results="Max results to list (1-25)",
+        offset="Skip this many matching contacts",
     )
-    @require_role("Steering Committee")
-    async def register_jobs_channel(
+    async def bulk_reprocess_resumes(
         self,
         interaction: discord.Interaction,
-        channel: JobWatchChannel | None = None,
+        max_results: int = 25,
+        offset: int = 0,
     ) -> None:
-        """Register a channel that triggers automatic candidate matching."""
-        guild = interaction.guild
-        if guild is None:
-            await interaction.response.send_message(
-                "⚠️ This command must be used inside a server.",
-                ephemeral=True,
-            )
-            return
-
-        target_channel = self._resolve_jobs_channel_target(interaction, channel)
-        if target_channel is None:
-            await interaction.response.send_message(
-                "⚠️ Choose a text/forum channel or run this in one.",
-                ephemeral=True,
-            )
-            return
-
-        await interaction.response.defer(ephemeral=True)
+        """List contacts missing key resume-derived fields for reprocessing."""
         try:
-            created = await asyncio.to_thread(
-                register_job_post_channel,
-                settings,
-                guild_id=str(guild.id),
-                channel_id=str(target_channel.id),
-            )
-            self._jobs_channels_by_guild.setdefault(guild.id, set()).add(
-                target_channel.id
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed to register jobs channel guild=%s channel=%s: %s",
-                guild.id,
-                target_channel.id,
-                exc,
-            )
-            await interaction.followup.send(
-                "❌ Failed to register this channel. Please try again.",
-                ephemeral=True,
-            )
-            return
+            await interaction.response.defer(ephemeral=True)
 
-        try:
+            if not settings.api_shared_secret:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.bulk_reprocess_resumes",
+                    result="error",
+                    metadata={
+                        "reason": "api_shared_secret_missing",
+                    },
+                )
+                await interaction.followup.send(
+                    "API_SHARED_SECRET is not configured for backend API access."
+                )
+                return
+
+            is_steering = hasattr(
+                interaction.user, "roles"
+            ) and check_user_roles_with_hierarchy(
+                interaction.user.roles, ["Steering Committee"]
+            )
+            if not is_steering:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.bulk_reprocess_resumes",
+                    result="denied",
+                    metadata={
+                        "reason": "missing_required_role",
+                    },
+                )
+                await interaction.followup.send(
+                    "You must have Steering Committee role or higher to run this."
+                )
+                return
+
+            clamped_limit = max(1, min(int(max_results or 0), 25))
+            clamped_offset = max(0, int(offset or 0))
+            contacts, total = await self._search_contacts_for_bulk_resume_reprocess(
+                limit=clamped_limit,
+                offset=clamped_offset,
+            )
+
+            if not contacts:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.bulk_reprocess_resumes",
+                    result="success",
+                    metadata={
+                        "results": 0,
+                        "offset": clamped_offset,
+                        "limit": clamped_limit,
+                    },
+                )
+                await interaction.followup.send(
+                    "No contacts found with missing country/timezone or skills/roles "
+                    "and a resume on file."
+                )
+                return
+
+            if len(contacts) == 1:
+                await self._prompt_reprocess_resume_confirmation(
+                    interaction=interaction,
+                    contact=contacts[0],
+                    search_term="bulk_missing_fields",
+                )
+                return
+
+            contact_lookup: dict[str, dict[str, Any]] = {}
+            lines: list[str] = []
+            for contact in contacts:
+                contact_id = str(contact.get("id", "")).strip()
+                if not contact_id:
+                    continue
+                contact_lookup[contact_id] = contact
+                name = str(contact.get("name") or "Unknown")
+                reason = self._bulk_resume_missing_summary(contact)
+                resume_name = self._extract_latest_resume_name_from_contact(contact)
+                resume_label = resume_name or "latest resume"
+                lines.append(
+                    f"- {name} ({contact_id}) - {reason}; resume: {resume_label}"
+                )
+
+            def _truncate(value: str, limit: int) -> str:
+                if len(value) <= limit:
+                    return value
+                return value[: limit - 3].rstrip() + "..."
+
+            class BulkResumeReprocessSelect(discord.ui.Select):
+                def __init__(
+                    self,
+                    crm_cog: Any,
+                    options: list[dict[str, Any]],
+                    contact_lookup: dict[str, dict[str, Any]],
+                ) -> None:
+                    self.crm_cog = crm_cog
+                    self.contact_lookup = contact_lookup
+                    select_options: list[discord.SelectOption] = []
+                    for item in options:
+                        item_id = str(item.get("id", "")).strip()
+                        if not item_id:
+                            continue
+                        label = str(item.get("name") or item_id)
+                        label = _truncate(label, 100)
+                        description = _truncate(
+                            self.crm_cog._bulk_resume_missing_summary(item),
+                            100,
+                        )
+                        select_options.append(
+                            discord.SelectOption(
+                                label=label,
+                                value=item_id,
+                                description=description,
+                            )
+                        )
+                    super().__init__(
+                        placeholder="Select a contact to reprocess",
+                        min_values=1,
+                        max_values=1,
+                        options=select_options,
+                    )
+
+                async def callback(self, interaction: discord.Interaction) -> None:
+                    contact_id = self.values[0]
+                    contact = self.contact_lookup.get(contact_id)
+                    if not contact:
+                        await interaction.response.send_message(
+                            "Selected contact not found. Re-run the command.",
+                            ephemeral=True,
+                        )
+                        return
+                    await interaction.response.defer(ephemeral=True)
+                    await self.crm_cog._prompt_reprocess_resume_confirmation(
+                        interaction=interaction,
+                        contact=contact,
+                        search_term="bulk_missing_fields",
+                    )
+
+            class BulkResumeReprocessSelectView(discord.ui.View):
+                def __init__(
+                    self,
+                    crm_cog: Any,
+                    options: list[dict[str, Any]],
+                ) -> None:
+                    super().__init__(timeout=600)
+                    self.add_item(
+                        BulkResumeReprocessSelect(
+                            crm_cog=crm_cog,
+                            options=options,
+                            contact_lookup=contact_lookup,
+                        )
+                    )
+
+            summary = (
+                f"Found {len(contact_lookup)} contacts with missing fields. "
+                "Select one to reprocess:"
+            )
+            if total is not None and total > len(contact_lookup):
+                summary = (
+                    f"Found {total} contacts in CRM matching the filters; after "
+                    f"resume checks, showing {len(contact_lookup)}:"
+                )
+
             self._audit_command(
                 interaction=interaction,
-                action="crm.register_jobs_channel",
+                action="crm.bulk_reprocess_resumes",
                 result="success",
                 metadata={
-                    "guild_id": str(guild.id),
-                    "channel_id": str(target_channel.id),
-                    "channel_name": target_channel.name,
-                    "created": created,
+                    "results": len(contact_lookup),
+                    "offset": clamped_offset,
+                    "limit": clamped_limit,
                 },
             )
-        except Exception as exc:
-            logger.warning("Audit write failed for crm.register_jobs_channel: %s", exc)
-
-        if created:
             await interaction.followup.send(
-                f"✅ Registered <#{target_channel.id}> for automatic job matching.",
+                summary + "\n" + "\n".join(lines),
+                view=BulkResumeReprocessSelectView(self, contacts),
                 ephemeral=True,
-            )
-        else:
-            await interaction.followup.send(
-                f"ℹ️ <#{target_channel.id}> is already registered.",
-                ephemeral=True,
-            )
-
-    @app_commands.command(
-        name="unregister-jobs-channel",
-        description="Stop automatic job-post matching for a text/forum channel.",
-    )
-    @app_commands.describe(
-        channel=(
-            "Channel to stop watching. Defaults to current channel "
-            "(or current thread's parent channel)."
-        )
-    )
-    @require_role("Steering Committee")
-    async def unregister_jobs_channel(
-        self,
-        interaction: discord.Interaction,
-        channel: JobWatchChannel | None = None,
-    ) -> None:
-        """Unregister a channel from automatic candidate matching."""
-        guild = interaction.guild
-        if guild is None:
-            await interaction.response.send_message(
-                "⚠️ This command must be used inside a server.",
-                ephemeral=True,
-            )
-            return
-
-        target_channel = self._resolve_jobs_channel_target(interaction, channel)
-        if target_channel is None:
-            await interaction.response.send_message(
-                "⚠️ Choose a text/forum channel or run this in one.",
-                ephemeral=True,
-            )
-            return
-
-        await interaction.response.defer(ephemeral=True)
-        try:
-            removed = await asyncio.to_thread(
-                unregister_job_post_channel,
-                settings,
-                guild_id=str(guild.id),
-                channel_id=str(target_channel.id),
-            )
-            self._jobs_channels_by_guild.setdefault(guild.id, set()).discard(
-                target_channel.id
             )
         except Exception as exc:
-            logger.warning(
-                "Failed to unregister jobs channel guild=%s channel=%s: %s",
-                guild.id,
-                target_channel.id,
-                exc,
-            )
-            await interaction.followup.send(
-                "❌ Failed to unregister this channel. Please try again.",
-                ephemeral=True,
-            )
-            return
-
-        try:
+            logger.error("Unexpected error in bulk_reprocess_resumes: %s", exc)
             self._audit_command(
                 interaction=interaction,
-                action="crm.unregister_jobs_channel",
-                result="success",
-                metadata={
-                    "guild_id": str(guild.id),
-                    "channel_id": str(target_channel.id),
-                    "channel_name": target_channel.name,
-                    "removed": removed,
-                },
-            )
-        except Exception as exc:
-            logger.warning(
-                "Audit write failed for crm.unregister_jobs_channel: %s",
-                exc,
-            )
-
-        if removed:
-            await interaction.followup.send(
-                f"✅ Unregistered <#{target_channel.id}> from automatic job matching.",
-                ephemeral=True,
-            )
-        else:
-            await interaction.followup.send(
-                f"ℹ️ <#{target_channel.id}> was not registered.",
-                ephemeral=True,
-            )
-
-    @app_commands.command(
-        name="match-candidates",
-        description="Reads this thread's opening message, attachments, and JD links, then returns ranked matching candidates.",
-    )
-    @require_role("Member")
-    async def match_candidates(
-        self,
-        interaction: discord.Interaction,
-    ) -> None:
-        """Parse the thread's starter message and find matching candidates ranked by fit.
-
-        Must be invoked inside a thread. The starter message is used as the job posting text.
-        The response is posted publicly in the thread.
-        """
-        if not isinstance(interaction.channel, discord.Thread):
-            self._audit_command(
-                interaction=interaction,
-                action="crm.match_candidates",
-                result="error",
-                metadata={"stage": "not_thread"},
-            )
-            await interaction.response.send_message(
-                "⚠️ This command must be used inside a thread. "
-                "Open a thread on the job posting message and run `/match-candidates` there.",
-                ephemeral=True,
-            )
-            return
-
-        thread: discord.Thread = interaction.channel
-        starter = thread.starter_message
-        fetch_error = None
-        if starter is None:
-            try:
-                starter = await thread.fetch_message(thread.id)
-            except Exception as exc:
-                fetch_error = exc
-                starter = None
-
-        if starter is None:
-            metadata = {"stage": "starter_message_unavailable"}
-            if fetch_error is not None:
-                error_text = (
-                    str(fetch_error).replace("\r", " ").replace("\n", " ").strip()
-                )
-                if len(error_text) > 300:
-                    error_text = f"{error_text[:297]}..."
-                metadata["error"] = error_text
-            self._audit_command(
-                interaction=interaction,
-                action="crm.match_candidates",
-                result="error",
-                metadata=metadata,
-            )
-            await interaction.response.send_message(
-                "⚠️ Could not read the thread's opening message. "
-                "Make sure the thread was created from a job posting message.",
-                ephemeral=True,
-            )
-            return
-
-        posting, posting_metadata = await self._build_match_candidates_posting(starter)
-        if not posting.strip():
-            self._audit_command(
-                interaction=interaction,
-                action="crm.match_candidates",
+                action="crm.bulk_reprocess_resumes",
                 result="error",
                 metadata={
-                    "stage": "starter_message_empty_after_scan",
-                    **posting_metadata,
+                    "error": str(exc),
                 },
             )
-            await interaction.response.send_message(
-                "⚠️ Could not extract a job description from the thread opener, "
-                "its attachments, or linked pages.",
-                ephemeral=True,
-            )
-            return
-
-        if thread.applied_tags:
-            tag_names = ", ".join(t.name for t in thread.applied_tags)
-            posting = f"Thread tags: {tag_names}\n\n{posting}"
-
-        await interaction.response.defer(ephemeral=False)
-
-        try:
-            requirements = await asyncio.to_thread(
-                extract_job_requirements,
-                posting,
-                api_key=settings.openai_api_key,
-                base_url=settings.openai_base_url or None,
-                model=settings.openai_model,
-                webhook_url=settings.discord_logs_webhook_url,
-            )
-        except RuntimeError as exc:
-            self._audit_command(
-                interaction=interaction,
-                action="crm.match_candidates",
-                result="error",
-                metadata={"stage": "extract_requirements", "error": str(exc)},
-            )
             await interaction.followup.send(
-                f"❌ Failed to analyze the job posting: {exc}",
-                ephemeral=True,
-            )
-            return
-
-        if not requirements.required_skills:
-            self._audit_command(
-                interaction=interaction,
-                action="crm.match_candidates",
-                result="error",
-                metadata={"stage": "no_required_skills_extracted"},
-            )
-            await interaction.followup.send(
-                "⚠️ No required skills could be extracted from this posting. "
-                "Please include explicit skill requirements and try again.",
-                ephemeral=True,
-            )
-            return
-
-        try:
-            candidates = await asyncio.to_thread(
-                search_candidates,
-                settings,
-                requirements,
-                limit=20,
-                min_match_score=8.0,
-            )
-        except Exception as exc:
-            logger.error("Candidate search failed: %s", exc)
-            self._audit_command(
-                interaction=interaction,
-                action="crm.match_candidates",
-                result="error",
-                metadata={"stage": "search_candidates", "error": str(exc)},
-            )
-            await interaction.followup.send(
-                "❌ Candidate search failed. Please try again later.",
-                ephemeral=True,
-            )
-            return
-
-        lines: list[str] = []
-
-        header_parts: list[str] = []
-        role_mentions_line: str | None = None
-        locality_mentions_line: str | None = None
-        role_mentions_role_ids: list[int] = []
-        locality_mentions_role_ids: list[int] = []
-        excluded_role_names = {
-            name.casefold() for name in DISCORD_ROLES_EXCLUDE_FROM_SYNC
-        }
-
-        def dedupe_role_names(role_names: list[str]) -> list[str]:
-            seen: set[str] = set()
-            deduped: list[str] = []
-            for role_name in role_names:
-                cleaned = role_name.strip()
-                if not cleaned:
-                    continue
-                key = cleaned.casefold()
-                if key in seen:
-                    continue
-                seen.add(key)
-                deduped.append(cleaned)
-            return deduped
-
-        def build_role_mentions(role_names: list[str]) -> tuple[list[str], list[int]]:
-            if not role_names:
-                return [], []
-            if interaction.guild is None:
-                return [f"`{r}`" for r in role_names], []
-
-            role_id_map = self._get_role_id_cache().get(interaction.guild.id)
-            if role_id_map is None:
-                self._refresh_role_id_cache(interaction.guild)
-                role_id_map = self._get_role_id_cache().get(interaction.guild.id, {})
-
-            mentions: list[str] = []
-            seen_mentions: set[str] = set()
-            allowed_role_ids: list[int] = []
-            seen_role_ids: set[int] = set()
-            for role_name in role_names:
-                normalized_role_name = role_name.casefold()
-                if normalized_role_name in excluded_role_names:
-                    continue
-                role_id = role_id_map.get(normalized_role_name)
-                if role_id is not None:
-                    mention = f"<@&{role_id}>"
-                    if mention not in seen_mentions:
-                        seen_mentions.add(mention)
-                        mentions.append(mention)
-                    if role_id not in seen_role_ids:
-                        seen_role_ids.add(role_id)
-                        allowed_role_ids.append(role_id)
-                    continue
-                role = None
-                for guild_role in interaction.guild.roles:
-                    guild_role_name = guild_role.name.casefold()
-                    if guild_role_name in excluded_role_names:
-                        continue
-                    if guild_role_name == normalized_role_name:
-                        role = guild_role
-                        break
-                if role is not None:
-                    if role.mention not in seen_mentions:
-                        seen_mentions.add(role.mention)
-                        mentions.append(role.mention)
-                    if role.id not in seen_role_ids:
-                        seen_role_ids.add(role.id)
-                        allowed_role_ids.append(role.id)
-                else:
-                    mention = f"`{role_name}`"
-                    if mention not in seen_mentions:
-                        seen_mentions.add(mention)
-                        mentions.append(mention)
-            return mentions, allowed_role_ids
-
-        if requirements.title:
-            header_parts.append(f"**{requirements.title}**")
-        if requirements.discord_role_types:
-            role_types = dedupe_role_names(requirements.discord_role_types)
-            if role_types:
-                role_mentions, role_ids = build_role_mentions(role_types)
-                if role_mentions:
-                    role_mentions_line = "Discord roles: " + ", ".join(role_mentions)
-                    role_mentions_role_ids = role_ids
-
-        locality_role_names: list[str] = []
-        location_text_parts: list[str] = []
-        if requirements.raw_location_text:
-            location_text_parts.append(requirements.raw_location_text)
-        if requirements.preferred_timezones:
-            location_text_parts.extend(requirements.preferred_timezones)
-        location_text = " ".join(location_text_parts).casefold()
-
-        if requirements.location_type == "us_only" or "united states" in location_text:
-            locality_role_names.append("USA")
-        if "usa" in location_text:
-            locality_role_names.append("USA")
-        if (
-            "europe" in location_text
-            or "emea" in location_text
-            or "e.u." in location_text
-        ):
-            locality_role_names.append("Europe")
-        if (
-            "americas" in location_text
-            or "latin america" in location_text
-            or "latam" in location_text
-        ):
-            locality_role_names.append("Americas")
-        if "north america" in location_text or "south america" in location_text:
-            locality_role_names.append("Americas")
-        if (
-            "asia" in location_text
-            or "apac" in location_text
-            or "asia pacific" in location_text
-        ):
-            locality_role_names.append("Asia")
-        if "japan" in location_text:
-            locality_role_names.append("Japan")
-        if "taiwan" in location_text:
-            locality_role_names.append("Taiwan")
-        if "africa" in location_text:
-            locality_role_names.append("Africa")
-
-        if requirements.preferred_timezones:
-            for tz in requirements.preferred_timezones:
-                tz_prefix = (
-                    tz.split("/", 1)[0].casefold() if "/" in tz else tz.casefold()
-                )
-                if tz_prefix == "europe":
-                    locality_role_names.append("Europe")
-                elif tz_prefix == "america":
-                    locality_role_names.append("Americas")
-                elif tz_prefix == "asia":
-                    locality_role_names.append("Asia")
-                elif tz_prefix == "africa":
-                    locality_role_names.append("Africa")
-                if tz.casefold() == "asia/tokyo":
-                    locality_role_names.append("Japan")
-                if tz.casefold() == "asia/taipei":
-                    locality_role_names.append("Taiwan")
-
-        locality_role_names = [
-            role_name
-            for role_name in dedupe_role_names(locality_role_names)
-            if role_name.casefold() not in excluded_role_names
-        ]
-        if locality_role_names:
-            locality_mentions, role_ids = build_role_mentions(locality_role_names)
-            if locality_mentions:
-                locality_mentions_line = "Locality roles: " + ", ".join(
-                    locality_mentions
-                )
-                locality_mentions_role_ids = role_ids
-        if requirements.required_skills:
-            header_parts.append(
-                "Skills: "
-                + ", ".join(f"`{s}`" for s in requirements.required_skills[:8])
-            )
-        if requirements.seniority:
-            header_parts.append(f"Seniority: `{requirements.seniority}`")
-        if requirements.location_type == "us_only":
-            header_parts.append("📍 US only")
-        elif requirements.raw_location_text:
-            header_parts.append(f"📍 {requirements.raw_location_text}")
-
-        header_lines: list[str] = ["## Job Match Results"]
-        if header_parts:
-            header_lines.append(" · ".join(header_parts))
-        header_lines.append(f"Found **{len(candidates)}** candidate(s).")
-
-        header_message = "\n".join(header_lines)
-        await interaction.followup.send(
-            header_message,
-            allowed_mentions=discord.AllowedMentions(
-                roles=False,
-                users=False,
-                everyone=False,
-            ),
-        )
-        if role_mentions_line:
-            allowed_role_mentions = (
-                discord.AllowedMentions(
-                    roles=[discord.Object(id=rid) for rid in role_mentions_role_ids],
-                    users=False,
-                    everyone=False,
-                )
-                if role_mentions_role_ids
-                else discord.AllowedMentions(
-                    roles=False,
-                    users=False,
-                    everyone=False,
-                )
-            )
-            await interaction.followup.send(
-                role_mentions_line,
-                allowed_mentions=allowed_role_mentions,
-            )
-        if locality_mentions_line:
-            allowed_locality_mentions = (
-                discord.AllowedMentions(
-                    roles=[
-                        discord.Object(id=rid) for rid in locality_mentions_role_ids
-                    ],
-                    users=False,
-                    everyone=False,
-                )
-                if locality_mentions_role_ids
-                else discord.AllowedMentions(
-                    roles=False,
-                    users=False,
-                    everyone=False,
-                )
-            )
-            await interaction.followup.send(
-                locality_mentions_line,
-                allowed_mentions=allowed_locality_mentions,
-            )
-
-        crm_base = settings.espo_base_url.rstrip("/")
-        resume_options: list[tuple[str, str, str]] = []
-
-        for i, c in enumerate(candidates, start=1):
-            label = "**[Member]**" if c.is_member else "[Prospect]"
-            name = discord.utils.escape_mentions(c.name or "Unknown")
-            email = discord.utils.escape_mentions(c.email_508 or c.email or "—")
-            crm_link = (
-                f"{crm_base}/#Contact/view/{c.crm_contact_id}"
-                if c.has_crm_link and c.crm_contact_id
-                else None
-            )
-            if crm_link:
-                parts = [f"{i}. {label} [{name}](<{crm_link}>) · {email}"]
-            else:
-                parts = [f"{i}. {label} {name} · {email}"]
-                if c.discord_user_id:
-                    parts.append(f"Discord ID: {c.discord_user_id}")
-
-            if c.linkedin:
-                parts.append(f"[LinkedIn](<{c.linkedin}>)")
-            if (
-                c.latest_resume_id
-                and c.latest_resume_name
-                and c.latest_resume_name not in AUTO_MATCH_EXCLUDED_RESUME_NAMES
-            ):
-                safe_resume_name = discord.utils.escape_mentions(c.latest_resume_name)
-                parts.append(f"Resume: `{safe_resume_name}`")
-                resume_options.append((name, c.latest_resume_id, safe_resume_name))
-
-            skill_info: list[str] = []
-            match_score = getattr(c, "match_score", None)
-            if isinstance(match_score, (int, float)):
-                skill_info.append(f"score: {match_score:.1f}")
-            if c.matched_required_skills:
-                skill_info.append(
-                    "✅ " + ", ".join(f"`{s}`" for s in c.matched_required_skills[:5])
-                )
-            if c.matched_discord_roles:
-                skill_info.append(
-                    "🏷️ " + ", ".join(f"`{r}`" for r in c.matched_discord_roles)
-                )
-            if c.seniority:
-                skill_info.append(f"seniority: `{c.seniority}`")
-            if c.timezone:
-                skill_info.append(f"tz: `{c.timezone}`")
-            if skill_info:
-                parts.append("   " + " · ".join(skill_info))
-
-            lines.append("\n".join(parts))
-
-        # Paginate: Discord followup allows multiple sends; split on 1900-char chunks.
-        messages: list[str] = []
-        current = ""
-        for line in lines:
-            candidate_block = line + "\n"
-            while len(candidate_block) > 1900:
-                if current:
-                    messages.append(current.rstrip())
-                    current = ""
-                messages.append(candidate_block[:1900].rstrip())
-                candidate_block = candidate_block[1900:]
-            if len(current) + len(candidate_block) > 1900:
-                if current:
-                    messages.append(current.rstrip())
-                current = candidate_block
-            else:
-                current += candidate_block
-        if current.strip():
-            messages.append(current.rstrip())
-
-        for msg in messages:
-            await interaction.followup.send(
-                msg,
-                allowed_mentions=discord.AllowedMentions(
-                    roles=False,
-                    users=False,
-                    everyone=False,
-                ),
-            )
-        if resume_options:
-            await interaction.followup.send(
-                "Resume download:",
-                view=MatchResumeSelectView(resume_options),
-            )
-
-        self._audit_command(
-            interaction=interaction,
-            action="crm.match_candidates",
-            result="success",
-            metadata={
-                "title": requirements.title,
-                "required_skills_count": len(requirements.required_skills),
-                "preferred_skills_count": len(requirements.preferred_skills),
-                "discord_role_types": requirements.discord_role_types,
-                "candidates_returned": len(candidates),
-                **posting_metadata,
-            },
-        )
-
-    async def _bulk_sync_guild_roles(
-        self, guild: discord.Guild
-    ) -> tuple[int, int, int]:
-        """Sync discord_roles for all non-bot guild members.
-
-        Returns (updated, skipped, failed). Per-member failures are logged and
-        skipped so one bad record never aborts the full run.
-        Roles in DISCORD_ROLES_EXCLUDE_FROM_SYNC (Bots, FixTweet, @everyone)
-        are excluded from the stored list.
-        """
-        updated = 0
-        skipped = 0
-        failed = 0
-        for member in guild.members:
-            if member.bot:
-                continue
-            role_names = [
-                r.name
-                for r in member.roles
-                if r.name not in DISCORD_ROLES_EXCLUDE_FROM_SYNC
-            ]
-            try:
-                await asyncio.to_thread(
-                    upsert_discord_member,
-                    settings,
-                    discord_user_id=str(member.id),
-                    guild_id=str(guild.id),
-                    discord_username=member.name,
-                    display_name=member.display_name,
-                    roles=role_names,
-                )
-                did_update = await asyncio.to_thread(
-                    update_person_discord_roles,
-                    settings,
-                    str(member.id),
-                    role_names,
-                )
-            except Exception as exc:
-                failed += 1
-                logger.warning(
-                    "bulk role sync: failed for user_id=%s: %s", member.id, exc
-                )
-                continue
-            if did_update:
-                updated += 1
-            else:
-                skipped += 1
-        return updated, skipped, failed
-
-    def _get_role_id_cache(self) -> dict[int, dict[str, int]]:
-        cache = getattr(self, "_role_id_cache", None)
-        if cache is None:
-            cache = {}
-            setattr(self, "_role_id_cache", cache)
-        return cache
-
-    def _refresh_role_id_cache(self, guild: discord.Guild) -> None:
-        excluded_names = {name.casefold() for name in DISCORD_ROLES_EXCLUDE_FROM_SYNC}
-        role_id_map: dict[str, int] = {}
-        sorted_roles = sorted(
-            guild.roles,
-            key=lambda role: (-getattr(role, "position", 0), role.id),
-        )
-        for role in sorted_roles:
-            normalized_name = role.name.casefold()
-            if normalized_name in excluded_names or normalized_name in role_id_map:
-                continue
-            role_id_map[normalized_name] = role.id
-        self._get_role_id_cache()[guild.id] = role_id_map
-
-    @commands.Cog.listener()
-    async def on_guild_role_create(self, role: discord.Role) -> None:
-        self._refresh_role_id_cache(role.guild)
-
-    @commands.Cog.listener()
-    async def on_guild_role_delete(self, role: discord.Role) -> None:
-        self._refresh_role_id_cache(role.guild)
-
-    @commands.Cog.listener()
-    async def on_guild_role_update(
-        self, before: discord.Role, after: discord.Role
-    ) -> None:
-        self._refresh_role_id_cache(after.guild)
-
-    @commands.Cog.listener()
-    async def on_guild_remove(self, guild: discord.Guild) -> None:
-        self._get_role_id_cache().pop(guild.id, None)
-
-    @commands.Cog.listener()
-    async def on_ready(self) -> None:
-        """Bulk-sync all guild member roles on startup."""
-        for guild in self.bot.guilds:
-            self._refresh_role_id_cache(guild)
-            try:
-                channel_ids = await self._refresh_jobs_channel_cache(guild.id)
-                logger.info(
-                    "Loaded %d registered jobs channel(s) for guild=%s",
-                    len(channel_ids),
-                    guild.name,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Failed loading jobs channel registrations for guild %s: %s",
-                    guild.name,
-                    exc,
-                )
-
-            try:
-                updated, skipped, failed = await self._bulk_sync_guild_roles(guild)
-                logger.info(
-                    "Startup discord role sync: guild=%s updated=%d skipped=%d failed=%d",
-                    guild.name,
-                    updated,
-                    skipped,
-                    failed,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Startup discord role sync failed for guild %s: %s", guild.name, exc
-                )
-
-    @commands.Cog.listener()
-    async def on_thread_create(self, thread: discord.Thread) -> None:
-        """Auto-run matching for new threads in registered channels."""
-        guild = thread.guild
-        parent = thread.parent
-        if guild is None or parent is None:
-            return
-        if not await self._refresh_jobs_channel_cache_if_missing(guild.id):
-            return
-
-        if not self._is_jobs_channel_registered(guild.id, parent.id):
-            return
-
-        owner = guild.get_member(thread.owner_id) if thread.owner_id else None
-        if owner is None or owner.bot:
-            return
-        if not check_user_roles_with_hierarchy(owner.roles, ["Member"]):
-            return
-
-        await self._run_auto_match_candidates_for_thread(
-            thread=thread,
-            trigger="thread_create",
-        )
-
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message) -> None:
-        """Auto-create a thread for registered text-channel posts and match."""
-        if message.guild is None:
-            return
-        if not await self._refresh_jobs_channel_cache_if_missing(message.guild.id):
-            return
-        if not isinstance(message.author, discord.Member):
-            return
-        if message.author.bot:
-            return
-        if not check_user_roles_with_hierarchy(message.author.roles, ["Member"]):
-            return
-        if isinstance(message.channel, discord.Thread):
-            return
-        if not isinstance(message.channel, discord.TextChannel):
-            return
-        if not self._is_jobs_channel_registered(message.guild.id, message.channel.id):
-            return
-        if message.channel.permissions_for(message.guild.default_role).view_channel:
-            logger.warning(
-                "Skipping auto-thread in publicly visible channel "
-                "(guild=%s channel=%s message=%s)",
-                message.guild.id,
-                message.channel.id,
-                message.id,
-            )
-            return
-        if not message.content.strip():
-            return
-
-        first_line = message.content.strip().splitlines()[0]
-        thread_name = first_line[:80] if first_line else f"job-post-{message.id}"
-
-        try:
-            thread = await message.create_thread(name=thread_name)
-        except discord.HTTPException as exc:
-            logger.warning(
-                "Failed to create auto-match thread (guild=%s channel=%s message=%s): %s",
-                message.guild.id,
-                message.channel.id,
-                message.id,
-                exc,
-            )
-            return
-
-        await self._run_auto_match_candidates_for_thread(
-            thread=thread,
-            trigger="message_create",
-        )
-
-    @app_commands.command(
-        name="sync-discord-roles",
-        description="Re-sync all server members' Discord roles into the candidate database.",
-    )
-    @require_role("Steering Committee")
-    async def sync_discord_roles(
-        self,
-        interaction: discord.Interaction,
-    ) -> None:
-        """Manually trigger a full guild role sync (also runs automatically on startup)."""
-        guild = interaction.guild
-        if guild is None:
-            await interaction.response.send_message(
-                "⚠️ This command must be used inside a server.", ephemeral=True
-            )
-            return
-
-        await interaction.response.defer(ephemeral=True)
-
-        updated, skipped, failed = await self._bulk_sync_guild_roles(guild)
-
-        self._audit_command(
-            interaction=interaction,
-            action="crm.sync_discord_roles",
-            result="success",
-            metadata={
-                "updated": updated,
-                "skipped_no_db_match": skipped,
-                "failed": failed,
-                "total_members_scanned": updated + skipped + failed,
-            },
-        )
-
-        await interaction.followup.send(
-            f"✅ Discord role sync complete.\n"
-            f"Updated: **{updated}** · No DB match (skipped): **{skipped}** · Failed: **{failed}**",
-            ephemeral=True,
-        )
-
-    @commands.Cog.listener()
-    async def on_member_update(
-        self,
-        before: discord.Member,
-        after: discord.Member,
-    ) -> None:
-        """Automatically sync discord_roles when a member's roles change."""
-        if before.roles == after.roles:
-            return
-
-        if after.guild is None:
-            return
-
-        role_names = [
-            r.name for r in after.roles if r.name not in DISCORD_ROLES_EXCLUDE_FROM_SYNC
-        ]
-
-        try:
-            await asyncio.to_thread(
-                upsert_discord_member,
-                settings,
-                discord_user_id=str(after.id),
-                guild_id=str(after.guild.id),
-                discord_username=after.name,
-                display_name=after.display_name,
-                roles=role_names,
-            )
-            await asyncio.to_thread(
-                update_person_discord_roles,
-                settings,
-                str(after.id),
-                role_names,
-            )
-        except Exception as exc:
-            logger.warning(
-                "on_member_update: failed to sync roles for user %s: %s",
-                after.id,
-                exc,
+                "An unexpected error occurred while loading bulk resume results."
             )
 
 

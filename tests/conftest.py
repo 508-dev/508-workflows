@@ -2,14 +2,20 @@
 Pytest configuration and shared fixtures for the 508.dev Discord bot tests.
 """
 
-import pytest
 import asyncio
+import os
+import pytest
 from unittest.mock import Mock, AsyncMock
 from discord.ext import commands
 import discord
 from typing import Generator
 
 # Config tests removed - no need to import Settings
+os.environ.setdefault("DISCORD_BOT_TOKEN", "test")
+os.environ.setdefault("ESPO_API_KEY", "test")
+os.environ.setdefault("ESPO_BASE_URL", "https://crm.example.invalid")
+os.environ.setdefault("KIMAI_BASE_URL", "https://kimai.example.invalid")
+os.environ.setdefault("KIMAI_API_TOKEN", "test")
 
 
 @pytest.fixture(scope="session")

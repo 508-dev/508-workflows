@@ -9,13 +9,14 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
-from five08.clients.espo import EspoAPI, EspoAPIError
+from five08.clients.espo import EspoAPIError, EspoClient
 from five08.crm_normalization import (
     ROLE_NORMALIZATION_MAP,
     normalize_city,
     normalize_country,
     normalize_role,
     normalize_roles,
+    normalize_state,
     normalize_seniority,
     normalize_timezone,
     normalize_website_url,
@@ -45,28 +46,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_SKILL_STRENGTH = 3
 
 
-class ResumeEspoClient:
-    """Minimal EspoCRM client wrapper for resume profile flows."""
-
-    def __init__(self) -> None:
-        api_url = settings.espo_base_url.rstrip("/") + "/api/v1"
-        self.api = EspoAPI(api_url, settings.espo_api_key)
-
-    def get_contact(self, contact_id: str) -> dict[str, Any]:
-        return self.api.request("GET", f"Contact/{contact_id}")
-
-    def download_attachment(self, attachment_id: str) -> bytes:
-        return self.api.download_file(f"Attachment/file/{attachment_id}")
-
-    def update_contact(self, contact_id: str, updates: dict[str, Any]) -> None:
-        self.api.request("PUT", f"Contact/{contact_id}", updates)
-
-
 class ResumeProfileProcessor:
     """End-to-end extraction and apply operations for uploaded resumes."""
 
     def __init__(self) -> None:
-        self.crm = ResumeEspoClient()
+        self.crm = EspoClient(settings.espo_base_url, settings.espo_api_key)
         self.extractor = ResumeProfileExtractor(
             api_key=settings.openai_api_key,
             base_url=settings.openai_base_url,
@@ -205,6 +189,15 @@ class ResumeProfileProcessor:
                 skipped=skipped,
             )
             self._collect_change(
+                crm_field="addressState",
+                label="State",
+                current=contact.get("addressState"),
+                proposed=self._normalize_state(extracted.address_state),
+                proposed_updates=proposed_updates,
+                proposed_changes=proposed_changes,
+                skipped=skipped,
+            )
+            self._collect_change(
                 crm_field="description",
                 label="Description",
                 current=contact.get("description"),
@@ -243,7 +236,7 @@ class ResumeProfileProcessor:
                     and current_seniority != "unknown"
                     and value != current_seniority
                 ),
-                blocked_reason="Existing seniority is preserved unless unknown",
+                blocked_reason="Existing seniority preserved",
             )
             if new_skills:
                 proposed_updates["skills"] = merged_skills
@@ -481,6 +474,14 @@ class ResumeProfileProcessor:
                     normalized_updates["addressCity"] = normalized_city
                 else:
                     normalized_updates.pop("addressCity", None)
+            if "addressState" in normalized_updates:
+                normalized_state = self._normalize_state(
+                    normalized_updates.get("addressState")
+                )
+                if normalized_state:
+                    normalized_updates["addressState"] = normalized_state
+                else:
+                    normalized_updates.pop("addressState", None)
 
             allowed_fields = {
                 "emailAddressData",
@@ -490,6 +491,7 @@ class ResumeProfileProcessor:
                 "addressCountry",
                 "cTimezone",
                 "addressCity",
+                "addressState",
                 "description",
                 "phoneNumber",
                 "cRoles",
@@ -789,6 +791,10 @@ class ResumeProfileProcessor:
     @staticmethod
     def _normalize_city(value: Any) -> str | None:
         return normalize_city(value, strip_parenthetical=False)
+
+    @staticmethod
+    def _normalize_state(value: Any) -> str | None:
+        return normalize_state(value)
 
     @staticmethod
     def _normalize_timezone(value: Any) -> str | None:

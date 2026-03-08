@@ -2,7 +2,7 @@
 
 from urllib.parse import urlparse
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, PrivateAttr, field_validator, model_validator
 
 from five08.settings import SharedSettings
 
@@ -10,14 +10,15 @@ from five08.settings import SharedSettings
 class WorkerSettings(SharedSettings):
     """Worker-specific settings layered on top of shared stack settings."""
 
+    _crm_linkedin_field: str = PrivateAttr(default="cLinkedIn")
+    _crm_intake_completed_field: str = PrivateAttr(default="")
+
     worker_name: str = "worker"
     worker_queue_names: str = "jobs.default"
     worker_burst: bool = False
 
     espo_base_url: str
     espo_api_key: str
-    crm_linkedin_field: str = "cLinkedIn"
-    crm_intake_completed_field: str = ""
     google_forms_allowed_form_ids: str = ""
 
     openai_api_key: str | None = None
@@ -29,7 +30,6 @@ class WorkerSettings(SharedSettings):
 
     max_file_size_mb: int = 10
     allowed_file_types: str = "pdf,doc,docx,txt"
-    resume_keywords: str = "resume,cv,curriculum"
     max_attachments_per_contact: int = 3
     crm_sync_enabled: bool = True
     crm_sync_interval_seconds: int = 900
@@ -66,23 +66,18 @@ class WorkerSettings(SharedSettings):
     oidc_client_secret: str = ""
     oidc_scope: str = "openid profile email groups"
     oidc_groups_claim: str = "groups"
-    oidc_admin_groups: str = "Admin,Owner,Steering Committee"
+    oidc_admin_groups: str = "authentik Admins"
     oidc_callback_path: str = "/auth/callback"
     oidc_redirect_base_url: str | None = None
-    oidc_http_timeout_seconds: float = 8.0
-    oidc_jwks_cache_seconds: int = 300
-    auth_state_ttl_seconds: int = 600
-    auth_session_ttl_seconds: int = 28800
     auth_session_cookie_name: str = "five08_session"
-    auth_cookie_secure: bool = False
-    auth_cookie_samesite: str = "lax"
     dashboard_default_path: str = "/dashboard"
     dashboard_public_base_url: str | None = None
     discord_bot_token: str | None = None
     discord_admin_guild_id: str | None = None
-    discord_admin_roles: str = "Admin,Owner,Steering Committee"
+    discord_admin_roles: str = "Admin,Owner"
     discord_api_timeout_seconds: float = 8.0
     discord_link_ttl_seconds: int = 600
+    discord_link_require_oidc_identity_checks: bool = True
 
     @property
     def google_forms_allowed_form_ids_set(self) -> set[str]:
@@ -113,15 +108,6 @@ class WorkerSettings(SharedSettings):
             )
         return self
 
-    @model_validator(mode="after")
-    def validate_auth_cookie_samesite(self) -> "WorkerSettings":
-        """Normalize and validate cookie SameSite policy."""
-        normalized = self.auth_cookie_samesite.strip().lower()
-        if normalized not in {"lax", "strict", "none"}:
-            raise ValueError("AUTH_COOKIE_SAMESITE must be one of: lax, strict, none")
-        self.auth_cookie_samesite = normalized
-        return self
-
     @field_validator("docuseal_member_agreement_template_id", mode="before")
     @classmethod
     def _normalize_docuseal_member_agreement_template_id(
@@ -145,11 +131,62 @@ class WorkerSettings(SharedSettings):
         return {ext.strip().lower() for ext in self.allowed_file_types.split(",")}
 
     @property
+    def crm_linkedin_field(self) -> str:
+        """Resume/profile sync always writes LinkedIn URLs to the canonical CRM field."""
+        return self._crm_linkedin_field
+
+    @crm_linkedin_field.setter
+    def crm_linkedin_field(self, value: str) -> None:
+        """Allow controlled runtime overrides without reintroducing env loading."""
+        self._crm_linkedin_field = value
+
+    @property
+    def crm_intake_completed_field(self) -> str:
+        """Intake completion field remains intentionally unset until explicitly adopted."""
+        return self._crm_intake_completed_field
+
+    @crm_intake_completed_field.setter
+    def crm_intake_completed_field(self, value: str) -> None:
+        """Allow tests to override the unset intake-completed mapping when needed."""
+        self._crm_intake_completed_field = value
+
+    @property
+    def oidc_http_timeout_seconds(self) -> float:
+        """Keep OIDC network calls bounded with a fixed timeout."""
+        return 8.0
+
+    @property
+    def oidc_jwks_cache_seconds(self) -> int:
+        """Cache OIDC signing keys briefly to avoid repeated JWKS fetches."""
+        return 300
+
+    @property
+    def auth_state_ttl_seconds(self) -> int:
+        """Short-lived state tokens reduce replay risk during login."""
+        return 600
+
+    @property
+    def auth_session_ttl_seconds(self) -> int:
+        """Dashboard sessions expire after one workday."""
+        return 28800
+
+    @property
+    def auth_cookie_secure(self) -> bool:
+        """Use secure cookies outside local/dev/test environments."""
+        env = self.environment.strip().lower()
+        return env not in {"local", "dev", "development", "test"}
+
+    @property
+    def auth_cookie_samesite(self) -> str:
+        """Auth session cookies use SameSite=Lax."""
+        return "lax"
+
+    @property
     def parsed_resume_keywords(self) -> set[str]:
         """Keywords used to identify resume-like attachments."""
         return {
             keyword.strip().lower()
-            for keyword in self.resume_keywords.split(",")
+            for keyword in ("resume,cv,curriculum").split(",")
             if keyword.strip()
         }
 

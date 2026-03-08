@@ -126,8 +126,8 @@ Use `.env.example` as source of truth. Key categories:
 - Bot credentials/integrations: Discord, email, Espo, Kimai
 - Discord CRM audit writer: `AUDIT_API_BASE_URL`, `AUDIT_API_TIMEOUT_SECONDS` (plus shared `API_SHARED_SECRET`)
 - Worker controls: `WORKER_NAME`, `WORKER_QUEUE_NAMES`, `WORKER_BURST`
-- Worker CRM processing: `MAX_ATTACHMENTS_PER_CONTACT`, `MAX_FILE_SIZE_MB`, `ALLOWED_FILE_TYPES`, `RESUME_KEYWORDS`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`, `RESUME_EXTRACTOR_VERSION`
-- Resume upload UX wiring: `BACKEND_API_BASE_URL` on bot, `CRM_LINKEDIN_FIELD` on worker.
+- Worker CRM processing: `MAX_ATTACHMENTS_PER_CONTACT`, `MAX_FILE_SIZE_MB`, `ALLOWED_FILE_TYPES`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`, `RESUME_EXTRACTOR_VERSION`
+- Resume upload UX wiring: `BACKEND_API_BASE_URL` on bot; worker-side LinkedIn field mapping is fixed in code.
 
 ## CI Notes
 

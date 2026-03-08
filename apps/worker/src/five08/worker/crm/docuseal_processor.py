@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from five08.clients.espo import EspoAPI, EspoAPIError
+from five08.clients.espo import EspoAPIError, EspoClient
 from five08.worker.config import settings
 from five08.worker.masking import mask_email
 
@@ -23,8 +23,7 @@ class DocusealAgreementProcessor:
     """Look up a CRM contact by email and mark their member agreement as signed."""
 
     def __init__(self) -> None:
-        api_url = settings.espo_base_url.rstrip("/") + "/api/v1"
-        self.api = EspoAPI(api_url, settings.espo_api_key)
+        self.api = EspoClient(settings.espo_base_url, settings.espo_api_key)
 
     @staticmethod
     def _normalize_completed_at(completed_at: str) -> str:

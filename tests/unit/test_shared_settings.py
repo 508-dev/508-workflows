@@ -25,3 +25,26 @@ def test_non_local_settings_require_non_empty_secrets() -> None:
             postgres_url="postgresql://user:pass@db.example.com:5432/workflows",
             minio_root_password=" ",
         )
+
+
+def test_sentry_environment_and_sampling_are_not_env_configurable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Low-value Sentry config should stay fixed even if legacy env vars are set."""
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("SENTRY_ENVIRONMENT", "staging")
+    monkeypatch.setenv("SENTRY_RELEASE", "v1.2.3")
+    monkeypatch.setenv("SENTRY_SAMPLE_RATE", "0.25")
+    monkeypatch.setenv("SENTRY_TRACES_SAMPLE_RATE", "0.5")
+    monkeypatch.setenv("SENTRY_PROFILES_SAMPLE_RATE", "0.75")
+
+    settings = SharedSettings(
+        postgres_url="postgresql://user:pass@db.example.com:5432/workflows",
+        minio_root_password="secret",
+    )
+
+    assert settings.sentry_environment_name == "production"
+    assert settings.sentry_release is None
+    assert settings.sentry_sample_rate == 1.0
+    assert settings.sentry_traces_sample_rate == 0.0
+    assert settings.sentry_profiles_sample_rate == 0.0

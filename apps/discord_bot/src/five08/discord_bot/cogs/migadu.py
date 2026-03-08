@@ -15,7 +15,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from five08.discord_bot.config import settings
-from five08.discord_bot.utils.audit import DiscordAuditLogger
+from five08.discord_bot.utils.audit import DiscordAuditCogMixin
 from five08.discord_bot.utils.role_decorators import require_role
 
 logger = logging.getLogger(__name__)
@@ -23,38 +23,12 @@ logger = logging.getLogger(__name__)
 MIGADU_API_BASE_URL = "https://api.migadu.com/v1"
 
 
-class MigaduCog(commands.Cog):
+class MigaduCog(DiscordAuditCogMixin, commands.Cog):
     """Migadu mailbox management cog."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        self.audit_logger = DiscordAuditLogger(
-            base_url=settings.audit_api_base_url,
-            shared_secret=settings.api_shared_secret,
-            timeout_seconds=settings.audit_api_timeout_seconds,
-            discord_logs_webhook_url=settings.discord_logs_webhook_url,
-            discord_logs_webhook_wait=settings.discord_logs_webhook_wait,
-        )
-
-    def _audit_command(
-        self,
-        *,
-        interaction: discord.Interaction,
-        action: str,
-        result: str,
-        metadata: dict[str, Any] | None = None,
-        resource_type: str | None = "discord_command",
-        resource_id: str | None = None,
-    ) -> None:
-        """Queue a best-effort audit write for Migadu command activity."""
-        self.audit_logger.log_command(
-            interaction=interaction,
-            action=action,
-            result=result,
-            metadata=metadata,
-            resource_type=resource_type,
-            resource_id=resource_id,
-        )
+        self._init_audit_logger()
 
     def _migadu_credentials(self) -> tuple[str, str]:
         """Return Migadu username and API token from configured settings."""

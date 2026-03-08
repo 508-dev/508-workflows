@@ -101,6 +101,24 @@ def test_google_forms_allowed_form_ids_parses_as_set() -> None:
     assert settings.google_forms_allowed_form_ids_set == {"form-1", "form-2", "form-3"}
 
 
+def test_oidc_admin_groups_default_matches_authentik_admins() -> None:
+    settings = WorkerSettings(
+        espo_base_url="https://crm.test.com",
+        espo_api_key="test-key",
+    )
+
+    assert settings.oidc_admin_group_names == {"authentik admins"}
+
+
+def test_discord_admin_roles_default_is_admin_owner() -> None:
+    settings = WorkerSettings(
+        espo_base_url="https://crm.test.com",
+        espo_api_key="test-key",
+    )
+
+    assert settings.discord_admin_role_names == {"admin", "owner"}
+
+
 def test_intake_resume_fetch_timeout_must_be_positive() -> None:
     with pytest.raises(ValidationError):
         WorkerSettings(
@@ -130,3 +148,60 @@ def test_intake_resume_allowed_hostnames_normalizes_dots_and_empties() -> None:
         "example.com",
         "sub.example.com",
     }
+
+
+def test_fixed_worker_defaults_ignore_legacy_env_vars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CRM_LINKEDIN_FIELD", "linkedinCustom")
+    monkeypatch.setenv("CRM_INTAKE_COMPLETED_FIELD", "cCompleted")
+    monkeypatch.setenv("RESUME_KEYWORDS", "portfolio")
+    monkeypatch.setenv("OIDC_HTTP_TIMEOUT_SECONDS", "12")
+    monkeypatch.setenv("OIDC_JWKS_CACHE_SECONDS", "60")
+    monkeypatch.setenv("AUTH_STATE_TTL_SECONDS", "42")
+    monkeypatch.setenv("AUTH_SESSION_TTL_SECONDS", "120")
+    monkeypatch.setenv("AUTH_COOKIE_SECURE", "true")
+    monkeypatch.setenv("AUTH_COOKIE_SAMESITE", "strict")
+
+    settings = WorkerSettings(
+        espo_base_url="https://crm.test.com",
+        espo_api_key="test-key",
+    )
+
+    assert settings.crm_linkedin_field == "cLinkedIn"
+    assert settings.crm_intake_completed_field == ""
+    assert settings.parsed_resume_keywords == {"resume", "cv", "curriculum"}
+    assert settings.oidc_http_timeout_seconds == 8.0
+    assert settings.oidc_jwks_cache_seconds == 300
+    assert settings.auth_state_ttl_seconds == 600
+    assert settings.auth_session_ttl_seconds == 28800
+    assert settings.auth_cookie_samesite == "lax"
+
+
+def test_auth_cookie_secure_is_false_for_local_even_if_legacy_env_is_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTH_COOKIE_SECURE", "true")
+
+    settings = WorkerSettings(
+        environment="local",
+        espo_base_url="https://crm.test.com",
+        espo_api_key="test-key",
+    )
+
+    assert settings.auth_cookie_secure is False
+
+
+def test_auth_cookie_secure_is_true_for_non_local_even_if_legacy_env_is_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTH_COOKIE_SECURE", "false")
+
+    settings = WorkerSettings(
+        environment="production",
+        espo_base_url="https://crm.test.com",
+        espo_api_key="test-key",
+        minio_root_password="secret",
+    )
+
+    assert settings.auth_cookie_secure is True

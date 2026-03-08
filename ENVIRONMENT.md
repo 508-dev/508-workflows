@@ -14,13 +14,9 @@ Use `.env.example` as the source of defaults.
 
 - `Optional` (non-local): `ENVIRONMENT` (default: `local`; non-local environments must set explicit `POSTGRES_URL` and `MINIO_ROOT_PASSWORD`)
 - `Optional`: `SENTRY_DSN` (default: unset; set to enable Sentry event capture)
-- `Optional`: `SENTRY_ENVIRONMENT` (defaults to `ENVIRONMENT`)
-- `Optional`: `SENTRY_RELEASE` (optional release identifier for Sentry)
-- `Optional`: `SENTRY_SAMPLE_RATE` (default: `1.0`)
-- `Optional`: `SENTRY_TRACES_SAMPLE_RATE` (default: `0.0`)
-- `Optional`: `SENTRY_PROFILES_SAMPLE_RATE` (default: `0.0`)
 - `Optional`: `SENTRY_SEND_DEFAULT_PII` (default: `false`)
 - `Optional`: `SENTRY_DEBUG` (default: `false`)
+- Note: Sentry environment always follows `ENVIRONMENT`; release/tracing/profiling sampling are fixed in code.
 
 ## Queue + Job Runtime
 
@@ -71,18 +67,14 @@ Use `.env.example` as the source of defaults.
 - `Optional`: `OIDC_ADMIN_GROUPS` (default: `Admin,Owner,Steering Committee`)
 - `Optional`: `OIDC_CALLBACK_PATH` (default: `/auth/callback`)
 - `Optional`: `OIDC_REDIRECT_BASE_URL` (default: infer from request base URL)
-- `Optional`: `OIDC_HTTP_TIMEOUT_SECONDS` (default: `8.0`)
-- `Optional`: `OIDC_JWKS_CACHE_SECONDS` (default: `300`)
-- `Optional`: `AUTH_STATE_TTL_SECONDS` (default: `600`)
-- `Optional`: `AUTH_SESSION_TTL_SECONDS` (default: `28800`)
+- Note: OIDC HTTP timeout, JWKS cache TTL, auth state TTL, and auth session TTL are fixed in code.
 
 ## Authentication + Dashboard
 
 - `Optional`: `AUTH_SESSION_COOKIE_NAME` (default: `five08_session`)
-- `Optional`: `AUTH_COOKIE_SECURE` (default: `false`)
-- `Optional`: `AUTH_COOKIE_SAMESITE` (default: `lax`)
 - `Optional`: `DASHBOARD_DEFAULT_PATH` (default: `/dashboard`)
 - `Optional`: `DASHBOARD_PUBLIC_BASE_URL` (base URL for generated deep links)
+- Note: auth cookies always use `SameSite=Lax`; `secure` is enabled automatically outside local/dev/test environments.
 
 ## Discord Admin Deep-Link Validation
 
@@ -105,11 +97,9 @@ Use `.env.example` as the source of defaults.
 - `Optional`: `CRM_SYNC_INTERVAL_SECONDS` (default: `900`)
 - `Optional`: `CRM_SYNC_PAGE_SIZE` (default: `200`)
 - `Optional`: `CHECK_EMAIL_WAIT` (default: `2`; minutes between mailbox polls)
-- `Optional`: `CRM_LINKEDIN_FIELD` (default: `cLinkedIn`)
 - `Optional`: `MAX_ATTACHMENTS_PER_CONTACT` (default: `3`)
 - `Optional`: `MAX_FILE_SIZE_MB` (default: `10`)
 - `Optional`: `ALLOWED_FILE_TYPES` (default: `pdf,doc,docx,txt`)
-- `Optional`: `RESUME_KEYWORDS` (default: `resume,cv,curriculum`)
 - `Optional`: `OPENAI_API_KEY` (if unset, heuristic extraction is used)
 - `Optional`: `OPENAI_BASE_URL` (set `https://openrouter.ai/api/v1` for OpenRouter)
 - `Optional`: `RESUME_AI_MODEL` (default: `gpt-4o-mini`; use plain names like `gpt-4o-mini`, OpenRouter gets auto-prefixed to `openai/<model>`)
@@ -123,12 +113,13 @@ Use `.env.example` as the source of defaults.
 - `Optional`: `EMAIL_RESUME_MAX_FILE_SIZE_MB` (default: `10`)
 - `Optional`: `EMAIL_REQUIRE_SENDER_AUTH_HEADERS` (default: `true`; requires SPF/DKIM/DMARC pass headers)
 - `Required when EMAIL_RESUME_INTAKE_ENABLED=true`: `EMAIL_USERNAME`, `EMAIL_PASSWORD`, `IMAP_SERVER`
+- Note: resume intake writes LinkedIn URLs to `cLinkedIn`, leaves the intake-completed field unset, and matches resume filenames using `resume,cv,curriculum`.
 
 ## Discord Bot Core
 
 - `Optional`: `BACKEND_API_BASE_URL` (default: `http://api:8090`)
 - `Optional`: `HEALTHCHECK_PORT` (default: `3000`)
-- `Optional`: `DISCORD_SENDMSG_CHARACTER_LIMIT` (default: `2000`)
+- Note: bot message chunking follows Discord's 2000 character limit in code.
 
 ## Migadu Mailbox Automation
 

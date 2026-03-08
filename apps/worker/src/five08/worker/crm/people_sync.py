@@ -7,7 +7,7 @@ import re
 from typing import Any
 
 from five08.audit import PeopleSyncStatus, PersonRecord, upsert_person
-from five08.clients.espo import EspoAPI, EspoAPIError
+from five08.clients.espo import EspoAPIError, EspoClient
 from five08.skills import normalize_skill_payload
 from five08.worker.config import settings
 
@@ -20,8 +20,7 @@ class EspoPeopleSyncClient:
     """Fetch contact identity data from EspoCRM."""
 
     def __init__(self) -> None:
-        api_url = settings.espo_base_url.rstrip("/") + "/api/v1"
-        self.api = EspoAPI(api_url, settings.espo_api_key)
+        self.api = EspoClient(settings.espo_base_url, settings.espo_api_key)
 
     def list_contact_page(
         self, *, offset: int, max_size: int

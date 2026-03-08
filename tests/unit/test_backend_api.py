@@ -212,6 +212,40 @@ def test_resume_extract_handler_enqueues_job(
     assert call_kwargs["idempotency_key"] == "resume-extract:c-1:a-1:v7:gpt-test"
 
 
+def test_resume_extract_handler_appends_refresh_token_to_idempotency_key(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Explicit refresh tokens should force a new resume extract job key."""
+    monkeypatch.setattr(api.settings, "resume_extractor_version", "v7")
+    monkeypatch.setattr(api.settings, "openai_api_key", "key")
+    monkeypatch.setattr(api.settings, "openai_base_url", None)
+    monkeypatch.setattr(api.settings, "resume_ai_model", "gpt-test")
+
+    with patch("five08.backend.api.enqueue_job") as mock_enqueue:
+        mock_enqueue.return_value = Mock(id="job-extract", created=True)
+        response = client.post(
+            "/jobs/resume-extract",
+            json={
+                "contact_id": "c-1",
+                "attachment_id": "a-1",
+                "filename": "resume.pdf",
+                "refresh_token": "refresh-123",
+            },
+            headers=auth_headers,
+        )
+
+    payload = response.json()
+    assert response.status_code == 202
+    assert payload["job_id"] == "job-extract"
+    call_kwargs = mock_enqueue.call_args.kwargs
+    assert (
+        call_kwargs["idempotency_key"]
+        == "resume-extract:c-1:a-1:v7:gpt-test:refresh-123"
+    )
+
+
 def test_resume_apply_handler_enqueues_job(
     client: TestClient,
     auth_headers: dict[str, str],
@@ -702,6 +736,8 @@ def test_auth_callback_success_writes_login_audit(client: TestClient) -> None:
     assert audit_payload.source == api.AuditSource.ADMIN_DASHBOARD
     assert audit_payload.actor_provider == api.ActorProvider.ADMIN_SSO
     assert audit_payload.actor_subject == "admin@508.dev"
+    assert audit_payload.metadata is not None
+    assert "discord_link_identity_checks_enforced" not in audit_payload.metadata
 
 
 def test_auth_callback_denied_writes_login_audit(client: TestClient) -> None:
@@ -751,6 +787,114 @@ def test_auth_callback_denied_writes_login_audit(client: TestClient) -> None:
     assert audit_payload.action == "auth.login"
     assert audit_payload.result == api.AuditResult.DENIED
     assert audit_payload.actor_subject == "member@508.dev"
+
+
+def test_auth_callback_discord_link_can_skip_oidc_identity_checks(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    monkeypatch.setattr(
+        api.settings, "discord_link_require_oidc_identity_checks", False
+    )
+    store = Mock()
+    store.pop_oidc_state = AsyncMock(
+        return_value=api.PendingOIDCState(
+            nonce="nonce-1",
+            code_verifier="verifier-1",
+            next_path="/dashboard",
+            discord_link_token="link-1",
+        )
+    )
+    store.get_discord_link = AsyncMock(
+        return_value=api.DiscordLinkGrant(
+            discord_user_id="123456789",
+            next_path="/dashboard",
+        )
+    )
+    store.delete_discord_link = AsyncMock()
+    store.save_session = AsyncMock()
+
+    oidc = Mock()
+    oidc.configured = True
+    oidc.exchange_code = AsyncMock(return_value={"id_token": "id-token-1"})
+    oidc.validate_id_token = AsyncMock(
+        return_value={
+            "sub": "authentik-user-4",
+            "name": "Bootstrap User",
+            "groups": ["not-admin-yet"],
+            "exp": 4_102_444_800,
+        }
+    )
+
+    with (
+        patch("five08.backend.api._auth_store_from_app", return_value=store),
+        patch("five08.backend.api._oidc_client_from_app", return_value=oidc),
+        patch("five08.backend.api._http_client_from_app", return_value=Mock()),
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
+    ):
+        response = client.get(
+            "/auth/callback?code=code-1&state=state-1",
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 302
+    saved_session = store.save_session.call_args.kwargs["payload"]
+    assert saved_session.is_admin is True
+    store.delete_discord_link.assert_awaited_once_with("link-1")
+    audit_payload = mock_insert.call_args.args[1]
+    assert audit_payload.metadata is not None
+    assert audit_payload.metadata["via_discord_link"] is True
+    assert audit_payload.metadata["discord_link_identity_checks_enforced"] is False
+
+
+def test_auth_discord_link_redirect_creates_discord_session_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    monkeypatch.setattr(
+        api.settings, "discord_link_require_oidc_identity_checks", False
+    )
+    store = Mock()
+    store.get_discord_link = AsyncMock(
+        return_value=api.DiscordLinkGrant(
+            discord_user_id="123456789",
+            next_path="/dashboard",
+        )
+    )
+    store.save_session = AsyncMock()
+    store.delete_discord_link = AsyncMock()
+    verifier = Mock()
+    verifier.resolve_admin_identity = AsyncMock(
+        return_value=Mock(
+            discord_user_id="123456789",
+            email="admin@508.dev",
+            display_name="Discord Admin",
+        )
+    )
+
+    with (
+        patch("five08.backend.api._auth_store_from_app", return_value=store),
+        patch(
+            "five08.backend.api._discord_admin_verifier_from_app",
+            return_value=verifier,
+        ),
+        patch("five08.backend.api._http_client_from_app", return_value=Mock()),
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
+    ):
+        response = client.get("/auth/discord/link/link-1", follow_redirects=False)
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "/dashboard"
+    store.delete_discord_link.assert_awaited_once_with("link-1")
+    saved_session = store.save_session.call_args.kwargs["payload"]
+    assert saved_session.subject == "123456789"
+    assert saved_session.actor_provider == api.ActorProvider.DISCORD.value
+    assert saved_session.email == "admin@508.dev"
+    audit_payload = mock_insert.call_args.args[1]
+    assert audit_payload.actor_provider == api.ActorProvider.DISCORD
+    assert audit_payload.actor_subject == "123456789"
+    assert audit_payload.metadata is not None
+    assert audit_payload.metadata["discord_link_identity_checks_enforced"] is False
 
 
 def test_auth_logout_writes_logout_audit(client: TestClient) -> None:

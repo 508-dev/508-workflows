@@ -5,7 +5,12 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 
-from five08.candidate_search import _seniority_score, search_candidates
+from five08.candidate_search import (
+    _build_location_hints,
+    _normalize_preferred_timezones,
+    _seniority_score,
+    search_candidates,
+)
 from five08.job_match import JobRequirements
 
 
@@ -50,6 +55,81 @@ def test_seniority_score_unknown_string_returns_zero() -> None:
     assert _seniority_score("senior", "lead") == 0.0
 
 
+def test_build_location_hints_matches_dotted_abbreviations() -> None:
+    reqs = JobRequirements(
+        raw_location_text="Open to U.S. and U.K. candidates; E.U. timezone preferred"
+    )
+
+    timezone_prefixes, country_hints, location_constrained, hints_available = (
+        _build_location_hints(
+            reqs, _normalize_preferred_timezones(reqs.preferred_timezones)
+        )
+    )
+
+    assert "america" in timezone_prefixes
+    assert "europe" in timezone_prefixes
+    assert "us" in country_hints
+    assert "uk" in country_hints
+    assert location_constrained is True
+    assert hints_available is True
+
+
+def test_build_location_hints_matches_usa_dotted_abbreviation() -> None:
+    reqs = JobRequirements(raw_location_text="Hiring across U.S.A. time zones")
+
+    timezone_prefixes, country_hints, location_constrained, hints_available = (
+        _build_location_hints(
+            reqs, _normalize_preferred_timezones(reqs.preferred_timezones)
+        )
+    )
+
+    assert "america" in timezone_prefixes
+    assert "us" in country_hints
+    assert location_constrained is True
+    assert hints_available is True
+
+
+def test_build_location_hints_includes_uk_without_trailing_dot_alias() -> None:
+    reqs = JobRequirements(raw_location_text="Remote in U.K")
+
+    _, country_hints, location_constrained, hints_available = _build_location_hints(
+        reqs, _normalize_preferred_timezones(reqs.preferred_timezones)
+    )
+
+    assert "u.k" in country_hints
+    assert location_constrained is True
+    assert hints_available is True
+
+
+def test_build_location_hints_strips_preferred_timezones() -> None:
+    reqs = JobRequirements(preferred_timezones=[" America/New_York ", "  "])
+
+    timezone_prefixes, _, location_constrained, hints_available = _build_location_hints(
+        reqs, _normalize_preferred_timezones(reqs.preferred_timezones)
+    )
+
+    assert timezone_prefixes == ["america"]
+    assert location_constrained is True
+    assert hints_available is True
+
+
+def test_build_location_hints_does_not_match_pronoun_us() -> None:
+    reqs = JobRequirements(raw_location_text="Contact us for details")
+
+    _, country_hints, _, _ = _build_location_hints(
+        reqs, _normalize_preferred_timezones(reqs.preferred_timezones)
+    )
+
+    assert "us" not in country_hints
+
+
+def test_normalize_preferred_timezones_trims_and_filters() -> None:
+    normalized = _normalize_preferred_timezones(
+        [" America/New_York ", "", "  ", "Europe/Berlin"]
+    )
+    assert normalized == ["America/New_York", "Europe/Berlin"]
+
+
 # ---------------------------------------------------------------------------
 # search_candidates — early-return guards
 # ---------------------------------------------------------------------------
@@ -88,6 +168,23 @@ def test_search_candidates_queries_db_when_only_role_types_provided() -> None:
     conn.cursor.assert_called_once()  # DB was queried, not short-circuited
 
 
+def test_search_candidates_binds_trimmed_exact_timezones() -> None:
+    row = _make_row(timezone="America/New_York")
+    conn = _patch_db([row])
+    reqs = _make_requirements(
+        required_skills=["python"],
+        preferred_timezones=[" America/New_York ", " "],
+    )
+    settings = MagicMock()
+
+    with patch("five08.candidate_search.get_postgres_connection", return_value=conn):
+        search_candidates(settings, reqs)
+
+    execute_params = conn.cursor.return_value.execute.call_args[0][1]
+    # Fixed SQL param order: exact_timezones is the 6th bind parameter.
+    assert execute_params[5] == ["America/New_York"]
+
+
 # ---------------------------------------------------------------------------
 # search_candidates — DB rows → CandidateMatch mapping and secondary sort
 # ---------------------------------------------------------------------------
@@ -115,6 +212,7 @@ def _make_row(**overrides: object) -> dict:
         "preferred_matched": 0,
         "timezone_matched": 1,
         "discord_role_matched": 0,
+        "location_signal": 0,
     }
     base.update(overrides)
     return base
@@ -150,7 +248,13 @@ def _patch_db(rows: list[dict]) -> MagicMock:
 
 
 def test_search_candidates_maps_row_to_candidate_match() -> None:
-    row = _make_row(crm_contact_id="abc", name="Bob", seniority="senior")
+    row = _make_row(
+        crm_contact_id="abc",
+        name="Bob Display",
+        crm_name="Bob CRM",
+        discord_username="bob_discord",
+        seniority="senior",
+    )
     conn = _patch_db([row])
 
     reqs = _make_requirements(required_skills=["python"], seniority="senior")
@@ -162,7 +266,9 @@ def test_search_candidates_maps_row_to_candidate_match() -> None:
     assert len(results) == 1
     c = results[0]
     assert c.crm_contact_id == "abc"
-    assert c.name == "Bob"
+    assert c.name == "Bob Display"
+    assert c.crm_name == "Bob CRM"
+    assert c.discord_username == "bob_discord"
     assert c.seniority == "senior"
     assert c.seniority_score == 1.0
     assert "python" in c.matched_required_skills
@@ -339,3 +445,32 @@ def test_search_candidates_secondary_sort_skill_score_over_discord_role() -> Non
     # skill match should beat role-only match in secondary sort
     assert results[0].crm_contact_id == "skill"
     assert results[1].crm_contact_id == "role"
+
+
+def test_search_candidates_secondary_sort_location_signal_over_match_score() -> None:
+    """Explicit location mismatches should rank below location-compatible candidates."""
+    location_match_row = _make_row(
+        crm_contact_id="match",
+        is_member=False,
+        match_score=22,
+        location_signal=2,
+    )
+    location_mismatch_row = _make_row(
+        crm_contact_id="mismatch",
+        is_member=False,
+        match_score=40,
+        location_signal=-4,
+    )
+    conn = _patch_db([location_mismatch_row, location_match_row])
+    reqs = _make_requirements(
+        required_skills=["python"],
+        raw_location_text="United States",
+        preferred_timezones=["America/New_York"],
+    )
+    settings = MagicMock()
+
+    with patch("five08.candidate_search.get_postgres_connection", return_value=conn):
+        results = search_candidates(settings, reqs)
+
+    assert results[0].crm_contact_id == "match"
+    assert results[1].crm_contact_id == "mismatch"

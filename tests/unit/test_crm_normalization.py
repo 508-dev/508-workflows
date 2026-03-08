@@ -6,6 +6,7 @@ from five08.crm_normalization import (
     normalize_role,
     normalize_roles,
     normalize_seniority,
+    normalize_state,
     normalize_timezone,
     normalize_website_url,
 )
@@ -48,7 +49,29 @@ def test_normalize_website_url_respects_disallowed_host_predicate() -> None:
 
 def test_normalize_country_and_city() -> None:
     assert normalize_country(" united states ") == "United States"
+    assert normalize_country("Taiwan") == "Taiwan"
+    assert normalize_country("Taiwan.") == "Taiwan"
+    assert normalize_country("Côte d’Ivoire") == "Ivory Coast"
+    assert normalize_country("Democratic Republic of the Congo") == (
+        "Democratic Republic Of The Congo"
+    )
+    assert normalize_country("Kaohsiung City") is None
     assert normalize_city("  new york, ny  ") == "New York"
+    assert normalize_city("JS") is None
+    assert normalize_city("Senior Engineer") is None
+    assert (
+        normalize_city("○ A Python Django Api Handles Account Creation And Management")
+        is None
+    )
+    assert normalize_state("CA") == "California"
+    assert normalize_state(" C.A. ") == "California"
+    assert normalize_state("BC") == "British Columbia"
+    assert normalize_state("Ontario") == "Ontario"
+    assert normalize_state("  ny  ") == "New York"
+    assert normalize_state("Kaohsiung City") == "Kaohsiung City"
+    assert normalize_state("台北市") == "台北市"
+    assert normalize_state("JavaScript") is None
+    assert normalize_state("Js") is None
     assert (
         normalize_city("San Francisco (Bay Area)", strip_parenthetical=True)
         == "San Francisco"

@@ -400,3 +400,68 @@ class DiscordAuditLogger:
             "correlation_id": str(interaction.id),
             "metadata": base_metadata,
         }
+
+
+def create_discord_audit_logger() -> DiscordAuditLogger:
+    """Build the standard Discord audit logger from bot settings."""
+    from five08.discord_bot.config import settings
+
+    return DiscordAuditLogger(
+        base_url=settings.audit_api_base_url,
+        shared_secret=settings.api_shared_secret,
+        timeout_seconds=settings.audit_api_timeout_seconds,
+        discord_logs_webhook_url=settings.discord_logs_webhook_url,
+        discord_logs_webhook_wait=settings.discord_logs_webhook_wait,
+    )
+
+
+class DiscordAuditCogMixin:
+    """Shared audit helpers for Discord bot cogs."""
+
+    audit_logger: DiscordAuditLogger
+
+    def _init_audit_logger(self) -> None:
+        self.audit_logger = create_discord_audit_logger()
+
+    def _audit_command(
+        self,
+        *,
+        interaction: discord.Interaction,
+        action: str,
+        result: str,
+        metadata: dict[str, Any] | None = None,
+        resource_type: str | None = "discord_command",
+        resource_id: str | None = None,
+    ) -> None:
+        """Queue a best-effort audit write for a Discord command."""
+        self.audit_logger.log_command(
+            interaction=interaction,
+            action=action,
+            result=result,
+            metadata=metadata,
+            resource_type=resource_type,
+            resource_id=resource_id,
+        )
+
+    def _audit_command_safe(
+        self,
+        *,
+        interaction: discord.Interaction,
+        action: str,
+        result: str,
+        metadata: dict[str, Any] | None = None,
+        resource_type: str | None = "discord_command",
+        resource_id: str | None = None,
+    ) -> None:
+        """Keep command flows alive if audit logging fails unexpectedly."""
+        try:
+            self._audit_command(
+                interaction=interaction,
+                action=action,
+                result=result,
+                metadata=metadata,
+                resource_type=resource_type,
+                resource_id=resource_id,
+            )
+        except Exception:
+            logger.warning("Audit logging failed for action=%s", action, exc_info=True)

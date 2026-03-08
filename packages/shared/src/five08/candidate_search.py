@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 
 from psycopg.rows import dict_row
@@ -15,7 +16,61 @@ logger = logging.getLogger(__name__)
 
 # US country strings we accept as-is (lowercased for comparison)
 _US_COUNTRY_VALUES = frozenset(
-    {"us", "usa", "united states", "united states of america"}
+    {
+        "us",
+        "u.s",
+        "u.s.",
+        "usa",
+        "u.s.a",
+        "u.s.a.",
+        "united states",
+        "united states of america",
+    }
+)
+
+_LOCATION_COUNTRY_HINTS: tuple[
+    tuple[re.Pattern[str], tuple[str, ...], str | None], ...
+] = (
+    (
+        re.compile(
+            r"(?<!\w)(?:(?-i:U\.?S(?:\.?A\.?)?)|usa|united states|united states of america)(?!\w)",
+            re.IGNORECASE,
+        ),
+        tuple(sorted(_US_COUNTRY_VALUES)),
+        "america",
+    ),
+    (
+        re.compile(
+            r"(?<!\w)(?:uk|u\.k\.?|united kingdom|great britain|britain)(?!\w)",
+            re.IGNORECASE,
+        ),
+        ("uk", "u.k", "u.k.", "united kingdom", "great britain", "britain"),
+        "europe",
+    ),
+    (re.compile(r"\bcanada\b", re.IGNORECASE), ("canada",), "america"),
+    (re.compile(r"\baustralia\b", re.IGNORECASE), ("australia",), "australia"),
+    (re.compile(r"\bindia\b", re.IGNORECASE), ("india",), "asia"),
+    (re.compile(r"\bjapan\b", re.IGNORECASE), ("japan",), "asia"),
+    (re.compile(r"\btaiwan\b", re.IGNORECASE), ("taiwan",), "asia"),
+)
+
+_LOCATION_REGION_HINTS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(r"(?<!\w)(?:europe|emea|e\.u\.?|eu)(?!\w)", re.IGNORECASE),
+        "europe",
+    ),
+    (
+        re.compile(
+            r"\b(?:americas|latin america|latam|north america|south america)\b",
+            re.IGNORECASE,
+        ),
+        "america",
+    ),
+    (
+        re.compile(r"\b(?:asia|apac|asia pacific)\b", re.IGNORECASE),
+        "asia",
+    ),
+    (re.compile(r"\bafrica\b", re.IGNORECASE), "africa"),
 )
 
 
@@ -25,6 +80,8 @@ class CandidateMatch:
 
     crm_contact_id: str | None
     name: str | None
+    crm_name: str | None
+    discord_username: str | None
     email_508: str | None
     email: str | None
     linkedin: str | None
@@ -42,6 +99,7 @@ class CandidateMatch:
     match_score: float = 0.0
     required_skill_score: int = 0  # sum of strength attrs for matched required skills
     seniority_score: float = 0.0  # 1.0 exact, 0.7 one level up, 0.0 mismatch or unknown
+    location_signal: int = 0  # higher is better; explicit mismatch is strongly negative
 
 
 def _seniority_score(candidate: str | None, required: str | None) -> float:
@@ -61,10 +119,59 @@ def _seniority_score(candidate: str | None, required: str | None) -> float:
     return 0.0
 
 
+def _normalize_preferred_timezones(timezones: list[str] | None) -> list[str]:
+    return [
+        tz.strip() for tz in (timezones or []) if isinstance(tz, str) and tz.strip()
+    ]
+
+
+def _build_location_hints(
+    requirements: JobRequirements,
+    preferred_timezones: list[str],
+) -> tuple[list[str], list[str], bool, bool]:
+    """Build location hints used for soft ranking penalties."""
+    location_text = (requirements.raw_location_text or "").strip()
+
+    # Job postings usually describe geography in free-form prose, so we derive
+    # broad country and timezone-prefix hints before handing the constraints to SQL.
+    timezone_prefixes = {tz.split("/", 1)[0].casefold() for tz in preferred_timezones}
+    country_hints: set[str] = set()
+
+    if requirements.location_type == "us_only":
+        country_hints.update(_US_COUNTRY_VALUES)
+        timezone_prefixes.add("america")
+
+    for pattern, aliases, timezone_prefix in _LOCATION_COUNTRY_HINTS:
+        if pattern.search(location_text):
+            country_hints.update(aliases)
+            if timezone_prefix:
+                timezone_prefixes.add(timezone_prefix)
+
+    for pattern, timezone_prefix in _LOCATION_REGION_HINTS:
+        if pattern.search(location_text):
+            timezone_prefixes.add(timezone_prefix)
+
+    location_constrained = (
+        requirements.location_type in {"us_only", "timezone_preferred"}
+        or bool(preferred_timezones)
+        or bool(location_text)
+    )
+    location_hints_available = bool(
+        preferred_timezones or timezone_prefixes or country_hints
+    )
+    return (
+        sorted(timezone_prefixes),
+        sorted(country_hints),
+        location_constrained,
+        location_hints_available,
+    )
+
+
 def search_candidates(
     settings: SharedSettings,
     requirements: JobRequirements,
     *,
+    guild_id: str | None = None,
     limit: int = 10,
     min_match_score: float = 0.0,
 ) -> list[CandidateMatch]:
@@ -72,8 +179,8 @@ def search_candidates(
 
     Ranking priority:
     1. Members before prospects.
-    2. US-only location restriction when enabled (hard filter; non-US candidates excluded).
-    3. Match score (weighted score from skills + CRM signals).
+    2. Location signal when posting has location constraints (explicit mismatch demoted).
+    3. Match score (weighted score from skills + CRM/location signals).
     4. Timezone match (soft signal; 1 when candidate timezone is in preferred_timezones).
     5. Required skill count matched.
     6. Discord role type matched (1 if any discord role matches the required role types).
@@ -83,6 +190,10 @@ def search_candidates(
 
     Candidates are included if they match ANY required skill OR any discord role type.
     A minimum final match score can be requested via min_match_score.
+    When guild_id is provided, discord member snapshots are scoped to that guild.
+    When requirements.location_type == "us_only", a hard US-only filter is applied
+    in SQL so non-US candidates are excluded rather than merely down-ranked by the
+    location signal.
     """
     required_skills = requirements.required_skills
     preferred_skills = requirements.preferred_skills
@@ -95,11 +206,18 @@ def search_candidates(
         return []
 
     us_only = requirements.location_type == "us_only"
-    preferred_timezones = requirements.preferred_timezones or []
+    preferred_timezones = _normalize_preferred_timezones(
+        requirements.preferred_timezones
+    )
+    (
+        location_timezone_prefix_hints,
+        location_country_hints,
+        location_constrained,
+        location_hints_available,
+    ) = _build_location_hints(requirements, preferred_timezones)
 
-    # Build the query. We use unnest + lateral subselects so a single round-trip
-    # handles scoring without pulling all rows into Python.
-    # Candidates match if they have ANY required skill OR any discord role type.
+    # SQL does the broad filtering and most of the scoring in one round-trip.
+    # Python only adds seniority alignment and the final tie-break sort afterwards.
     query = """
         WITH
           req AS (SELECT %s::text[] AS skills),
@@ -108,7 +226,7 @@ def search_candidates(
           dm_agg AS (
             SELECT
                 dm_raw.discord_user_id,
-                MAX(dm_raw.discord_username) AS discord_username,
+                MAX(dm_raw.discord_username) AS member_discord_username,
                 MAX(dm_raw.display_name) AS display_name,
                 COALESCE(
                     jsonb_agg(DISTINCT role) FILTER (WHERE role IS NOT NULL),
@@ -116,12 +234,22 @@ def search_candidates(
                 ) AS roles
             FROM discord_members dm_raw
             LEFT JOIN LATERAL jsonb_array_elements_text(dm_raw.roles) AS role ON true
+            WHERE (%s::text IS NULL OR dm_raw.guild_id = %s)
             GROUP BY dm_raw.discord_user_id
           ),
-          scored AS (
+          loc AS (
+            SELECT
+                %s::text[] AS exact_timezones,
+                %s::text[] AS timezone_prefixes,
+                %s::text[] AS countries,
+                %s::boolean AS constrained,
+                %s::boolean AS hints_available
+          ),
+            scored AS (
             SELECT
                 p.crm_contact_id AS crm_contact_id,
-                COALESCE(p.name, dm.display_name, dm.discord_username) AS name,
+                COALESCE(dm.display_name, dm.member_discord_username, p.name) AS name,
+                p.name AS crm_name,
                 p.email_508,
                 p.email,
                 p.linkedin,
@@ -134,6 +262,7 @@ def search_candidates(
                 COALESCE(p.skills, '{}'::text[]) AS skills,
                 COALESCE(p.skill_attrs, '{}'::jsonb) AS skill_attrs,
                 COALESCE(dm.roles, p.discord_roles, '[]'::jsonb) AS discord_roles,
+                COALESCE(dm.member_discord_username, p.discord_username) AS discord_username,
                 COALESCE(p.discord_user_id, dm.discord_user_id) AS discord_user_id,
                 (p.crm_contact_id IS NOT NULL) AS has_crm_link,
                 -- How many required skills this candidate has
@@ -161,8 +290,8 @@ def search_candidates(
                 ) AS preferred_matched,
                 -- Timezone match: 1 if candidate timezone is in the preferred list
                 CASE
-                  WHEN %s::text[] = '{}'::text[] THEN 0
-                  ELSE (COALESCE(p.timezone, '') = ANY(%s::text[]))::int
+                  WHEN loc.exact_timezones = '{}'::text[] THEN 0
+                  ELSE (COALESCE(p.timezone, '') = ANY(loc.exact_timezones))::int
                 END AS timezone_matched,
                 -- Discord role match: 1 if any discord role matches the required role types
                 CASE
@@ -175,10 +304,33 @@ def search_candidates(
                     WHERE r = ANY(rtypes.types)
                   ) THEN 1
                   ELSE 0
-                END AS discord_role_matched
+                END AS discord_role_matched,
+                -- Location signal: promote clear matches, demote explicit mismatches.
+                CASE
+                  WHEN NOT loc.constrained OR NOT loc.hints_available THEN 0
+                  WHEN loc.exact_timezones <> '{}'::text[]
+                    AND COALESCE(p.timezone, '') = ANY(loc.exact_timezones)
+                    AND (
+                      loc.countries = '{}'::text[]
+                      OR COALESCE(p.address_country, '') = ''
+                      OR LOWER(COALESCE(p.address_country, '')) = ANY(loc.countries)
+                    ) THEN 3
+                  WHEN loc.countries <> '{}'::text[]
+                    AND LOWER(COALESCE(p.address_country, '')) = ANY(loc.countries)
+                    THEN 2
+                  WHEN loc.countries <> '{}'::text[]
+                    AND COALESCE(p.address_country, '') <> '' THEN -4
+                  WHEN loc.timezone_prefixes <> '{}'::text[]
+                    AND split_part(LOWER(COALESCE(p.timezone, '')), '/', 1)
+                        = ANY(loc.timezone_prefixes) THEN 2
+                  WHEN COALESCE(p.timezone, '') = ''
+                    AND COALESCE(p.address_country, '') = '' THEN -1
+                  ELSE 0
+                END AS location_signal
             FROM people p
             FULL OUTER JOIN dm_agg dm ON dm.discord_user_id = p.discord_user_id
             CROSS JOIN rtypes
+            CROSS JOIN loc
             WHERE (p.sync_status = 'active' OR p.sync_status IS NULL)
               -- Must match at least one required skill OR one discord role type
               AND (
@@ -200,6 +352,8 @@ def search_candidates(
         SELECT
             crm_contact_id,
             name,
+            crm_name,
+            discord_username,
             email_508,
             email,
             linkedin,
@@ -219,19 +373,22 @@ def search_candidates(
             preferred_matched,
             timezone_matched,
             discord_role_matched,
+            location_signal,
             (
-              required_matched * 10
-              + required_skill_score * 2
-              + preferred_matched * 2
-              + timezone_matched * 2
-              + (discord_role_matched * 2)
-              + CASE WHEN is_member THEN 4 ELSE 0 END
-              + CASE WHEN has_crm_link THEN 6 ELSE 0 END
+                required_matched * 10
+                + required_skill_score * 2
+                + preferred_matched * 2
+                + timezone_matched * 2
+                + (discord_role_matched * 2)
+                + (location_signal * 3)
+                + CASE WHEN is_member THEN 4 ELSE 0 END
+                + CASE WHEN has_crm_link THEN 6 ELSE 0 END
             ) AS match_score
         FROM scored
         ORDER BY
             is_member DESC,
             has_crm_link DESC,
+            location_signal DESC,
             match_score DESC,
             timezone_matched DESC,
             required_matched DESC,
@@ -251,8 +408,13 @@ def search_candidates(
                     required_skills,
                     preferred_skills,
                     role_types,
+                    guild_id,
+                    guild_id,
                     preferred_timezones,
-                    preferred_timezones,
+                    location_timezone_prefix_hints,
+                    location_country_hints,
+                    location_constrained,
+                    location_hints_available,
                     us_only,
                     us_values,
                     limit,
@@ -278,11 +440,14 @@ def search_candidates(
         sen_score = _seniority_score(row.get("seniority"), requirements.seniority)
         raw_match_score = row.get("match_score")
         if raw_match_score is None:
+            # Keep the final Python pass resilient if the selected SQL columns ever
+            # drift; this mirrors the SQL scoring formula rather than failing closed.
             required_matched = row.get("required_matched") or 0
             required_skill_score = row.get("required_skill_score") or 0
             preferred_matched = row.get("preferred_matched") or 0
             timezone_matched = row.get("timezone_matched") or 0
             discord_role_matched = row.get("discord_role_matched") or 0
+            location_signal = row.get("location_signal") or 0
             is_member = bool(row.get("is_member"))
             has_crm_link = bool(row.get("has_crm_link", True))
             raw_match_score = (
@@ -291,6 +456,7 @@ def search_candidates(
                 + preferred_matched * 2
                 + timezone_matched * 2
                 + (discord_role_matched * 2)
+                + (location_signal * 3)
                 + (4 if is_member else 0)
                 + (6 if has_crm_link else 0)
             )
@@ -301,6 +467,8 @@ def search_candidates(
             CandidateMatch(
                 crm_contact_id=row.get("crm_contact_id"),
                 name=row.get("name"),
+                crm_name=row.get("crm_name"),
+                discord_username=row.get("discord_username"),
                 email_508=row.get("email_508"),
                 email=row.get("email"),
                 linkedin=row.get("linkedin"),
@@ -318,6 +486,7 @@ def search_candidates(
                 match_score=match_score,
                 required_skill_score=row.get("required_skill_score") or 0,
                 seniority_score=sen_score,
+                location_signal=row.get("location_signal") or 0,
             )
         )
 
@@ -329,6 +498,7 @@ def search_candidates(
         key=lambda c: (
             not c.is_member,
             not c.has_crm_link,
+            -c.location_signal,
             -c.match_score,
             -len(c.matched_required_skills),
             -len(c.matched_discord_roles),

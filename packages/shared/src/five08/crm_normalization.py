@@ -31,59 +31,388 @@ SENIORITY_MAP: dict[str, str] = {
     "staff+": "staff",
 }
 
-US_STATE_ABBREVIATIONS: dict[str, str] = {
-    "al": "Alabama",
-    "ak": "Alaska",
-    "az": "Arizona",
-    "ar": "Arkansas",
-    "ca": "California",
-    "co": "Colorado",
-    "ct": "Connecticut",
-    "de": "Delaware",
-    "fl": "Florida",
-    "ga": "Georgia",
-    "hi": "Hawaii",
-    "id": "Idaho",
-    "il": "Illinois",
-    "in": "Indiana",
-    "ia": "Iowa",
-    "ks": "Kansas",
-    "ky": "Kentucky",
-    "la": "Louisiana",
-    "me": "Maine",
-    "md": "Maryland",
-    "ma": "Massachusetts",
-    "mi": "Michigan",
-    "mn": "Minnesota",
-    "ms": "Mississippi",
-    "mo": "Missouri",
-    "mt": "Montana",
-    "ne": "Nebraska",
-    "nv": "Nevada",
-    "nh": "New Hampshire",
-    "nj": "New Jersey",
-    "nm": "New Mexico",
-    "ny": "New York",
-    "nc": "North Carolina",
-    "nd": "North Dakota",
-    "oh": "Ohio",
-    "ok": "Oklahoma",
-    "or": "Oregon",
-    "pa": "Pennsylvania",
-    "ri": "Rhode Island",
-    "sc": "South Carolina",
-    "sd": "South Dakota",
-    "tn": "Tennessee",
-    "tx": "Texas",
-    "ut": "Utah",
-    "vt": "Vermont",
-    "va": "Virginia",
-    "wa": "Washington",
-    "wv": "West Virginia",
-    "wi": "Wisconsin",
-    "wy": "Wyoming",
-    "dc": "District of Columbia",
+_US_STATE_ABBREVIATIONS: dict[str, str] = {
+    "AL": "Alabama",
+    "AK": "Alaska",
+    "AZ": "Arizona",
+    "AR": "Arkansas",
+    "CA": "California",
+    "CO": "Colorado",
+    "CT": "Connecticut",
+    "DE": "Delaware",
+    "FL": "Florida",
+    "GA": "Georgia",
+    "HI": "Hawaii",
+    "ID": "Idaho",
+    "IL": "Illinois",
+    "IN": "Indiana",
+    "IA": "Iowa",
+    "KS": "Kansas",
+    "KY": "Kentucky",
+    "LA": "Louisiana",
+    "ME": "Maine",
+    "MD": "Maryland",
+    "MA": "Massachusetts",
+    "MI": "Michigan",
+    "MN": "Minnesota",
+    "MS": "Mississippi",
+    "MO": "Missouri",
+    "MT": "Montana",
+    "NE": "Nebraska",
+    "NV": "Nevada",
+    "NH": "New Hampshire",
+    "NJ": "New Jersey",
+    "NM": "New Mexico",
+    "NY": "New York",
+    "NC": "North Carolina",
+    "ND": "North Dakota",
+    "OH": "Ohio",
+    "OK": "Oklahoma",
+    "OR": "Oregon",
+    "PA": "Pennsylvania",
+    "RI": "Rhode Island",
+    "SC": "South Carolina",
+    "SD": "South Dakota",
+    "TN": "Tennessee",
+    "TX": "Texas",
+    "UT": "Utah",
+    "VT": "Vermont",
+    "VA": "Virginia",
+    "WA": "Washington",
+    "WV": "West Virginia",
+    "WI": "Wisconsin",
+    "WY": "Wyoming",
+    "DC": "District Of Columbia",
 }
+_US_STATE_NAMES: dict[str, str] = {
+    value.casefold(): value for value in _US_STATE_ABBREVIATIONS.values()
+}
+_CANADA_PROVINCE_ABBREVIATIONS: dict[str, str] = {
+    "AB": "Alberta",
+    "BC": "British Columbia",
+    "MB": "Manitoba",
+    "NB": "New Brunswick",
+    "NL": "Newfoundland And Labrador",
+    "NS": "Nova Scotia",
+    "NT": "Northwest Territories",
+    "NU": "Nunavut",
+    "ON": "Ontario",
+    "PE": "Prince Edward Island",
+    "QC": "Quebec",
+    "SK": "Saskatchewan",
+    "YT": "Yukon",
+}
+_CANADA_PROVINCE_NAMES: dict[str, str] = {
+    value.casefold(): value for value in _CANADA_PROVINCE_ABBREVIATIONS.values()
+}
+_LOCATION_STOPWORDS = frozenset(
+    {
+        "account",
+        "accounts",
+        "api",
+        "backend",
+        "creation",
+        "developer",
+        "development",
+        "django",
+        "engineer",
+        "engineering",
+        "frontend",
+        "fullstack",
+        "handles",
+        "intern",
+        "internship",
+        "javascript",
+        "management",
+        "manager",
+        "python",
+        "react",
+        "senior",
+        "software",
+    }
+)
+_CANONICAL_COUNTRY_NAMES: tuple[str, ...] = (
+    "Afghanistan",
+    "Albania",
+    "Algeria",
+    "Andorra",
+    "Angola",
+    "Antigua And Barbuda",
+    "Argentina",
+    "Armenia",
+    "Australia",
+    "Austria",
+    "Azerbaijan",
+    "Bahamas",
+    "Bahrain",
+    "Bangladesh",
+    "Barbados",
+    "Belarus",
+    "Belgium",
+    "Belize",
+    "Benin",
+    "Bhutan",
+    "Bolivia",
+    "Bosnia And Herzegovina",
+    "Botswana",
+    "Brazil",
+    "Brunei",
+    "Bulgaria",
+    "Burkina Faso",
+    "Burundi",
+    "Cambodia",
+    "Cameroon",
+    "Canada",
+    "Cape Verde",
+    "Central African Republic",
+    "Chad",
+    "Chile",
+    "China",
+    "Colombia",
+    "Comoros",
+    "Congo",
+    "Costa Rica",
+    "Croatia",
+    "Cuba",
+    "Cyprus",
+    "Czech Republic",
+    "Denmark",
+    "Djibouti",
+    "Dominica",
+    "Dominican Republic",
+    "Democratic Republic Of The Congo",
+    "Ecuador",
+    "Egypt",
+    "El Salvador",
+    "Equatorial Guinea",
+    "Eritrea",
+    "Estonia",
+    "Eswatini",
+    "Ethiopia",
+    "Fiji",
+    "Finland",
+    "France",
+    "Gabon",
+    "Gambia",
+    "Georgia",
+    "Germany",
+    "Ghana",
+    "Greece",
+    "Grenada",
+    "Guatemala",
+    "Guinea",
+    "Guinea-Bissau",
+    "Guyana",
+    "Haiti",
+    "Honduras",
+    "Hungary",
+    "Iceland",
+    "India",
+    "Indonesia",
+    "Iran",
+    "Iraq",
+    "Ireland",
+    "Israel",
+    "Italy",
+    "Ivory Coast",
+    "Jamaica",
+    "Japan",
+    "Jordan",
+    "Kazakhstan",
+    "Kenya",
+    "Kiribati",
+    "Kuwait",
+    "Kyrgyzstan",
+    "Laos",
+    "Latvia",
+    "Lebanon",
+    "Lesotho",
+    "Liberia",
+    "Libya",
+    "Liechtenstein",
+    "Lithuania",
+    "Luxembourg",
+    "Madagascar",
+    "Malawi",
+    "Malaysia",
+    "Maldives",
+    "Mali",
+    "Malta",
+    "Marshall Islands",
+    "Mauritania",
+    "Mauritius",
+    "Mexico",
+    "Micronesia",
+    "Moldova",
+    "Monaco",
+    "Mongolia",
+    "Montenegro",
+    "Morocco",
+    "Mozambique",
+    "Myanmar",
+    "Namibia",
+    "Nauru",
+    "Nepal",
+    "Netherlands",
+    "New Zealand",
+    "Nicaragua",
+    "Niger",
+    "Nigeria",
+    "North Korea",
+    "North Macedonia",
+    "Norway",
+    "Oman",
+    "Pakistan",
+    "Palau",
+    "Palestine",
+    "Panama",
+    "Papua New Guinea",
+    "Paraguay",
+    "Peru",
+    "Philippines",
+    "Poland",
+    "Portugal",
+    "Qatar",
+    "Romania",
+    "Republic Of The Congo",
+    "Russia",
+    "Rwanda",
+    "Saint Kitts And Nevis",
+    "Saint Lucia",
+    "Saint Vincent And The Grenadines",
+    "Samoa",
+    "San Marino",
+    "Sao Tome And Principe",
+    "Saudi Arabia",
+    "Senegal",
+    "Serbia",
+    "Seychelles",
+    "Sierra Leone",
+    "Singapore",
+    "Slovakia",
+    "Slovenia",
+    "Solomon Islands",
+    "Somalia",
+    "South Africa",
+    "South Korea",
+    "South Sudan",
+    "Spain",
+    "Sri Lanka",
+    "Sudan",
+    "Suriname",
+    "Sweden",
+    "Switzerland",
+    "Syria",
+    "Taiwan",
+    "Tajikistan",
+    "Tanzania",
+    "Thailand",
+    "Timor-Leste",
+    "Togo",
+    "Tonga",
+    "Trinidad And Tobago",
+    "Tunisia",
+    "Turkey",
+    "Turkmenistan",
+    "Tuvalu",
+    "Uganda",
+    "Ukraine",
+    "United Arab Emirates",
+    "United Kingdom",
+    "United States",
+    "Uruguay",
+    "Uzbekistan",
+    "Vanuatu",
+    "Vatican City",
+    "Venezuela",
+    "Vietnam",
+    "Yemen",
+    "Zambia",
+    "Zimbabwe",
+)
+_RAW_COUNTRY_ALIASES: dict[str, str] = {
+    "america": "United States",
+    "britain": "United Kingdom",
+    "cote d ivoire": "Ivory Coast",
+    "cote d'ivoire": "Ivory Coast",
+    "congo brazzaville": "Republic Of The Congo",
+    "congo drc": "Democratic Republic Of The Congo",
+    "congo kinshasa": "Democratic Republic Of The Congo",
+    "czechia": "Czech Republic",
+    "democratic republic of congo": "Democratic Republic Of The Congo",
+    "democratic republic of the congo": "Democratic Republic Of The Congo",
+    "england": "United Kingdom",
+    "great britain": "United Kingdom",
+    "holland": "Netherlands",
+    "korea south": "South Korea",
+    "korea north": "North Korea",
+    "republic of korea": "South Korea",
+    "republic of china": "Taiwan",
+    "russian federation": "Russia",
+    "scotland": "United Kingdom",
+    "south korea": "South Korea",
+    "taiwan roc": "Taiwan",
+    "u k": "United Kingdom",
+    "u s": "United States",
+    "uae": "United Arab Emirates",
+    "uk": "United Kingdom",
+    "united states of america": "United States",
+    "u s a": "United States",
+    "usa": "United States",
+    "us": "United States",
+    "vatican": "Vatican City",
+    "wales": "United Kingdom",
+}
+
+
+def _normalize_location_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip(" ,.")
+
+
+def _location_lookup_key(value: str) -> str:
+    normalized = _normalize_location_text(value)
+    normalized = normalized.replace("’", "'").replace("‘", "'")
+    normalized = unicodedata.normalize("NFKD", normalized)
+    normalized = "".join(
+        ch for ch in normalized if not unicodedata.combining(ch)
+    ).casefold()
+    collapsed = "".join(ch if ch.isalnum() else " " for ch in normalized)
+    return re.sub(r"\s+", " ", collapsed).strip()
+
+
+_COUNTRY_CANONICAL_MAP: dict[str, str] = {
+    _location_lookup_key(value): value for value in _CANONICAL_COUNTRY_NAMES
+}
+_COUNTRY_ALIASES: dict[str, str] = {
+    _location_lookup_key(key): value for key, value in _RAW_COUNTRY_ALIASES.items()
+}
+
+
+def _is_plausible_location_phrase(
+    value: str,
+    *,
+    max_words: int,
+    max_length: int,
+) -> bool:
+    if not value or len(value) > max_length:
+        return False
+    tokens = [
+        token.casefold()
+        for token in re.findall(r"[^\W\d_][^\W\d_'-]*", value, flags=re.UNICODE)
+    ]
+    if not tokens or len(tokens) > max_words:
+        return False
+    if any(token in _LOCATION_STOPWORDS for token in tokens):
+        return False
+    for ch in value:
+        if ch.isalpha() or ch in {" ", "-", "'", ".", "(", ")"}:
+            continue
+        return False
+    return True
+
+
+def _title_case_location(value: str) -> str:
+    return " ".join(part.strip().title() for part in value.split())
 
 
 def normalize_timezone_offset(value: str) -> str | None:
@@ -147,27 +476,65 @@ def normalize_timezone(value: Any) -> str | None:
 def normalize_country(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
-    normalized = value.strip()
-    return normalized.title() if normalized else None
+    normalized = _normalize_location_text(value)
+    if not normalized:
+        return None
+    lookup_key = _location_lookup_key(normalized)
+    if not lookup_key:
+        return None
+
+    alias = _COUNTRY_ALIASES.get(lookup_key)
+    if alias:
+        return alias
+
+    return _COUNTRY_CANONICAL_MAP.get(lookup_key)
 
 
 def normalize_state(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
-    normalized = re.sub(r"\s+", " ", value.strip())
+    compact_abbreviation = re.sub(r"[^A-Za-z]", "", value).upper()
+    if compact_abbreviation:
+        us_state = _US_STATE_ABBREVIATIONS.get(compact_abbreviation)
+        if us_state:
+            return us_state
+        canada_province = _CANADA_PROVINCE_ABBREVIATIONS.get(compact_abbreviation)
+        if canada_province:
+            return canada_province
+    normalized = _normalize_location_text(value)
     if not normalized:
         return None
-    abbreviated = normalized.casefold().replace(".", "")
-    expanded = US_STATE_ABBREVIATIONS.get(abbreviated)
-    if expanded:
-        return expanded
-    return normalized.title()
+
+    us_state = _US_STATE_ABBREVIATIONS.get(normalized.upper())
+    if us_state:
+        return us_state
+
+    canonical_us_state = _US_STATE_NAMES.get(normalized.casefold())
+    if canonical_us_state:
+        return canonical_us_state
+
+    canada_province = _CANADA_PROVINCE_ABBREVIATIONS.get(normalized.upper())
+    if canada_province:
+        return canada_province
+
+    canonical_canada_province = _CANADA_PROVINCE_NAMES.get(normalized.casefold())
+    if canonical_canada_province:
+        return canonical_canada_province
+
+    if not _is_plausible_location_phrase(normalized, max_words=4, max_length=40):
+        return None
+
+    letter_count = sum(1 for ch in normalized if ch.isalpha())
+    if letter_count <= 2:
+        return None
+
+    return _title_case_location(normalized)
 
 
 def normalize_city(value: Any, *, strip_parenthetical: bool = False) -> str | None:
     if not isinstance(value, str):
         return None
-    normalized = value.strip()
+    normalized = _normalize_location_text(value)
     if not normalized:
         return None
     if strip_parenthetical:
@@ -175,7 +542,12 @@ def normalize_city(value: Any, *, strip_parenthetical: bool = False) -> str | No
     normalized = normalized.split(",")[0].strip()
     if not normalized:
         return None
-    return " ".join(part.strip().title() for part in normalized.split())
+    if not _is_plausible_location_phrase(normalized, max_words=4, max_length=40):
+        return None
+    letter_count = sum(1 for ch in normalized if ch.isalpha())
+    if letter_count <= 2:
+        return None
+    return _title_case_location(normalized)
 
 
 def normalize_seniority(value: Any, *, empty_as_unknown: bool = False) -> str | None:
