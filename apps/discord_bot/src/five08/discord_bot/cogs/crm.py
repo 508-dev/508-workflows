@@ -13,6 +13,7 @@ import logging
 from datetime import date, datetime, timezone
 import re
 from typing import Any, Literal
+from uuid import uuid4
 
 import aiohttp
 import discord
@@ -2282,13 +2283,20 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         return f"{settings.backend_api_base_url.rstrip('/')}{path}"
 
     async def _enqueue_resume_extract_job(
-        self, *, contact_id: str, attachment_id: str, filename: str
+        self,
+        *,
+        contact_id: str,
+        attachment_id: str,
+        filename: str,
+        refresh_token: str | None = None,
     ) -> str:
         payload = {
             "contact_id": contact_id,
             "attachment_id": attachment_id,
             "filename": filename,
         }
+        if refresh_token:
+            payload["refresh_token"] = refresh_token
         data = await self._backend_request_json(
             "POST",
             "/jobs/resume-extract",
@@ -3059,11 +3067,13 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         status_text = (
             status_message or "📥 Resume uploaded. Extracting profile fields now..."
         )
+        refresh_token = uuid4().hex if action_name == "crm.reprocess_resume" else None
         try:
             job_id = await self._enqueue_resume_extract_job(
                 contact_id=contact_id,
                 attachment_id=attachment_id,
                 filename=filename,
+                refresh_token=refresh_token,
             )
         except Exception as exc:
             logger.error("Failed to enqueue resume extract job: %s", exc)

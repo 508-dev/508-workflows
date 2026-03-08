@@ -4915,6 +4915,39 @@ class TestCRMCog:
         )
 
     @pytest.mark.asyncio
+    async def test_run_resume_extract_and_preview_uses_refresh_token_for_reprocess(
+        self, crm_cog, mock_interaction
+    ):
+        """Explicit reprocess actions should bypass cached extract jobs."""
+        crm_cog._enqueue_resume_extract_job = AsyncMock(return_value="job-123")
+        crm_cog._wait_for_backend_job_result = AsyncMock(
+            return_value={
+                "status": "succeeded",
+                "result": {"success": False, "error": "boom"},
+            }
+        )
+        crm_cog._build_resume_extract_debug_file = Mock(return_value=Mock())
+        crm_cog._audit_command = Mock()
+
+        with patch(
+            "five08.discord_bot.cogs.crm.uuid4",
+            return_value=Mock(hex="refresh-token-123"),
+        ):
+            await crm_cog._run_resume_extract_and_preview(
+                mock_interaction,
+                contact_id="contact123",
+                contact_name="Candidate User",
+                attachment_id="resume123",
+                filename="candidate.pdf",
+                link_member=None,
+                action="crm.reprocess_resume",
+                status_message="🔄 Reprocessing resume and extracting profile fields now...",
+            )
+
+        kwargs = crm_cog._enqueue_resume_extract_job.await_args.kwargs
+        assert kwargs["refresh_token"] == "refresh-token-123"
+
+    @pytest.mark.asyncio
     async def test_build_match_candidates_posting_fetches_jd_links_from_text(
         self, jobs_cog
     ):

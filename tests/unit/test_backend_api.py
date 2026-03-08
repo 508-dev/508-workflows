@@ -190,7 +190,6 @@ def test_resume_extract_handler_enqueues_job(
     monkeypatch.setattr(api.settings, "openai_api_key", "key")
     monkeypatch.setattr(api.settings, "openai_base_url", None)
     monkeypatch.setattr(api.settings, "resume_ai_model", "gpt-test")
-    monkeypatch.setattr(api, "_generate_ulid", lambda: "01ARZ3NDEKTSV4RRFFQ69G5FAV")
 
     with patch("five08.backend.api.enqueue_job") as mock_enqueue:
         mock_enqueue.return_value = Mock(id="job-extract", created=True)
@@ -210,9 +209,40 @@ def test_resume_extract_handler_enqueues_job(
     assert payload["contact_id"] == "c-1"
     assert payload["attachment_id"] == "a-1"
     call_kwargs = mock_enqueue.call_args.kwargs
+    assert call_kwargs["idempotency_key"] == "resume-extract:c-1:a-1:v7:gpt-test"
+
+
+def test_resume_extract_handler_appends_refresh_token_to_idempotency_key(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Explicit refresh tokens should force a new resume extract job key."""
+    monkeypatch.setattr(api.settings, "resume_extractor_version", "v7")
+    monkeypatch.setattr(api.settings, "openai_api_key", "key")
+    monkeypatch.setattr(api.settings, "openai_base_url", None)
+    monkeypatch.setattr(api.settings, "resume_ai_model", "gpt-test")
+
+    with patch("five08.backend.api.enqueue_job") as mock_enqueue:
+        mock_enqueue.return_value = Mock(id="job-extract", created=True)
+        response = client.post(
+            "/jobs/resume-extract",
+            json={
+                "contact_id": "c-1",
+                "attachment_id": "a-1",
+                "filename": "resume.pdf",
+                "refresh_token": "refresh-123",
+            },
+            headers=auth_headers,
+        )
+
+    payload = response.json()
+    assert response.status_code == 202
+    assert payload["job_id"] == "job-extract"
+    call_kwargs = mock_enqueue.call_args.kwargs
     assert (
         call_kwargs["idempotency_key"]
-        == "resume-extract:c-1:a-1:v7:gpt-test:01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        == "resume-extract:c-1:a-1:v7:gpt-test:refresh-123"
     )
 
 

@@ -81,6 +81,7 @@ class ResumeExtractRequest(BaseModel):
     contact_id: str
     attachment_id: str
     filename: str
+    refresh_token: str | None = None
 
 
 class ResumeApplyRequest(BaseModel):
@@ -619,11 +620,12 @@ async def resume_extract_handler(request: Request) -> JSONResponse:
 
     queue = request.app.state.queue
     model_name = _resume_extract_model_name()
-    manual_nonce = _generate_ulid()
     idempotency_key = (
         f"resume-extract:{payload.contact_id}:{payload.attachment_id}:"
-        f"{settings.resume_extractor_version}:{model_name}:{manual_nonce}"
+        f"{settings.resume_extractor_version}:{model_name}"
     )
+    if payload.refresh_token:
+        idempotency_key = f"{idempotency_key}:{payload.refresh_token}"
     job = await asyncio.to_thread(
         enqueue_job,
         queue=queue,
