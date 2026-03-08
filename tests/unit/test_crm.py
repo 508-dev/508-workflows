@@ -707,6 +707,14 @@ class TestCRMCog:
                     "raw_llm_output": '{"address_city":"Berlin"}',
                     "raw_llm_json": {"address_city": "Berlin"},
                     "llm_fallback_reason": "ValueError: normalized with fallback",
+                    "current_title": "Founding Engineer",
+                    "recent_titles": ["Founding Engineer", "Software Engineer"],
+                    "current_location_raw": "Berlin, Germany",
+                    "current_location_source": "current_role",
+                    "current_location_evidence": (
+                        "Founding Engineer | Berlin, Germany | 2024-Present"
+                    ),
+                    "role_rationale": "Engineering titles indicate a developer profile.",
                 },
             },
             link_member=None,
@@ -715,6 +723,13 @@ class TestCRMCog:
         debug_field = next(field for field in embed.fields if field.name == "Debug")
         assert "resume-extract-debug.json" in debug_field.value
         assert "Fallback:" in debug_field.value
+        evidence_field = next(
+            field for field in embed.fields if field.name == "Inference Evidence"
+        )
+        assert "Founding Engineer" in evidence_field.value
+        assert "Berlin, Germany" in evidence_field.value
+        assert "current role" in evidence_field.value
+        assert "developer profile" in evidence_field.value
 
     def test_build_resume_extract_debug_file_serializes_raw_payload(self, crm_cog):
         """The debug attachment should include raw and normalized extraction payloads."""

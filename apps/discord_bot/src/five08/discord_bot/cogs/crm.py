@@ -2650,6 +2650,56 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     value=truncate_field_value(debug_value),
                     inline=False,
                 )
+            evidence_lines: list[str] = []
+            current_title = str(extracted_profile.get("current_title") or "").strip()
+            if current_title:
+                evidence_lines.append(
+                    f"Title: `{truncate_preview_value(current_title, label='title')}`"
+                )
+            recent_titles = extracted_profile.get("recent_titles")
+            if isinstance(recent_titles, list) and recent_titles:
+                formatted_recent_titles = ", ".join(
+                    str(item).strip() for item in recent_titles[:3] if str(item).strip()
+                )
+                if formatted_recent_titles:
+                    evidence_lines.append(
+                        "Recent titles: "
+                        f"`{truncate_preview_value(formatted_recent_titles, label='title')}`"
+                    )
+            current_location_raw = str(
+                extracted_profile.get("current_location_raw") or ""
+            ).strip()
+            current_location_source = str(
+                extracted_profile.get("current_location_source") or ""
+            ).strip()
+            if current_location_raw:
+                location_line = (
+                    "Current base: "
+                    f"`{truncate_preview_value(current_location_raw, label='location')}`"
+                )
+                if current_location_source:
+                    location_line += f" ({current_location_source.replace('_', ' ')})"
+                evidence_lines.append(location_line)
+            current_location_evidence = str(
+                extracted_profile.get("current_location_evidence") or ""
+            ).strip()
+            if current_location_evidence:
+                evidence_lines.append(
+                    "Location evidence: "
+                    f"`{truncate_preview_value(current_location_evidence, label='location evidence')}`"
+                )
+            role_rationale = str(extracted_profile.get("role_rationale") or "").strip()
+            if role_rationale:
+                evidence_lines.append(
+                    "Role rationale: "
+                    f"`{truncate_preview_value(role_rationale, label='role rationale')}`"
+                )
+            if evidence_lines:
+                embed.add_field(
+                    name="Inference Evidence",
+                    value=truncate_field_value("\n".join(evidence_lines)),
+                    inline=False,
+                )
 
         parsed_seniority = _extract_parsed_seniority(extracted_profile)
         if parsed_seniority:
