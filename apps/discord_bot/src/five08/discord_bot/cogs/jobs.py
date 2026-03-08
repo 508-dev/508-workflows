@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import html
 import ipaddress
-import io
 import logging
 import re
 import socket
@@ -21,6 +20,7 @@ from discord.ext import commands
 
 from five08.audit import update_person_discord_roles, upsert_discord_member
 from five08.candidate_search import search_candidates
+from five08.document_text import document_file_extension, extract_document_text
 from five08.discord_bot.config import settings
 from five08.discord_bot.utils.audit import DiscordAuditCogMixin
 from five08.discord_bot.utils.role_decorators import (
@@ -589,9 +589,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
 
     @staticmethod
     def _resume_file_extension(filename: str | None) -> str:
-        if not filename or "." not in filename:
-            return ""
-        return "." + filename.rsplit(".", 1)[-1].lower()
+        return document_file_extension(filename)
 
     def _extract_resume_text(
         self,
@@ -603,33 +601,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         extracted_text = ""
 
         try:
-            if extension == ".pdf":
-                from pdfminer.high_level import extract_text as extract_pdf_text
-
-                extracted_text = extract_pdf_text(io.BytesIO(file_content)).strip()
-            elif extension == ".docx":
-                from docx import Document
-
-                document = Document(io.BytesIO(file_content))
-                chunks: list[str] = []
-                for paragraph in document.paragraphs:
-                    text = paragraph.text.strip()
-                    if text:
-                        chunks.append(text)
-                for table in document.tables:
-                    for row in table.rows:
-                        row_cells = [
-                            cell.text.strip() for cell in row.cells if cell.text.strip()
-                        ]
-                        if row_cells:
-                            chunks.append(" | ".join(row_cells))
-                extracted_text = "\n".join(chunks).strip()
-            elif extension == ".doc":
-                extracted_text = file_content.decode("utf-8", errors="ignore")
-                extracted_text = re.sub(r"[^\x20-\x7E\n\r\t]", " ", extracted_text)
-                extracted_text = re.sub(r"\s+", " ", extracted_text).strip()
-            else:
-                extracted_text = file_content.decode("utf-8", errors="ignore").strip()
+            extracted_text = extract_document_text(file_content, filename=filename)
         except Exception as exc:
             logger.warning(
                 "Failed to extract resume text filename=%s extension=%s error=%s",

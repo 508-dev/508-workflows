@@ -6,7 +6,6 @@ requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.13.1",
     "discord.py~=2.6.0",
-    "pdfminer.six>=20250506",
     "pydantic~=2.10",
     "pydantic-settings~=2.8",
     "python-docx>=1.2.0",
