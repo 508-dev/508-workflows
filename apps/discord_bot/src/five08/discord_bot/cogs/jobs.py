@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import html
+import ipaddress
 import io
 import logging
 import re
+import socket
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Literal
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import aiohttp
 import discord
@@ -43,6 +45,8 @@ MATCH_CANDIDATES_MAX_LINK_SCAN = 3
 MATCH_CANDIDATES_MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
 MATCH_CANDIDATES_MAX_ATTACHMENT_TEXT_CHARS = 10000
 MATCH_CANDIDATES_MAX_LINK_TEXT_CHARS = 12000
+MATCH_CANDIDATES_MAX_LINK_BYTES = 2 * 1024 * 1024
+MATCH_CANDIDATES_MAX_LINK_REDIRECTS = 2
 MATCH_CANDIDATES_MAX_POSTING_CHARS = 36000
 MATCH_CANDIDATES_SUPPORTED_ATTACHMENT_EXTENSIONS = frozenset(
     {".txt", ".md", ".pdf", ".doc", ".docx", ".html", ".htm", ".rtf"}
@@ -70,6 +74,7 @@ MATCH_CANDIDATES_JD_URL_HINTS = (
 AUTO_MATCH_DEDUPE_MAX = 10_000
 # Exclude known-bad resume artifact from auto-match rendering.
 AUTO_MATCH_EXCLUDED_RESUME_NAMES = frozenset({"Vladyslav_Stryzhak.pdf"})
+IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 JobWatchChannel = discord.ForumChannel
 
 
@@ -164,7 +169,8 @@ class MatchResumeSelect(discord.ui.Select):
                         "Audit write failed in match resume select: %s", audit_exc
                     )
             await interaction.followup.send(
-                "❌ An unexpected error occurred while downloading the resume."
+                "❌ An unexpected error occurred while downloading the resume.",
+                ephemeral=True,
             )
 
 
@@ -189,6 +195,8 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         self._jobs_channels_by_guild: dict[int, set[int]] = {}
         self._auto_matched_thread_ids: OrderedDict[int, None] = OrderedDict()
         self._auto_matched_thread_lock = asyncio.Lock()
+        self._startup_sync_done = False
+        self._startup_sync_lock = asyncio.Lock()
 
     @staticmethod
     def _resolve_jobs_channel_target(
@@ -639,6 +647,78 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         unescaped = html.unescape(text_only)
         return re.sub(r"\s+", " ", unescaped).strip()
 
+    @staticmethod
+    def _parse_ip_literal(value: str) -> IPAddress | None:
+        try:
+            return ipaddress.ip_address(value)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _is_public_ip(value: IPAddress) -> bool:
+        return not (
+            value.is_private
+            or value.is_loopback
+            or value.is_link_local
+            or value.is_multicast
+            or value.is_reserved
+            or value.is_unspecified
+        )
+
+    @classmethod
+    def _hostname_resolves_publicly(cls, host: str) -> bool:
+        if host in {"localhost", "localhost.localdomain"}:
+            return False
+
+        ip_literal = cls._parse_ip_literal(host)
+        if ip_literal is not None:
+            return cls._is_public_ip(ip_literal)
+
+        try:
+            addr_infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+        except socket.gaierror:
+            return False
+        except Exception:
+            return False
+
+        resolved_ips: set[IPAddress] = set()
+        for _, _, _, _, sockaddr in addr_infos:
+            if not sockaddr:
+                continue
+            ip_text = str(sockaddr[0]).strip()
+            parsed_ip = cls._parse_ip_literal(ip_text)
+            if parsed_ip is None:
+                continue
+            resolved_ips.add(parsed_ip)
+
+        if not resolved_ips:
+            return False
+        return all(cls._is_public_ip(parsed_ip) for parsed_ip in resolved_ips)
+
+    async def _validate_match_candidates_url(self, candidate_url: str) -> str | None:
+        try:
+            parsed = urlsplit(candidate_url)
+        except Exception:
+            return "Job description URL is invalid."
+
+        if parsed.scheme.lower() != "https":
+            return "Job description URL must use https."
+
+        if parsed.username or parsed.password:
+            return "Job description URL must not include credentials."
+
+        host = (parsed.hostname or "").strip().lower().rstrip(".")
+        if not host:
+            return "Job description URL must include a hostname."
+
+        resolves_publicly = await asyncio.to_thread(
+            self._hostname_resolves_publicly, host
+        )
+        if not resolves_publicly:
+            return "Job description URL host resolves to a non-public address."
+
+        return None
+
     async def _read_match_candidates_attachment_text(
         self, attachment: discord.Attachment
     ) -> str | None:
@@ -682,21 +762,86 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
     async def _fetch_match_candidates_link_text(self, url: str) -> str | None:
         timeout = aiohttp.ClientTimeout(total=12)
         headers = {"User-Agent": "508-job-match/1.0"}
+        current_url = url
         try:
             async with aiohttp.ClientSession(
                 timeout=timeout, headers=headers
             ) as session:
-                async with session.get(url, allow_redirects=True) as response:
-                    if response.status >= 400:
-                        return None
-                    content_type = (
-                        response.headers.get("Content-Type", "")
-                        .split(";")[0]
-                        .strip()
-                        .lower()
+                for _ in range(MATCH_CANDIDATES_MAX_LINK_REDIRECTS + 1):
+                    validation_error = await self._validate_match_candidates_url(
+                        current_url
                     )
-                    final_url = str(response.url)
-                    raw = await response.read()
+                    if validation_error:
+                        logger.info(
+                            "Skipping JD link fetch url=%s reason=%s",
+                            current_url,
+                            validation_error,
+                        )
+                        return None
+
+                    async with session.get(
+                        current_url, allow_redirects=False
+                    ) as response:
+                        if response.status in {301, 302, 303, 307, 308}:
+                            redirect_to = response.headers.get("Location")
+                            if not redirect_to:
+                                return None
+                            current_url = urljoin(current_url, redirect_to)
+                            continue
+                        if response.status >= 400:
+                            return None
+
+                        content_type = (
+                            response.headers.get("Content-Type", "")
+                            .split(";")[0]
+                            .strip()
+                            .lower()
+                        )
+                        is_supported_content_type = content_type in {
+                            "application/pdf",
+                            "application/xhtml+xml",
+                        } or content_type.startswith("text/")
+                        if content_type and not is_supported_content_type:
+                            logger.info(
+                                "Skipping unsupported JD content type url=%s content_type=%s",
+                                current_url,
+                                content_type,
+                            )
+                            return None
+
+                        content_length = response.headers.get("Content-Length")
+                        if content_length:
+                            try:
+                                content_len_bytes = int(content_length)
+                            except (TypeError, ValueError):
+                                pass
+                            else:
+                                if content_len_bytes > MATCH_CANDIDATES_MAX_LINK_BYTES:
+                                    logger.info(
+                                        "Skipping oversized JD link url=%s bytes=%s",
+                                        current_url,
+                                        content_len_bytes,
+                                    )
+                                    return None
+
+                        final_url = str(response.url)
+                        raw_chunks = bytearray()
+                        async for chunk in response.content.iter_chunked(8192):
+                            if not chunk:
+                                continue
+                            raw_chunks.extend(chunk)
+                            if len(raw_chunks) > MATCH_CANDIDATES_MAX_LINK_BYTES:
+                                logger.info(
+                                    "Skipping oversized JD body url=%s bytes>%s",
+                                    final_url,
+                                    MATCH_CANDIDATES_MAX_LINK_BYTES,
+                                )
+                                return None
+                        raw = bytes(raw_chunks)
+                        break
+                else:
+                    logger.info("Skipping JD link after too many redirects url=%s", url)
+                    return None
         except Exception as exc:
             logger.info("Failed fetching JD link url=%s error=%s", url, exc)
             return None
@@ -1061,35 +1206,43 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
     @commands.Cog.listener()
     async def on_ready(self) -> None:
         """Warm caches and sync role-backed candidate data on startup."""
-        for guild in self.bot.guilds:
-            self._refresh_role_id_cache(guild)
-            try:
-                channel_ids = await self._refresh_jobs_channel_cache(guild.id)
-                logger.info(
-                    "Loaded %d registered jobs channel(s) for guild=%s",
-                    len(channel_ids),
-                    guild.name,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Failed loading jobs channel registrations for guild %s: %s",
-                    guild.name,
-                    exc,
-                )
+        async with self._startup_sync_lock:
+            if self._startup_sync_done:
+                return
 
-            try:
-                updated, skipped, failed = await self._bulk_sync_guild_roles(guild)
-                logger.info(
-                    "Startup discord role sync: guild=%s updated=%d skipped=%d failed=%d",
-                    guild.name,
-                    updated,
-                    skipped,
-                    failed,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Startup discord role sync failed for guild %s: %s", guild.name, exc
-                )
+            for guild in self.bot.guilds:
+                self._refresh_role_id_cache(guild)
+                try:
+                    channel_ids = await self._refresh_jobs_channel_cache(guild.id)
+                    logger.info(
+                        "Loaded %d registered jobs channel(s) for guild=%s",
+                        len(channel_ids),
+                        guild.name,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed loading jobs channel registrations for guild %s: %s",
+                        guild.name,
+                        exc,
+                    )
+
+                try:
+                    updated, skipped, failed = await self._bulk_sync_guild_roles(guild)
+                    logger.info(
+                        "Startup discord role sync: guild=%s updated=%d skipped=%d failed=%d",
+                        guild.name,
+                        updated,
+                        skipped,
+                        failed,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Startup discord role sync failed for guild %s: %s",
+                        guild.name,
+                        exc,
+                    )
+
+            self._startup_sync_done = True
 
     @commands.Cog.listener()
     async def on_thread_create(self, thread: discord.Thread) -> None:
@@ -1102,6 +1255,15 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             return
 
         if not self._is_jobs_channel_registered(guild.id, parent.id):
+            return
+
+        if parent.permissions_for(guild.default_role).view_channel:
+            logger.info(
+                "Skipping auto-match for publicly visible forum channel %s (%s) in guild %s",
+                parent.id,
+                parent.name,
+                guild.name,
+            )
             return
 
         owner = guild.get_member(thread.owner_id) if thread.owner_id else None
@@ -1295,7 +1457,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         if not isinstance(interaction.channel, discord.Thread) or not isinstance(
             interaction.channel.parent, discord.ForumChannel
         ):
-            self._audit_command(
+            self._audit_command_safe(
                 interaction=interaction,
                 action="crm.match_candidates",
                 result="error",
@@ -1326,7 +1488,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 if len(error_text) > 300:
                     error_text = f"{error_text[:297]}..."
                 metadata["error"] = error_text
-            self._audit_command(
+            self._audit_command_safe(
                 interaction=interaction,
                 action="crm.match_candidates",
                 result="error",
@@ -1339,9 +1501,11 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
+        await interaction.response.defer(ephemeral=False)
+
         posting, posting_metadata = await self._build_match_candidates_posting(starter)
         if not posting.strip():
-            self._audit_command(
+            self._audit_command_safe(
                 interaction=interaction,
                 action="crm.match_candidates",
                 result="error",
@@ -1350,7 +1514,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                     **posting_metadata,
                 },
             )
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "⚠️ Could not extract a job description from the thread opener, "
                 "its attachments, or linked pages.",
                 ephemeral=True,
@@ -1361,8 +1525,6 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             tag_names = ", ".join(t.name for t in thread.applied_tags)
             posting = f"Thread tags: {tag_names}\n\n{posting}"
 
-        await interaction.response.defer(ephemeral=False)
-
         try:
             requirements = await asyncio.to_thread(
                 extract_job_requirements,
@@ -1372,8 +1534,8 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 model=settings.openai_model,
                 webhook_url=settings.discord_logs_webhook_url,
             )
-        except RuntimeError as exc:
-            self._audit_command(
+        except Exception as exc:
+            self._audit_command_safe(
                 interaction=interaction,
                 action="crm.match_candidates",
                 result="error",
@@ -1386,7 +1548,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             return
 
         if not requirements.required_skills:
-            self._audit_command(
+            self._audit_command_safe(
                 interaction=interaction,
                 action="crm.match_candidates",
                 result="error",
@@ -1410,7 +1572,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             )
         except Exception as exc:
             logger.error("Candidate search failed: %s", exc)
-            self._audit_command(
+            self._audit_command_safe(
                 interaction=interaction,
                 action="crm.match_candidates",
                 result="error",
@@ -1429,7 +1591,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             guild=interaction.guild,
         )
 
-        self._audit_command(
+        self._audit_command_safe(
             interaction=interaction,
             action="crm.match_candidates",
             result="success",
@@ -1465,7 +1627,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
 
         updated, skipped, failed = await self._bulk_sync_guild_roles(guild)
 
-        self._audit_command(
+        self._audit_command_safe(
             interaction=interaction,
             action="crm.sync_discord_roles",
             result="success",
@@ -1490,7 +1652,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         after: discord.Member,
     ) -> None:
         """Automatically sync discord roles/names on member updates."""
-        if after.guild is None:
+        if after.guild is None or after.bot:
             return
         roles_changed = before.roles != after.roles
         name_changed = (

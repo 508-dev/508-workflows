@@ -11,7 +11,6 @@ from typing import Any, Final
 import discord
 import requests
 
-from five08.discord_bot.config import settings
 from five08.discord_webhook import DiscordWebhookLogger
 
 logger = logging.getLogger(__name__)
@@ -405,6 +404,8 @@ class DiscordAuditLogger:
 
 def create_discord_audit_logger() -> DiscordAuditLogger:
     """Build the standard Discord audit logger from bot settings."""
+    from five08.discord_bot.config import settings
+
     return DiscordAuditLogger(
         base_url=settings.audit_api_base_url,
         shared_secret=settings.api_shared_secret,

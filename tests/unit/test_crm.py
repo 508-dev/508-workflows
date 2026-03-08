@@ -1201,8 +1201,12 @@ class TestCRMCog:
             def __init__(self, channel_id: int) -> None:
                 self.id = channel_id
 
+            def permissions_for(self, _role):
+                return Mock(view_channel=False)
+
         guild = Mock()
         guild.id = 123
+        guild.default_role = Mock()
         parent = DummyForumChannel(456)
         thread = Mock()
         thread.guild = guild
@@ -1227,8 +1231,12 @@ class TestCRMCog:
             def __init__(self, channel_id: int) -> None:
                 self.id = channel_id
 
+            def permissions_for(self, _role):
+                return Mock(view_channel=False)
+
         guild = Mock()
         guild.id = 123
+        guild.default_role = Mock()
         parent = DummyForumChannel(456)
         thread = Mock()
         thread.guild = guild
@@ -1257,8 +1265,12 @@ class TestCRMCog:
             def __init__(self, channel_id: int) -> None:
                 self.id = channel_id
 
+            def permissions_for(self, _role):
+                return Mock(view_channel=False)
+
         guild = Mock()
         guild.id = 123
+        guild.default_role = Mock()
         parent = DummyForumChannel(456)
         thread = Mock()
         thread.guild = guild
@@ -1285,6 +1297,94 @@ class TestCRMCog:
                 await jobs_cog.on_thread_create(thread)
 
         jobs_cog._run_auto_match_candidates_for_thread.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_on_thread_create_skips_public_forum(self, jobs_cog):
+        class DummyForumChannel:
+            def __init__(self, channel_id: int) -> None:
+                self.id = channel_id
+                self.name = "jobs"
+
+            def permissions_for(self, _role):
+                return Mock(view_channel=True)
+
+        guild = Mock()
+        guild.id = 123
+        guild.name = "508"
+        guild.default_role = Mock()
+        parent = DummyForumChannel(456)
+        thread = Mock()
+        thread.guild = guild
+        thread.parent = parent
+        thread.owner_id = 999
+
+        owner = Mock()
+        owner.bot = False
+        owner.roles = [Mock()]
+        guild.get_member.return_value = owner
+
+        jobs_cog._refresh_jobs_channel_cache_if_missing = AsyncMock(return_value=True)
+        jobs_cog._is_jobs_channel_registered = Mock(return_value=True)
+        jobs_cog._run_auto_match_candidates_for_thread = AsyncMock()
+
+        with patch(
+            "five08.discord_bot.cogs.jobs.discord.ForumChannel",
+            DummyForumChannel,
+        ):
+            await jobs_cog.on_thread_create(thread)
+
+        jobs_cog._run_auto_match_candidates_for_thread.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_on_ready_runs_startup_sync_once(self, jobs_cog, mock_bot):
+        guild = Mock()
+        guild.id = 123
+        guild.name = "508"
+        mock_bot.guilds = [guild]
+
+        jobs_cog._refresh_role_id_cache = Mock()
+        jobs_cog._refresh_jobs_channel_cache = AsyncMock(return_value={456})
+        jobs_cog._bulk_sync_guild_roles = AsyncMock(return_value=(1, 2, 3))
+
+        await jobs_cog.on_ready()
+        await jobs_cog.on_ready()
+
+        jobs_cog._refresh_role_id_cache.assert_called_once_with(guild)
+        jobs_cog._refresh_jobs_channel_cache.assert_awaited_once_with(guild.id)
+        jobs_cog._bulk_sync_guild_roles.assert_awaited_once_with(guild)
+
+    @pytest.mark.asyncio
+    async def test_validate_match_candidates_url_rejects_non_https(self, jobs_cog):
+        message = await jobs_cog._validate_match_candidates_url("http://example.com/jd")
+
+        assert message == "Job description URL must use https."
+
+    @pytest.mark.asyncio
+    async def test_validate_match_candidates_url_rejects_private_hosts(self, jobs_cog):
+        message = await jobs_cog._validate_match_candidates_url(
+            "https://127.0.0.1/internal"
+        )
+
+        assert message == "Job description URL host resolves to a non-public address."
+
+    @pytest.mark.asyncio
+    async def test_on_member_update_skips_bot_members(self, jobs_cog):
+        before = Mock()
+        before.roles = []
+        before.display_name = "Bot"
+        before.name = "bot"
+
+        after = Mock()
+        after.guild = Mock()
+        after.bot = True
+        after.roles = [Mock()]
+        after.display_name = "Bot"
+        after.name = "bot"
+
+        with patch("five08.discord_bot.cogs.jobs.asyncio.to_thread") as to_thread:
+            await jobs_cog.on_member_update(before, after)
+
+        to_thread.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_search_contacts_requires_query_or_skills(

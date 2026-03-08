@@ -189,6 +189,9 @@ def search_candidates(
     Candidates are included if they match ANY required skill OR any discord role type.
     A minimum final match score can be requested via min_match_score.
     When guild_id is provided, discord member snapshots are scoped to that guild.
+    When requirements.location_type == "us_only", a hard US-only filter is applied
+    in SQL so non-US candidates are excluded rather than merely down-ranked by the
+    location signal.
     """
     required_skills = requirements.required_skills
     preferred_skills = requirements.preferred_skills
