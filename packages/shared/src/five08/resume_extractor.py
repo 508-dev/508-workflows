@@ -993,6 +993,9 @@ def _parse_location_candidate(
         country = _normalize_country(region)
         if country:
             return city, None, country
+        state = _normalize_state(region)
+        if state:
+            return city, state, None
         return None
 
     state = _normalize_state(region) if _looks_like_state_region(region) else None
@@ -2344,6 +2347,9 @@ class ResumeProfileExtractor:
             "- if timezone is provided, normalize it to UTC offset form like UTC±HH:MM before output\n"
             "- location/timezone evidence order: explicit location/timezone fields or contact header > explicit current role location > deterministic city/country mapping; otherwise null\n"
             "- infer city/state/country only when there is explicit resume evidence or an unambiguous mapping from a known city; if ambiguous, use null\n"
+            "- address_country must be a real country name only; never put a city, province, state, technology, employer, or job-skill token into address_country\n"
+            "- for two-part locations like 'Nanzih, Kaohsiung City', treat the second token as a province/state/region when it is not a valid country; only set address_country when the country is explicitly present or unambiguously inferable\n"
+            "- short tech tokens like 'JS' are never valid city/state/country values unless the source explicitly labels them as a location code\n"
             "- if timezone is null but address_city or address_country is known or can be inferred from the resume, infer the standard UTC offset (e.g., San Francisco/Los Angeles/Seattle → UTC-08:00, Denver → UTC-07:00, Chicago/Dallas/Houston → UTC-06:00, New York/Boston/Atlanta → UTC-05:00, London/Dublin/Lisbon → UTC+00:00, Paris/Berlin/Amsterdam/Rome/Madrid → UTC+01:00, Bucharest/Athens/Kyiv → UTC+02:00, Nairobi/Istanbul → UTC+03:00, UAE/Dubai → UTC+04:00, India/Mumbai/Bangalore → UTC+05:30, Singapore/Shanghai/Beijing → UTC+08:00, Tokyo/Seoul → UTC+09:00, Sydney/Melbourne → UTC+10:00); omit if location is ambiguous\n"
             "- if country is multi-timezone and city is missing or ambiguous, timezone must be null\n"
             "- for location, first check the resume header/contact block; if missing, infer from the most recent job/experience entry (last position/location line)\n"

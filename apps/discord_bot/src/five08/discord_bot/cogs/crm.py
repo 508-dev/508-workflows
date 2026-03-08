@@ -895,6 +895,111 @@ class ResumeEditSkillsModal(discord.ui.Modal, title="Edit Skills"):
         )
 
 
+class ResumeEditLocationModal(discord.ui.Modal, title="Edit Location"):
+    """Modal for editing proposed location fields before confirmation."""
+
+    city_input: discord.ui.TextInput = discord.ui.TextInput(
+        label="City",
+        required=False,
+        max_length=100,
+    )
+    state_input: discord.ui.TextInput = discord.ui.TextInput(
+        label="State / Region",
+        required=False,
+        max_length=100,
+    )
+    country_input: discord.ui.TextInput = discord.ui.TextInput(
+        label="Country",
+        required=False,
+        max_length=100,
+    )
+    timezone_input: discord.ui.TextInput = discord.ui.TextInput(
+        label="Timezone",
+        required=False,
+        max_length=100,
+    )
+
+    def __init__(self, *, confirmation_view: "ResumeUpdateConfirmationView") -> None:
+        super().__init__()
+        self.confirmation_view = confirmation_view
+        self.city_input.default = str(
+            confirmation_view.proposed_updates.get("addressCity") or ""
+        ).strip()
+        self.state_input.default = str(
+            confirmation_view.proposed_updates.get("addressState") or ""
+        ).strip()
+        self.country_input.default = str(
+            confirmation_view.proposed_updates.get("addressCountry") or ""
+        ).strip()
+        self.timezone_input.default = str(
+            confirmation_view.proposed_updates.get("cTimezone") or ""
+        ).strip()
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        from five08.crm_normalization import (
+            normalize_city,
+            normalize_country,
+            normalize_state,
+            normalize_timezone,
+        )
+
+        raw_city = (self.city_input.value or "").strip()
+        raw_state = (self.state_input.value or "").strip()
+        raw_country = (self.country_input.value or "").strip()
+        raw_timezone = (self.timezone_input.value or "").strip()
+
+        city = normalize_city(raw_city) if raw_city else None
+        state = normalize_state(raw_state) if raw_state else None
+        country = normalize_country(raw_country) if raw_country else None
+        timezone = normalize_timezone(raw_timezone) if raw_timezone else None
+
+        invalid_fields: list[str] = []
+        if raw_city and not city:
+            invalid_fields.append("City")
+        if raw_state and not state:
+            invalid_fields.append("State / Region")
+        if raw_country and not country:
+            invalid_fields.append("Country")
+        if raw_timezone and not timezone:
+            invalid_fields.append("Timezone")
+
+        if invalid_fields:
+            invalid_list = ", ".join(f"`{field}`" for field in invalid_fields)
+            await interaction.response.send_message(
+                f"❌ Invalid location fields: {invalid_list}.",
+                ephemeral=True,
+            )
+            return
+
+        updates = self.confirmation_view.proposed_updates
+        if city:
+            updates["addressCity"] = city
+        else:
+            updates.pop("addressCity", None)
+        if state:
+            updates["addressState"] = state
+        else:
+            updates.pop("addressState", None)
+        if country:
+            updates["addressCountry"] = country
+        else:
+            updates.pop("addressCountry", None)
+        if timezone:
+            updates["cTimezone"] = timezone
+        else:
+            updates.pop("cTimezone", None)
+
+        summary = self.confirmation_view._format_location_summary(updates)
+        if summary == "None":
+            message = "✅ Location updates cleared. Click **Confirm Updates** to apply."
+        else:
+            message = (
+                f"✅ Location updated to `{summary}`. "
+                "Click **Confirm Updates** to apply."
+            )
+        await interaction.response.send_message(message, ephemeral=True)
+
+
 class ResumeEditWebsitesButton(discord.ui.Button["ResumeUpdateConfirmationView"]):
     """Button that opens the Edit Websites modal."""
 
@@ -961,6 +1066,28 @@ class ResumeEditSkillsButton(discord.ui.Button["ResumeUpdateConfirmationView"]):
         )
 
 
+class ResumeEditLocationButton(discord.ui.Button["ResumeUpdateConfirmationView"]):
+    """Button that opens the Edit Location modal."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            label="Edit Location",
+            style=discord.ButtonStyle.secondary,
+            custom_id="resume_edit_location",
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if not isinstance(view, ResumeUpdateConfirmationView):
+            await interaction.response.send_message(
+                "❌ Unable to edit location.", ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(
+            ResumeEditLocationModal(confirmation_view=view)
+        )
+
+
 class ResumeUpdateConfirmationView(discord.ui.View):
     """Confirm extracted profile updates before writing to CRM."""
 
@@ -977,9 +1104,17 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         "cWebsiteLink": "Website",
         "cSocialLinks": "Social Links",
         "cSeniority": "Seniority",
+        "addressCity": "City",
+        "addressState": "State",
+        "addressCountry": "Country",
+        "cTimezone": "Timezone",
+        "location": "Location",
         "cDiscordUserID": "Discord User ID",
         "cDiscordUsername": "Discord Username",
     }
+    _LOCATION_FIELDS = frozenset(
+        {"addressCity", "addressState", "addressCountry", "cTimezone"}
+    )
 
     def __init__(
         self,
@@ -1015,11 +1150,46 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             self.add_item(ResumeEditSocialLinksButton())
         if proposed_updates.get("skills") or proposed_updates.get("cSkillAttrs"):
             self.add_item(ResumeEditSkillsButton())
+        if self._has_location_updates(proposed_updates):
+            self.add_item(ResumeEditLocationButton())
 
     def _set_seniority_override(self, value: str) -> str:
         self.seniority_override = value
         self.proposed_updates["cSeniority"] = value
         return _format_seniority_label(value)
+
+    @classmethod
+    def _is_location_field(cls, field: str) -> bool:
+        return field in cls._LOCATION_FIELDS
+
+    @classmethod
+    def _has_location_updates(cls, values: dict[str, Any]) -> bool:
+        return any(values.get(field) for field in cls._LOCATION_FIELDS)
+
+    @staticmethod
+    def _location_component(value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text or text.casefold() in {"none", "null"}:
+            return None
+        return text
+
+    @classmethod
+    def _format_location_summary(cls, values: dict[str, Any]) -> str:
+        city = cls._location_component(values.get("addressCity"))
+        state = cls._location_component(values.get("addressState"))
+        country = cls._location_component(values.get("addressCountry"))
+        timezone = cls._location_component(values.get("cTimezone"))
+        location_parts = [part for part in (city, state, country) if part]
+        location_value = ", ".join(location_parts)
+        if timezone:
+            return (
+                f"{location_value} (Timezone: {timezone})"
+                if location_value
+                else f"Timezone: {timezone}"
+            )
+        return location_value or "None"
 
     @classmethod
     def _field_label(cls, field: str) -> str:
@@ -1205,8 +1375,17 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             )
             lines.append(f"**Skills**: `{truncated_combined_skills}`")
 
+        if any(self._is_location_field(field) for field in updated_fields):
+            location_values = {
+                field: updated_values.get(field, self.proposed_updates.get(field))
+                for field in self._LOCATION_FIELDS
+            }
+            lines.append(
+                f"**Location**: `{self._format_location_summary(location_values)}`"
+            )
+
         for field in self._collapse_updated_fields(updated_fields):
-            if field == "skills":
+            if field in {"skills", "location"}:
                 continue
             label = self._field_label(field)
             value = updated_values.get(field, self.proposed_updates.get(field))
@@ -1274,13 +1453,14 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         joined = "\n".join(kept)
         return cls._truncate_embed_field(joined, cls._APPLIED_FIELD_TOTAL_LIMIT)
 
-    @staticmethod
-    def _collapse_updated_fields(updated_fields: list[str]) -> list[str]:
+    @classmethod
+    def _collapse_updated_fields(cls, updated_fields: list[str]) -> list[str]:
         """Collapse skill fields into a single logical skills entry."""
         collapsed: list[str] = []
         seen: set[str] = set()
         has_skills = "skills" in updated_fields
         has_skill_attrs = "cSkillAttrs" in updated_fields
+        has_location = any(field in cls._LOCATION_FIELDS for field in updated_fields)
 
         for field in updated_fields:
             normalized_field = field
@@ -1289,6 +1469,9 @@ class ResumeUpdateConfirmationView(discord.ui.View):
                     continue
                 if has_skill_attrs:
                     normalized_field = "skills"
+            elif field in cls._LOCATION_FIELDS:
+                if has_location:
+                    normalized_field = "location"
             key = normalized_field.casefold()
             if key in seen:
                 continue
@@ -2545,7 +2728,39 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
 
         if isinstance(changes, list) and changes:
             lines: list[str] = []
-            for change in changes[:8]:
+            location_current: dict[str, Any] = {}
+            location_proposed: dict[str, Any] = {}
+            non_location_changes: list[dict[str, Any]] = []
+            for change in changes:
+                if not isinstance(change, dict):
+                    continue
+                field_name = str(change.get("field", ""))
+                if ResumeUpdateConfirmationView._is_location_field(field_name):
+                    location_current[field_name] = change.get("current")
+                    location_proposed[field_name] = change.get("proposed")
+                    continue
+                non_location_changes.append(change)
+
+            if location_current or location_proposed:
+                current_location = truncate_preview_value(
+                    ResumeUpdateConfirmationView._format_location_summary(
+                        location_current
+                    ),
+                    field_name="location",
+                    label="Location",
+                )
+                proposed_location = truncate_preview_value(
+                    ResumeUpdateConfirmationView._format_location_summary(
+                        location_proposed
+                    ),
+                    field_name="location",
+                    label="Location",
+                )
+                lines.append(
+                    f"**Location**: `{current_location}` → `{proposed_location}`"
+                )
+
+            for change in non_location_changes[:8]:
                 if not isinstance(change, dict):
                     continue
                 field_name = str(change.get("field", ""))
@@ -6969,6 +7184,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             else:
                 city = normalize_city(token0)
                 country = normalize_country_token(token1)
+                if not country:
+                    state = normalize_state_token(token1)
         elif len(segments) >= 3:
             city = normalize_city(", ".join(segments[:-2]))
             state_token = segments[-2]

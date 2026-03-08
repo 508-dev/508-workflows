@@ -17,6 +17,8 @@ from five08.discord_bot.cogs.crm import (
     ReprocessResumeSelectionView,
     ResumeDownloadButton,
     ResumeSeniorityOverrideSelect,
+    ResumeEditLocationButton,
+    ResumeEditLocationModal,
     ResumeEditWebsitesButton,
     ResumeEditSocialLinksButton,
     ResumeEditWebsitesModal,
@@ -248,6 +250,55 @@ class TestCRMCog:
         assert collapsed == ["skills", "phoneNumber"]
 
     @pytest.mark.asyncio
+    async def test_resume_apply_confirmation_groups_location_fields(self, crm_cog):
+        """Applied updates should render location fields as one combined line."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+        )
+
+        lines = view._build_applied_updates_lines(
+            updated_fields=[
+                "addressCity",
+                "addressState",
+                "addressCountry",
+                "cTimezone",
+            ],
+            updated_values={
+                "addressCity": "Nanzih",
+                "addressState": "Kaohsiung City",
+                "addressCountry": "Taiwan",
+                "cTimezone": "UTC+08:00",
+            },
+        )
+
+        assert lines == [
+            "**Location**: `Nanzih, Kaohsiung City, Taiwan (Timezone: UTC+08:00)`"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_resume_apply_confirmation_maps_location_fields_to_location(
+        self, crm_cog
+    ):
+        """Updated fields should collapse location subfields into one Location label."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+        )
+
+        collapsed = view._collapse_updated_fields(
+            ["addressCity", "cTimezone", "phoneNumber"]
+        )
+
+        assert collapsed == ["location", "phoneNumber"]
+
+    @pytest.mark.asyncio
     async def test_resume_apply_confirmation_caps_updated_fields_length(self, crm_cog):
         """Updated Fields text should stay within Discord field limits."""
         view = ResumeUpdateConfirmationView(
@@ -449,6 +500,44 @@ class TestCRMCog:
         )
 
     @pytest.mark.asyncio
+    async def test_resume_update_view_adds_location_button_when_location_proposed(
+        self, crm_cog
+    ):
+        """Edit Location button should appear when location fields are proposed."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={
+                "addressCity": "Nanzih",
+                "addressCountry": "Taiwan",
+                "cTimezone": "UTC+08:00",
+            },
+        )
+
+        assert any(
+            isinstance(child, ResumeEditLocationButton) for child in view.children
+        )
+
+    @pytest.mark.asyncio
+    async def test_resume_update_view_no_location_button_without_location(
+        self, crm_cog
+    ):
+        """Edit Location button should not appear when location fields are absent."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+        )
+
+        assert not any(
+            isinstance(child, ResumeEditLocationButton) for child in view.children
+        )
+
+    @pytest.mark.asyncio
     async def test_edit_websites_modal_prepopulates_list_values(self, crm_cog):
         """Edit Websites modal should pre-fill with proposed website list, one per line."""
         view = ResumeUpdateConfirmationView(
@@ -487,6 +576,29 @@ class TestCRMCog:
             modal.social_links_input.default
             == "https://linkedin.com/in/user\nhttps://x.com/user"
         )
+
+    @pytest.mark.asyncio
+    async def test_edit_location_modal_prepopulates_values(self, crm_cog):
+        """Edit Location modal should pre-fill location fields from proposed updates."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={
+                "addressCity": "Nanzih",
+                "addressState": "Kaohsiung City",
+                "addressCountry": "Taiwan",
+                "cTimezone": "UTC+08:00",
+            },
+        )
+
+        modal = ResumeEditLocationModal(confirmation_view=view)
+
+        assert modal.city_input.default == "Nanzih"
+        assert modal.state_input.default == "Kaohsiung City"
+        assert modal.country_input.default == "Taiwan"
+        assert modal.timezone_input.default == "UTC+08:00"
 
     @pytest.mark.asyncio
     async def test_edit_skills_modal_prepopulates_list_values(self, crm_cog):
@@ -552,6 +664,32 @@ class TestCRMCog:
             "https://linkedin.com/in/new",
             "https://x.com/user",
         ]
+        mock_interaction.response.send_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_edit_location_modal_submit_updates_proposed(
+        self, crm_cog, mock_interaction
+    ):
+        """Submitting the Edit Location modal should replace proposed location values."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={"addressCountry": "Canada"},
+        )
+        modal = ResumeEditLocationModal(confirmation_view=view)
+        modal.city_input._value = "Nanzih"
+        modal.state_input._value = "Kaohsiung City"
+        modal.country_input._value = "Taiwan"
+        modal.timezone_input._value = "UTC+8"
+
+        await modal.on_submit(mock_interaction)
+
+        assert view.proposed_updates["addressCity"] == "Nanzih"
+        assert view.proposed_updates["addressState"] == "Kaohsiung City"
+        assert view.proposed_updates["addressCountry"] == "Taiwan"
+        assert view.proposed_updates["cTimezone"] == "UTC+08:00"
         mock_interaction.response.send_message.assert_called_once()
 
     @pytest.mark.asyncio
@@ -621,6 +759,36 @@ class TestCRMCog:
         await modal.on_submit(mock_interaction)
 
         assert "cSocialLinks" not in view.proposed_updates
+
+    @pytest.mark.asyncio
+    async def test_edit_location_modal_submit_removes_fields_when_blank(
+        self, crm_cog, mock_interaction
+    ):
+        """Clearing the location modal should remove proposed location updates."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={
+                "addressCity": "Nanzih",
+                "addressState": "Kaohsiung City",
+                "addressCountry": "Taiwan",
+                "cTimezone": "UTC+08:00",
+            },
+        )
+        modal = ResumeEditLocationModal(confirmation_view=view)
+        modal.city_input._value = ""
+        modal.state_input._value = ""
+        modal.country_input._value = ""
+        modal.timezone_input._value = ""
+
+        await modal.on_submit(mock_interaction)
+
+        assert "addressCity" not in view.proposed_updates
+        assert "addressState" not in view.proposed_updates
+        assert "addressCountry" not in view.proposed_updates
+        assert "cTimezone" not in view.proposed_updates
 
     @pytest.mark.asyncio
     async def test_edit_skills_modal_submit_removes_fields_when_blank(
@@ -693,6 +861,50 @@ class TestCRMCog:
         )
         assert "python (3), go (2)" in proposed_field.value
         assert "→" in proposed_field.value
+
+    def test_resume_preview_groups_location_and_timezone_changes(self, crm_cog):
+        """Location-related proposed changes should render as one grouped summary."""
+        embed, _ = crm_cog._build_resume_preview_embed(
+            contact_id="contact-1",
+            contact_name="Test User",
+            result={
+                "proposed_changes": [
+                    {
+                        "field": "addressCity",
+                        "label": "City",
+                        "current": None,
+                        "proposed": "Nanzih",
+                    },
+                    {
+                        "field": "addressState",
+                        "label": "State",
+                        "current": None,
+                        "proposed": "Kaohsiung City",
+                    },
+                    {
+                        "field": "addressCountry",
+                        "label": "Country",
+                        "current": "Taiwan",
+                        "proposed": "Taiwan",
+                    },
+                    {
+                        "field": "cTimezone",
+                        "label": "Timezone",
+                        "current": None,
+                        "proposed": "UTC+08:00",
+                    },
+                ]
+            },
+            link_member=None,
+        )
+
+        proposed_field = next(
+            field for field in embed.fields if field.name == "Proposed Changes"
+        )
+        assert (
+            "**Location**: `Taiwan` → "
+            "`Nanzih, Kaohsiung City, Taiwan (Timezone: UTC+08:00)`"
+        ) in proposed_field.value
 
     def test_resume_preview_embed_includes_debug_field(self, crm_cog):
         """Preview embeds should point operators at the raw extraction payload."""
@@ -806,6 +1018,30 @@ class TestCRMCog:
         mock_interaction.response.send_modal.assert_called_once()
         modal_arg = mock_interaction.response.send_modal.call_args[0][0]
         assert isinstance(modal_arg, ResumeEditSocialLinksModal)
+
+    @pytest.mark.asyncio
+    async def test_edit_location_button_callback_opens_modal(
+        self, crm_cog, mock_interaction
+    ):
+        """Edit Location button callback should open the location modal."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={"addressCountry": "Taiwan"},
+        )
+        button = next(
+            child
+            for child in view.children
+            if isinstance(child, ResumeEditLocationButton)
+        )
+
+        await button.callback(mock_interaction)
+
+        mock_interaction.response.send_modal.assert_called_once()
+        modal_arg = mock_interaction.response.send_modal.call_args[0][0]
+        assert isinstance(modal_arg, ResumeEditLocationModal)
 
     @pytest.mark.asyncio
     async def test_download_and_send_resume_success(self, crm_cog, mock_interaction):
@@ -3078,6 +3314,36 @@ class TestCRMCog:
         assert update_payload["addressState"] == "California"
         assert update_payload["addressCountry"] == "United States"
         assert "addressCity" not in update_payload
+
+    @pytest.mark.asyncio
+    async def test_update_contact_parses_city_region_country_location(
+        self, crm_cog, mock_interaction
+    ):
+        """Parse city + region + country for non-US locations."""
+        mock_interaction.user.id = 123456789
+        target_contact = {
+            "id": "contact123",
+            "name": "Test User",
+        }
+
+        with patch.object(
+            crm_cog,
+            "_find_contact_by_discord_id",
+            new=AsyncMock(return_value=target_contact),
+        ):
+            crm_cog.espo_api.request.return_value = {"id": "contact123"}
+
+            await crm_cog.update_contact.callback(
+                crm_cog,
+                mock_interaction,
+                location="Nanzih, Kaohsiung City, Taiwan",
+            )
+
+        update_call = crm_cog.espo_api.request.call_args
+        update_payload = update_call[0][2]
+        assert update_payload["addressCity"] == "Nanzih"
+        assert update_payload["addressState"] == "Kaohsiung City"
+        assert update_payload["addressCountry"] == "Taiwan"
 
     @pytest.mark.asyncio
     async def test_update_contact_rejects_invalid_desired_hours(

@@ -756,6 +756,75 @@ def test_extract_uses_current_location_and_title_evidence_fields() -> None:
     assert result.current_location_evidence is not None
 
 
+def test_extract_discards_invalid_country_and_repairs_current_location_region() -> None:
+    """Invalid LLM location fields should be replaced by deterministic parsing."""
+
+    class _FakeChatCompletions:
+        @staticmethod
+        def create(**_: object) -> object:
+            return type(
+                "Response",
+                (),
+                {
+                    "choices": [
+                        type(
+                            "Choice",
+                            (),
+                            {
+                                "message": type(
+                                    "Message",
+                                    (),
+                                    {
+                                        "content": (
+                                            '{"name": "Jane Doe", '
+                                            '"email": "jane@example.com", '
+                                            '"primary_roles": ["developer"], '
+                                            '"current_title": "Software Engineer", '
+                                            '"recent_titles": ["Software Engineer"], '
+                                            '"role_rationale": "Engineering title indicates a developer profile.", '
+                                            '"current_location_raw": "Nanzih, Kaohsiung City", '
+                                            '"current_location_source": "current_role", '
+                                            '"current_location_evidence": "Software Engineer | Nanzih, Kaohsiung City | 2024-Present", '
+                                            '"address_city": null, '
+                                            '"address_state": "JS", '
+                                            '"address_country": "Kaohsiung City", '
+                                            '"timezone": null, '
+                                            '"website_url_candidates": [], '
+                                            '"website_links": [], '
+                                            '"social_links": [], '
+                                            '"phone": null, '
+                                            '"skills": [], '
+                                            '"skill_attrs": null, '
+                                            '"confidence": 0.88}'
+                                        )
+                                    },
+                                )()
+                            },
+                        )()
+                    ]
+                },
+            )()
+
+    extractor = ResumeProfileExtractor(api_key="test-key")
+    extractor.client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": _FakeChatCompletions()})()},
+    )()
+    extractor.model = "fake-model"
+
+    result = extractor.extract(
+        "Jane Doe\n"
+        "Country: Taiwan\n"
+        "Software Engineer | 2024-Present\n"
+        "Nanzih, Kaohsiung City\n"
+    )
+
+    assert result.address_city == "Nanzih"
+    assert result.address_state == "Kaohsiung City"
+    assert result.address_country == "Taiwan"
+
+
 def test_extract_linkedin_url_supports_hyphenated_slugs() -> None:
     """LinkedIn profile extraction should include hyphenated slug segments."""
     url = ResumeProfileExtractor._extract_linkedin_url(
@@ -1024,7 +1093,7 @@ def test_extract_header_location_supports_city_state_two_part() -> None:
     )
 
     assert city == "San Francisco"
-    assert state == "Ca"
+    assert state == "California"
     assert country is None
 
 
@@ -1035,7 +1104,7 @@ def test_extract_header_location_preserves_state_when_country_present() -> None:
     )
 
     assert city == "San Francisco"
-    assert state == "Ca"
+    assert state == "California"
     assert country == "United States"
 
 
@@ -1047,6 +1116,17 @@ def test_extract_header_location_keeps_state_for_city_state_only() -> None:
 
     assert city == "Atlanta"
     assert state == "Georgia"
+    assert country is None
+
+
+def test_extract_header_location_supports_city_region_without_country() -> None:
+    """Two-part non-country locations should be treated as city + region."""
+    city, state, country = ResumeProfileExtractor._extract_header_location(
+        "Jane Doe\nNanzih, Kaohsiung City\njane@example.com"
+    )
+
+    assert city == "Nanzih"
+    assert state == "Kaohsiung City"
     assert country is None
 
 
