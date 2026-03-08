@@ -31,6 +31,60 @@ SENIORITY_MAP: dict[str, str] = {
     "staff+": "staff",
 }
 
+US_STATE_ABBREVIATIONS: dict[str, str] = {
+    "al": "Alabama",
+    "ak": "Alaska",
+    "az": "Arizona",
+    "ar": "Arkansas",
+    "ca": "California",
+    "co": "Colorado",
+    "ct": "Connecticut",
+    "de": "Delaware",
+    "fl": "Florida",
+    "ga": "Georgia",
+    "hi": "Hawaii",
+    "id": "Idaho",
+    "il": "Illinois",
+    "in": "Indiana",
+    "ia": "Iowa",
+    "ks": "Kansas",
+    "ky": "Kentucky",
+    "la": "Louisiana",
+    "me": "Maine",
+    "md": "Maryland",
+    "ma": "Massachusetts",
+    "mi": "Michigan",
+    "mn": "Minnesota",
+    "ms": "Mississippi",
+    "mo": "Missouri",
+    "mt": "Montana",
+    "ne": "Nebraska",
+    "nv": "Nevada",
+    "nh": "New Hampshire",
+    "nj": "New Jersey",
+    "nm": "New Mexico",
+    "ny": "New York",
+    "nc": "North Carolina",
+    "nd": "North Dakota",
+    "oh": "Ohio",
+    "ok": "Oklahoma",
+    "or": "Oregon",
+    "pa": "Pennsylvania",
+    "ri": "Rhode Island",
+    "sc": "South Carolina",
+    "sd": "South Dakota",
+    "tn": "Tennessee",
+    "tx": "Texas",
+    "ut": "Utah",
+    "vt": "Vermont",
+    "va": "Virginia",
+    "wa": "Washington",
+    "wv": "West Virginia",
+    "wi": "Wisconsin",
+    "wy": "Wyoming",
+    "dc": "District of Columbia",
+}
+
 
 def normalize_timezone_offset(value: str) -> str | None:
     raw = value.strip().replace(" ", "")
@@ -100,8 +154,14 @@ def normalize_country(value: Any) -> str | None:
 def normalize_state(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
-    normalized = value.strip()
-    return normalized.title() if normalized else None
+    normalized = re.sub(r"\s+", " ", value.strip())
+    if not normalized:
+        return None
+    abbreviated = normalized.casefold().replace(".", "")
+    expanded = US_STATE_ABBREVIATIONS.get(abbreviated)
+    if expanded:
+        return expanded
+    return normalized.title()
 
 
 def normalize_city(value: Any, *, strip_parenthetical: bool = False) -> str | None:
