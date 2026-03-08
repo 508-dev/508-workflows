@@ -973,6 +973,7 @@ def _parse_location_candidate(
         "",
         candidate,
     ).strip(" -,:")
+    candidate = re.sub(r"^[\s*•·○●◦▪-]+", "", candidate).strip(" -,:")
     candidate = re.sub(r"(?i)^(?:remote|hybrid|onsite)\s*[-,:]?\s*", "", candidate)
     candidate = re.sub(r"\b\d{5}(?:-\d{4})?\b", "", candidate).strip(" ,")
     if not candidate:
@@ -1007,7 +1008,7 @@ def _parse_location_candidate(
 
 def _candidate_location_fragments(line: str) -> list[str]:
     fragments = [line.strip()]
-    for fragment in re.split(r"[|•·]", line):
+    for fragment in re.split(r"[|•·○●◦▪]", line):
         cleaned = fragment.strip()
         if cleaned and cleaned not in fragments:
             fragments.append(cleaned)
@@ -2621,9 +2622,9 @@ class ResumeProfileExtractor:
                 continue
             if "remote" in lowered:
                 continue
-            if len(line) > 80:
-                continue
             for candidate in _candidate_location_fragments(line):
+                if len(candidate) > 80:
+                    continue
                 parsed = _parse_location_candidate(candidate)
                 if parsed:
                     return parsed

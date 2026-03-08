@@ -2,6 +2,8 @@
 
 from unittest.mock import Mock, patch
 
+import pytest
+
 from five08.resume_extractor import _coerce_email_list
 from five08.resume_extractor import _infer_timezone_from_location
 from five08.resume_extractor import _normalize_name_part
@@ -1127,6 +1129,39 @@ def test_extract_header_location_supports_city_region_without_country() -> None:
 
     assert city == "Nanzih"
     assert state == "Kaohsiung City"
+    assert country is None
+
+
+def test_extract_header_location_ignores_unicode_bullet_trailing_text() -> None:
+    """Header parsing should recover location before OCR-style bullet text."""
+    city, state, country = ResumeProfileExtractor._extract_header_location(
+        "Jane Doe\n"
+        "Toronto, Ontario ○ A Python Django API handles account creation and management, and applies\n"
+        "jane@example.com"
+    )
+
+    assert city == "Toronto"
+    assert state == "Ontario"
+    assert country is None
+
+
+@pytest.mark.parametrize(
+    "header_line",
+    [
+        "• Location: Toronto, Ontario",
+        "○ based in Toronto, Ontario",
+    ],
+)
+def test_extract_header_location_supports_leading_bullets_and_prefixes(
+    header_line: str,
+) -> None:
+    """Header parsing should handle leading bullets and location prefixes."""
+    city, state, country = ResumeProfileExtractor._extract_header_location(
+        f"Jane Doe\n{header_line}\nAdditional OCR text\njane@example.com"
+    )
+
+    assert city == "Toronto"
+    assert state == "Ontario"
     assert country is None
 
 
