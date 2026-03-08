@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from unittest.mock import Mock
 from types import SimpleNamespace
 
 os.environ.setdefault("DISCORD_BOT_TOKEN", "test")
@@ -58,6 +59,29 @@ def test_build_match_candidate_lines_uses_crm_name_and_discord_username() -> Non
         "1. **[Member]** [Caleb](<https://crm.example/#Contact/view/abc>)" in lines[0]
     )
     assert "`@caleb`" in lines[0]
+
+
+def test_build_match_candidate_lines_handles_non_string_names() -> None:
+    candidate = _make_candidate(
+        is_member=True,
+        name="Server Nickname",
+        crm_name=Mock(),
+        discord_username=Mock(),
+        crm_contact_id="abc",
+        has_crm_link=True,
+    )
+
+    lines, _ = JobsCog._build_match_candidate_lines(
+        candidates=[candidate],
+        crm_base="https://crm.example",
+    )
+
+    assert len(lines) == 1
+    assert (
+        "1. **[Member]** [Server Nickname](<https://crm.example/#Contact/view/abc>)"
+        in lines[0]
+    )
+    assert "`@" not in lines[0]
 
 
 def test_build_match_candidate_lines_omits_crm_link_for_prospect() -> None:

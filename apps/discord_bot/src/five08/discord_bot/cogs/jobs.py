@@ -511,14 +511,20 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
 
         for i, candidate in enumerate(candidates, start=1):
             label = "**[Member]**" if candidate.is_member else "[Prospect]"
+            raw_crm_name = (
+                candidate.crm_name if isinstance(candidate.crm_name, str) else None
+            )
+            raw_display_name = (
+                candidate.name if isinstance(candidate.name, str) else None
+            )
             crm_name = discord.utils.escape_mentions(
-                candidate.crm_name or candidate.name or "Unknown"
+                raw_crm_name or raw_display_name or "Unknown"
             )
             discord_username = (
                 discord.utils.escape_mentions(
                     str(candidate.discord_username).lstrip("@")
                 )
-                if candidate.discord_username
+                if isinstance(candidate.discord_username, str)
                 else None
             )
             crm_link = (
