@@ -511,18 +511,29 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
 
         for i, candidate in enumerate(candidates, start=1):
             label = "**[Member]**" if candidate.is_member else "[Prospect]"
-            name = discord.utils.escape_mentions(candidate.name or "Unknown")
+            crm_name = discord.utils.escape_mentions(
+                candidate.crm_name or candidate.name or "Unknown"
+            )
+            discord_username = (
+                discord.utils.escape_mentions(
+                    str(candidate.discord_username).lstrip("@")
+                )
+                if candidate.discord_username
+                else None
+            )
             crm_link = (
                 f"{crm_base}/#Contact/view/{candidate.crm_contact_id}"
                 if candidate.has_crm_link and candidate.crm_contact_id
                 else None
             )
             if crm_link:
-                parts = [f"{i}. {label} [{name}](<{crm_link}>)"]
+                display_name = f"[{crm_name}](<{crm_link}>)"
             else:
-                parts = [f"{i}. {label} {name}"]
-                if candidate.discord_user_id:
-                    parts.append(f"Discord ID: {candidate.discord_user_id}")
+                display_name = crm_name
+
+            parts = [f"{i}. {label} {display_name}"]
+            if discord_username:
+                parts.append(f"`@{discord_username}`")
 
             if candidate.linkedin:
                 parts.append(f"[LinkedIn](<{candidate.linkedin}>)")
@@ -535,7 +546,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                     candidate.latest_resume_name
                 )
                 resume_options.append(
-                    (name, candidate.latest_resume_id, safe_resume_name)
+                    (crm_name, candidate.latest_resume_id, safe_resume_name)
                 )
 
             skill_info: list[str] = []

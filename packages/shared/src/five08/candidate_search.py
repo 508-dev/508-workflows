@@ -80,6 +80,8 @@ class CandidateMatch:
 
     crm_contact_id: str | None
     name: str | None
+    crm_name: str | None
+    discord_username: str | None
     email_508: str | None
     email: str | None
     linkedin: str | None
@@ -224,7 +226,7 @@ def search_candidates(
           dm_agg AS (
             SELECT
                 dm_raw.discord_user_id,
-                MAX(dm_raw.discord_username) AS discord_username,
+                MAX(dm_raw.discord_username) AS member_discord_username,
                 MAX(dm_raw.display_name) AS display_name,
                 COALESCE(
                     jsonb_agg(DISTINCT role) FILTER (WHERE role IS NOT NULL),
@@ -246,7 +248,8 @@ def search_candidates(
           scored AS (
             SELECT
                 p.crm_contact_id AS crm_contact_id,
-                COALESCE(dm.display_name, dm.discord_username, p.name) AS name,
+                COALESCE(p.name, dm.display_name, dm.member_discord_username) AS name,
+                p.name AS crm_name,
                 p.email_508,
                 p.email,
                 p.linkedin,
@@ -259,6 +262,7 @@ def search_candidates(
                 COALESCE(p.skills, '{}'::text[]) AS skills,
                 COALESCE(p.skill_attrs, '{}'::jsonb) AS skill_attrs,
                 COALESCE(dm.roles, p.discord_roles, '[]'::jsonb) AS discord_roles,
+                COALESCE(dm.member_discord_username, p.discord_username) AS discord_username,
                 COALESCE(p.discord_user_id, dm.discord_user_id) AS discord_user_id,
                 (p.crm_contact_id IS NOT NULL) AS has_crm_link,
                 -- How many required skills this candidate has
@@ -346,11 +350,13 @@ def search_candidates(
               )
           )
         SELECT
-            crm_contact_id,
-            name,
-            email_508,
-            email,
-            linkedin,
+                crm_contact_id,
+                name,
+                crm_name,
+                discord_username,
+                email_508,
+                email,
+                linkedin,
             latest_resume_id,
             latest_resume_name,
             is_member,
@@ -461,6 +467,8 @@ def search_candidates(
             CandidateMatch(
                 crm_contact_id=row.get("crm_contact_id"),
                 name=row.get("name"),
+                crm_name=row.get("crm_name"),
+                discord_username=row.get("discord_username"),
                 email_508=row.get("email_508"),
                 email=row.get("email"),
                 linkedin=row.get("linkedin"),

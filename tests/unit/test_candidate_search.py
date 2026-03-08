@@ -248,7 +248,13 @@ def _patch_db(rows: list[dict]) -> MagicMock:
 
 
 def test_search_candidates_maps_row_to_candidate_match() -> None:
-    row = _make_row(crm_contact_id="abc", name="Bob", seniority="senior")
+    row = _make_row(
+        crm_contact_id="abc",
+        name="Bob Display",
+        crm_name="Bob CRM",
+        discord_username="bob_discord",
+        seniority="senior",
+    )
     conn = _patch_db([row])
 
     reqs = _make_requirements(required_skills=["python"], seniority="senior")
@@ -260,7 +266,9 @@ def test_search_candidates_maps_row_to_candidate_match() -> None:
     assert len(results) == 1
     c = results[0]
     assert c.crm_contact_id == "abc"
-    assert c.name == "Bob"
+    assert c.name == "Bob Display"
+    assert c.crm_name == "Bob CRM"
+    assert c.discord_username == "bob_discord"
     assert c.seniority == "senior"
     assert c.seniority_score == 1.0
     assert "python" in c.matched_required_skills
