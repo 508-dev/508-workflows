@@ -29,7 +29,7 @@ class WorkerSettings(SharedSettings):
     docuseal_member_agreement_template_id: int | None = None
 
     max_file_size_mb: int = 10
-    allowed_file_types: str = "pdf,doc,docx,txt"
+    allowed_file_types: str = "pdf,docx,txt"
     max_attachments_per_contact: int = 3
     crm_sync_enabled: bool = True
     crm_sync_interval_seconds: int = 900
@@ -58,7 +58,7 @@ class WorkerSettings(SharedSettings):
     intake_resume_fetch_timeout_seconds: float = Field(default=20.0, gt=0)
     intake_resume_max_redirects: int = Field(default=3, ge=0)
     intake_resume_allowed_hosts: str = ""
-    email_resume_allowed_extensions: str = "pdf,doc,docx"
+    email_resume_allowed_extensions: str = "pdf,docx"
     email_resume_max_file_size_mb: int = 10
     email_require_sender_auth_headers: bool = True
     oidc_issuer_url: str = ""

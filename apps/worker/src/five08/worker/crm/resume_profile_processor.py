@@ -72,7 +72,7 @@ class ResumeProfileProcessor:
         try:
             contact = self.crm.get_contact(contact_id)
             content = self.crm.download_attachment(attachment_id)
-            content_hash = self.document_processor.get_content_hash(content)
+            content_hash = self.document_processor.get_content_hash(content, filename)
             text = self.document_processor.extract_text(content, filename)
             extracted = self.extractor.extract(text)
             model_name = extracted.source

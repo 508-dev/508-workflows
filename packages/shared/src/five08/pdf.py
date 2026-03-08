@@ -14,12 +14,13 @@ def extract_pdf_text_with_links(content: bytes) -> str:
     except Exception as exc:  # pragma: no cover - import failure is env-dependent
         raise ValueError(f"PDF processing dependency missing: {exc}") from exc
 
+    document = None
     try:
-        document = fitz.open(stream=content, filetype="pdf")
-    except TypeError:
-        document = fitz.open(stream=io.BytesIO(content), filetype="pdf")
+        try:
+            document = fitz.open(stream=content, filetype="pdf")
+        except (TypeError, RuntimeError, fitz.FileDataError, fitz.EmptyFileError):
+            document = fitz.open(stream=io.BytesIO(content), filetype="pdf")
 
-    try:
         page_chunks: list[str] = []
         for page in document:
             page_text = page.get_text().strip()
@@ -32,7 +33,8 @@ def extract_pdf_text_with_links(content: bytes) -> str:
     except Exception as exc:
         raise ValueError(f"Failed to extract text from PDF: {exc}") from exc
     finally:
-        document.close()
+        if document is not None:
+            document.close()
 
 
 def _extract_page_link_lines(page, fitz_module) -> list[str]:
@@ -59,11 +61,11 @@ def _extract_page_link_lines(page, fitz_module) -> list[str]:
             )
             anchor_text = _normalize_anchor_text(word[4] for word in linked_words)
         else:
-            anchor_text = uri
+            anchor_text = ""
 
         link_lines.setdefault(
             (float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1)),
-            f"{anchor_text}: {uri}",
+            f"{anchor_text}: {uri}" if anchor_text else uri,
         )
 
     return list(link_lines.values())

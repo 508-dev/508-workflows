@@ -6444,7 +6444,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     )
                     return
 
-                valid_extensions = {".pdf", ".doc", ".docx", ".txt"}
+                valid_extensions = {".pdf", ".docx", ".txt"}
                 file_extension = (
                     "." + resume.filename.split(".")[-1].lower()
                     if "." in resume.filename
@@ -7434,7 +7434,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 return
 
             # Validate file type
-            valid_extensions = {".pdf", ".doc", ".docx", ".txt"}
+            valid_extensions = {".pdf", ".docx", ".txt"}
             file_extension = (
                 "." + file.filename.split(".")[-1].lower()
                 if "." in file.filename

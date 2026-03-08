@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from five08.document_text import document_file_extension
 from five08.document_text import extract_document_text
 
@@ -12,10 +14,6 @@ def test_document_file_extension_normalizes_missing_and_mixed_case_names() -> No
     assert document_file_extension("resume") == ""
 
 
-def test_extract_document_text_normalizes_doc_binary_content() -> None:
-    extracted = extract_document_text(
-        b"Jane\x00 Doe\x07\tEngineer\n\nRemote",
-        filename="resume.doc",
-    )
-
-    assert extracted == "Jane Doe Engineer Remote"
+def test_extract_document_text_rejects_legacy_doc_files() -> None:
+    with pytest.raises(ValueError, match=r"Legacy \.doc files are not supported\."):
+        extract_document_text(b"binary-doc-content", filename="resume.doc")

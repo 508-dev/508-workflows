@@ -49,7 +49,7 @@ MATCH_CANDIDATES_MAX_LINK_BYTES = 2 * 1024 * 1024
 MATCH_CANDIDATES_MAX_LINK_REDIRECTS = 2
 MATCH_CANDIDATES_MAX_POSTING_CHARS = 36000
 MATCH_CANDIDATES_SUPPORTED_ATTACHMENT_EXTENSIONS = frozenset(
-    {".txt", ".md", ".pdf", ".doc", ".docx", ".html", ".htm", ".rtf"}
+    {".txt", ".md", ".pdf", ".docx", ".html", ".htm", ".rtf"}
 )
 MATCH_CANDIDATES_URL_PATTERN = re.compile(r"(?i)\bhttps?://[^\s<>()\[\]\"']+")
 MATCH_CANDIDATES_JD_URL_HINTS = (

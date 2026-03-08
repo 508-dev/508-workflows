@@ -18,9 +18,10 @@ class DocumentProcessor:
         self.max_file_size = settings.max_file_size_mb * 1024 * 1024
         self._content_cache: dict[str, str] = {}
 
-    def get_content_hash(self, content: bytes) -> str:
+    def get_content_hash(self, content: bytes, filename: str) -> str:
         """Hash bytes for extraction caching."""
-        return hashlib.sha256(content).hexdigest()
+        extension = Path(filename).suffix.lower().encode("utf-8")
+        return hashlib.sha256(content + b"\0" + extension).hexdigest()
 
     def is_valid_file(self, filename: str, file_size: int) -> tuple[bool, str | None]:
         """Validate extension and size."""
@@ -37,7 +38,7 @@ class DocumentProcessor:
 
     def extract_text(self, content: bytes, filename: str) -> str:
         """Extract text from supported format and cache results."""
-        content_hash = self.get_content_hash(content)
+        content_hash = self.get_content_hash(content, filename)
         if content_hash in self._content_cache:
             return self._content_cache[content_hash]
 

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import io
-import re
-
 from five08.pdf import extract_pdf_text_with_links
 
 
@@ -22,7 +20,7 @@ def extract_document_text(content: bytes, *, filename: str | None) -> str:
     if extension == ".docx":
         return _extract_docx_text(content).strip()
     if extension == ".doc":
-        return _extract_doc_text(content).strip()
+        raise ValueError("Legacy .doc files are not supported.")
     return content.decode("utf-8", errors="ignore").strip()
 
 
@@ -55,10 +53,3 @@ def _extract_docx_text(content: bytes) -> str:
         return "\n".join(chunks)
     except Exception as exc:
         raise ValueError("Failed to extract text from DOCX document.") from exc
-
-
-def _extract_doc_text(content: bytes) -> str:
-    text = content.decode("utf-8", errors="ignore")
-    text = re.sub(r"[^\x20-\x7E\n\r\t]", " ", text)
-    text = re.sub(r"\s+", " ", text)
-    return text

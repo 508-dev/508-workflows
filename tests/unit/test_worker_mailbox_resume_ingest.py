@@ -41,7 +41,7 @@ def _build_settings() -> SimpleNamespace:
         email_username="workflows@508.dev",
         email_password="test_password",
         imap_server="imap.test.com",
-        email_resume_allowed_extensions="pdf,doc,docx",
+        email_resume_allowed_extensions="pdf,docx",
         email_resume_max_file_size_mb=10,
         email_require_sender_auth_headers=True,
     )
