@@ -2633,6 +2633,23 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     ),
                     inline=False,
                 )
+            raw_llm_output = extracted_profile.get("raw_llm_output")
+            raw_llm_json = extracted_profile.get("raw_llm_json")
+            llm_fallback_reason = extracted_profile.get("llm_fallback_reason")
+            if raw_llm_output or raw_llm_json or llm_fallback_reason:
+                debug_value = (
+                    "Attached raw extraction payload: `resume-extract-debug.json`"
+                )
+                if llm_fallback_reason:
+                    debug_value += "\n" + truncate_field_value(
+                        f"Fallback: {llm_fallback_reason}",
+                        limit=180,
+                    )
+                embed.add_field(
+                    name="Debug",
+                    value=truncate_field_value(debug_value),
+                    inline=False,
+                )
 
         parsed_seniority = _extract_parsed_seniority(extracted_profile)
         if parsed_seniority:
@@ -2656,6 +2673,49 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         profile_url = f"{self.base_url}/#Contact/view/{contact_id}"
         embed.add_field(name="🔗 CRM Profile", value=f"[View in CRM]({profile_url})")
         return embed, proposed_updates
+
+    @staticmethod
+    def _build_resume_extract_debug_file(
+        *,
+        contact_id: str,
+        contact_name: str,
+        attachment_id: str,
+        filename: str,
+        result: dict[str, Any],
+    ) -> discord.File:
+        extracted_profile = result.get("extracted_profile")
+        profile_payload = (
+            dict(extracted_profile) if isinstance(extracted_profile, dict) else {}
+        )
+        debug_payload = {
+            "contact_id": contact_id,
+            "contact_name": contact_name,
+            "attachment_id": attachment_id,
+            "filename": filename,
+            "success": bool(result.get("success", False)),
+            "source": profile_payload.get("source"),
+            "confidence": profile_payload.get("confidence"),
+            "llm_fallback_reason": profile_payload.get("llm_fallback_reason"),
+            "raw_llm_output": profile_payload.get("raw_llm_output"),
+            "raw_llm_json": profile_payload.get("raw_llm_json"),
+            "normalized_extracted_profile": {
+                key: value
+                for key, value in profile_payload.items()
+                if key not in {"raw_llm_output", "raw_llm_json"}
+            },
+            "proposed_updates": result.get("proposed_updates") or {},
+            "proposed_changes": result.get("proposed_changes") or [],
+        }
+        payload_bytes = json.dumps(
+            debug_payload,
+            indent=2,
+            sort_keys=True,
+            default=str,
+        ).encode("utf-8")
+        return discord.File(
+            io.BytesIO(payload_bytes),
+            filename="resume-extract-debug.json",
+        )
 
     def _build_role_suggestions_embed(
         self,
@@ -2851,6 +2911,14 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
+        debug_file = self._build_resume_extract_debug_file(
+            contact_id=contact_id,
+            contact_name=contact_name,
+            attachment_id=attachment_id,
+            filename=filename,
+            result=result,
+        )
+
         if not result.get("success", False):
             self._audit_command(
                 interaction=interaction,
@@ -2868,6 +2936,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
             await interaction.followup.send(
                 f"❌ Resume extraction failed: {result.get('error') or 'Unknown error'}",
+                file=debug_file,
                 ephemeral=True,
             )
             return
@@ -2936,7 +3005,11 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             embeds = [embed]
             if role_suggestions_embed:
                 embeds.append(role_suggestions_embed)
-            await interaction.followup.send(embeds=embeds, ephemeral=True)
+            await interaction.followup.send(
+                embeds=embeds,
+                file=debug_file,
+                ephemeral=True,
+            )
             return
 
         link_discord_payload: dict[str, str] | None = None
@@ -2974,7 +3047,12 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         embeds = [embed]
         if role_suggestions_embed:
             embeds.append(role_suggestions_embed)
-        await interaction.followup.send(embeds=embeds, view=view, ephemeral=True)
+        await interaction.followup.send(
+            embeds=embeds,
+            file=debug_file,
+            view=view,
+            ephemeral=True,
+        )
 
     async def _download_and_send_resume(
         self, interaction: discord.Interaction, contact_name: str, resume_id: str

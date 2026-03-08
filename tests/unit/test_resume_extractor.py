@@ -580,6 +580,182 @@ def test_extract_llm_backfills_location_and_timezone_from_resume_text() -> None:
     assert result.timezone == "UTC-08:00"
 
 
+def test_extract_exposes_raw_llm_output_and_json() -> None:
+    """Successful LLM extraction should retain the raw model payload for debugging."""
+
+    class _FakeChatCompletions:
+        @staticmethod
+        def create(**_: object) -> object:
+            return type(
+                "Response",
+                (),
+                {
+                    "choices": [
+                        type(
+                            "Choice",
+                            (),
+                            {
+                                "message": type(
+                                    "Message",
+                                    (),
+                                    {
+                                        "content": (
+                                            '{"name": "Jane Doe", '
+                                            '"email": "jane@example.com", '
+                                            '"primary_roles": ["developer"], '
+                                            '"current_title": "Senior Software Engineer", '
+                                            '"recent_titles": ["Senior Software Engineer", "Software Engineer"], '
+                                            '"role_rationale": "Recent engineering titles indicate a developer profile.", '
+                                            '"current_location_raw": "Berlin, Germany", '
+                                            '"current_location_source": "current_role", '
+                                            '"current_location_evidence": "Senior Software Engineer | Berlin, Germany | 2024-Present", '
+                                            '"address_city": "Berlin", '
+                                            '"address_country": "Germany", '
+                                            '"timezone": "UTC+01:00", '
+                                            '"website_url_candidates": [], '
+                                            '"website_links": [], '
+                                            '"social_links": [], '
+                                            '"phone": null, '
+                                            '"skills": [], '
+                                            '"skill_attrs": null, '
+                                            '"confidence": 0.88}'
+                                        )
+                                    },
+                                )()
+                            },
+                        )()
+                    ]
+                },
+            )()
+
+    extractor = ResumeProfileExtractor(api_key="test-key")
+    extractor.client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": _FakeChatCompletions()})()},
+    )()
+    extractor.model = "fake-model"
+
+    result = extractor.extract("Jane Doe\nSenior Software Engineer\nBerlin, Germany")
+
+    assert result.raw_llm_output is not None
+    assert result.raw_llm_json is not None
+    assert result.raw_llm_json["address_city"] == "Berlin"
+    assert result.raw_llm_json["primary_roles"] == ["developer"]
+    assert result.current_title == "Senior Software Engineer"
+    assert result.current_location_raw == "Berlin, Germany"
+    assert result.current_location_source == "current_role"
+    assert result.llm_fallback_reason is None
+
+
+def test_extract_preserves_raw_llm_output_on_fallback() -> None:
+    """Fallback extraction should keep the raw LLM payload and the failure reason."""
+
+    class _FakeChatCompletions:
+        @staticmethod
+        def create(**_: object) -> object:
+            return type(
+                "Response",
+                (),
+                {
+                    "choices": [
+                        type(
+                            "Choice",
+                            (),
+                            {
+                                "message": type(
+                                    "Message",
+                                    (),
+                                    {"content": '{"name": "Jane Doe", "timezone": ]'},
+                                )()
+                            },
+                        )()
+                    ]
+                },
+            )()
+
+    extractor = ResumeProfileExtractor(api_key="test-key")
+    extractor.client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": _FakeChatCompletions()})()},
+    )()
+
+    result = extractor.extract("Jane Doe\nSoftware Engineer\nBerlin, Germany")
+
+    assert result.source == "heuristic"
+    assert result.raw_llm_output == '{"name": "Jane Doe", "timezone": ]'
+    assert result.raw_llm_json is None
+    assert result.llm_fallback_reason is not None
+    assert "JSONDecodeError" in result.llm_fallback_reason
+
+
+def test_extract_uses_current_location_and_title_evidence_fields() -> None:
+    """LLM evidence fields should backfill location and role outputs deterministically."""
+
+    class _FakeChatCompletions:
+        @staticmethod
+        def create(**_: object) -> object:
+            return type(
+                "Response",
+                (),
+                {
+                    "choices": [
+                        type(
+                            "Choice",
+                            (),
+                            {
+                                "message": type(
+                                    "Message",
+                                    (),
+                                    {
+                                        "content": (
+                                            '{"name": "Jane Doe", '
+                                            '"email": "jane@example.com", '
+                                            '"primary_roles": null, '
+                                            '"current_title": "Founding Engineer", '
+                                            '"recent_titles": ["Founding Engineer", "Software Engineer"], '
+                                            '"role_rationale": "Engineering titles show an IC software background.", '
+                                            '"current_location_raw": "Berlin, Germany", '
+                                            '"current_location_source": "current_role", '
+                                            '"current_location_evidence": "Founding Engineer | Berlin, Germany | 2024-Present", '
+                                            '"address_city": null, '
+                                            '"address_state": null, '
+                                            '"address_country": null, '
+                                            '"timezone": null, '
+                                            '"website_url_candidates": [], '
+                                            '"website_links": [], '
+                                            '"social_links": [], '
+                                            '"phone": null, '
+                                            '"skills": [], '
+                                            '"skill_attrs": null, '
+                                            '"confidence": 0.88}'
+                                        )
+                                    },
+                                )()
+                            },
+                        )()
+                    ]
+                },
+            )()
+
+    extractor = ResumeProfileExtractor(api_key="test-key")
+    extractor.client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": _FakeChatCompletions()})()},
+    )()
+    extractor.model = "fake-model"
+
+    result = extractor.extract("Jane Doe\nFounding Engineer\nBerlin, Germany")
+
+    assert result.primary_roles == ["developer"]
+    assert result.address_city == "Berlin"
+    assert result.address_country == "Germany"
+    assert result.timezone == "UTC+01:00"
+    assert result.current_location_evidence is not None
+
+
 def test_extract_linkedin_url_supports_hyphenated_slugs() -> None:
     """LinkedIn profile extraction should include hyphenated slug segments."""
     url = ResumeProfileExtractor._extract_linkedin_url(
@@ -749,6 +925,15 @@ def test_extract_roles_falls_back_to_title_inference_non_developer() -> None:
     assert "program manager" in roles
 
 
+def test_extract_roles_infers_generic_engineering_titles_as_developer() -> None:
+    """Generic engineering titles should still map to the canonical developer role."""
+    roles = ResumeProfileExtractor._extract_roles(
+        "Experience\nFounding Engineer at Example Inc\nBuilt the platform"
+    )
+
+    assert "developer" in roles
+
+
 def test_extract_roles_ignores_collaboration_narrative_false_positive() -> None:
     """Narrative collaborator mentions should not infer candidate role."""
     roles = ResumeProfileExtractor._infer_roles_from_resume(
@@ -854,3 +1039,22 @@ def test_extract_header_location_keeps_state_for_city_state_only() -> None:
     assert city == "Atlanta"
     assert state == "Georgia"
     assert country is None
+
+
+def test_extract_location_uses_current_role_location_when_header_missing() -> None:
+    """Current-role location lines should backfill address fields and timezone."""
+    extractor = ResumeProfileExtractor(api_key=None)
+
+    result = extractor.extract(
+        "Jane Doe\n"
+        "Experience\n"
+        "Senior Software Engineer | Jan 2024 - Present\n"
+        "Berlin, Germany\n"
+        "Software Engineer | 2021 - 2023\n"
+        "Paris, France\n"
+    )
+
+    assert result.address_city == "Berlin"
+    assert result.address_state is None
+    assert result.address_country == "Germany"
+    assert result.timezone == "UTC+01:00"
