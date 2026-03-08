@@ -190,6 +190,7 @@ def test_resume_extract_handler_enqueues_job(
     monkeypatch.setattr(api.settings, "openai_api_key", "key")
     monkeypatch.setattr(api.settings, "openai_base_url", None)
     monkeypatch.setattr(api.settings, "resume_ai_model", "gpt-test")
+    monkeypatch.setattr(api, "_generate_ulid", lambda: "01ARZ3NDEKTSV4RRFFQ69G5FAV")
 
     with patch("five08.backend.api.enqueue_job") as mock_enqueue:
         mock_enqueue.return_value = Mock(id="job-extract", created=True)
@@ -209,8 +210,9 @@ def test_resume_extract_handler_enqueues_job(
     assert payload["contact_id"] == "c-1"
     assert payload["attachment_id"] == "a-1"
     call_kwargs = mock_enqueue.call_args.kwargs
-    assert call_kwargs["idempotency_key"].startswith(
-        "resume-extract:c-1:a-1:v7:gpt-test:"
+    assert (
+        call_kwargs["idempotency_key"]
+        == "resume-extract:c-1:a-1:v7:gpt-test:01ARZ3NDEKTSV4RRFFQ69G5FAV"
     )
 
 
