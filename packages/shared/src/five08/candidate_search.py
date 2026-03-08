@@ -245,10 +245,10 @@ def search_candidates(
                 %s::boolean AS constrained,
                 %s::boolean AS hints_available
           ),
-          scored AS (
+            scored AS (
             SELECT
                 p.crm_contact_id AS crm_contact_id,
-                COALESCE(p.name, dm.display_name, dm.member_discord_username) AS name,
+                COALESCE(dm.display_name, dm.member_discord_username, p.name) AS name,
                 p.name AS crm_name,
                 p.email_508,
                 p.email,
@@ -350,13 +350,13 @@ def search_candidates(
               )
           )
         SELECT
-                crm_contact_id,
-                name,
-                crm_name,
-                discord_username,
-                email_508,
-                email,
-                linkedin,
+            crm_contact_id,
+            name,
+            crm_name,
+            discord_username,
+            email_508,
+            email,
+            linkedin,
             latest_resume_id,
             latest_resume_name,
             is_member,
@@ -375,14 +375,14 @@ def search_candidates(
             discord_role_matched,
             location_signal,
             (
-              required_matched * 10
-              + required_skill_score * 2
-              + preferred_matched * 2
-              + timezone_matched * 2
-              + (discord_role_matched * 2)
-              + (location_signal * 3)
-              + CASE WHEN is_member THEN 4 ELSE 0 END
-              + CASE WHEN has_crm_link THEN 6 ELSE 0 END
+                required_matched * 10
+                + required_skill_score * 2
+                + preferred_matched * 2
+                + timezone_matched * 2
+                + (discord_role_matched * 2)
+                + (location_signal * 3)
+                + CASE WHEN is_member THEN 4 ELSE 0 END
+                + CASE WHEN has_crm_link THEN 6 ELSE 0 END
             ) AS match_score
         FROM scored
         ORDER BY

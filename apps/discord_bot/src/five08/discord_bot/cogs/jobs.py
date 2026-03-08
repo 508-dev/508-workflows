@@ -512,19 +512,27 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         for i, candidate in enumerate(candidates, start=1):
             label = "**[Member]**" if candidate.is_member else "[Prospect]"
             raw_crm_name = (
-                candidate.crm_name if isinstance(candidate.crm_name, str) else None
+                candidate.crm_name.strip()
+                if isinstance(candidate.crm_name, str) and candidate.crm_name.strip()
+                else None
             )
             raw_display_name = (
-                candidate.name if isinstance(candidate.name, str) else None
+                candidate.name.strip()
+                if isinstance(candidate.name, str) and candidate.name.strip()
+                else None
             )
-            crm_name = discord.utils.escape_mentions(
+            resolved_name = discord.utils.escape_mentions(
                 raw_crm_name or raw_display_name or "Unknown"
             )
-            discord_username = (
-                discord.utils.escape_mentions(
-                    str(candidate.discord_username).lstrip("@")
-                )
+            normalized_discord_username = (
+                candidate.discord_username.strip()
                 if isinstance(candidate.discord_username, str)
+                else None
+            )
+            discord_username = (
+                discord.utils.escape_mentions(normalized_discord_username.lstrip("@"))
+                if normalized_discord_username
+                and normalized_discord_username.lstrip("@")
                 else None
             )
             crm_link = (
@@ -533,9 +541,9 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 else None
             )
             if crm_link:
-                display_name = f"[{crm_name}](<{crm_link}>)"
+                display_name = f"[{resolved_name}](<{crm_link}>)"
             else:
-                display_name = crm_name
+                display_name = resolved_name
 
             parts = [f"{i}. {label} {display_name}"]
             if discord_username:
@@ -552,7 +560,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                     candidate.latest_resume_name
                 )
                 resume_options.append(
-                    (crm_name, candidate.latest_resume_id, safe_resume_name)
+                    (resolved_name, candidate.latest_resume_id, safe_resume_name)
                 )
 
             skill_info: list[str] = []
