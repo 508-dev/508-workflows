@@ -1847,8 +1847,8 @@ class ResumeWebsiteURLCandidateResponse(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    url: str
-    kind: str
+    url: str | None = None
+    kind: str | None = None
     confidence: float | int | str | None = None
     reason: str | None = None
 
@@ -1884,7 +1884,7 @@ class ResumeLLMExtractionResponse(BaseModel):
     current_title: str | None = None
     recent_titles: list[str] | str | None = None
     role_rationale: str | None = None
-    website_url_candidates: list[ResumeWebsiteURLCandidateResponse] = Field(
+    website_url_candidates: list[ResumeWebsiteURLCandidateResponse | None] = Field(
         default_factory=list
     )
     website_links: list[str] | str | None = None
@@ -1924,7 +1924,7 @@ class ResumeProfileExtractor:
     def _build_extract_messages(
         *,
         prompt: str,
-        invalid_output_retry: bool,
+        retry_reason: str | None,
     ) -> list[dict[str, str]]:
         system_prompt = (
             "You extract structured candidate profile fields for a CRM. "
@@ -1935,7 +1935,7 @@ class ResumeProfileExtractor:
             "Never fabricate details or use outside knowledge. "
             "Assume candidates are typically technical professionals unless the resume clearly indicates otherwise."
         )
-        if invalid_output_retry:
+        if retry_reason == "invalid_output":
             system_prompt += (
                 " The previous output was invalid JSON/schema. "
                 "Regenerate the full object so it matches the required schema exactly."
@@ -1993,6 +1993,7 @@ class ResumeProfileExtractor:
         parsed: dict[str, Any] | None = None
         attempt_max_tokens = self.max_tokens
         got_successful_response = False
+        retry_reason: str | None = None
         prompt = self._build_prompt(
             source_texts=source_texts,
             primary_text=text,
@@ -2002,7 +2003,7 @@ class ResumeProfileExtractor:
             for attempt_index in range(2):
                 messages = self._build_extract_messages(
                     prompt=prompt,
-                    invalid_output_retry=attempt_index > 0,
+                    retry_reason=retry_reason,
                 )
                 attempt_temperature = 0.1 if attempt_index == 0 else 0.0
 
@@ -2025,12 +2026,14 @@ class ResumeProfileExtractor:
                         )
                 except (ValidationError, json.JSONDecodeError, ValueError):
                     if attempt_index == 0:
+                        retry_reason = "invalid_output"
                         continue
                     raise
                 except Exception:
                     if use_structured_output:
                         use_structured_output = False
                     if attempt_index == 0:
+                        retry_reason = "request_error"
                         continue
                     raise
 
@@ -2050,6 +2053,7 @@ class ResumeProfileExtractor:
                 if not raw_content:
                     if attempt_index == 0 and finish_reason == "length":
                         attempt_max_tokens = self.max_tokens * 2
+                        retry_reason = "length"
                         continue
                     raise _empty_llm_content_error(response)
 
@@ -2062,6 +2066,7 @@ class ResumeProfileExtractor:
                         ).model_dump(mode="python")
                 except (ValidationError, json.JSONDecodeError, ValueError):
                     if attempt_index == 0:
+                        retry_reason = "invalid_output"
                         continue
                     raise
 

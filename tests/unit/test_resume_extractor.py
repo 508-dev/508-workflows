@@ -13,6 +13,7 @@ from five08.resume_extractor import _normalize_phone_with_country
 from five08.resume_extractor import _normalize_website_url
 from five08.resume_extractor import ResumeLLMExtractionResponse
 from five08.resume_extractor import ResumeProfileExtractor
+from five08.resume_extractor import ResumeWebsiteURLCandidateResponse
 
 
 def test_coerce_email_list_skips_non_string_entries() -> None:
@@ -859,6 +860,12 @@ def test_extract_retries_once_on_length_then_succeeds() -> None:
     assert fake_completions.create.call_count == 2
     assert fake_completions.create.call_args_list[0].kwargs["max_tokens"] == 32
     assert fake_completions.create.call_args_list[1].kwargs["max_tokens"] == 64
+    assert (
+        "invalid JSON/schema"
+        not in fake_completions.create.call_args_list[1].kwargs["messages"][0][
+            "content"
+        ]
+    )
     assert result.first_name == "Jane"
     assert result.last_name == "Doe"
     assert result.current_title == "Senior Software Engineer"
@@ -945,9 +952,7 @@ def test_extract_retries_once_on_structured_validation_failure() -> None:
     """Structured-output validation failures should trigger one strict retry."""
 
     try:
-        ResumeLLMExtractionResponse.model_validate(
-            {"website_url_candidates": [{"url": None, "kind": None}]}
-        )
+        ResumeLLMExtractionResponse.model_validate({"confidence": {"bad": 1}})
     except ValidationError as exc:
         validation_error = exc
     else:  # pragma: no cover
@@ -1021,6 +1026,79 @@ def test_extract_retries_once_on_structured_validation_failure() -> None:
     )
     assert result.first_name == "Jane"
     assert result.last_name == "Doe"
+    assert result.llm_fallback_reason is None
+
+
+def test_extract_accepts_nullable_website_url_candidates() -> None:
+    """Nullable candidate entries should validate and be filtered downstream."""
+
+    payload = ResumeLLMExtractionResponse(
+        name="Jane Doe",
+        firstName="Jane",
+        lastName="Doe",
+        website_url_candidates=[
+            None,
+            ResumeWebsiteURLCandidateResponse(url=None, kind=None),
+            None,
+        ],
+        confidence=0.8,
+    )
+    response = type(
+        "Response",
+        (),
+        {
+            "choices": [
+                type(
+                    "Choice",
+                    (),
+                    {
+                        "finish_reason": "stop",
+                        "message": type(
+                            "Message",
+                            (),
+                            {
+                                "content": json.dumps(payload.model_dump(mode="json")),
+                                "parsed": payload,
+                                "refusal": "",
+                                "tool_calls": [],
+                            },
+                        )(),
+                    },
+                )()
+            ]
+        },
+    )()
+
+    fake_parse = Mock(return_value=response)
+    extractor = ResumeProfileExtractor(api_key="test-key")
+    extractor.client = type(
+        "Client",
+        (),
+        {
+            "beta": type(
+                "Beta",
+                (),
+                {
+                    "chat": type(
+                        "Chat",
+                        (),
+                        {
+                            "completions": type(
+                                "Completions", (), {"parse": fake_parse}
+                            )()
+                        },
+                    )()
+                },
+            )()
+        },
+    )()
+
+    result = extractor.extract("Jane Doe\nSoftware Engineer")
+
+    assert result.first_name == "Jane"
+    assert result.last_name == "Doe"
+    assert result.website_links == []
+    assert result.social_links == []
     assert result.llm_fallback_reason is None
 
 
