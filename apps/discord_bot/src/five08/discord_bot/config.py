@@ -35,6 +35,7 @@ class Settings(SharedSettings):
     openai_api_key: str | None = None
     openai_base_url: str | None = None
     openai_model: str = "gpt-5-mini"
+    resume_extractor_max_tokens: int = 2000
 
     # Kimai time tracking settings
     kimai_base_url: str

@@ -25,6 +25,7 @@ class WorkerSettings(SharedSettings):
     openai_base_url: str | None = None
     openai_model: str = "gpt-5-mini"
     resume_ai_model: str = "gpt-5-mini"
+    resume_extractor_max_tokens: int = 2000
     resume_extractor_version: str = "v1"
     docuseal_member_agreement_template_id: int | None = None
 

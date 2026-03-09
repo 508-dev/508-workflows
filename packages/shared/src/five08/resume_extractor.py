@@ -1843,13 +1843,13 @@ class ResumeProfileExtractor:
         api_key: str | None,
         base_url: str | None = None,
         model: str = "gpt-5-mini",
-        max_tokens: int = 800,
+        max_tokens: int = 2000,
         snippet_chars: int = 12000,
     ) -> None:
         self.model = model.strip() if model else "gpt-5-mini"
         if not self.model:
             self.model = "gpt-5-mini"
-        self.max_tokens = max_tokens
+        self.max_tokens = max(1, max_tokens)
         self.snippet_chars = max(1000, snippet_chars)
         self.client: Any = None
 
@@ -1885,56 +1885,64 @@ class ResumeProfileExtractor:
 
         raw_content: str | None = None
         parsed: dict[str, Any] | None = None
+        attempt_max_tokens = self.max_tokens
+        retry_after_length = True
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You extract structured candidate profile fields for a CRM. "
-                            "Return JSON only with no commentary. "
-                            "Prefer explicit evidence from the provided text. "
-                            "Be conservative for contact/location/website fields, but proactive for role and seniority inference. "
-                            "For primary_roles and seniority_level, infer the best fit from titles, summary, and work history even when labels are not explicit. "
-                            "Never fabricate details or use outside knowledge. "
-                            "Assume candidates are typically technical professionals unless the resume clearly indicates otherwise."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": self._build_prompt(
-                            source_texts=source_texts,
-                            primary_text=text,
-                        ),
-                    },
-                ],
-                temperature=0.1,
-                max_tokens=self.max_tokens,
-            )
-            choices = getattr(response, "choices", None)
-            first_choice = choices[0] if choices else None
-            message = getattr(first_choice, "message", None)
-            raw_content = getattr(message, "content", None) if message else None
-            if not raw_content:
-                raise _empty_llm_content_error(response)
+            while True:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You extract structured candidate profile fields for a CRM. "
+                                "Return JSON only with no commentary. "
+                                "Prefer explicit evidence from the provided text. "
+                                "Be conservative for contact/location/website fields, but proactive for role and seniority inference. "
+                                "For primary_roles and seniority_level, infer the best fit from titles, summary, and work history even when labels are not explicit. "
+                                "Never fabricate details or use outside knowledge. "
+                                "Assume candidates are typically technical professionals unless the resume clearly indicates otherwise."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": self._build_prompt(
+                                source_texts=source_texts,
+                                primary_text=text,
+                            ),
+                        },
+                    ],
+                    temperature=0.1,
+                    max_tokens=attempt_max_tokens,
+                )
+                choices = getattr(response, "choices", None)
+                first_choice = choices[0] if choices else None
+                message = getattr(first_choice, "message", None)
+                raw_content = getattr(message, "content", None) if message else None
+                if not raw_content:
+                    finish_reason = getattr(first_choice, "finish_reason", None)
+                    if retry_after_length and finish_reason == "length":
+                        retry_after_length = False
+                        attempt_max_tokens = self.max_tokens * 2
+                        continue
+                    raise _empty_llm_content_error(response)
 
-            parsed = _parse_json_object(raw_content)
-            raw_first_name = parsed.get("firstName")
-            if raw_first_name is None:
-                raw_first_name = parsed.get("first_name")
-            raw_last_name = parsed.get("lastName")
-            if raw_last_name is None:
-                raw_last_name = parsed.get("last_name")
-            extracted_name = _normalize_name(parsed.get("name"))
-            extracted_first_name, extracted_last_name = self.split_name(
-                full_name=extracted_name,
-                first_name_hint=raw_first_name,
-                last_name_hint=raw_last_name,
-            )
-            parsed_url_candidates = _extract_website_url_candidates(
-                parsed.get("website_url_candidates")
-            )
+                parsed = _parse_json_object(raw_content)
+                raw_first_name = parsed.get("firstName")
+                if raw_first_name is None:
+                    raw_first_name = parsed.get("first_name")
+                raw_last_name = parsed.get("lastName")
+                if raw_last_name is None:
+                    raw_last_name = parsed.get("last_name")
+                extracted_name = _normalize_name(parsed.get("name"))
+                extracted_first_name, extracted_last_name = self.split_name(
+                    full_name=extracted_name,
+                    first_name_hint=raw_first_name,
+                    last_name_hint=raw_last_name,
+                )
+                parsed_url_candidates = _extract_website_url_candidates(
+                    parsed.get("website_url_candidates")
+                )
             legacy_website_links = _normalize_website_links(parsed.get("website_links"))
             legacy_social_links = _normalize_website_links(parsed.get("social_links"))
             heuristic_candidates = (

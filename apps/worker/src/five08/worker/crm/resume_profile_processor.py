@@ -55,6 +55,7 @@ class ResumeProfileProcessor:
             api_key=settings.openai_api_key,
             base_url=settings.openai_base_url,
             model=settings.resolved_resume_ai_model,
+            max_tokens=settings.resume_extractor_max_tokens,
         )
         self.skills_extractor = SkillsExtractor()
         self.document_processor = DocumentProcessor()
