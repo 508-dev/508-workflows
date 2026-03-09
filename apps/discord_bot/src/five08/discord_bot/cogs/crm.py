@@ -1624,7 +1624,11 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         self.link_discord = link_discord
         self.parsed_seniority = parsed_seniority
         self.discord_role_target_user_id = discord_role_target_user_id
-        self.can_apply_discord_roles = can_apply_discord_roles
+        self.can_apply_discord_roles = bool(
+            can_apply_discord_roles
+            or discord_role_target_user_id
+            or (isinstance(link_discord, dict) and bool(link_discord.get("user_id")))
+        )
         self.discord_role_suggestions = list(
             dict.fromkeys(discord_role_suggestions or [])
         )
