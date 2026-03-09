@@ -1207,6 +1207,14 @@ def _has_personal_website_context(
     return any(keyword in context for keyword in PERSONAL_WEBSITE_CONTEXT_KEYWORDS)
 
 
+def _match_is_part_of_email(text: str, start_index: int, end_index: int) -> bool:
+    if start_index > 0 and text[start_index - 1] == "@":
+        return True
+    if end_index < len(text) and text[end_index] == "@":
+        return True
+    return False
+
+
 def _website_position_scale(
     text_length: int, start_index: int, end_index: int
 ) -> float:
@@ -2395,6 +2403,7 @@ class ResumeProfileExtractor:
             '- trust the explicit source labels and sections (for example lines like "website:", "portfolio:", "my website", "homepage") when selecting personal_website candidates\n'
             "- section confidence ordering for personal websites: explicit website label > contact/header block > footer > body/project bullets\n"
             "- when evaluating personal website candidates, boost confidence if domain/subdomain/path includes candidate identity tokens (first name, last name, first+last, common username handles from email/github/linkedin)\n"
+            "- never infer a website candidate from the local-part of an email address; only the domain of a custom, non-public email host may support a personal_website inference when other personal-site signals are present\n"
             "- candidate-owned domains or handles in header/footer are strong personal_website signals; body-only project/company links are weak signals unless explicitly labeled personal\n"
             "- never classify employer/company/product/repository/docs links as personal_website unless the resume explicitly marks them as the candidate's own site\n"
             "- if a token can be either a technology name and a URL, default to excluding it from candidates unless context is clearly personal\n"
@@ -3069,7 +3078,11 @@ class ResumeProfileExtractor:
             matches.append((match.group(0), confidence, match.start(), match.end()))
 
         for match in BARE_DOMAIN_URL_PATTERN.finditer(resume_text):
-            if match.start() > 0 and resume_text[match.start() - 1] == "@":
+            if _match_is_part_of_email(
+                resume_text,
+                match.start(),
+                match.end(),
+            ):
                 continue
             raw_url = match.group(0)
             position_scale = _website_position_scale(
