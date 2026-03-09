@@ -1772,7 +1772,10 @@ def test_extract_does_not_backfill_heuristic_roles_when_llm_suggests_roles() -> 
 
     result = extractor.extract("Jane Doe\nSoftware Engineer")
 
+    # LLM-suggested roles should be preserved, and heuristic roles like
+    # "developer" should not be added on top.
     assert result.primary_roles == ["platform specialist"]
+    assert "developer" not in result.primary_roles
 
 
 def test_extract_discards_invalid_country_and_repairs_current_location_region() -> None:
