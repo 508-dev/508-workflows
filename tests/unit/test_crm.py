@@ -4910,8 +4910,18 @@ class TestCRMCog:
                 "_search_contacts_for_reprocess_resume",
                 new=AsyncMock(
                     return_value=[
-                        {"id": "contact123", "name": "John Doe"},
-                        {"id": "contact456", "name": "John Smith"},
+                        {
+                            "id": "contact123",
+                            "name": "John Doe",
+                            "resumeIds": ["resume123"],
+                            "resumeNames": {"resume123": "john-doe.pdf"},
+                        },
+                        {
+                            "id": "contact456",
+                            "name": "John Smith",
+                            "resumeIds": [],
+                            "resumeNames": {},
+                        },
                     ]
                 ),
             ),
@@ -4922,6 +4932,73 @@ class TestCRMCog:
         followup_kwargs = mock_interaction.followup.send.call_args.kwargs
         assert "view" in followup_kwargs
         assert isinstance(followup_kwargs["view"], ReprocessResumeSelectionView)
+        labels = [
+            child.label
+            for child in followup_kwargs["view"].children
+            if isinstance(child, discord.ui.Button)
+        ]
+        assert labels == ["John Doe", "Upload Resume: John Smith"]
+
+    @pytest.mark.asyncio
+    async def test_reprocess_resume_selection_button_without_resume_hands_off_to_upload(
+        self, crm_cog
+    ):
+        """No-resume selections should route to the upload-resume handoff."""
+        crm_cog._prompt_reprocess_resume_confirmation = AsyncMock()
+        crm_cog._prompt_upload_resume_for_contact = AsyncMock()
+
+        view = ReprocessResumeSelectionView(
+            crm_cog=crm_cog,
+            requester_id=101,
+            search_term="candidate",
+        )
+        view.add_contact_button(
+            {
+                "id": "contact123",
+                "name": "Candidate User",
+                "resumeIds": [],
+                "resumeNames": {},
+            }
+        )
+
+        button = next(
+            child
+            for child in view.children
+            if isinstance(child, discord.ui.Button)
+            and child.label == "Upload Resume: Candidate User"
+        )
+        interaction = AsyncMock()
+        interaction.user = Mock()
+        interaction.user.id = 101
+        interaction.response = AsyncMock()
+        interaction.response.defer = AsyncMock()
+        interaction.followup = AsyncMock()
+        interaction.followup.send = AsyncMock()
+        interaction.message = None
+
+        await button.callback(interaction)
+
+        crm_cog._prompt_upload_resume_for_contact.assert_awaited_once()
+        crm_cog._prompt_reprocess_resume_confirmation.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_prompt_upload_resume_for_contact_shows_upload_resume_instructions(
+        self, crm_cog, mock_interaction
+    ):
+        """Upload handoff should send the contact into the upload-resume flow."""
+        crm_cog._audit_command = Mock()
+
+        await crm_cog._prompt_upload_resume_for_contact(
+            interaction=mock_interaction,
+            contact={"id": "contact123", "name": "Candidate User"},
+            search_term="candidate",
+        )
+
+        mock_interaction.followup.send.assert_called_once()
+        message = mock_interaction.followup.send.call_args.args[0]
+        assert "/upload-resume" in message
+        assert "`contact123`" in message
+        assert "Candidate User" in message
 
     @pytest.mark.asyncio
     async def test_reprocess_resume_no_resume_found(self, crm_cog, mock_interaction):

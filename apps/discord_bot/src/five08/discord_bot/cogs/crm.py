@@ -119,6 +119,26 @@ def _truncate_component_placeholder(value: str, *, limit: int = 150) -> str:
     return value[: limit - 3] + "..."
 
 
+def _truncate_component_label(value: str, *, limit: int = 80) -> str:
+    if len(value) <= limit:
+        return value
+    if limit <= 3:
+        return value[:limit]
+    return value[: limit - 3].rstrip() + "..."
+
+
+def _format_reprocess_resume_button_label(
+    contact_name: str, *, has_resume: bool
+) -> str:
+    if has_resume:
+        return _truncate_component_label(contact_name)
+    prefix = "Upload Resume: "
+    return prefix + _truncate_component_label(
+        contact_name,
+        limit=max(1, 80 - len(prefix)),
+    )
+
+
 class ResumeButtonView(discord.ui.View):
     """View containing resume download buttons for contact search results."""
 
@@ -411,9 +431,23 @@ class ReprocessResumeSelectionButton(discord.ui.Button["ReprocessResumeSelection
     """Button for selecting a contact to reprocess a resume."""
 
     def __init__(self, contact: dict[str, Any], requester_id: int) -> None:
-        contact_name = contact.get("name", "Unknown")
-        label = contact_name[:80] if len(contact_name) > 80 else contact_name
-        super().__init__(style=discord.ButtonStyle.primary, label=label, emoji="🔄")
+        contact_name = str(contact.get("name", "Unknown"))
+        resume_ids = contact.get("resumeIds")
+        self.has_resume = isinstance(resume_ids, list) and any(
+            str(item).strip() for item in resume_ids
+        )
+        super().__init__(
+            style=(
+                discord.ButtonStyle.primary
+                if self.has_resume
+                else discord.ButtonStyle.secondary
+            ),
+            label=_format_reprocess_resume_button_label(
+                contact_name,
+                has_resume=self.has_resume,
+            ),
+            emoji="🔄" if self.has_resume else "📤",
+        )
         self.contact = contact
         self.requester_id = requester_id
 
@@ -430,11 +464,18 @@ class ReprocessResumeSelectionButton(discord.ui.Button["ReprocessResumeSelection
                 return
 
             await interaction.response.defer(ephemeral=True)
-            await self.view.crm_cog._prompt_reprocess_resume_confirmation(
-                interaction=interaction,
-                contact=self.contact,
-                search_term=self.view.search_term,
-            )
+            if self.has_resume:
+                await self.view.crm_cog._prompt_reprocess_resume_confirmation(
+                    interaction=interaction,
+                    contact=self.contact,
+                    search_term=self.view.search_term,
+                )
+            else:
+                await self.view.crm_cog._prompt_upload_resume_for_contact(
+                    interaction=interaction,
+                    contact=self.contact,
+                    search_term=self.view.search_term,
+                )
 
             for item in self.view.children:
                 if isinstance(item, discord.ui.Button):
@@ -5635,15 +5676,21 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             email = contact.get("emailAddress", "No email")
             email_508 = contact.get("c508Email", "No 508 email")
             contact_id = contact.get("id", "")
+            resume_name = self._extract_latest_resume_name_from_contact(contact)
+            resume_status = resume_name or "missing"
             contact_info = (
-                f"📧 {email}\n🏢 508 Email: {email_508}\n🆔 ID: `{contact_id}`"
+                f"📧 {email}\n🏢 508 Email: {email_508}\n"
+                f"📄 Resume: {resume_status}\n🆔 ID: `{contact_id}`"
             )
             embed.add_field(name=f"{i}. {name}", value=contact_info, inline=True)
             view.add_contact_button(contact)
 
         embed.add_field(
             name="💡 Tip",
-            value="Select the contact button to continue, or rerun with a more specific term.",
+            value=(
+                "Select the contact button to continue. Contacts without a resume "
+                "will hand off to `/upload-resume`."
+            ),
             inline=False,
         )
 
@@ -6153,12 +6200,18 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         self, search_term: str
     ) -> list[dict[str, Any]]:
         """Resolve search term for resume reprocessing lookup."""
+        select_fields = (
+            "id,name,emailAddress,c508Email,cDiscordUsername,resumeIds,resumeNames"
+        )
         mention_user_id = self._extract_discord_id_from_mention(search_term)
         if mention_user_id:
             by_discord_id = await self._find_contact_by_discord_id(mention_user_id)
             return [by_discord_id] if by_discord_id else []
 
-        contacts = await self._search_contact_for_linking(search_term)
+        contacts = await self._search_contact_for_linking(
+            search_term,
+            select=select_fields,
+        )
         if contacts:
             return contacts
 
@@ -6175,7 +6228,10 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             and " " not in search_term
             and not self._is_hex_string(search_term)
         ):
-            contacts = await self._search_contact_for_linking(f"{search_term}@508.dev")
+            contacts = await self._search_contact_for_linking(
+                f"{search_term}@508.dev",
+                select=select_fields,
+            )
         return contacts
 
     def _is_blank_crm_field(self, value: Any) -> bool:
@@ -6399,6 +6455,50 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         await interaction.followup.send(
             f"⚠️ Reprocess resume `{display_filename}` for `{contact_name}`?",
             view=view,
+            ephemeral=True,
+        )
+
+    async def _prompt_upload_resume_for_contact(
+        self,
+        interaction: discord.Interaction,
+        contact: dict[str, Any],
+        search_term: str,
+    ) -> None:
+        """Hand off a selected contact without a resume to the upload flow."""
+        contact_id = str(contact.get("id", "")).strip()
+        if not contact_id:
+            self._audit_command(
+                interaction=interaction,
+                action="crm.reprocess_resume",
+                result="error",
+                metadata={
+                    "search_term": search_term,
+                    "reason": "contact_id_missing",
+                    "stage": "upload_resume_prompt",
+                },
+            )
+            await interaction.followup.send("❌ Contact ID not found.")
+            return
+
+        contact_name = str(contact.get("name", "Unknown"))
+        self._audit_command(
+            interaction=interaction,
+            action="crm.reprocess_resume",
+            result="success",
+            metadata={
+                "search_term": search_term,
+                "contact_id": contact_id,
+                "contact_name": contact_name,
+                "stage": "upload_resume_prompt_shown",
+            },
+            resource_type="crm_contact",
+            resource_id=contact_id,
+        )
+        await interaction.followup.send(
+            "⚠️ "
+            f"`{contact_name}` does not have a resume on file yet. Continue with "
+            f"`/upload-resume` and set `search_term` to `{contact_id}` to attach "
+            "one for this contact.",
             ephemeral=True,
         )
 
