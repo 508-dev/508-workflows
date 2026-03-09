@@ -1239,18 +1239,6 @@ class ResumeProfileProcessor:
 
         return list(merged.values())
 
-    def _mark_resume_processed(self, contact_id: str) -> None:
-        """Best-effort update for extraction completion tracking."""
-        processed_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        try:
-            self.crm.update_contact(contact_id, {"cResumeLastProcessed": processed_at})
-        except Exception as exc:
-            logger.warning(
-                "Failed to update cResumeLastProcessed contact_id=%s error=%s",
-                contact_id,
-                exc,
-            )
-
     def _configured_model_name(self) -> str:
         """Model identity used for idempotency/ledger keys."""
         if settings.openai_api_key:
