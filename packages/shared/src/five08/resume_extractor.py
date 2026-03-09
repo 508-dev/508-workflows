@@ -2095,6 +2095,9 @@ class ResumeProfileExtractor:
             "verbosity": "low",
         }
 
+    def _next_length_retry_max_tokens(self, current_max_tokens: int) -> int:
+        return max(self.max_tokens * 2, current_max_tokens * 2)
+
     def extract(
         self,
         resume_text: str,
@@ -2181,9 +2184,9 @@ class ResumeProfileExtractor:
                     )
                 if not raw_content:
                     if finish_reason == "length" and attempt_index < 2:
-                        attempt_max_tokens = self.max_tokens * 2
-                        if attempt_index == 1:
-                            attempt_max_tokens = self.max_tokens * 4
+                        attempt_max_tokens = self._next_length_retry_max_tokens(
+                            attempt_max_tokens
+                        )
                         retry_reason = "length"
                         continue
                     raise _empty_llm_content_error(response)
@@ -2197,9 +2200,9 @@ class ResumeProfileExtractor:
                         ).model_dump(mode="python")
                 except (ValidationError, json.JSONDecodeError, ValueError):
                     if finish_reason == "length" and attempt_index < 2:
-                        attempt_max_tokens = self.max_tokens * 2
-                        if attempt_index == 1:
-                            attempt_max_tokens = self.max_tokens * 4
+                        attempt_max_tokens = self._next_length_retry_max_tokens(
+                            attempt_max_tokens
+                        )
                         retry_reason = "length"
                         continue
                     if attempt_index == 0:

@@ -1080,6 +1080,92 @@ def test_extract_retries_length_response_twice_before_succeeding() -> None:
     assert result.llm_fallback_reason is None
 
 
+def test_extract_length_retry_after_invalid_output_uses_two_x_budget() -> None:
+    """A later length retry should scale from the current budget, not attempt index."""
+
+    class _Message:
+        def __init__(self, content: str | None) -> None:
+            self.content = content
+            self.refusal = ""
+            self.tool_calls = []
+
+    bad_json_response = type(
+        "Response",
+        (),
+        {
+            "choices": [
+                type(
+                    "Choice",
+                    (),
+                    {
+                        "message": _Message('{"name":"Jane Doe","firstName":"Jane",'),
+                        "finish_reason": "stop",
+                    },
+                )()
+            ]
+        },
+    )()
+    empty_length_response = type(
+        "Response",
+        (),
+        {
+            "choices": [
+                type(
+                    "Choice",
+                    (),
+                    {
+                        "message": _Message(""),
+                        "finish_reason": "length",
+                    },
+                )()
+            ]
+        },
+    )()
+    success_response = type(
+        "Response",
+        (),
+        {
+            "choices": [
+                type(
+                    "Choice",
+                    (),
+                    {
+                        "message": _Message(
+                            '{"name":"Jane Doe","firstName":"Jane","lastName":"Doe"}'
+                        ),
+                        "finish_reason": "stop",
+                    },
+                )()
+            ]
+        },
+    )()
+
+    fake_completions = Mock()
+    fake_completions.create.side_effect = [
+        bad_json_response,
+        empty_length_response,
+        success_response,
+    ]
+    extractor = ResumeProfileExtractor(api_key="test-key", max_tokens=40)
+    extractor.client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": fake_completions})()},
+    )()
+    extractor.model = "fake-model"
+
+    with patch.object(extractor, "_split_name_with_llm", return_value=("Jane", "Doe")):
+        result = extractor.extract("Jane Doe\nSoftware Engineer")
+
+    assert fake_completions.create.call_count == 3
+    assert fake_completions.create.call_args_list[0].kwargs["max_tokens"] == 40
+    assert fake_completions.create.call_args_list[1].kwargs["max_tokens"] == 40
+    assert fake_completions.create.call_args_list[2].kwargs["max_tokens"] == 80
+    assert result.first_name == "Jane"
+    assert result.last_name == "Doe"
+    assert result.llm_fallback_reason is None
+
+
 def test_extract_uses_structured_output_parse_when_supported() -> None:
     """Structured-output clients should parse into the raw schema directly."""
 
