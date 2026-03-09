@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 from urllib.parse import parse_qs, urlsplit
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from five08.crm_normalization import (
     normalize_city as shared_normalize_city,
     normalize_country as shared_normalize_country,
@@ -1842,6 +1842,59 @@ class ResumeExtractedProfile(BaseModel):
     source: str
 
 
+class ResumeWebsiteURLCandidateResponse(BaseModel):
+    """Structured LLM response fragment for URL candidate extraction."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    url: str
+    kind: str
+    confidence: float | int | str | None = None
+    reason: str | None = None
+
+
+class ResumeLLMExtractionResponse(BaseModel):
+    """Schema-backed raw LLM response before local normalization."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    name: str | None = None
+    firstName: str | None = None
+    first_name: str | None = None
+    lastName: str | None = None
+    last_name: str | None = None
+    email: str | None = None
+    additional_emails: list[str] | str | None = None
+    description: str | None = None
+    primary_roles: list[str] | str | None = None
+    primary_role: list[str] | str | None = None
+    github_username: str | None = None
+    linkedin_url: str | None = None
+    timezone: str | None = None
+    address_city: str | None = None
+    address_state: str | None = None
+    address_country: str | None = None
+    seniority_level: str | None = None
+    availability: str | None = None
+    rate_range: str | None = None
+    referred_by: str | None = None
+    current_location_raw: str | None = None
+    current_location_source: str | None = None
+    current_location_evidence: str | None = None
+    current_title: str | None = None
+    recent_titles: list[str] | str | None = None
+    role_rationale: str | None = None
+    website_url_candidates: list[ResumeWebsiteURLCandidateResponse] = Field(
+        default_factory=list
+    )
+    website_links: list[str] | str | None = None
+    social_links: list[str] | str | None = None
+    phone: str | None = None
+    skills: list[str] | str | None = None
+    skill_attrs: Any = None
+    confidence: float | int | str | None = None
+
+
 class ResumeProfileExtractor:
     """Extract candidate profile fields from resume text."""
 
@@ -1866,6 +1919,51 @@ class ResumeProfileExtractor:
                 api_key=api_key,
                 base_url=base_url,
             )
+
+    @staticmethod
+    def _build_extract_messages(
+        *,
+        prompt: str,
+        invalid_output_retry: bool,
+    ) -> list[dict[str, str]]:
+        system_prompt = (
+            "You extract structured candidate profile fields for a CRM. "
+            "Return JSON only with no commentary. "
+            "Prefer explicit evidence from the provided text. "
+            "Be conservative for contact/location/website fields, but proactive for role and seniority inference. "
+            "For primary_roles and seniority_level, infer the best fit from titles, summary, and work history even when labels are not explicit. "
+            "Never fabricate details or use outside knowledge. "
+            "Assume candidates are typically technical professionals unless the resume clearly indicates otherwise."
+        )
+        if invalid_output_retry:
+            system_prompt += (
+                " The previous output was invalid JSON/schema. "
+                "Regenerate the full object so it matches the required schema exactly."
+            )
+
+        return [
+            {
+                "role": "system",
+                "content": system_prompt,
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ]
+
+    @staticmethod
+    def _coerce_message_content_to_text(value: Any) -> str | None:
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        return None
+
+    def _supports_structured_output(self) -> bool:
+        beta = getattr(self.client, "beta", None)
+        chat = getattr(beta, "chat", None)
+        completions = getattr(chat, "completions", None)
+        return hasattr(completions, "parse")
 
     def extract(
         self,
@@ -1895,46 +1993,78 @@ class ResumeProfileExtractor:
         parsed: dict[str, Any] | None = None
         attempt_max_tokens = self.max_tokens
         got_successful_response = False
+        prompt = self._build_prompt(
+            source_texts=source_texts,
+            primary_text=text,
+        )
+        use_structured_output = self._supports_structured_output()
         try:
             for attempt_index in range(2):
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You extract structured candidate profile fields for a CRM. "
-                                "Return JSON only with no commentary. "
-                                "Prefer explicit evidence from the provided text. "
-                                "Be conservative for contact/location/website fields, but proactive for role and seniority inference. "
-                                "For primary_roles and seniority_level, infer the best fit from titles, summary, and work history even when labels are not explicit. "
-                                "Never fabricate details or use outside knowledge. "
-                                "Assume candidates are typically technical professionals unless the resume clearly indicates otherwise."
-                            ),
-                        },
-                        {
-                            "role": "user",
-                            "content": self._build_prompt(
-                                source_texts=source_texts,
-                                primary_text=text,
-                            ),
-                        },
-                    ],
-                    temperature=0.1,
-                    max_tokens=attempt_max_tokens,
+                messages = self._build_extract_messages(
+                    prompt=prompt,
+                    invalid_output_retry=attempt_index > 0,
                 )
+                attempt_temperature = 0.1 if attempt_index == 0 else 0.0
+
+                try:
+                    if use_structured_output:
+                        response = self.client.beta.chat.completions.parse(
+                            model=self.model,
+                            messages=messages,
+                            response_format=ResumeLLMExtractionResponse,
+                            temperature=attempt_temperature,
+                            max_tokens=attempt_max_tokens,
+                        )
+                    else:
+                        response = self.client.chat.completions.create(
+                            model=self.model,
+                            messages=messages,
+                            response_format={"type": "json_object"},
+                            temperature=attempt_temperature,
+                            max_tokens=attempt_max_tokens,
+                        )
+                except (ValidationError, json.JSONDecodeError, ValueError):
+                    if attempt_index == 0:
+                        continue
+                    raise
+                except Exception:
+                    if use_structured_output:
+                        use_structured_output = False
+                    if attempt_index == 0:
+                        continue
+                    raise
+
                 choices = getattr(response, "choices", None)
                 first_choice = choices[0] if choices else None
                 message = getattr(first_choice, "message", None)
-                raw_content = getattr(message, "content", None) if message else None
+                finish_reason = getattr(first_choice, "finish_reason", None)
+                raw_content = self._coerce_message_content_to_text(
+                    getattr(message, "content", None) if message else None
+                )
+                parsed_model = getattr(message, "parsed", None) if message else None
+                if not raw_content and parsed_model is not None:
+                    raw_content = json.dumps(
+                        parsed_model.model_dump(mode="json"),
+                        separators=(",", ":"),
+                    )
                 if not raw_content:
-                    finish_reason = getattr(first_choice, "finish_reason", None)
                     if attempt_index == 0 and finish_reason == "length":
                         attempt_max_tokens = self.max_tokens * 2
                         continue
                     raise _empty_llm_content_error(response)
 
-                parsed = _parse_json_object(raw_content)
+                try:
+                    if parsed_model is not None:
+                        parsed = parsed_model.model_dump(mode="python")
+                    else:
+                        parsed = ResumeLLMExtractionResponse.model_validate(
+                            _parse_json_object(raw_content)
+                        ).model_dump(mode="python")
+                except (ValidationError, json.JSONDecodeError, ValueError):
+                    if attempt_index == 0:
+                        continue
+                    raise
+
                 got_successful_response = True
                 break
             if not got_successful_response or parsed is None:

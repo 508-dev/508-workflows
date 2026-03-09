@@ -1,14 +1,17 @@
 """Unit tests for resume extractor helpers."""
 
+import json
 from unittest.mock import Mock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from five08.resume_extractor import _coerce_email_list
 from five08.resume_extractor import _infer_timezone_from_location
 from five08.resume_extractor import _normalize_name_part
 from five08.resume_extractor import _normalize_phone_with_country
 from five08.resume_extractor import _normalize_website_url
+from five08.resume_extractor import ResumeLLMExtractionResponse
 from five08.resume_extractor import ResumeProfileExtractor
 
 
@@ -663,40 +666,43 @@ def test_extract_exposes_raw_llm_output_and_json() -> None:
 
 
 def test_extract_preserves_raw_llm_output_on_fallback() -> None:
-    """Fallback extraction should keep the raw LLM payload and the failure reason."""
+    """Fallback extraction should keep the raw LLM payload after one retry."""
 
-    class _FakeChatCompletions:
-        @staticmethod
-        def create(**_: object) -> object:
-            return type(
-                "Response",
-                (),
-                {
-                    "choices": [
-                        type(
-                            "Choice",
+    bad_response = type(
+        "Response",
+        (),
+        {
+            "choices": [
+                type(
+                    "Choice",
+                    (),
+                    {
+                        "message": type(
+                            "Message",
                             (),
-                            {
-                                "message": type(
-                                    "Message",
-                                    (),
-                                    {"content": '{"name": "Jane Doe", "timezone": ]'},
-                                )()
-                            },
+                            {"content": '{"name": "Jane Doe", "timezone": ]'},
                         )()
-                    ]
-                },
-            )()
+                    },
+                )()
+            ]
+        },
+    )()
+
+    fake_completions = Mock()
+    fake_completions.create.side_effect = [bad_response, bad_response]
 
     extractor = ResumeProfileExtractor(api_key="test-key")
     extractor.client = type(
         "Client",
         (),
-        {"chat": type("Chat", (), {"completions": _FakeChatCompletions()})()},
+        {"chat": type("Chat", (), {"completions": fake_completions})()},
     )()
 
-    result = extractor.extract("Jane Doe\nSoftware Engineer\nBerlin, Germany")
+    with patch.object(extractor, "_split_name_with_llm", return_value=None):
+        result = extractor.extract("Jane Doe\nSoftware Engineer\nBerlin, Germany")
 
+    assert fake_completions.create.call_count == 2
+    assert fake_completions.create.call_args_list[1].kwargs["temperature"] == 0.0
     assert result.source == "heuristic"
     assert result.raw_llm_output == '{"name": "Jane Doe", "timezone": ]'
     assert result.raw_llm_json is None
@@ -857,6 +863,236 @@ def test_extract_retries_once_on_length_then_succeeds() -> None:
     assert result.last_name == "Doe"
     assert result.current_title == "Senior Software Engineer"
     assert result.source == "fake-model"
+    assert result.llm_fallback_reason is None
+
+
+def test_extract_uses_structured_output_parse_when_supported() -> None:
+    """Structured-output clients should parse into the raw schema directly."""
+
+    payload = ResumeLLMExtractionResponse(
+        name="Jane Doe",
+        firstName="Jane",
+        lastName="Doe",
+        email="jane@example.com",
+        current_title="Senior Software Engineer",
+        address_city="Berlin",
+        address_country="Germany",
+        confidence=0.91,
+    )
+    response = type(
+        "Response",
+        (),
+        {
+            "choices": [
+                type(
+                    "Choice",
+                    (),
+                    {
+                        "finish_reason": "stop",
+                        "message": type(
+                            "Message",
+                            (),
+                            {
+                                "content": json.dumps(payload.model_dump(mode="json")),
+                                "parsed": payload,
+                                "refusal": "",
+                                "tool_calls": [],
+                            },
+                        )(),
+                    },
+                )()
+            ]
+        },
+    )()
+
+    fake_parse = Mock(return_value=response)
+    extractor = ResumeProfileExtractor(api_key="test-key")
+    extractor.client = type(
+        "Client",
+        (),
+        {
+            "beta": type(
+                "Beta",
+                (),
+                {
+                    "chat": type(
+                        "Chat",
+                        (),
+                        {
+                            "completions": type(
+                                "Completions", (), {"parse": fake_parse}
+                            )()
+                        },
+                    )()
+                },
+            )()
+        },
+    )()
+    extractor.model = "fake-model"
+
+    result = extractor.extract("Jane Doe\nSenior Software Engineer\nBerlin, Germany")
+
+    assert fake_parse.call_count == 1
+    assert fake_parse.call_args.kwargs["response_format"] is ResumeLLMExtractionResponse
+    assert result.first_name == "Jane"
+    assert result.last_name == "Doe"
+    assert result.current_title == "Senior Software Engineer"
+    assert result.source == "fake-model"
+    assert result.llm_fallback_reason is None
+
+
+def test_extract_retries_once_on_structured_validation_failure() -> None:
+    """Structured-output validation failures should trigger one strict retry."""
+
+    try:
+        ResumeLLMExtractionResponse.model_validate(
+            {"website_url_candidates": [{"url": None, "kind": None}]}
+        )
+    except ValidationError as exc:
+        validation_error = exc
+    else:  # pragma: no cover
+        raise AssertionError("Expected a validation error for the invalid payload.")
+
+    payload = ResumeLLMExtractionResponse(
+        name="Jane Doe",
+        firstName="Jane",
+        lastName="Doe",
+        email="jane@example.com",
+        confidence=0.84,
+    )
+    response = type(
+        "Response",
+        (),
+        {
+            "choices": [
+                type(
+                    "Choice",
+                    (),
+                    {
+                        "finish_reason": "stop",
+                        "message": type(
+                            "Message",
+                            (),
+                            {
+                                "content": json.dumps(payload.model_dump(mode="json")),
+                                "parsed": payload,
+                                "refusal": "",
+                                "tool_calls": [],
+                            },
+                        )(),
+                    },
+                )()
+            ]
+        },
+    )()
+
+    fake_parse = Mock(side_effect=[validation_error, response])
+    extractor = ResumeProfileExtractor(api_key="test-key")
+    extractor.client = type(
+        "Client",
+        (),
+        {
+            "beta": type(
+                "Beta",
+                (),
+                {
+                    "chat": type(
+                        "Chat",
+                        (),
+                        {
+                            "completions": type(
+                                "Completions", (), {"parse": fake_parse}
+                            )()
+                        },
+                    )()
+                },
+            )()
+        },
+    )()
+
+    result = extractor.extract("Jane Doe\nSoftware Engineer")
+
+    assert fake_parse.call_count == 2
+    assert fake_parse.call_args_list[0].kwargs["temperature"] == 0.1
+    assert fake_parse.call_args_list[1].kwargs["temperature"] == 0.0
+    assert (
+        "invalid JSON/schema"
+        in fake_parse.call_args_list[1].kwargs["messages"][0]["content"]
+    )
+    assert result.first_name == "Jane"
+    assert result.last_name == "Doe"
+    assert result.llm_fallback_reason is None
+
+
+def test_extract_falls_back_to_json_object_when_structured_api_errors() -> None:
+    """Structured-output API errors should degrade to the legacy JSON-object path."""
+
+    fake_parse = Mock(side_effect=RuntimeError("structured outputs unsupported"))
+    good_response = type(
+        "Response",
+        (),
+        {
+            "choices": [
+                type(
+                    "Choice",
+                    (),
+                    {
+                        "finish_reason": "stop",
+                        "message": type(
+                            "Message",
+                            (),
+                            {
+                                "content": (
+                                    '{"name":"Jane Doe","firstName":"Jane",'
+                                    '"lastName":"Doe","email":"jane@example.com"}'
+                                ),
+                                "refusal": "",
+                                "tool_calls": [],
+                            },
+                        )(),
+                    },
+                )()
+            ]
+        },
+    )()
+    fake_create = Mock(return_value=good_response)
+
+    extractor = ResumeProfileExtractor(api_key="test-key")
+    extractor.client = type(
+        "Client",
+        (),
+        {
+            "beta": type(
+                "Beta",
+                (),
+                {
+                    "chat": type(
+                        "Chat",
+                        (),
+                        {
+                            "completions": type(
+                                "Completions", (), {"parse": fake_parse}
+                            )()
+                        },
+                    )()
+                },
+            )(),
+            "chat": type(
+                "Chat",
+                (),
+                {"completions": type("Completions", (), {"create": fake_create})()},
+            )(),
+        },
+    )()
+
+    result = extractor.extract("Jane Doe\nSoftware Engineer")
+
+    assert fake_parse.call_count == 1
+    assert fake_create.call_count == 1
+    assert fake_create.call_args.kwargs["response_format"] == {"type": "json_object"}
+    assert fake_create.call_args.kwargs["temperature"] == 0.0
+    assert result.first_name == "Jane"
+    assert result.last_name == "Doe"
     assert result.llm_fallback_reason is None
 
 
