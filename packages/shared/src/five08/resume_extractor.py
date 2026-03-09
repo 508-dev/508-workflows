@@ -1120,10 +1120,10 @@ def _normalize_website_links(value: Any) -> list[str]:
         normalized_link = _normalize_website_url(candidate)
         if not normalized_link:
             continue
-        lower = normalized_link.lower()
-        if lower in seen:
+        dedupe_key = _website_identity_key(normalized_link)
+        if dedupe_key is None or dedupe_key in seen:
             continue
-        seen.add(lower)
+        seen.add(dedupe_key)
         normalized_links.append(normalized_link)
 
     return normalized_links
@@ -1187,7 +1187,9 @@ def _extract_website_url_candidates(
         if confidence < LLM_WEBSITE_URL_MIN_CONFIDENCE:
             continue
 
-        key = normalized_url.casefold()
+        key = _website_identity_key(normalized_url)
+        if key is None:
+            continue
         prior = normalized.get(key)
         if prior is not None and prior[2] >= confidence:
             continue
@@ -1248,6 +1250,27 @@ def _normalized_host(host: str | None) -> str:
     if normalized.startswith("www."):
         normalized = normalized[4:]
     return normalized
+
+
+def _website_identity_key(value: str) -> str | None:
+    normalized_url = _normalize_website_url(value)
+    if not normalized_url:
+        return None
+
+    try:
+        parsed = urlsplit(normalized_url)
+    except Exception:
+        return normalized_url.casefold()
+
+    netloc = parsed.netloc.casefold()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    path = re.sub(r"/+", "/", parsed.path or "").rstrip("/")
+    query = parsed.query.casefold()
+    key = f"{netloc}{path}"
+    if query:
+        key = f"{key}?{query}"
+    return key
 
 
 def _host_matches_domain(host: str | None, domain: str) -> bool:
@@ -1587,6 +1610,7 @@ def _build_website_and_social_from_candidates(
 ) -> tuple[list[str], list[str]]:
     urls_to_consider: list[str] = []
     seen: set[str] = set()
+    has_llm_personal_website = False
 
     for candidate_url, candidate_kind, candidate_confidence in llm_candidates:
         if candidate_kind == LLM_URL_CANDIDATE_KIND_PERSONAL:
@@ -1608,18 +1632,22 @@ def _build_website_and_social_from_candidates(
         ):
             continue
 
-        candidate_key = candidate_url.casefold()
-        if candidate_key in seen:
+        candidate_key = _website_identity_key(candidate_url)
+        if candidate_key is None or candidate_key in seen:
             continue
         seen.add(candidate_key)
         urls_to_consider.append(candidate_url)
+        if candidate_kind == LLM_URL_CANDIDATE_KIND_PERSONAL:
+            has_llm_personal_website = True
 
     for candidate_url, candidate_confidence in heuristic_candidates:
         if candidate_confidence < MIDDLE_WEBSITE_POSITION_SCALE:
             continue
+        if has_llm_personal_website and not _is_social_url(candidate_url):
+            continue
 
-        candidate_key = candidate_url.casefold()
-        if candidate_key in seen:
+        candidate_key = _website_identity_key(candidate_url)
+        if candidate_key is None or candidate_key in seen:
             continue
         seen.add(candidate_key)
         urls_to_consider.append(candidate_url)
@@ -1647,8 +1675,8 @@ def _split_social_and_website_links(
             continue
         social_profile = _normalize_social_profile_url(candidate)
         if social_profile:
-            social_key = social_profile.casefold()
-            if social_key in seen_social:
+            social_key = _website_identity_key(social_profile)
+            if social_key is None or social_key in seen_social:
                 continue
             seen_social.add(social_key)
             social_links.append(social_profile)
@@ -1658,8 +1686,8 @@ def _split_social_and_website_links(
         if _is_personal_website_disallowed(candidate):
             continue
 
-        normal_key = candidate.casefold()
-        if normal_key in seen_normal:
+        normal_key = _website_identity_key(candidate)
+        if normal_key is None or normal_key in seen_normal:
             continue
         seen_normal.add(normal_key)
         normal_links.append(candidate)
@@ -3408,8 +3436,8 @@ class ResumeProfileExtractor:
                     end_index,
                 ):
                     continue
-            normalized_key = normalized_link.casefold()
-            if normalized_key in seen:
+            normalized_key = _website_identity_key(normalized_link)
+            if normalized_key is None or normalized_key in seen:
                 continue
             seen.add(normalized_key)
             normalized_links.append((normalized_link, confidence))

@@ -240,6 +240,53 @@ def test_extract_profile_proposal_merges_and_serializes_social_links() -> None:
     ]
 
 
+def test_extract_profile_proposal_deduplicates_existing_and_extracted_websites_by_scheme() -> (
+    None
+):
+    """Existing and extracted links should merge by website identity, not scheme."""
+    processor = ResumeProfileProcessor()
+    processor.crm = Mock()
+    processor.extractor = Mock()
+    processor.skills_extractor = Mock()
+    processor.document_processor = Mock()
+    processor._record_processing_run = Mock()
+    processor.skills_extractor.canonicalize_skill.side_effect = lambda v: (
+        str(v).strip().lower()
+    )
+
+    processor.crm.get_contact.return_value = {
+        "emailAddress": "member@example.com",
+        "cWebsiteLink": ["http://bit.ly/charleschen-portfolio"],
+    }
+    processor.crm.download_attachment.return_value = b"resume-bytes"
+    processor.document_processor.extract_text.return_value = "resume text"
+    processor.document_processor.get_content_hash.return_value = "hash-scheme"
+    processor.extractor.extract.return_value = ResumeExtractedProfile(
+        email=None,
+        github_username=None,
+        linkedin_url=None,
+        phone=None,
+        website_links=["https://bit.ly/charleschen-portfolio"],
+        confidence=0.9,
+        source="gpt-4o-mini",
+    )
+    processor.skills_extractor.extract_skills.return_value = ExtractedSkills(
+        skills=[],
+        skill_attrs={},
+        confidence=0.8,
+        source="gpt-4o-mini",
+    )
+
+    result = processor.extract_profile_proposal(
+        contact_id="contact-scheme",
+        attachment_id="att-scheme",
+        filename="resume.pdf",
+    )
+
+    assert result.success is True
+    assert "cWebsiteLink" not in result.proposed_updates
+
+
 def test_extract_profile_proposal_deduplicates_skills_in_confirmation() -> None:
     """Duplicate extracted or existing skills should not appear in confirmation updates."""
     processor = ResumeProfileProcessor()
