@@ -3393,9 +3393,15 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 )
             llm_fallback_reason = extracted_profile.get("llm_fallback_reason")
             if llm_fallback_reason:
+                debug_value = " ".join(
+                    [
+                        "File: `resume-extract-debug.json`",
+                        f"Fallback: {llm_fallback_reason}",
+                    ]
+                )
                 embed.add_field(
                     name="Debug",
-                    value=truncate_field_value(f"Fallback: {llm_fallback_reason}"),
+                    value=truncate_field_value(debug_value),
                     inline=False,
                 )
             evidence_lines: list[str] = []
@@ -3545,16 +3551,23 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         self,
         *,
         contact_name: str,
-        technical_roles: list[str],
-        locality_roles: list[str],
+        technical_roles: list[str] | None = None,
+        locality_roles: list[str] | None = None,
+        extracted_profile: dict[str, Any] | None = None,
+        current_discord_roles: list[str] | None = None,
     ) -> discord.Embed | None:
         """Build a separate embed suggesting Discord roles to add based on resume data.
 
         Only ever suggests additions — roles are never removed.
         Never suggests roles in DISCORD_ROLES_NEVER_SUGGEST.
         """
-        technical = technical_roles
-        locality = locality_roles
+        if technical_roles is None and locality_roles is None:
+            technical_roles, locality_roles = self._build_discord_role_suggestions(
+                extracted_profile or {},
+                current_discord_roles=current_discord_roles,
+            )
+        technical = technical_roles or []
+        locality = locality_roles or []
 
         if not technical and not locality:
             return None
