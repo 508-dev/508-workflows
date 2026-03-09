@@ -1760,12 +1760,15 @@ def _parse_json_object(content: str) -> dict[str, Any]:
     return parsed
 
 
-def _format_llm_debug_value(value: Any, *, limit: int = 120) -> str:
-    """Return a compact debug representation for LLM response fields."""
-    rendered = repr(value)
-    if len(rendered) <= limit:
-        return rendered
-    return f"{rendered[: limit - 3]}..."
+def _summarize_llm_debug_value(value: Any) -> str:
+    """Return a redacted debug summary for LLM response fields."""
+    if value is None:
+        return "none"
+    if isinstance(value, str):
+        return f"str(len={len(value)})"
+    if isinstance(value, (list, tuple, set, frozenset, dict)):
+        return f"{type(value).__name__}(len={len(value)})"
+    return type(value).__name__
 
 
 def _empty_llm_content_error(response: Any) -> ValueError:
@@ -1780,16 +1783,16 @@ def _empty_llm_content_error(response: Any) -> ValueError:
     if message is None:
         return ValueError(
             "LLM returned empty content "
-            f"(choice.message={_format_llm_debug_value(message)}, "
-            f"finish_reason={_format_llm_debug_value(finish_reason)})"
+            f"(choice.message={_summarize_llm_debug_value(message)}, "
+            f"finish_reason={finish_reason!r})"
         )
 
     return ValueError(
         "LLM returned empty content "
-        f"(message.content={_format_llm_debug_value(getattr(message, 'content', None))}, "
-        f"message.refusal={_format_llm_debug_value(getattr(message, 'refusal', None))}, "
-        f"message.tool_calls={_format_llm_debug_value(getattr(message, 'tool_calls', None))}, "
-        f"finish_reason={_format_llm_debug_value(finish_reason)})"
+        f"(message.content={_summarize_llm_debug_value(getattr(message, 'content', None))}, "
+        f"message.refusal={_summarize_llm_debug_value(getattr(message, 'refusal', None))}, "
+        f"message.tool_calls={_summarize_llm_debug_value(getattr(message, 'tool_calls', None))}, "
+        f"finish_reason={finish_reason!r})"
     )
 
 
@@ -1909,7 +1912,10 @@ class ResumeProfileExtractor:
                 temperature=0.1,
                 max_tokens=self.max_tokens,
             )
-            raw_content = response.choices[0].message.content
+            choices = getattr(response, "choices", None)
+            first_choice = choices[0] if choices else None
+            message = getattr(first_choice, "message", None)
+            raw_content = getattr(message, "content", None) if message else None
             if not raw_content:
                 raise _empty_llm_content_error(response)
 
