@@ -1756,13 +1756,127 @@ def _is_placeholder_name(value: str | None) -> bool:
     return normalized in _PLACEHOLDER_NAME_TOKENS
 
 
+def _strip_json_code_fences(raw: str) -> str:
+    stripped = raw.strip()
+    if stripped.startswith("```"):
+        lines = [line for line in stripped.splitlines() if not line.startswith("```")]
+        return "\n".join(lines).strip()
+    return stripped
+
+
+def _extract_json_object_candidate(raw: str) -> str:
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        return raw
+    return raw[start : end + 1].strip()
+
+
+def _strip_json_comments(raw: str) -> str:
+    cleaned: list[str] = []
+    in_string = False
+    escape = False
+    index = 0
+    length = len(raw)
+
+    while index < length:
+        char = raw[index]
+        next_char = raw[index + 1] if index + 1 < length else ""
+
+        if in_string:
+            cleaned.append(char)
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+
+        if char == '"':
+            in_string = True
+            cleaned.append(char)
+            index += 1
+            continue
+
+        if char == "/" and next_char == "/":
+            index += 2
+            while index < length and raw[index] not in "\r\n":
+                index += 1
+            continue
+
+        if char == "/" and next_char == "*":
+            index += 2
+            while index + 1 < length and not (
+                raw[index] == "*" and raw[index + 1] == "/"
+            ):
+                index += 1
+            index = min(length, index + 2)
+            continue
+
+        cleaned.append(char)
+        index += 1
+
+    return "".join(cleaned)
+
+
+def _strip_trailing_json_commas(raw: str) -> str:
+    cleaned: list[str] = []
+    in_string = False
+    escape = False
+    index = 0
+    length = len(raw)
+
+    while index < length:
+        char = raw[index]
+
+        if in_string:
+            cleaned.append(char)
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+
+        if char == '"':
+            in_string = True
+            cleaned.append(char)
+            index += 1
+            continue
+
+        if char == ",":
+            next_index = index + 1
+            while next_index < length and raw[next_index].isspace():
+                next_index += 1
+            if next_index < length and raw[next_index] in "}]":
+                index += 1
+                continue
+
+        cleaned.append(char)
+        index += 1
+
+    return "".join(cleaned)
+
+
+def _repair_json_object_candidate(content: str) -> str:
+    repaired = _strip_json_code_fences(content)
+    repaired = _extract_json_object_candidate(repaired)
+    repaired = _strip_json_comments(repaired)
+    repaired = _strip_trailing_json_commas(repaired)
+    return repaired.strip()
+
+
 def _parse_json_object(content: str) -> dict[str, Any]:
     raw = content.strip()
-    if raw.startswith("```"):
-        lines = [line for line in raw.splitlines() if not line.startswith("```")]
-        raw = "\n".join(lines).strip()
-
-    parsed = json.loads(raw)
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        repaired = _repair_json_object_candidate(raw)
+        parsed = json.loads(repaired)
     if not isinstance(parsed, dict):
         raise ValueError("Model output was not a JSON object")
     return parsed
@@ -1965,6 +2079,25 @@ class ResumeProfileExtractor:
         completions = getattr(chat, "completions", None)
         return hasattr(completions, "parse")
 
+    def _build_completion_kwargs(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        temperature: float,
+        max_tokens: int,
+    ) -> dict[str, Any]:
+        return {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "reasoning_effort": "minimal",
+            "verbosity": "low",
+        }
+
+    def _next_length_retry_max_tokens(self, current_max_tokens: int) -> int:
+        return max(self.max_tokens * 2, current_max_tokens * 2)
+
     def extract(
         self,
         resume_text: str,
@@ -2000,29 +2133,28 @@ class ResumeProfileExtractor:
         )
         use_structured_output = self._supports_structured_output()
         try:
-            for attempt_index in range(2):
+            for attempt_index in range(3):
                 messages = self._build_extract_messages(
                     prompt=prompt,
                     retry_reason=retry_reason,
                 )
                 attempt_temperature = 0.1 if attempt_index == 0 else 0.0
+                request_kwargs = self._build_completion_kwargs(
+                    messages=messages,
+                    temperature=attempt_temperature,
+                    max_tokens=attempt_max_tokens,
+                )
 
                 try:
                     if use_structured_output:
                         response = self.client.beta.chat.completions.parse(
-                            model=self.model,
-                            messages=messages,
                             response_format=ResumeLLMExtractionResponse,
-                            temperature=attempt_temperature,
-                            max_tokens=attempt_max_tokens,
+                            **request_kwargs,
                         )
                     else:
                         response = self.client.chat.completions.create(
-                            model=self.model,
-                            messages=messages,
                             response_format={"type": "json_object"},
-                            temperature=attempt_temperature,
-                            max_tokens=attempt_max_tokens,
+                            **request_kwargs,
                         )
                 except (ValidationError, json.JSONDecodeError, ValueError):
                     if attempt_index == 0:
@@ -2051,8 +2183,10 @@ class ResumeProfileExtractor:
                         separators=(",", ":"),
                     )
                 if not raw_content:
-                    if attempt_index == 0 and finish_reason == "length":
-                        attempt_max_tokens = self.max_tokens * 2
+                    if finish_reason == "length" and attempt_index < 2:
+                        attempt_max_tokens = self._next_length_retry_max_tokens(
+                            attempt_max_tokens
+                        )
                         retry_reason = "length"
                         continue
                     raise _empty_llm_content_error(response)
@@ -2065,12 +2199,14 @@ class ResumeProfileExtractor:
                             _parse_json_object(raw_content)
                         ).model_dump(mode="python")
                 except (ValidationError, json.JSONDecodeError, ValueError):
+                    if finish_reason == "length" and attempt_index < 2:
+                        attempt_max_tokens = self._next_length_retry_max_tokens(
+                            attempt_max_tokens
+                        )
+                        retry_reason = "length"
+                        continue
                     if attempt_index == 0:
-                        if finish_reason == "length":
-                            attempt_max_tokens = self.max_tokens * 2
-                            retry_reason = "length"
-                        else:
-                            retry_reason = "invalid_output"
+                        retry_reason = "invalid_output"
                         continue
                     raise
 

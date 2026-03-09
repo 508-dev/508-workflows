@@ -545,10 +545,9 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             else:
                 display_name = resolved_name
 
-            candidate_line = f"{i}. {label} {display_name}"
+            parts = [f"{i}. {label} {display_name}"]
             if discord_username:
-                candidate_line = f"{candidate_line} @{discord_username}"
-            parts = [candidate_line]
+                parts.append(f"`@{discord_username}`")
 
             if candidate.linkedin:
                 parts.append(f"[LinkedIn](<{candidate.linkedin}>)")
