@@ -711,6 +711,65 @@ def test_extract_preserves_raw_llm_output_on_fallback() -> None:
     assert "JSONDecodeError" in result.llm_fallback_reason
 
 
+def test_extract_repairs_json_with_comments_trailing_commas_and_prose() -> None:
+    """Common near-JSON formatting issues should not force heuristic fallback."""
+
+    repaired_response = type(
+        "Response",
+        (),
+        {
+            "choices": [
+                type(
+                    "Choice",
+                    (),
+                    {
+                        "finish_reason": "stop",
+                        "message": type(
+                            "Message",
+                            (),
+                            {
+                                "content": (
+                                    "Structured candidate profile:\n"
+                                    "```json\n"
+                                    "{\n"
+                                    "  // header\n"
+                                    '  "name": "Jane Doe",\n'
+                                    '  "firstName": "Jane",\n'
+                                    '  "lastName": "Doe",\n'
+                                    '  "email": "jane@example.com",\n'
+                                    '  "confidence": 0.82,\n'
+                                    "}\n"
+                                    "```"
+                                )
+                            },
+                        )(),
+                    },
+                )()
+            ]
+        },
+    )()
+
+    fake_completions = Mock()
+    fake_completions.create.return_value = repaired_response
+    extractor = ResumeProfileExtractor(api_key="test-key")
+    extractor.client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": fake_completions})()},
+    )()
+    extractor.model = "fake-model"
+
+    with patch.object(extractor, "_split_name_with_llm", return_value=("Jane", "Doe")):
+        result = extractor.extract("Jane Doe\nSoftware Engineer")
+
+    assert fake_completions.create.call_count == 1
+    assert result.source == "fake-model"
+    assert result.first_name == "Jane"
+    assert result.last_name == "Doe"
+    assert result.email == "jane@example.com"
+    assert result.llm_fallback_reason is None
+
+
 def test_extract_reports_empty_llm_response_fields_on_fallback() -> None:
     """Fallback reason should identify which chat completion fields were empty."""
 
@@ -932,6 +991,92 @@ def test_extract_retries_partial_length_response_with_higher_token_budget() -> N
     assert result.first_name == "Jane"
     assert result.last_name == "Doe"
     assert result.current_title == "Senior Software Engineer"
+    assert result.llm_fallback_reason is None
+
+
+def test_extract_retries_length_response_twice_before_succeeding() -> None:
+    """Repeated empty length responses should get a third attempt with more tokens."""
+
+    class _Message:
+        def __init__(self, content: str | None) -> None:
+            self.content = content
+            self.refusal = ""
+            self.tool_calls = []
+
+    fake_completions = Mock()
+    fake_completions.create.side_effect = [
+        type(
+            "Response",
+            (),
+            {
+                "choices": [
+                    type(
+                        "Choice",
+                        (),
+                        {
+                            "message": _Message(""),
+                            "finish_reason": "length",
+                        },
+                    )()
+                ]
+            },
+        )(),
+        type(
+            "Response",
+            (),
+            {
+                "choices": [
+                    type(
+                        "Choice",
+                        (),
+                        {
+                            "message": _Message(""),
+                            "finish_reason": "length",
+                        },
+                    )()
+                ]
+            },
+        )(),
+        type(
+            "Response",
+            (),
+            {
+                "choices": [
+                    type(
+                        "Choice",
+                        (),
+                        {
+                            "message": _Message(
+                                '{"name":"Jane Doe","firstName":"Jane","lastName":"Doe"}'
+                            ),
+                            "finish_reason": "stop",
+                        },
+                    )()
+                ]
+            },
+        )(),
+    ]
+    extractor = ResumeProfileExtractor(api_key="test-key", max_tokens=40)
+    extractor.client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": fake_completions})()},
+    )()
+    extractor.model = "fake-model"
+
+    with patch.object(extractor, "_split_name_with_llm", return_value=("Jane", "Doe")):
+        result = extractor.extract("Jane Doe\nSoftware Engineer")
+
+    assert fake_completions.create.call_count == 3
+    assert fake_completions.create.call_args_list[0].kwargs["max_tokens"] == 40
+    assert fake_completions.create.call_args_list[1].kwargs["max_tokens"] == 80
+    assert fake_completions.create.call_args_list[2].kwargs["max_tokens"] == 160
+    assert fake_completions.create.call_args_list[0].kwargs["reasoning_effort"] == (
+        "minimal"
+    )
+    assert fake_completions.create.call_args_list[0].kwargs["verbosity"] == "low"
+    assert result.first_name == "Jane"
+    assert result.last_name == "Doe"
     assert result.llm_fallback_reason is None
 
 
