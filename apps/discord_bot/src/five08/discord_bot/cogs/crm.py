@@ -1023,7 +1023,9 @@ class ResumeEditDiscordRolesModal(discord.ui.Modal, title="Edit Discord Roles"):
         self.confirmation_view.discord_role_suggestions = normalized
         for item in self.confirmation_view.children:
             if isinstance(item, ResumeApplyDiscordRolesButton):
-                item.disabled = not bool(normalized)
+                item.disabled = not (
+                    self.confirmation_view.can_apply_discord_roles and bool(normalized)
+                )
 
         if normalized:
             count = len(normalized)
@@ -1285,13 +1287,6 @@ class ResumeApplyDiscordRolesButton(discord.ui.Button["ResumeUpdateConfirmationV
             )
             return
 
-        if not view.can_apply_discord_roles:
-            await interaction.response.send_message(
-                "❌ Discord roles can only be applied after linking this contact to a Discord user.",
-                ephemeral=True,
-            )
-            return
-
         target_user_id_raw: str | None = None
 
         def _audit_apply_roles_event(
@@ -1313,6 +1308,18 @@ class ResumeApplyDiscordRolesButton(discord.ui.Button["ResumeUpdateConfirmationV
                 resource_type="crm_contact",
                 resource_id=view.contact_id,
             )
+
+        if not view.can_apply_discord_roles:
+            _audit_apply_roles_event(
+                "denied",
+                "missing_linked_user",
+                {"reason": "button_disabled_for_role_application"},
+            )
+            await interaction.response.send_message(
+                "❌ Discord roles can only be applied after linking this contact to a Discord user.",
+                ephemeral=True,
+            )
+            return
 
         if not interaction.guild:
             await interaction.response.send_message(

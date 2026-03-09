@@ -757,6 +757,26 @@ class TestCRMCog:
 
         assert modal.discord_roles_input.default == "Backend\nOperations"
 
+    def test_apply_discord_roles_button_disabled_without_linked_discord_user(
+        self, crm_cog
+    ):
+        """Apply button should be disabled if no Discord link target is available."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+            discord_role_suggestions=["Backend", "Operations"],
+        )
+
+        apply_button = next(
+            child
+            for child in view.children
+            if isinstance(child, ResumeApplyDiscordRolesButton)
+        )
+        assert apply_button.disabled is True
+
     @pytest.mark.asyncio
     async def test_edit_discord_roles_modal_submit_updates_suggested_roles(
         self, crm_cog
@@ -769,6 +789,7 @@ class TestCRMCog:
             contact_name="Test User",
             proposed_updates={},
             discord_role_suggestions=["Backend"],
+            discord_role_target_user_id="1001",
         )
         modal = ResumeEditDiscordRolesModal(confirmation_view=view)
         modal.discord_roles_input._value = (
@@ -791,6 +812,66 @@ class TestCRMCog:
             "✅ Discord roles updated to 2 roles.",
             ephemeral=True,
         )
+
+    @pytest.mark.asyncio
+    async def test_edit_discord_roles_modal_submit_keeps_apply_disabled_without_link(
+        self, crm_cog
+    ):
+        """Apply Discord Roles remains disabled until the contact is linked."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+            discord_role_suggestions=["Backend"],
+        )
+        modal = ResumeEditDiscordRolesModal(confirmation_view=view)
+        modal.discord_roles_input._value = "Backend\nOperations"
+        interaction = AsyncMock()
+        interaction.response = AsyncMock()
+        interaction.response.send_message = AsyncMock()
+
+        await modal.on_submit(interaction)
+
+        apply_button = next(
+            child
+            for child in view.children
+            if isinstance(child, ResumeApplyDiscordRolesButton)
+        )
+        assert apply_button.disabled is True
+        interaction.response.send_message.assert_called_once_with(
+            "✅ Discord roles updated to 2 roles.",
+            ephemeral=True,
+        )
+
+    def test_build_role_suggestions_embed_marks_link_required_when_not_linked(
+        self, crm_cog
+    ):
+        """Role suggestions embed should include a link required callout when role apply is blocked."""
+        embed = crm_cog._build_role_suggestions_embed(
+            contact_name="Test User",
+            technical_roles=["Backend"],
+            locality_roles=["APAC"],
+            can_apply_discord_roles=False,
+        )
+
+        assert embed is not None
+        assert any(field.name == "🔒 Link required" for field in embed.fields)
+
+    def test_build_role_suggestions_embed_hides_link_required_when_linked(
+        self, crm_cog
+    ):
+        """Role suggestions embed should hide link required callout when application is enabled."""
+        embed = crm_cog._build_role_suggestions_embed(
+            contact_name="Test User",
+            technical_roles=["Backend"],
+            locality_roles=["APAC"],
+            can_apply_discord_roles=True,
+        )
+
+        assert embed is not None
+        assert all(field.name != "🔒 Link required" for field in embed.fields)
 
     @pytest.mark.asyncio
     async def test_apply_discord_roles_button_applies_roles_and_reports_results(
