@@ -72,10 +72,26 @@ MATCH_CANDIDATES_JD_URL_HINTS = (
     "notion.site",
 )
 AUTO_MATCH_DEDUPE_MAX = 10_000
+MATCH_CANDIDATES_PRIVATE_TRUTHY = frozenset({"true", "1", "yes", "y", "on"})
 # Exclude known-bad resume artifact from auto-match rendering.
 AUTO_MATCH_EXCLUDED_RESUME_NAMES = frozenset({"Vladyslav_Stryzhak.pdf"})
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 JobWatchChannel = discord.ForumChannel
+
+
+def _parse_match_candidates_private(private_flag: str | None) -> bool | None:
+    """Parse the `private` arg into a bool, or return None for invalid values."""
+    if private_flag is None:
+        return False
+
+    normalized = private_flag.strip().lower()
+    if not normalized:
+        return None
+
+    if normalized in MATCH_CANDIDATES_PRIVATE_TRUTHY:
+        return True
+
+    return None
 
 
 class MatchResumeSelectView(discord.ui.View):
@@ -1441,16 +1457,28 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         name="match-candidates",
         description="Reads this thread's opening message, attachments, and JD links, then returns ranked matching candidates.",
     )
+    @app_commands.describe(
+        private="Set to `true`, `1`, `yes`, `y`, or `on` to post privately."
+    )
     @require_role("Member")
     async def match_candidates(
         self,
         interaction: discord.Interaction,
+        private: str | None = None,
     ) -> None:
         """Parse the thread's starter message and find matching candidates ranked by fit.
 
         Must be invoked inside a thread. The starter message is used as the job posting text.
         The response is posted publicly in the thread.
         """
+        is_private = _parse_match_candidates_private(private)
+        if is_private is None:
+            await interaction.response.send_message(
+                "⚠️ Invalid value for `private`. Use `true`, `1`, `yes`, `y`, or `on`.",
+                ephemeral=True,
+            )
+            return
+
         if not isinstance(interaction.channel, discord.Thread) or not isinstance(
             interaction.channel.parent, discord.ForumChannel
         ):
@@ -1498,7 +1526,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
-        await interaction.response.defer(ephemeral=False)
+        await interaction.response.defer(ephemeral=is_private)
 
         posting, posting_metadata = await self._build_match_candidates_posting(starter)
         if not posting.strip():
@@ -1581,8 +1609,13 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
+        async def _send_match_result(message: str, **kwargs: Any) -> None:
+            if is_private:
+                kwargs["ephemeral"] = True
+            await interaction.followup.send(message, **kwargs)
+
         await self._publish_match_results(
-            send=interaction.followup.send,
+            send=_send_match_result,
             requirements=requirements,
             candidates=candidates,
             guild=interaction.guild,

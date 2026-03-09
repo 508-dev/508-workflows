@@ -1729,6 +1729,125 @@ class TestCRMCog:
         assert "Alice (Nickname)" in candidate_call.args[0]
         assert "alice@508.dev" not in candidate_call.args[0]
         assert_mentions_disabled(candidate_call)
+        assert mock_interaction.response.defer.call_args.kwargs["ephemeral"] is False
+
+    @pytest.mark.asyncio
+    async def test_match_candidates_private_arg_private_mode(
+        self, jobs_cog, mock_interaction, mock_member_role
+    ):
+        """Passing a truthy private arg should send all results ephemerally."""
+        role_frontend = Mock()
+        role_frontend.name = "Frontend"
+        role_frontend.id = 111
+        role_frontend.position = 3
+
+        role_usa = Mock()
+        role_usa.name = "USA"
+        role_usa.id = 222
+        role_usa.position = 2
+
+        guild = Mock()
+        guild.id = 55
+        guild.roles = [role_frontend, role_usa]
+
+        mock_interaction.guild = guild
+        mock_interaction.user.id = 999
+        mock_interaction.user.name = "Requester"
+        mock_interaction.user.roles = [mock_member_role]
+
+        starter_msg = Mock()
+        starter_msg.content = "Example job"
+        starter_msg.attachments = []
+        starter_msg.embeds = []
+
+        class DummyForumChannel:
+            def __init__(self, channel_id: int) -> None:
+                self.id = channel_id
+
+        class DummyThread:
+            id = 123
+            applied_tags = []
+
+            def __init__(self, parent: DummyForumChannel) -> None:
+                self.parent = parent
+
+        thread_instance = DummyThread(DummyForumChannel(456))
+        thread_instance.starter_message = starter_msg
+        mock_interaction.channel = thread_instance
+
+        requirements = Mock()
+        requirements.title = "Frontend Engineer"
+        requirements.discord_role_types = [" Frontend ", "Senior"]
+        requirements.raw_location_text = "USA"
+        requirements.preferred_timezones = []
+        requirements.location_type = "us_only"
+        requirements.required_skills = ["python"]
+        requirements.preferred_skills = []
+        requirements.seniority = "Senior"
+
+        candidate = Mock()
+        candidate.is_member = True
+        candidate.name = "Alice (Nickname)"
+        candidate.email_508 = "alice@508.dev"
+        candidate.email = None
+        candidate.crm_contact_id = None
+        candidate.has_crm_link = False
+        candidate.discord_user_id = 12345
+        candidate.linkedin = None
+        candidate.latest_resume_id = None
+        candidate.latest_resume_name = None
+        candidate.match_score = 9.2
+        candidate.matched_required_skills = ["python"]
+        candidate.matched_discord_roles = ["Frontend"]
+        candidate.seniority = "Senior"
+        candidate.timezone = "America/New_York"
+
+        jobs_cog._refresh_role_id_cache(guild)
+
+        with (
+            patch(
+                "five08.discord_bot.cogs.jobs.extract_job_requirements",
+                return_value=requirements,
+            ),
+            patch(
+                "five08.discord_bot.cogs.jobs.search_candidates",
+                return_value=[candidate],
+            ),
+            patch(
+                "five08.discord_bot.cogs.jobs.settings.espo_base_url",
+                "https://crm.example.com",
+            ),
+            patch("five08.discord_bot.cogs.jobs.discord.Thread", DummyThread),
+            patch(
+                "five08.discord_bot.cogs.jobs.discord.ForumChannel",
+                DummyForumChannel,
+            ),
+            patch.object(jobs_cog, "_audit_command"),
+        ):
+            await jobs_cog.match_candidates.callback(jobs_cog, mock_interaction, "yes")
+
+        assert mock_interaction.response.defer.call_args.kwargs["ephemeral"] is True
+
+        calls = mock_interaction.followup.send.call_args_list
+        assert calls
+        for call in calls:
+            assert call.kwargs["ephemeral"] is True
+
+    @pytest.mark.asyncio
+    async def test_match_candidates_private_arg_rejects_falsey_value(
+        self, jobs_cog, mock_interaction, mock_member_role
+    ):
+        """Passing a non-truthy private arg should be rejected."""
+        mock_interaction.user.roles = [mock_member_role]
+
+        await jobs_cog.match_candidates.callback(jobs_cog, mock_interaction, "no")
+
+        mock_interaction.response.send_message.assert_called_once_with(
+            "⚠️ Invalid value for `private`. Use `true`, `1`, `yes`, `y`, or `on`.",
+            ephemeral=True,
+        )
+        mock_interaction.response.defer.assert_not_called()
+        mock_interaction.followup.send.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_search_contacts_success(
