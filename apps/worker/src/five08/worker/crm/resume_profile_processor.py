@@ -289,8 +289,6 @@ class ResumeProfileProcessor:
                     )
                 )
 
-            # Track extraction completion before user confirmation/apply step.
-            self._mark_resume_processed(contact_id)
             self._record_processing_run(
                 contact_id=contact_id,
                 attachment_id=attachment_id,
@@ -541,8 +539,13 @@ class ResumeProfileProcessor:
                     error="No valid profile fields provided",
                 )
 
+            update_payload = dict(sanitized_updates)
+            update_payload["cResumeLastProcessed"] = datetime.now(
+                tz=timezone.utc
+            ).strftime("%Y-%m-%d %H:%M:%S")
+
             try:
-                self.crm.update_contact(contact_id, sanitized_updates)
+                self.crm.update_contact(contact_id, update_payload)
                 verified_fields = self._verify_updated_fields(
                     contact_id=contact_id,
                     baseline_contact=pre_update_contact,
@@ -589,7 +592,8 @@ class ResumeProfileProcessor:
                 if verified_fields is not None:
                     updated_fields = verified_fields
 
-            if len(updated_fields) == len(sanitized_updates):
+                if len(updated_fields) == len(sanitized_updates):
+                    self._mark_resume_processed(contact_id)
                 return ResumeApplyResult(
                     contact_id=contact_id,
                     updated_fields=sorted(updated_fields),

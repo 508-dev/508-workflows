@@ -67,16 +67,7 @@ def test_extract_profile_proposal_filters_508_email() -> None:
         json.loads(result.proposed_updates["cSkillAttrs"])["fastapi"]["strength"] == 4
     )
     assert any(item.field == "emailAddress" for item in result.skipped)
-    processor.crm.update_contact.assert_called_once()
-    update_contact_payload = processor.crm.update_contact.call_args.args[1]
-    assert "cResumeLastProcessed" in update_contact_payload
-    assert isinstance(update_contact_payload["cResumeLastProcessed"], str)
-    assert (
-        datetime.strptime(
-            update_contact_payload["cResumeLastProcessed"], "%Y-%m-%d %H:%M:%S"
-        )
-        is not None
-    )
+    processor.crm.update_contact.assert_not_called()
     processor._record_processing_run.assert_called_once()
     record_kwargs = processor._record_processing_run.call_args.kwargs
     assert record_kwargs["status"] == "succeeded"
@@ -818,6 +809,12 @@ def test_apply_profile_updates_adds_discord_and_filters_email() -> None:
     assert update_payload["skills"] == ["python", "fastapi"]
     assert update_payload["cDiscordUserID"] == "123"
     assert update_payload["cDiscordUsername"] == "member#0001 (ID: 123)"
+    assert "cResumeLastProcessed" in update_payload
+    assert isinstance(update_payload["cResumeLastProcessed"], str)
+    assert (
+        datetime.strptime(update_payload["cResumeLastProcessed"], "%Y-%m-%d %H:%M:%S")
+        is not None
+    )
 
 
 def test_apply_profile_updates_normalizes_csv_skills_to_array() -> None:
