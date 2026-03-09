@@ -7,6 +7,7 @@ import argparse
 import json
 from dataclasses import dataclass
 from pathlib import Path
+import sys
 from typing import Any
 
 from five08.document_text import extract_document_text
@@ -107,13 +108,13 @@ def main() -> None:
     for file_arg in args.files:
         path = Path(file_arg)
         if not path.is_file():
-            print(f"error: missing file: {path}")
+            print(f"error: missing file: {path}", file=sys.stderr)
             exit_code = 1
             continue
         try:
             results.append(_process_file(path))
         except Exception as exc:  # pragma: no cover - runtime diagnostic path
-            print(f"error: failed to process {path}: {exc}")
+            print(f"error: failed to process {path}: {exc}", file=sys.stderr)
             exit_code = 1
 
     if not results:
