@@ -2106,6 +2106,78 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         joined = "\n".join(kept)
         return cls._truncate_embed_field(joined, cls._APPLIED_FIELD_TOTAL_LIMIT)
 
+    @staticmethod
+    def _format_discord_link_value(
+        *,
+        link_discord: dict[str, str] | None = None,
+        link_member: discord.Member | None = None,
+    ) -> str | None:
+        user_id = ""
+        username = ""
+
+        if link_member is not None:
+            user_id = str(link_member.id)
+            username = str(link_member).strip()
+        elif link_discord:
+            user_id = str(link_discord.get("user_id") or "").strip()
+            username = str(link_discord.get("username") or "").strip()
+
+        if not user_id.isdigit():
+            return None
+
+        mention = f"<@{user_id}>"
+        safe_username = discord.utils.escape_markdown(
+            discord.utils.escape_mentions(username)
+        )
+        return f"{mention} ({safe_username})" if username else mention
+
+    def _build_apply_success_embed(
+        self,
+        *,
+        updated_fields: list[str],
+        updated_values: dict[str, Any],
+        link_discord_applied: bool | None,
+    ) -> discord.Embed:
+        embed = discord.Embed(
+            title="✅ CRM Updated",
+            description=f"Applied updates for **{self.contact_name}**.",
+            color=0x00FF00,
+        )
+        display_fields = self._collapse_updated_fields(updated_fields)
+        labeled_fields = [self._field_label(field) for field in display_fields]
+        updated_fields_value = self._format_updated_fields_value(labeled_fields)
+        embed.add_field(
+            name="Updated Fields",
+            value=updated_fields_value,
+            inline=False,
+        )
+        applied_lines = self._build_applied_updates_lines(
+            updated_fields=updated_fields,
+            updated_values=updated_values,
+        )
+        if applied_lines:
+            applied_updates_value = self._format_applied_updates_value(applied_lines)
+            embed.add_field(
+                name="Applied Updates",
+                value=applied_updates_value,
+                inline=False,
+            )
+
+        if link_discord_applied:
+            discord_link_value = self._format_discord_link_value(
+                link_discord=self.link_discord
+            )
+            if discord_link_value:
+                embed.add_field(
+                    name="Discord Link",
+                    value=f"Linked contact to {discord_link_value}",
+                    inline=False,
+                )
+
+        profile_url = f"{self.crm_cog.base_url}/#Contact/view/{self.contact_id}"
+        embed.add_field(name="🔗 CRM Profile", value=f"[View in CRM]({profile_url})")
+        return embed
+
     @classmethod
     def _collapse_updated_fields(cls, updated_fields: list[str]) -> list[str]:
         """Collapse skill fields into a single logical skills entry."""
@@ -2424,32 +2496,11 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             )
             return
 
-        embed = discord.Embed(
-            title="✅ CRM Updated",
-            description=f"Applied updates for **{self.contact_name}**.",
-            color=0x00FF00,
-        )
-        display_fields = self._collapse_updated_fields(updated_fields)
-        labeled_fields = [self._field_label(field) for field in display_fields]
-        updated_fields_value = self._format_updated_fields_value(labeled_fields)
-        embed.add_field(
-            name="Updated Fields",
-            value=updated_fields_value,
-            inline=False,
-        )
-        applied_lines = self._build_applied_updates_lines(
+        embed = self._build_apply_success_embed(
             updated_fields=updated_fields,
             updated_values=updated_values,
+            link_discord_applied=link_discord_applied,
         )
-        if applied_lines:
-            applied_updates_value = self._format_applied_updates_value(applied_lines)
-            embed.add_field(
-                name="Applied Updates",
-                value=applied_updates_value,
-                inline=False,
-            )
-        profile_url = f"{self.crm_cog.base_url}/#Contact/view/{self.contact_id}"
-        embed.add_field(name="🔗 CRM Profile", value=f"[View in CRM]({profile_url})")
         _audit_apply_event(
             "success",
             {
@@ -3572,11 +3623,14 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 inline=True,
             )
 
-        if link_member:
+        discord_link_value = ResumeUpdateConfirmationView._format_discord_link_value(
+            link_member=link_member
+        )
+        if discord_link_value:
             embed.add_field(
                 name="Discord Link",
                 value=truncate_field_value(
-                    f"Will link contact to {link_member.mention}"
+                    f"Will link contact to {discord_link_value}"
                 ),
                 inline=False,
             )
