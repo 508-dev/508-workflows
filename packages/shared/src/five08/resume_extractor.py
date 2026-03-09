@@ -2066,7 +2066,11 @@ class ResumeProfileExtractor:
                         ).model_dump(mode="python")
                 except (ValidationError, json.JSONDecodeError, ValueError):
                     if attempt_index == 0:
-                        retry_reason = "invalid_output"
+                        if finish_reason == "length":
+                            attempt_max_tokens = self.max_tokens * 2
+                            retry_reason = "length"
+                        else:
+                            retry_reason = "invalid_output"
                         continue
                     raise
 

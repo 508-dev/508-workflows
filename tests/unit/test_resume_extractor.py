@@ -873,6 +873,68 @@ def test_extract_retries_once_on_length_then_succeeds() -> None:
     assert result.llm_fallback_reason is None
 
 
+def test_extract_retries_partial_length_response_with_higher_token_budget() -> None:
+    """Partial JSON plus finish_reason=length should retry with more tokens."""
+
+    class _Message:
+        def __init__(self, content: str | None) -> None:
+            self.content = content
+            self.refusal = ""
+            self.tool_calls = []
+
+    first_choice = type(
+        "Choice",
+        (),
+        {
+            "message": _Message('{"name":"Jane Doe","firstName":"Jane",'),
+            "finish_reason": "length",
+        },
+    )()
+
+    second_choice = type(
+        "Choice",
+        (),
+        {
+            "message": _Message(
+                (
+                    '{"name":"Jane Doe","firstName":"Jane","lastName":"Doe",'
+                    '"current_title":"Senior Software Engineer"}'
+                )
+            ),
+            "finish_reason": "stop",
+        },
+    )()
+
+    fake_completions = Mock()
+    fake_completions.create.side_effect = [
+        type("Response", (), {"choices": [first_choice]})(),
+        type("Response", (), {"choices": [second_choice]})(),
+    ]
+    extractor = ResumeProfileExtractor(api_key="test-key", max_tokens=48)
+    extractor.client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": fake_completions})()},
+    )()
+    extractor.model = "fake-model"
+
+    result = extractor.extract("Jane Doe\nSenior Software Engineer")
+
+    assert fake_completions.create.call_count == 2
+    assert fake_completions.create.call_args_list[0].kwargs["max_tokens"] == 48
+    assert fake_completions.create.call_args_list[1].kwargs["max_tokens"] == 96
+    assert (
+        "invalid JSON/schema"
+        not in fake_completions.create.call_args_list[1].kwargs["messages"][0][
+            "content"
+        ]
+    )
+    assert result.first_name == "Jane"
+    assert result.last_name == "Doe"
+    assert result.current_title == "Senior Software Engineer"
+    assert result.llm_fallback_reason is None
+
+
 def test_extract_uses_structured_output_parse_when_supported() -> None:
     """Structured-output clients should parse into the raw schema directly."""
 
