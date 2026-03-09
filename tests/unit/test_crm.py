@@ -4463,7 +4463,7 @@ class TestCRMCog:
             assert payload["phoneNumber"] == "+1 555-0100"
             assert payload["addressCountry"] == "Canada"
             assert payload["cSeniority"] == "senior"
-            assert payload["skills"] == "Python, fastapi"
+            assert payload["skills"] == ["Python", "fastapi"]
             assert payload["firstName"] == "Jane"
             assert payload["lastName"] == "Doe"
 

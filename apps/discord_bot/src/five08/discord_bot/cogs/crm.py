@@ -2607,7 +2607,7 @@ class ResumeCreateContactView(discord.ui.View):
         link_user: discord.Member | None,
         inferred_contact_meta: dict[str, Any] | None,
         target_scope: str,
-        create_payload_override: dict[str, str] | None = None,
+        create_payload_override: dict[str, Any] | None = None,
         created_target_scope: str = "created",
     ) -> None:
         super().__init__(timeout=180)
@@ -2657,7 +2657,7 @@ class ResumeCreateContactView(discord.ui.View):
     ) -> None:
         """Create the inferred contact and continue resume upload."""
         await interaction.response.defer(ephemeral=True)
-        create_payload: dict[str, str] | None = None
+        create_payload: dict[str, Any] | None = None
         try:
             if self.create_payload_override:
                 create_payload = dict(self.create_payload_override)
@@ -5325,7 +5325,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         return self._extract_resume_name_fallback(file_content, filename=filename)
 
     def _populate_name_fields(
-        self, payload: dict[str, str], *, source_name: str
+        self, payload: dict[str, Any], *, source_name: str
     ) -> None:
         """Populate firstName and lastName fields for CRM contact creation payloads."""
         first_name, last_name = self.resume_extractor.split_name(
@@ -5341,7 +5341,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         file_content: bytes,
         *,
         filename: str | None = None,
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         """Build a minimal contact create payload from resume hints."""
         hints = self._extract_resume_contact_hints(file_content, filename=filename)
         name = self._extract_resume_name_hint(file_content, filename=filename)
@@ -5406,7 +5406,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 str(item).strip() for item in skills if str(item).strip()
             ]
             if normalized_skills:
-                payload["skills"] = ", ".join(normalized_skills)
+                payload["skills"] = normalized_skills
 
         return payload
 
@@ -5415,7 +5415,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         file_content: bytes,
         *,
         filename: str | None = None,
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         """Build contact payload without blocking the event loop."""
         return await asyncio.to_thread(
             self._build_resume_create_contact_payload,
@@ -5458,7 +5458,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         user: discord.Member,
         file_content: bytes,
         filename: str | None = None,
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         """Build contact payload from resume hints plus explicit Discord linkage."""
         payload = self._build_resume_create_contact_payload(
             file_content=file_content,
@@ -5481,7 +5481,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         user: discord.Member,
         file_content: bytes,
         filename: str | None = None,
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         """Build link-user payload without blocking the event loop."""
         return await asyncio.to_thread(
             self._build_contact_payload_for_link_user,
