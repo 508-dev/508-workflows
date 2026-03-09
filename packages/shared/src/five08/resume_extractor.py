@@ -2330,6 +2330,22 @@ class ResumeProfileExtractor:
                 limit=5,
             )
             parsed_role_rationale = _normalize_scalar(parsed.get("role_rationale"))
+            parsed_primary_roles_raw = parsed.get("primary_roles")
+            if not parsed_primary_roles_raw:
+                parsed_primary_roles_raw = parsed.get("primary_role")
+            parsed_primary_roles = _normalize_role_collection(parsed_primary_roles_raw)
+            llm_provided_role_suggestion = bool(parsed_primary_roles)
+            resolved_primary_roles = parsed_primary_roles
+            if not llm_provided_role_suggestion:
+                resolved_primary_roles = (
+                    resolved_primary_roles
+                    or self._infer_roles_from_signals(
+                        current_title=parsed_current_title,
+                        recent_titles=parsed_recent_titles,
+                        role_rationale=parsed_role_rationale,
+                    )
+                    or self._infer_roles_from_resume(resume_text)
+                )
             (
                 parsed_city,
                 parsed_state,
@@ -2354,17 +2370,7 @@ class ResumeProfileExtractor:
                 email=parsed_email,
                 additional_emails=parsed_emails,
                 description=_normalize_description(parsed.get("description")),
-                primary_roles=(
-                    _normalize_role_collection(
-                        parsed.get("primary_roles") or parsed.get("primary_role")
-                    )
-                    or self._infer_roles_from_signals(
-                        current_title=parsed_current_title,
-                        recent_titles=parsed_recent_titles,
-                        role_rationale=parsed_role_rationale,
-                    )
-                    or self._infer_roles_from_resume(resume_text)
-                ),
+                primary_roles=resolved_primary_roles,
                 github_username=github_username,
                 linkedin_url=linkedin_url,
                 timezone=parsed_timezone,

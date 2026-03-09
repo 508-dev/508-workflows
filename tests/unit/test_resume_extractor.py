@@ -1713,6 +1713,135 @@ def test_extract_uses_current_location_and_title_evidence_fields() -> None:
     assert result.current_location_evidence is not None
 
 
+def test_extract_does_not_backfill_heuristic_roles_when_llm_suggests_roles() -> None:
+    """LLM-suggested role fields should not be expanded by heuristic role inference."""
+
+    class _FakeChatCompletions:
+        @staticmethod
+        def create(**_: object) -> object:
+            return type(
+                "Response",
+                (),
+                {
+                    "choices": [
+                        type(
+                            "Choice",
+                            (),
+                            {
+                                "message": type(
+                                    "Message",
+                                    (),
+                                    {
+                                        "content": (
+                                            '{"name": "Jane Doe", '
+                                            '"email": "jane@example.com", '
+                                            '"primary_roles": ["platform specialist"], '
+                                            '"current_title": "Software Engineer", '
+                                            '"recent_titles": ["Software Engineer"], '
+                                            '"role_rationale": "Engineering title indicates a developer profile.", '
+                                            '"current_location_raw": null, '
+                                            '"current_location_source": null, '
+                                            '"current_location_evidence": null, '
+                                            '"address_city": null, '
+                                            '"address_state": null, '
+                                            '"address_country": null, '
+                                            '"timezone": null, '
+                                            '"website_url_candidates": [], '
+                                            '"website_links": [], '
+                                            '"social_links": [], '
+                                            '"phone": null, '
+                                            '"skills": [], '
+                                            '"skill_attrs": null, '
+                                            '"confidence": 0.88}'
+                                        )
+                                    },
+                                )()
+                            },
+                        )()
+                    ]
+                },
+            )()
+
+    extractor = ResumeProfileExtractor(api_key="test-key")
+    extractor.client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": _FakeChatCompletions()})()},
+    )()
+    extractor.model = "fake-model"
+
+    result = extractor.extract("Jane Doe\nSoftware Engineer")
+
+    # LLM-suggested roles should be preserved, and heuristic roles like
+    # "developer" should not be added on top.
+    assert result.primary_roles == ["platform specialist"]
+    assert "developer" not in result.primary_roles
+
+
+def test_extract_does_not_backfill_heuristic_roles_for_legacy_primary_role() -> None:
+    """Legacy primary_role should also suppress heuristic role expansion."""
+
+    class _FakeChatCompletions:
+        @staticmethod
+        def create(**_: object) -> object:
+            return type(
+                "Response",
+                (),
+                {
+                    "choices": [
+                        type(
+                            "Choice",
+                            (),
+                            {
+                                "message": type(
+                                    "Message",
+                                    (),
+                                    {
+                                        "content": (
+                                            '{"name": "Jane Doe", '
+                                            '"email": "jane@example.com", '
+                                            '"primary_roles": null, '
+                                            '"primary_role": "platform specialist", '
+                                            '"current_title": "Software Engineer", '
+                                            '"recent_titles": ["Software Engineer"], '
+                                            '"role_rationale": "Engineering title indicates a developer profile.", '
+                                            '"current_location_raw": null, '
+                                            '"current_location_source": null, '
+                                            '"current_location_evidence": null, '
+                                            '"address_city": null, '
+                                            '"address_state": null, '
+                                            '"address_country": null, '
+                                            '"timezone": null, '
+                                            '"website_url_candidates": [], '
+                                            '"website_links": [], '
+                                            '"social_links": [], '
+                                            '"phone": null, '
+                                            '"skills": [], '
+                                            '"skill_attrs": null, '
+                                            '"confidence": 0.88}'
+                                        )
+                                    },
+                                )()
+                            },
+                        )()
+                    ]
+                },
+            )()
+
+    extractor = ResumeProfileExtractor(api_key="test-key")
+    extractor.client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": _FakeChatCompletions()})()},
+    )()
+    extractor.model = "fake-model"
+
+    result = extractor.extract("Jane Doe\nSoftware Engineer")
+
+    assert result.primary_roles == ["platform specialist"]
+    assert "developer" not in result.primary_roles
+
+
 def test_extract_discards_invalid_country_and_repairs_current_location_region() -> None:
     """Invalid LLM location fields should be replaced by deterministic parsing."""
 
