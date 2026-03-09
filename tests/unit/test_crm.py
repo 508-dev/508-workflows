@@ -4837,7 +4837,12 @@ class TestCRMCog:
                 "_search_contacts_for_reprocess_resume",
                 new=AsyncMock(
                     return_value=[
-                        {"id": "contact123", "name": "Candidate User"},
+                        {
+                            "id": "contact123",
+                            "name": "Candidate User",
+                            "resumeIds": ["resume123"],
+                            "resumeNames": {"resume123": "candidate.pdf"},
+                        },
                     ]
                 ),
             ),
@@ -4914,7 +4919,7 @@ class TestCRMCog:
                             "id": "contact123",
                             "name": "John Doe",
                             "resumeIds": ["resume123"],
-                            "resumeNames": {"resume123": "john-doe.pdf"},
+                            "resumeNames": {},
                         },
                         {
                             "id": "contact456",
@@ -4932,12 +4937,15 @@ class TestCRMCog:
         followup_kwargs = mock_interaction.followup.send.call_args.kwargs
         assert "view" in followup_kwargs
         assert isinstance(followup_kwargs["view"], ReprocessResumeSelectionView)
+        embed = mock_interaction.followup.send.call_args.kwargs["embed"]
         labels = [
             child.label
             for child in followup_kwargs["view"].children
             if isinstance(child, discord.ui.Button)
         ]
         assert labels == ["John Doe", "Upload Resume: John Smith"]
+        assert "📄 Resume: on file" in embed.fields[0].value
+        assert "📄 Resume: missing" in embed.fields[1].value
 
     @pytest.mark.asyncio
     async def test_reprocess_resume_selection_button_without_resume_hands_off_to_upload(
@@ -5001,9 +5009,30 @@ class TestCRMCog:
         assert "Candidate User" in message
 
     @pytest.mark.asyncio
-    async def test_reprocess_resume_no_resume_found(self, crm_cog, mock_interaction):
-        """Error when the target contact has no resume on file."""
+    async def test_prompt_upload_resume_for_contact_rejects_missing_contact_id(
+        self, crm_cog, mock_interaction
+    ):
+        """Missing contact IDs should not fall through as the literal string 'None'."""
+        crm_cog._audit_command = Mock()
+
+        await crm_cog._prompt_upload_resume_for_contact(
+            interaction=mock_interaction,
+            contact={"id": None, "name": "Candidate User"},
+            search_term="candidate",
+        )
+
+        mock_interaction.followup.send.assert_called_once_with(
+            "❌ Contact ID not found."
+        )
+
+    @pytest.mark.asyncio
+    async def test_reprocess_resume_exact_match_without_resume_hands_off_to_upload(
+        self, crm_cog, mock_interaction
+    ):
+        """Exact-match reprocess requests should use the upload handoff when needed."""
         mock_interaction.user.id = 101
+        crm_cog._prompt_reprocess_resume_confirmation = AsyncMock()
+        crm_cog._prompt_upload_resume_for_contact = AsyncMock()
         with (
             patch(
                 "five08.discord_bot.cogs.crm.settings.api_shared_secret",
@@ -5017,21 +5046,23 @@ class TestCRMCog:
                 crm_cog,
                 "_search_contacts_for_reprocess_resume",
                 new=AsyncMock(
-                    return_value=[{"id": "contact123", "name": "Candidate User"}]
+                    return_value=[
+                        {
+                            "id": "contact123",
+                            "name": "Candidate User",
+                            "resumeIds": [],
+                            "resumeNames": {},
+                        }
+                    ]
                 ),
-            ),
-            patch.object(
-                crm_cog,
-                "_get_latest_resume_attachment_for_contact",
-                new=AsyncMock(return_value=(None, None)),
             ),
         ):
             await crm_cog.reprocess_resume.callback(
                 crm_cog, mock_interaction, "candidate"
             )
 
-        message = mock_interaction.followup.send.call_args.args[0]
-        assert "No resume found for `Candidate User`" in message
+        crm_cog._prompt_upload_resume_for_contact.assert_awaited_once()
+        crm_cog._prompt_reprocess_resume_confirmation.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_reprocess_resume_requires_steering(self, crm_cog, mock_interaction):

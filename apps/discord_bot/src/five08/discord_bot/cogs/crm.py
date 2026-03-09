@@ -493,7 +493,7 @@ class ReprocessResumeSelectionButton(discord.ui.Button["ReprocessResumeSelection
         except Exception as exc:
             logger.error("Error in reprocess resume selection callback: %s", exc)
             await interaction.followup.send(
-                "❌ An error occurred while reprocessing the resume."
+                "❌ An error occurred while handling the selection."
             )
 
 
@@ -5337,7 +5337,12 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         return None
 
     async def _find_contact_by_discord_username(
-        self, discord_username: str
+        self,
+        discord_username: str,
+        *,
+        select: str = (
+            "id,name,emailAddress,c508Email,cDiscordUsername,cDiscordUserID"
+        ),
     ) -> dict[str, Any] | None:
         """Find a contact by Discord username."""
         search_params = {
@@ -5349,7 +5354,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 }
             ],
             "maxSize": 1,
-            "select": "id,name,emailAddress,c508Email,cDiscordUsername,cDiscordUserID",
+            "select": select,
         }
 
         response = self.espo_api.request("GET", "Contact", search_params)
@@ -5677,7 +5682,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             email_508 = contact.get("c508Email", "No 508 email")
             contact_id = contact.get("id", "")
             resume_name = self._extract_latest_resume_name_from_contact(contact)
-            resume_status = resume_name or "missing"
+            has_resume = self._contact_has_resume(contact)
+            resume_status = resume_name or ("on file" if has_resume else "missing")
             contact_info = (
                 f"📧 {email}\n🏢 508 Email: {email_508}\n"
                 f"📄 Resume: {resume_status}\n🆔 ID: `{contact_id}`"
@@ -6086,7 +6092,12 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 await interaction.followup.send(message)
 
     async def _find_contact_by_discord_id(
-        self, discord_user_id: str
+        self,
+        discord_user_id: str,
+        *,
+        select: str = (
+            "id,name,emailAddress,c508Email,cDiscordUsername,cGitHubUsername"
+        ),
     ) -> dict[str, Any] | None:
         """Find a contact by Discord user ID."""
         search_params = {
@@ -6098,7 +6109,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 }
             ],
             "maxSize": 1,
-            "select": "id,name,emailAddress,c508Email,cDiscordUsername,cGitHubUsername",
+            "select": select,
         }
 
         response = self.espo_api.request("GET", "Contact", search_params)
@@ -6205,7 +6216,10 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         )
         mention_user_id = self._extract_discord_id_from_mention(search_term)
         if mention_user_id:
-            by_discord_id = await self._find_contact_by_discord_id(mention_user_id)
+            by_discord_id = await self._find_contact_by_discord_id(
+                mention_user_id,
+                select=select_fields,
+            )
             return [by_discord_id] if by_discord_id else []
 
         contacts = await self._search_contact_for_linking(
@@ -6218,7 +6232,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         normalized_username = self._normalize_508_username(search_term)
         if normalized_username:
             by_discord_username = await self._find_contact_by_discord_username(
-                normalized_username
+                normalized_username,
+                select=select_fields,
             )
             if by_discord_username:
                 return [by_discord_username]
@@ -6405,7 +6420,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         search_term: str,
     ) -> None:
         """Prompt for confirmation to reprocess the selected contact's resume."""
-        contact_id = str(contact.get("id", ""))
+        raw_contact_id = contact.get("id")
+        contact_id = str(raw_contact_id).strip() if raw_contact_id is not None else ""
         if not contact_id:
             self._audit_command(
                 interaction=interaction,
@@ -6465,7 +6481,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         search_term: str,
     ) -> None:
         """Hand off a selected contact without a resume to the upload flow."""
-        contact_id = str(contact.get("id", "")).strip()
+        raw_contact_id = contact.get("id")
+        contact_id = str(raw_contact_id).strip() if raw_contact_id is not None else ""
         if not contact_id:
             self._audit_command(
                 interaction=interaction,
@@ -8148,11 +8165,18 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 return
 
             contact = contacts[0]
-            await self._prompt_reprocess_resume_confirmation(
-                interaction=interaction,
-                contact=contact,
-                search_term=search_term,
-            )
+            if self._contact_has_resume(contact):
+                await self._prompt_reprocess_resume_confirmation(
+                    interaction=interaction,
+                    contact=contact,
+                    search_term=search_term,
+                )
+            else:
+                await self._prompt_upload_resume_for_contact(
+                    interaction=interaction,
+                    contact=contact,
+                    search_term=search_term,
+                )
         except Exception as e:
             logger.error("Unexpected error in reprocess_resume: %s", e)
             self._audit_command(
