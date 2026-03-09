@@ -56,10 +56,15 @@ def _shorten_text(text: str, limit: int) -> str:
     return f"{text[:limit]}\n... ({omitted} more chars omitted)"
 
 
+def extract_website_link_candidates(text: str) -> list[tuple[str, float]]:
+    """Extract normalized website links and confidence scores from resume text."""
+    return ResumeProfileExtractor._extract_website_link_candidates(text)
+
+
 def _process_file(path: Path) -> FileResult:
     raw = path.read_bytes()
     text = extract_document_text(raw, filename=path.name)
-    link_candidates = ResumeProfileExtractor._extract_website_link_candidates(text)
+    link_candidates = extract_website_link_candidates(text)
     return FileResult(
         path=str(path),
         text_length=len(text),
