@@ -252,6 +252,31 @@ class TestCRMCog:
         assert collapsed == ["skills", "phoneNumber"]
 
     @pytest.mark.asyncio
+    async def test_resume_apply_success_embed_includes_discord_link_mention(
+        self, crm_cog
+    ):
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+            link_discord={"user_id": "123456789", "username": "test-user"},
+        )
+
+        embed = view._build_apply_success_embed(
+            updated_fields=["skills"],
+            updated_values={"skills": ["python"]},
+            link_discord_applied=True,
+        )
+
+        discord_link_field = next(
+            field for field in embed.fields if field.name == "Discord Link"
+        )
+        assert "<@123456789>" in discord_link_field.value
+        assert "test-user" in discord_link_field.value
+
+    @pytest.mark.asyncio
     async def test_resume_apply_confirmation_groups_location_fields(self, crm_cog):
         """Applied updates should render location fields as one combined line."""
         view = ResumeUpdateConfirmationView(
@@ -1048,6 +1073,24 @@ class TestCRMCog:
         assert "Berlin, Germany" in evidence_field.value
         assert "current role" in evidence_field.value
         assert "developer profile" in evidence_field.value
+
+    def test_resume_preview_embed_includes_discord_link_mention(self, crm_cog):
+        link_member = Mock()
+        link_member.id = 123456789
+        link_member.__str__ = Mock(return_value="resume-user")
+
+        embed, _ = crm_cog._build_resume_preview_embed(
+            contact_id="contact-1",
+            contact_name="Test User",
+            result={"proposed_changes": []},
+            link_member=link_member,
+        )
+
+        discord_link_field = next(
+            field for field in embed.fields if field.name == "Discord Link"
+        )
+        assert "<@123456789>" in discord_link_field.value
+        assert "resume-user" in discord_link_field.value
 
     def test_build_resume_extract_debug_file_serializes_raw_payload(self, crm_cog):
         """The debug attachment should include raw and normalized extraction payloads."""
