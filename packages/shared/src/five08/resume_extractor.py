@@ -1610,7 +1610,7 @@ def _build_website_and_social_from_candidates(
 ) -> tuple[list[str], list[str]]:
     urls_to_consider: list[str] = []
     seen: set[str] = set()
-    has_llm_personal_website = False
+    has_llm_url_candidates = False
 
     for candidate_url, candidate_kind, candidate_confidence in llm_candidates:
         if candidate_kind == LLM_URL_CANDIDATE_KIND_PERSONAL:
@@ -1637,13 +1637,12 @@ def _build_website_and_social_from_candidates(
             continue
         seen.add(candidate_key)
         urls_to_consider.append(candidate_url)
-        if candidate_kind == LLM_URL_CANDIDATE_KIND_PERSONAL:
-            has_llm_personal_website = True
+        has_llm_url_candidates = True
 
     for candidate_url, candidate_confidence in heuristic_candidates:
         if candidate_confidence < MIDDLE_WEBSITE_POSITION_SCALE:
             continue
-        if has_llm_personal_website and not _is_social_url(candidate_url):
+        if has_llm_url_candidates:
             continue
 
         candidate_key = _website_identity_key(candidate_url)

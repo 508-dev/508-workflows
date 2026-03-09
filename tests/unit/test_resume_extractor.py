@@ -480,8 +480,8 @@ def test_extract_deduplicates_websites_across_http_and_https() -> None:
     assert result.website_links == ["http://bit.ly/charleschen-portfolio"]
 
 
-def test_extract_does_not_append_heuristic_websites_after_llm_website_success() -> None:
-    """Accepted LLM personal websites should suppress heuristic website backfill."""
+def test_extract_does_not_append_heuristic_urls_after_llm_website_success() -> None:
+    """Accepted LLM website candidates should suppress all heuristic URL backfill."""
 
     class _FakeChatCompletions:
         @staticmethod
@@ -533,9 +533,70 @@ def test_extract_does_not_append_heuristic_websites_after_llm_website_success() 
         "Portfolio: https://charleschen.dev\n"
         "References: https://developer.apple.com/documentation/widgetkit/creating-a-widget-extension\n"
         "Community: https://opennet.tw/\n"
+        "Follow: https://x.com/charleschen\n"
     )
 
     assert result.website_links == ["https://charleschen.dev"]
+    assert result.social_links == []
+
+
+def test_extract_does_not_append_heuristic_urls_after_llm_social_success() -> None:
+    """Accepted LLM social candidates should also suppress heuristic URL backfill."""
+
+    class _FakeChatCompletions:
+        @staticmethod
+        def create(**_: object) -> object:
+            return type(
+                "Response",
+                (),
+                {
+                    "choices": [
+                        type(
+                            "Choice",
+                            (),
+                            {
+                                "message": type(
+                                    "Message",
+                                    (),
+                                    {
+                                        "content": (
+                                            '{"name": null, "email": null, '
+                                            '"github_username": null, '
+                                            '"linkedin_url": null, '
+                                            '"website_url_candidates": ['
+                                            '{"url": "https://x.com/charleschen", '
+                                            '"kind": "social_profile", "confidence": 0.96, '
+                                            '"reason": "explicit social"} '
+                                            "], "
+                                            '"website_links": [], '
+                                            '"social_links": [], '
+                                            '"phone": null, "skills": [], '
+                                            '"skill_attrs": null, "confidence": 0.8}'
+                                        )
+                                    },
+                                )()
+                            },
+                        )()
+                    ]
+                },
+            )()
+
+    extractor = ResumeProfileExtractor(api_key="test-key")
+    extractor.client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": _FakeChatCompletions()})()},
+    )()
+    extractor.model = "fake-model"
+
+    result = extractor.extract(
+        "Follow: https://x.com/charleschen\n"
+        "Portfolio: https://charleschen.dev\n"
+        "Community: https://opennet.tw/\n"
+    )
+
+    assert result.social_links == ["https://x.com/charleschen"]
+    assert result.website_links == []
 
 
 def test_extract_ignores_low_confidence_website_candidate() -> None:
