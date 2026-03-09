@@ -3434,6 +3434,12 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     "Location evidence: "
                     f"`{truncate_preview_value(current_location_evidence, label='location evidence')}`"
                 )
+            role_rationale = str(extracted_profile.get("role_rationale") or "").strip()
+            if role_rationale:
+                evidence_lines.append(
+                    "Role rationale: "
+                    f"`{truncate_preview_value(role_rationale, label='role rationale')}`"
+                )
             if evidence_lines:
                 embed.add_field(
                     name="Inference Evidence",
