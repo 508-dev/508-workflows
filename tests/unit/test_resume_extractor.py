@@ -70,6 +70,17 @@ def test_extract_website_links_excludes_middle_company_url_without_context() -> 
     assert "https://acme.com" not in links
 
 
+def test_extract_website_links_excludes_email_local_part_false_positive() -> None:
+    """Email addresses should not contribute bare-domain website matches."""
+    links = ResumeProfileExtractor._extract_website_links(
+        "Email: timsiline.kevin@gmail.com\nAlternate: me@michaelmwu.com\n"
+    )
+
+    assert "https://timsiline.kevin" not in links
+    assert "https://gmail.com" not in links
+    assert "https://michaelmwu.com" not in links
+
+
 def test_normalize_website_url_removes_zero_width_characters() -> None:
     """Unicode formatting characters should not block valid URL normalization."""
     assert (
