@@ -2334,14 +2334,7 @@ class ResumeProfileExtractor:
             if not parsed_primary_roles_raw:
                 parsed_primary_roles_raw = parsed.get("primary_role")
             parsed_primary_roles = _normalize_role_collection(parsed_primary_roles_raw)
-            llm_provided_role_suggestion = False
-            if isinstance(parsed_primary_roles_raw, str):
-                llm_provided_role_suggestion = bool(parsed_primary_roles_raw.strip())
-            elif isinstance(parsed_primary_roles_raw, (list, tuple)):
-                llm_provided_role_suggestion = any(
-                    isinstance(item, str) and bool(item.strip())
-                    for item in parsed_primary_roles_raw
-                )
+            llm_provided_role_suggestion = bool(parsed_primary_roles)
             resolved_primary_roles = parsed_primary_roles
             if not llm_provided_role_suggestion:
                 resolved_primary_roles = (
