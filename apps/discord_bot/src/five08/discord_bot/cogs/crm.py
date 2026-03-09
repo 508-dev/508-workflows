@@ -919,10 +919,7 @@ class ResumeEditRolesModal(discord.ui.Modal, title="Edit Roles"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         raw = self.roles_input.value or ""
-        cleaned = [
-            line.strip() for line in raw.replace(",", "\n").splitlines() if line.strip()
-        ]
-        normalized_roles = normalize_roles(cleaned)
+        normalized_roles = normalize_roles(raw)
 
         if normalized_roles:
             self.confirmation_view.proposed_updates["cRoles"] = normalized_roles
