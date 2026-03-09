@@ -1284,20 +1284,53 @@ class ResumeApplyDiscordRolesButton(discord.ui.Button["ResumeUpdateConfirmationV
             )
             return
 
+        target_user_id_raw: str | None = None
+
+        def _audit_apply_roles_event(
+            result: str,
+            stage: str,
+            metadata: dict[str, Any] | None = None,
+        ) -> None:
+            view.crm_cog._audit_command_safe(
+                interaction=interaction,
+                action="apply_discord_roles",
+                result=result,
+                metadata={
+                    "contact_id": view.contact_id,
+                    "action_by_user_id": str(interaction.user.id),
+                    "target_user_id": target_user_id_raw,
+                    "stage": stage,
+                    **(metadata or {}),
+                },
+                resource_type="crm_contact",
+                resource_id=view.contact_id,
+            )
+
         if not interaction.guild:
             await interaction.response.send_message(
                 "❌ Discord roles can only be managed inside a server.",
                 ephemeral=True,
+            )
+            _audit_apply_roles_event(
+                "denied",
+                "missing_guild",
+                {"reason": "callback must be used in guild context"},
             )
             return
 
         target_user_id = view.discord_role_target_user_id
         if not target_user_id and isinstance(view.link_discord, dict):
             target_user_id = view.link_discord.get("user_id")
+        target_user_id_raw = target_user_id
         if not target_user_id:
             await interaction.response.send_message(
                 "❌ No linked Discord user found for role assignment.",
                 ephemeral=True,
+            )
+            _audit_apply_roles_event(
+                "denied",
+                "missing_linked_user",
+                {"reason": "no_linked_discord_user"},
             )
             return
 
@@ -1306,6 +1339,14 @@ class ResumeApplyDiscordRolesButton(discord.ui.Button["ResumeUpdateConfirmationV
         except (TypeError, ValueError):
             await interaction.response.send_message(
                 "❌ Invalid linked Discord user ID.", ephemeral=True
+            )
+            _audit_apply_roles_event(
+                "error",
+                "invalid_target_user_id",
+                {
+                    "reason": "invalid_linked_discord_user_id",
+                    "value": str(target_user_id),
+                },
             )
             return
 
@@ -1320,6 +1361,11 @@ class ResumeApplyDiscordRolesButton(discord.ui.Button["ResumeUpdateConfirmationV
                 "❌ Linked Discord user is not in this server.",
                 ephemeral=True,
             )
+            _audit_apply_roles_event(
+                "denied",
+                "target_not_in_server",
+                {"reason": "member_not_in_guild"},
+            )
             return
 
         bot_member = interaction.guild.me
@@ -1328,12 +1374,22 @@ class ResumeApplyDiscordRolesButton(discord.ui.Button["ResumeUpdateConfirmationV
                 "❌ Unable to resolve bot member for role validation.",
                 ephemeral=True,
             )
+            _audit_apply_roles_event(
+                "error",
+                "missing_bot_member",
+                {"reason": "bot_member_unresolved"},
+            )
             return
 
         if not bot_member.guild_permissions.manage_roles:
             await interaction.response.send_message(
                 "❌ Bot missing **Manage Roles** permission.",
                 ephemeral=True,
+            )
+            _audit_apply_roles_event(
+                "error",
+                "missing_manage_roles_permission",
+                {"reason": "manage_roles_permission_missing"},
             )
             return
 
@@ -1342,6 +1398,11 @@ class ResumeApplyDiscordRolesButton(discord.ui.Button["ResumeUpdateConfirmationV
                 "❌ Bot role position is not high enough to edit this member.",
                 ephemeral=True,
             )
+            _audit_apply_roles_event(
+                "denied",
+                "bot_role_too_low",
+                {"reason": "hierarchy_check_failed"},
+            )
             return
 
         suggested_roles = view.discord_role_suggestions
@@ -1349,6 +1410,11 @@ class ResumeApplyDiscordRolesButton(discord.ui.Button["ResumeUpdateConfirmationV
             await interaction.response.send_message(
                 "ℹ️ No Discord role suggestions to apply.",
                 ephemeral=True,
+            )
+            _audit_apply_roles_event(
+                "denied",
+                "no_suggestions",
+                {"reason": "no_discord_role_suggestions"},
             )
             return
 
@@ -1390,6 +1456,11 @@ class ResumeApplyDiscordRolesButton(discord.ui.Button["ResumeUpdateConfirmationV
                 "⚠️ None of the suggested roles are assignable right now.",
                 ephemeral=True,
             )
+            _audit_apply_roles_event(
+                "denied",
+                "no_assignable_roles",
+                {"reason": "all_suggestions_filtered", "suggestions": suggested_roles},
+            )
             return
 
         await interaction.response.defer(thinking=True, ephemeral=True)
@@ -1412,6 +1483,15 @@ class ResumeApplyDiscordRolesButton(discord.ui.Button["ResumeUpdateConfirmationV
             await interaction.followup.send(
                 "⚠️ Failed to apply Discord roles. Verify bot permissions and try again.",
                 ephemeral=True,
+            )
+            _audit_apply_roles_event(
+                "error",
+                "role_apply_failed",
+                {
+                    "reason": "discord_http_exception",
+                    "error": str(exc),
+                    "roles_requested": [role.name for role in role_add],
+                },
             )
             return
 
@@ -1445,6 +1525,18 @@ class ResumeApplyDiscordRolesButton(discord.ui.Button["ResumeUpdateConfirmationV
         await interaction.followup.send(
             "\n".join(summary_lines),
             ephemeral=True,
+        )
+        _audit_apply_roles_event(
+            "success",
+            "apply_complete",
+            {
+                "applied": [role.name for role in role_add],
+                "already_assigned": already_assigned,
+                "missing": missing,
+                "blocked": blocked,
+                "protected": protected,
+                "summary": "\n".join(summary_lines),
+            },
         )
 
 
