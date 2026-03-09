@@ -814,7 +814,8 @@ def test_extract_retries_once_on_length_then_succeeds() -> None:
         {
             "message": _Message(
                 (
-                    '{"name":"Jane Doe", "current_title":"Senior Software Engineer", '
+                    '{"name":"Jane Doe", "firstName":"Jane", "lastName":"Doe", '
+                    '"current_title":"Senior Software Engineer", '
                     '"address_city":"Berlin", "address_country":"Germany", '
                     '"email":"jane@example.com"}'
                 )
