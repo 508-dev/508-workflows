@@ -1760,6 +1760,42 @@ def _parse_json_object(content: str) -> dict[str, Any]:
     return parsed
 
 
+def _summarize_llm_debug_value(value: Any) -> str:
+    """Return a redacted debug summary for LLM response fields."""
+    if value is None:
+        return "none"
+    if isinstance(value, str):
+        return f"str(len={len(value)})"
+    if isinstance(value, (list, tuple, set, frozenset, dict)):
+        return f"{type(value).__name__}(len={len(value)})"
+    return type(value).__name__
+
+
+def _empty_llm_content_error(response: Any) -> ValueError:
+    """Build a detailed empty-content error from a chat completion response."""
+    choices = getattr(response, "choices", None)
+    if not choices:
+        return ValueError("LLM returned empty content (response.choices empty)")
+
+    first_choice = choices[0]
+    message = getattr(first_choice, "message", None)
+    finish_reason = getattr(first_choice, "finish_reason", None)
+    if message is None:
+        return ValueError(
+            "LLM returned empty content "
+            f"(choice.message={_summarize_llm_debug_value(message)}, "
+            f"finish_reason={finish_reason!r})"
+        )
+
+    return ValueError(
+        "LLM returned empty content "
+        f"(message.content={_summarize_llm_debug_value(getattr(message, 'content', None))}, "
+        f"message.refusal={_summarize_llm_debug_value(getattr(message, 'refusal', None))}, "
+        f"message.tool_calls={_summarize_llm_debug_value(getattr(message, 'tool_calls', None))}, "
+        f"finish_reason={finish_reason!r})"
+    )
+
+
 class ResumeExtractedProfile(BaseModel):
     """Normalized profile fields extracted from resume text."""
 
@@ -1876,9 +1912,12 @@ class ResumeProfileExtractor:
                 temperature=0.1,
                 max_tokens=self.max_tokens,
             )
-            raw_content = response.choices[0].message.content
+            choices = getattr(response, "choices", None)
+            first_choice = choices[0] if choices else None
+            message = getattr(first_choice, "message", None)
+            raw_content = getattr(message, "content", None) if message else None
             if not raw_content:
-                raise ValueError("LLM returned empty content")
+                raise _empty_llm_content_error(response)
 
             parsed = _parse_json_object(raw_content)
             raw_first_name = parsed.get("firstName")

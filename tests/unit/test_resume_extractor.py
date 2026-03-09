@@ -693,6 +693,103 @@ def test_extract_preserves_raw_llm_output_on_fallback() -> None:
     assert "JSONDecodeError" in result.llm_fallback_reason
 
 
+def test_extract_reports_empty_llm_response_fields_on_fallback() -> None:
+    """Fallback reason should identify which chat completion fields were empty."""
+
+    class _FakeChatCompletions:
+        @staticmethod
+        def create(**_: object) -> object:
+            return type(
+                "Response",
+                (),
+                {
+                    "choices": [
+                        type(
+                            "Choice",
+                            (),
+                            {
+                                "finish_reason": "stop",
+                                "message": type(
+                                    "Message",
+                                    (),
+                                    {
+                                        "content": None,
+                                        "refusal": "",
+                                        "tool_calls": [],
+                                    },
+                                )(),
+                            },
+                        )()
+                    ]
+                },
+            )()
+
+    extractor = ResumeProfileExtractor(api_key="test-key")
+    extractor.client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": _FakeChatCompletions()})()},
+    )()
+
+    result = extractor.extract("Jane Doe\nSoftware Engineer\nBerlin, Germany")
+
+    assert result.source == "heuristic"
+    assert result.llm_fallback_reason is not None
+    assert "message.content=none" in result.llm_fallback_reason
+    assert "message.refusal=str(len=0)" in result.llm_fallback_reason
+    assert "message.tool_calls=list(len=0)" in result.llm_fallback_reason
+    assert "finish_reason='stop'" in result.llm_fallback_reason
+
+
+def test_extract_reports_empty_choices_on_fallback() -> None:
+    """Fallback reason should cover chat completion responses with no choices."""
+
+    class _FakeChatCompletions:
+        @staticmethod
+        def create(**_: object) -> object:
+            return type("Response", (), {"choices": []})()
+
+    extractor = ResumeProfileExtractor(api_key="test-key")
+    extractor.client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": _FakeChatCompletions()})()},
+    )()
+
+    result = extractor.extract("Jane Doe\nSoftware Engineer\nBerlin, Germany")
+
+    assert result.source == "heuristic"
+    assert result.llm_fallback_reason is not None
+    assert "response.choices empty" in result.llm_fallback_reason
+
+
+def test_extract_reports_missing_message_on_fallback() -> None:
+    """Fallback reason should cover chat completion choices without a message."""
+
+    class _FakeChatCompletions:
+        @staticmethod
+        def create(**_: object) -> object:
+            return type(
+                "Response",
+                (),
+                {"choices": [type("Choice", (), {"finish_reason": "stop"})()]},
+            )()
+
+    extractor = ResumeProfileExtractor(api_key="test-key")
+    extractor.client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": _FakeChatCompletions()})()},
+    )()
+
+    result = extractor.extract("Jane Doe\nSoftware Engineer\nBerlin, Germany")
+
+    assert result.source == "heuristic"
+    assert result.llm_fallback_reason is not None
+    assert "choice.message=none" in result.llm_fallback_reason
+    assert "finish_reason='stop'" in result.llm_fallback_reason
+
+
 def test_extract_uses_current_location_and_title_evidence_fields() -> None:
     """LLM evidence fields should backfill location and role outputs deterministically."""
 
