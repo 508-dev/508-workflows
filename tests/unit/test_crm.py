@@ -757,7 +757,8 @@ class TestCRMCog:
 
         assert modal.discord_roles_input.default == "Backend\nOperations"
 
-    def test_apply_discord_roles_button_disabled_without_linked_discord_user(
+    @pytest.mark.asyncio
+    async def test_apply_discord_roles_button_disabled_without_linked_discord_user(
         self, crm_cog
     ):
         """Apply button should be disabled if no Discord link target is available."""
