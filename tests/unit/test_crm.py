@@ -799,14 +799,17 @@ class TestCRMCog:
         """Apply Discord Roles should grant assignable roles and report status."""
 
         class _Role:
-            def __init__(self, name: str, position: int) -> None:
+            def __init__(self, name: str, position: int, role_id: int = 0) -> None:
                 self.name = name
                 self.position = position
+                self.id = role_id
 
             def __gt__(self, other: object) -> bool:
                 if not isinstance(other, _Role):
                     return False
-                return self.position > other.position
+                if self.position != other.position:
+                    return self.position > other.position
+                return self.id > other.id
 
         bot_top_role = _Role("Bot", 99)
         target_top_role = _Role("Member", 10)
