@@ -289,8 +289,6 @@ class ResumeProfileProcessor:
                     )
                 )
 
-            # Track extraction completion before user confirmation/apply step.
-            self._mark_resume_processed(contact_id)
             self._record_processing_run(
                 contact_id=contact_id,
                 attachment_id=attachment_id,
@@ -501,18 +499,18 @@ class ResumeProfileProcessor:
                 "cWebsiteLink",
                 "cSocialLinks",
             }
-            sanitized_updates: dict[str, Any] = {
+            approved_updates: dict[str, Any] = {
                 field: value
                 for field, value in normalized_updates.items()
                 if field in allowed_fields and value
             }
             parsed_skills_for_apply = self._normalize_skills_for_apply(
-                sanitized_updates.get("skills")
+                approved_updates.get("skills")
             )
             if parsed_skills_for_apply is not None:
-                sanitized_updates["skills"] = parsed_skills_for_apply
+                approved_updates["skills"] = parsed_skills_for_apply
 
-            if not sanitized_updates:
+            if not approved_updates:
                 return ResumeApplyResult(
                     contact_id=contact_id,
                     updated_fields=[],
@@ -526,13 +524,13 @@ class ResumeProfileProcessor:
                 discord_user_id = str(link_discord.get("user_id", "")).strip()
                 discord_username = str(link_discord.get("username", "")).strip()
                 if discord_user_id and discord_username:
-                    sanitized_updates["cDiscordUserID"] = discord_user_id
-                    sanitized_updates["cDiscordUsername"] = (
+                    approved_updates["cDiscordUserID"] = discord_user_id
+                    approved_updates["cDiscordUsername"] = (
                         f"{discord_username} (ID: {discord_user_id})"
                     )
                     link_applied = True
 
-            if not sanitized_updates:
+            if not approved_updates:
                 return ResumeApplyResult(
                     contact_id=contact_id,
                     updated_fields=[],
@@ -541,22 +539,28 @@ class ResumeProfileProcessor:
                     error="No valid profile fields provided",
                 )
 
+            # NOTE: cResumeLastProcessed is stored as UTC for CRM compatibility.
+            crm_update_payload = dict(approved_updates)
+            crm_update_payload["cResumeLastProcessed"] = datetime.now(
+                tz=timezone.utc
+            ).strftime("%Y-%m-%d %H:%M:%S")
+
             try:
-                self.crm.update_contact(contact_id, sanitized_updates)
+                self.crm.update_contact(contact_id, crm_update_payload)
                 verified_fields = self._verify_updated_fields(
                     contact_id=contact_id,
                     baseline_contact=pre_update_contact,
-                    candidate_fields=list(sanitized_updates.keys()),
+                    candidate_fields=list(approved_updates.keys()),
                 )
                 if verified_fields is None:
-                    verified_fields = sorted(sanitized_updates.keys())
+                    verified_fields = sorted(approved_updates.keys())
                 return ResumeApplyResult(
                     contact_id=contact_id,
                     updated_fields=verified_fields,
                     updated_values={
-                        field: sanitized_updates[field]
+                        field: approved_updates[field]
                         for field in verified_fields
-                        if field in sanitized_updates
+                        if field in approved_updates
                     },
                     link_discord_applied=link_applied,
                     success=bool(verified_fields),
@@ -571,7 +575,7 @@ class ResumeProfileProcessor:
 
             updated_fields: list[str] = []
             batch_errors: list[str] = []
-            for field, value in sanitized_updates.items():
+            for field, value in approved_updates.items():
                 try:
                     self.crm.update_contact(contact_id, {field: value})
                     updated_fields.append(field)
@@ -589,14 +593,13 @@ class ResumeProfileProcessor:
                 if verified_fields is not None:
                     updated_fields = verified_fields
 
-            if len(updated_fields) == len(sanitized_updates):
                 return ResumeApplyResult(
                     contact_id=contact_id,
                     updated_fields=sorted(updated_fields),
                     updated_values={
-                        field: sanitized_updates[field]
+                        field: approved_updates[field]
                         for field in sorted(updated_fields)
-                        if field in sanitized_updates
+                        if field in approved_updates
                     },
                     link_discord_applied=link_applied,
                     success=True,
@@ -607,9 +610,9 @@ class ResumeProfileProcessor:
                     contact_id=contact_id,
                     updated_fields=sorted(updated_fields),
                     updated_values={
-                        field: sanitized_updates[field]
+                        field: approved_updates[field]
                         for field in sorted(updated_fields)
-                        if field in sanitized_updates
+                        if field in approved_updates
                     },
                     link_discord_applied=link_applied,
                     success=False,
@@ -620,8 +623,8 @@ class ResumeProfileProcessor:
 
             return ResumeApplyResult(
                 contact_id=contact_id,
-                updated_fields=sorted(sanitized_updates.keys()),
-                updated_values=dict(sanitized_updates),
+                updated_fields=sorted(approved_updates.keys()),
+                updated_values=dict(approved_updates),
                 link_discord_applied=link_applied,
                 success=False,
                 error="; ".join(batch_errors)
@@ -1235,18 +1238,6 @@ class ResumeProfileProcessor:
             }
 
         return list(merged.values())
-
-    def _mark_resume_processed(self, contact_id: str) -> None:
-        """Best-effort update for extraction completion tracking."""
-        processed_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        try:
-            self.crm.update_contact(contact_id, {"cResumeLastProcessed": processed_at})
-        except Exception as exc:
-            logger.warning(
-                "Failed to update cResumeLastProcessed contact_id=%s error=%s",
-                contact_id,
-                exc,
-            )
 
     def _configured_model_name(self) -> str:
         """Model identity used for idempotency/ledger keys."""
