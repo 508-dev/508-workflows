@@ -62,6 +62,9 @@ ONBOARDER_FIELD_CANDIDATES = (
 _DISCORD_ROLES_PROTECTED_FROM_APPLY: frozenset[str] = frozenset(
     {"Member", "Admin", "Steering Committee"}
 )
+_DISCORD_ROLES_PROTECTED_FROM_APPLY_CASEFOLDED: frozenset[str] = frozenset(
+    name.casefold() for name in _DISCORD_ROLES_PROTECTED_FROM_APPLY
+)
 EXCLUDED_ONBOARDING_STATES = frozenset({"onboarded", "waitlist", "rejected"})
 ONBOARDING_QUEUE_MAX_SIZE = 200
 ONBOARDING_QUEUE_PAGE_SIZE = 1
@@ -1009,7 +1012,7 @@ class ResumeEditDiscordRolesModal(discord.ui.Modal, title="Edit Discord Roles"):
             if not role_name:
                 continue
             key = role_name.casefold()
-            if key in {name.casefold() for name in _DISCORD_ROLES_PROTECTED_FROM_APPLY}:
+            if key in _DISCORD_ROLES_PROTECTED_FROM_APPLY_CASEFOLDED:
                 blocked.append(role_name)
                 continue
             if key in seen:
@@ -1361,9 +1364,7 @@ class ResumeApplyDiscordRolesButton(discord.ui.Button["ResumeUpdateConfirmationV
         blocked: list[str] = []
         protected: list[str] = []
         for role_name in suggested_roles:
-            if role_name.casefold() in {
-                name.casefold() for name in _DISCORD_ROLES_PROTECTED_FROM_APPLY
-            }:
+            if role_name.casefold() in _DISCORD_ROLES_PROTECTED_FROM_APPLY_CASEFOLDED:
                 protected.append(role_name)
                 continue
             if role_name in existing:
@@ -1378,7 +1379,13 @@ class ResumeApplyDiscordRolesButton(discord.ui.Button["ResumeUpdateConfirmationV
                 continue
             role_add.append(role)
 
-        if not role_add and not already_assigned and not protected:
+        if (
+            not role_add
+            and not already_assigned
+            and not protected
+            and not missing
+            and not blocked
+        ):
             await interaction.response.send_message(
                 "⚠️ None of the suggested roles are assignable right now.",
                 ephemeral=True,
@@ -3536,9 +3543,16 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
 
         technical = [r for r in technical if r not in DISCORD_ROLES_NEVER_SUGGEST]
         locality = [r for r in locality if r not in DISCORD_ROLES_NEVER_SUGGEST]
-        protected = {name.casefold() for name in _DISCORD_ROLES_PROTECTED_FROM_APPLY}
-        technical = [r for r in technical if r.casefold() not in protected]
-        locality = [r for r in locality if r.casefold() not in protected]
+        technical = [
+            r
+            for r in technical
+            if r.casefold() not in _DISCORD_ROLES_PROTECTED_FROM_APPLY_CASEFOLDED
+        ]
+        locality = [
+            r
+            for r in locality
+            if r.casefold() not in _DISCORD_ROLES_PROTECTED_FROM_APPLY_CASEFOLDED
+        ]
 
         if current_discord_roles is not None:
             existing = {role.casefold() for role in current_discord_roles}
