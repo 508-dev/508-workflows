@@ -276,6 +276,18 @@ class TestCRMCog:
         assert "<@123456789>" in discord_link_field.value
         assert "test-user" in discord_link_field.value
 
+    def test_format_discord_link_value_escapes_username_mentions_and_markdown(self):
+        username = "@everyone **ops**"
+        expected_username = discord.utils.escape_markdown(
+            discord.utils.escape_mentions(username)
+        )
+
+        value = ResumeUpdateConfirmationView._format_discord_link_value(
+            link_discord={"user_id": "123456789", "username": username}
+        )
+
+        assert value == f"<@123456789> ({expected_username})"
+
     @pytest.mark.asyncio
     async def test_resume_apply_confirmation_groups_location_fields(self, crm_cog):
         """Applied updates should render location fields as one combined line."""

@@ -1729,7 +1729,10 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             return None
 
         mention = f"<@{user_id}>"
-        return f"{mention} ({username})" if username else mention
+        safe_username = discord.utils.escape_markdown(
+            discord.utils.escape_mentions(username)
+        )
+        return f"{mention} ({safe_username})" if username else mention
 
     def _build_apply_success_embed(
         self,
