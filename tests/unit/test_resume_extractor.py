@@ -790,6 +790,64 @@ def test_extract_reports_missing_message_on_fallback() -> None:
     assert "finish_reason='stop'" in result.llm_fallback_reason
 
 
+def test_extract_retries_once_on_length_then_succeeds() -> None:
+    """Truncated responses are retried once, and success returns extracted data."""
+
+    class _Message:
+        def __init__(self, content: str | None) -> None:
+            self.content = content
+            self.refusal = ""
+            self.tool_calls = []
+
+    first_choice = type(
+        "Choice",
+        (),
+        {
+            "message": _Message(""),
+            "finish_reason": "length",
+        },
+    )()
+
+    second_choice = type(
+        "Choice",
+        (),
+        {
+            "message": _Message(
+                (
+                    '{"name":"Jane Doe", "current_title":"Senior Software Engineer", '
+                    '"address_city":"Berlin", "address_country":"Germany", '
+                    '"email":"jane@example.com"}'
+                )
+            ),
+            "finish_reason": "stop",
+        },
+    )()
+
+    fake_completions = Mock()
+    fake_completions.create.side_effect = [
+        type("Response", (), {"choices": [first_choice]})(),
+        type("Response", (), {"choices": [second_choice]})(),
+    ]
+    extractor = ResumeProfileExtractor(api_key="test-key", max_tokens=32)
+    extractor.client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": fake_completions})()},
+    )()
+    extractor.model = "fake-model"
+
+    result = extractor.extract("Jane Doe\nSenior Software Engineer\nBerlin, Germany")
+
+    assert fake_completions.create.call_count == 2
+    assert fake_completions.create.call_args_list[0].kwargs["max_tokens"] == 32
+    assert fake_completions.create.call_args_list[1].kwargs["max_tokens"] == 64
+    assert result.first_name == "Jane"
+    assert result.last_name == "Doe"
+    assert result.current_title == "Senior Software Engineer"
+    assert result.source == "fake-model"
+    assert result.llm_fallback_reason is None
+
+
 def test_extract_uses_current_location_and_title_evidence_fields() -> None:
     """LLM evidence fields should backfill location and role outputs deterministically."""
 

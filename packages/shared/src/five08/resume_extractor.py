@@ -1886,9 +1886,9 @@ class ResumeProfileExtractor:
         raw_content: str | None = None
         parsed: dict[str, Any] | None = None
         attempt_max_tokens = self.max_tokens
-        retry_after_length = True
+        got_successful_response = False
         try:
-            while True:
+            for attempt_index in range(2):
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=[
@@ -1921,28 +1921,32 @@ class ResumeProfileExtractor:
                 raw_content = getattr(message, "content", None) if message else None
                 if not raw_content:
                     finish_reason = getattr(first_choice, "finish_reason", None)
-                    if retry_after_length and finish_reason == "length":
-                        retry_after_length = False
+                    if attempt_index == 0 and finish_reason == "length":
                         attempt_max_tokens = self.max_tokens * 2
                         continue
                     raise _empty_llm_content_error(response)
 
                 parsed = _parse_json_object(raw_content)
-                raw_first_name = parsed.get("firstName")
-                if raw_first_name is None:
-                    raw_first_name = parsed.get("first_name")
-                raw_last_name = parsed.get("lastName")
-                if raw_last_name is None:
-                    raw_last_name = parsed.get("last_name")
-                extracted_name = _normalize_name(parsed.get("name"))
-                extracted_first_name, extracted_last_name = self.split_name(
-                    full_name=extracted_name,
-                    first_name_hint=raw_first_name,
-                    last_name_hint=raw_last_name,
-                )
-                parsed_url_candidates = _extract_website_url_candidates(
-                    parsed.get("website_url_candidates")
-                )
+                got_successful_response = True
+                break
+            if not got_successful_response or parsed is None:
+                raise _empty_llm_content_error(response)
+
+            raw_first_name = parsed.get("firstName")
+            if raw_first_name is None:
+                raw_first_name = parsed.get("first_name")
+            raw_last_name = parsed.get("lastName")
+            if raw_last_name is None:
+                raw_last_name = parsed.get("last_name")
+            extracted_name = _normalize_name(parsed.get("name"))
+            extracted_first_name, extracted_last_name = self.split_name(
+                full_name=extracted_name,
+                first_name_hint=raw_first_name,
+                last_name_hint=raw_last_name,
+            )
+            parsed_url_candidates = _extract_website_url_candidates(
+                parsed.get("website_url_candidates")
+            )
             legacy_website_links = _normalize_website_links(parsed.get("website_links"))
             legacy_social_links = _normalize_website_links(parsed.get("social_links"))
             heuristic_candidates = (
