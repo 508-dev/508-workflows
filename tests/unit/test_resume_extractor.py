@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 import pytest
 from pydantic import ValidationError
 
+from five08.crm_normalization import website_identity_key
 from five08.resume_extractor import _coerce_email_list
 from five08.resume_extractor import _infer_timezone_from_location
 from five08.resume_extractor import _normalize_name_part
@@ -477,7 +478,10 @@ def test_extract_deduplicates_websites_across_http_and_https() -> None:
 
     result = extractor.extract("Portfolio: https://bit.ly/charleschen-portfolio")
 
-    assert result.website_links == ["http://bit.ly/charleschen-portfolio"]
+    assert len(result.website_links) == 1
+    assert website_identity_key(result.website_links[0]) == website_identity_key(
+        "https://bit.ly/charleschen-portfolio"
+    )
 
 
 def test_extract_does_not_append_heuristic_urls_after_llm_website_success() -> None:

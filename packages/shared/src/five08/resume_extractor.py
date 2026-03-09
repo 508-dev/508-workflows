@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from five08.crm_normalization import (
+    normalized_website_identity_key as shared_normalized_website_identity_key,
     normalize_city as shared_normalize_city,
     normalize_country as shared_normalize_country,
     normalize_role as shared_normalize_role,
@@ -1253,24 +1254,7 @@ def _normalized_host(host: str | None) -> str:
 
 
 def _website_identity_key(value: str) -> str | None:
-    normalized_url = _normalize_website_url(value)
-    if not normalized_url:
-        return None
-
-    try:
-        parsed = urlsplit(normalized_url)
-    except Exception:
-        return normalized_url.casefold()
-
-    netloc = parsed.netloc.casefold()
-    if netloc.startswith("www."):
-        netloc = netloc[4:]
-    path = re.sub(r"/+", "/", parsed.path or "").rstrip("/")
-    query = parsed.query.casefold()
-    key = f"{netloc}{path}"
-    if query:
-        key = f"{key}?{query}"
-    return key
+    return shared_normalized_website_identity_key(value)
 
 
 def _host_matches_domain(host: str | None, domain: str) -> bool:

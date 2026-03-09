@@ -5,15 +5,14 @@ from __future__ import annotations
 import ast
 import json
 import logging
-import re
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlsplit
 
 from five08.clients.espo import EspoAPIError, EspoClient
 from five08.crm_normalization import (
     ROLE_NORMALIZATION_MAP,
+    normalized_website_identity_key,
     normalize_city,
     normalize_country,
     normalize_role,
@@ -1045,7 +1044,7 @@ class ResumeProfileProcessor:
             normalized_link = self._normalize_website_url(raw_value.strip())
             if normalized_link is None:
                 continue
-            dedupe_key = self._website_dedupe_key(normalized_link)
+            dedupe_key = normalized_website_identity_key(normalized_link)
             if dedupe_key is None or dedupe_key in seen:
                 continue
             seen.add(dedupe_key)
@@ -1065,7 +1064,7 @@ class ResumeProfileProcessor:
             normalized = self._normalize_website_url(value)
             if not normalized:
                 continue
-            dedupe_key = self._website_dedupe_key(normalized)
+            dedupe_key = normalized_website_identity_key(normalized)
             if dedupe_key is None or dedupe_key in seen:
                 continue
             seen.add(dedupe_key)
@@ -1077,7 +1076,7 @@ class ResumeProfileProcessor:
             normalized = self._normalize_website_url(value)
             if not normalized:
                 continue
-            dedupe_key = self._website_dedupe_key(normalized)
+            dedupe_key = normalized_website_identity_key(normalized)
             if dedupe_key is None or dedupe_key in seen:
                 continue
             seen.add(dedupe_key)
@@ -1088,27 +1087,6 @@ class ResumeProfileProcessor:
     @staticmethod
     def _normalize_website_url(value: str) -> str | None:
         return normalize_website_url(value, allow_scheme_less=True)
-
-    @staticmethod
-    def _website_dedupe_key(value: str) -> str | None:
-        normalized = normalize_website_url(value, allow_scheme_less=True)
-        if normalized is None:
-            return None
-
-        try:
-            parsed = urlsplit(normalized)
-        except Exception:
-            return normalized.casefold()
-
-        netloc = parsed.netloc.casefold()
-        if netloc.startswith("www."):
-            netloc = netloc[4:]
-        path = re.sub(r"/+", "/", parsed.path or "").rstrip("/")
-        query = parsed.query.casefold()
-        key = f"{netloc}{path}"
-        if query:
-            key = f"{key}?{query}"
-        return key
 
     def _normalize_email_address(self, value: Any) -> str | None:
         if not isinstance(value, str):

@@ -707,3 +707,36 @@ def normalize_website_url(
     elif normalized.startswith("http://www."):
         normalized = normalized.replace("http://www.", "http://", 1)
     return normalized
+
+
+def normalized_website_identity_key(normalized_url: str) -> str | None:
+    try:
+        parsed = urlsplit(normalized_url)
+    except Exception:
+        return normalized_url.casefold()
+
+    netloc = parsed.netloc.casefold()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    path = re.sub(r"/+", "/", parsed.path or "").rstrip("/").casefold()
+    query = parsed.query.casefold()
+    key = f"{netloc}{path}"
+    if query:
+        key = f"{key}?{query}"
+    return key
+
+
+def website_identity_key(
+    value: str,
+    *,
+    allow_scheme_less: bool = True,
+    disallowed_host_predicate: Callable[[str], bool] | None = None,
+) -> str | None:
+    normalized = normalize_website_url(
+        value,
+        allow_scheme_less=allow_scheme_less,
+        disallowed_host_predicate=disallowed_host_predicate,
+    )
+    if normalized is None:
+        return None
+    return normalized_website_identity_key(normalized)

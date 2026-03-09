@@ -9,6 +9,7 @@ from five08.crm_normalization import (
     normalize_state,
     normalize_timezone,
     normalize_website_url,
+    website_identity_key,
 )
 
 
@@ -44,6 +45,12 @@ def test_normalize_website_url_respects_disallowed_host_predicate() -> None:
             disallowed_host_predicate=lambda host: host.casefold() == "node.js",
         )
         is None
+    )
+
+
+def test_website_identity_key_ignores_scheme_and_path_casing() -> None:
+    assert website_identity_key("http://Example.com/About") == website_identity_key(
+        "https://example.com/about/"
     )
 
 
