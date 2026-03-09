@@ -23,6 +23,7 @@ from discord.ext import commands
 from five08.discord_bot.config import settings
 from five08.clients import espo
 from five08.document_text import document_file_extension, extract_document_text
+from five08.crm_normalization import normalize_roles
 from five08.resume_extractor import (
     ResumeExtractedProfile,
     ResumeProfileExtractor,
@@ -897,6 +898,49 @@ class ResumeEditSkillsModal(discord.ui.Modal, title="Edit Skills"):
         )
 
 
+class ResumeEditRolesModal(discord.ui.Modal, title="Edit Roles"):
+    """Modal for editing proposed roles before confirmation."""
+
+    roles_input: discord.ui.TextInput = discord.ui.TextInput(
+        label="Roles (one per line)",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=1000,
+    )
+
+    def __init__(self, *, confirmation_view: "ResumeUpdateConfirmationView") -> None:
+        super().__init__()
+        self.confirmation_view = confirmation_view
+        normalized = confirmation_view._normalize_roles_value(
+            confirmation_view.proposed_updates.get("cRoles")
+        )
+        default = "\n".join(normalized)
+        self.roles_input.default = default
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        raw = self.roles_input.value or ""
+        cleaned = [
+            line.strip() for line in raw.replace(",", "\n").splitlines() if line.strip()
+        ]
+        normalized_roles = normalize_roles(cleaned)
+
+        if normalized_roles:
+            self.confirmation_view.proposed_updates["cRoles"] = normalized_roles
+            count = len(normalized_roles)
+            await interaction.response.send_message(
+                f"✅ Roles updated to {count} role{'s' if count != 1 else ''}. "
+                "Click **Confirm Updates** to apply.",
+                ephemeral=True,
+            )
+            return
+
+        self.confirmation_view.proposed_updates.pop("cRoles", None)
+        await interaction.response.send_message(
+            "✅ Roles updates cleared. Click **Confirm Updates** to apply.",
+            ephemeral=True,
+        )
+
+
 class ResumeEditLocationModal(discord.ui.Modal, title="Edit Location"):
     """Modal for editing proposed location fields before confirmation."""
 
@@ -1072,6 +1116,28 @@ class ResumeEditSkillsButton(discord.ui.Button["ResumeUpdateConfirmationView"]):
         )
 
 
+class ResumeEditRolesButton(discord.ui.Button["ResumeUpdateConfirmationView"]):
+    """Button that opens the Edit Roles modal."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            label="Edit Roles",
+            style=discord.ButtonStyle.secondary,
+            custom_id="resume_edit_roles",
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if not isinstance(view, ResumeUpdateConfirmationView):
+            await interaction.response.send_message(
+                "❌ Unable to edit roles.", ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(
+            ResumeEditRolesModal(confirmation_view=view)
+        )
+
+
 class ResumeEditLocationButton(discord.ui.Button["ResumeUpdateConfirmationView"]):
     """Button that opens the Edit Location modal."""
 
@@ -1158,6 +1224,8 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             self.add_item(ResumeEditSocialLinksButton())
         if proposed_updates.get("skills") or proposed_updates.get("cSkillAttrs"):
             self.add_item(ResumeEditSkillsButton())
+        if proposed_updates.get("cRoles"):
+            self.add_item(ResumeEditRolesButton())
         self.add_item(ResumeEditLocationButton())
 
     def _set_seniority_override(self, value: str) -> str:
@@ -1463,6 +1531,18 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         else:
             raw_skills = []
         return normalize_skill_list(raw_skills)
+
+    @staticmethod
+    def _normalize_roles_value(value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return normalize_roles(value)
+        if isinstance(value, (list, tuple, set)):
+            return normalize_roles(
+                [str(item).strip() for item in value if item is not None]
+            )
+        return []
 
     @classmethod
     def _parse_skill_strengths(cls, value: Any) -> dict[str, int]:

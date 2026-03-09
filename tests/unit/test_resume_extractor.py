@@ -1112,6 +1112,16 @@ def test_extract_roles_does_not_treat_non_software_engineer_as_developer() -> No
     assert "developer" not in roles
 
 
+def test_infer_roles_does_not_treat_design_verbs_as_designer() -> None:
+    """Action-language design wording should not infer the explicit designer role."""
+    roles = ResumeProfileExtractor._infer_roles_from_resume(
+        "Experience\nMarketing Manager at Example Inc\nDesigned and executed seasonal events "
+        "and promotional campaigns.\nRelational Database Design."
+    )
+
+    assert "designer" not in roles
+
+
 def test_extract_roles_ignores_collaboration_narrative_false_positive() -> None:
     """Narrative collaborator mentions should not infer candidate role."""
     roles = ResumeProfileExtractor._infer_roles_from_resume(

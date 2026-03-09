@@ -25,6 +25,8 @@ from five08.discord_bot.cogs.crm import (
     ResumeEditSocialLinksModal,
     ResumeEditSkillsButton,
     ResumeEditSkillsModal,
+    ResumeEditRolesButton,
+    ResumeEditRolesModal,
     _extract_parsed_seniority,
     _format_seniority_label,
 )
@@ -538,6 +540,36 @@ class TestCRMCog:
         )
 
     @pytest.mark.asyncio
+    async def test_resume_update_view_adds_roles_button_when_roles_proposed(
+        self, crm_cog
+    ):
+        """Edit Roles button should appear when cRoles is in proposed updates."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={"cRoles": ["developer"]},
+        )
+
+        assert any(isinstance(child, ResumeEditRolesButton) for child in view.children)
+
+    @pytest.mark.asyncio
+    async def test_resume_update_view_no_roles_button_without_roles(self, crm_cog):
+        """Edit Roles button should not appear when cRoles is absent."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+        )
+
+        assert not any(
+            isinstance(child, ResumeEditRolesButton) for child in view.children
+        )
+
+    @pytest.mark.asyncio
     async def test_edit_websites_modal_prepopulates_list_values(self, crm_cog):
         """Edit Websites modal should pre-fill with proposed website list, one per line."""
         view = ResumeUpdateConfirmationView(
@@ -619,6 +651,21 @@ class TestCRMCog:
         assert modal.skills_input.default == "python: 5\ngo\nrust: 4"
 
     @pytest.mark.asyncio
+    async def test_edit_roles_modal_prepopulates_list_values(self, crm_cog):
+        """Edit Roles modal should pre-fill with proposed roles, one per line."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={"cRoles": ["developer", "marketing"]},
+        )
+
+        modal = ResumeEditRolesModal(confirmation_view=view)
+
+        assert modal.roles_input.default == "developer\nmarketing"
+
+    @pytest.mark.asyncio
     async def test_edit_websites_modal_submit_updates_proposed(
         self, crm_cog, mock_interaction
     ):
@@ -639,6 +686,26 @@ class TestCRMCog:
             "https://new.com",
             "https://other.com",
         ]
+        mock_interaction.response.send_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_edit_roles_modal_submit_updates_proposed(
+        self, crm_cog, mock_interaction
+    ):
+        """Submitting the Edit Roles modal should replace proposed cRoles."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={"cRoles": ["developer"]},
+        )
+        modal = ResumeEditRolesModal(confirmation_view=view)
+        modal.roles_input._value = "developer,marketing"
+
+        await modal.on_submit(mock_interaction)
+
+        assert view.proposed_updates["cRoles"] == ["developer", "marketing"]
         mock_interaction.response.send_message.assert_called_once()
 
     @pytest.mark.asyncio
@@ -779,6 +846,25 @@ class TestCRMCog:
         await modal.on_submit(mock_interaction)
 
         assert "cSocialLinks" not in view.proposed_updates
+
+    @pytest.mark.asyncio
+    async def test_edit_roles_modal_submit_removes_field_when_blank(
+        self, crm_cog, mock_interaction
+    ):
+        """Clearing roles in the modal should remove proposed cRoles."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={"cRoles": ["developer"]},
+        )
+        modal = ResumeEditRolesModal(confirmation_view=view)
+        modal.roles_input._value = "   \n  \n  "
+
+        await modal.on_submit(mock_interaction)
+
+        assert "cRoles" not in view.proposed_updates
 
     @pytest.mark.asyncio
     async def test_edit_location_modal_submit_removes_fields_when_blank(
@@ -1038,6 +1124,28 @@ class TestCRMCog:
         mock_interaction.response.send_modal.assert_called_once()
         modal_arg = mock_interaction.response.send_modal.call_args[0][0]
         assert isinstance(modal_arg, ResumeEditSocialLinksModal)
+
+    @pytest.mark.asyncio
+    async def test_edit_roles_button_callback_opens_modal(
+        self, crm_cog, mock_interaction
+    ):
+        """Edit Roles button callback should open the roles modal."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={"cRoles": ["developer"]},
+        )
+        button = next(
+            child for child in view.children if isinstance(child, ResumeEditRolesButton)
+        )
+
+        await button.callback(mock_interaction)
+
+        mock_interaction.response.send_modal.assert_called_once()
+        modal_arg = mock_interaction.response.send_modal.call_args[0][0]
+        assert isinstance(modal_arg, ResumeEditRolesModal)
 
     @pytest.mark.asyncio
     async def test_edit_location_button_callback_opens_modal(
