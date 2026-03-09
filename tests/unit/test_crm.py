@@ -422,6 +422,46 @@ class TestCRMCog:
         )
 
     @pytest.mark.asyncio
+    async def test_resume_update_view_seniority_select_last_with_buttons_first(
+        self, crm_cog
+    ):
+        """Seniority override select should be last input while other controls stay buttons."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={
+                "cWebsiteLink": ["https://example.com"],
+                "cSocialLinks": ["https://example.com/social"],
+                "skills": ["python"],
+                "cRoles": ["developer"],
+                "addressCity": "Nanzih",
+            },
+            discord_role_suggestions=["Backend"],
+            parsed_seniority="senior",
+        )
+
+        interactive_children = [
+            child
+            for child in view.children
+            if isinstance(child, (discord.ui.Button, discord.ui.Select))
+        ]
+        override_index = next(
+            idx
+            for idx, child in enumerate(interactive_children)
+            if isinstance(child, ResumeSeniorityOverrideSelect)
+        )
+        button_indices = [
+            idx
+            for idx, child in enumerate(interactive_children)
+            if isinstance(child, discord.ui.Button)
+        ]
+
+        assert override_index == len(interactive_children) - 1
+        assert all(idx < override_index for idx in button_indices)
+
+    @pytest.mark.asyncio
     async def test_resume_update_view_sets_seniority_override(self, crm_cog):
         """Seniority override should update the proposed CRM payload."""
         view = ResumeUpdateConfirmationView(

@@ -1620,13 +1620,6 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         )
         self.seniority_override: str | None = None
 
-        if parsed_seniority:
-            self.add_item(
-                ResumeSeniorityOverrideSelect(
-                    parsed_seniority=parsed_seniority,
-                )
-            )
-
         if proposed_updates.get("cWebsiteLink"):
             self.add_item(ResumeEditWebsitesButton())
         if proposed_updates.get("cSocialLinks"):
@@ -1639,6 +1632,13 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             self.add_item(ResumeEditDiscordRolesButton())
             self.add_item(ResumeApplyDiscordRolesButton())
         self.add_item(ResumeEditLocationButton())
+
+        if parsed_seniority:
+            self.add_item(
+                ResumeSeniorityOverrideSelect(
+                    parsed_seniority=parsed_seniority,
+                )
+            )
 
     def _set_seniority_override(self, value: str) -> str:
         self.seniority_override = value
