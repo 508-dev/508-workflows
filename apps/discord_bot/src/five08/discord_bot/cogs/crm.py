@@ -471,7 +471,7 @@ class ReprocessResumeSelectionButton(discord.ui.Button["ReprocessResumeSelection
 
             await interaction.response.defer(ephemeral=True)
             if self.has_resume:
-                await self.view.crm_cog._prompt_reprocess_resume_confirmation(
+                await self.view.crm_cog._start_resume_reprocess_from_contact(
                     interaction=interaction,
                     contact=self.contact,
                     search_term=self.view.search_term,
@@ -6927,6 +6927,53 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             ephemeral=True,
         )
 
+    async def _start_resume_reprocess_from_contact(
+        self,
+        interaction: discord.Interaction,
+        contact: dict[str, Any],
+        search_term: str,
+    ) -> None:
+        """Start resume reprocessing for a selected contact without extra confirmation."""
+        raw_contact_id = contact.get("id")
+        contact_id = str(raw_contact_id).strip() if raw_contact_id is not None else ""
+        if not contact_id:
+            self._audit_command(
+                interaction=interaction,
+                action="crm.reprocess_resume",
+                result="error",
+                metadata={
+                    "search_term": search_term,
+                    "reason": "contact_id_missing",
+                },
+            )
+            await interaction.followup.send("❌ Contact ID not found.")
+            return
+
+        contact_name = str(contact.get("name", "Unknown"))
+        (
+            attachment_id,
+            filename,
+        ) = await self._get_latest_resume_attachment_for_contact(contact_id)
+        if not attachment_id:
+            await self._prompt_upload_resume_for_contact(
+                interaction=interaction,
+                contact=contact,
+                search_term=search_term,
+            )
+            return
+
+        display_filename = filename or "latest resume"
+        await self._run_resume_extract_and_preview(
+            interaction=interaction,
+            contact_id=contact_id,
+            contact_name=contact_name,
+            attachment_id=attachment_id,
+            filename=display_filename,
+            link_member=None,
+            action="crm.reprocess_resume",
+            status_message="🔄 Reprocessing resume and extracting profile fields now...",
+        )
+
     async def _prompt_upload_resume_for_contact(
         self,
         interaction: discord.Interaction,
@@ -8794,7 +8841,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                         )
                         return
                     await interaction.response.defer(ephemeral=True)
-                    await self.crm_cog._prompt_reprocess_resume_confirmation(
+                    await self.crm_cog._start_resume_reprocess_from_contact(
                         interaction=interaction,
                         contact=contact,
                         search_term="bulk_missing_fields",
