@@ -59,6 +59,9 @@ ONBOARDER_FIELD_CANDIDATES = (
     "cOnboarder",
     "cOnboardingCoordinator",
 )
+_DISCORD_ROLES_PROTECTED_FROM_APPLY: frozenset[str] = frozenset(
+    {"Member", "Admin", "Steering Committee"}
+)
 EXCLUDED_ONBOARDING_STATES = frozenset({"onboarded", "waitlist", "rejected"})
 ONBOARDING_QUEUE_MAX_SIZE = 200
 ONBOARDING_QUEUE_PAGE_SIZE = 1
@@ -979,6 +982,68 @@ class ResumeEditRolesModal(discord.ui.Modal, title="Edit Roles"):
         )
 
 
+class ResumeEditDiscordRolesModal(discord.ui.Modal, title="Edit Discord Roles"):
+    """Modal for editing suggested Discord roles before applying."""
+
+    discord_roles_input: discord.ui.TextInput = discord.ui.TextInput(
+        label="Discord Roles (one per line)",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=1000,
+    )
+
+    def __init__(self, *, confirmation_view: "ResumeUpdateConfirmationView") -> None:
+        super().__init__()
+        self.confirmation_view = confirmation_view
+        self.discord_roles_input.default = "\n".join(
+            confirmation_view.discord_role_suggestions
+        )
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        raw = self.discord_roles_input.value or ""
+        normalized: list[str] = []
+        blocked: list[str] = []
+        seen: set[str] = set()
+        for role in raw.splitlines():
+            role_name = role.strip()
+            if not role_name:
+                continue
+            key = role_name.casefold()
+            if key in {name.casefold() for name in _DISCORD_ROLES_PROTECTED_FROM_APPLY}:
+                blocked.append(role_name)
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(role_name)
+
+        self.confirmation_view.discord_role_suggestions = normalized
+        for item in self.confirmation_view.children:
+            if isinstance(item, ResumeApplyDiscordRolesButton):
+                item.disabled = not bool(normalized)
+
+        if normalized:
+            count = len(normalized)
+            await interaction.response.send_message(
+                f"✅ Discord roles updated to {count} role{'s' if count != 1 else ''}.",
+                ephemeral=True,
+            )
+            return
+
+        if blocked:
+            await interaction.response.send_message(
+                "✅ No assignable Discord roles specified. "
+                "Protected roles (Member, Admin, Steering Committee) cannot be added.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message(
+            "✅ Discord role suggestions cleared. Add roles above to enable apply.",
+            ephemeral=True,
+        )
+
+
 class ResumeEditLocationModal(discord.ui.Modal, title="Edit Location"):
     """Modal for editing proposed location fields before confirmation."""
 
@@ -1176,6 +1241,206 @@ class ResumeEditRolesButton(discord.ui.Button["ResumeUpdateConfirmationView"]):
         )
 
 
+class ResumeEditDiscordRolesButton(discord.ui.Button["ResumeUpdateConfirmationView"]):
+    """Button that opens the Discord role editor modal."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            label="Edit Discord Roles",
+            style=discord.ButtonStyle.secondary,
+            custom_id="resume_edit_discord_roles",
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if not isinstance(view, ResumeUpdateConfirmationView):
+            await interaction.response.send_message(
+                "❌ Unable to edit Discord roles.", ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(
+            ResumeEditDiscordRolesModal(confirmation_view=view)
+        )
+
+
+class ResumeApplyDiscordRolesButton(discord.ui.Button["ResumeUpdateConfirmationView"]):
+    """Button that applies suggested Discord roles to the linked member."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            label="Apply Discord Roles",
+            style=discord.ButtonStyle.success,
+            custom_id="resume_apply_discord_roles",
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if not isinstance(view, ResumeUpdateConfirmationView):
+            await interaction.response.send_message(
+                "❌ Unable to apply Discord roles.", ephemeral=True
+            )
+            return
+
+        if not interaction.guild:
+            await interaction.response.send_message(
+                "❌ Discord roles can only be managed inside a server.",
+                ephemeral=True,
+            )
+            return
+
+        target_user_id = view.discord_role_target_user_id
+        if not target_user_id and isinstance(view.link_discord, dict):
+            target_user_id = view.link_discord.get("user_id")
+        if not target_user_id:
+            await interaction.response.send_message(
+                "❌ No linked Discord user found for role assignment.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            target_user_id_int = int(target_user_id)
+        except (TypeError, ValueError):
+            await interaction.response.send_message(
+                "❌ Invalid linked Discord user ID.", ephemeral=True
+            )
+            return
+
+        target_member = interaction.guild.get_member(target_user_id_int)
+        if not target_member:
+            try:
+                target_member = await interaction.guild.fetch_member(target_user_id_int)
+            except Exception:
+                target_member = None
+        if not target_member:
+            await interaction.response.send_message(
+                "❌ Linked Discord user is not in this server.",
+                ephemeral=True,
+            )
+            return
+
+        bot_member = interaction.guild.me
+        if not bot_member:
+            await interaction.response.send_message(
+                "❌ Unable to resolve bot member for role validation.",
+                ephemeral=True,
+            )
+            return
+
+        if not bot_member.guild_permissions.manage_roles:
+            await interaction.response.send_message(
+                "❌ Bot missing **Manage Roles** permission.",
+                ephemeral=True,
+            )
+            return
+
+        if not (bot_member.top_role > target_member.top_role):
+            await interaction.response.send_message(
+                "❌ Bot role position is not high enough to edit this member.",
+                ephemeral=True,
+            )
+            return
+
+        suggested_roles = view.discord_role_suggestions
+        if not suggested_roles:
+            await interaction.response.send_message(
+                "ℹ️ No Discord role suggestions to apply.",
+                ephemeral=True,
+            )
+            return
+
+        guild_roles: list[discord.Role] = list(interaction.guild.roles)
+        name_to_role: dict[str, discord.Role] = {
+            role.name: role for role in guild_roles
+        }
+        existing = {role.name for role in target_member.roles}
+
+        role_add: list[discord.Role] = []
+        already_assigned: list[str] = []
+        missing: list[str] = []
+        blocked: list[str] = []
+        protected: list[str] = []
+        for role_name in suggested_roles:
+            if role_name.casefold() in {
+                name.casefold() for name in _DISCORD_ROLES_PROTECTED_FROM_APPLY
+            }:
+                protected.append(role_name)
+                continue
+            if role_name in existing:
+                already_assigned.append(role_name)
+                continue
+            role = name_to_role.get(role_name)
+            if not role:
+                missing.append(role_name)
+                continue
+            if not (bot_member.top_role > role):
+                blocked.append(role_name)
+                continue
+            role_add.append(role)
+
+        if not role_add and not already_assigned and not protected:
+            await interaction.response.send_message(
+                "⚠️ None of the suggested roles are assignable right now.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        try:
+            if role_add:
+                await target_member.add_roles(
+                    *role_add,
+                    reason=(
+                        f"Resume role suggestions applied via bot for "
+                        f"contact {view.contact_id}"
+                    ),
+                )
+        except discord.HTTPException as exc:
+            logger.error(
+                "Failed to apply Discord roles for contact_id=%s user=%s: %s",
+                view.contact_id,
+                target_user_id_int,
+                exc,
+            )
+            await interaction.followup.send(
+                "⚠️ Failed to apply Discord roles. Verify bot permissions and try again.",
+                ephemeral=True,
+            )
+            return
+
+        if role_add:
+            for item in view.children:
+                if isinstance(item, ResumeApplyDiscordRolesButton):
+                    item.disabled = True
+
+            if interaction.message:
+                try:
+                    await interaction.message.edit(view=view)
+                except discord.HTTPException as exc:
+                    logger.warning("Failed to update role apply button: %s", exc)
+
+        summary_lines: list[str] = []
+        if role_add:
+            summary_lines.append(
+                f"✅ Applied: {', '.join(role.name for role in role_add)}"
+            )
+        else:
+            summary_lines.append("✅ No new roles to apply.")
+        if already_assigned:
+            summary_lines.append(f"Already present: {', '.join(already_assigned)}")
+        if missing:
+            summary_lines.append(f"Not found: {', '.join(missing)}")
+        if blocked:
+            summary_lines.append(f"Blocked by hierarchy: {', '.join(blocked)}")
+        if protected:
+            summary_lines.append(f"Protected roles blocked: {', '.join(protected)}")
+
+        await interaction.followup.send(
+            "\n".join(summary_lines),
+            ephemeral=True,
+        )
+
+
 class ResumeEditLocationButton(discord.ui.Button["ResumeUpdateConfirmationView"]):
     """Button that opens the Edit Location modal."""
 
@@ -1210,6 +1475,7 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         "emailAddressData": "Email Address",
         "cRoles": "Roles",
         "cGitHubUsername": "GitHub",
+        "description": "Description",
         "phoneNumber": "Phone",
         "skills": "Skills",
         "cSkillAttrs": "Skill Strengths",
@@ -1238,6 +1504,8 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         proposed_updates: dict[str, Any],
         link_discord: dict[str, str] | None = None,
         parsed_seniority: str | None = None,
+        discord_role_suggestions: list[str] | None = None,
+        discord_role_target_user_id: str | None = None,
     ) -> None:
         super().__init__(timeout=300)
         self.crm_cog = crm_cog
@@ -1247,6 +1515,10 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         self.proposed_updates = proposed_updates
         self.link_discord = link_discord
         self.parsed_seniority = parsed_seniority
+        self.discord_role_target_user_id = discord_role_target_user_id
+        self.discord_role_suggestions = list(
+            dict.fromkeys(discord_role_suggestions or [])
+        )
         self.seniority_override: str | None = None
 
         if parsed_seniority:
@@ -1264,6 +1536,9 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             self.add_item(ResumeEditSkillsButton())
         if proposed_updates.get("cRoles"):
             self.add_item(ResumeEditRolesButton())
+        if self.discord_role_suggestions:
+            self.add_item(ResumeEditDiscordRolesButton())
+            self.add_item(ResumeApplyDiscordRolesButton())
         self.add_item(ResumeEditLocationButton())
 
     def _set_seniority_override(self, value: str) -> str:
@@ -3116,39 +3391,14 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     ),
                     inline=False,
                 )
-            raw_llm_output = extracted_profile.get("raw_llm_output")
-            raw_llm_json = extracted_profile.get("raw_llm_json")
             llm_fallback_reason = extracted_profile.get("llm_fallback_reason")
-            if raw_llm_output or raw_llm_json or llm_fallback_reason:
-                debug_value = (
-                    "Attached raw extraction payload: `resume-extract-debug.json`"
-                )
-                if llm_fallback_reason:
-                    debug_value += "\n" + truncate_field_value(
-                        f"Fallback: {llm_fallback_reason}",
-                        limit=180,
-                    )
+            if llm_fallback_reason:
                 embed.add_field(
                     name="Debug",
-                    value=truncate_field_value(debug_value),
+                    value=truncate_field_value(f"Fallback: {llm_fallback_reason}"),
                     inline=False,
                 )
             evidence_lines: list[str] = []
-            current_title = str(extracted_profile.get("current_title") or "").strip()
-            if current_title:
-                evidence_lines.append(
-                    f"Title: `{truncate_preview_value(current_title, label='title')}`"
-                )
-            recent_titles = extracted_profile.get("recent_titles")
-            if isinstance(recent_titles, list) and recent_titles:
-                formatted_recent_titles = ", ".join(
-                    str(item).strip() for item in recent_titles[:3] if str(item).strip()
-                )
-                if formatted_recent_titles:
-                    evidence_lines.append(
-                        "Recent titles: "
-                        f"`{truncate_preview_value(formatted_recent_titles, label='title')}`"
-                    )
             current_location_raw = str(
                 extracted_profile.get("current_location_raw") or ""
             ).strip()
@@ -3170,12 +3420,6 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 evidence_lines.append(
                     "Location evidence: "
                     f"`{truncate_preview_value(current_location_evidence, label='location evidence')}`"
-                )
-            role_rationale = str(extracted_profile.get("role_rationale") or "").strip()
-            if role_rationale:
-                evidence_lines.append(
-                    "Role rationale: "
-                    f"`{truncate_preview_value(role_rationale, label='role rationale')}`"
                 )
             if evidence_lines:
                 embed.add_field(
@@ -3250,34 +3494,67 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             filename="resume-extract-debug.json",
         )
 
+    @staticmethod
+    def _build_discord_role_suggestions(
+        extracted_profile: dict[str, Any],
+        current_discord_roles: list[str] | None = None,
+    ) -> tuple[list[str], list[str]]:
+        skills = extracted_profile.get("skills") or []
+        primary_roles = extracted_profile.get("primary_roles") or []
+        country = extracted_profile.get("address_country") or extracted_profile.get(
+            "addressCountry"
+        )
+
+        if not isinstance(skills, (list, tuple, set)):
+            skills = []
+        if not isinstance(primary_roles, (list, tuple, set)):
+            primary_roles = []
+
+        if isinstance(country, (list, tuple, set)):
+            country = next(
+                (
+                    entry
+                    for entry in country
+                    if isinstance(entry, str) and entry.strip()
+                ),
+                None,
+            )
+        if not isinstance(country, str):
+            country = None
+
+        technical = suggest_technical_discord_roles(
+            [str(role).strip() for role in skills],
+            [str(role).strip() for role in primary_roles],
+        )
+        locality = suggest_locality_discord_roles(country)
+
+        technical = [r for r in technical if r not in DISCORD_ROLES_NEVER_SUGGEST]
+        locality = [r for r in locality if r not in DISCORD_ROLES_NEVER_SUGGEST]
+        protected = {name.casefold() for name in _DISCORD_ROLES_PROTECTED_FROM_APPLY}
+        technical = [r for r in technical if r.casefold() not in protected]
+        locality = [r for r in locality if r.casefold() not in protected]
+
+        if current_discord_roles is not None:
+            existing = {role.casefold() for role in current_discord_roles}
+            technical = [r for r in technical if r.casefold() not in existing]
+            locality = [r for r in locality if r.casefold() not in existing]
+
+        return technical, locality
+
     def _build_role_suggestions_embed(
         self,
         *,
         contact_name: str,
-        extracted_profile: dict[str, Any],
-        current_discord_roles: list[str] | None = None,
+        technical_roles: list[str],
+        locality_roles: list[str],
     ) -> discord.Embed | None:
         """Build a separate embed suggesting Discord roles to add based on resume data.
 
         Only ever suggests additions — roles are never removed.
         Never suggests roles in DISCORD_ROLES_NEVER_SUGGEST.
         """
-        skills: list[str] = extracted_profile.get("skills") or []
-        primary_roles: list[str] = extracted_profile.get("primary_roles") or []
-        country: str | None = extracted_profile.get("address_country")
-
-        technical = suggest_technical_discord_roles(skills, primary_roles)
-        locality = suggest_locality_discord_roles(country)
-
-        # Filter roles that should never be suggested
-        technical = [r for r in technical if r not in DISCORD_ROLES_NEVER_SUGGEST]
-        locality = [r for r in locality if r not in DISCORD_ROLES_NEVER_SUGGEST]
-
-        # If we know the member's current roles, only show missing ones
-        if current_discord_roles is not None:
-            existing = set(current_discord_roles)
-            technical = [r for r in technical if r not in existing]
-            locality = [r for r in locality if r not in existing]
+        technical = technical_roles
+        locality = locality_roles
 
         if not technical and not locality:
             return None
@@ -3486,6 +3763,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
 
         # Build role suggestions embed for reprocess actions or uploads with a linked user.
         role_suggestions_embed: discord.Embed | None = None
+        suggested_discord_roles: list[str] = []
+        discord_role_target_user_id: str | None = None
         if action_name == "crm.reprocess_resume" or (
             action_name == "crm.upload_resume" and link_member
         ):
@@ -3498,6 +3777,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                         settings,
                         contact_id,
                     )
+                    if discord_user_id:
+                        discord_role_target_user_id = str(discord_user_id)
                     if discord_user_id and interaction.guild:
                         guild_member = interaction.guild.get_member(
                             int(discord_user_id)
@@ -3510,19 +3791,61 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                         exc,
                     )
             elif link_member:
+                discord_role_target_user_id = str(link_member.id)
                 try:
                     current_discord_roles = [r.name for r in link_member.roles]
                 except Exception as exc:
                     logger.warning(
                         "Could not read linked member roles for suggestions: %s", exc
                     )
+            technical_suggestions, locality_suggestions = (
+                self._build_discord_role_suggestions(
+                    extracted_profile=extracted_profile,
+                    current_discord_roles=current_discord_roles,
+                )
+            )
+            suggested_discord_roles = list(
+                dict.fromkeys(technical_suggestions + locality_suggestions)
+            )
             role_suggestions_embed = self._build_role_suggestions_embed(
                 contact_name=contact_name,
-                extracted_profile=extracted_profile,
-                current_discord_roles=current_discord_roles,
+                technical_roles=technical_suggestions,
+                locality_roles=locality_suggestions,
             )
 
         if not proposed_updates and not link_member and not parsed_seniority:
+            if role_suggestions_embed is None:
+                if action_name != "crm.reprocess_resume":
+                    self._audit_command(
+                        interaction=interaction,
+                        action=action_name,
+                        result="success",
+                        metadata={
+                            "filename": filename,
+                            "attachment_id": attachment_id,
+                            "job_id": job_id,
+                            "stage": "preview_no_changes",
+                        },
+                        resource_type="crm_contact",
+                        resource_id=str(contact_id),
+                    )
+                await interaction.followup.send(
+                    embeds=[embed],
+                    file=debug_file,
+                    ephemeral=True,
+                )
+                return
+
+            view = ResumeUpdateConfirmationView(
+                crm_cog=self,
+                requester_id=interaction.user.id,
+                contact_id=contact_id,
+                contact_name=contact_name,
+                proposed_updates=proposed_updates,
+                parsed_seniority=parsed_seniority,
+                discord_role_suggestions=suggested_discord_roles,
+                discord_role_target_user_id=discord_role_target_user_id,
+            )
             if action_name != "crm.reprocess_resume":
                 self._audit_command(
                     interaction=interaction,
@@ -3532,7 +3855,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                         "filename": filename,
                         "attachment_id": attachment_id,
                         "job_id": job_id,
-                        "stage": "preview_no_changes",
+                        "stage": "preview_ready",
+                        "proposed_updates_count": len(proposed_updates),
+                        "role_suggestions_count": len(suggested_discord_roles),
                     },
                     resource_type="crm_contact",
                     resource_id=str(contact_id),
@@ -3543,6 +3868,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             await interaction.followup.send(
                 embeds=embeds,
                 file=debug_file,
+                view=view,
                 ephemeral=True,
             )
             return
@@ -3562,6 +3888,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             proposed_updates=proposed_updates,
             link_discord=link_discord_payload,
             parsed_seniority=parsed_seniority,
+            discord_role_suggestions=suggested_discord_roles,
+            discord_role_target_user_id=discord_role_target_user_id,
         )
         if action_name != "crm.reprocess_resume":
             self._audit_command(

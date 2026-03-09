@@ -27,6 +27,9 @@ from five08.discord_bot.cogs.crm import (
     ResumeEditSkillsModal,
     ResumeEditRolesButton,
     ResumeEditRolesModal,
+    ResumeApplyDiscordRolesButton,
+    ResumeEditDiscordRolesButton,
+    ResumeEditDiscordRolesModal,
     _extract_parsed_seniority,
     _format_seniority_label,
 )
@@ -370,6 +373,38 @@ class TestCRMCog:
 
         assert _extract_parsed_seniority(DummyProfile()) == "midlevel"
 
+    def test_build_discord_role_suggestions_filters_current_roles_and_blocked_terms(
+        self, crm_cog
+    ):
+        """Discord role suggestions should filter existing roles and blocked terms."""
+        extracted_profile = {
+            "skills": ["Python", "Python"],
+            "primary_roles": ["Staff Engineer"],
+            "address_country": "Taiwan",
+        }
+
+        with (
+            patch(
+                "five08.discord_bot.cogs.crm.suggest_technical_discord_roles",
+                return_value=["Backend", "Manager", "Member", "Steering Committee"],
+            ),
+            patch(
+                "five08.discord_bot.cogs.crm.suggest_locality_discord_roles",
+                return_value=["Taiwan", "Manager"],
+            ),
+            patch(
+                "five08.discord_bot.cogs.crm.DISCORD_ROLES_NEVER_SUGGEST",
+                {"Manager"},
+            ),
+        ):
+            technical, locality = crm_cog._build_discord_role_suggestions(
+                extracted_profile=extracted_profile,
+                current_discord_roles=["backend"],
+            )
+
+        assert technical == []
+        assert locality == ["Taiwan"]
+
     @pytest.mark.asyncio
     async def test_resume_update_view_adds_seniority_select(self, crm_cog):
         """Resume update view should expose a seniority override dropdown."""
@@ -570,6 +605,47 @@ class TestCRMCog:
         )
 
     @pytest.mark.asyncio
+    async def test_resume_update_view_adds_discord_roles_buttons_with_suggestions(
+        self, crm_cog
+    ):
+        """Discord roles edit/apply buttons should appear when suggestions exist."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+            discord_role_suggestions=["Backend", "Taiwan"],
+        )
+
+        assert any(
+            isinstance(child, ResumeEditDiscordRolesButton) for child in view.children
+        )
+        assert any(
+            isinstance(child, ResumeApplyDiscordRolesButton) for child in view.children
+        )
+
+    @pytest.mark.asyncio
+    async def test_resume_update_view_without_discord_role_suggestions_no_role_buttons(
+        self, crm_cog
+    ):
+        """Discord role buttons should not appear when no suggestions exist."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+        )
+
+        assert not any(
+            isinstance(child, ResumeEditDiscordRolesButton) for child in view.children
+        )
+        assert not any(
+            isinstance(child, ResumeApplyDiscordRolesButton) for child in view.children
+        )
+
+    @pytest.mark.asyncio
     async def test_edit_websites_modal_prepopulates_list_values(self, crm_cog):
         """Edit Websites modal should pre-fill with proposed website list, one per line."""
         view = ResumeUpdateConfirmationView(
@@ -664,6 +740,142 @@ class TestCRMCog:
         modal = ResumeEditRolesModal(confirmation_view=view)
 
         assert modal.roles_input.default == "developer\nmarketing"
+
+    @pytest.mark.asyncio
+    async def test_edit_discord_roles_modal_prepopulates_values(self, crm_cog):
+        """Discord Roles modal should pre-fill with suggested role list."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+            discord_role_suggestions=["Backend", "Operations"],
+        )
+
+        modal = ResumeEditDiscordRolesModal(confirmation_view=view)
+
+        assert modal.discord_roles_input.default == "Backend\nOperations"
+
+    @pytest.mark.asyncio
+    async def test_edit_discord_roles_modal_submit_updates_suggested_roles(
+        self, crm_cog
+    ):
+        """Submitting the Edit Discord Roles modal should deduplicate and update suggestions."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+            discord_role_suggestions=["Backend"],
+        )
+        modal = ResumeEditDiscordRolesModal(confirmation_view=view)
+        modal.discord_roles_input._value = (
+            "Backend\nbackend\nOperations\nSteering Committee\nAdmin\n"
+        )
+        interaction = AsyncMock()
+        interaction.response = AsyncMock()
+        interaction.response.send_message = AsyncMock()
+
+        await modal.on_submit(interaction)
+
+        assert view.discord_role_suggestions == ["Backend", "Operations"]
+        apply_button = next(
+            child
+            for child in view.children
+            if isinstance(child, ResumeApplyDiscordRolesButton)
+        )
+        assert apply_button.disabled is False
+        interaction.response.send_message.assert_called_once_with(
+            "✅ Discord roles updated to 2 roles.",
+            ephemeral=True,
+        )
+
+    @pytest.mark.asyncio
+    async def test_apply_discord_roles_button_applies_roles_and_reports_results(
+        self, crm_cog
+    ):
+        """Apply Discord Roles should grant assignable roles and report status."""
+
+        class _Role:
+            def __init__(self, name: str, position: int) -> None:
+                self.name = name
+                self.position = position
+
+            def __gt__(self, other: object) -> bool:
+                if not isinstance(other, _Role):
+                    return False
+                return self.position > other.position
+
+        bot_top_role = _Role("Bot", 99)
+        target_top_role = _Role("Member", 10)
+        backend_role = _Role("Backend", 30)
+        blocked_role = _Role("Blocked", 150)
+        manager_role = _Role("Manager", 5)
+
+        bot_member = Mock()
+        bot_member.top_role = bot_top_role
+        bot_member.guild_permissions = Mock()
+        bot_member.guild_permissions.manage_roles = True
+
+        target_member = Mock()
+        target_member.top_role = target_top_role
+        target_member.roles = [manager_role]
+        target_member.add_roles = AsyncMock()
+
+        interaction = AsyncMock()
+        interaction.guild = Mock()
+        interaction.guild.get_member = Mock(return_value=target_member)
+        interaction.guild.fetch_member = AsyncMock()
+        interaction.guild.me = bot_member
+        interaction.guild.roles = [backend_role, blocked_role, manager_role]
+        interaction.response = AsyncMock()
+        interaction.response.defer = AsyncMock()
+        interaction.response.send_message = AsyncMock()
+        interaction.followup = AsyncMock()
+        interaction.followup.send = AsyncMock()
+        interaction.message = Mock()
+        interaction.message.edit = AsyncMock()
+
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+            discord_role_suggestions=[
+                "Backend",
+                "Manager",
+                "Missing",
+                "Blocked",
+                "Member",
+                "Admin",
+                "Steering Committee",
+            ],
+            discord_role_target_user_id="1001",
+        )
+        button = next(
+            child
+            for child in view.children
+            if isinstance(child, ResumeApplyDiscordRolesButton)
+        )
+
+        await button.callback(interaction)
+
+        target_member.add_roles.assert_awaited_once()
+        called_args = target_member.add_roles.await_args.args
+        assert called_args[0].name == "Backend"
+        interaction.response.defer.assert_awaited_once_with(
+            thinking=True, ephemeral=True
+        )
+        interaction.message.edit.assert_awaited_once_with(view=view)
+        summary = interaction.followup.send.call_args.args[0]
+        assert "✅ Applied: Backend" in summary
+        assert "Already present: Manager" in summary
+        assert "Not found: Missing" in summary
+        assert "Blocked by hierarchy: Blocked" in summary
+        assert "Protected roles blocked: Member, Admin, Steering Committee" in summary
 
     @pytest.mark.asyncio
     async def test_edit_websites_modal_submit_updates_proposed(
