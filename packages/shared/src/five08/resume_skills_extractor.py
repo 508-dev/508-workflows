@@ -130,6 +130,11 @@ class SkillsExtractor:
             canonical = self._normalize_skill_name(token)
             if canonical in COMMON_SKILLS and canonical not in DISALLOWED_SKILLS:
                 detected.add(canonical)
+        for skill in COMMON_SKILLS:
+            if " " not in skill or skill in DISALLOWED_SKILLS:
+                continue
+            if re.search(rf"\b{re.escape(skill)}\b", lowered):
+                detected.add(skill)
 
         sorted_skills = sorted(detected)
         return ExtractedSkills(

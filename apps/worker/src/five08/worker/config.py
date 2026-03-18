@@ -30,7 +30,7 @@ class WorkerSettings(SharedSettings):
     docuseal_member_agreement_template_id: int | None = None
 
     max_file_size_mb: int = 10
-    allowed_file_types: str = "pdf,docx,txt"
+    allowed_file_types: str = "pdf,docx"
     max_attachments_per_contact: int = 3
     crm_sync_enabled: bool = True
     crm_sync_interval_seconds: int = 900

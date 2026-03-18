@@ -45,6 +45,27 @@ from five08.resume_skills_extractor import SkillsExtractor
 
 logger = logging.getLogger(__name__)
 DEFAULT_SKILL_STRENGTH = 3
+SUPPORTED_RESUME_FILE_EXTENSIONS = ("pdf", "docx")
+DEFAULT_RESUME_MAX_FILE_SIZE_MB = 10
+
+
+def _normalize_allowed_resume_extensions(value: Any) -> set[str]:
+    if isinstance(value, set):
+        raw_extensions = value
+    elif isinstance(value, (list, tuple)):
+        raw_extensions = set(value)
+    else:
+        raw_extensions = set()
+
+    normalized = {
+        str(ext).strip().lower().lstrip(".")
+        for ext in raw_extensions
+        if str(ext).strip()
+    }
+    supported = {
+        ext for ext in normalized if ext in set(SUPPORTED_RESUME_FILE_EXTENSIONS)
+    }
+    return supported or set(SUPPORTED_RESUME_FILE_EXTENSIONS)
 
 
 @dataclass(frozen=True)
@@ -59,11 +80,32 @@ class ResumeProcessorConfig:
     resume_extractor_max_tokens: int = 2000
     crm_linkedin_field: str = "cLinkedIn"
     allowed_file_extensions: set[str] = field(
-        default_factory=lambda: {"pdf", "docx", "txt"}
+        default_factory=lambda: set(SUPPORTED_RESUME_FILE_EXTENSIONS)
     )
-    max_file_size_mb: int = 10
+    max_file_size_mb: int = DEFAULT_RESUME_MAX_FILE_SIZE_MB
     resume_extractor_version: str = "v1"
     postgres_url: str = ""
+
+    @property
+    def allowed_attachment_suffixes(self) -> frozenset[str]:
+        return frozenset(f".{ext}" for ext in self.allowed_file_extensions)
+
+    @property
+    def allowed_file_extensions_label(self) -> str:
+        labels = [
+            ext.upper()
+            for ext in SUPPORTED_RESUME_FILE_EXTENSIONS
+            if ext in self.allowed_file_extensions
+        ]
+        if not labels:
+            labels = [ext.upper() for ext in SUPPORTED_RESUME_FILE_EXTENSIONS]
+        if len(labels) == 1:
+            return labels[0]
+        return f"{labels[0]} or {labels[1]}"
+
+    @property
+    def max_file_size_bytes(self) -> int:
+        return max(1, int(self.max_file_size_mb)) * 1024 * 1024
 
     @classmethod
     def from_settings(cls, settings: Any) -> "ResumeProcessorConfig":
@@ -76,7 +118,7 @@ class ResumeProcessorConfig:
                 if ext.strip()
             }
         if not allowed_extensions:
-            allowed_extensions = {"pdf", "docx", "txt"}
+            allowed_extensions = set(SUPPORTED_RESUME_FILE_EXTENSIONS)
 
         resume_model = (
             str(getattr(settings, "resolved_resume_ai_model", "")).strip()
@@ -98,10 +140,12 @@ class ResumeProcessorConfig:
                 getattr(settings, "crm_linkedin_field", "cLinkedIn")
             ).strip()
             or "cLinkedIn",
-            allowed_file_extensions={
-                ext.strip().lower() for ext in allowed_extensions if str(ext).strip()
-            },
-            max_file_size_mb=int(getattr(settings, "max_file_size_mb", 10)),
+            allowed_file_extensions=_normalize_allowed_resume_extensions(
+                allowed_extensions
+            ),
+            max_file_size_mb=int(
+                getattr(settings, "max_file_size_mb", DEFAULT_RESUME_MAX_FILE_SIZE_MB)
+            ),
             resume_extractor_version=str(
                 getattr(settings, "resume_extractor_version", "v1")
             ).strip()
@@ -664,6 +708,7 @@ class ResumeProfileProcessor:
                 )
                 if verified_fields is not None:
                     updated_fields = verified_fields
+                warning_message = "; ".join(batch_errors) if batch_errors else None
 
                 return ResumeApplyResult(
                     contact_id=contact_id,
@@ -674,23 +719,11 @@ class ResumeProfileProcessor:
                         if field in approved_updates
                     },
                     link_discord_applied=link_applied,
-                    success=True,
-                )
-
-            if updated_fields:
-                return ResumeApplyResult(
-                    contact_id=contact_id,
-                    updated_fields=sorted(updated_fields),
-                    updated_values={
-                        field: approved_updates[field]
-                        for field in sorted(updated_fields)
-                        if field in approved_updates
-                    },
-                    link_discord_applied=link_applied,
-                    success=False,
-                    error="; ".join(batch_errors)
-                    if batch_errors
+                    success=bool(updated_fields),
+                    error=None
+                    if updated_fields
                     else "Some fields did not persist after update",
+                    warning=warning_message,
                 )
 
             return ResumeApplyResult(

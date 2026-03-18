@@ -88,3 +88,4 @@ class ResumeApplyResult(BaseModel):
     link_discord_applied: bool = False
     success: bool
     error: str | None = None
+    warning: str | None = None

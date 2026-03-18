@@ -2,11 +2,31 @@
 
 import json
 from datetime import datetime
+from types import SimpleNamespace
 
 from unittest.mock import Mock
 
+from five08.clients.espo import EspoAPIError
+from five08.resume_profile_processor import ResumeProcessorConfig
 from five08.worker.crm.resume_profile_processor import ResumeProfileProcessor
 from five08.worker.models import ExtractedSkills, ResumeExtractedProfile
+
+
+def test_resume_processor_config_filters_unsupported_extensions() -> None:
+    """Shared config should clamp settings to the supported resume formats."""
+    config = ResumeProcessorConfig.from_settings(
+        SimpleNamespace(
+            espo_base_url="https://crm.example.com",
+            espo_api_key="secret",
+            allowed_file_types="pdf,docx,txt",
+            max_file_size_mb=12,
+        )
+    )
+
+    assert config.allowed_file_extensions == {"pdf", "docx"}
+    assert config.allowed_attachment_suffixes == frozenset({".pdf", ".docx"})
+    assert config.allowed_file_extensions_label == "PDF or DOCX"
+    assert config.max_file_size_bytes == 12 * 1024 * 1024
 
 
 def test_extract_profile_proposal_filters_508_email() -> None:
@@ -989,6 +1009,32 @@ def test_apply_profile_updates_normalizes_skill_aliases_for_api_payload() -> Non
     payload = processor.crm.update_contact.call_args[0][1]
     assert payload["skills"] == ["node"]
     assert json.loads(payload["cSkillAttrs"]) == {"node": {"strength": 5}}
+
+
+def test_apply_profile_updates_returns_warning_for_partial_success() -> None:
+    """Fallback field updates should surface partial failures without dropping successes."""
+    processor = ResumeProfileProcessor()
+    processor.crm = Mock()
+    processor._verify_updated_fields = Mock(return_value=["cGitHubUsername"])
+    processor.crm.update_contact.side_effect = [
+        EspoAPIError("batch failed"),
+        None,
+        EspoAPIError("phone rejected"),
+    ]
+
+    result = processor.apply_profile_updates(
+        contact_id="contact-partial",
+        updates={
+            "cGitHubUsername": "new-gh",
+            "phoneNumber": "14155551234",
+        },
+    )
+
+    assert result.success is True
+    assert result.updated_fields == ["cGitHubUsername"]
+    assert result.updated_values == {"cGitHubUsername": "new-gh"}
+    assert result.warning == "phoneNumber: phone rejected"
+    assert result.error is None
 
 
 def test_extract_profile_proposal_records_failed_run() -> None:

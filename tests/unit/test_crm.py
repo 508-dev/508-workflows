@@ -353,6 +353,41 @@ class TestCRMCog:
         """Seniority labels should normalize consistent display strings."""
         assert _format_seniority_label(raw) == expected
 
+    @pytest.mark.asyncio
+    async def test_resume_apply_confirmation_shows_partial_warning(
+        self, crm_cog, mock_interaction
+    ):
+        """Successful partial applies should render any returned warning."""
+        mock_interaction.message = None
+        crm_cog._apply_resume_profile_direct = AsyncMock(
+            return_value={
+                "success": True,
+                "updated_fields": ["cGitHubUsername"],
+                "updated_values": {"cGitHubUsername": "wumichaelm"},
+                "warning": "phoneNumber: phone rejected",
+            }
+        )
+
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={"cGitHubUsername": "wumichaelm"},
+        )
+        button = next(
+            child
+            for child in view.children
+            if isinstance(child, discord.ui.Button) and child.label == "Confirm Updates"
+        )
+
+        await button.callback(mock_interaction)
+
+        final_send = mock_interaction.followup.send.call_args_list[-1]
+        embed = final_send.kwargs["embed"]
+        warning_field = next(field for field in embed.fields if field.name == "Warning")
+        assert warning_field.value == "phoneNumber: phone rejected"
+
     @pytest.mark.parametrize(
         ("payload", "expected"),
         [

@@ -1,5 +1,6 @@
 """Unit tests for heuristic skills extraction."""
 
+from five08.resume_skills_extractor import SkillsExtractor as SharedSkillsExtractor
 from five08.worker.crm.skills_extractor import SkillsExtractor
 
 
@@ -23,6 +24,22 @@ def test_heuristic_extractor_includes_two_letter_go_skill() -> None:
 
     assert "go" in result.skills
     assert "python" in result.skills
+
+
+def test_shared_heuristic_extractor_detects_multiword_phrases() -> None:
+    """Shared heuristic fallback should detect plain multi-word skills."""
+    extractor = SharedSkillsExtractor(
+        model="heuristic",
+        openai_api_key=None,
+        openai_base_url=None,
+    )
+    result = extractor._extract_skills_heuristic(
+        "Led product management and go to market planning for a customer relationship management platform."
+    )
+
+    assert "product management" in result.skills
+    assert "go to market" in result.skills
+    assert "customer relationship management" in result.skills
 
 
 def test_normalize_extracted_payload_canonicalizes_and_validates_strength() -> None:

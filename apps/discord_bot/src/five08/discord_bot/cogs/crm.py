@@ -63,10 +63,6 @@ _DISCORD_ROLES_PROTECTED_FROM_APPLY_CASEFOLDED: frozenset[str] = frozenset(
 EXCLUDED_ONBOARDING_STATES = frozenset({"onboarded", "waitlist", "rejected"})
 ONBOARDING_QUEUE_MAX_SIZE = 200
 ONBOARDING_QUEUE_PAGE_SIZE = 1
-RESUME_ALLOWED_EXTENSIONS = frozenset({".pdf", ".docx"})
-RESUME_ALLOWED_EXTENSIONS_LABEL = "PDF or DOCX"
-RESUME_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024
-RESUME_MAX_FILE_SIZE_MB = RESUME_MAX_FILE_SIZE_BYTES // (1024 * 1024)
 ESPO_DATE_FORMAT = "%Y-%m-%d"
 ESPO_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 LINKEDIN_FIELD = "cLinkedIn"
@@ -2262,6 +2258,7 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         updated_fields: list[str] = []
         updated_values: dict[str, Any] = {}
         link_discord_applied: bool | None = None
+        warning_message = ""
         if isinstance(result, dict):
             raw_fields = result.get("updated_fields")
             if isinstance(raw_fields, list):
@@ -2274,6 +2271,9 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             raw_link_applied = result.get("link_discord_applied")
             if isinstance(raw_link_applied, bool):
                 link_discord_applied = raw_link_applied
+            raw_warning = result.get("warning")
+            if raw_warning is not None:
+                warning_message = str(raw_warning).strip()
 
         if isinstance(result, dict) and result.get("success") is False:
             error_message = str(result.get("error") or "")
@@ -2339,6 +2339,12 @@ class ResumeUpdateConfirmationView(discord.ui.View):
                 value=applied_updates_value,
                 inline=False,
             )
+        if warning_message:
+            embed.add_field(
+                name="Warning",
+                value=self.crm_cog._sanitize_error_message_for_discord(warning_message),
+                inline=False,
+            )
         profile_url = f"{self.crm_cog.base_url}/#Contact/view/{self.contact_id}"
         embed.add_field(name="🔗 CRM Profile", value=f"[View in CRM]({profile_url})")
         _audit_apply_event(
@@ -2350,6 +2356,7 @@ class ResumeUpdateConfirmationView(discord.ui.View):
                 "proposed_updates_count": len(self.proposed_updates),
                 "link_member_requested": bool(self.link_discord),
                 "link_discord_applied": link_discord_applied,
+                "warning": warning_message or None,
             },
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
@@ -2775,7 +2782,11 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         return text[: max_length - 1].rstrip() + "…"
 
     def _create_resume_profile_processor(self) -> ResumeProfileProcessor:
-        return ResumeProfileProcessor(ResumeProcessorConfig.from_settings(settings))
+        return ResumeProfileProcessor(self._resume_processor_config())
+
+    @staticmethod
+    def _resume_processor_config() -> ResumeProcessorConfig:
+        return ResumeProcessorConfig.from_settings(settings)
 
     async def _extract_resume_profile_direct(
         self,
@@ -4732,8 +4743,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         attachment: discord.Attachment,
         failure_result: Literal["denied", "error"],
     ) -> bool:
+        resume_config = self._resume_processor_config()
         file_extension = self._resume_file_extension(attachment.filename)
-        if file_extension not in RESUME_ALLOWED_EXTENSIONS:
+        if file_extension not in resume_config.allowed_attachment_suffixes:
             self._audit_command(
                 interaction=interaction,
                 action=action,
@@ -4745,12 +4757,12 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
             await interaction.followup.send(
                 "❌ Invalid file type. "
-                f"Upload a {RESUME_ALLOWED_EXTENSIONS_LABEL} file.\n"
+                f"Upload a {resume_config.allowed_file_extensions_label} file.\n"
                 f"You uploaded: `{attachment.filename}`"
             )
             return False
 
-        if attachment.size > RESUME_MAX_FILE_SIZE_BYTES:
+        if attachment.size > resume_config.max_file_size_bytes:
             self._audit_command(
                 interaction=interaction,
                 action=action,
@@ -4762,7 +4774,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 },
             )
             await interaction.followup.send(
-                f"❌ File too large. Maximum size is {RESUME_MAX_FILE_SIZE_MB}MB.\n"
+                f"❌ File too large. Maximum size is {resume_config.max_file_size_mb}MB.\n"
                 f"Your file: {attachment.size / (1024 * 1024):.1f}MB"
             )
             return False
