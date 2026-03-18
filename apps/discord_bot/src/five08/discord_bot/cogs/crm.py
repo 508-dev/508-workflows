@@ -4746,7 +4746,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         resume_config = self._resume_processor_config()
         file_extension = self._resume_file_extension(attachment.filename)
         if file_extension not in resume_config.allowed_attachment_suffixes:
-            self._audit_command(
+            self._audit_command_safe(
                 interaction=interaction,
                 action=action,
                 result=failure_result,
@@ -4763,7 +4763,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             return False
 
         if attachment.size > resume_config.max_file_size_bytes:
-            self._audit_command(
+            self._audit_command_safe(
                 interaction=interaction,
                 action=action,
                 result=failure_result,
@@ -8002,7 +8002,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         description="Upload resume, extract profile fields, and preview CRM updates",
     )
     @app_commands.describe(
-        file="Resume file to upload (PDF, DOC, or DOCX)",
+        file="Resume file to upload (PDF or DOCX)",
         search_term="Email, name, or contact ID (Steering Committee+ only). Omit to infer from resume.",
         overwrite="Replace existing resumes instead of appending",
         link_user="Discord user to link to this CRM contact (optional, Steering Committee+ for others)",
