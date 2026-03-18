@@ -656,10 +656,9 @@ class ResumeProfileProcessor:
                 )
 
             # NOTE: cResumeLastProcessed is stored as UTC for CRM compatibility.
+            processed_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             crm_update_payload = dict(approved_updates)
-            crm_update_payload["cResumeLastProcessed"] = datetime.now(
-                tz=timezone.utc
-            ).strftime("%Y-%m-%d %H:%M:%S")
+            crm_update_payload["cResumeLastProcessed"] = processed_at
 
             try:
                 self.crm.update_contact(contact_id, crm_update_payload)
@@ -701,6 +700,15 @@ class ResumeProfileProcessor:
                     batch_errors.append(f"{field}: {field_error}")
 
             if updated_fields:
+                try:
+                    self.crm.update_contact(
+                        contact_id, {"cResumeLastProcessed": processed_at}
+                    )
+                except EspoAPIError as timestamp_error:
+                    batch_errors.append(f"cResumeLastProcessed: {timestamp_error}")
+                except Exception as timestamp_error:
+                    batch_errors.append(f"cResumeLastProcessed: {timestamp_error}")
+
                 verified_fields = self._verify_updated_fields(
                     contact_id=contact_id,
                     baseline_contact=pre_update_contact,

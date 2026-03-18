@@ -1020,6 +1020,7 @@ def test_apply_profile_updates_returns_warning_for_partial_success() -> None:
         EspoAPIError("batch failed"),
         None,
         EspoAPIError("phone rejected"),
+        None,
     ]
 
     result = processor.apply_profile_updates(
@@ -1035,6 +1036,15 @@ def test_apply_profile_updates_returns_warning_for_partial_success() -> None:
     assert result.updated_values == {"cGitHubUsername": "new-gh"}
     assert result.warning == "phoneNumber: phone rejected"
     assert result.error is None
+    timestamp_call = processor.crm.update_contact.call_args_list[-1]
+    assert timestamp_call.args[0] == "contact-partial"
+    assert set(timestamp_call.args[1].keys()) == {"cResumeLastProcessed"}
+    assert (
+        datetime.strptime(
+            timestamp_call.args[1]["cResumeLastProcessed"], "%Y-%m-%d %H:%M:%S"
+        )
+        is not None
+    )
 
 
 def test_extract_profile_proposal_records_failed_run() -> None:
