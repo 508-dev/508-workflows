@@ -10,7 +10,6 @@ from five08.settings import SharedSettings
 class WorkerSettings(SharedSettings):
     """Worker-specific settings layered on top of shared stack settings."""
 
-    _crm_linkedin_field: str = PrivateAttr(default="cLinkedIn")
     _crm_intake_completed_field: str = PrivateAttr(default="")
 
     worker_name: str = "worker"
@@ -130,16 +129,6 @@ class WorkerSettings(SharedSettings):
     def allowed_file_extensions(self) -> set[str]:
         """Allowed resume file extensions."""
         return {ext.strip().lower() for ext in self.allowed_file_types.split(",")}
-
-    @property
-    def crm_linkedin_field(self) -> str:
-        """Resume/profile sync always writes LinkedIn URLs to the canonical CRM field."""
-        return self._crm_linkedin_field
-
-    @crm_linkedin_field.setter
-    def crm_linkedin_field(self, value: str) -> None:
-        """Allow controlled runtime overrides without reintroducing env loading."""
-        self._crm_linkedin_field = value
 
     @property
     def crm_intake_completed_field(self) -> str:

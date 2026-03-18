@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_SKILL_STRENGTH = 3
 SUPPORTED_RESUME_FILE_EXTENSIONS = ("pdf", "docx")
 DEFAULT_RESUME_MAX_FILE_SIZE_MB = 10
+LINKEDIN_FIELD = "cLinkedIn"
 
 
 def _normalize_allowed_resume_extensions(value: Any) -> set[str]:
@@ -78,7 +79,6 @@ class ResumeProcessorConfig:
     openai_base_url: str | None = None
     resume_model: str = "gpt-5-mini"
     resume_extractor_max_tokens: int = 2000
-    crm_linkedin_field: str = "cLinkedIn"
     allowed_file_extensions: set[str] = field(
         default_factory=lambda: set(SUPPORTED_RESUME_FILE_EXTENSIONS)
     )
@@ -136,10 +136,6 @@ class ResumeProcessorConfig:
             resume_extractor_max_tokens=int(
                 getattr(settings, "resume_extractor_max_tokens", 2000)
             ),
-            crm_linkedin_field=str(
-                getattr(settings, "crm_linkedin_field", "cLinkedIn")
-            ).strip()
-            or "cLinkedIn",
             allowed_file_extensions=_normalize_allowed_resume_extensions(
                 allowed_extensions
             ),
@@ -261,9 +257,9 @@ class ResumeProfileProcessor:
                 skipped=skipped,
             )
             self._collect_change(
-                crm_field=self.config.crm_linkedin_field,
+                crm_field=LINKEDIN_FIELD,
                 label="LinkedIn",
-                current=contact.get(self.config.crm_linkedin_field),
+                current=contact.get(LINKEDIN_FIELD),
                 proposed=extracted.linkedin_url,
                 proposed_updates=proposed_updates,
                 proposed_changes=proposed_changes,
@@ -601,7 +597,7 @@ class ResumeProfileProcessor:
             allowed_fields = {
                 "emailAddressData",
                 "cGitHubUsername",
-                self.config.crm_linkedin_field,
+                LINKEDIN_FIELD,
                 "cSeniority",
                 "addressCountry",
                 "cTimezone",
@@ -625,15 +621,6 @@ class ResumeProfileProcessor:
             )
             if parsed_skills_for_apply is not None:
                 approved_updates["skills"] = parsed_skills_for_apply
-
-            if not approved_updates:
-                return ResumeApplyResult(
-                    contact_id=contact_id,
-                    updated_fields=[],
-                    updated_values={},
-                    success=False,
-                    error="No valid profile fields provided",
-                )
 
             link_applied = False
             if link_discord:
@@ -736,8 +723,8 @@ class ResumeProfileProcessor:
 
             return ResumeApplyResult(
                 contact_id=contact_id,
-                updated_fields=sorted(approved_updates.keys()),
-                updated_values=dict(approved_updates),
+                updated_fields=[],
+                updated_values={},
                 link_discord_applied=link_applied,
                 success=False,
                 error="; ".join(batch_errors)

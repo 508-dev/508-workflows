@@ -33,6 +33,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+LINKEDIN_FIELD = "cLinkedIn"
 
 DESCRIPTION_SECTIONS = {
     "primary_skills_interests": "Primary skills and interests",
@@ -42,7 +43,7 @@ DESCRIPTION_SECTIONS = {
 FIELD_MAP = {
     "phone": "phoneNumber",
     "discord_username": "cDiscordUsername",
-    "linkedin_url": settings.crm_linkedin_field,
+    "linkedin_url": LINKEDIN_FIELD,
     "github_username": "cGitHubUsername",
     "address_country": "addressCountry",
     "address_city": "addressCity",
@@ -448,7 +449,7 @@ class IntakeFormProcessor:
             if profile_github:
                 updates["cGitHubUsername"] = profile_github
             if profile_linkedin:
-                updates[settings.crm_linkedin_field] = profile_linkedin
+                updates[LINKEDIN_FIELD] = profile_linkedin
             if profile_timezone:
                 updates.setdefault("cTimezone", profile_timezone)
             if profile_city:
