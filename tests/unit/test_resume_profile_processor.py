@@ -504,6 +504,10 @@ def test_extract_profile_proposal_uses_configured_linkedin_field(
     monkeypatch: object,
 ) -> None:
     """LinkedIn proposal should respect configurable CRM field mapping."""
+    monkeypatch.setattr(
+        "five08.worker.crm.resume_profile_processor.settings.crm_linkedin_field",
+        "cLinkedInProfile",
+    )
     processor = ResumeProfileProcessor()
     processor.crm = Mock()
     processor.extractor = Mock()
@@ -512,11 +516,6 @@ def test_extract_profile_proposal_uses_configured_linkedin_field(
     processor._record_processing_run = Mock()
     processor.skills_extractor.canonicalize_skill.side_effect = lambda v: (
         str(v).strip().lower()
-    )
-
-    monkeypatch.setattr(
-        "five08.worker.crm.resume_profile_processor.settings.crm_linkedin_field",
-        "cLinkedInProfile",
     )
 
     processor.crm.get_contact.return_value = {
@@ -955,13 +954,12 @@ def test_apply_profile_updates_allows_configured_linkedin_field(
     monkeypatch: object,
 ) -> None:
     """Apply should accept LinkedIn updates using configured CRM field name."""
-    processor = ResumeProfileProcessor()
-    processor.crm = Mock()
-
     monkeypatch.setattr(
         "five08.worker.crm.resume_profile_processor.settings.crm_linkedin_field",
         "cLinkedInProfile",
     )
+    processor = ResumeProfileProcessor()
+    processor.crm = Mock()
 
     result = processor.apply_profile_updates(
         contact_id="contact-linkedin",

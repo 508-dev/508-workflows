@@ -2482,8 +2482,8 @@ class TestCRMCog:
                 {
                     "id": "contact123",
                     "name": "John Doe",
-                    "cOnboardingCoordinator": "old",
-                    "cOnboardingStatus": "onboarded",
+                    "cOnboarder": "old",
+                    "cOnboardingState": "onboarded",
                 },
                 {"id": "contact123"},
             ]
@@ -2493,7 +2493,7 @@ class TestCRMCog:
             )
 
         payload = crm_cog.espo_api.request.call_args_list[1][0][2]
-        assert payload == {"cOnboardingCoordinator": "jane"}
+        assert payload == {"cOnboarder": "jane"}
         message = mock_interaction.followup.send.call_args[0][0]
         assert "onboarding state left unchanged" in message
 
@@ -2621,7 +2621,7 @@ class TestCRMCog:
         crm_cog.espo_api.request.assert_called_once_with("GET", "Contact/contact123")
         message = mock_interaction.followup.send.call_args[0][0]
         assert (
-            "Could not locate a known onboarder field for this CRM contact." in message
+            "Could not locate the `cOnboarder` field for this CRM contact." in message
         )
         crm_cog._audit_command.assert_called_once()
         audit_kwargs = crm_cog._audit_command.call_args.kwargs
@@ -2675,13 +2675,13 @@ class TestCRMCog:
                     "cOnboarder": "mentorA",
                     "type": "Member",
                 },
-                {"id": "c2", "name": "Bob", "cOnboardingStatus": "onboarded"},
-                {"id": "c3", "name": "Cara", "cOnboarding": "waitlist"},
-                {"id": "c4", "name": "Drew", "cOnboarding": "rejected"},
+                {"id": "c2", "name": "Bob", "cOnboardingState": "onboarded"},
+                {"id": "c3", "name": "Cara", "cOnboardingState": "waitlist"},
+                {"id": "c4", "name": "Drew", "cOnboardingState": "rejected"},
                 {
                     "id": "c5",
                     "name": "Eli",
-                    "cOnboardingStatus": "",
+                    "cOnboardingState": "",
                     "type": "Candidate / Member",
                 },
             ]
@@ -2696,8 +2696,7 @@ class TestCRMCog:
                 "maxSize": 200,
                 "select": (
                     "id,name,emailAddress,cDiscordUsername,cDiscordUserID,"
-                    "cOnboardingState,cOnboardingStatus,cOnboarding,"
-                    "cOnboarder,cOnboardingCoordinator,cOnboardingUpdatedAt"
+                    "cOnboardingState,cOnboarder,cOnboardingUpdatedAt"
                 ),
             },
         )
@@ -2737,7 +2736,7 @@ class TestCRMCog:
             "list": [
                 {"id": "c1", "name": "Bob", "cOnboardingState": "onboarded"},
                 {"id": "c2", "name": "Cara", "cOnboardingState": "waitlist"},
-                {"id": "c3", "name": "Drew", "cOnboarding": "rejected"},
+                {"id": "c3", "name": "Drew", "cOnboardingState": "rejected"},
             ]
         }
 
@@ -2750,8 +2749,7 @@ class TestCRMCog:
                 "maxSize": 200,
                 "select": (
                     "id,name,emailAddress,cDiscordUsername,cDiscordUserID,"
-                    "cOnboardingState,cOnboardingStatus,cOnboarding,"
-                    "cOnboarder,cOnboardingCoordinator,cOnboardingUpdatedAt"
+                    "cOnboardingState,cOnboarder,cOnboardingUpdatedAt"
                 ),
             },
         )
@@ -2808,18 +2806,14 @@ class TestCRMCog:
         assert "view" in send_kwargs
         assert send_kwargs["view"].total_pages > 1
 
-    def test_format_onboarding_updated_at_normalizes_timezone(self, crm_cog):
-        """Timestamps should be normalized consistently for display."""
-        assert crm_cog._format_onboarding_updated_at(0) == "1970-01-01 00:00 UTC"
-        assert (
-            crm_cog._format_onboarding_updated_at("2026-03-03T12:00:00-05:00")
-            == "2026-03-03 17:00 UTC"
+    def test_format_onboarding_updated_at_uses_espo_formats(self, crm_cog):
+        """Espo date and datetime values should be formatted directly."""
+        assert crm_cog._format_onboarding_updated_at("2026-03-03 12:00:00") == (
+            "2026-03-03 12:00 UTC"
         )
-        assert crm_cog._format_onboarding_updated_at("2026-03-03T12:00:00") == (
-            "2026-03-03 12:00"
-        )
-        assert crm_cog._format_onboarding_updated_at("2026-03-03T00:00:00Z") == (
-            "2026-03-03"
+        assert crm_cog._format_onboarding_updated_at("2026-03-03") == "2026-03-03"
+        assert crm_cog._format_onboarding_updated_at("2026-03-03T12:00:00Z") == (
+            "2026-03-03T12:00:00Z"
         )
 
     @pytest.mark.asyncio
@@ -3672,24 +3666,19 @@ class TestCRMCog:
         """Search-by-field includes the requested field and excludes the default."""
         crm_cog.espo_api.request.return_value = {"list": []}
 
-        with patch.object(
-            crm_cog, "_configured_linkedin_field", return_value="cLinkedIn"
-        ) as configured_field:
-            configured_linkedin_field = crm_cog._configured_linkedin_field()
-            await crm_cog._search_contacts_by_field(
-                field=configured_linkedin_field, value="https://linkedin.com/in/test"
-            )
+        await crm_cog._search_contacts_by_field(
+            field="cLinkedIn", value="https://linkedin.com/in/test"
+        )
 
         call = crm_cog.espo_api.request.call_args
         assert call.args[0] == "GET"
         assert call.args[1] == "Contact"
         params = call.args[2]
-        configured_field.assert_called_once()
-        assert params["where"][0]["attribute"] == configured_linkedin_field
+        assert params["where"][0]["attribute"] == "cLinkedIn"
         assert params["where"][0]["value"] == "https://linkedin.com/in/test"
         assert params["where"][0]["type"] == "equals"
         select_fields = params["select"].split(",")
-        assert configured_linkedin_field in select_fields
+        assert "cLinkedIn" in select_fields
         assert "cLinkedInUrl" not in select_fields
 
     @pytest.mark.asyncio
@@ -4073,21 +4062,14 @@ class TestCRMCog:
         assert "Provide at least one of" in message
 
     @pytest.mark.asyncio
-    async def test_update_contact_uses_configured_linkedin_field(
-        self, crm_cog, mock_interaction
-    ):
-        """Configured LinkedIn custom field should flow through update payload and embed."""
+    async def test_update_contact_uses_clinkedin_field(self, crm_cog, mock_interaction):
+        """LinkedIn updates should flow through the cLinkedIn field and embed."""
         mock_interaction.user.id = 123456789
 
-        with (
-            patch.object(
-                crm_cog, "_configured_linkedin_field", return_value="cLinkedIn"
-            ),
-            patch.object(
-                crm_cog,
-                "_find_contact_by_discord_id",
-                new=AsyncMock(return_value={"id": "contact123", "name": "Test User"}),
-            ),
+        with patch.object(
+            crm_cog,
+            "_find_contact_by_discord_id",
+            new=AsyncMock(return_value={"id": "contact123", "name": "Test User"}),
         ):
             crm_cog.espo_api.request.return_value = {"id": "contact123"}
 
@@ -4158,6 +4140,45 @@ class TestCRMCog:
         kwargs = mock_upload.await_args.kwargs
         assert kwargs["contact"]["id"] == "contact123"
         assert kwargs["target_scope"] == "self"
+
+    @pytest.mark.asyncio
+    async def test_update_contact_resume_rejects_txt_file(
+        self, crm_cog, mock_interaction
+    ):
+        """Resume uploads should reject TXT files."""
+        mock_interaction.user.id = 123456789
+        resume_file = Mock()
+        resume_file.filename = "resume.txt"
+        resume_file.size = 1024
+
+        crm_cog._audit_command = Mock()
+
+        with (
+            patch(
+                "five08.discord_bot.cogs.crm.settings.api_shared_secret",
+                "test-shared-secret",
+            ),
+            patch.object(
+                crm_cog,
+                "_upload_resume_attachment_to_contact",
+                new=AsyncMock(),
+            ) as mock_upload,
+        ):
+            await crm_cog.update_contact.callback(
+                crm_cog, mock_interaction, resume=resume_file
+            )
+
+        mock_upload.assert_not_awaited()
+        message = mock_interaction.followup.send.call_args.args[0]
+        assert "Invalid file type. Upload a PDF or DOCX file." in message
+        crm_cog._audit_command.assert_called_once()
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["action"] == "crm.update_contact"
+        assert audit_kwargs["result"] == "denied"
+        assert audit_kwargs["metadata"] == {
+            "filename": "resume.txt",
+            "reason": "invalid_file_type",
+        }
 
     @pytest.mark.asyncio
     async def test_update_contact_unexpected_exception(self, crm_cog, mock_interaction):
@@ -4389,15 +4410,16 @@ class TestCRMCog:
     def test_build_resume_create_contact_payload_sets_email_field_by_domain(
         self, crm_cog
     ):
-        """Test that resume payload writes either emailAddress or c508Email."""
+        """Payload should prefer one non-508 email when available."""
         with (
             patch.object(
                 crm_cog,
                 "_extract_resume_contact_hints",
                 return_value={
-                    "emails": ["person@example.com"],
-                    "github_usernames": [],
-                    "linkedin_urls": [],
+                    "emails": ["person@508.dev", "person@example.com"],
+                    "github_usernames": ["personhub"],
+                    "linkedin_urls": ["https://linkedin.com/in/person"],
+                    "phone": "+1 555-0100",
                 },
             ),
             patch.object(
@@ -4411,15 +4433,21 @@ class TestCRMCog:
             assert payload["firstName"] == "Person"
             assert payload["lastName"] == "Example"
             assert "c508Email" not in payload
+            assert "cGitHubUsername" not in payload
+            assert "cLinkedIn" not in payload
+            assert "phoneNumber" not in payload
 
+    def test_build_resume_create_contact_payload_falls_back_to_508_email(self, crm_cog):
+        """When only 508 email exists, keep just that single identifier."""
         with (
             patch.object(
                 crm_cog,
                 "_extract_resume_contact_hints",
                 return_value={
                     "emails": ["person@508.dev"],
-                    "github_usernames": [],
-                    "linkedin_urls": [],
+                    "github_usernames": ["personhub"],
+                    "linkedin_urls": ["https://linkedin.com/in/person508"],
+                    "phone": "+1 555-0100",
                 },
             ),
             patch.object(
@@ -4433,23 +4461,27 @@ class TestCRMCog:
             assert payload["firstName"] == "Person"
             assert payload["lastName"] == "Unknown"
             assert "emailAddress" not in payload
+            assert "cGitHubUsername" not in payload
+            assert "cLinkedIn" not in payload
+            assert "phoneNumber" not in payload
 
-    def test_build_resume_create_contact_payload_populates_prospect_details(
+    def test_build_resume_create_contact_payload_uses_first_non_email_identifier(
         self, crm_cog
     ):
-        """Test creating prospect payload includes richer parsed fields."""
+        """If no email exists, choose exactly one fallback identifier in priority order."""
         with (
             patch.object(
                 crm_cog,
                 "_extract_resume_contact_hints",
                 return_value={
-                    "emails": ["jane@example.com"],
-                    "github_usernames": ["janedoe"],
+                    "emails": [],
+                    "github_usernames": [" janedoe ", "backupuser"],
                     "linkedin_urls": ["https://linkedin.com/in/janedoe"],
                     "phone": "+1 555-0100",
                     "address_country": "Canada",
                     "seniority_level": "senior",
                     "skills": ["Python", " fastapi ", ""],
+                    "description": "Senior backend engineer",
                 },
             ),
             patch.object(crm_cog, "_extract_resume_name_hint", return_value="Jane Doe"),
@@ -4457,15 +4489,19 @@ class TestCRMCog:
             payload = crm_cog._build_resume_create_contact_payload(b"resume")
             assert payload["type"] == "Prospect"
             assert payload["name"] == "Jane Doe"
-            assert payload["emailAddress"] == "jane@example.com"
             assert payload["cGitHubUsername"] == "janedoe"
-            assert payload["cLinkedIn"] == "https://linkedin.com/in/janedoe"
-            assert payload["phoneNumber"] == "+1 555-0100"
-            assert payload["addressCountry"] == "Canada"
-            assert payload["cSeniority"] == "senior"
-            assert payload["skills"] == ["Python", "fastapi"]
             assert payload["firstName"] == "Jane"
             assert payload["lastName"] == "Doe"
+            assert "emailAddress" not in payload
+            assert "c508Email" not in payload
+            assert "cLinkedIn" not in payload
+            assert "phoneNumber" not in payload
+            assert "addressCountry" not in payload
+            assert "cTimezone" not in payload
+            assert "addressCity" not in payload
+            assert "cSeniority" not in payload
+            assert "description" not in payload
+            assert "skills" not in payload
 
     def test_build_resume_create_contact_payload_single_name_uses_unknown_last(
         self, crm_cog
@@ -4562,10 +4598,12 @@ class TestCRMCog:
         """Test lookup summary fallback uses parsed identifiers with cleanup."""
         with (
             patch.object(crm_cog, "_format_inferred_attempts", return_value=""),
-            patch.object(
-                crm_cog,
-                "_extract_resume_contact_hints",
-                return_value={
+            patch.object(crm_cog, "_extract_resume_contact_hints") as extract_hints,
+        ):
+            summary = crm_cog._build_inference_lookup_summary(
+                file_content=b"resume",
+                attempts=[],
+                hints={
                     "emails": [
                         " jane@example.com ",
                         "jane@example.com",
@@ -4579,10 +4617,6 @@ class TestCRMCog:
                         "https://linkedin.com/in/jane",
                     ],
                 },
-            ),
-        ):
-            summary = crm_cog._build_inference_lookup_summary(
-                file_content=b"resume", attempts=[]
             )
 
             assert (
@@ -4591,15 +4625,15 @@ class TestCRMCog:
                 + "emails: `jane@example.com`, `second@example.com`; "
                 + "github usernames: `janedoe`; linkedin URLs: `https://linkedin.com/in/jane`"
             )
+            extract_hints.assert_not_called()
 
-    def test_build_inference_lookup_summary_with_non_dict_hints(self, crm_cog):
-        """Test non-dict parsed contact hints produce empty summary safely."""
+    def test_build_inference_lookup_summary_with_empty_hints(self, crm_cog):
+        """Empty hints should produce an empty lookup summary."""
         with (
             patch.object(crm_cog, "_format_inferred_attempts", return_value=""),
-            patch.object(crm_cog, "_extract_resume_contact_hints", return_value=None),
         ):
             summary = crm_cog._build_inference_lookup_summary(
-                file_content=b"resume", attempts=[]
+                file_content=b"resume", attempts=[], hints={}
             )
 
             assert summary == ""
@@ -4608,22 +4642,20 @@ class TestCRMCog:
         self, crm_cog
     ):
         """Parsed name and email are included in resume identity summary."""
-        with patch.object(
-            crm_cog,
-            "_extract_resume_contact_hints",
-            return_value={
-                "name": "Jane Doe",
-                "emails": ["jane@example.com", "ignored@alt.example"],
-            },
-        ):
+        with patch.object(crm_cog, "_extract_resume_contact_hints") as extract_hints:
             summary = crm_cog._build_resume_parsed_identity_summary(
-                file_content=b"resume"
+                file_content=b"resume",
+                hints={
+                    "name": "Jane Doe",
+                    "emails": ["jane@example.com", "ignored@alt.example"],
+                },
             )
 
             assert (
                 summary
                 == "\nParsed contact details: name=`Jane Doe`, email=`jane@example.com`"
             )
+            extract_hints.assert_not_called()
 
     def test_build_resume_parsed_identity_summary_ignores_heading_name(self, crm_cog):
         """Heading-like parsed names should fall back to heuristic name extraction."""
@@ -4887,7 +4919,7 @@ class TestCRMCog:
     async def test_upload_resume_invalid_file_type_records_error(
         self, crm_cog, mock_interaction
     ):
-        """Uploading non-PDF/DOC/DOCX/TXT files should be recorded as an error."""
+        """Uploading unsupported file types should be recorded as an error."""
         mock_interaction.user.id = 101
 
         resume_file = Mock()
@@ -4910,15 +4942,44 @@ class TestCRMCog:
             )
 
         message = mock_interaction.followup.send.call_args[0][0]
-        assert (
-            "Invalid file type. Please upload a PDF, DOC, DOCX, or TXT file." in message
-        )
+        assert "Invalid file type. Upload a PDF or DOCX file." in message
         crm_cog._audit_command.assert_called_once()
         audit_kwargs = crm_cog._audit_command.call_args.kwargs
         assert audit_kwargs["action"] == "crm.upload_resume"
         assert audit_kwargs["result"] == "error"
         assert audit_kwargs["metadata"] == {
             "filename": "image.png",
+            "reason": "invalid_file_type",
+        }
+
+    @pytest.mark.asyncio
+    async def test_upload_resume_rejects_doc_file(self, crm_cog, mock_interaction):
+        """DOC files should be rejected when they are not parser-supported."""
+        mock_interaction.user.id = 101
+
+        resume_file = Mock()
+        resume_file.filename = "candidate.doc"
+        resume_file.size = 1024
+
+        crm_cog._audit_command = Mock()
+
+        await crm_cog.upload_resume.callback(
+            crm_cog,
+            mock_interaction,
+            resume_file,
+            None,
+            False,
+            None,
+        )
+
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert "Invalid file type. Upload a PDF or DOCX file." in message
+        crm_cog._audit_command.assert_called_once()
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["action"] == "crm.upload_resume"
+        assert audit_kwargs["result"] == "error"
+        assert audit_kwargs["metadata"] == {
+            "filename": "candidate.doc",
             "reason": "invalid_file_type",
         }
 
@@ -5145,6 +5206,79 @@ class TestCRMCog:
             in message
         )
         assert "view" in mock_interaction.followup.send.call_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_upload_resume_reuses_inferred_hints_in_failure_summaries(
+        self, crm_cog, mock_interaction
+    ):
+        """Inference failure UI should pass through already-parsed hints."""
+        mock_interaction.user.id = 101
+        mock_interaction.user.name = "Requester"
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+
+        resume_file = Mock()
+        resume_file.filename = "candidate.pdf"
+        resume_file.size = 1024
+        resume_file.read = AsyncMock(return_value=b"resume-bytes")
+
+        inferred_hints = {
+            "name": "Jane Doe",
+            "emails": ["jane@example.com"],
+        }
+        crm_cog._build_inference_lookup_summary_async = AsyncMock(return_value="")
+        crm_cog._build_resume_parsed_identity_summary_async = AsyncMock(
+            return_value="\nParsed contact details: name=`Jane Doe`, email=`jane@example.com`"
+        )
+
+        with (
+            patch.object(
+                crm_cog,
+                "_infer_contact_from_resume",
+                new=AsyncMock(
+                    return_value=(
+                        None,
+                        {
+                            "reason": "no_matching_contact",
+                            "hints": inferred_hints,
+                        },
+                    )
+                ),
+            ),
+            patch.object(
+                crm_cog,
+                "_find_contact_by_discord_id",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "five08.discord_bot.cogs.crm.check_user_roles_with_hierarchy",
+                return_value=True,
+            ),
+            patch(
+                "five08.discord_bot.cogs.crm.settings.api_shared_secret",
+                "test-shared-secret",
+            ),
+        ):
+            await crm_cog.upload_resume.callback(
+                crm_cog,
+                mock_interaction,
+                resume_file,
+                None,
+                False,
+                None,
+            )
+
+        assert (
+            crm_cog._build_inference_lookup_summary_async.await_args.kwargs["hints"]
+            == inferred_hints
+        )
+        assert (
+            crm_cog._build_resume_parsed_identity_summary_async.await_args.kwargs[
+                "hints"
+            ]
+            == inferred_hints
+        )
 
     @pytest.mark.asyncio
     async def test_resume_create_contact_view_logs_create_failure(
@@ -5587,37 +5721,32 @@ class TestCRMCog:
         )
 
     @pytest.mark.asyncio
-    async def test_run_resume_extract_and_preview_uses_refresh_token_for_reprocess(
+    async def test_run_resume_extract_and_preview_calls_direct_extract_for_reprocess(
         self, crm_cog, mock_interaction
     ):
-        """Explicit reprocess actions should bypass cached extract jobs."""
-        crm_cog._enqueue_resume_extract_job = AsyncMock(return_value="job-123")
-        crm_cog._wait_for_backend_job_result = AsyncMock(
-            return_value={
-                "status": "succeeded",
-                "result": {"success": False, "error": "boom"},
-            }
+        """Reprocess should call the direct extract path with the latest attachment."""
+        crm_cog._extract_resume_profile_direct = AsyncMock(
+            return_value={"success": False, "error": "boom"}
         )
         crm_cog._build_resume_extract_debug_file = Mock(return_value=Mock())
         crm_cog._audit_command = Mock()
 
-        with patch(
-            "five08.discord_bot.cogs.crm.uuid4",
-            return_value=Mock(hex="refresh-token-123"),
-        ):
-            await crm_cog._run_resume_extract_and_preview(
-                mock_interaction,
-                contact_id="contact123",
-                contact_name="Candidate User",
-                attachment_id="resume123",
-                filename="candidate.pdf",
-                link_member=None,
-                action="crm.reprocess_resume",
-                status_message="🔄 Reprocessing resume and extracting profile fields now...",
-            )
+        await crm_cog._run_resume_extract_and_preview(
+            mock_interaction,
+            contact_id="contact123",
+            contact_name="Candidate User",
+            attachment_id="resume123",
+            filename="candidate.pdf",
+            link_member=None,
+            action="crm.reprocess_resume",
+            status_message="🔄 Reprocessing resume and extracting profile fields now...",
+        )
 
-        kwargs = crm_cog._enqueue_resume_extract_job.await_args.kwargs
-        assert kwargs["refresh_token"] == "refresh-token-123"
+        crm_cog._extract_resume_profile_direct.assert_awaited_once_with(
+            contact_id="contact123",
+            attachment_id="resume123",
+            filename="candidate.pdf",
+        )
 
     @pytest.mark.asyncio
     async def test_build_match_candidates_posting_fetches_jd_links_from_text(
