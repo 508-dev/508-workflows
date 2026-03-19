@@ -208,39 +208,6 @@ class SkillsExtractor:
             source=source,
         )
 
-    def _parse_strength(self, value: Any) -> int | None:
-        raw: Any = value
-        if isinstance(value, dict):
-            raw = value.get("strength")
-        if raw is None:
-            return None
-        if isinstance(raw, str) and not raw.strip():
-            return None
-        try:
-            numeric = int(float(raw))
-        except Exception:
-            return None
-        if numeric < 1 or numeric > 5:
-            return None
-        return numeric
-
-    def _parse_skill_with_strength(self, value: str) -> tuple[str, int | None]:
-        raw = value.strip()
-        match = re.match(r"^(.*)\(\s*(\d*)\s*\)\s*$", raw)
-        if match is None:
-            return self._normalize_skill_name(raw), None
-
-        base = match.group(1).strip()
-        parsed_strength = self._parse_strength(match.group(2))
-        if not base:
-            return "", None
-        normalized_base = self._normalize_skill_name(base)
-        if not normalized_base:
-            return "", None
-        if parsed_strength is None:
-            return normalized_base, None
-        return normalized_base, parsed_strength
-
     def _normalize_skill_name(self, value: str) -> str:
         return normalize_skill(value)
 
