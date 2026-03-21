@@ -823,7 +823,7 @@ def test_apply_profile_updates_adds_discord_and_filters_email() -> None:
     assert update_payload["phoneNumber"] == "14155551234"
     assert update_payload["skills"] == ["python", "fastapi"]
     assert update_payload["cDiscordUserID"] == "123"
-    assert update_payload["cDiscordUsername"] == "member#0001 (ID: 123)"
+    assert update_payload["cDiscordUsername"] == "member#0001"
     assert "cResumeLastProcessed" in update_payload
     assert isinstance(update_payload["cResumeLastProcessed"], str)
     assert (
@@ -954,7 +954,7 @@ def test_apply_profile_updates_accepts_link_only_updates() -> None:
     assert result.updated_fields == ["cDiscordUserID", "cDiscordUsername"]
     payload = processor.crm.update_contact.call_args[0][1]
     assert payload["cDiscordUserID"] == "123"
-    assert payload["cDiscordUsername"] == "member#0001 (ID: 123)"
+    assert payload["cDiscordUsername"] == "member#0001"
 
 
 def test_apply_profile_updates_returns_warning_for_partial_success() -> None:

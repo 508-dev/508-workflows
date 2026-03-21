@@ -2432,13 +2432,15 @@ class TestCRMCog:
     @pytest.mark.asyncio
     async def test_resolve_onboarder_username_maps_discord_mention(self, crm_cog):
         """Discord mentions should resolve to linked contact 508 usernames."""
+        interaction = Mock()
+        interaction.guild = None
         with patch.object(
             crm_cog,
             "_find_contact_by_discord_id",
             new=AsyncMock(return_value={"c508Email": "Mentor@508.dev"}),
         ):
             resolved = await crm_cog._resolve_onboarder_username(
-                interaction=Mock(), raw_onboarder="<@987654321>"
+                interaction=interaction, raw_onboarder="<@987654321>"
             )
 
         assert resolved == "mentor"
@@ -2448,13 +2450,15 @@ class TestCRMCog:
         self, crm_cog
     ):
         """Unlinked mention values should fail resolution."""
+        interaction = Mock()
+        interaction.guild = None
         with patch.object(
             crm_cog,
             "_find_contact_by_discord_id",
             new=AsyncMock(return_value=None),
         ):
             resolved = await crm_cog._resolve_onboarder_username(
-                interaction=Mock(), raw_onboarder="<@987654321>"
+                interaction=interaction, raw_onboarder="<@987654321>"
             )
 
         assert resolved is None
@@ -2470,7 +2474,7 @@ class TestCRMCog:
 
         with patch.object(
             crm_cog,
-            "_search_contact_for_linking",
+            "_search_contacts_for_lookup",
             new=AsyncMock(return_value=[{"id": "contact123", "name": "John Doe"}]),
         ):
             crm_cog.espo_api.request.side_effect = [
@@ -2510,7 +2514,7 @@ class TestCRMCog:
 
         with patch.object(
             crm_cog,
-            "_search_contact_for_linking",
+            "_search_contacts_for_lookup",
             new=AsyncMock(return_value=[{"id": "contact123", "name": "John Doe"}]),
         ):
             crm_cog.espo_api.request.side_effect = [
@@ -2544,7 +2548,7 @@ class TestCRMCog:
 
         with patch.object(
             crm_cog,
-            "_search_contact_for_linking",
+            "_search_contacts_for_lookup",
             new=AsyncMock(
                 return_value=[
                     {"id": "contact123", "name": "John Doe"},
@@ -2580,7 +2584,7 @@ class TestCRMCog:
 
         with patch.object(
             crm_cog,
-            "_search_contact_for_linking",
+            "_search_contacts_for_lookup",
             new=AsyncMock(return_value=[]),
         ):
             await crm_cog.assign_onboarder.callback(
@@ -2607,6 +2611,7 @@ class TestCRMCog:
         steering_role = Mock()
         steering_role.name = "Steering Committee"
         mock_interaction.user.roles = [steering_role]
+        mock_interaction.guild = None
         crm_cog._audit_command = Mock()
 
         with patch.object(
@@ -2642,7 +2647,7 @@ class TestCRMCog:
 
         with patch.object(
             crm_cog,
-            "_search_contact_for_linking",
+            "_search_contacts_for_lookup",
             new=AsyncMock(return_value=[{"id": "contact123", "name": "John Doe"}]),
         ):
             crm_cog.espo_api.request.return_value = {
@@ -2681,7 +2686,7 @@ class TestCRMCog:
 
         with patch.object(
             crm_cog,
-            "_search_contact_for_linking",
+            "_search_contacts_for_lookup",
             new=AsyncMock(return_value=[{"id": "contact123", "name": "John Doe"}]),
         ):
             crm_cog.espo_api.request.side_effect = EspoAPIError("CRM unavailable")
@@ -2959,11 +2964,11 @@ class TestCRMCog:
 
     @pytest.mark.asyncio
     async def test_search_contacts_for_view_skills_delegates_to_linking(self, crm_cog):
-        """`_search_contacts_for_view_skills` should delegate to `_search_contact_for_linking`."""
+        """`_search_contacts_for_view_skills` should delegate to `_search_contacts_for_lookup`."""
         expected = [{"id": "contact123"}]
         with patch.object(
             crm_cog,
-            "_search_contact_for_linking",
+            "_search_contacts_for_lookup",
             new=AsyncMock(return_value=expected),
         ) as mock_search:
             result = await crm_cog._search_contacts_for_view_skills("john")
@@ -3675,15 +3680,27 @@ class TestCRMCog:
             }
         ]
 
+    def test_build_contact_search_filters_raw_discord_id(self, crm_cog):
+        """Build shared search filters for raw Discord user IDs."""
+        filters = crm_cog._build_contact_search_filters("111111111111111111")
+
+        assert filters == [
+            {
+                "type": "equals",
+                "attribute": "cDiscordUserID",
+                "value": "111111111111111111",
+            }
+        ]
+
     @pytest.mark.asyncio
-    async def test_search_contact_for_linking_includes_discord_username_filter_when_requested(
+    async def test_search_contacts_for_lookup_includes_discord_username_filter_when_requested(
         self, crm_cog
     ):
         """Search helper includes Discord username criteria when requested."""
         crm_cog.espo_api.request.return_value = {"list": []}
 
-        await crm_cog._search_contact_for_linking(
-            "john", include_discord_username_search=True, max_size=10
+        await crm_cog._search_contacts_for_lookup(
+            "john", include_discord_user_search=True, max_size=10
         )
 
         call = crm_cog.espo_api.request.call_args.args
@@ -4004,7 +4021,7 @@ class TestCRMCog:
 
         with patch.object(
             crm_cog,
-            "_search_contact_for_linking",
+            "_search_contacts_for_lookup",
             new=AsyncMock(return_value=[{"id": "contact456", "name": "John Doe"}]),
         ):
             crm_cog.espo_api.request.return_value = {"id": "contact456"}
@@ -4037,7 +4054,7 @@ class TestCRMCog:
         # Mock search helper to return multiple contacts
         with patch.object(
             crm_cog,
-            "_search_contact_for_linking",
+            "_search_contacts_for_lookup",
             new=AsyncMock(
                 return_value=[
                     {
@@ -4776,7 +4793,9 @@ class TestCRMCog:
                 return_value=True,
             ),
             patch.object(
-                crm_cog, "_find_contact_by_discord_id", new=AsyncMock(return_value=None)
+                crm_cog,
+                "_find_contact_by_discord_user",
+                new=AsyncMock(return_value=None),
             ),
             patch.object(
                 crm_cog, "_upload_resume_attachment_to_contact", new=AsyncMock()
@@ -4876,7 +4895,7 @@ class TestCRMCog:
             ),
             patch.object(
                 crm_cog,
-                "_search_contact_for_linking",
+                "_search_contacts_for_lookup",
                 new=AsyncMock(return_value=[]),
             ),
             patch.object(
@@ -4925,7 +4944,7 @@ class TestCRMCog:
         with (
             patch.object(
                 crm_cog,
-                "_find_contact_by_discord_id",
+                "_find_contact_by_discord_user",
                 new=AsyncMock(return_value=None),
             ),
             patch(
@@ -5081,7 +5100,7 @@ class TestCRMCog:
             ),
             patch.object(
                 crm_cog,
-                "_search_contact_for_linking",
+                "_search_contacts_for_lookup",
                 new=AsyncMock(
                     return_value=[{"id": "contact123"}, {"id": "contact456"}]
                 ),
