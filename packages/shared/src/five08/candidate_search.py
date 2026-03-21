@@ -90,6 +90,8 @@ class CandidateMatch:
     is_member: bool
     seniority: str | None
     address_country: str | None
+    address_city: str | None
+    address_state: str | None
     timezone: str | None
     discord_user_id: str | None = None
     has_crm_link: bool = True
@@ -258,6 +260,8 @@ def search_candidates(
                 COALESCE(p.is_member, false) AS is_member,
                 p.seniority,
                 p.address_country,
+                p.address_city,
+                p.address_state,
                 p.timezone,
                 COALESCE(p.skills, '{}'::text[]) AS skills,
                 COALESCE(p.skill_attrs, '{}'::jsonb) AS skill_attrs,
@@ -362,6 +366,8 @@ def search_candidates(
             is_member,
             seniority,
             address_country,
+            address_city,
+            address_state,
             timezone,
             skills,
             skill_attrs,
@@ -477,6 +483,8 @@ def search_candidates(
                 is_member=bool(row.get("is_member")),
                 seniority=row.get("seniority"),
                 address_country=row.get("address_country"),
+                address_city=row.get("address_city"),
+                address_state=row.get("address_state"),
                 timezone=row.get("timezone"),
                 discord_user_id=row.get("discord_user_id"),
                 has_crm_link=bool(row.get("has_crm_link", True)),

@@ -25,7 +25,10 @@ from five08.clients.docuseal import (
     create_member_agreement_submission,
 )
 from five08.document_text import document_file_extension, extract_document_text
-from five08.crm_normalization import normalize_roles
+from five08.crm_normalization import (
+    format_seniority_label as shared_format_seniority_label,
+    normalize_roles,
+)
 from five08.resume_extractor import (
     ResumeExtractedProfile,
     ResumeProfileExtractor,
@@ -77,22 +80,7 @@ EspoAPIError = espo.EspoAPIError
 
 
 def _format_seniority_label(value: str | None) -> str:
-    if value is None:
-        return "Unknown"
-    normalized = str(value).strip().lower().replace("_", "-")
-    if not normalized:
-        return "Unknown"
-    labels = {
-        "junior": "Junior",
-        "midlevel": "Mid-level",
-        "mid-level": "Mid-level",
-        "senior": "Senior",
-        "staff": "Staff",
-        "unknown": "Unknown",
-    }
-    if normalized in labels:
-        return labels[normalized]
-    return normalized.title()
+    return shared_format_seniority_label(value) or "Unknown"
 
 
 def _extract_parsed_seniority(extracted_profile: Any) -> str | None:
@@ -4955,6 +4943,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             "phone": profile.phone,
             "name": profile.name,
             "address_country": profile.address_country,
+            "address_state": profile.address_state,
             "timezone": profile.timezone,
             "address_city": profile.address_city,
             "description": profile.description,

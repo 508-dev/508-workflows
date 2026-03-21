@@ -203,6 +203,8 @@ def _make_row(**overrides: object) -> dict:
         "is_member": True,
         "seniority": "senior",
         "address_country": "US",
+        "address_city": "New York",
+        "address_state": "New York",
         "timezone": "America/New_York",
         "skills": ["python", "django"],
         "skill_attrs": {"python": "4"},
@@ -270,6 +272,8 @@ def test_search_candidates_maps_row_to_candidate_match() -> None:
     assert c.crm_name == "Bob CRM"
     assert c.discord_username == "bob_discord"
     assert c.seniority == "senior"
+    assert c.address_city == "New York"
+    assert c.address_state == "New York"
     assert c.seniority_score == 1.0
     assert "python" in c.matched_required_skills
 

@@ -61,6 +61,7 @@ class PersonRecord:
     is_member: bool = False
     address_country: str | None = None
     address_city: str | None = None
+    address_state: str | None = None
     timezone: str | None = None
     seniority: str | None = None
     linkedin: str | None = None
@@ -141,6 +142,7 @@ def upsert_person(settings: SharedSettings, person: PersonRecord) -> str:
             is_member,
             address_country,
             address_city,
+            address_state,
             timezone,
             seniority,
             linkedin,
@@ -154,7 +156,7 @@ def upsert_person(settings: SharedSettings, person: PersonRecord) -> str:
             %s, %s, %s, %s, %s,
             %s, %s, %s, %s, %s,
             %s, %s, %s, %s, %s,
-            %s
+            %s, %s
         )
         ON CONFLICT (crm_contact_id) DO UPDATE
         SET
@@ -169,6 +171,7 @@ def upsert_person(settings: SharedSettings, person: PersonRecord) -> str:
             is_member = EXCLUDED.is_member,
             address_country = EXCLUDED.address_country,
             address_city = EXCLUDED.address_city,
+            address_state = EXCLUDED.address_state,
             timezone = EXCLUDED.timezone,
             seniority = EXCLUDED.seniority,
             linkedin = EXCLUDED.linkedin,
@@ -201,6 +204,7 @@ def upsert_person(settings: SharedSettings, person: PersonRecord) -> str:
                     person.is_member,
                     _normalize_text(person.address_country),
                     _normalize_text(person.address_city),
+                    _normalize_text(person.address_state),
                     _normalize_text(person.timezone),
                     _normalize_text(person.seniority),
                     _normalize_text(person.linkedin),

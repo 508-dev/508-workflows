@@ -31,7 +31,8 @@ class EspoPeopleSyncClient:
             "id,name,emailAddress,emailAddressData,c508Email,"
             "cDiscordUsername,cDiscordUserId,cDiscordRoles,cDiscordUserID,"
             "cGithubUsername,githubUsername,type,contactType,"
-            "addressCountry,addressCity,cTimezone,cSeniority,cMemberAgreementSignedAt,"
+            "addressCountry,addressCity,addressState,cTimezone,cSeniority,"
+            "cMemberAgreementSignedAt,"
             f"{LINKEDIN_FIELD},skills,cSkillAttrs,resumeIds,resumeNames"
         )
         raw = self.api.request(
@@ -190,6 +191,7 @@ class PeopleSyncProcessor:
             is_member=self._is_member(raw_contact),
             address_country=_text_or_none(raw_contact.get("addressCountry")),
             address_city=_text_or_none(raw_contact.get("addressCity")),
+            address_state=_text_or_none(raw_contact.get("addressState")),
             timezone=_text_or_none(raw_contact.get("cTimezone")),
             seniority=_text_or_none(raw_contact.get("cSeniority")),
             linkedin=self._coerce_linkedin(raw_contact),
