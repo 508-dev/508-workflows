@@ -20,6 +20,7 @@ from discord.ext import commands
 
 from five08.audit import update_person_discord_roles, upsert_discord_member
 from five08.candidate_search import search_candidates
+from five08.crm_normalization import format_seniority_label
 from five08.document_text import document_file_extension, extract_document_text
 from five08.discord_bot.config import settings
 from five08.discord_bot.utils.audit import DiscordAuditCogMixin
@@ -516,23 +517,6 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         return messages
 
     @staticmethod
-    def _format_candidate_seniority(value: Any) -> str | None:
-        """Return a human-friendly seniority label for candidate match output."""
-        if not isinstance(value, str):
-            return None
-        normalized = value.strip()
-        if not normalized:
-            return None
-
-        return {
-            "junior": "Junior",
-            "midlevel": "Mid-level",
-            "mid-level": "Mid-level",
-            "senior": "Senior",
-            "staff": "Staff",
-        }.get(normalized.casefold(), normalized.replace("_", " ").title())
-
-    @staticmethod
     def _build_match_candidate_lines(
         *,
         candidates: list[Any],
@@ -633,8 +617,9 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 skill_info.append(
                     "🏷️ " + ", ".join(f"`{r}`" for r in candidate.matched_discord_roles)
                 )
-            seniority_label = JobsCog._format_candidate_seniority(
-                getattr(candidate, "seniority", None)
+            seniority_label = format_seniority_label(
+                getattr(candidate, "seniority", None),
+                default=None,
             )
             if seniority_label:
                 skill_info.append(f"seniority: `{seniority_label}`")

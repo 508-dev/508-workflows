@@ -1,6 +1,7 @@
 """Unit tests for shared CRM normalization helpers."""
 
 from five08.crm_normalization import (
+    format_seniority_label,
     normalize_city,
     normalize_country,
     normalize_role,
@@ -90,6 +91,13 @@ def test_normalize_seniority_modes() -> None:
     assert normalize_seniority("senior engineer") == "senior"
     assert normalize_seniority("  ", empty_as_unknown=False) is None
     assert normalize_seniority("  ", empty_as_unknown=True) == "unknown"
+
+
+def test_format_seniority_label_humanizes_values() -> None:
+    assert format_seniority_label("midlevel") == "Mid-level"
+    assert format_seniority_label("mid_level") == "Mid-level"
+    assert format_seniority_label(None) == "Unknown"
+    assert format_seniority_label("", default=None) is None
 
 
 def test_normalize_roles_skips_non_string_items() -> None:

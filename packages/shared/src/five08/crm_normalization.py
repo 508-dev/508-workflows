@@ -602,6 +602,28 @@ def normalize_seniority(value: Any, *, empty_as_unknown: bool = False) -> str | 
     return "unknown"
 
 
+def format_seniority_label(
+    value: Any, *, default: str | None = "Unknown"
+) -> str | None:
+    """Return a human-friendly seniority label from a raw or normalized value."""
+    if value is None:
+        return default
+    normalized = str(value).strip().lower().replace("_", "-")
+    if not normalized:
+        return default
+    labels = {
+        "junior": "Junior",
+        "midlevel": "Mid-level",
+        "mid-level": "Mid-level",
+        "senior": "Senior",
+        "staff": "Staff",
+        "unknown": "Unknown",
+    }
+    if normalized in labels:
+        return labels[normalized]
+    return normalized.title()
+
+
 def normalize_role(value: Any, role_map: dict[str, str] | None = None) -> str | None:
     if not isinstance(value, str):
         return None
