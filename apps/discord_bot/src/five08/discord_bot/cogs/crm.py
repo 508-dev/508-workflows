@@ -10,12 +10,10 @@ import ast
 import io
 import json
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 import re
 from typing import Any, Literal
-from uuid import uuid4
 
-import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -33,6 +31,10 @@ from five08.resume_extractor import (
     ResumeProfileExtractor,
     is_reserved_resume_name_token,
     normalize_resume_name_token,
+)
+from five08.resume_profile_processor import (
+    ResumeProcessorConfig,
+    ResumeProfileProcessor,
 )
 from five08.skills import normalize_skill, normalize_skill_list
 from five08.discord_bot.utils.audit import DiscordAuditCogMixin
@@ -55,15 +57,8 @@ ID_VERIFIED_AT_FIELD = "cIdVerifiedAt"
 ID_VERIFIED_BY_FIELD = "cIdVerifiedBy"
 ID_VERIFIED_TYPE_FIELD = "cVerifiedIdType"
 MEMBER_AGREEMENT_SIGNED_AT_FIELD = "cMemberAgreementSignedAt"
-ONBOARDING_STATUS_FIELD_CANDIDATES = (
-    "cOnboardingState",
-    "cOnboardingStatus",
-    "cOnboarding",
-)
-ONBOARDER_FIELD_CANDIDATES = (
-    "cOnboarder",
-    "cOnboardingCoordinator",
-)
+ONBOARDING_STATUS_FIELD = "cOnboardingState"
+ONBOARDER_FIELD = "cOnboarder"
 _DISCORD_ROLES_PROTECTED_FROM_APPLY: frozenset[str] = frozenset(
     {"Member", "Admin", "Steering Committee"}
 )
@@ -73,18 +68,12 @@ _DISCORD_ROLES_PROTECTED_FROM_APPLY_CASEFOLDED: frozenset[str] = frozenset(
 EXCLUDED_ONBOARDING_STATES = frozenset({"onboarded", "waitlist", "rejected"})
 ONBOARDING_QUEUE_MAX_SIZE = 200
 ONBOARDING_QUEUE_PAGE_SIZE = 1
+ESPO_DATE_FORMAT = "%Y-%m-%d"
+ESPO_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+LINKEDIN_FIELD = "cLinkedIn"
 EspoClient = espo.EspoClient
 EspoAPI = EspoClient
 EspoAPIError = espo.EspoAPIError
-
-
-def _configured_linkedin_field_from_settings() -> str:
-    value = getattr(settings, "crm_linkedin_field", None)
-    if isinstance(value, str):
-        value = value.strip()
-        if value:
-            return value
-    return "cLinkedIn"
 
 
 def _format_seniority_label(value: str | None) -> str:
@@ -1708,8 +1697,7 @@ class ResumeUpdateConfirmationView(discord.ui.View):
 
     @classmethod
     def _field_label(cls, field: str) -> str:
-        linkedin_field = _configured_linkedin_field_from_settings()
-        if field == linkedin_field:
+        if field == LINKEDIN_FIELD:
             return "LinkedIn"
         return cls._FIELD_LABELS.get(field, field)
 
@@ -2217,7 +2205,7 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button["ResumeUpdateConfirmationView"],
     ) -> None:
-        """Apply confirmed updates through the worker."""
+        """Apply confirmed updates directly through shared CRM logic."""
         await interaction.response.defer(thinking=True, ephemeral=True)
         if not self.proposed_updates and not self.link_discord:
             await interaction.followup.send(
@@ -2243,84 +2231,39 @@ class ResumeUpdateConfirmationView(discord.ui.View):
                     exc,
                 )
 
-        try:
-            apply_job_id = await self.crm_cog._enqueue_resume_apply_job(
-                contact_id=self.contact_id,
-                updates=self.proposed_updates,
-                link_discord=self.link_discord,
-            )
-        except Exception as exc:
-            logger.error("Failed to enqueue resume apply job: %s", exc)
-            _audit_apply_event(
-                "error",
-                {
-                    "contact_id": self.contact_id,
-                    "stage": "apply_enqueue",
-                    "error": str(exc),
-                    "updated_fields": [],
-                    "proposed_updates_count": len(self.proposed_updates),
-                    "link_member_requested": bool(self.link_discord),
-                    "link_discord_applied": None,
-                },
-            )
-            await interaction.followup.send(
-                "❌ Failed to enqueue CRM apply job. Please try again.",
-                ephemeral=True,
-            )
-            return
-
         await interaction.followup.send(
             "🛠️ Applying confirmed updates to CRM...",
             ephemeral=True,
         )
         try:
-            apply_result = await self.crm_cog._wait_for_backend_job_result(apply_job_id)
+            result = await self.crm_cog._apply_resume_profile_direct(
+                contact_id=self.contact_id,
+                updates=self.proposed_updates,
+                link_discord=self.link_discord,
+            )
         except Exception as exc:
             logger.error(
-                "Worker polling failed for apply_job_id=%s contact_id=%s error=%s",
-                apply_job_id,
-                self.contact_id,
-                exc,
+                "Resume apply failed for contact_id=%s error=%s", self.contact_id, exc
             )
             _audit_apply_event(
                 "error",
                 {
                     "contact_id": self.contact_id,
-                    "stage": "apply_polling_failed",
-                    "job_id": apply_job_id,
+                    "stage": "apply_execute",
                     "error": str(exc),
                     "updated_fields": [],
                     "link_discord_applied": None,
                 },
             )
             await interaction.followup.send(
-                "⚠️ Resume apply polling failed. Please retry or check CRM manually.",
+                "❌ Failed to apply CRM updates. Please try again.",
                 ephemeral=True,
             )
             return
-
-        if not apply_result:
-            _audit_apply_event(
-                "error",
-                {
-                    "contact_id": self.contact_id,
-                    "stage": "apply_timeout",
-                    "job_id": apply_job_id,
-                    "updated_fields": [],
-                    "link_discord_applied": None,
-                },
-            )
-            await interaction.followup.send(
-                "⚠️ Timed out waiting for apply job. Please check again shortly.",
-                ephemeral=True,
-            )
-            return
-
-        status = str(apply_result.get("status", "unknown"))
-        result = apply_result.get("result")
         updated_fields: list[str] = []
         updated_values: dict[str, Any] = {}
         link_discord_applied: bool | None = None
+        warning_message = ""
         if isinstance(result, dict):
             raw_fields = result.get("updated_fields")
             if isinstance(raw_fields, list):
@@ -2333,75 +2276,25 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             raw_link_applied = result.get("link_discord_applied")
             if isinstance(raw_link_applied, bool):
                 link_discord_applied = raw_link_applied
-
-        if status != "succeeded":
-            result_error = str(apply_result.get("last_error", ""))
-            result_success = None
-            if isinstance(result, dict):
-                result_success = result.get("success")
-
-            if result_success is False:
-                error_message = str(
-                    result.get("error") if isinstance(result, dict) else ""
-                )
-                if not error_message:
-                    error_message = result_error or "Unknown error"
-                _audit_apply_event(
-                    "error",
-                    {
-                        "contact_id": self.contact_id,
-                        "stage": "apply_failed",
-                        "job_id": apply_job_id,
-                        "job_status": status,
-                        "last_error": result_error,
-                        "apply_error": error_message,
-                        "updated_fields": updated_fields,
-                        "link_discord_applied": link_discord_applied,
-                    },
-                )
-                await interaction.followup.send(
-                    f"❌ Apply job failed (status: {status}). Error: {error_message}",
-                    ephemeral=True,
-                )
-                return
-
-            _audit_apply_event(
-                "error",
-                {
-                    "contact_id": self.contact_id,
-                    "stage": "apply_failed",
-                    "job_id": apply_job_id,
-                    "job_status": status,
-                    "last_error": str(apply_result.get("last_error", "")),
-                    "updated_fields": updated_fields,
-                    "link_discord_applied": link_discord_applied,
-                },
-            )
-            await interaction.followup.send(
-                f"❌ Apply job failed (status: {status}). "
-                f"Error: {apply_result.get('last_error') or 'Unknown error'}",
-                ephemeral=True,
-            )
-            return
+            raw_warning = result.get("warning")
+            if raw_warning is not None:
+                warning_message = str(raw_warning).strip()
 
         if isinstance(result, dict) and result.get("success") is False:
             error_message = str(result.get("error") or "")
             if not error_message:
-                error_message = str(apply_result.get("last_error", "Unknown error"))
+                error_message = "Unknown error"
             _audit_apply_event(
                 "error",
                 {
                     "contact_id": self.contact_id,
                     "stage": "apply_failed",
-                    "job_id": apply_job_id,
-                    "job_status": status,
                     "updated_fields": updated_fields,
                     "link_discord_applied": link_discord_applied,
                 },
             )
             await interaction.followup.send(
-                "❌ Apply completed but returned a failed result. "
-                f"Error: {error_message}",
+                f"❌ Failed to apply CRM updates. Error: {error_message}",
                 ephemeral=True,
             )
             return
@@ -2416,8 +2309,6 @@ class ResumeUpdateConfirmationView(discord.ui.View):
                 {
                     "contact_id": self.contact_id,
                     "stage": "apply_no_updates",
-                    "job_id": apply_job_id,
-                    "job_status": status,
                     "updated_fields": updated_fields,
                     "link_discord_applied": link_discord_applied,
                 },
@@ -2453,6 +2344,12 @@ class ResumeUpdateConfirmationView(discord.ui.View):
                 value=applied_updates_value,
                 inline=False,
             )
+        if warning_message:
+            embed.add_field(
+                name="Warning",
+                value=self.crm_cog._sanitize_error_message_for_discord(warning_message),
+                inline=False,
+            )
         profile_url = f"{self.crm_cog.base_url}/#Contact/view/{self.contact_id}"
         embed.add_field(name="🔗 CRM Profile", value=f"[View in CRM]({profile_url})")
         _audit_apply_event(
@@ -2460,11 +2357,11 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             {
                 "contact_id": self.contact_id,
                 "stage": "apply_succeeded",
-                "job_id": apply_job_id,
                 "updated_fields": updated_fields,
                 "proposed_updates_count": len(self.proposed_updates),
                 "link_member_requested": bool(self.link_discord),
                 "link_discord_applied": link_discord_applied,
+                "warning": warning_message or None,
             },
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
@@ -2864,11 +2761,6 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         self._init_audit_logger()
 
     @staticmethod
-    def _configured_linkedin_field() -> str:
-        """Return the configured field for LinkedIn profile values."""
-        return _configured_linkedin_field_from_settings()
-
-    @staticmethod
     def _sanitize_error_message_for_discord(
         raw_error: Any,
         max_length: int = 1900,
@@ -2957,120 +2849,44 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             "Content-Type": "application/json",
         }
 
-    async def _backend_request_json(
-        self,
-        method: Literal["GET", "POST"],
-        path: str,
-        *,
-        expected_status: int,
-        payload: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        timeout = aiohttp.ClientTimeout(total=30)
-        request_kwargs: dict[str, Any] = {
-            "headers": self._backend_headers(),
-            "timeout": timeout,
-        }
-        if payload is not None:
-            request_kwargs["json"] = payload
+    def _create_resume_profile_processor(self) -> ResumeProfileProcessor:
+        return ResumeProfileProcessor(self._resume_processor_config())
 
-        async with aiohttp.ClientSession() as session:
-            async with session.request(
-                method,
-                self._backend_url(path),
-                **request_kwargs,
-            ) as response:
-                data = await response.json()
-                if response.status != expected_status:
-                    raise ValueError(f"Backend {method} {path} failed: {data}")
-                if not isinstance(data, dict):
-                    raise ValueError(
-                        f"Backend {method} {path} returned a non-object response."
-                    )
-                return data
+    @staticmethod
+    def _resume_processor_config() -> ResumeProcessorConfig:
+        return ResumeProcessorConfig.from_settings(settings)
 
-    def _backend_url(self, path: str) -> str:
-        return f"{settings.backend_api_base_url.rstrip('/')}{path}"
-
-    async def _enqueue_resume_extract_job(
+    async def _extract_resume_profile_direct(
         self,
         *,
         contact_id: str,
         attachment_id: str,
         filename: str,
-        refresh_token: str | None = None,
-    ) -> str:
-        payload = {
-            "contact_id": contact_id,
-            "attachment_id": attachment_id,
-            "filename": filename,
-        }
-        if refresh_token:
-            payload["refresh_token"] = refresh_token
-        data = await self._backend_request_json(
-            "POST",
-            "/jobs/resume-extract",
-            payload=payload,
-            expected_status=202,
+    ) -> dict[str, Any]:
+        processor = self._create_resume_profile_processor()
+        result = await asyncio.to_thread(
+            processor.extract_profile_proposal,
+            contact_id=contact_id,
+            attachment_id=attachment_id,
+            filename=filename,
         )
-        job_id = data.get("job_id")
-        if not isinstance(job_id, str) or not job_id:
-            raise ValueError("Missing backend extract job_id in response.")
-        return job_id
+        return result.model_dump()
 
-    async def _enqueue_resume_apply_job(
+    async def _apply_resume_profile_direct(
         self,
         *,
         contact_id: str,
         updates: dict[str, Any],
         link_discord: dict[str, str] | None = None,
-    ) -> str:
-        payload = {
-            "contact_id": contact_id,
-            "updates": updates,
-            "link_discord": link_discord,
-        }
-        data = await self._backend_request_json(
-            "POST",
-            "/jobs/resume-apply",
-            payload=payload,
-            expected_status=202,
+    ) -> dict[str, Any]:
+        processor = self._create_resume_profile_processor()
+        result = await asyncio.to_thread(
+            processor.apply_profile_updates,
+            contact_id=contact_id,
+            updates=updates,
+            link_discord=link_discord,
         )
-        job_id = data.get("job_id")
-        if not isinstance(job_id, str) or not job_id:
-            raise ValueError("Missing backend apply job_id in response.")
-        return job_id
-
-    async def _get_backend_job_status(self, job_id: str) -> dict[str, Any]:
-        return await self._backend_request_json(
-            "GET",
-            f"/jobs/{job_id}",
-            expected_status=200,
-        )
-
-    async def _wait_for_backend_job_result(
-        self, job_id: str, *, timeout_seconds: int = 180, poll_seconds: float = 2.0
-    ) -> dict[str, Any] | None:
-        """Poll backend job status until terminal or timeout."""
-        terminal = {"succeeded", "dead", "canceled"}
-        max_attempts = max(1, int(timeout_seconds / poll_seconds))
-
-        for _ in range(max_attempts):
-            job = await self._get_backend_job_status(job_id)
-            status = str(job.get("status", ""))
-            if status in terminal:
-                return job
-            await asyncio.sleep(poll_seconds)
-
-        return None
-
-    def _resolve_field_name(
-        self, contact: dict[str, Any], *, candidates: tuple[str, ...]
-    ) -> str | None:
-        """Return the first matching field name that exists on a contact."""
-        for field_name in candidates:
-            if field_name in contact:
-                return field_name
-        return None
+        return result.model_dump()
 
     def _normalize_onboarding_state(self, value: Any) -> str:
         """Normalize onboarding state for comparisons."""
@@ -3083,32 +2899,23 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         if raw_value is None:
             return "Unknown"
 
-        if isinstance(raw_value, (int, float)):
-            try:
-                return datetime.fromtimestamp(raw_value, tz=timezone.utc).strftime(
-                    "%Y-%m-%d %H:%M UTC"
-                )
-            except (OSError, OverflowError, ValueError):
-                return str(raw_value)
-
         raw_value_text = str(raw_value).strip()
         if not raw_value_text:
             return "Unknown"
 
         try:
-            parsed = datetime.fromisoformat(raw_value_text.replace("Z", "+00:00"))
+            return datetime.strptime(raw_value_text, ESPO_DATETIME_FORMAT).strftime(
+                "%Y-%m-%d %H:%M UTC"
+            )
+        except ValueError:
+            pass
+
+        try:
+            return datetime.strptime(raw_value_text, ESPO_DATE_FORMAT).strftime(
+                ESPO_DATE_FORMAT
+            )
         except ValueError:
             return raw_value_text
-
-        if parsed.tzinfo is None:
-            if parsed.time() and parsed.time() != datetime.min.time():
-                return parsed.strftime("%Y-%m-%d %H:%M")
-            return parsed.strftime("%Y-%m-%d")
-
-        parsed_utc = parsed.astimezone(timezone.utc)
-        if parsed_utc.time() and parsed_utc.time() != datetime.min.time():
-            return parsed_utc.strftime("%Y-%m-%d %H:%M UTC")
-        return parsed_utc.strftime("%Y-%m-%d")
 
     async def _resolve_onboarder_username(
         self, interaction: discord.Interaction, raw_onboarder: str
@@ -3122,7 +2929,13 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         if mention_match:
             discord_id = mention_match.group("user_id")
             try:
-                contact = await self._find_contact_by_discord_id(discord_id)
+                contact = None
+                if interaction.guild:
+                    member = interaction.guild.get_member(int(discord_id))
+                    if member:
+                        contact = await self._find_contact_by_discord_user(member)
+                if not contact:
+                    contact = await self._find_contact_by_discord_id(discord_id)
             except ValueError:
                 contact = None
 
@@ -3205,14 +3018,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 else discord_username.strip()
             )
 
-        onboarder_field = self._resolve_field_name(
-            contact_record, candidates=ONBOARDER_FIELD_CANDIDATES
-        )
-        onboarder_value = (
-            str(contact_record.get(onboarder_field, "")).strip()
-            if onboarder_field
-            else ""
-        )
+        onboarder_value = str(contact_record.get(ONBOARDER_FIELD, "")).strip()
 
         return {
             "name": name,
@@ -3814,39 +3620,11 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         action: str = "crm.upload_resume",
         status_message: str | None = None,
     ) -> None:
-        """Kick off worker extraction and show confirmation preview."""
+        """Run extraction directly and show confirmation preview."""
         action_name = action
         status_text = (
             status_message or "📥 Resume uploaded. Extracting profile fields now..."
         )
-        refresh_token = uuid4().hex if action_name == "crm.reprocess_resume" else None
-        try:
-            job_id = await self._enqueue_resume_extract_job(
-                contact_id=contact_id,
-                attachment_id=attachment_id,
-                filename=filename,
-                refresh_token=refresh_token,
-            )
-        except Exception as exc:
-            logger.error("Failed to enqueue resume extract job: %s", exc)
-            self._audit_command(
-                interaction=interaction,
-                action=action_name,
-                result="error",
-                metadata={
-                    "filename": filename,
-                    "attachment_id": attachment_id,
-                    "stage": "extract_enqueue",
-                    "error": str(exc),
-                },
-                resource_type="crm_contact",
-                resource_id=str(contact_id),
-            )
-            await interaction.followup.send(
-                "⚠️ Resume uploaded, but extraction job could not be enqueued.",
-                ephemeral=True,
-            )
-            return
 
         await interaction.followup.send(
             status_text,
@@ -3854,9 +3632,18 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         )
 
         try:
-            job = await self._wait_for_backend_job_result(job_id)
+            result = await self._extract_resume_profile_direct(
+                contact_id=contact_id,
+                attachment_id=attachment_id,
+                filename=filename,
+            )
         except Exception as exc:
-            logger.error("Worker polling failed for job_id=%s error=%s", job_id, exc)
+            logger.error(
+                "Resume extraction failed contact_id=%s attachment_id=%s error=%s",
+                contact_id,
+                attachment_id,
+                exc,
+            )
             self._audit_command(
                 interaction=interaction,
                 action=action_name,
@@ -3864,63 +3651,17 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 metadata={
                     "filename": filename,
                     "attachment_id": attachment_id,
-                    "job_id": job_id,
-                    "stage": "extract_polling",
+                    "stage": "extract_execute",
                     "error": str(exc),
                 },
                 resource_type="crm_contact",
                 resource_id=str(contact_id),
             )
             await interaction.followup.send(
-                "⚠️ Resume uploaded, but extraction polling failed.",
+                "⚠️ Resume uploaded, but extraction failed.",
                 ephemeral=True,
             )
             return
-        if not job:
-            self._audit_command(
-                interaction=interaction,
-                action=action_name,
-                result="error",
-                metadata={
-                    "filename": filename,
-                    "attachment_id": attachment_id,
-                    "job_id": job_id,
-                    "stage": "extract_timeout",
-                },
-                resource_type="crm_contact",
-                resource_id=str(contact_id),
-            )
-            await interaction.followup.send(
-                "⚠️ Timed out waiting for extraction result. Try again in a moment.",
-                ephemeral=True,
-            )
-            return
-
-        status = str(job.get("status", "unknown"))
-        if status != "succeeded":
-            self._audit_command(
-                interaction=interaction,
-                action=action_name,
-                result="error",
-                metadata={
-                    "filename": filename,
-                    "attachment_id": attachment_id,
-                    "job_id": job_id,
-                    "stage": "extract_failed",
-                    "job_status": status,
-                    "last_error": str(job.get("last_error", "")),
-                },
-                resource_type="crm_contact",
-                resource_id=str(contact_id),
-            )
-            await interaction.followup.send(
-                f"❌ Extraction job failed (status: {status}). "
-                f"Error: {job.get('last_error') or 'Unknown error'}",
-                ephemeral=True,
-            )
-            return
-
-        result = job.get("result")
         if not isinstance(result, dict):
             self._audit_command(
                 interaction=interaction,
@@ -3929,7 +3670,6 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 metadata={
                     "filename": filename,
                     "attachment_id": attachment_id,
-                    "job_id": job_id,
                     "stage": "extract_malformed_result",
                 },
                 resource_type="crm_contact",
@@ -3957,7 +3697,6 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 metadata={
                     "filename": filename,
                     "attachment_id": attachment_id,
-                    "job_id": job_id,
                     "stage": "extract_unsuccessful",
                     "error": str(result.get("error", "")),
                 },
@@ -4044,7 +3783,6 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                         metadata={
                             "filename": filename,
                             "attachment_id": attachment_id,
-                            "job_id": job_id,
                             "stage": "preview_no_changes",
                         },
                         resource_type="crm_contact",
@@ -4076,7 +3814,6 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     metadata={
                         "filename": filename,
                         "attachment_id": attachment_id,
-                        "job_id": job_id,
                         "stage": "preview_ready",
                         "proposed_updates_count": len(proposed_updates),
                         "role_suggestions_count": len(suggested_discord_roles),
@@ -4122,7 +3859,6 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 metadata={
                     "filename": filename,
                     "attachment_id": attachment_id,
-                    "job_id": job_id,
                     "stage": "preview_ready",
                     "proposed_updates_count": len(proposed_updates),
                     "link_member_requested": bool(link_member),
@@ -4394,31 +4130,50 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             # Search contacts using EspoCRM API
             where_filters = []
             if query_value:
+                discord_user_id = self._extract_discord_id_from_mention(
+                    query_value
+                ) or (
+                    query_value
+                    if self._looks_like_discord_user_id(query_value)
+                    else None
+                )
+                query_filters = [
+                    {
+                        "type": "contains",
+                        "attribute": "name",
+                        "value": query_value,
+                    },
+                    {
+                        "type": "contains",
+                        "attribute": "emailAddress",
+                        "value": query_value,
+                    },
+                    {
+                        "type": "contains",
+                        "attribute": "c508Email",
+                        "value": query_value,
+                    },
+                ]
+                if discord_user_id:
+                    query_filters.append(
+                        {
+                            "type": "equals",
+                            "attribute": "cDiscordUserID",
+                            "value": discord_user_id,
+                        }
+                    )
+                else:
+                    query_filters.append(
+                        {
+                            "type": "contains",
+                            "attribute": "cDiscordUsername",
+                            "value": query_value,
+                        }
+                    )
                 where_filters.append(
                     {
                         "type": "or",
-                        "value": [
-                            {
-                                "type": "contains",
-                                "attribute": "name",
-                                "value": query_value,
-                            },
-                            {
-                                "type": "contains",
-                                "attribute": "cDiscordUsername",
-                                "value": query_value,
-                            },
-                            {
-                                "type": "contains",
-                                "attribute": "emailAddress",
-                                "value": query_value,
-                            },
-                            {
-                                "type": "contains",
-                                "attribute": "c508Email",
-                                "value": query_value,
-                            },
-                        ],
+                        "value": query_filters,
                     }
                 )
 
@@ -4571,7 +4326,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 )
                 return
 
-            contacts = await self._search_contact_for_linking(contact)
+            contacts = await self._search_contacts_for_lookup(contact)
             if not contacts:
                 self._audit_command(
                     interaction=interaction,
@@ -4631,10 +4386,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 return
 
             full_contact = self.espo_api.request("GET", f"Contact/{contact_id}")
-            onboarder_field = self._resolve_field_name(
-                full_contact, candidates=ONBOARDER_FIELD_CANDIDATES
-            )
-            if not onboarder_field:
+            if ONBOARDER_FIELD not in full_contact:
                 self._audit_command(
                     interaction=interaction,
                     action="crm.assign_onboarder",
@@ -4648,21 +4400,18 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     resource_id=str(contact_id),
                 )
                 await interaction.followup.send(
-                    "❌ Could not locate a known onboarder field for this CRM contact."
+                    "❌ Could not locate the `cOnboarder` field for this CRM contact."
                 )
                 return
 
-            state_field = self._resolve_field_name(
-                full_contact, candidates=ONBOARDING_STATUS_FIELD_CANDIDATES
-            )
             current_state = self._normalize_onboarding_state(
-                full_contact.get(state_field) if state_field else None
+                full_contact.get(ONBOARDING_STATUS_FIELD)
             )
 
-            update_payload: dict[str, str] = {onboarder_field: onboarder_username}
+            update_payload: dict[str, str] = {ONBOARDER_FIELD: onboarder_username}
             state_updated = False
-            if state_field and current_state == "pending":
-                update_payload[state_field] = "selected"
+            if current_state == "pending":
+                update_payload[ONBOARDING_STATUS_FIELD] = "selected"
                 state_updated = True
 
             self.espo_api.request("PUT", f"Contact/{contact_id}", update_payload)
@@ -4685,7 +4434,6 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     "contact_id": str(contact_id),
                     "contact_name": contact_name,
                     "onboarder": onboarder_username,
-                    "state_field": state_field,
                     "state_updated": state_updated,
                     "previous_state": current_state or None,
                 },
@@ -4731,8 +4479,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     "maxSize": ONBOARDING_QUEUE_MAX_SIZE,
                     "select": (
                         "id,name,emailAddress,cDiscordUsername,cDiscordUserID,"
-                        "cOnboardingState,cOnboardingStatus,cOnboarding,"
-                        "cOnboarder,cOnboardingCoordinator,cOnboardingUpdatedAt"
+                        "cOnboardingState,cOnboarder,cOnboardingUpdatedAt"
                     ),
                 },
             )
@@ -4740,13 +4487,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
 
             queue_entries: list[tuple[dict[str, Any], str]] = []
             for contact_record in contacts:
-                state_field = self._resolve_field_name(
-                    contact_record, candidates=ONBOARDING_STATUS_FIELD_CANDIDATES
-                )
-                status = (
-                    self._normalize_onboarding_state(contact_record.get(state_field))
-                    if state_field
-                    else ""
+                status = self._normalize_onboarding_state(
+                    contact_record.get(ONBOARDING_STATUS_FIELD)
                 )
                 if status in EXCLUDED_ONBOARDING_STATES:
                     continue
@@ -4883,11 +4625,11 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         """Download and send a contact's resume as a file attachment."""
         try:
             await interaction.response.defer(ephemeral=True)
-            contacts = await self._search_contact_for_linking(
+            contacts = await self._search_contacts_for_lookup(
                 query,
                 max_size=1,
                 select="id,name,emailAddress,c508Email,cDiscordUsername,resumeIds,resumeNames,resumeTypes",
-                include_discord_username_search=True,
+                include_discord_user_search=True,
             )
 
             if not contacts:
@@ -4990,6 +4732,15 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 }
             ]
 
+        if self._looks_like_discord_user_id(normalized):
+            return [
+                {
+                    "type": "equals",
+                    "attribute": "cDiscordUserID",
+                    "value": normalized,
+                }
+            ]
+
         search_filters: list[dict[str, Any]] = []
         has_space = " " in normalized
         has_at = "@" in normalized
@@ -5024,13 +4775,18 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
         return search_filters
 
-    async def _search_contact_for_linking(
+    def _looks_like_discord_user_id(self, value: str) -> bool:
+        """Return whether the provided value looks like a Discord snowflake."""
+        normalized = value.strip()
+        return normalized.isdigit() and len(normalized) >= 15
+
+    async def _search_contacts_for_lookup(
         self,
         search_term: str,
         *,
         max_size: int | None = None,
         select: str = "id,name,emailAddress,c508Email,cDiscordUsername",
-        include_discord_username_search: bool = False,
+        include_discord_user_search: bool = False,
     ) -> list[dict[str, Any]]:
         """Search for contacts using multiple shared criteria."""
         # Check if it looks like a hex contact ID
@@ -5046,20 +4802,27 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         if not search_filters:
             return []
 
-        if include_discord_username_search and "@" not in search_term:
+        normalized_search_term = search_term.strip()
+        if (
+            include_discord_user_search
+            and "@" not in normalized_search_term
+            and not self._looks_like_discord_user_id(normalized_search_term)
+        ):
             search_filters.append(
                 {
                     "type": "contains",
                     "attribute": "cDiscordUsername",
-                    "value": search_term.strip(),
+                    "value": normalized_search_term,
                 }
             )
 
-        has_at = "@" in search_term.strip()
-        has_space = " " in search_term.strip()
+        has_at = "@" in normalized_search_term
+        has_space = " " in normalized_search_term
         if max_size is None:
             max_size = 1 if has_space and not has_at else 10
-            if self._extract_discord_id_from_mention(search_term.strip()):
+            if self._extract_discord_id_from_mention(
+                normalized_search_term
+            ) or self._looks_like_discord_user_id(normalized_search_term):
                 max_size = 1
 
         search_params = {
@@ -5085,6 +4848,52 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
     @staticmethod
     def _resume_file_extension(filename: str | None) -> str:
         return document_file_extension(filename)
+
+    async def _validate_resume_attachment(
+        self,
+        *,
+        interaction: discord.Interaction,
+        action: str,
+        attachment: discord.Attachment,
+        failure_result: Literal["denied", "error"],
+    ) -> bool:
+        resume_config = self._resume_processor_config()
+        file_extension = self._resume_file_extension(attachment.filename)
+        if file_extension not in resume_config.allowed_attachment_suffixes:
+            self._audit_command_safe(
+                interaction=interaction,
+                action=action,
+                result=failure_result,
+                metadata={
+                    "filename": attachment.filename,
+                    "reason": "invalid_file_type",
+                },
+            )
+            await interaction.followup.send(
+                "❌ Invalid file type. "
+                f"Upload a {resume_config.allowed_file_extensions_label} file.\n"
+                f"You uploaded: `{attachment.filename}`"
+            )
+            return False
+
+        if attachment.size > resume_config.max_file_size_bytes:
+            self._audit_command_safe(
+                interaction=interaction,
+                action=action,
+                result=failure_result,
+                metadata={
+                    "filename": attachment.filename,
+                    "size_bytes": attachment.size,
+                    "reason": "file_too_large",
+                },
+            )
+            await interaction.followup.send(
+                f"❌ File too large. Maximum size is {resume_config.max_file_size_mb}MB.\n"
+                f"Your file: {attachment.size / (1024 * 1024):.1f}MB"
+            )
+            return False
+
+        return True
 
     @staticmethod
     def _is_valid_resume_name_candidate(value: str) -> bool:
@@ -5275,6 +5084,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         *,
         file_content: bytes,
         attempts: list[dict[str, Any]] | None,
+        hints: dict[str, Any] | None = None,
         filename: str | None = None,
     ) -> str:
         """Build a user-facing description of resume-derived lookup values."""
@@ -5282,11 +5092,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         if attempts_text:
             return f"\nTried contact lookups: {attempts_text}"
 
-        hints_raw = self._extract_resume_contact_hints(file_content, filename=filename)
-        if isinstance(hints_raw, dict):
-            hints: dict[str, Any] = hints_raw
-        else:
-            hints = {}
+        if hints is None:
+            hints = self._extract_resume_contact_hints(file_content, filename=filename)
 
         def _to_values(raw_values: Any) -> list[str]:
             values: list[str] = []
@@ -5329,6 +5136,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         *,
         file_content: bytes,
         attempts: list[dict[str, Any]] | None,
+        hints: dict[str, Any] | None = None,
         filename: str | None = None,
     ) -> str:
         """Build lookup summary without blocking the event loop."""
@@ -5336,14 +5144,20 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             self._build_inference_lookup_summary,
             file_content=file_content,
             attempts=attempts,
+            hints=hints,
             filename=filename,
         )
 
     def _build_resume_parsed_identity_summary(
-        self, file_content: bytes, *, filename: str | None = None
+        self,
+        file_content: bytes,
+        *,
+        hints: dict[str, Any] | None = None,
+        filename: str | None = None,
     ) -> str:
         """Build a short display summary of parsed contact identity fields."""
-        hints = self._extract_resume_contact_hints(file_content, filename=filename)
+        if hints is None:
+            hints = self._extract_resume_contact_hints(file_content, filename=filename)
         parsed_name = str(hints.get("name") or "").strip()
         if not self._is_valid_resume_name_candidate(parsed_name):
             parsed_name = self._extract_resume_name_fallback(
@@ -5364,12 +5178,17 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         )
 
     async def _build_resume_parsed_identity_summary_async(
-        self, file_content: bytes, *, filename: str | None = None
+        self,
+        file_content: bytes,
+        *,
+        hints: dict[str, Any] | None = None,
+        filename: str | None = None,
     ) -> str:
         """Build parsed identity summary without blocking the event loop."""
         return await asyncio.to_thread(
             self._build_resume_parsed_identity_summary,
             file_content,
+            hints=hints,
             filename=filename,
         )
 
@@ -5408,64 +5227,67 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         emails = hints.get("emails", [])
         github_usernames = hints.get("github_usernames", [])
         linkedin_urls = hints.get("linkedin_urls", [])
-        skills = hints.get("skills", [])
-        description = str(hints.get("description", "")).strip()
         if not isinstance(emails, list):
             emails = []
         if not isinstance(github_usernames, list):
             github_usernames = []
         if not isinstance(linkedin_urls, list):
             linkedin_urls = []
-        if not isinstance(skills, list):
-            skills = []
 
         payload: dict[str, Any] = {
             "type": "Prospect",
             "name": contact_name,
         }
         self._populate_name_fields(payload, source_name=contact_name)
-        if emails:
-            primary_email = emails[0]
-            if primary_email.endswith("@508.dev"):
-                payload["c508Email"] = primary_email
+
+        normalized_emails = [
+            str(email).strip()
+            for email in emails
+            if isinstance(email, str) and str(email).strip()
+        ]
+        preferred_email = next(
+            (
+                email
+                for email in normalized_emails
+                if not email.casefold().endswith("@508.dev")
+            ),
+            None,
+        )
+        fallback_508_email = next(
+            (
+                email
+                for email in normalized_emails
+                if email.casefold().endswith("@508.dev")
+            ),
+            None,
+        )
+        selected_email = preferred_email or fallback_508_email
+        if selected_email:
+            if selected_email.casefold().endswith("@508.dev"):
+                payload["c508Email"] = selected_email
             else:
-                payload["emailAddress"] = primary_email
-        if github_usernames:
-            payload["cGitHubUsername"] = github_usernames[0]
-        if linkedin_urls:
-            payload[self._configured_linkedin_field()] = linkedin_urls[0]
+                payload["emailAddress"] = selected_email
+            return payload
+
+        for github_username in github_usernames:
+            normalized = (
+                str(github_username).strip() if isinstance(github_username, str) else ""
+            )
+            if normalized:
+                payload["cGitHubUsername"] = normalized
+                return payload
+
+        for linkedin_url in linkedin_urls:
+            normalized = (
+                str(linkedin_url).strip() if isinstance(linkedin_url, str) else ""
+            )
+            if normalized:
+                payload[LINKEDIN_FIELD] = normalized
+                return payload
+
         phone = hints.get("phone")
         if isinstance(phone, str) and phone.strip():
             payload["phoneNumber"] = phone.strip()
-        primary_roles = hints.get("primary_roles")
-        if isinstance(primary_roles, list):
-            normalized_roles = [
-                str(role).strip()
-                for role in primary_roles
-                if isinstance(role, str) and role.strip()
-            ]
-            if normalized_roles:
-                payload["cRoles"] = normalized_roles
-        address_country = str(hints.get("address_country", "")).strip()
-        if address_country:
-            payload["addressCountry"] = address_country
-        timezone = self._normalize_timezone(hints.get("timezone"))
-        if timezone:
-            payload["cTimezone"] = timezone
-        address_city = str(hints.get("address_city", "")).strip()
-        if address_city:
-            payload["addressCity"] = address_city
-        seniority = str(hints.get("seniority_level", "")).strip()
-        if seniority:
-            payload["cSeniority"] = seniority
-        if description:
-            payload["description"] = description
-        if skills:
-            normalized_skills = [
-                str(item).strip() for item in skills if str(item).strip()
-            ]
-            if normalized_skills:
-                payload["skills"] = normalized_skills
 
         return payload
 
@@ -5482,9 +5304,10 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             filename=filename,
         )
 
-    def _discord_display_name(self, user: discord.Member) -> str:
+    def _discord_display_name(self, user: discord.User | discord.Member) -> str:
         """Format Discord username for CRM fields."""
-        username = str(getattr(user, "name", "")).strip()
+        raw_username = getattr(user, "name", "")
+        username = raw_username.strip() if isinstance(raw_username, str) else ""
         discriminator = getattr(user, "discriminator", "0")
         if (
             isinstance(discriminator, str)
@@ -5596,12 +5419,13 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             emails = []
         for email in emails:
             attempts.append({"method": "email", "value": email})
-            contacts = await self._search_contact_for_linking(email)
+            contacts = await self._search_contacts_for_lookup(email)
             if len(contacts) == 1:
                 return contacts[0], {
                     "method": "email",
                     "value": email,
                     "attempts": attempts,
+                    "hints": hints,
                 }
             if len(contacts) > 1:
                 return None, {
@@ -5609,6 +5433,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     "value": email,
                     "reason": "multiple_matches",
                     "attempts": attempts,
+                    "hints": hints,
                 }
 
         github_usernames = hints.get("github_usernames", [])
@@ -5624,6 +5449,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     "method": "github",
                     "value": github_username,
                     "attempts": attempts,
+                    "hints": hints,
                 }
             if len(contacts) > 1:
                 return None, {
@@ -5631,6 +5457,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     "value": github_username,
                     "reason": "multiple_matches",
                     "attempts": attempts,
+                    "hints": hints,
                 }
 
         linkedin_urls = hints.get("linkedin_urls", [])
@@ -5639,13 +5466,14 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         for linkedin_url in linkedin_urls:
             attempts.append({"method": "linkedin", "value": linkedin_url})
             contacts = await self._search_contacts_by_field(
-                field=self._configured_linkedin_field(), value=linkedin_url
+                field=LINKEDIN_FIELD, value=linkedin_url
             )
             if len(contacts) == 1:
                 return contacts[0], {
                     "method": "linkedin",
                     "value": linkedin_url,
                     "attempts": attempts,
+                    "hints": hints,
                 }
             if len(contacts) > 1:
                 return None, {
@@ -5653,9 +5481,14 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     "value": linkedin_url,
                     "reason": "multiple_matches",
                     "attempts": attempts,
+                    "hints": hints,
                 }
 
-        return None, {"reason": "no_matching_contact", "attempts": attempts}
+        return None, {
+            "reason": "no_matching_contact",
+            "attempts": attempts,
+            "hints": hints,
+        }
 
     async def _perform_discord_linking(
         self,
@@ -5848,14 +5681,15 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             if match and interaction.guild:
                 member = interaction.guild.get_member(int(match.group(1)))
                 if member:
-                    contact = await self._find_contact_by_discord_id(str(member.id))
+                    contact = await self._find_contact_by_discord_user(member)
                     if contact:
                         candidate = self._normalize_508_username(
                             contact.get("c508Email") or ""
                         )
                         if candidate:
                             return candidate
-                    return self._normalize_508_username(member.name)
+                    member_name = member.name if isinstance(member.name, str) else ""
+                    return self._normalize_508_username(member_name)
 
             return self._normalize_508_username(verified_by)
 
@@ -5869,21 +5703,62 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         if not user:
             return None
 
-        if getattr(user, "id", None):
-            contact = await self._find_contact_by_discord_id(str(user.id))
-            if contact:
-                candidate = self._normalize_508_username(contact.get("c508Email") or "")
-                if candidate:
-                    return candidate
+        contact = await self._find_contact_by_discord_user(user)
+        if contact:
+            candidate = self._normalize_508_username(contact.get("c508Email") or "")
+            if candidate:
+                return candidate
 
-        discord_username = self._normalize_508_username(str(user.name))
+        raw_username = getattr(user, "name", "")
+        discord_username = self._normalize_508_username(
+            raw_username if isinstance(raw_username, str) else ""
+        )
         if discord_username:
-            contact = await self._find_contact_by_discord_username(discord_username)
-            if contact:
-                candidate = self._normalize_508_username(contact.get("c508Email") or "")
-                if candidate:
-                    return candidate
             return discord_username
+
+        return None
+
+    def _discord_username_search_candidates(
+        self, user: discord.User | discord.Member
+    ) -> list[str]:
+        """Build candidate usernames for Discord-backed CRM lookup."""
+        raw_username = getattr(user, "name", "")
+        username = raw_username.strip() if isinstance(raw_username, str) else ""
+        candidates: list[str] = []
+        for candidate in (
+            self._discord_display_name(user),
+            username,
+            self._normalize_508_username(username),
+        ):
+            normalized_candidate = str(candidate or "").strip()
+            if normalized_candidate and normalized_candidate not in candidates:
+                candidates.append(normalized_candidate)
+        return candidates
+
+    async def _find_contact_by_discord_user(
+        self,
+        user: discord.User | discord.Member,
+        *,
+        select: str = (
+            "id,name,emailAddress,c508Email,cDiscordUsername,cDiscordUserID"
+        ),
+    ) -> dict[str, Any] | None:
+        """Find a contact by Discord ID first, then by Discord username."""
+        if getattr(user, "id", None):
+            contact = await self._find_contact_by_discord_id(
+                str(user.id),
+                select=select,
+            )
+            if contact:
+                return contact
+
+        for discord_username in self._discord_username_search_candidates(user):
+            contact = await self._find_contact_by_discord_username(
+                discord_username,
+                select=select,
+            )
+            if contact:
+                return contact
 
         return None
 
@@ -5950,7 +5825,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         self, search_term: str
     ) -> list[dict[str, Any]]:
         """Search for contacts for ID verification."""
-        contacts = await self._search_contact_for_linking(search_term)
+        contacts = await self._search_contacts_for_lookup(search_term)
         return contacts
 
     async def _mark_id_verified_for_contact(
@@ -6415,13 +6290,13 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         try:
             await interaction.response.defer(ephemeral=True)
 
-            contacts = await self._search_contact_for_linking(
+            contacts = await self._search_contacts_for_lookup(
                 search_term,
                 select=(
                     "id,name,emailAddress,c508Email,cDiscordUsername,"
                     f"{MEMBER_AGREEMENT_SIGNED_AT_FIELD}"
                 ),
-                include_discord_username_search=True,
+                include_discord_user_search=True,
             )
             if not contacts:
                 self._audit_command(
@@ -6586,7 +6461,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             await interaction.response.defer(ephemeral=True)
 
             # Determine search strategy based on search_term format
-            contacts = await self._search_contact_for_linking(search_term)
+            contacts = await self._search_contacts_for_lookup(search_term)
 
             if not contacts:
                 self._audit_command(
@@ -6926,7 +6801,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         self, search_term: str
     ) -> list[dict[str, Any]]:
         """Resolve search term for view-skills lookup."""
-        contacts = await self._search_contact_for_linking(search_term)
+        contacts = await self._search_contacts_for_lookup(search_term)
         return contacts
 
     async def _search_contacts_for_reprocess_resume(
@@ -6944,17 +6819,22 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
             return [by_discord_id] if by_discord_id else []
 
-        contacts = await self._search_contact_for_linking(
+        contacts = await self._search_contacts_for_lookup(
             search_term,
             select=select_fields,
+            include_discord_user_search=True,
         )
         if contacts:
             return contacts
 
-        normalized_username = self._normalize_508_username(search_term)
-        if normalized_username:
+        for discord_username in {
+            search_term.strip(),
+            self._normalize_508_username(search_term),
+        }:
+            if not discord_username:
+                continue
             by_discord_username = await self._find_contact_by_discord_username(
-                normalized_username,
+                discord_username,
                 select=select_fields,
             )
             if by_discord_username:
@@ -6965,7 +6845,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             and " " not in search_term
             and not self._is_hex_string(search_term)
         ):
-            contacts = await self._search_contact_for_linking(
+            contacts = await self._search_contacts_for_lookup(
                 f"{search_term}@508.dev",
                 select=select_fields,
             )
@@ -7308,8 +7188,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
 
             target_contact: dict[str, Any] | None = None
             if not query:
-                target_contact = await self._find_contact_by_discord_id(
-                    str(interaction.user.id)
+                target_contact = await self._find_contact_by_discord_user(
+                    interaction.user
                 )
                 if not target_contact:
                     self._audit_command(
@@ -7530,58 +7410,12 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 return
 
             if resume is not None:
-                if not settings.api_shared_secret:
-                    self._audit_command(
-                        interaction=interaction,
-                        action="crm.update_contact",
-                        result="error",
-                        metadata={
-                            "filename": resume.filename,
-                            "reason": "api_shared_secret_missing",
-                        },
-                    )
-                    await interaction.followup.send(
-                        "❌ API_SHARED_SECRET is not configured for backend API access."
-                    )
-                    return
-
-                valid_extensions = {".pdf", ".docx", ".txt"}
-                file_extension = (
-                    "." + resume.filename.split(".")[-1].lower()
-                    if "." in resume.filename
-                    else ""
-                )
-                if file_extension not in valid_extensions:
-                    self._audit_command(
-                        interaction=interaction,
-                        action="crm.update_contact",
-                        result="denied",
-                        metadata={
-                            "filename": resume.filename,
-                            "reason": "invalid_file_type",
-                        },
-                    )
-                    await interaction.followup.send(
-                        f"❌ Invalid file type. Upload a PDF, DOC, DOCX, or TXT file.\n"
-                        f"You uploaded: `{resume.filename}`"
-                    )
-                    return
-
-                max_size = 10 * 1024 * 1024
-                if resume.size > max_size:
-                    self._audit_command(
-                        interaction=interaction,
-                        action="crm.update_contact",
-                        result="denied",
-                        metadata={
-                            "filename": resume.filename,
-                            "size_bytes": resume.size,
-                            "reason": "file_too_large",
-                        },
-                    )
-                    await interaction.followup.send(
-                        f"❌ File too large. Maximum size is 10MB.\nYour file: {resume.size / (1024 * 1024):.1f}MB"
-                    )
+                if not await self._validate_resume_attachment(
+                    interaction=interaction,
+                    action="crm.update_contact",
+                    attachment=resume,
+                    failure_result="denied",
+                ):
                     return
 
             is_steering = hasattr(
@@ -7608,7 +7442,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             target_scope = "self"
 
             if search_term:
-                contacts = await self._search_contact_for_linking(search_term)
+                contacts = await self._search_contacts_for_lookup(search_term)
                 if not contacts:
                     self._audit_command(
                         interaction=interaction,
@@ -7645,8 +7479,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 target_contact = contacts[0]
                 target_scope = "other"
             else:
-                target_contact = await self._find_contact_by_discord_id(
-                    str(interaction.user.id)
+                target_contact = await self._find_contact_by_discord_user(
+                    interaction.user
                 )
                 if not target_contact:
                     self._audit_command(
@@ -7692,7 +7526,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             if linkedin is not None:
                 clean_linkedin = linkedin.strip()
                 if clean_linkedin:
-                    update_data[self._configured_linkedin_field()] = clean_linkedin
+                    update_data[LINKEDIN_FIELD] = clean_linkedin
                     requested_updates.append("linkedin")
 
             if rate_range is not None:
@@ -7857,10 +7691,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                             inline=True,
                         )
                     if "linkedin" in requested_updates:
-                        linkedin_field = self._configured_linkedin_field()
                         embed.add_field(
                             name="🔗 LinkedIn",
-                            value=update_data[linkedin_field],
+                            value=update_data[LINKEDIN_FIELD],
                             inline=True,
                         )
                     if "skills" in requested_updates:
@@ -8502,7 +8335,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         description="Upload resume, extract profile fields, and preview CRM updates",
     )
     @app_commands.describe(
-        file="Resume file to upload (PDF, DOC, DOCX, TXT)",
+        file="Resume file to upload (PDF or DOCX)",
         search_term="Email, name, or contact ID (Steering Committee+ only). Omit to infer from resume.",
         overwrite="Replace existing resumes instead of appending",
         link_user="Discord user to link to this CRM contact (optional, Steering Committee+ for others)",
@@ -8519,60 +8352,12 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         try:
             await interaction.response.defer(ephemeral=True)
 
-            if not settings.api_shared_secret:
-                self._audit_command(
-                    interaction=interaction,
-                    action="crm.upload_resume",
-                    result="error",
-                    metadata={
-                        "filename": file.filename,
-                        "reason": "api_shared_secret_missing",
-                    },
-                )
-                await interaction.followup.send(
-                    "❌ API_SHARED_SECRET is not configured for backend API access."
-                )
-                return
-
-            # Validate file type
-            valid_extensions = {".pdf", ".docx", ".txt"}
-            file_extension = (
-                "." + file.filename.split(".")[-1].lower()
-                if "." in file.filename
-                else ""
-            )
-
-            if file_extension not in valid_extensions:
-                self._audit_command(
-                    interaction=interaction,
-                    action="crm.upload_resume",
-                    result="error",
-                    metadata={
-                        "filename": file.filename,
-                        "reason": "invalid_file_type",
-                    },
-                )
-                await interaction.followup.send(
-                    f"❌ Invalid file type. Please upload a PDF, DOC, DOCX, or TXT file.\nYou uploaded: `{file.filename}`"
-                )
-                return
-
-            # Validate file size (10MB limit)
-            max_size = 10 * 1024 * 1024  # 10MB in bytes
-            if file.size > max_size:
-                self._audit_command(
-                    interaction=interaction,
-                    action="crm.upload_resume",
-                    result="error",
-                    metadata={
-                        "filename": file.filename,
-                        "size_bytes": file.size,
-                        "reason": "file_too_large",
-                    },
-                )
-                await interaction.followup.send(
-                    f"❌ File too large. Maximum size is 10MB.\nYour file: {file.size / (1024 * 1024):.1f}MB"
-                )
+            if not await self._validate_resume_attachment(
+                interaction=interaction,
+                action="crm.upload_resume",
+                attachment=file,
+                failure_result="error",
+            ):
                 return
 
             is_steering = hasattr(
@@ -8627,7 +8412,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             inferred_contact_meta: dict[str, Any] | None = None
 
             if search_term:
-                contacts = await self._search_contact_for_linking(search_term)
+                contacts = await self._search_contacts_for_lookup(search_term)
                 if not contacts:
                     self._audit_command(
                         interaction=interaction,
@@ -8667,9 +8452,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             elif is_steering and link_user is not None:
                 # Uploading for linked user (Steering Committee+ path)
                 target_scope = "other"
-                target_contact = await self._find_contact_by_discord_id(
-                    str(link_user.id)
-                )
+                target_contact = await self._find_contact_by_discord_user(link_user)
                 if not target_contact:
                     create_payload = (
                         await self._build_contact_payload_for_link_user_async(
@@ -8730,6 +8513,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                         "reason", "resume_contact_not_found"
                     )
                     inferred_attempts = (inferred_contact_meta or {}).get("attempts")
+                    inferred_hints = (inferred_contact_meta or {}).get("hints")
+                    if not isinstance(inferred_hints, dict):
+                        inferred_hints = None
                     inference_metadata = {
                         "filename": file.filename,
                         "target_scope": "resume_inferred",
@@ -8748,6 +8534,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                             attempts=inferred_attempts
                             if isinstance(inferred_attempts, list)
                             else None,
+                            hints=inferred_hints,
                             filename=file.filename,
                         )
                     )
@@ -8790,6 +8577,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                             + inferred_attempts_text
                             + await self._build_resume_parsed_identity_summary_async(
                                 file_content,
+                                hints=inferred_hints,
                                 filename=file.filename,
                             ),
                             view=view,
@@ -8810,8 +8598,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 target_scope = "resume"
             else:
                 # Uploading own resume - find contact by Discord user ID
-                target_contact = await self._find_contact_by_discord_id(
-                    str(interaction.user.id)
+                target_contact = await self._find_contact_by_discord_user(
+                    interaction.user
                 )
                 if not target_contact:
                     self._audit_command(
@@ -8871,21 +8659,6 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         """Re-run resume extraction for a contact's latest resume."""
         try:
             await interaction.response.defer(ephemeral=True)
-
-            if not settings.api_shared_secret:
-                self._audit_command(
-                    interaction=interaction,
-                    action="crm.reprocess_resume",
-                    result="error",
-                    metadata={
-                        "search_term": search_term,
-                        "reason": "api_shared_secret_missing",
-                    },
-                )
-                await interaction.followup.send(
-                    "❌ API_SHARED_SECRET is not configured for backend API access."
-                )
-                return
 
             is_steering = hasattr(
                 interaction.user, "roles"
@@ -8980,20 +8753,6 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         """List contacts missing key resume-derived fields for reprocessing."""
         try:
             await interaction.response.defer(ephemeral=True)
-
-            if not settings.api_shared_secret:
-                self._audit_command(
-                    interaction=interaction,
-                    action="crm.bulk_reprocess_resumes",
-                    result="error",
-                    metadata={
-                        "reason": "api_shared_secret_missing",
-                    },
-                )
-                await interaction.followup.send(
-                    "API_SHARED_SECRET is not configured for backend API access."
-                )
-                return
 
             is_steering = hasattr(
                 interaction.user, "roles"

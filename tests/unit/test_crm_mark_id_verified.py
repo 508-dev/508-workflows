@@ -76,11 +76,11 @@ class TestMarkIdVerifiedCommand:
     async def test_search_contacts_for_mark_id_verification_delegates_to_linking(
         self, crm_cog
     ):
-        """`_search_contacts_for_mark_id_verification` should delegate to `_search_contact_for_linking`."""
+        """`_search_contacts_for_mark_id_verification` should delegate to `_search_contacts_for_lookup`."""
         expected = [{"id": "contact123"}]
         with patch.object(
             crm_cog,
-            "_search_contact_for_linking",
+            "_search_contacts_for_lookup",
             new=AsyncMock(return_value=expected),
         ) as mock_search:
             result = await crm_cog._search_contacts_for_mark_id_verification("john")
@@ -97,7 +97,7 @@ class TestMarkIdVerifiedCommand:
     ):
         mock_interaction.guild = Mock()
         mock_interaction.guild.get_member.return_value = admin_member
-        crm_cog._find_contact_by_discord_id = AsyncMock(
+        crm_cog._find_contact_by_discord_user = AsyncMock(
             return_value={"c508Email": "caleb@508.dev", "id": "c1"}
         )
 
@@ -111,15 +111,16 @@ class TestMarkIdVerifiedCommand:
         crm_cog,
         mock_interaction,
     ):
-        mock_interaction.user.id = 123
-        crm_cog._find_contact_by_discord_id = AsyncMock(
+        crm_cog._find_contact_by_discord_user = AsyncMock(
             return_value={"c508Email": "admin_user@508.dev", "id": "admin-contact"}
         )
 
         resolved = await crm_cog._resolve_verified_by(mock_interaction, "")
 
         assert resolved == "admin_user"
-        crm_cog._find_contact_by_discord_id.assert_awaited_once_with("123")
+        crm_cog._find_contact_by_discord_user.assert_awaited_once_with(
+            mock_interaction.user
+        )
 
     @pytest.mark.asyncio
     async def test_resolve_verified_by_from_invoker_via_discord_username_fallback(
@@ -128,15 +129,16 @@ class TestMarkIdVerifiedCommand:
         mock_interaction,
     ):
         mock_interaction.user.name = "Admin User"
-        crm_cog._find_contact_by_discord_id = AsyncMock(return_value=None)
-        crm_cog._find_contact_by_discord_username = AsyncMock(
+        crm_cog._find_contact_by_discord_user = AsyncMock(
             return_value={"c508Email": "admin_user@508.dev", "id": "admin-contact"}
         )
 
         resolved = await crm_cog._resolve_verified_by(mock_interaction, "")
 
         assert resolved == "admin_user"
-        crm_cog._find_contact_by_discord_username.assert_awaited_once_with("admin user")
+        crm_cog._find_contact_by_discord_user.assert_awaited_once_with(
+            mock_interaction.user
+        )
 
     @pytest.mark.asyncio
     async def test_mark_id_verified_single_contact_updates_id_fields(

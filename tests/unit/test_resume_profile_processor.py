@@ -2,11 +2,31 @@
 
 import json
 from datetime import datetime
+from types import SimpleNamespace
 
 from unittest.mock import Mock
 
+from five08.clients.espo import EspoAPIError
+from five08.resume_profile_processor import ResumeProcessorConfig
 from five08.worker.crm.resume_profile_processor import ResumeProfileProcessor
 from five08.worker.models import ExtractedSkills, ResumeExtractedProfile
+
+
+def test_resume_processor_config_filters_unsupported_extensions() -> None:
+    """Shared config should clamp settings to the supported resume formats."""
+    config = ResumeProcessorConfig.from_settings(
+        SimpleNamespace(
+            espo_base_url="https://crm.example.com",
+            espo_api_key="secret",
+            allowed_file_types="pdf,docx,txt",
+            max_file_size_mb=12,
+        )
+    )
+
+    assert config.allowed_file_extensions == {"pdf", "docx"}
+    assert config.allowed_attachment_suffixes == frozenset({".pdf", ".docx"})
+    assert config.allowed_file_extensions_label == "PDF or DOCX"
+    assert config.max_file_size_bytes == 12 * 1024 * 1024
 
 
 def test_extract_profile_proposal_filters_508_email() -> None:
@@ -500,58 +520,6 @@ def test_extract_profile_proposal_normalizes_unknown_seniority_to_unknown() -> N
     assert result.proposed_updates["cSeniority"] == "unknown"
 
 
-def test_extract_profile_proposal_uses_configured_linkedin_field(
-    monkeypatch: object,
-) -> None:
-    """LinkedIn proposal should respect configurable CRM field mapping."""
-    processor = ResumeProfileProcessor()
-    processor.crm = Mock()
-    processor.extractor = Mock()
-    processor.skills_extractor = Mock()
-    processor.document_processor = Mock()
-    processor._record_processing_run = Mock()
-    processor.skills_extractor.canonicalize_skill.side_effect = lambda v: (
-        str(v).strip().lower()
-    )
-
-    monkeypatch.setattr(
-        "five08.worker.crm.resume_profile_processor.settings.crm_linkedin_field",
-        "cLinkedInProfile",
-    )
-
-    processor.crm.get_contact.return_value = {
-        "emailAddress": "member@example.com",
-        "cLinkedInProfile": "https://linkedin.com/in/old",
-    }
-    processor.crm.download_attachment.return_value = b"resume-bytes"
-    processor.document_processor.extract_text.return_value = "resume text"
-    processor.document_processor.get_content_hash.return_value = "hash-linkedin-config"
-    processor.extractor.extract.return_value = ResumeExtractedProfile(
-        email=None,
-        github_username=None,
-        linkedin_url="https://linkedin.com/in/new",
-        phone=None,
-        confidence=0.9,
-        source="gpt-4o-mini",
-    )
-    processor.skills_extractor.extract_skills.return_value = ExtractedSkills(
-        skills=[],
-        skill_attrs={},
-        confidence=0.8,
-        source="gpt-4o-mini",
-    )
-
-    result = processor.extract_profile_proposal(
-        contact_id="contact-linkedin",
-        attachment_id="att-linkedin",
-        filename="resume.pdf",
-    )
-
-    assert result.success is True
-    assert result.proposed_updates["cLinkedInProfile"] == "https://linkedin.com/in/new"
-    assert "cLinkedIn" not in result.proposed_updates
-
-
 def test_apply_profile_updates_appends_resume_email_as_primary_emailAddressData() -> (
     None
 ):
@@ -855,7 +823,7 @@ def test_apply_profile_updates_adds_discord_and_filters_email() -> None:
     assert update_payload["phoneNumber"] == "14155551234"
     assert update_payload["skills"] == ["python", "fastapi"]
     assert update_payload["cDiscordUserID"] == "123"
-    assert update_payload["cDiscordUsername"] == "member#0001 (ID: 123)"
+    assert update_payload["cDiscordUsername"] == "member#0001"
     assert "cResumeLastProcessed" in update_payload
     assert isinstance(update_payload["cResumeLastProcessed"], str)
     assert (
@@ -951,29 +919,6 @@ def test_apply_profile_updates_normalizes_unknown_seniority_to_unknown() -> None
     assert payload["cSeniority"] == "unknown"
 
 
-def test_apply_profile_updates_allows_configured_linkedin_field(
-    monkeypatch: object,
-) -> None:
-    """Apply should accept LinkedIn updates using configured CRM field name."""
-    processor = ResumeProfileProcessor()
-    processor.crm = Mock()
-
-    monkeypatch.setattr(
-        "five08.worker.crm.resume_profile_processor.settings.crm_linkedin_field",
-        "cLinkedInProfile",
-    )
-
-    result = processor.apply_profile_updates(
-        contact_id="contact-linkedin",
-        updates={"cLinkedInProfile": "https://linkedin.com/in/new"},
-    )
-
-    assert result.success is True
-    payload = processor.crm.update_contact.call_args[0][1]
-    assert payload["cLinkedInProfile"] == "https://linkedin.com/in/new"
-    assert "cLinkedIn" not in payload
-
-
 def test_apply_profile_updates_normalizes_skill_aliases_for_api_payload() -> None:
     """Alias-heavy skills should be normalized into shared canonical forms."""
     processor = ResumeProfileProcessor()
@@ -991,6 +936,87 @@ def test_apply_profile_updates_normalizes_skill_aliases_for_api_payload() -> Non
     payload = processor.crm.update_contact.call_args[0][1]
     assert payload["skills"] == ["node"]
     assert json.loads(payload["cSkillAttrs"]) == {"node": {"strength": 5}}
+
+
+def test_apply_profile_updates_accepts_link_only_updates() -> None:
+    """Link-only submissions should still persist Discord linkage."""
+    processor = ResumeProfileProcessor()
+    processor.crm = Mock()
+
+    result = processor.apply_profile_updates(
+        contact_id="contact-link-only",
+        updates={},
+        link_discord={"user_id": "123", "username": "member#0001"},
+    )
+
+    assert result.success is True
+    assert result.link_discord_applied is True
+    assert result.updated_fields == ["cDiscordUserID", "cDiscordUsername"]
+    payload = processor.crm.update_contact.call_args[0][1]
+    assert payload["cDiscordUserID"] == "123"
+    assert payload["cDiscordUsername"] == "member#0001"
+
+
+def test_apply_profile_updates_returns_warning_for_partial_success() -> None:
+    """Fallback field updates should surface partial failures without dropping successes."""
+    processor = ResumeProfileProcessor()
+    processor.crm = Mock()
+    processor._verify_updated_fields = Mock(return_value=["cGitHubUsername"])
+    processor.crm.update_contact.side_effect = [
+        EspoAPIError("batch failed"),
+        None,
+        EspoAPIError("phone rejected"),
+        None,
+    ]
+
+    result = processor.apply_profile_updates(
+        contact_id="contact-partial",
+        updates={
+            "cGitHubUsername": "new-gh",
+            "phoneNumber": "14155551234",
+        },
+    )
+
+    assert result.success is True
+    assert result.updated_fields == ["cGitHubUsername"]
+    assert result.updated_values == {"cGitHubUsername": "new-gh"}
+    assert result.warning == "phoneNumber: phone rejected"
+    assert result.error is None
+    timestamp_call = processor.crm.update_contact.call_args_list[-1]
+    assert timestamp_call.args[0] == "contact-partial"
+    assert set(timestamp_call.args[1].keys()) == {"cResumeLastProcessed"}
+    assert (
+        datetime.strptime(
+            timestamp_call.args[1]["cResumeLastProcessed"], "%Y-%m-%d %H:%M:%S"
+        )
+        is not None
+    )
+
+
+def test_apply_profile_updates_does_not_report_failed_fields_as_updated() -> None:
+    """Failed writes should not be echoed back as updated fields or values."""
+    processor = ResumeProfileProcessor()
+    processor.crm = Mock()
+    processor.crm.update_contact.side_effect = [
+        EspoAPIError("batch failed"),
+        EspoAPIError("github rejected"),
+        EspoAPIError("phone rejected"),
+    ]
+
+    result = processor.apply_profile_updates(
+        contact_id="contact-failed",
+        updates={
+            "cGitHubUsername": "new-gh",
+            "phoneNumber": "14155551234",
+        },
+    )
+
+    assert result.success is False
+    assert result.updated_fields == []
+    assert result.updated_values == {}
+    assert (
+        result.error == "cGitHubUsername: github rejected; phoneNumber: phone rejected"
+    )
 
 
 def test_extract_profile_proposal_records_failed_run() -> None:
