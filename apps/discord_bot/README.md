@@ -31,7 +31,7 @@ This document captures Discord bot behavior, permissions, and slash command usag
   - Required role: Admin
   - Args:
     - `mailbox_username` (required): 508 mailbox username or address. If the domain is omitted, `@508.dev` is added automatically.
-    - `search_term` (optional): CRM lookup by email, name, Discord username, or contact ID. Bare terms prioritize non-`@508.dev` matches before falling back to `c508Email`.
+    - `search_term` (optional): CRM lookup by email, name, Discord username, or contact ID. Bare terms first search contact name and Discord username, then fall back to `c508Email = {term}@508.dev` if needed.
     - `name` (optional): Full mailbox name. Defaults from the matched CRM contact when available.
     - `backup_email` (optional unless `search_term` is omitted): Full backup email where the invite should be sent. Defaults from the matched CRM contact when available.
   - Behavior:

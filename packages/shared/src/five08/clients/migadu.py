@@ -10,7 +10,7 @@ import requests
 MIGADU_API_BASE_URL = "https://api.migadu.com/v1"
 
 
-class MigaduAPIError(ValueError):
+class MigaduAPIError(RuntimeError):
     """Raised when the Migadu API request fails or returns invalid data."""
 
 

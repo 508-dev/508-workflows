@@ -18,6 +18,7 @@ from discord.ext import commands
 
 from five08.clients.espo import EspoAPIError, EspoClient
 from five08.clients.migadu import (
+    MigaduAPIError,
     MigaduClient,
     MigaduMailboxCreateRequest,
     normalize_migadu_mailbox_domain,
@@ -199,7 +200,7 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
         return normalize_migadu_mailbox_domain(settings.migadu_mailbox_domain)
 
     def _migadu_client(self) -> MigaduClient:
-        """Create a shared Migadu client from runtime settings."""
+        """Build a Migadu client from the current runtime settings."""
         username, token = self._migadu_credentials()
         return MigaduClient(
             username=username,
@@ -305,7 +306,7 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
 
         return deduplicated_contacts
 
-    def _search_contacts(
+    async def _search_contacts(
         self,
         *,
         filters: list[dict[str, Any]],
@@ -315,7 +316,8 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
         if not filters:
             return []
 
-        response = self.espo_api.request(
+        response = await asyncio.to_thread(
+            self.espo_api.request,
             "GET",
             "Contact",
             {
@@ -344,7 +346,11 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
 
         if self._is_hex_string(normalized):
             try:
-                response = self.espo_api.request("GET", f"Contact/{normalized}")
+                response = await asyncio.to_thread(
+                    self.espo_api.request,
+                    "GET",
+                    f"Contact/{normalized}",
+                )
             except EspoAPIError:
                 response = {}
             if response and response.get("id"):
@@ -352,7 +358,7 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
 
         mention_user_id = self._extract_discord_id_from_mention(normalized)
         if mention_user_id:
-            return self._search_contacts(
+            return await self._search_contacts(
                 filters=[
                     {
                         "type": "equals",
@@ -406,19 +412,19 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
                     }
                 )
 
-        contacts = self._search_contacts(filters=primary_filters, max_size=10)
+        contacts = await self._search_contacts(filters=primary_filters, max_size=10)
         if fallback_filters:
             contacts.extend(
-                self._search_contacts(filters=fallback_filters, max_size=10)
+                await self._search_contacts(filters=fallback_filters, max_size=10)
             )
 
         return self._deduplicate_contacts(contacts)
 
-    def _lookup_contacts_by_backup_email(
+    async def _lookup_contacts_by_backup_email(
         self, backup_email: str
     ) -> list[dict[str, Any]]:
         """Find CRM contacts with a matching primary email address."""
-        return self._search_contacts(
+        return await self._search_contacts(
             filters=[
                 {
                     "type": "equals",
@@ -429,22 +435,22 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
             max_size=10,
         )
 
-    def _try_resolve_contact_by_backup_email(
+    async def _try_resolve_contact_by_backup_email(
         self,
         backup_email: str,
     ) -> dict[str, Any] | None:
         """Resolve a unique CRM contact by backup email, or return None when ambiguous."""
-        contacts = self._lookup_contacts_by_backup_email(backup_email)
+        contacts = await self._lookup_contacts_by_backup_email(backup_email)
         if len(contacts) != 1:
             return None
         return contacts[0]
 
-    def _resolve_unique_contact_by_backup_email(
+    async def _resolve_unique_contact_by_backup_email(
         self,
         backup_email: str,
     ) -> dict[str, Any]:
         """Resolve exactly one CRM contact by backup email."""
-        contacts = self._lookup_contacts_by_backup_email(backup_email)
+        contacts = await self._lookup_contacts_by_backup_email(backup_email)
         if not contacts:
             raise ValueError(
                 f"Mailbox was created, but no CRM contact was found for backup email `{backup_email}`."
@@ -548,7 +554,7 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
         """
         pre_resolved_contact = crm_contact
         if pre_resolved_contact is None and context.requested_backup_email is not None:
-            pre_resolved_contact = self._try_resolve_contact_by_backup_email(
+            pre_resolved_contact = await self._try_resolve_contact_by_backup_email(
                 context.requested_backup_email
             )
 
@@ -580,7 +586,7 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
 
         try:
             if contact_to_update is None:
-                contact_to_update = self._resolve_unique_contact_by_backup_email(
+                contact_to_update = await self._resolve_unique_contact_by_backup_email(
                     backup_email
                 )
 
@@ -597,7 +603,8 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
                     raise ValueError(
                         "Mailbox was created, but the matched CRM contact has no ID."
                     )
-                self.espo_api.update_contact(
+                await asyncio.to_thread(
+                    self.espo_api.update_contact,
                     contact_id,
                     {"c508Email": context.mailbox_email},
                 )
@@ -659,6 +666,26 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
                 context=context,
                 crm_contact=crm_contact,
             )
+        except MigaduAPIError as exc:
+            logger.error("Migadu API error in create_mailbox: %s", exc)
+            self._audit_command(
+                interaction=interaction,
+                action="migadu.create_mailbox",
+                result="error",
+                metadata={
+                    "mailbox_username": context.mailbox_username,
+                    "search_term": context.search_term,
+                    "backup_email": context.requested_backup_email,
+                    "name": context.requested_name,
+                    "mailbox_email": context.mailbox_email,
+                    "error": str(exc),
+                },
+            )
+            await interaction.followup.send(
+                "❌ Migadu mailbox creation failed. Please try again later.",
+                ephemeral=True,
+            )
+            return
         except ValueError as exc:
             logger.error("Invalid request in create_mailbox: %s", exc)
             self._audit_command(
@@ -674,7 +701,7 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
                     "error": str(exc),
                 },
             )
-            await interaction.followup.send(f"⚠️ {exc}")
+            await interaction.followup.send(f"⚠️ {exc}", ephemeral=True)
             return
         except Exception as exc:
             logger.error("Unexpected error in create_mailbox: %s", exc)
@@ -692,7 +719,8 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
                 },
             )
             await interaction.followup.send(
-                "❌ An unexpected error occurred while creating the mailbox."
+                "❌ An unexpected error occurred while creating the mailbox.",
+                ephemeral=True,
             )
             return
 
@@ -703,7 +731,7 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
                 context=context,
                 outcome=outcome,
             )
-            await interaction.followup.send(embed=embed)
+            await interaction.followup.send(embed=embed, ephemeral=True)
             self._audit_command(
                 interaction=interaction,
                 action="migadu.create_mailbox",
@@ -738,7 +766,7 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
             context=context,
             outcome=outcome,
         )
-        await interaction.followup.send(embed=embed)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         self._audit_command(
             interaction=interaction,
             action="migadu.create_mailbox",
@@ -838,6 +866,7 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
                         "⚠️ Multiple CRM contacts match "
                         f"`{context.search_term}`. Select the contact to update.",
                         view=view,
+                        ephemeral=True,
                     )
                     return
 
@@ -862,7 +891,7 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
                     "error": str(exc),
                 },
             )
-            await interaction.followup.send(f"⚠️ {exc}")
+            await interaction.followup.send(f"⚠️ {exc}", ephemeral=True)
         except Exception as exc:
             logger.error("Unexpected error in create_mailbox: %s", exc)
             self._audit_command(
@@ -878,7 +907,8 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
                 },
             )
             await interaction.followup.send(
-                "❌ An unexpected error occurred while creating the mailbox."
+                "❌ An unexpected error occurred while creating the mailbox.",
+                ephemeral=True,
             )
 
 

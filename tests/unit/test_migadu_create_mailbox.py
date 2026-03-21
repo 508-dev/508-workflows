@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
+from five08.clients.migadu import MigaduAPIError
 from five08.discord_bot.cogs.migadu import CreateMailboxContactSelectView, MigaduCog
 
 
@@ -109,6 +110,7 @@ async def test_create_mailbox_command_success_with_crm_defaults_and_sync(
 
     _args, kwargs = mock_interaction.followup.send.call_args
     assert kwargs["embed"].title == "✅ Mailbox Created"
+    assert kwargs["ephemeral"] is True
 
 
 @pytest.mark.asyncio
@@ -128,6 +130,7 @@ async def test_create_mailbox_requires_backup_email_without_search_term(
     assert (
         "`backup_email` is required" in mock_interaction.followup.send.call_args[0][0]
     )
+    assert mock_interaction.followup.send.call_args.kwargs["ephemeral"] is True
 
 
 @pytest.mark.asyncio
@@ -166,6 +169,7 @@ async def test_create_mailbox_shows_contact_selector_for_multiple_matches(
     args, kwargs = mock_interaction.followup.send.call_args
     assert "Multiple CRM contacts match" in args[0]
     assert isinstance(kwargs["view"], CreateMailboxContactSelectView)
+    assert kwargs["ephemeral"] is True
 
 
 @pytest.mark.asyncio
@@ -197,6 +201,7 @@ async def test_create_mailbox_aborts_when_matched_contact_has_508_email(
 
     migadu_cog._create_migadu_mailbox.assert_not_called()
     assert "already has a 508 mailbox" in mock_interaction.followup.send.call_args[0][0]
+    assert mock_interaction.followup.send.call_args.kwargs["ephemeral"] is True
 
 
 @pytest.mark.asyncio
@@ -209,8 +214,8 @@ async def test_create_mailbox_reports_partial_failure_when_crm_sync_fails(
     migadu_cog._create_migadu_mailbox = AsyncMock(
         return_value={"address": "alice@508.dev"}
     )
-    migadu_cog._try_resolve_contact_by_backup_email = Mock(return_value=None)
-    migadu_cog._resolve_unique_contact_by_backup_email = Mock(
+    migadu_cog._try_resolve_contact_by_backup_email = AsyncMock(return_value=None)
+    migadu_cog._resolve_unique_contact_by_backup_email = AsyncMock(
         side_effect=ValueError(
             "Mailbox was created, but no CRM contact was found for backup email `alice@gmail.com`."
         )
@@ -225,3 +230,31 @@ async def test_create_mailbox_reports_partial_failure_when_crm_sync_fails(
 
     _args, kwargs = mock_interaction.followup.send.call_args
     assert kwargs["embed"].title == "⚠️ Mailbox Created, CRM Sync Failed"
+    assert kwargs["ephemeral"] is True
+
+
+@pytest.mark.asyncio
+async def test_create_mailbox_reports_migadu_api_errors_as_operational_failures(
+    migadu_cog: MigaduCog,
+    mock_interaction: AsyncMock,
+) -> None:
+    """Treat Migadu API failures as operational errors, not user denial."""
+    migadu_cog._audit_command = Mock()
+    migadu_cog._create_migadu_mailbox = AsyncMock(
+        side_effect=MigaduAPIError("status=500")
+    )
+    migadu_cog._try_resolve_contact_by_backup_email = AsyncMock(return_value=None)
+
+    await migadu_cog.create_mailbox.callback(
+        migadu_cog,
+        mock_interaction,
+        "alice",
+        backup_email="alice@gmail.com",
+    )
+
+    assert (
+        mock_interaction.followup.send.call_args[0][0]
+        == "❌ Migadu mailbox creation failed. Please try again later."
+    )
+    assert mock_interaction.followup.send.call_args.kwargs["ephemeral"] is True
+    assert migadu_cog._audit_command.call_args.kwargs["result"] == "error"
