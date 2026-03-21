@@ -2,7 +2,7 @@
 
 from urllib.parse import urlparse
 
-from pydantic import Field, PrivateAttr, field_validator, model_validator
+from pydantic import Field, PrivateAttr, model_validator
 
 from five08.settings import SharedSettings
 
@@ -27,8 +27,6 @@ class WorkerSettings(SharedSettings):
     resume_ai_model: str = "gpt-5-mini"
     resume_extractor_max_tokens: int = 2000
     resume_extractor_version: str = "v1"
-    docuseal_member_agreement_template_id: int | None = None
-
     max_file_size_mb: int = 10
     allowed_file_types: str = "pdf,docx,txt"
     max_attachments_per_contact: int = 3
@@ -108,23 +106,6 @@ class WorkerSettings(SharedSettings):
                 "IMAP_SERVER must be set when EMAIL_RESUME_INTAKE_ENABLED=true"
             )
         return self
-
-    @field_validator("docuseal_member_agreement_template_id", mode="before")
-    @classmethod
-    def _normalize_docuseal_member_agreement_template_id(
-        cls,
-        value: object,
-    ) -> int | None:
-        if value is None:
-            return None
-        if isinstance(value, int):
-            return value
-        if isinstance(value, str):
-            normalized = value.strip()
-            if not normalized:
-                return None
-            return int(normalized)
-        raise TypeError("DOCUSEAL_MEMBER_AGREEMENT_TEMPLATE_ID must be an integer")
 
     @property
     def allowed_file_extensions(self) -> set[str]:

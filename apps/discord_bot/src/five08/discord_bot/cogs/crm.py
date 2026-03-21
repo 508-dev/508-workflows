@@ -22,6 +22,10 @@ from discord.ext import commands
 
 from five08.discord_bot.config import settings
 from five08.clients import espo
+from five08.clients.docuseal import (
+    DocusealAPIError,
+    create_member_agreement_submission,
+)
 from five08.document_text import document_file_extension, extract_document_text
 from five08.crm_normalization import normalize_roles
 from five08.resume_extractor import (
@@ -50,6 +54,7 @@ logger = logging.getLogger(__name__)
 ID_VERIFIED_AT_FIELD = "cIdVerifiedAt"
 ID_VERIFIED_BY_FIELD = "cIdVerifiedBy"
 ID_VERIFIED_TYPE_FIELD = "cVerifiedIdType"
+MEMBER_AGREEMENT_SIGNED_AT_FIELD = "cMemberAgreementSignedAt"
 ONBOARDING_STATUS_FIELD_CANDIDATES = (
     "cOnboardingState",
     "cOnboardingStatus",
@@ -2888,6 +2893,60 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             return text[:max_length]
 
         return text[: max_length - 1].rstrip() + "…"
+
+    @staticmethod
+    def _contact_text_value(value: Any) -> str | None:
+        """Normalize one optional contact field to stripped text."""
+        normalized = str(value or "").strip()
+        if not normalized:
+            return None
+        return normalized
+
+    def _contact_has_signed_member_agreement(self, contact: dict[str, Any]) -> bool:
+        """Return whether the contact already has a signed member agreement."""
+        return bool(
+            self._contact_text_value(contact.get(MEMBER_AGREEMENT_SIGNED_AT_FIELD))
+        )
+
+    def _contact_preferred_email(self, contact: dict[str, Any]) -> str | None:
+        """Prefer the contact primary email, with 508 email as fallback."""
+        for field_name in ("emailAddress", "c508Email"):
+            value = self._contact_text_value(contact.get(field_name))
+            if value:
+                return value
+        return None
+
+    async def _create_member_agreement_submission_for_contact(
+        self,
+        contact: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Create a DocuSeal submission for the selected contact."""
+        base_url = self._contact_text_value(settings.docuseal_base_url)
+        if not base_url:
+            raise ValueError("DOCUSEAL_BASE_URL is not configured.")
+
+        api_key = self._contact_text_value(settings.docuseal_api_key)
+        if not api_key:
+            raise ValueError("DOCUSEAL_API_KEY is not configured.")
+
+        template_id = settings.docuseal_member_agreement_template_id
+        if template_id is None:
+            raise ValueError("DOCUSEAL_MEMBER_AGREEMENT_TEMPLATE_ID is not configured.")
+
+        submitter_email = self._contact_preferred_email(contact)
+        if not submitter_email:
+            raise ValueError("Selected contact does not have an email address in CRM.")
+
+        submitter_name = self._contact_text_value(contact.get("name"))
+        return await asyncio.to_thread(
+            create_member_agreement_submission,
+            base_url=base_url,
+            api_key=api_key,
+            template_id=template_id,
+            submitter_name=submitter_name,
+            submitter_email=submitter_email,
+            send_email=True,
+        )
 
     def _backend_headers(self) -> dict[str, str]:
         """Build auth headers for internal backend API calls."""
@@ -6337,6 +6396,177 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
             await interaction.followup.send(
                 "❌ An unexpected error occurred while marking ID verification."
+            )
+
+    @app_commands.command(
+        name="send-member-agreement",
+        description="Send the member agreement for signing to a CRM contact.",
+    )
+    @app_commands.describe(
+        search_term="Email, 508 email, Discord username, name, or contact ID."
+    )
+    @require_role("Steering Committee")
+    async def send_member_agreement(
+        self,
+        interaction: discord.Interaction,
+        search_term: str,
+    ) -> None:
+        """Send the member agreement to a contact via DocuSeal."""
+        try:
+            await interaction.response.defer(ephemeral=True)
+
+            contacts = await self._search_contact_for_linking(
+                search_term,
+                select=(
+                    "id,name,emailAddress,c508Email,cDiscordUsername,"
+                    f"{MEMBER_AGREEMENT_SIGNED_AT_FIELD}"
+                ),
+                include_discord_username_search=True,
+            )
+            if not contacts:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.send_member_agreement",
+                    result="success",
+                    metadata={"search_term": search_term, "contacts_found": 0},
+                )
+                await interaction.followup.send(
+                    f"❌ No contact found for: `{search_term}`"
+                )
+                return
+
+            if len(contacts) > 1:
+                lines: list[str] = []
+                for contact in contacts[:5]:
+                    contact_name = str(contact.get("name") or "Unknown")
+                    contact_id = str(contact.get("id") or "")
+                    display_email = self._contact_preferred_email(contact) or "No email"
+                    lines.append(
+                        f"- **{contact_name}** (`{contact_id}`) - `{display_email}`"
+                    )
+                suffix = (
+                    f"\n...and {len(contacts) - 5} more." if len(contacts) > 5 else ""
+                )
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.send_member_agreement",
+                    result="success",
+                    metadata={
+                        "search_term": search_term,
+                        "contacts_found": len(contacts),
+                        "requires_selection": True,
+                    },
+                )
+                await interaction.followup.send(
+                    "⚠️ Multiple contacts found. Please refine your search:\n"
+                    + "\n".join(lines)
+                    + suffix
+                )
+                return
+
+            contact = contacts[0]
+            contact_id = str(contact.get("id") or "").strip()
+            contact_name = str(contact.get("name") or "Unknown").strip() or "Unknown"
+            contact_email = self._contact_preferred_email(contact)
+            signed_at = self._contact_text_value(
+                contact.get(MEMBER_AGREEMENT_SIGNED_AT_FIELD)
+            )
+
+            if signed_at:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.send_member_agreement",
+                    result="denied",
+                    metadata={
+                        "search_term": search_term,
+                        "contact_name": contact_name,
+                        "contact_email": contact_email,
+                        "signed_at": signed_at,
+                        "reason": "already_signed",
+                    },
+                    resource_type="crm_contact",
+                    resource_id=contact_id,
+                )
+                await interaction.followup.send(
+                    f"⚠️ **{contact_name}** already signed the member agreement at "
+                    f"`{signed_at}`. No DocuSeal submission was sent."
+                )
+                return
+
+            if not contact_email:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.send_member_agreement",
+                    result="denied",
+                    metadata={
+                        "search_term": search_term,
+                        "contact_name": contact_name,
+                        "reason": "missing_email",
+                    },
+                    resource_type="crm_contact",
+                    resource_id=contact_id,
+                )
+                await interaction.followup.send(
+                    f"❌ **{contact_name}** does not have an email address in CRM."
+                )
+                return
+
+            submission = await self._create_member_agreement_submission_for_contact(
+                contact
+            )
+            submission_id = submission.get("id")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.send_member_agreement",
+                result="success",
+                metadata={
+                    "search_term": search_term,
+                    "contact_name": contact_name,
+                    "contact_email": contact_email,
+                    "submission_id": submission_id,
+                },
+                resource_type="crm_contact",
+                resource_id=contact_id,
+            )
+
+            submission_label = (
+                f" Submission ID: `{submission_id}`."
+                if submission_id is not None
+                else ""
+            )
+            await interaction.followup.send(
+                f"✅ Sent the member agreement to **{contact_name}** at `{contact_email}`."
+                f"{submission_label}"
+            )
+        except ValueError as exc:
+            logger.error("Member agreement command configuration/input error: %s", exc)
+            self._audit_command(
+                interaction=interaction,
+                action="crm.send_member_agreement",
+                result="error",
+                metadata={"search_term": search_term, "error": str(exc)},
+            )
+            await interaction.followup.send(f"❌ {exc}")
+        except DocusealAPIError as exc:
+            logger.error("DocuSeal API error in send_member_agreement: %s", exc)
+            sanitized_error = self._sanitize_error_message_for_discord(exc)
+            self._audit_command(
+                interaction=interaction,
+                action="crm.send_member_agreement",
+                result="error",
+                metadata={"search_term": search_term, "error": sanitized_error},
+            )
+            await interaction.followup.send(f"❌ DocuSeal API error: {sanitized_error}")
+        except Exception as exc:
+            logger.error("Unexpected error in send_member_agreement: %s", exc)
+            self._audit_command(
+                interaction=interaction,
+                action="crm.send_member_agreement",
+                result="error",
+                metadata={"search_term": search_term, "error": str(exc)},
+            )
+            await interaction.followup.send(
+                "❌ An unexpected error occurred while sending the member agreement."
             )
 
     @app_commands.command(

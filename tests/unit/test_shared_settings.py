@@ -48,3 +48,10 @@ def test_sentry_environment_and_sampling_are_not_env_configurable(
     assert settings.sentry_sample_rate == 1.0
     assert settings.sentry_traces_sample_rate == 0.0
     assert settings.sentry_profiles_sample_rate == 0.0
+
+
+def test_shared_settings_docuseal_template_id_accepts_numeric_string() -> None:
+    """Shared settings should coerce DocuSeal template ids from env-like strings."""
+    settings = SharedSettings(docuseal_member_agreement_template_id="1000001")
+
+    assert settings.docuseal_member_agreement_template_id == 1000001

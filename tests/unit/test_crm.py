@@ -5700,6 +5700,155 @@ class TestCRMCog:
         assert metadata["attachments_extracted"] == 1
         assert metadata["links_fetched"] == 1
 
+    @pytest.mark.asyncio
+    async def test_send_member_agreement_sends_submission(
+        self, crm_cog, mock_interaction
+    ):
+        """The command should send a DocuSeal submission for one eligible contact."""
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+        crm_cog._audit_command = Mock()
+        crm_cog._search_contact_for_linking = AsyncMock(
+            return_value=[
+                {
+                    "id": "contact123",
+                    "name": "Jane Doe",
+                    "emailAddress": "jane@example.com",
+                    "cMemberAgreementSignedAt": None,
+                }
+            ]
+        )
+        crm_cog._create_member_agreement_submission_for_contact = AsyncMock(
+            return_value={"id": 4200}
+        )
+
+        await crm_cog.send_member_agreement.callback(
+            crm_cog, mock_interaction, "jane@example.com"
+        )
+
+        crm_cog._create_member_agreement_submission_for_contact.assert_awaited_once()
+        mock_interaction.followup.send.assert_called_once_with(
+            "✅ Sent the member agreement to **Jane Doe** at `jane@example.com`."
+            " Submission ID: `4200`."
+        )
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["action"] == "crm.send_member_agreement"
+        assert audit_kwargs["result"] == "success"
+        assert audit_kwargs["metadata"]["submission_id"] == 4200
+
+    @pytest.mark.asyncio
+    async def test_send_member_agreement_warns_when_already_signed(
+        self, crm_cog, mock_interaction
+    ):
+        """Already signed contacts should not receive a new submission."""
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+        crm_cog._audit_command = Mock()
+        crm_cog._search_contact_for_linking = AsyncMock(
+            return_value=[
+                {
+                    "id": "contact123",
+                    "name": "Jane Doe",
+                    "emailAddress": "jane@example.com",
+                    "cMemberAgreementSignedAt": "2026-03-20 10:00:00",
+                }
+            ]
+        )
+        crm_cog._create_member_agreement_submission_for_contact = AsyncMock()
+
+        await crm_cog.send_member_agreement.callback(
+            crm_cog, mock_interaction, "jane@example.com"
+        )
+
+        crm_cog._create_member_agreement_submission_for_contact.assert_not_awaited()
+        mock_interaction.followup.send.assert_called_once_with(
+            "⚠️ **Jane Doe** already signed the member agreement at "
+            "`2026-03-20 10:00:00`. No DocuSeal submission was sent."
+        )
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["result"] == "denied"
+        assert audit_kwargs["metadata"]["reason"] == "already_signed"
+
+    @pytest.mark.asyncio
+    async def test_send_member_agreement_requires_contact_email(
+        self, crm_cog, mock_interaction
+    ):
+        """Contacts without a CRM email should be rejected before DocuSeal."""
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+        crm_cog._audit_command = Mock()
+        crm_cog._search_contact_for_linking = AsyncMock(
+            return_value=[
+                {
+                    "id": "contact123",
+                    "name": "Jane Doe",
+                    "emailAddress": "",
+                    "c508Email": "",
+                    "cMemberAgreementSignedAt": None,
+                }
+            ]
+        )
+        crm_cog._create_member_agreement_submission_for_contact = AsyncMock()
+
+        await crm_cog.send_member_agreement.callback(crm_cog, mock_interaction, "jane")
+
+        crm_cog._create_member_agreement_submission_for_contact.assert_not_awaited()
+        mock_interaction.followup.send.assert_called_once_with(
+            "❌ **Jane Doe** does not have an email address in CRM."
+        )
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["result"] == "denied"
+        assert audit_kwargs["metadata"]["reason"] == "missing_email"
+
+    @pytest.mark.asyncio
+    async def test_send_member_agreement_search_includes_discord_username(
+        self, crm_cog
+    ):
+        """The command should enable Discord username lookup on contact search."""
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction = AsyncMock()
+        mock_interaction.response = AsyncMock()
+        mock_interaction.response.defer = AsyncMock()
+        mock_interaction.followup = AsyncMock()
+        mock_interaction.followup.send = AsyncMock()
+        mock_interaction.user = Mock()
+        mock_interaction.user.roles = [steering_role]
+        crm_cog._audit_command = Mock()
+        crm_cog._create_member_agreement_submission_for_contact = AsyncMock(
+            return_value={"id": 4200}
+        )
+
+        with patch.object(
+            crm_cog,
+            "_search_contact_for_linking",
+            new=AsyncMock(
+                return_value=[
+                    {
+                        "id": "contact123",
+                        "name": "Jane Doe",
+                        "emailAddress": "jane@example.com",
+                        "cMemberAgreementSignedAt": None,
+                    }
+                ]
+            ),
+        ) as mock_search:
+            await crm_cog.send_member_agreement.callback(
+                crm_cog, mock_interaction, "jane_doe"
+            )
+
+        mock_search.assert_awaited_once_with(
+            "jane_doe",
+            select=(
+                "id,name,emailAddress,c508Email,cDiscordUsername,"
+                "cMemberAgreementSignedAt"
+            ),
+            include_discord_username_search=True,
+        )
+
 
 class TestResumeButtonView:
     """Tests for ResumeButtonView class."""
