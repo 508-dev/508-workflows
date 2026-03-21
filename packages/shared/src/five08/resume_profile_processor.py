@@ -628,9 +628,7 @@ class ResumeProfileProcessor:
                 discord_username = str(link_discord.get("username", "")).strip()
                 if discord_user_id and discord_username:
                     approved_updates["cDiscordUserID"] = discord_user_id
-                    approved_updates["cDiscordUsername"] = (
-                        f"{discord_username} (ID: {discord_user_id})"
-                    )
+                    approved_updates["cDiscordUsername"] = discord_username
                     link_applied = True
 
             if not approved_updates:
