@@ -53,6 +53,16 @@ This document captures Discord bot behavior, permissions, and slash command usag
     - `cIdVerifiedBy` ← `verified_by`
     - `cVerifiedIdType` ← `id_type`
 
+- `/send-member-agreement`
+  - Description: Send the member agreement for signature through DocuSeal.
+  - Required role: Steering Committee
+  - Prerequisites: `DOCUSEAL_BASE_URL`, `DOCUSEAL_API_KEY`, and `DOCUSEAL_MEMBER_AGREEMENT_TEMPLATE_ID` must be configured.
+  - Args:
+    - `search_term` (required): Email, 508 email, Discord username, name, or contact ID.
+  - Guardrails:
+    - Does not send when the contact already has `cMemberAgreementSignedAt` set.
+    - Requires a CRM email address on the contact.
+
 - `/search-members`
   - Description: Search for candidates/members in the CRM.
   - Args:

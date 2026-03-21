@@ -20,6 +20,10 @@ from discord.ext import commands
 
 from five08.discord_bot.config import settings
 from five08.clients import espo
+from five08.clients.docuseal import (
+    DocusealAPIError,
+    create_member_agreement_submission,
+)
 from five08.document_text import document_file_extension, extract_document_text
 from five08.crm_normalization import normalize_roles
 from five08.resume_extractor import (
@@ -52,6 +56,7 @@ logger = logging.getLogger(__name__)
 ID_VERIFIED_AT_FIELD = "cIdVerifiedAt"
 ID_VERIFIED_BY_FIELD = "cIdVerifiedBy"
 ID_VERIFIED_TYPE_FIELD = "cVerifiedIdType"
+MEMBER_AGREEMENT_SIGNED_AT_FIELD = "cMemberAgreementSignedAt"
 ONBOARDING_STATUS_FIELD = "cOnboardingState"
 ONBOARDER_FIELD = "cOnboarder"
 _DISCORD_ROLES_PROTECTED_FROM_APPLY: frozenset[str] = frozenset(
@@ -2781,6 +2786,69 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
 
         return text[: max_length - 1].rstrip() + "…"
 
+    @staticmethod
+    def _contact_text_value(value: Any) -> str | None:
+        """Normalize one optional contact field to stripped text."""
+        normalized = str(value or "").strip()
+        if not normalized:
+            return None
+        return normalized
+
+    def _contact_has_signed_member_agreement(self, contact: dict[str, Any]) -> bool:
+        """Return whether the contact already has a signed member agreement."""
+        return bool(
+            self._contact_text_value(contact.get(MEMBER_AGREEMENT_SIGNED_AT_FIELD))
+        )
+
+    def _contact_preferred_email(self, contact: dict[str, Any]) -> str | None:
+        """Prefer the contact primary email, with 508 email as fallback."""
+        for field_name in ("emailAddress", "c508Email"):
+            value = self._contact_text_value(contact.get(field_name))
+            if value:
+                return value
+        return None
+
+    async def _create_member_agreement_submission_for_contact(
+        self,
+        contact: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Create a DocuSeal submission for the selected contact."""
+        base_url = self._contact_text_value(settings.docuseal_base_url)
+        if not base_url:
+            raise ValueError("DOCUSEAL_BASE_URL is not configured.")
+
+        api_key = self._contact_text_value(settings.docuseal_api_key)
+        if not api_key:
+            raise ValueError("DOCUSEAL_API_KEY is not configured.")
+
+        template_id = settings.docuseal_member_agreement_template_id
+        if template_id is None:
+            raise ValueError("DOCUSEAL_MEMBER_AGREEMENT_TEMPLATE_ID is not configured.")
+
+        submitter_email = self._contact_preferred_email(contact)
+        if not submitter_email:
+            raise ValueError("Selected contact does not have an email address in CRM.")
+
+        submitter_name = self._contact_text_value(contact.get("name"))
+        return await asyncio.to_thread(
+            create_member_agreement_submission,
+            base_url=base_url,
+            api_key=api_key,
+            template_id=template_id,
+            submitter_name=submitter_name,
+            submitter_email=submitter_email,
+            send_email=True,
+        )
+
+    def _backend_headers(self) -> dict[str, str]:
+        """Build auth headers for internal backend API calls."""
+        if not settings.api_shared_secret:
+            raise ValueError("API_SHARED_SECRET is required for backend API requests.")
+        return {
+            "X-API-Secret": settings.api_shared_secret,
+            "Content-Type": "application/json",
+        }
+
     def _create_resume_profile_processor(self) -> ResumeProfileProcessor:
         return ResumeProfileProcessor(self._resume_processor_config())
 
@@ -2861,7 +2929,13 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         if mention_match:
             discord_id = mention_match.group("user_id")
             try:
-                contact = await self._find_contact_by_discord_id(discord_id)
+                contact = None
+                if interaction.guild:
+                    member = interaction.guild.get_member(int(discord_id))
+                    if member:
+                        contact = await self._find_contact_by_discord_user(member)
+                if not contact:
+                    contact = await self._find_contact_by_discord_id(discord_id)
             except ValueError:
                 contact = None
 
@@ -4056,31 +4130,50 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             # Search contacts using EspoCRM API
             where_filters = []
             if query_value:
+                discord_user_id = self._extract_discord_id_from_mention(
+                    query_value
+                ) or (
+                    query_value
+                    if self._looks_like_discord_user_id(query_value)
+                    else None
+                )
+                query_filters = [
+                    {
+                        "type": "contains",
+                        "attribute": "name",
+                        "value": query_value,
+                    },
+                    {
+                        "type": "contains",
+                        "attribute": "emailAddress",
+                        "value": query_value,
+                    },
+                    {
+                        "type": "contains",
+                        "attribute": "c508Email",
+                        "value": query_value,
+                    },
+                ]
+                if discord_user_id:
+                    query_filters.append(
+                        {
+                            "type": "equals",
+                            "attribute": "cDiscordUserID",
+                            "value": discord_user_id,
+                        }
+                    )
+                else:
+                    query_filters.append(
+                        {
+                            "type": "contains",
+                            "attribute": "cDiscordUsername",
+                            "value": query_value,
+                        }
+                    )
                 where_filters.append(
                     {
                         "type": "or",
-                        "value": [
-                            {
-                                "type": "contains",
-                                "attribute": "name",
-                                "value": query_value,
-                            },
-                            {
-                                "type": "contains",
-                                "attribute": "cDiscordUsername",
-                                "value": query_value,
-                            },
-                            {
-                                "type": "contains",
-                                "attribute": "emailAddress",
-                                "value": query_value,
-                            },
-                            {
-                                "type": "contains",
-                                "attribute": "c508Email",
-                                "value": query_value,
-                            },
-                        ],
+                        "value": query_filters,
                     }
                 )
 
@@ -4233,7 +4326,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 )
                 return
 
-            contacts = await self._search_contact_for_linking(contact)
+            contacts = await self._search_contacts_for_lookup(contact)
             if not contacts:
                 self._audit_command(
                     interaction=interaction,
@@ -4532,11 +4625,11 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         """Download and send a contact's resume as a file attachment."""
         try:
             await interaction.response.defer(ephemeral=True)
-            contacts = await self._search_contact_for_linking(
+            contacts = await self._search_contacts_for_lookup(
                 query,
                 max_size=1,
                 select="id,name,emailAddress,c508Email,cDiscordUsername,resumeIds,resumeNames,resumeTypes",
-                include_discord_username_search=True,
+                include_discord_user_search=True,
             )
 
             if not contacts:
@@ -4639,6 +4732,15 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 }
             ]
 
+        if self._looks_like_discord_user_id(normalized):
+            return [
+                {
+                    "type": "equals",
+                    "attribute": "cDiscordUserID",
+                    "value": normalized,
+                }
+            ]
+
         search_filters: list[dict[str, Any]] = []
         has_space = " " in normalized
         has_at = "@" in normalized
@@ -4673,13 +4775,18 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
         return search_filters
 
-    async def _search_contact_for_linking(
+    def _looks_like_discord_user_id(self, value: str) -> bool:
+        """Return whether the provided value looks like a Discord snowflake."""
+        normalized = value.strip()
+        return normalized.isdigit() and len(normalized) >= 15
+
+    async def _search_contacts_for_lookup(
         self,
         search_term: str,
         *,
         max_size: int | None = None,
         select: str = "id,name,emailAddress,c508Email,cDiscordUsername",
-        include_discord_username_search: bool = False,
+        include_discord_user_search: bool = False,
     ) -> list[dict[str, Any]]:
         """Search for contacts using multiple shared criteria."""
         # Check if it looks like a hex contact ID
@@ -4695,20 +4802,27 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         if not search_filters:
             return []
 
-        if include_discord_username_search and "@" not in search_term:
+        normalized_search_term = search_term.strip()
+        if (
+            include_discord_user_search
+            and "@" not in normalized_search_term
+            and not self._looks_like_discord_user_id(normalized_search_term)
+        ):
             search_filters.append(
                 {
                     "type": "contains",
                     "attribute": "cDiscordUsername",
-                    "value": search_term.strip(),
+                    "value": normalized_search_term,
                 }
             )
 
-        has_at = "@" in search_term.strip()
-        has_space = " " in search_term.strip()
+        has_at = "@" in normalized_search_term
+        has_space = " " in normalized_search_term
         if max_size is None:
             max_size = 1 if has_space and not has_at else 10
-            if self._extract_discord_id_from_mention(search_term.strip()):
+            if self._extract_discord_id_from_mention(
+                normalized_search_term
+            ) or self._looks_like_discord_user_id(normalized_search_term):
                 max_size = 1
 
         search_params = {
@@ -5190,9 +5304,10 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             filename=filename,
         )
 
-    def _discord_display_name(self, user: discord.Member) -> str:
+    def _discord_display_name(self, user: discord.User | discord.Member) -> str:
         """Format Discord username for CRM fields."""
-        username = str(getattr(user, "name", "")).strip()
+        raw_username = getattr(user, "name", "")
+        username = raw_username.strip() if isinstance(raw_username, str) else ""
         discriminator = getattr(user, "discriminator", "0")
         if (
             isinstance(discriminator, str)
@@ -5304,7 +5419,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             emails = []
         for email in emails:
             attempts.append({"method": "email", "value": email})
-            contacts = await self._search_contact_for_linking(email)
+            contacts = await self._search_contacts_for_lookup(email)
             if len(contacts) == 1:
                 return contacts[0], {
                     "method": "email",
@@ -5566,14 +5681,15 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             if match and interaction.guild:
                 member = interaction.guild.get_member(int(match.group(1)))
                 if member:
-                    contact = await self._find_contact_by_discord_id(str(member.id))
+                    contact = await self._find_contact_by_discord_user(member)
                     if contact:
                         candidate = self._normalize_508_username(
                             contact.get("c508Email") or ""
                         )
                         if candidate:
                             return candidate
-                    return self._normalize_508_username(member.name)
+                    member_name = member.name if isinstance(member.name, str) else ""
+                    return self._normalize_508_username(member_name)
 
             return self._normalize_508_username(verified_by)
 
@@ -5587,21 +5703,62 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         if not user:
             return None
 
-        if getattr(user, "id", None):
-            contact = await self._find_contact_by_discord_id(str(user.id))
-            if contact:
-                candidate = self._normalize_508_username(contact.get("c508Email") or "")
-                if candidate:
-                    return candidate
+        contact = await self._find_contact_by_discord_user(user)
+        if contact:
+            candidate = self._normalize_508_username(contact.get("c508Email") or "")
+            if candidate:
+                return candidate
 
-        discord_username = self._normalize_508_username(str(user.name))
+        raw_username = getattr(user, "name", "")
+        discord_username = self._normalize_508_username(
+            raw_username if isinstance(raw_username, str) else ""
+        )
         if discord_username:
-            contact = await self._find_contact_by_discord_username(discord_username)
-            if contact:
-                candidate = self._normalize_508_username(contact.get("c508Email") or "")
-                if candidate:
-                    return candidate
             return discord_username
+
+        return None
+
+    def _discord_username_search_candidates(
+        self, user: discord.User | discord.Member
+    ) -> list[str]:
+        """Build candidate usernames for Discord-backed CRM lookup."""
+        raw_username = getattr(user, "name", "")
+        username = raw_username.strip() if isinstance(raw_username, str) else ""
+        candidates: list[str] = []
+        for candidate in (
+            self._discord_display_name(user),
+            username,
+            self._normalize_508_username(username),
+        ):
+            normalized_candidate = str(candidate or "").strip()
+            if normalized_candidate and normalized_candidate not in candidates:
+                candidates.append(normalized_candidate)
+        return candidates
+
+    async def _find_contact_by_discord_user(
+        self,
+        user: discord.User | discord.Member,
+        *,
+        select: str = (
+            "id,name,emailAddress,c508Email,cDiscordUsername,cDiscordUserID"
+        ),
+    ) -> dict[str, Any] | None:
+        """Find a contact by Discord ID first, then by Discord username."""
+        if getattr(user, "id", None):
+            contact = await self._find_contact_by_discord_id(
+                str(user.id),
+                select=select,
+            )
+            if contact:
+                return contact
+
+        for discord_username in self._discord_username_search_candidates(user):
+            contact = await self._find_contact_by_discord_username(
+                discord_username,
+                select=select,
+            )
+            if contact:
+                return contact
 
         return None
 
@@ -5668,7 +5825,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         self, search_term: str
     ) -> list[dict[str, Any]]:
         """Search for contacts for ID verification."""
-        contacts = await self._search_contact_for_linking(search_term)
+        contacts = await self._search_contacts_for_lookup(search_term)
         return contacts
 
     async def _mark_id_verified_for_contact(
@@ -6117,6 +6274,177 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
 
     @app_commands.command(
+        name="send-member-agreement",
+        description="Send the member agreement for signing to a CRM contact.",
+    )
+    @app_commands.describe(
+        search_term="Email, 508 email, Discord username, name, or contact ID."
+    )
+    @require_role("Steering Committee")
+    async def send_member_agreement(
+        self,
+        interaction: discord.Interaction,
+        search_term: str,
+    ) -> None:
+        """Send the member agreement to a contact via DocuSeal."""
+        try:
+            await interaction.response.defer(ephemeral=True)
+
+            contacts = await self._search_contacts_for_lookup(
+                search_term,
+                select=(
+                    "id,name,emailAddress,c508Email,cDiscordUsername,"
+                    f"{MEMBER_AGREEMENT_SIGNED_AT_FIELD}"
+                ),
+                include_discord_user_search=True,
+            )
+            if not contacts:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.send_member_agreement",
+                    result="success",
+                    metadata={"search_term": search_term, "contacts_found": 0},
+                )
+                await interaction.followup.send(
+                    f"❌ No contact found for: `{search_term}`"
+                )
+                return
+
+            if len(contacts) > 1:
+                lines: list[str] = []
+                for contact in contacts[:5]:
+                    contact_name = str(contact.get("name") or "Unknown")
+                    contact_id = str(contact.get("id") or "")
+                    display_email = self._contact_preferred_email(contact) or "No email"
+                    lines.append(
+                        f"- **{contact_name}** (`{contact_id}`) - `{display_email}`"
+                    )
+                suffix = (
+                    f"\n...and {len(contacts) - 5} more." if len(contacts) > 5 else ""
+                )
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.send_member_agreement",
+                    result="success",
+                    metadata={
+                        "search_term": search_term,
+                        "contacts_found": len(contacts),
+                        "requires_selection": True,
+                    },
+                )
+                await interaction.followup.send(
+                    "⚠️ Multiple contacts found. Please refine your search:\n"
+                    + "\n".join(lines)
+                    + suffix
+                )
+                return
+
+            contact = contacts[0]
+            contact_id = str(contact.get("id") or "").strip()
+            contact_name = str(contact.get("name") or "Unknown").strip() or "Unknown"
+            contact_email = self._contact_preferred_email(contact)
+            signed_at = self._contact_text_value(
+                contact.get(MEMBER_AGREEMENT_SIGNED_AT_FIELD)
+            )
+
+            if self._contact_has_signed_member_agreement(contact):
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.send_member_agreement",
+                    result="denied",
+                    metadata={
+                        "search_term": search_term,
+                        "contact_name": contact_name,
+                        "contact_email": contact_email,
+                        "signed_at": signed_at,
+                        "reason": "already_signed",
+                    },
+                    resource_type="crm_contact",
+                    resource_id=contact_id,
+                )
+                await interaction.followup.send(
+                    f"⚠️ **{contact_name}** already signed the member agreement at "
+                    f"`{signed_at}`. No DocuSeal submission was sent."
+                )
+                return
+
+            if not contact_email:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.send_member_agreement",
+                    result="denied",
+                    metadata={
+                        "search_term": search_term,
+                        "contact_name": contact_name,
+                        "reason": "missing_email",
+                    },
+                    resource_type="crm_contact",
+                    resource_id=contact_id,
+                )
+                await interaction.followup.send(
+                    f"❌ **{contact_name}** does not have an email address in CRM."
+                )
+                return
+
+            submission = await self._create_member_agreement_submission_for_contact(
+                contact
+            )
+            submission_id = submission.get("id")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.send_member_agreement",
+                result="success",
+                metadata={
+                    "search_term": search_term,
+                    "contact_name": contact_name,
+                    "contact_email": contact_email,
+                    "submission_id": submission_id,
+                },
+                resource_type="crm_contact",
+                resource_id=contact_id,
+            )
+
+            submission_label = (
+                f" Submission ID: `{submission_id}`."
+                if submission_id is not None
+                else ""
+            )
+            await interaction.followup.send(
+                f"✅ Sent the member agreement to **{contact_name}** at `{contact_email}`."
+                f"{submission_label}"
+            )
+        except ValueError as exc:
+            logger.error("Member agreement command configuration/input error: %s", exc)
+            self._audit_command(
+                interaction=interaction,
+                action="crm.send_member_agreement",
+                result="error",
+                metadata={"search_term": search_term, "error": str(exc)},
+            )
+            await interaction.followup.send(f"❌ {exc}")
+        except DocusealAPIError as exc:
+            logger.error("DocuSeal API error in send_member_agreement: %s", exc)
+            sanitized_error = self._sanitize_error_message_for_discord(exc)
+            self._audit_command(
+                interaction=interaction,
+                action="crm.send_member_agreement",
+                result="error",
+                metadata={"search_term": search_term, "error": sanitized_error},
+            )
+            await interaction.followup.send(f"❌ DocuSeal API error: {sanitized_error}")
+        except Exception as exc:
+            logger.error("Unexpected error in send_member_agreement: %s", exc)
+            self._audit_command(
+                interaction=interaction,
+                action="crm.send_member_agreement",
+                result="error",
+                metadata={"search_term": search_term, "error": str(exc)},
+            )
+            await interaction.followup.send(
+                "❌ An unexpected error occurred while sending the member agreement."
+            )
+
+    @app_commands.command(
         name="link-discord-user",
         description="Link a Discord user to a CRM contact (Steering Committee+ only)",
     )
@@ -6133,7 +6461,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             await interaction.response.defer(ephemeral=True)
 
             # Determine search strategy based on search_term format
-            contacts = await self._search_contact_for_linking(search_term)
+            contacts = await self._search_contacts_for_lookup(search_term)
 
             if not contacts:
                 self._audit_command(
@@ -6473,7 +6801,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         self, search_term: str
     ) -> list[dict[str, Any]]:
         """Resolve search term for view-skills lookup."""
-        contacts = await self._search_contact_for_linking(search_term)
+        contacts = await self._search_contacts_for_lookup(search_term)
         return contacts
 
     async def _search_contacts_for_reprocess_resume(
@@ -6491,17 +6819,22 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
             return [by_discord_id] if by_discord_id else []
 
-        contacts = await self._search_contact_for_linking(
+        contacts = await self._search_contacts_for_lookup(
             search_term,
             select=select_fields,
+            include_discord_user_search=True,
         )
         if contacts:
             return contacts
 
-        normalized_username = self._normalize_508_username(search_term)
-        if normalized_username:
+        for discord_username in {
+            search_term.strip(),
+            self._normalize_508_username(search_term),
+        }:
+            if not discord_username:
+                continue
             by_discord_username = await self._find_contact_by_discord_username(
-                normalized_username,
+                discord_username,
                 select=select_fields,
             )
             if by_discord_username:
@@ -6512,7 +6845,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             and " " not in search_term
             and not self._is_hex_string(search_term)
         ):
-            contacts = await self._search_contact_for_linking(
+            contacts = await self._search_contacts_for_lookup(
                 f"{search_term}@508.dev",
                 select=select_fields,
             )
@@ -6855,8 +7188,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
 
             target_contact: dict[str, Any] | None = None
             if not query:
-                target_contact = await self._find_contact_by_discord_id(
-                    str(interaction.user.id)
+                target_contact = await self._find_contact_by_discord_user(
+                    interaction.user
                 )
                 if not target_contact:
                     self._audit_command(
@@ -7109,7 +7442,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             target_scope = "self"
 
             if search_term:
-                contacts = await self._search_contact_for_linking(search_term)
+                contacts = await self._search_contacts_for_lookup(search_term)
                 if not contacts:
                     self._audit_command(
                         interaction=interaction,
@@ -7146,8 +7479,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 target_contact = contacts[0]
                 target_scope = "other"
             else:
-                target_contact = await self._find_contact_by_discord_id(
-                    str(interaction.user.id)
+                target_contact = await self._find_contact_by_discord_user(
+                    interaction.user
                 )
                 if not target_contact:
                     self._audit_command(
@@ -8079,7 +8412,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             inferred_contact_meta: dict[str, Any] | None = None
 
             if search_term:
-                contacts = await self._search_contact_for_linking(search_term)
+                contacts = await self._search_contacts_for_lookup(search_term)
                 if not contacts:
                     self._audit_command(
                         interaction=interaction,
@@ -8119,9 +8452,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             elif is_steering and link_user is not None:
                 # Uploading for linked user (Steering Committee+ path)
                 target_scope = "other"
-                target_contact = await self._find_contact_by_discord_id(
-                    str(link_user.id)
-                )
+                target_contact = await self._find_contact_by_discord_user(link_user)
                 if not target_contact:
                     create_payload = (
                         await self._build_contact_payload_for_link_user_async(
@@ -8267,8 +8598,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 target_scope = "resume"
             else:
                 # Uploading own resume - find contact by Discord user ID
-                target_contact = await self._find_contact_by_discord_id(
-                    str(interaction.user.id)
+                target_contact = await self._find_contact_by_discord_user(
+                    interaction.user
                 )
                 if not target_contact:
                     self._audit_command(

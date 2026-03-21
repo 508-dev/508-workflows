@@ -1,5 +1,5 @@
 """API clients shared across services."""
 
-from . import espo, kimai, migadu
+from . import docuseal, espo, kimai, migadu
 
-__all__ = ["espo", "kimai", "migadu"]
+__all__ = ["docuseal", "espo", "kimai", "migadu"]

@@ -654,6 +654,7 @@ dependencies = [
     { name = "pymupdf" },
     { name = "python-docx" },
     { name = "redis" },
+    { name = "requests" },
     { name = "sentry-sdk" },
 ]
 
@@ -665,6 +666,7 @@ requires-dist = [
     { name = "pymupdf", specifier = ">=1.26.5" },
     { name = "python-docx", specifier = ">=1.2.0" },
     { name = "redis", specifier = ">=6.4.0" },
+    { name = "requests", specifier = "~=2.31" },
     { name = "sentry-sdk", specifier = ">=2.30.0" },
 ]
 

@@ -2432,13 +2432,15 @@ class TestCRMCog:
     @pytest.mark.asyncio
     async def test_resolve_onboarder_username_maps_discord_mention(self, crm_cog):
         """Discord mentions should resolve to linked contact 508 usernames."""
+        interaction = Mock()
+        interaction.guild = None
         with patch.object(
             crm_cog,
             "_find_contact_by_discord_id",
             new=AsyncMock(return_value={"c508Email": "Mentor@508.dev"}),
         ):
             resolved = await crm_cog._resolve_onboarder_username(
-                interaction=Mock(), raw_onboarder="<@987654321>"
+                interaction=interaction, raw_onboarder="<@987654321>"
             )
 
         assert resolved == "mentor"
@@ -2448,13 +2450,15 @@ class TestCRMCog:
         self, crm_cog
     ):
         """Unlinked mention values should fail resolution."""
+        interaction = Mock()
+        interaction.guild = None
         with patch.object(
             crm_cog,
             "_find_contact_by_discord_id",
             new=AsyncMock(return_value=None),
         ):
             resolved = await crm_cog._resolve_onboarder_username(
-                interaction=Mock(), raw_onboarder="<@987654321>"
+                interaction=interaction, raw_onboarder="<@987654321>"
             )
 
         assert resolved is None
@@ -2470,7 +2474,7 @@ class TestCRMCog:
 
         with patch.object(
             crm_cog,
-            "_search_contact_for_linking",
+            "_search_contacts_for_lookup",
             new=AsyncMock(return_value=[{"id": "contact123", "name": "John Doe"}]),
         ):
             crm_cog.espo_api.request.side_effect = [
@@ -2510,7 +2514,7 @@ class TestCRMCog:
 
         with patch.object(
             crm_cog,
-            "_search_contact_for_linking",
+            "_search_contacts_for_lookup",
             new=AsyncMock(return_value=[{"id": "contact123", "name": "John Doe"}]),
         ):
             crm_cog.espo_api.request.side_effect = [
@@ -2544,7 +2548,7 @@ class TestCRMCog:
 
         with patch.object(
             crm_cog,
-            "_search_contact_for_linking",
+            "_search_contacts_for_lookup",
             new=AsyncMock(
                 return_value=[
                     {"id": "contact123", "name": "John Doe"},
@@ -2580,7 +2584,7 @@ class TestCRMCog:
 
         with patch.object(
             crm_cog,
-            "_search_contact_for_linking",
+            "_search_contacts_for_lookup",
             new=AsyncMock(return_value=[]),
         ):
             await crm_cog.assign_onboarder.callback(
@@ -2607,6 +2611,7 @@ class TestCRMCog:
         steering_role = Mock()
         steering_role.name = "Steering Committee"
         mock_interaction.user.roles = [steering_role]
+        mock_interaction.guild = None
         crm_cog._audit_command = Mock()
 
         with patch.object(
@@ -2642,7 +2647,7 @@ class TestCRMCog:
 
         with patch.object(
             crm_cog,
-            "_search_contact_for_linking",
+            "_search_contacts_for_lookup",
             new=AsyncMock(return_value=[{"id": "contact123", "name": "John Doe"}]),
         ):
             crm_cog.espo_api.request.return_value = {
@@ -2681,7 +2686,7 @@ class TestCRMCog:
 
         with patch.object(
             crm_cog,
-            "_search_contact_for_linking",
+            "_search_contacts_for_lookup",
             new=AsyncMock(return_value=[{"id": "contact123", "name": "John Doe"}]),
         ):
             crm_cog.espo_api.request.side_effect = EspoAPIError("CRM unavailable")
@@ -2959,11 +2964,11 @@ class TestCRMCog:
 
     @pytest.mark.asyncio
     async def test_search_contacts_for_view_skills_delegates_to_linking(self, crm_cog):
-        """`_search_contacts_for_view_skills` should delegate to `_search_contact_for_linking`."""
+        """`_search_contacts_for_view_skills` should delegate to `_search_contacts_for_lookup`."""
         expected = [{"id": "contact123"}]
         with patch.object(
             crm_cog,
-            "_search_contact_for_linking",
+            "_search_contacts_for_lookup",
             new=AsyncMock(return_value=expected),
         ) as mock_search:
             result = await crm_cog._search_contacts_for_view_skills("john")
@@ -3675,15 +3680,27 @@ class TestCRMCog:
             }
         ]
 
+    def test_build_contact_search_filters_raw_discord_id(self, crm_cog):
+        """Build shared search filters for raw Discord user IDs."""
+        filters = crm_cog._build_contact_search_filters("111111111111111111")
+
+        assert filters == [
+            {
+                "type": "equals",
+                "attribute": "cDiscordUserID",
+                "value": "111111111111111111",
+            }
+        ]
+
     @pytest.mark.asyncio
-    async def test_search_contact_for_linking_includes_discord_username_filter_when_requested(
+    async def test_search_contacts_for_lookup_includes_discord_username_filter_when_requested(
         self, crm_cog
     ):
         """Search helper includes Discord username criteria when requested."""
         crm_cog.espo_api.request.return_value = {"list": []}
 
-        await crm_cog._search_contact_for_linking(
-            "john", include_discord_username_search=True, max_size=10
+        await crm_cog._search_contacts_for_lookup(
+            "john", include_discord_user_search=True, max_size=10
         )
 
         call = crm_cog.espo_api.request.call_args.args
@@ -4004,7 +4021,7 @@ class TestCRMCog:
 
         with patch.object(
             crm_cog,
-            "_search_contact_for_linking",
+            "_search_contacts_for_lookup",
             new=AsyncMock(return_value=[{"id": "contact456", "name": "John Doe"}]),
         ):
             crm_cog.espo_api.request.return_value = {"id": "contact456"}
@@ -4037,7 +4054,7 @@ class TestCRMCog:
         # Mock search helper to return multiple contacts
         with patch.object(
             crm_cog,
-            "_search_contact_for_linking",
+            "_search_contacts_for_lookup",
             new=AsyncMock(
                 return_value=[
                     {
@@ -4776,7 +4793,9 @@ class TestCRMCog:
                 return_value=True,
             ),
             patch.object(
-                crm_cog, "_find_contact_by_discord_id", new=AsyncMock(return_value=None)
+                crm_cog,
+                "_find_contact_by_discord_user",
+                new=AsyncMock(return_value=None),
             ),
             patch.object(
                 crm_cog, "_upload_resume_attachment_to_contact", new=AsyncMock()
@@ -4876,7 +4895,7 @@ class TestCRMCog:
             ),
             patch.object(
                 crm_cog,
-                "_search_contact_for_linking",
+                "_search_contacts_for_lookup",
                 new=AsyncMock(return_value=[]),
             ),
             patch.object(
@@ -4925,7 +4944,7 @@ class TestCRMCog:
         with (
             patch.object(
                 crm_cog,
-                "_find_contact_by_discord_id",
+                "_find_contact_by_discord_user",
                 new=AsyncMock(return_value=None),
             ),
             patch(
@@ -5081,7 +5100,7 @@ class TestCRMCog:
             ),
             patch.object(
                 crm_cog,
-                "_search_contact_for_linking",
+                "_search_contacts_for_lookup",
                 new=AsyncMock(
                     return_value=[{"id": "contact123"}, {"id": "contact456"}]
                 ),
@@ -5863,6 +5882,155 @@ class TestCRMCog:
         assert metadata["attachments_scanned"] == 1
         assert metadata["attachments_extracted"] == 1
         assert metadata["links_fetched"] == 1
+
+    @pytest.mark.asyncio
+    async def test_send_member_agreement_sends_submission(
+        self, crm_cog, mock_interaction
+    ):
+        """The command should send a DocuSeal submission for one eligible contact."""
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+        crm_cog._audit_command = Mock()
+        crm_cog._search_contacts_for_lookup = AsyncMock(
+            return_value=[
+                {
+                    "id": "contact123",
+                    "name": "Jane Doe",
+                    "emailAddress": "jane@example.com",
+                    "cMemberAgreementSignedAt": None,
+                }
+            ]
+        )
+        crm_cog._create_member_agreement_submission_for_contact = AsyncMock(
+            return_value={"id": 4200}
+        )
+
+        await crm_cog.send_member_agreement.callback(
+            crm_cog, mock_interaction, "jane@example.com"
+        )
+
+        crm_cog._create_member_agreement_submission_for_contact.assert_awaited_once()
+        mock_interaction.followup.send.assert_called_once_with(
+            "✅ Sent the member agreement to **Jane Doe** at `jane@example.com`."
+            " Submission ID: `4200`."
+        )
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["action"] == "crm.send_member_agreement"
+        assert audit_kwargs["result"] == "success"
+        assert audit_kwargs["metadata"]["submission_id"] == 4200
+
+    @pytest.mark.asyncio
+    async def test_send_member_agreement_warns_when_already_signed(
+        self, crm_cog, mock_interaction
+    ):
+        """Already signed contacts should not receive a new submission."""
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+        crm_cog._audit_command = Mock()
+        crm_cog._search_contacts_for_lookup = AsyncMock(
+            return_value=[
+                {
+                    "id": "contact123",
+                    "name": "Jane Doe",
+                    "emailAddress": "jane@example.com",
+                    "cMemberAgreementSignedAt": "2026-03-20 10:00:00",
+                }
+            ]
+        )
+        crm_cog._create_member_agreement_submission_for_contact = AsyncMock()
+
+        await crm_cog.send_member_agreement.callback(
+            crm_cog, mock_interaction, "jane@example.com"
+        )
+
+        crm_cog._create_member_agreement_submission_for_contact.assert_not_awaited()
+        mock_interaction.followup.send.assert_called_once_with(
+            "⚠️ **Jane Doe** already signed the member agreement at "
+            "`2026-03-20 10:00:00`. No DocuSeal submission was sent."
+        )
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["result"] == "denied"
+        assert audit_kwargs["metadata"]["reason"] == "already_signed"
+
+    @pytest.mark.asyncio
+    async def test_send_member_agreement_requires_contact_email(
+        self, crm_cog, mock_interaction
+    ):
+        """Contacts without a CRM email should be rejected before DocuSeal."""
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.roles = [steering_role]
+        crm_cog._audit_command = Mock()
+        crm_cog._search_contacts_for_lookup = AsyncMock(
+            return_value=[
+                {
+                    "id": "contact123",
+                    "name": "Jane Doe",
+                    "emailAddress": "",
+                    "c508Email": "",
+                    "cMemberAgreementSignedAt": None,
+                }
+            ]
+        )
+        crm_cog._create_member_agreement_submission_for_contact = AsyncMock()
+
+        await crm_cog.send_member_agreement.callback(crm_cog, mock_interaction, "jane")
+
+        crm_cog._create_member_agreement_submission_for_contact.assert_not_awaited()
+        mock_interaction.followup.send.assert_called_once_with(
+            "❌ **Jane Doe** does not have an email address in CRM."
+        )
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["result"] == "denied"
+        assert audit_kwargs["metadata"]["reason"] == "missing_email"
+
+    @pytest.mark.asyncio
+    async def test_send_member_agreement_search_includes_discord_username(
+        self, crm_cog
+    ):
+        """The command should enable Discord username lookup on contact search."""
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction = AsyncMock()
+        mock_interaction.response = AsyncMock()
+        mock_interaction.response.defer = AsyncMock()
+        mock_interaction.followup = AsyncMock()
+        mock_interaction.followup.send = AsyncMock()
+        mock_interaction.user = Mock()
+        mock_interaction.user.roles = [steering_role]
+        crm_cog._audit_command = Mock()
+        crm_cog._create_member_agreement_submission_for_contact = AsyncMock(
+            return_value={"id": 4200}
+        )
+
+        with patch.object(
+            crm_cog,
+            "_search_contacts_for_lookup",
+            new=AsyncMock(
+                return_value=[
+                    {
+                        "id": "contact123",
+                        "name": "Jane Doe",
+                        "emailAddress": "jane@example.com",
+                        "cMemberAgreementSignedAt": None,
+                    }
+                ]
+            ),
+        ) as mock_search:
+            await crm_cog.send_member_agreement.callback(
+                crm_cog, mock_interaction, "jane_doe"
+            )
+
+        mock_search.assert_awaited_once_with(
+            "jane_doe",
+            select=(
+                "id,name,emailAddress,c508Email,cDiscordUsername,"
+                "cMemberAgreementSignedAt"
+            ),
+            include_discord_user_search=True,
+        )
 
 
 class TestResumeButtonView:

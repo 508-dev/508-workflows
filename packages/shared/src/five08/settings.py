@@ -3,7 +3,7 @@
 import os
 import sys
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -45,8 +45,33 @@ class SharedSettings(BaseSettings):
     api_shared_secret: str | None = None
     discord_logs_webhook_url: str | None = None
     discord_logs_webhook_wait: bool = True
+    docuseal_base_url: str | None = None
+    docuseal_api_key: str | None = None
+    docuseal_member_agreement_template_id: int | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @field_validator("docuseal_member_agreement_template_id", mode="before")
+    @classmethod
+    def _normalize_docuseal_member_agreement_template_id(
+        cls,
+        value: object,
+    ) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip()
+            if not normalized:
+                return None
+            try:
+                return int(normalized)
+            except ValueError as exc:
+                raise ValueError(
+                    "DOCUSEAL_MEMBER_AGREEMENT_TEMPLATE_ID must be an integer"
+                ) from exc
+        raise TypeError("DOCUSEAL_MEMBER_AGREEMENT_TEMPLATE_ID must be an integer")
 
     @classmethod
     def _skip_dotenv(cls) -> bool:
