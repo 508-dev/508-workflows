@@ -26,12 +26,19 @@ This document captures Discord bot behavior, permissions, and slash command usag
     - Returns an ephemeral one-time URL with expiry.
 
 - `/create-mailbox`
-  - Description: Create a Migadu mailbox for a 508 user and email the invitation to a backup address.
+  - Description: Create a Migadu mailbox for a 508 user, optionally link it to a CRM contact, and sync `c508Email`.
   - Prerequisites: `MIGADU_API_USER` and `MIGADU_API_KEY` must be configured (configured in env; command will fail if missing).
   - Required role: Admin
   - Args:
-    - `mailbox_username` (required): 508 mailbox address (e.g. `alice@508.dev`).
-    - `backup_email` (required): Full backup email where invite should be sent (e.g. `alice@gmail.com`).
+    - `mailbox_username` (required): 508 mailbox username or address. If the domain is omitted, `@508.dev` is added automatically.
+    - `search_term` (optional): CRM lookup by email, name, Discord username, or contact ID. Bare terms prioritize non-`@508.dev` matches before falling back to `c508Email`.
+    - `name` (optional): Full mailbox name. Defaults from the matched CRM contact when available.
+    - `backup_email` (optional unless `search_term` is omitted): Full backup email where the invite should be sent. Defaults from the matched CRM contact when available.
+  - Behavior:
+    - Rejects explicit mailbox domains other than `@508.dev`.
+    - Aborts before creation if the matched CRM contact already has a `c508Email`.
+    - Prompts for contact selection when multiple eligible CRM matches are found.
+    - Updates the linked CRM contact `c508Email` after mailbox creation and reports partial failure if that sync fails.
 
 - `/mark-id-verified`
   - Description: Mark a contact as ID verified.
