@@ -622,9 +622,9 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 default=None,
             )
             if seniority_label:
-                skill_info.append(f"seniority: `{seniority_label}`")
+                skill_info.append(f"seniority: **{seniority_label}**")
             if location:
-                location_info.append(f"location: `{location}`")
+                location_info.append(f"location: **{location}**")
             if candidate.timezone:
                 location_info.append(f"tz: `{candidate.timezone}`")
             line = " ".join(header_parts)

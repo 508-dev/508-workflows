@@ -152,5 +152,5 @@ def test_build_match_candidate_lines_keeps_name_discord_and_linkedin_on_first_li
         "[LinkedIn](<https://linkedin.com/in/robertanthonybellamy>)"
     )
     assert "score: 31.0" in second_line
-    assert "seniority: `Mid-level`" in second_line
-    assert "location: `Seattle, Washington, US` · tz: `UTC-08:00`" in third_line
+    assert "seniority: **Mid-level**" in second_line
+    assert "location: **Seattle, Washington, US** · tz: `UTC-08:00`" in third_line
