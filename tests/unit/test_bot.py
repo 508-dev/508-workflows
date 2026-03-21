@@ -7,7 +7,13 @@ from unittest.mock import Mock, AsyncMock, patch
 from pathlib import Path
 import discord
 
-from five08.discord_bot.bot import Bot508, create_bot, settings
+from five08.discord_bot.bot import (
+    Bot508,
+    DISCORD_COMMAND_DESCRIPTION_LIMIT,
+    create_bot,
+    settings,
+    validate_app_command_descriptions,
+)
 from five08.discord_bot.config import Settings
 
 
@@ -133,3 +139,27 @@ class TestBot508:
         config = Settings()
 
         assert config.discord_sendmsg_character_limit == 2000
+
+    def test_validate_app_command_descriptions_accepts_valid_lengths(self):
+        tree = Mock()
+        tree.walk_commands.return_value = [
+            Mock(name="valid", qualified_name="valid", description="short"),
+        ]
+
+        validate_app_command_descriptions(tree)
+
+    def test_validate_app_command_descriptions_rejects_over_limit(self):
+        tree = Mock()
+        tree.walk_commands.return_value = [
+            Mock(
+                name="too-long",
+                qualified_name="too-long",
+                description="x" * (DISCORD_COMMAND_DESCRIPTION_LIMIT + 1),
+            ),
+        ]
+
+        with pytest.raises(
+            ValueError,
+            match=r"/too-long description has 101 characters",
+        ):
+            validate_app_command_descriptions(tree)

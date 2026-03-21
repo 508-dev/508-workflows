@@ -7341,7 +7341,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
 
     @app_commands.command(
         name="update-contact",
-        description="Update CRM contact fields (github, linkedin, skills, rate range, location, desired hours, websites, and resume)",
+        description="Update CRM contact fields and resume details.",
     )
     @app_commands.describe(
         github="GitHub username to set",

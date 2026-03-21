@@ -1489,7 +1489,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
 
     @app_commands.command(
         name="match-candidates",
-        description="Reads this thread's opening message, attachments, and JD links, then returns ranked matching candidates.",
+        description="Rank matching candidates from this thread's job details.",
     )
     @app_commands.describe(
         private="Set to `true`, `1`, `yes`, `y`, or `on` to post privately."
