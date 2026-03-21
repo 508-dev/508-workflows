@@ -4841,6 +4841,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             "phone": profile.phone,
             "name": profile.name,
             "address_country": profile.address_country,
+            "address_state": profile.address_state,
             "timezone": profile.timezone,
             "address_city": profile.address_city,
             "description": profile.description,

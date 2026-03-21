@@ -24,6 +24,9 @@ def _make_candidate(**overrides: object) -> SimpleNamespace:
         "matched_preferred_skills": [],
         "match_score": 0.0,
         "seniority": None,
+        "address_city": None,
+        "address_state": None,
+        "address_country": None,
         "timezone": None,
         "linkedin": None,
     }
@@ -118,3 +121,37 @@ def test_build_match_candidate_lines_omits_crm_link_for_prospect() -> None:
     assert "`@michaelmwu`" in lines[0]
     assert "<https://crm.example/#Contact/view/" not in lines[0]
     assert "<@" not in lines[0]
+
+
+def test_build_match_candidate_lines_keeps_name_discord_and_linkedin_on_first_line() -> (
+    None
+):
+    candidate = _make_candidate(
+        is_member=True,
+        crm_name="Robert Anthony Bellamy",
+        discord_username="robertanthonybellamy",
+        linkedin="https://linkedin.com/in/robertanthonybellamy",
+        match_score=31.0,
+        seniority="senior",
+        address_city="Seattle",
+        address_state="Washington",
+        address_country="US",
+        timezone="UTC-08:00",
+        matched_required_skills=["amazon web services"],
+    )
+
+    lines, _ = JobsCog._build_match_candidate_lines(
+        candidates=[candidate],
+        crm_base="https://crm.example",
+    )
+
+    assert len(lines) == 1
+    first_line, second_line = lines[0].split("\n")
+    assert (
+        first_line == "1. **[Member]** Robert Anthony Bellamy `@robertanthonybellamy` "
+        "[LinkedIn](<https://linkedin.com/in/robertanthonybellamy>)"
+    )
+    assert "location: `Seattle, Washington, US`" in second_line
+    assert second_line.index("location: `Seattle, Washington, US`") < second_line.index(
+        "tz: `UTC-08:00`"
+    )

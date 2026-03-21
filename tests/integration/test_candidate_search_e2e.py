@@ -40,6 +40,7 @@ _CREATE_PEOPLE_TABLE = """
         is_member          BOOLEAN     NOT NULL DEFAULT false,
         address_country    TEXT,
         address_city       TEXT,
+        address_state      TEXT,
         timezone           TEXT,
         seniority          TEXT,
         linkedin           TEXT,
@@ -182,6 +183,7 @@ def _insert(
     sync_status: str = "active",
     seniority: str | None = None,
     address_country: str | None = None,
+    address_state: str | None = None,
     timezone: str | None = None,
     skills: list[str] | None = None,
     skill_attrs: dict | None = None,
@@ -194,8 +196,8 @@ def _insert(
                 crm_contact_id, name, email, email_508,
                 discord_user_id, discord_username,
                 is_member, sync_status, seniority,
-                address_country, timezone, skills, skill_attrs, discord_roles
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                address_country, address_state, timezone, skills, skill_attrs, discord_roles
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 crm_contact_id,
@@ -208,6 +210,7 @@ def _insert(
                 sync_status,
                 seniority,
                 address_country,
+                address_state,
                 timezone,
                 skills or [],
                 Jsonb(skill_attrs or {}),

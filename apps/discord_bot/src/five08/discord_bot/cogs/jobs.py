@@ -561,12 +561,12 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             else:
                 display_name = resolved_name
 
-            parts = [f"{i}. {label} {display_name}"]
+            header_parts = [f"{i}. {label} {display_name}"]
             if discord_username:
-                parts.append(f"`@{discord_username}`")
+                header_parts.append(f"`@{discord_username}`")
 
             if candidate.linkedin:
-                parts.append(f"[LinkedIn](<{candidate.linkedin}>)")
+                header_parts.append(f"[LinkedIn](<{candidate.linkedin}>)")
             if (
                 candidate.latest_resume_id
                 and candidate.latest_resume_name
@@ -579,6 +579,29 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                     (resolved_name, candidate.latest_resume_id, safe_resume_name)
                 )
 
+            raw_city = (
+                candidate.address_city.strip()
+                if isinstance(getattr(candidate, "address_city", None), str)
+                and candidate.address_city.strip()
+                else None
+            )
+            raw_state = (
+                candidate.address_state.strip()
+                if isinstance(getattr(candidate, "address_state", None), str)
+                and candidate.address_state.strip()
+                else None
+            )
+            raw_country = (
+                candidate.address_country.strip()
+                if isinstance(getattr(candidate, "address_country", None), str)
+                and candidate.address_country.strip()
+                else None
+            )
+            location = ", ".join(
+                discord.utils.escape_mentions(part)
+                for part in (raw_city, raw_state, raw_country)
+                if part
+            )
             skill_info: list[str] = []
             match_score = getattr(candidate, "match_score", None)
             if isinstance(match_score, (int, float)):
@@ -594,12 +617,15 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 )
             if candidate.seniority:
                 skill_info.append(f"seniority: `{candidate.seniority}`")
+            if location:
+                skill_info.append(f"location: `{location}`")
             if candidate.timezone:
                 skill_info.append(f"tz: `{candidate.timezone}`")
+            line = " ".join(header_parts)
             if skill_info:
-                parts.append("   " + " · ".join(skill_info))
+                line += "\n   " + " · ".join(skill_info)
 
-            lines.append("\n".join(parts))
+            lines.append(line)
 
         return lines, resume_options
 

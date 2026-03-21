@@ -16,6 +16,7 @@ def test_to_person_record_parses_discord_snapshot_fields() -> None:
             "cDiscordUsername": "jane#1234 (ID: 987654321)",
             "cDiscordRoles": "Member, Admin",
             "cGithubUsername": "janedoe",
+            "addressState": "Washington",
         }
     )
 
@@ -25,6 +26,7 @@ def test_to_person_record_parses_discord_snapshot_fields() -> None:
     assert person.discord_user_id == "987654321"
     assert person.discord_roles == ["Member", "Admin"]
     assert person.github_username == "janedoe"
+    assert person.address_state == "Washington"
 
 
 def test_email_falls_back_to_email_address_data() -> None:
