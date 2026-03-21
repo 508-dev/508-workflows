@@ -31,7 +31,8 @@ class EspoPeopleSyncClient:
             "id,name,emailAddress,emailAddressData,c508Email,"
             "cDiscordUsername,cDiscordUserId,cDiscordRoles,cDiscordUserID,"
             "cGithubUsername,githubUsername,type,contactType,"
-            "addressCountry,addressCity,cTimezone,cSeniority,cMemberAgreementSignedAt,"
+            "addressCountry,addressCity,addressState,cTimezone,cSeniority,"
+            "cMemberAgreementSignedAt,"
             f"{LINKEDIN_FIELD},skills,cSkillAttrs,resumeIds,resumeNames"
         )
         raw = self.api.request(

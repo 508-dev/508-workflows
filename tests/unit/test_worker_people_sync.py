@@ -1,6 +1,20 @@
 """Unit tests for CRM people sync normalizers."""
 
-from five08.worker.crm.people_sync import PeopleSyncProcessor
+from unittest.mock import MagicMock
+
+from five08.worker.crm.people_sync import EspoPeopleSyncClient, PeopleSyncProcessor
+
+
+def test_list_contact_page_requests_address_state() -> None:
+    """Full-sync contact fetches should include addressState in select fields."""
+    client = EspoPeopleSyncClient()
+    client.api = MagicMock()
+    client.api.request.return_value = {"list": [], "total": 0}
+
+    client.list_contact_page(offset=0, max_size=100)
+
+    request_params = client.api.request.call_args.args[2]
+    assert "addressState" in request_params["select"]
 
 
 def test_to_person_record_parses_discord_snapshot_fields() -> None:
