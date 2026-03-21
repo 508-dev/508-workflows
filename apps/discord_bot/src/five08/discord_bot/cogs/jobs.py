@@ -603,6 +603,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 if part
             )
             skill_info: list[str] = []
+            location_info: list[str] = []
             match_score = getattr(candidate, "match_score", None)
             if isinstance(match_score, (int, float)):
                 skill_info.append(f"score: {match_score:.1f}")
@@ -618,12 +619,14 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             if candidate.seniority:
                 skill_info.append(f"seniority: `{candidate.seniority}`")
             if location:
-                skill_info.append(f"location: `{location}`")
+                location_info.append(f"location: `{location}`")
             if candidate.timezone:
-                skill_info.append(f"tz: `{candidate.timezone}`")
+                location_info.append(f"tz: `{candidate.timezone}`")
             line = " ".join(header_parts)
             if skill_info:
                 line += "\n   " + " · ".join(skill_info)
+            if location_info:
+                line += "\n   " + " · ".join(location_info)
 
             lines.append(line)
 

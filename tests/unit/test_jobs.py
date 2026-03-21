@@ -146,12 +146,10 @@ def test_build_match_candidate_lines_keeps_name_discord_and_linkedin_on_first_li
     )
 
     assert len(lines) == 1
-    first_line, second_line = lines[0].split("\n")
+    first_line, second_line, third_line = lines[0].split("\n")
     assert (
         first_line == "1. **[Member]** Robert Anthony Bellamy `@robertanthonybellamy` "
         "[LinkedIn](<https://linkedin.com/in/robertanthonybellamy>)"
     )
-    assert "location: `Seattle, Washington, US`" in second_line
-    assert second_line.index("location: `Seattle, Washington, US`") < second_line.index(
-        "tz: `UTC-08:00`"
-    )
+    assert "score: 31.0" in second_line
+    assert "location: `Seattle, Washington, US` · tz: `UTC-08:00`" in third_line
