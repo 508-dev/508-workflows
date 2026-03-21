@@ -6472,7 +6472,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 contact.get(MEMBER_AGREEMENT_SIGNED_AT_FIELD)
             )
 
-            if signed_at:
+            if self._contact_has_signed_member_agreement(contact):
                 self._audit_command(
                     interaction=interaction,
                     action="crm.send_member_agreement",

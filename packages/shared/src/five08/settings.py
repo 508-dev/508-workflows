@@ -65,7 +65,12 @@ class SharedSettings(BaseSettings):
             normalized = value.strip()
             if not normalized:
                 return None
-            return int(normalized)
+            try:
+                return int(normalized)
+            except ValueError as exc:
+                raise ValueError(
+                    "DOCUSEAL_MEMBER_AGREEMENT_TEMPLATE_ID must be an integer"
+                ) from exc
         raise TypeError("DOCUSEAL_MEMBER_AGREEMENT_TEMPLATE_ID must be an integer")
 
     @classmethod

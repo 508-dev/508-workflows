@@ -57,7 +57,18 @@ class DocusealClient:
         if not response.content:
             return {}
 
-        json_data = response.json()
+        try:
+            json_data = response.json()
+        except ValueError as exc:
+            body_preview = " ".join((response.text or "").strip().split())
+            if len(body_preview) > 200:
+                body_preview = body_preview[:200] + "..."
+            if not body_preview:
+                body_preview = "<empty>"
+            raise DocusealAPIError(
+                f"Failed to decode JSON response (status {response.status_code}). "
+                f"Body preview: {body_preview}"
+            ) from exc
         if not isinstance(json_data, dict):
             raise DocusealAPIError("API response is not a JSON object")
         return json_data

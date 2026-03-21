@@ -68,3 +68,28 @@ def test_create_member_agreement_submission_raises_on_api_error() -> None:
                 submitter_name="Jane Doe",
                 submitter_email="jane@example.com",
             )
+
+
+def test_create_member_agreement_submission_raises_on_invalid_json_body() -> None:
+    """2xx responses with invalid JSON should still raise DocusealAPIError."""
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.text = "not-json"
+    mock_response.content = b"not-json"
+    mock_response.json.side_effect = ValueError("bad json")
+
+    with patch(
+        "five08.clients.docuseal.requests.request",
+        return_value=mock_response,
+    ):
+        with pytest.raises(
+            DocusealAPIError,
+            match="Failed to decode JSON response \\(status 200\\)",
+        ):
+            create_member_agreement_submission(
+                base_url="https://docuseal.example.com",
+                api_key="secret",
+                template_id=1000001,
+                submitter_name="Jane Doe",
+                submitter_email="jane@example.com",
+            )

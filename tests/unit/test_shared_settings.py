@@ -55,3 +55,12 @@ def test_shared_settings_docuseal_template_id_accepts_numeric_string() -> None:
     settings = SharedSettings(docuseal_member_agreement_template_id="1000001")
 
     assert settings.docuseal_member_agreement_template_id == 1000001
+
+
+def test_shared_settings_docuseal_template_id_rejects_non_numeric_string() -> None:
+    """Shared settings should surface a clear validation error for bad template ids."""
+    with pytest.raises(
+        ValidationError,
+        match="DOCUSEAL_MEMBER_AGREEMENT_TEMPLATE_ID must be an integer",
+    ):
+        SharedSettings(docuseal_member_agreement_template_id="abc")
