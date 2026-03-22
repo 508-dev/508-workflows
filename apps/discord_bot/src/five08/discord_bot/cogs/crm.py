@@ -13,6 +13,7 @@ import logging
 from datetime import date, datetime
 import re
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import discord
 from discord import app_commands
@@ -4704,6 +4705,54 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         """Check if string looks like a hex contact ID."""
         return len(s) >= 15 and all(c in "0123456789abcdefABCDEF" for c in s)
 
+    @staticmethod
+    def _linkedin_profile_search_variants(value: str) -> list[str]:
+        """Return exact-match LinkedIn profile URL variants for CRM lookup."""
+        candidate = value.strip()
+        if not candidate or "linkedin.com" not in candidate.casefold():
+            return []
+        if not candidate.casefold().startswith(("http://", "https://")):
+            candidate = f"https://{candidate}"
+
+        try:
+            parsed = urlsplit(candidate)
+        except ValueError:
+            return []
+
+        host = (parsed.hostname or "").casefold()
+        if host.startswith("www."):
+            host = host[4:]
+        if host != "linkedin.com" and not host.endswith(".linkedin.com"):
+            return []
+
+        path = re.sub(r"/+", "/", parsed.path or "").rstrip("/")
+        if not path:
+            return []
+
+        profile_path = path.casefold()
+        if not (profile_path.startswith("/in/") or profile_path.startswith("/pub/")):
+            return []
+
+        variants: list[str] = []
+        for variant in (
+            value.strip(),
+            f"linkedin.com{path}",
+            f"linkedin.com{path}/",
+            f"www.linkedin.com{path}",
+            f"www.linkedin.com{path}/",
+            f"http://linkedin.com{path}",
+            f"http://linkedin.com{path}/",
+            f"http://www.linkedin.com{path}",
+            f"http://www.linkedin.com{path}/",
+            f"https://linkedin.com{path}",
+            f"https://linkedin.com{path}/",
+            f"https://www.linkedin.com{path}",
+            f"https://www.linkedin.com{path}/",
+        ):
+            if variant and variant not in variants:
+                variants.append(variant)
+        return variants
+
     def _build_contact_search_filters(self, search_term: str) -> list[dict[str, Any]]:
         """Build a shared list of CRM search filters for contact lookup."""
         normalized = search_term.strip()
@@ -4727,6 +4776,17 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     "attribute": "cDiscordUserID",
                     "value": normalized,
                 }
+            ]
+
+        linkedin_variants = self._linkedin_profile_search_variants(normalized)
+        if linkedin_variants:
+            return [
+                {
+                    "type": "equals",
+                    "attribute": LINKEDIN_FIELD,
+                    "value": variant,
+                }
+                for variant in linkedin_variants
             ]
 
         search_filters: list[dict[str, Any]] = []
