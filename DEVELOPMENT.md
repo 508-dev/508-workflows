@@ -122,15 +122,15 @@ Use `crmctl` when you want direct EspoCRM contact search/update control outside 
 Examples:
 
 ```bash
-uv run --package five08 crmctl search --timezone empty --location present
-uv run --package five08 crmctl batch-update --timezone empty --location present --update timezone=@location
-uv run --package five08 crmctl batch-update --timezone empty --location present --update timezone=@location --apply
+uv run --package five08 crmctl search --where timezone__is_null=true --where location__is_not_null=true
+uv run --package five08 crmctl batch-update --where timezone__is_null=true --where location__is_not_null=true --update timezone=@location
+uv run --package five08 crmctl batch-update --where timezone__is_null=true --where location__is_not_null=true --update timezone=@location --apply
 ```
 
 Inside `uv run --package five08 crmctl repl`, contacts are mutable Python objects:
 
 ```python
-contacts = search(timezone="empty", location="present", member_type=["Member"])
+contacts = search(timezone__is_null=True, location__is_not_null=True)
 contact = contacts[0]
 contact.timezone = contact.infer_timezone()
 contact.save()

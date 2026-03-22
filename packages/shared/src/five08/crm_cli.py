@@ -37,6 +37,13 @@ def _build_parser() -> argparse.ArgumentParser:
     search_parser = subparsers.add_parser("search", help="Search contacts.")
     _add_search_arguments(search_parser)
     search_parser.add_argument(
+        "--where",
+        dest="where_clauses",
+        action="append",
+        type=_parse_assignment,
+        help="Filter in field__operator=value form. Example: --where timezone__is_null=true",
+    )
+    search_parser.add_argument(
         "--limit",
         type=_limit_argument,
         default=100,
@@ -49,6 +56,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Preview or apply updates to matching contacts.",
     )
     _add_search_arguments(batch_parser)
+    batch_parser.add_argument(
+        "--where",
+        dest="where_clauses",
+        action="append",
+        type=_parse_assignment,
+        help="Filter in field__operator=value form. Example: --where timezone__is_null=true",
+    )
     batch_parser.add_argument(
         "--limit",
         type=_limit_argument,
@@ -118,7 +132,9 @@ def _load_repository() -> EspoContactRepository:
 
 
 def _criteria_from_args(args: argparse.Namespace) -> dict[str, Any]:
-    criteria: dict[str, Any] = {}
+    criteria: dict[str, Any] = _parse_assignments(
+        getattr(args, "where_clauses", []) or []
+    )
     if args.timezone:
         criteria["timezone"] = args.timezone
     if args.location:
@@ -270,6 +286,7 @@ Available objects:
   pprint
 
 Examples:
+  contacts = search(timezone__is_null=True, location__is_not_null=True)
   contacts = search(timezone="empty", location="present", member_type=["Member"])
   contact = contacts[0]
   contact.timezone = contact.infer_timezone()

@@ -93,8 +93,8 @@ uv run --package worker jobsctl recent
 
 # EspoCRM REPL / search / batch updates
 uv run --package five08 crmctl repl
-uv run --package five08 crmctl search --timezone empty --location present --member-type Member
-uv run --package five08 crmctl batch-update --timezone empty --location present --update timezone=@location
+uv run --package five08 crmctl search --where timezone__is_null=true --where location__is_not_null=true
+uv run --package five08 crmctl batch-update --where timezone__is_null=true --where location__is_not_null=true --update timezone=@location
 ```
 
 Or run the full stack with Docker Compose:
@@ -253,29 +253,28 @@ Inside the REPL you get:
 - `contact.save()` to persist pending changes
 - `batch_update(where={...}, update={...}, apply=False)` for preview/apply flows
 - `FROM_LOCATION` to infer `cTimezone` from location fields
+- `field__operator=value` filters for both CLI `--where` and Python kwargs
 
 Examples:
 
 ```bash
 uv run --package five08 crmctl search \
-  --timezone empty \
-  --location present \
-  --member-type Member \
-  --member-type Prospect
+  --where timezone__is_null=true \
+  --where location__is_not_null=true \
+  --where member_type__in=Member,Prospect
 
 uv run --package five08 crmctl search \
-  --roles developer \
-  --phone-country-code +1 \
-  --phone-country-code-match missing
+  --where roles__contains=developer \
+  --where phone__not_like=+1%
 
 uv run --package five08 crmctl batch-update \
-  --timezone empty \
-  --location present \
+  --where timezone__is_null=true \
+  --where location__is_not_null=true \
   --update timezone=@location
 
 uv run --package five08 crmctl batch-update \
-  --timezone empty \
-  --location present \
+  --where timezone__is_null=true \
+  --where location__is_not_null=true \
   --update timezone=@location \
   --apply
 ```

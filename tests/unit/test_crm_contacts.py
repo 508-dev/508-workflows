@@ -66,9 +66,7 @@ def test_search_builds_remote_filters_and_applies_local_location_filter() -> Non
     )
 
     assert [contact.id for contact in contacts] == ["contact-1"]
-    assert client.list_calls[0]["where"] == [
-        {"type": "equals", "attribute": "type", "value": "Member"},
-    ]
+    assert "where" not in client.list_calls[0]
 
 
 def test_search_filters_by_role_and_phone_country_code_locally() -> None:
@@ -126,6 +124,70 @@ def test_search_matches_raw_timezone_when_normalization_fails() -> None:
     repo = EspoContactRepository(client)
 
     contacts = repo.search(timezone="EST")
+
+    assert [contact.id for contact in contacts] == ["contact-1"]
+
+
+def test_search_supports_generic_field_operator_filters() -> None:
+    client = FakeEspoClient(
+        pages=[
+            {
+                "list": [
+                    {
+                        "id": "contact-1",
+                        "name": "Alice",
+                        "type": "Member",
+                        "cSeniority": "senior",
+                        "phoneNumber": "+1 5551212",
+                    },
+                    {
+                        "id": "contact-2",
+                        "name": "Bob",
+                        "type": "Inactive Member",
+                        "cSeniority": "junior",
+                        "phoneNumber": "5551212",
+                    },
+                ],
+                "total": 2,
+            }
+        ]
+    )
+    repo = EspoContactRepository(client)
+
+    contacts = repo.search(
+        member_type__in=["Member", "Prospect"],
+        seniority__not_equals="junior",
+        phone__starts_with="+1",
+    )
+
+    assert [contact.id for contact in contacts] == ["contact-1"]
+
+
+def test_search_supports_compound_location_filters() -> None:
+    client = FakeEspoClient(
+        pages=[
+            {
+                "list": [
+                    {
+                        "id": "contact-1",
+                        "name": "Alice",
+                        "addressCity": "Berlin",
+                        "addressCountry": "Germany",
+                    },
+                    {
+                        "id": "contact-2",
+                        "name": "Bob",
+                        "addressCity": "",
+                        "addressCountry": "",
+                    },
+                ],
+                "total": 2,
+            }
+        ]
+    )
+    repo = EspoContactRepository(client)
+
+    contacts = repo.search(location__contains="berlin")
 
     assert [contact.id for contact in contacts] == ["contact-1"]
 

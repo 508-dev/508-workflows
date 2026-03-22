@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any, Final, Protocol
 
 from five08.crm_normalization import (
@@ -67,6 +68,49 @@ SEARCH_CRITERIA_KEYS: Final[set[str]] = {
     "seniority",
     "timezone",
     "timezone_empty",
+}
+FILTER_OPERATOR_ALIASES: Final[dict[str, str]] = {
+    "contains": "contains",
+    "not_contains": "notContains",
+    "notcontains": "notContains",
+    "starts_with": "startsWith",
+    "startswith": "startsWith",
+    "ends_with": "endsWith",
+    "endswith": "endsWith",
+    "like": "like",
+    "not_like": "notLike",
+    "notlike": "notLike",
+    "in": "in",
+    "not_in": "notIn",
+    "notin": "notIn",
+    "is_true": "isTrue",
+    "istrue": "isTrue",
+    "is_false": "isFalse",
+    "isfalse": "isFalse",
+    "is_null": "isNull",
+    "isnull": "isNull",
+    "is_not_null": "isNotNull",
+    "isnotnull": "isNotNull",
+    "greater_than": "greaterThan",
+    "greaterthan": "greaterThan",
+    "gt": "greaterThan",
+    "less_than": "lessThan",
+    "lessthan": "lessThan",
+    "lt": "lessThan",
+    "greater_than_or_equals": "greaterThanOrEquals",
+    "greaterthanorequals": "greaterThanOrEquals",
+    "gte": "greaterThanOrEquals",
+    "less_than_or_equals": "lessThanOrEquals",
+    "lessthanorequals": "lessThanOrEquals",
+    "lte": "lessThanOrEquals",
+    "equals": "equals",
+    "eq": "equals",
+    "not_equals": "notEquals",
+    "notequals": "notEquals",
+    "neq": "notEquals",
+}
+COMPOUND_FIELDS: Final[dict[str, tuple[str, ...]]] = {
+    "location": LOCATION_FIELDS,
 }
 
 
@@ -192,6 +236,196 @@ def _presence_keyword_to_bool(
     raise ValueError(f"{field_name} must be 'present' or 'empty'")
 
 
+def _normalize_filter_operator(operator: str) -> str:
+    normalized = operator.strip().replace("-", "_").casefold()
+    mapped = FILTER_OPERATOR_ALIASES.get(normalized)
+    if mapped is None:
+        raise ValueError(f"Unsupported filter operator: {operator}")
+    return mapped
+
+
+def _normalize_list_value(value: Any) -> list[Any]:
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [item for item in value]
+    return [value]
+
+
+def _like_pattern_to_regex(pattern: str) -> re.Pattern[str]:
+    escaped = re.escape(pattern)
+    escaped = escaped.replace(r"\%", ".*").replace(r"\_", ".")
+    return re.compile(f"^{escaped}$", flags=re.IGNORECASE)
+
+
+def _normalize_scalar_for_field(field_name: str, value: Any) -> Any:
+    raw_field_name = _resolve_field_name(field_name)
+    if raw_field_name == "cTimezone":
+        return _best_effort_timezone_value(value)
+    if raw_field_name == "cSeniority":
+        return normalize_seniority(value, empty_as_unknown=True)
+    if raw_field_name == "cRoles":
+        return normalize_roles(value)
+    if isinstance(value, str):
+        text = value.strip()
+        return text
+    return value
+
+
+def _compare_values(left: Any, right: Any) -> int:
+    if isinstance(left, bool) and isinstance(right, bool):
+        return (left > right) - (left < right)
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return (left > right) - (left < right)
+
+    left_text = "" if left is None else str(left).casefold()
+    right_text = "" if right is None else str(right).casefold()
+    return (left_text > right_text) - (left_text < right_text)
+
+
+@dataclass(slots=True)
+class FilterExpression:
+    field: str
+    operator: str
+    value: Any = None
+
+    @classmethod
+    def from_key_value(cls, key: str, value: Any) -> "FilterExpression":
+        field, raw_operator = key.rsplit("__", 1) if "__" in key else (key, "equals")
+        return cls(
+            field=field,
+            operator=_normalize_filter_operator(raw_operator),
+            value=value,
+        )
+
+    def matches(self, contact: dict[str, Any]) -> bool:
+        if self.field in COMPOUND_FIELDS:
+            return self._matches_compound(contact)
+        actual = _normalize_scalar_for_field(
+            self.field,
+            contact.get(_resolve_field_name(self.field)),
+        )
+        return self._matches_value(actual)
+
+    def _matches_compound(self, contact: dict[str, Any]) -> bool:
+        values = [contact.get(component) for component in COMPOUND_FIELDS[self.field]]
+        if self.operator == "isNull":
+            return all(_is_blank(item) for item in values)
+        if self.operator == "isNotNull":
+            return any(not _is_blank(item) for item in values)
+        if self.operator == "contains":
+            expected = str(self.value).strip().casefold()
+            return any(expected in str(item).casefold() for item in values if item)
+        if self.operator == "notContains":
+            expected = str(self.value).strip().casefold()
+            return all(expected not in str(item).casefold() for item in values if item)
+        raise ValueError(
+            f"Operator {self.operator} is not supported for compound field {self.field}"
+        )
+
+    def _matches_value(self, actual: Any) -> bool:
+        operator = self.operator
+        if operator == "isNull":
+            return _is_blank(actual)
+        if operator == "isNotNull":
+            return not _is_blank(actual)
+        if operator == "isTrue":
+            return bool(actual) is True
+        if operator == "isFalse":
+            return bool(actual) is False
+
+        expected = _normalize_scalar_for_field(self.field, self.value)
+        if operator == "equals":
+            return self._equals(actual, expected)
+        if operator == "notEquals":
+            return not self._equals(actual, expected)
+        if operator == "contains":
+            return self._contains(actual, expected)
+        if operator == "notContains":
+            return not self._contains(actual, expected)
+        if operator == "startsWith":
+            return self._starts_with(actual, expected)
+        if operator == "endsWith":
+            return self._ends_with(actual, expected)
+        if operator == "like":
+            return self._like(actual, expected)
+        if operator == "notLike":
+            return not self._like(actual, expected)
+        if operator == "in":
+            return self._in(actual, expected)
+        if operator == "notIn":
+            return not self._in(actual, expected)
+        if operator == "greaterThan":
+            return _compare_values(actual, expected) > 0
+        if operator == "lessThan":
+            return _compare_values(actual, expected) < 0
+        if operator == "greaterThanOrEquals":
+            return _compare_values(actual, expected) >= 0
+        if operator == "lessThanOrEquals":
+            return _compare_values(actual, expected) <= 0
+        raise ValueError(f"Unsupported filter operator: {operator}")
+
+    @staticmethod
+    def _equals(actual: Any, expected: Any) -> bool:
+        if isinstance(actual, list):
+            if isinstance(expected, list):
+                return actual == expected
+            return expected in actual
+        if isinstance(expected, list):
+            return actual in expected
+        if isinstance(actual, str) and isinstance(expected, str):
+            return actual.casefold() == expected.casefold()
+        return actual == expected
+
+    @staticmethod
+    def _contains(actual: Any, expected: Any) -> bool:
+        if expected is None:
+            return False
+        if isinstance(actual, list):
+            expected_text = str(expected).casefold()
+            return any(expected_text in str(item).casefold() for item in actual)
+        return str(expected).casefold() in str(actual).casefold()
+
+    @staticmethod
+    def _starts_with(actual: Any, expected: Any) -> bool:
+        if isinstance(actual, list):
+            expected_text = str(expected).casefold()
+            return any(
+                str(item).casefold().startswith(expected_text) for item in actual
+            )
+        return str(actual).casefold().startswith(str(expected).casefold())
+
+    @staticmethod
+    def _ends_with(actual: Any, expected: Any) -> bool:
+        if isinstance(actual, list):
+            expected_text = str(expected).casefold()
+            return any(str(item).casefold().endswith(expected_text) for item in actual)
+        return str(actual).casefold().endswith(str(expected).casefold())
+
+    @staticmethod
+    def _like(actual: Any, expected: Any) -> bool:
+        if expected is None:
+            return False
+        regex = _like_pattern_to_regex(str(expected))
+        if isinstance(actual, list):
+            return any(regex.match(str(item)) for item in actual)
+        return regex.match(str(actual)) is not None
+
+    @staticmethod
+    def _in(actual: Any, expected: Any) -> bool:
+        expected_list = _normalize_list_value(expected)
+        normalized_expected = [
+            item.casefold() if isinstance(item, str) else item for item in expected_list
+        ]
+        if isinstance(actual, list):
+            actual_values = [
+                item.casefold() if isinstance(item, str) else item for item in actual
+            ]
+            return any(item in normalized_expected for item in actual_values)
+        actual_value = actual.casefold() if isinstance(actual, str) else actual
+        return actual_value in normalized_expected
+
+
 @dataclass(slots=True)
 class SearchCriteria:
     timezone: str | None = None
@@ -203,16 +437,18 @@ class SearchCriteria:
     roles_empty: bool | None = None
     phone_country_code: str | None = None
     phone_missing_country_code: bool | None = None
+    filters: tuple[FilterExpression, ...] = ()
 
     @classmethod
     def from_mapping(
         cls, raw_criteria: dict[str, Any] | None = None
     ) -> "SearchCriteria":
         criteria = raw_criteria or {}
-        unknown = sorted(set(criteria) - SEARCH_CRITERIA_KEYS)
-        if unknown:
-            joined = ", ".join(unknown)
-            raise ValueError(f"Unsupported search criteria: {joined}")
+        generic_filters: list[FilterExpression] = []
+        for key, value in criteria.items():
+            if key in SEARCH_CRITERIA_KEYS:
+                continue
+            generic_filters.append(FilterExpression.from_key_value(key, value))
 
         timezone_raw = criteria.get("timezone")
         timezone = None
@@ -297,6 +533,7 @@ class SearchCriteria:
             ),
             phone_country_code=phone_country_code,
             phone_missing_country_code=phone_missing_country_code,
+            filters=tuple(generic_filters),
         )
         parsed.validate()
         return parsed
@@ -312,22 +549,7 @@ class SearchCriteria:
             )
 
     def to_remote_filters(self) -> list[dict[str, Any]]:
-        filters: list[dict[str, Any]] = []
-        if self.timezone:
-            filters.append(
-                {"type": "equals", "attribute": "cTimezone", "value": self.timezone}
-            )
-
-        if self.roles_empty is True:
-            filters.append({"type": "arrayIsEmpty", "attribute": "cRoles"})
-
-        if self.member_types:
-            filters.append(_build_or_equals("type", self.member_types))
-
-        if self.seniorities:
-            filters.append(_build_or_equals("cSeniority", self.seniorities))
-
-        return filters
+        return []
 
     def matches(self, contact: dict[str, Any]) -> bool:
         contact_timezone = _best_effort_timezone_value(contact.get("cTimezone"))
@@ -377,6 +599,10 @@ class SearchCriteria:
             if self.phone_missing_country_code is True and has_prefix:
                 return False
             if self.phone_missing_country_code in {False, None} and not has_prefix:
+                return False
+
+        for expression in self.filters:
+            if not expression.matches(contact):
                 return False
 
         return True
