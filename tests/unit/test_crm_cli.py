@@ -164,6 +164,32 @@ def test_crmctl_batch_update_rejects_invalid_assignment() -> None:
     assert exc_info.value.code == 2
 
 
+def test_crmctl_batch_update_reports_invalid_timezone_update(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = FakeRepository()
+    monkeypatch.setattr(crm_cli, "_load_repository", lambda: repo)
+
+    def _raise_batch_update(**kwargs: Any) -> BatchUpdateResult:
+        raise ValueError("Invalid timezone value: 'EST'")
+
+    repo.batch_update = _raise_batch_update  # type: ignore[assignment]
+
+    exit_code = crm_cli.run(
+        [
+            "batch-update",
+            "--where",
+            "timezone__is_null=true",
+            "--update",
+            "timezone=EST",
+        ]
+    )
+
+    assert exit_code == 1
+    assert "Invalid timezone value" in capsys.readouterr().err
+
+
 def test_crmctl_reports_runtime_error(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

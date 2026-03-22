@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from five08.crm_contacts import FROM_LOCATION, EspoContactRepository
+import pytest
+
+from five08.crm_contacts import Contact, FROM_LOCATION, EspoContactRepository
 
 
 class FakeEspoClient:
@@ -163,6 +165,25 @@ def test_search_supports_generic_field_operator_filters() -> None:
     assert [contact.id for contact in contacts] == ["contact-1"]
 
 
+def test_search_supports_like_wildcards() -> None:
+    client = FakeEspoClient(
+        pages=[
+            {
+                "list": [
+                    {"id": "contact-1", "name": "Alice", "phoneNumber": "+1 5551212"},
+                    {"id": "contact-2", "name": "Bob", "phoneNumber": "5551212"},
+                ],
+                "total": 2,
+            }
+        ]
+    )
+    repo = EspoContactRepository(client)
+
+    contacts = repo.search(phone__not_like="+1%")
+
+    assert [contact.id for contact in contacts] == ["contact-2"]
+
+
 def test_search_supports_compound_location_filters() -> None:
     client = FakeEspoClient(
         pages=[
@@ -190,6 +211,51 @@ def test_search_supports_compound_location_filters() -> None:
     contacts = repo.search(location__contains="berlin")
 
     assert [contact.id for contact in contacts] == ["contact-1"]
+
+
+def test_search_limit_zero_means_no_limit() -> None:
+    client = FakeEspoClient(
+        pages=[
+            {
+                "list": [
+                    {"id": "contact-1", "name": "Alice"},
+                    {"id": "contact-2", "name": "Bob"},
+                ],
+                "total": 2,
+            }
+        ]
+    )
+    repo = EspoContactRepository(client)
+
+    contacts = repo.search(limit=0)
+
+    assert [contact.id for contact in contacts] == ["contact-1", "contact-2"]
+
+
+def test_search_adds_required_fields_to_custom_select() -> None:
+    client = FakeEspoClient(
+        pages=[
+            {
+                "list": [
+                    {
+                        "id": "contact-1",
+                        "name": "Alice",
+                        "phoneNumber": "+1 5551212",
+                    }
+                ],
+                "total": 1,
+            }
+        ]
+    )
+    repo = EspoContactRepository(client)
+
+    contacts = repo.search(
+        select="id,name",
+        phone__starts_with="+1",
+    )
+
+    assert [contact.id for contact in contacts] == ["contact-1"]
+    assert client.list_calls[0]["select"] == "id,name,phoneNumber"
 
 
 def test_batch_update_infers_timezone_from_location() -> None:
@@ -234,6 +300,17 @@ def test_prepare_contact_updates_skips_timezone_when_inference_fails() -> None:
     assert "cTimezone" not in updates
 
 
+def test_prepare_contact_updates_rejects_invalid_timezone_value() -> None:
+    client = FakeEspoClient()
+    repo = EspoContactRepository(client)
+
+    with pytest.raises(ValueError, match="Invalid timezone value"):
+        repo.prepare_contact_updates(
+            current_values={"cTimezone": "UTC-05:00"},
+            updates={"timezone": "EST"},
+        )
+
+
 def test_search_by_phone_country_code_defaults_to_present_prefix() -> None:
     client = FakeEspoClient(
         pages=[
@@ -273,3 +350,29 @@ def test_contact_object_tracks_alias_updates_and_saves_normalized_roles() -> Non
     assert client.update_calls == [
         ("contact-1", {"cRoles": ["developer", "data scientist"]})
     ]
+
+
+def test_contact_rejects_setting_class_defined_attributes() -> None:
+    client = FakeEspoClient()
+    client.contacts_by_id["contact-1"] = {"id": "contact-1", "name": "Alice"}
+    repo = EspoContactRepository(client)
+    contact = repo.get("contact-1")
+    dynamic_contact: Any = contact
+
+    with pytest.raises(AttributeError, match="Cannot set attribute 'id'"):
+        dynamic_contact.id = "contact-2"
+
+
+def test_contact_save_fails_when_payload_has_no_id() -> None:
+    client = FakeEspoClient()
+    repo = EspoContactRepository(client)
+    raw_contact = {
+        "name": "Alice",
+        "cRoles": [],
+    }
+
+    contact = Contact(repo, raw_contact)
+    contact.roles = "Developer"
+
+    with pytest.raises(ValueError, match="missing required id"):
+        contact.save()

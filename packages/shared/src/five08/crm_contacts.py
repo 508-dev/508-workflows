@@ -14,9 +14,6 @@ from five08.crm_normalization import (
     normalize_state,
     normalize_timezone,
 )
-from five08.resume_extractor import (
-    _infer_timezone_from_location as infer_timezone_from_location_helper,
-)
 
 FIELD_ALIASES: Final[dict[str, str]] = {
     "city": "addressCity",
@@ -202,16 +199,18 @@ def _best_effort_timezone_value(value: Any) -> str | None:
     return text or None
 
 
-def _build_or_equals(attribute: str, values: tuple[str, ...]) -> dict[str, Any]:
-    if len(values) == 1:
-        return {"type": "equals", "attribute": attribute, "value": values[0]}
-    return {
-        "type": "or",
-        "value": [
-            {"type": "equals", "attribute": attribute, "value": value}
-            for value in values
-        ],
-    }
+def infer_timezone_from_location_helper(
+    *, city: str | None, state: str | None, country: str | None
+) -> str | None:
+    from five08.resume_extractor import (
+        _infer_timezone_from_location,
+    )
+
+    return _infer_timezone_from_location(
+        city=city,
+        state=state,
+        country=country,
+    )
 
 
 def _presence_keyword_to_bool(
@@ -253,9 +252,15 @@ def _normalize_list_value(value: Any) -> list[Any]:
 
 
 def _like_pattern_to_regex(pattern: str) -> re.Pattern[str]:
-    escaped = re.escape(pattern)
-    escaped = escaped.replace(r"\%", ".*").replace(r"\_", ".")
-    return re.compile(f"^{escaped}$", flags=re.IGNORECASE)
+    parts: list[str] = []
+    for character in pattern:
+        if character == "%":
+            parts.append(".*")
+        elif character == "_":
+            parts.append(".")
+        else:
+            parts.append(re.escape(character))
+    return re.compile(f"^{''.join(parts)}$", flags=re.IGNORECASE)
 
 
 def _normalize_scalar_for_field(field_name: str, value: Any) -> Any:
@@ -551,6 +556,27 @@ class SearchCriteria:
     def to_remote_filters(self) -> list[dict[str, Any]]:
         return []
 
+    def required_fields(self) -> set[str]:
+        fields = {"id"}
+        if self.timezone is not None or self.timezone_empty is not None:
+            fields.add("cTimezone")
+        if self.location_present is not None:
+            fields.update(LOCATION_FIELDS)
+        if self.member_types:
+            fields.add("type")
+        if self.seniorities:
+            fields.add("cSeniority")
+        if self.roles or self.roles_empty is not None:
+            fields.add("cRoles")
+        if self.phone_country_code is not None:
+            fields.add("phoneNumber")
+        for expression in self.filters:
+            if expression.field in COMPOUND_FIELDS:
+                fields.update(COMPOUND_FIELDS[expression.field])
+                continue
+            fields.add(_resolve_field_name(expression.field))
+        return fields
+
     def matches(self, contact: dict[str, Any]) -> bool:
         contact_timezone = _best_effort_timezone_value(contact.get("cTimezone"))
         criteria_timezone = _best_effort_timezone_value(self.timezone)
@@ -582,14 +608,15 @@ class SearchCriteria:
             if seniority not in self.seniorities:
                 return False
 
-        contact_roles = set(normalize_roles(contact.get("cRoles")))
-        if self.roles_empty is not None:
-            roles_blank = not contact_roles
-            if roles_blank != self.roles_empty:
-                return False
+        if self.roles or self.roles_empty is not None:
+            contact_roles = set(normalize_roles(contact.get("cRoles")))
+            if self.roles_empty is not None:
+                roles_blank = not contact_roles
+                if roles_blank != self.roles_empty:
+                    return False
 
-        if self.roles and not contact_roles.intersection(self.roles):
-            return False
+            if self.roles and not contact_roles.intersection(self.roles):
+                return False
 
         if self.phone_country_code is not None:
             phone_number = str(contact.get("phoneNumber") or "").strip()
@@ -666,14 +693,21 @@ class Contact:
         raise AttributeError(name)
 
     def __setattr__(self, name: str, value: Any) -> None:
-        if name.startswith("_") or hasattr(type(self), name):
+        if name.startswith("_"):
             object.__setattr__(self, name, value)
             return
+        if hasattr(type(self), name):
+            raise AttributeError(
+                f"Cannot set attribute {name!r} on Contact; it is defined on the class"
+            )
         self.set(**{name: value})
 
     @property
     def id(self) -> str:
-        return str(self._raw.get("id") or "")
+        contact_id = str(self._raw.get("id") or "").strip()
+        if not contact_id:
+            raise ValueError("Contact payload is missing required id")
+        return contact_id
 
     @property
     def pending_updates(self) -> dict[str, Any]:
@@ -748,11 +782,16 @@ class EspoContactRepository:
         order: str = "desc",
         **criteria: Any,
     ) -> list[Contact]:
-        if limit is not None and limit <= 0:
-            raise ValueError("limit must be greater than 0")
+        if limit == 0:
+            limit = None
+        elif limit is not None and limit < 0:
+            raise ValueError("limit must be greater than or equal to 0")
 
         parsed_criteria = SearchCriteria.from_mapping(criteria)
-        select_fields = self._select_string(select)
+        select_fields = self._select_string(
+            select,
+            required_fields=parsed_criteria.required_fields(),
+        )
         remote_filters = parsed_criteria.to_remote_filters()
 
         contacts: list[Contact] = []
@@ -883,7 +922,7 @@ class EspoContactRepository:
         if field_name == "addressCountry":
             return self._normalize_string_field(value, normalize_country)
         if field_name == "cTimezone":
-            return self._normalize_string_field(value, normalize_timezone)
+            return self._normalize_timezone_update(value)
         if field_name == "cRoles":
             return normalize_roles(value)
         if field_name == "cSeniority":
@@ -908,9 +947,38 @@ class EspoContactRepository:
         return text or None
 
     @staticmethod
-    def _select_string(select: str | list[str] | tuple[str, ...] | None) -> str:
+    def _normalize_timezone_update(value: Any) -> str | None:
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            normalized = normalize_timezone(text)
+            if normalized is None:
+                raise ValueError(f"Invalid timezone value: {value!r}")
+            return normalized
+        normalized = normalize_timezone(value)
+        if normalized is None:
+            raise ValueError(f"Invalid timezone value: {value!r}")
+        return normalized
+
+    @staticmethod
+    def _select_string(
+        select: str | list[str] | tuple[str, ...] | None,
+        *,
+        required_fields: set[str] | None = None,
+    ) -> str:
+        required = required_fields or set()
         if select is None:
-            return ",".join(DEFAULT_SELECT_FIELDS)
-        if isinstance(select, str):
-            return select
-        return ",".join(select)
+            fields = list(DEFAULT_SELECT_FIELDS)
+        elif isinstance(select, str):
+            fields = [field.strip() for field in select.split(",") if field.strip()]
+        else:
+            fields = [field.strip() for field in select if field.strip()]
+
+        seen = set(fields)
+        for field in sorted(required):
+            if field in seen:
+                continue
+            fields.append(field)
+            seen.add(field)
+        return ",".join(fields)
