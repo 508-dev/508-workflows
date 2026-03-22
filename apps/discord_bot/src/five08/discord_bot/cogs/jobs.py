@@ -634,7 +634,6 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 line += "\n   " + " · ".join(location_info)
 
             lines.append(line)
-
         return lines, resume_options
 
     @staticmethod
