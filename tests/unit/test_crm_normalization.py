@@ -2,6 +2,7 @@
 
 from five08.crm_normalization import (
     format_seniority_label,
+    infer_timezone_from_location,
     normalize_city,
     normalize_country,
     normalize_role,
@@ -105,3 +106,11 @@ def test_normalize_roles_skips_non_string_items() -> None:
         "developer",
         "biz dev",
     ]
+
+
+def test_infer_timezone_from_location_preserves_resume_extractor_coverage() -> None:
+    assert infer_timezone_from_location(country="Portugal") == "UTC+00:00"
+    assert (
+        infer_timezone_from_location(country="Australia", city="Perth") == "UTC+08:00"
+    )
+    assert infer_timezone_from_location(country="United States", state="Texas") is None
