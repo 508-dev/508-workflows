@@ -715,6 +715,63 @@ def test_extract_llm_location_unknown_values_normalize_to_none() -> None:
     assert result.timezone is None
 
 
+def test_extract_llm_location_none_strings_normalize_to_none() -> None:
+    """Literal placeholder strings from the model should normalize to missing."""
+
+    class _FakeChatCompletions:
+        @staticmethod
+        def create(**_: object) -> object:
+            return type(
+                "Response",
+                (),
+                {
+                    "choices": [
+                        type(
+                            "Choice",
+                            (),
+                            {
+                                "message": type(
+                                    "Message",
+                                    (),
+                                    {
+                                        "content": (
+                                            '{"name": null, "email": null, '
+                                            '"github_username": null, '
+                                            '"linkedin_url": null, '
+                                            '"address_city": " None ", '
+                                            '"address_state": "none", '
+                                            '"address_country": "NULL", '
+                                            '"timezone": " none ", '
+                                            '"website_url_candidates": [], '
+                                            '"website_links": [], '
+                                            '"social_links": [], '
+                                            '"phone": null, "skills": [], '
+                                            '"skill_attrs": null, "confidence": 0.8}'
+                                        )
+                                    },
+                                )()
+                            },
+                        )()
+                    ]
+                },
+            )()
+
+    extractor = ResumeProfileExtractor(api_key="test-key")
+    extractor.client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": _FakeChatCompletions()})()},
+    )()
+    extractor.model = "fake-model"
+
+    result = extractor.extract("Jane Doe\njane@example.com\nSenior Engineer\n")
+
+    assert result.address_city is None
+    assert result.address_state is None
+    assert result.address_country is None
+    assert result.timezone is None
+
+
 def test_extract_llm_backfills_location_and_timezone_from_resume_text() -> None:
     """LLM mode should backfill explicit location fields and infer timezone."""
 
