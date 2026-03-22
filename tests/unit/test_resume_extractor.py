@@ -658,7 +658,19 @@ def test_extract_ignores_low_confidence_website_candidate() -> None:
     assert result.social_links == []
 
 
-def test_extract_llm_location_unknown_values_normalize_to_none() -> None:
+@pytest.mark.parametrize(
+    ("city", "state", "country", "timezone"),
+    [
+        ("unknown", "N/A", "none", "unknown"),
+        (" None ", "none", "NULL", " none "),
+    ],
+)
+def test_extract_llm_location_placeholder_values_normalize_to_none(
+    city: str,
+    state: str,
+    country: str,
+    timezone: str,
+) -> None:
     """Location placeholders from model output should not persist as literal values."""
 
     class _FakeChatCompletions:
@@ -681,67 +693,10 @@ def test_extract_llm_location_unknown_values_normalize_to_none() -> None:
                                             '{"name": null, "email": null, '
                                             '"github_username": null, '
                                             '"linkedin_url": null, '
-                                            '"address_city": "unknown", '
-                                            '"address_state": "N/A", '
-                                            '"address_country": "none", '
-                                            '"timezone": "unknown", '
-                                            '"website_url_candidates": [], '
-                                            '"website_links": [], '
-                                            '"social_links": [], '
-                                            '"phone": null, "skills": [], '
-                                            '"skill_attrs": null, "confidence": 0.8}'
-                                        )
-                                    },
-                                )()
-                            },
-                        )()
-                    ]
-                },
-            )()
-
-    extractor = ResumeProfileExtractor(api_key="test-key")
-    extractor.client = type(
-        "Client",
-        (),
-        {"chat": type("Chat", (), {"completions": _FakeChatCompletions()})()},
-    )()
-    extractor.model = "fake-model"
-
-    result = extractor.extract("Jane Doe\njane@example.com\nSenior Engineer\n")
-
-    assert result.address_city is None
-    assert result.address_state is None
-    assert result.address_country is None
-    assert result.timezone is None
-
-
-def test_extract_llm_location_none_strings_normalize_to_none() -> None:
-    """Literal placeholder strings from the model should normalize to missing."""
-
-    class _FakeChatCompletions:
-        @staticmethod
-        def create(**_: object) -> object:
-            return type(
-                "Response",
-                (),
-                {
-                    "choices": [
-                        type(
-                            "Choice",
-                            (),
-                            {
-                                "message": type(
-                                    "Message",
-                                    (),
-                                    {
-                                        "content": (
-                                            '{"name": null, "email": null, '
-                                            '"github_username": null, '
-                                            '"linkedin_url": null, '
-                                            '"address_city": " None ", '
-                                            '"address_state": "none", '
-                                            '"address_country": "NULL", '
-                                            '"timezone": " none ", '
+                                            f'"address_city": {json.dumps(city)}, '
+                                            f'"address_state": {json.dumps(state)}, '
+                                            f'"address_country": {json.dumps(country)}, '
+                                            f'"timezone": {json.dumps(timezone)}, '
                                             '"website_url_candidates": [], '
                                             '"website_links": [], '
                                             '"social_links": [], '
