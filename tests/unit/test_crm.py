@@ -3692,6 +3692,40 @@ class TestCRMCog:
             }
         ]
 
+    def test_build_contact_search_filters_linkedin_profile_url(self, crm_cog):
+        """Build shared search filters for LinkedIn profile URLs."""
+        filters = crm_cog._build_contact_search_filters(
+            "https://www.linkedin.com/in/hshidara/"
+        )
+
+        assert all(filter_["attribute"] == "cLinkedIn" for filter_ in filters)
+        assert {
+            "type": "equals",
+            "attribute": "cLinkedIn",
+            "value": "https://www.linkedin.com/in/hshidara/",
+        } in filters
+        assert {
+            "type": "equals",
+            "attribute": "cLinkedIn",
+            "value": "https://linkedin.com/in/hshidara",
+        } in filters
+        assert {
+            "type": "equals",
+            "attribute": "cLinkedIn",
+            "value": "https://www.linkedin.com/in/hshidara",
+        } in filters
+
+    def test_build_contact_search_filters_bare_linkedin_profile_url(self, crm_cog):
+        """Build shared search filters for bare LinkedIn profile URLs."""
+        filters = crm_cog._build_contact_search_filters("linkedin.com/in/hshidara")
+
+        assert {
+            "type": "equals",
+            "attribute": "cLinkedIn",
+            "value": "https://linkedin.com/in/hshidara",
+        } in filters
+        assert not any(filter_["attribute"] == "name" for filter_ in filters)
+
     @pytest.mark.asyncio
     async def test_search_contacts_for_lookup_includes_discord_username_filter_when_requested(
         self, crm_cog
