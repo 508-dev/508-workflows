@@ -990,15 +990,27 @@ class EspoContactRepository:
             return None
 
         if field_name == "addressCity":
-            return self._normalize_string_field(value, normalize_city)
+            return self._normalize_location_update(
+                value,
+                normalizer=normalize_city,
+                label="city",
+            )
         if field_name == "addressState":
-            return self._normalize_string_field(value, normalize_state)
+            return self._normalize_location_update(
+                value,
+                normalizer=normalize_state,
+                label="state",
+            )
         if field_name == "addressCountry":
-            return self._normalize_string_field(value, normalize_country)
+            return self._normalize_location_update(
+                value,
+                normalizer=normalize_country,
+                label="country",
+            )
         if field_name == "cTimezone":
             return self._normalize_timezone_update(value)
         if field_name == "cRoles":
-            return normalize_roles(value)
+            return self._normalize_roles_update(value)
         if field_name == "cSeniority":
             if isinstance(value, str) and not value.strip():
                 return None
@@ -1014,6 +1026,25 @@ class EspoContactRepository:
         if isinstance(value, str) and not value.strip():
             return None
         return normalizer(value)
+
+    @staticmethod
+    def _normalize_location_update(
+        value: Any, *, normalizer: Any, label: str
+    ) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            normalized = normalizer(text)
+            if normalized is None:
+                raise ValueError(f"Invalid {label} value: {value!r}")
+            return normalized
+        normalized = normalizer(value)
+        if normalized is None:
+            raise ValueError(f"Invalid {label} value: {value!r}")
+        return normalized
 
     @staticmethod
     def _normalize_plain_string(value: Any) -> str | None:
@@ -1034,6 +1065,16 @@ class EspoContactRepository:
         if normalized is None:
             raise ValueError(f"Invalid timezone value: {value!r}")
         return normalized
+
+    @staticmethod
+    def _normalize_roles_update(value: Any) -> list[str]:
+        if isinstance(value, str):
+            return normalize_roles(value)
+        if isinstance(value, (list, tuple, set)):
+            if not all(isinstance(item, str) for item in value):
+                raise ValueError(f"Invalid roles value: {value!r}")
+            return normalize_roles(value)
+        raise ValueError(f"Invalid roles value: {value!r}")
 
     @staticmethod
     def _select_string(

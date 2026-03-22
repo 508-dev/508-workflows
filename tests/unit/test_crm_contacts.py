@@ -355,6 +355,28 @@ def test_prepare_contact_updates_rejects_invalid_timezone_value() -> None:
         )
 
 
+def test_prepare_contact_updates_rejects_invalid_country_value() -> None:
+    client = FakeEspoClient()
+    repo = EspoContactRepository(client)
+
+    with pytest.raises(ValueError, match="Invalid country value"):
+        repo.prepare_contact_updates(
+            current_values={"addressCountry": "Brazil"},
+            updates={"country": "Brasil"},
+        )
+
+
+def test_prepare_contact_updates_rejects_invalid_roles_type() -> None:
+    client = FakeEspoClient()
+    repo = EspoContactRepository(client)
+
+    with pytest.raises(ValueError, match="Invalid roles value"):
+        repo.prepare_contact_updates(
+            current_values={"cRoles": ["developer"]},
+            updates={"roles": True},
+        )
+
+
 def test_search_by_phone_country_code_defaults_to_present_prefix() -> None:
     client = FakeEspoClient(
         pages=[
