@@ -4736,6 +4736,14 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         variants: list[str] = []
         for variant in (
             value.strip(),
+            f"linkedin.com{path}",
+            f"linkedin.com{path}/",
+            f"www.linkedin.com{path}",
+            f"www.linkedin.com{path}/",
+            f"http://linkedin.com{path}",
+            f"http://linkedin.com{path}/",
+            f"http://www.linkedin.com{path}",
+            f"http://www.linkedin.com{path}/",
             f"https://linkedin.com{path}",
             f"https://linkedin.com{path}/",
             f"https://www.linkedin.com{path}",

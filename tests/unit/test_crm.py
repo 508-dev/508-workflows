@@ -3714,6 +3714,16 @@ class TestCRMCog:
             "attribute": "cLinkedIn",
             "value": "https://www.linkedin.com/in/hshidara",
         } in filters
+        assert {
+            "type": "equals",
+            "attribute": "cLinkedIn",
+            "value": "http://linkedin.com/in/hshidara",
+        } in filters
+        assert {
+            "type": "equals",
+            "attribute": "cLinkedIn",
+            "value": "http://www.linkedin.com/in/hshidara/",
+        } in filters
 
     def test_build_contact_search_filters_bare_linkedin_profile_url(self, crm_cog):
         """Build shared search filters for bare LinkedIn profile URLs."""
@@ -3723,6 +3733,11 @@ class TestCRMCog:
             "type": "equals",
             "attribute": "cLinkedIn",
             "value": "https://linkedin.com/in/hshidara",
+        } in filters
+        assert {
+            "type": "equals",
+            "attribute": "cLinkedIn",
+            "value": "www.linkedin.com/in/hshidara",
         } in filters
         assert not any(filter_["attribute"] == "name" for filter_ in filters)
 
