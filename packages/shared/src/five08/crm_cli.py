@@ -38,7 +38,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_search_arguments(search_parser)
     search_parser.add_argument(
         "--limit",
-        type=int,
+        type=_limit_argument,
         default=100,
         help="Maximum contacts to return (default: 100). Use 0 for all.",
     )
@@ -51,7 +51,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_search_arguments(batch_parser)
     batch_parser.add_argument(
         "--limit",
-        type=int,
+        type=_limit_argument,
         default=100,
         help="Maximum contacts to scan (default: 100). Use 0 for all.",
     )
@@ -59,6 +59,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--set",
         dest="assignments",
         action="append",
+        type=_parse_assignment,
         required=True,
         help="Update assignment in field=value form. Use timezone=@location to infer timezone.",
     )
@@ -73,11 +74,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _add_search_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
+    timezone_group = parser.add_mutually_exclusive_group()
+    timezone_group.add_argument(
         "--timezone",
         help="Exact timezone match, e.g. UTC-05:00.",
     )
-    parser.add_argument(
+    timezone_group.add_argument(
         "--timezone-empty",
         action="store_true",
         help="Match contacts with an empty timezone.",
@@ -97,12 +99,13 @@ def _add_search_arguments(parser: argparse.ArgumentParser) -> None:
         action="append",
         help="Repeatable seniority filter, e.g. senior or staff.",
     )
-    parser.add_argument(
+    role_group = parser.add_mutually_exclusive_group()
+    role_group.add_argument(
         "--role",
         action="append",
         help="Repeatable role filter. Matches any requested role.",
     )
-    parser.add_argument(
+    role_group.add_argument(
         "--roles-empty",
         action="store_true",
         help="Match contacts with empty roles.",
@@ -111,10 +114,16 @@ def _add_search_arguments(parser: argparse.ArgumentParser) -> None:
         "--phone-country-code",
         help="Phone prefix to validate, e.g. +1.",
     )
-    parser.add_argument(
+    phone_prefix_group = parser.add_mutually_exclusive_group()
+    phone_prefix_group.add_argument(
         "--phone-missing-country-code",
         action="store_true",
         help="Require phone numbers to be present and not start with --phone-country-code.",
+    )
+    phone_prefix_group.add_argument(
+        "--phone-has-country-code",
+        action="store_true",
+        help="Require phone numbers to be present and start with --phone-country-code.",
     )
 
 
@@ -145,7 +154,19 @@ def _criteria_from_args(args: argparse.Namespace) -> dict[str, Any]:
         criteria["phone_country_code"] = args.phone_country_code
     if args.phone_missing_country_code:
         criteria["phone_missing_country_code"] = True
+    if args.phone_has_country_code:
+        criteria["phone_missing_country_code"] = False
     return criteria
+
+
+def _limit_argument(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("limit must be an integer") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("limit must be 0 or greater")
+    return parsed
 
 
 def _limit_value(raw_limit: int) -> int | None:
@@ -158,11 +179,15 @@ def _limit_value(raw_limit: int) -> int | None:
 
 def _parse_assignment(raw_assignment: str) -> tuple[str, Any]:
     if "=" not in raw_assignment:
-        raise ValueError(f"Invalid assignment: {raw_assignment!r}")
+        raise argparse.ArgumentTypeError(
+            f"Invalid assignment {raw_assignment!r}; expected field=value"
+        )
     field_name, raw_value = raw_assignment.split("=", 1)
     field_name = field_name.strip()
     if not field_name:
-        raise ValueError(f"Invalid assignment: {raw_assignment!r}")
+        raise argparse.ArgumentTypeError(
+            f"Invalid assignment {raw_assignment!r}; expected field=value"
+        )
 
     value_text = raw_value.strip()
     lowered = value_text.lower()
@@ -175,18 +200,40 @@ def _parse_assignment(raw_assignment: str) -> tuple[str, Any]:
     elif lowered == "false":
         value = False
     elif value_text.startswith("[") or value_text.startswith("{"):
-        value = json.loads(value_text)
+        try:
+            value = json.loads(value_text)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                f"Invalid JSON value for assignment {raw_assignment!r}"
+            ) from exc
     else:
         value = value_text
     return field_name, value
 
 
-def _parse_assignments(raw_assignments: Sequence[str]) -> dict[str, Any]:
+def _parse_assignments(raw_assignments: Sequence[tuple[str, Any]]) -> dict[str, Any]:
     assignments: dict[str, Any] = {}
-    for raw_assignment in raw_assignments:
-        field_name, value = _parse_assignment(raw_assignment)
+    for field_name, value in raw_assignments:
         assignments[field_name] = value
     return assignments
+
+
+def _validate_args(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> argparse.Namespace:
+    if getattr(args, "command", None) not in {"search", "batch-update"}:
+        return args
+
+    if getattr(args, "phone_country_code", None) is None and (
+        getattr(args, "phone_missing_country_code", False)
+        or getattr(args, "phone_has_country_code", False)
+    ):
+        parser.error(
+            "--phone-country-code is required with "
+            "--phone-missing-country-code or --phone-has-country-code"
+        )
+
+    return args
 
 
 def _render_contacts(contacts: list[Any]) -> int:
@@ -287,6 +334,7 @@ def _handle_batch_update(args: argparse.Namespace) -> int:
 def run(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
+    args = _validate_args(parser, args)
     try:
         return args.handler(args)
     except KeyboardInterrupt:

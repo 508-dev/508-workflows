@@ -111,6 +111,25 @@ def test_search_filters_by_role_and_phone_country_code_locally() -> None:
     assert "where" not in client.list_calls[0]
 
 
+def test_search_matches_raw_timezone_when_normalization_fails() -> None:
+    client = FakeEspoClient(
+        pages=[
+            {
+                "list": [
+                    {"id": "contact-1", "name": "Alice", "cTimezone": "EST"},
+                    {"id": "contact-2", "name": "Bob", "cTimezone": "PST"},
+                ],
+                "total": 2,
+            }
+        ]
+    )
+    repo = EspoContactRepository(client)
+
+    contacts = repo.search(timezone="EST")
+
+    assert [contact.id for contact in contacts] == ["contact-1"]
+
+
 def test_batch_update_infers_timezone_from_location() -> None:
     client = FakeEspoClient(
         pages=[
@@ -139,6 +158,18 @@ def test_batch_update_infers_timezone_from_location() -> None:
     assert result.applied is True
     assert result.count == 1
     assert client.update_calls == [("contact-1", {"cTimezone": "UTC+01:00"})]
+
+
+def test_prepare_contact_updates_skips_timezone_when_inference_fails() -> None:
+    client = FakeEspoClient()
+    repo = EspoContactRepository(client)
+
+    updates = repo.prepare_contact_updates(
+        current_values={"cTimezone": "UTC-05:00"},
+        updates={"timezone": FROM_LOCATION},
+    )
+
+    assert "cTimezone" not in updates
 
 
 def test_contact_object_tracks_alias_updates_and_saves_normalized_roles() -> None:

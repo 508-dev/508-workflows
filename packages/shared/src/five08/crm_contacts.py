@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Final
+from typing import Any, Final, Protocol
 
-from five08.clients.espo import EspoClient
 from five08.crm_normalization import (
     normalize_city,
     normalize_country,
@@ -77,6 +76,16 @@ class _InferFromLocation:
 FROM_LOCATION: Final = _InferFromLocation()
 
 
+class ContactAPIClient(Protocol):
+    def get_contact(self, contact_id: str) -> dict[str, Any]: ...
+
+    def update_contact(
+        self, contact_id: str, updates: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
+    def list_contacts(self, params: dict[str, Any]) -> dict[str, Any]: ...
+
+
 def _is_blank(value: Any) -> bool:
     if value is None:
         return True
@@ -135,6 +144,16 @@ def _field_values_equal(left: Any, right: Any) -> bool:
     if _is_blank(left) and _is_blank(right):
         return True
     return left == right
+
+
+def _best_effort_timezone_value(value: Any) -> str | None:
+    normalized = normalize_timezone(value)
+    if normalized is not None:
+        return normalized
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _build_or_equals(attribute: str, values: tuple[str, ...]) -> dict[str, Any]:
@@ -241,8 +260,9 @@ class SearchCriteria:
         return filters
 
     def matches(self, contact: dict[str, Any]) -> bool:
-        timezone_value = normalize_timezone(contact.get("cTimezone"))
-        if self.timezone is not None and timezone_value != self.timezone:
+        contact_timezone = _best_effort_timezone_value(contact.get("cTimezone"))
+        criteria_timezone = _best_effort_timezone_value(self.timezone)
+        if self.timezone is not None and contact_timezone != criteria_timezone:
             return False
 
         if self.timezone_empty is not None:
@@ -416,7 +436,7 @@ class Contact:
 class EspoContactRepository:
     """Search and update contacts with a Python-friendly API."""
 
-    def __init__(self, client: EspoClient, *, page_size: int = 100) -> None:
+    def __init__(self, client: ContactAPIClient, *, page_size: int = 100) -> None:
         self.client = client
         self.page_size = page_size
 
@@ -543,7 +563,9 @@ class EspoContactRepository:
         if pending_timezone_value is not None:
             timezone_context = dict(current_values)
             timezone_context.update(normalized)
-            normalized["cTimezone"] = self.infer_timezone(timezone_context)
+            inferred_timezone = self.infer_timezone(timezone_context)
+            if inferred_timezone is not None:
+                normalized["cTimezone"] = inferred_timezone
 
         return normalized
 
