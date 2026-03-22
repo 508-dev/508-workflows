@@ -260,13 +260,29 @@ def _like_pattern_to_regex(pattern: str) -> re.Pattern[str]:
     return re.compile(f"^{''.join(parts)}$", flags=re.IGNORECASE)
 
 
-def _normalize_scalar_for_field(field_name: str, value: Any) -> Any:
+def _normalize_scalar_for_field(
+    field_name: str,
+    value: Any,
+    *,
+    operator: str | None = None,
+) -> Any:
     raw_field_name = _resolve_field_name(field_name)
     if raw_field_name == "cTimezone":
         return _best_effort_timezone_value(value)
     if raw_field_name == "cSeniority":
         return normalize_seniority(value, empty_as_unknown=True)
     if raw_field_name == "cRoles":
+        if operator in {
+            "contains",
+            "notContains",
+            "startsWith",
+            "endsWith",
+            "like",
+            "notLike",
+        }:
+            if isinstance(value, str):
+                return value.strip()
+            return value
         return normalize_roles(value)
     if isinstance(value, str):
         text = value.strip()
@@ -315,6 +331,7 @@ class FilterExpression:
         actual = _normalize_scalar_for_field(
             self.field,
             contact.get(_resolve_field_name(self.field)),
+            operator=self.operator,
         )
         return self._matches_value(actual)
 
@@ -345,7 +362,11 @@ class FilterExpression:
         if operator == "isFalse":
             return bool(actual) is False
 
-        expected = _normalize_scalar_for_field(self.field, self.value)
+        expected = _normalize_scalar_for_field(
+            self.field,
+            self.value,
+            operator=operator,
+        )
         if operator == "equals":
             return self._equals(actual, expected)
         if operator == "notEquals":
@@ -640,7 +661,9 @@ class SearchCriteria:
                 continue
 
             filter_value = _normalize_scalar_for_field(
-                expression.field, expression.value
+                expression.field,
+                expression.value,
+                operator=expression.operator,
             )
             filter_dict: dict[str, Any] = {
                 "attribute": _resolve_field_name(expression.field),
@@ -1038,18 +1061,15 @@ class EspoContactRepository:
         if field_name == "cSeniority":
             if isinstance(value, str) and not value.strip():
                 return None
-            return normalize_seniority(value, empty_as_unknown=True)
+            normalized = normalize_seniority(value, empty_as_unknown=True)
+            if normalized is None:
+                raise ValueError(f"Invalid seniority value: {value!r}")
+            return normalized
         if field_name == "type":
             return self._normalize_plain_string(value)
         if field_name == "phoneNumber":
             return self._normalize_plain_string(value)
         return value
-
-    @staticmethod
-    def _normalize_string_field(value: Any, normalizer: Any) -> str | None:
-        if isinstance(value, str) and not value.strip():
-            return None
-        return normalizer(value)
 
     @staticmethod
     def _normalize_location_update(

@@ -565,7 +565,6 @@ _COUNTRY_TIMEZONE: dict[str, str] = {
     "taiwan": "UTC+08:00",
     "ukraine": "UTC+02:00",
     "united kingdom": "UTC+00:00",
-    "united states": None,  # type: ignore[dict-item]
 }
 _STATE_TIMEZONE: dict[str, str] = {
     "california": "UTC-08:00",

@@ -195,6 +195,25 @@ def test_search_supports_like_wildcards() -> None:
     assert [contact.id for contact in contacts] == ["contact-2"]
 
 
+def test_search_supports_role_text_filters() -> None:
+    client = FakeEspoClient(
+        pages=[
+            {
+                "list": [
+                    {"id": "contact-1", "name": "Alice", "cRoles": ["developer"]},
+                    {"id": "contact-2", "name": "Bob", "cRoles": ["designer"]},
+                ],
+                "total": 2,
+            }
+        ]
+    )
+    repo = EspoContactRepository(client)
+
+    contacts = repo.search(roles__contains="developer")
+
+    assert [contact.id for contact in contacts] == ["contact-1"]
+
+
 def test_text_operators_ignore_blank_source_values() -> None:
     def _search_ids(**criteria: Any) -> list[str]:
         client = FakeEspoClient(
@@ -401,6 +420,17 @@ def test_prepare_contact_updates_rejects_invalid_roles_type() -> None:
         repo.prepare_contact_updates(
             current_values={"cRoles": ["developer"]},
             updates={"roles": True},
+        )
+
+
+def test_prepare_contact_updates_rejects_invalid_seniority_type() -> None:
+    client = FakeEspoClient()
+    repo = EspoContactRepository(client)
+
+    with pytest.raises(ValueError, match="Invalid seniority value"):
+        repo.prepare_contact_updates(
+            current_values={"cSeniority": "senior"},
+            updates={"seniority": True},
         )
 
 

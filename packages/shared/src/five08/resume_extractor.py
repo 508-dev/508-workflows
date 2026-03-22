@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from five08.crm_normalization import (
+    infer_timezone_from_location as shared_infer_timezone_from_location,
     normalized_website_identity_key as shared_normalized_website_identity_key,
     normalize_city as shared_normalize_city,
     normalize_country as shared_normalize_country,
@@ -740,174 +741,6 @@ def _looks_like_state_region(value: str) -> bool:
     return bool(re.fullmatch(r"[A-Z]{2}", value.strip()))
 
 
-_COUNTRY_TIMEZONE: dict[str, str] = {
-    # Americas
-    "colombia": "UTC-05:00",
-    "ecuador": "UTC-05:00",
-    "peru": "UTC-05:00",
-    "venezuela": "UTC-04:00",
-    "bolivia": "UTC-04:00",
-    "chile": "UTC-04:00",
-    "paraguay": "UTC-04:00",
-    "argentina": "UTC-03:00",
-    "uruguay": "UTC-03:00",
-    # Europe
-    "united kingdom": "UTC+00:00",
-    "uk": "UTC+00:00",
-    "ireland": "UTC+00:00",
-    "portugal": "UTC+00:00",
-    "ghana": "UTC+00:00",
-    "senegal": "UTC+00:00",
-    "ivory coast": "UTC+00:00",
-    "germany": "UTC+01:00",
-    "france": "UTC+01:00",
-    "netherlands": "UTC+01:00",
-    "belgium": "UTC+01:00",
-    "spain": "UTC+01:00",
-    "italy": "UTC+01:00",
-    "sweden": "UTC+01:00",
-    "norway": "UTC+01:00",
-    "denmark": "UTC+01:00",
-    "switzerland": "UTC+01:00",
-    "austria": "UTC+01:00",
-    "poland": "UTC+01:00",
-    "czech republic": "UTC+01:00",
-    "czechia": "UTC+01:00",
-    "hungary": "UTC+01:00",
-    "croatia": "UTC+01:00",
-    "serbia": "UTC+01:00",
-    "nigeria": "UTC+01:00",
-    "cameroon": "UTC+01:00",
-    "morocco": "UTC+01:00",
-    "algeria": "UTC+01:00",
-    "tunisia": "UTC+01:00",
-    "romania": "UTC+02:00",
-    "bulgaria": "UTC+02:00",
-    "ukraine": "UTC+02:00",
-    "greece": "UTC+02:00",
-    "finland": "UTC+02:00",
-    "estonia": "UTC+02:00",
-    "latvia": "UTC+02:00",
-    "lithuania": "UTC+02:00",
-    "south africa": "UTC+02:00",
-    "israel": "UTC+02:00",
-    "egypt": "UTC+02:00",
-    "zimbabwe": "UTC+02:00",
-    "zambia": "UTC+02:00",
-    "rwanda": "UTC+02:00",
-    "kenya": "UTC+03:00",
-    "tanzania": "UTC+03:00",
-    "ethiopia": "UTC+03:00",
-    "uganda": "UTC+03:00",
-    "saudi arabia": "UTC+03:00",
-    "iraq": "UTC+03:00",
-    "turkey": "UTC+03:00",
-    "iran": "UTC+03:30",
-    "uae": "UTC+04:00",
-    "united arab emirates": "UTC+04:00",
-    "azerbaijan": "UTC+04:00",
-    "georgia": "UTC+04:00",
-    "armenia": "UTC+04:00",
-    "afghanistan": "UTC+04:30",
-    "pakistan": "UTC+05:00",
-    "uzbekistan": "UTC+05:00",
-    "india": "UTC+05:30",
-    "sri lanka": "UTC+05:30",
-    "nepal": "UTC+05:45",
-    "bangladesh": "UTC+06:00",
-    "myanmar": "UTC+06:30",
-    "thailand": "UTC+07:00",
-    "vietnam": "UTC+07:00",
-    "cambodia": "UTC+07:00",
-    "laos": "UTC+07:00",
-    "china": "UTC+08:00",
-    "singapore": "UTC+08:00",
-    "malaysia": "UTC+08:00",
-    "philippines": "UTC+08:00",
-    "taiwan": "UTC+08:00",
-    "hong kong": "UTC+08:00",
-    "mongolia": "UTC+08:00",
-    "japan": "UTC+09:00",
-    "south korea": "UTC+09:00",
-    "korea": "UTC+09:00",
-    "new zealand": "UTC+12:00",
-}
-
-# Countries that span multiple timezones — skip rather than guess wrong.
-_AMBIGUOUS_COUNTRY_TIMEZONE: frozenset[str] = frozenset(
-    {
-        "united states",
-        "usa",
-        "us",
-        "canada",
-        "mexico",
-        "brazil",
-        "australia",
-        "russia",
-        "indonesia",
-    }
-)
-
-_CITY_TIMEZONE: dict[str, str] = {
-    # US Pacific
-    "san francisco": "UTC-08:00",
-    "los angeles": "UTC-08:00",
-    "seattle": "UTC-08:00",
-    "san diego": "UTC-08:00",
-    # US Mountain
-    "denver": "UTC-07:00",
-    "phoenix": "UTC-07:00",
-    "salt lake city": "UTC-07:00",
-    # US Central
-    "chicago": "UTC-06:00",
-    "dallas": "UTC-06:00",
-    "houston": "UTC-06:00",
-    "austin": "UTC-06:00",
-    "minneapolis": "UTC-06:00",
-    # US Eastern
-    "new york": "UTC-05:00",
-    "boston": "UTC-05:00",
-    "atlanta": "UTC-05:00",
-    "miami": "UTC-05:00",
-    "philadelphia": "UTC-05:00",
-    # Canada
-    "toronto": "UTC-05:00",
-    "montreal": "UTC-05:00",
-    "vancouver": "UTC-08:00",
-    "calgary": "UTC-07:00",
-    # Mexico
-    "mexico city": "UTC-06:00",
-    "guadalajara": "UTC-06:00",
-    "tijuana": "UTC-08:00",
-    # Brazil
-    "sao paulo": "UTC-03:00",
-    "são paulo": "UTC-03:00",
-    "rio de janeiro": "UTC-03:00",
-    # Australia
-    "sydney": "UTC+10:00",
-    "melbourne": "UTC+10:00",
-    "brisbane": "UTC+10:00",
-    "perth": "UTC+08:00",
-    # Russia
-    "moscow": "UTC+03:00",
-    "saint petersburg": "UTC+03:00",
-    "st. petersburg": "UTC+03:00",
-}
-
-_STATE_TIMEZONE: dict[str, str] = {
-    "california": "UTC-08:00",
-    "washington": "UTC-08:00",
-    "arizona": "UTC-07:00",
-    "colorado": "UTC-07:00",
-    "utah": "UTC-07:00",
-    "illinois": "UTC-06:00",
-    "minnesota": "UTC-06:00",
-    "new york": "UTC-05:00",
-    "massachusetts": "UTC-05:00",
-    "georgia": "UTC-05:00",
-    "pennsylvania": "UTC-05:00",
-    "district of columbia": "UTC-05:00",
-}
 _CITY_REGION_HINTS: dict[str, tuple[str | None, str | None]] = {
     "san francisco": ("California", "United States"),
     "los angeles": ("California", "United States"),
@@ -1035,23 +868,12 @@ def _candidate_location_fragments(line: str) -> list[str]:
 def _infer_timezone_from_location(
     *, country: str | None, state: str | None = None, city: str | None = None
 ) -> str | None:
-    """Best-effort UTC offset from city or country (heuristic fallback only)."""
-    if city:
-        city_tz = _CITY_TIMEZONE.get(city.strip().lower())
-        if city_tz:
-            return city_tz
-    if state:
-        state_tz = _STATE_TIMEZONE.get(state.strip().lower())
-        if state_tz:
-            return state_tz
-    if country:
-        country_key = country.strip().lower()
-        if country_key in _AMBIGUOUS_COUNTRY_TIMEZONE:
-            return None
-        tz = _COUNTRY_TIMEZONE.get(country_key)
-        if tz:
-            return tz
-    return None
+    """Best-effort UTC offset from city/state/country via shared normalization."""
+    return shared_infer_timezone_from_location(
+        country=country,
+        state=state,
+        city=city,
+    )
 
 
 def _infer_country_from_state(state: str | None) -> str | None:
