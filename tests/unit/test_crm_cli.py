@@ -191,6 +191,36 @@ def test_crmctl_batch_update_rejects_invalid_assignment() -> None:
     assert exc_info.value.code == 2
 
 
+def test_crmctl_rejects_duplicate_where_assignment() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        crm_cli.run(
+            [
+                "search",
+                "--where",
+                "timezone__is_null=true",
+                "--where",
+                "timezone__is_null=false",
+            ]
+        )
+
+    assert exc_info.value.code == 2
+
+
+def test_crmctl_rejects_duplicate_update_assignment() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        crm_cli.run(
+            [
+                "batch-update",
+                "--update",
+                "timezone=UTC+01:00",
+                "--update",
+                "timezone=UTC+02:00",
+            ]
+        )
+
+    assert exc_info.value.code == 2
+
+
 def test_crmctl_batch_update_reports_invalid_timezone_update(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

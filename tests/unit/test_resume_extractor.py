@@ -2223,6 +2223,10 @@ def test_infer_timezone_city_resolves_ambiguous_country() -> None:
     )
 
 
+def test_infer_timezone_ambiguous_state_returns_none() -> None:
+    assert _infer_timezone_from_location(country="United States", state="Texas") is None
+
+
 def test_infer_timezone_unknown_city_falls_back_to_country() -> None:
     assert (
         _infer_timezone_from_location(country="Japan", city="Unknown City")

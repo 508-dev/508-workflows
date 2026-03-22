@@ -207,6 +207,10 @@ def _parse_assignment(raw_assignment: str) -> tuple[str, Any]:
 def _parse_assignments(raw_assignments: Sequence[tuple[str, Any]]) -> dict[str, Any]:
     assignments: dict[str, Any] = {}
     for field_name, value in raw_assignments:
+        if field_name in assignments:
+            raise argparse.ArgumentTypeError(
+                f"Duplicate assignment for field {field_name!r}; each field may be specified at most once"
+            )
         assignments[field_name] = value
     return assignments
 
@@ -222,6 +226,12 @@ def _validate_args(
         and getattr(args, "phone_country_code_match", None) is not None
     ):
         parser.error("--phone-country-code is required with --phone-country-code-match")
+
+    try:
+        _parse_assignments(getattr(args, "where_clauses", []) or [])
+        _parse_assignments(getattr(args, "assignments", []) or [])
+    except argparse.ArgumentTypeError as exc:
+        parser.error(str(exc))
 
     return args
 

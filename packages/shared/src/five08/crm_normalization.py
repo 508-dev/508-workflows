@@ -567,7 +567,6 @@ _COUNTRY_TIMEZONE: dict[str, str] = {
 }
 _STATE_TIMEZONE: dict[str, str] = {
     "california": "UTC-08:00",
-    "texas": "UTC-06:00",
     "new york": "UTC-05:00",
     "north carolina": "UTC-05:00",
     "washington": "UTC-08:00",
@@ -589,6 +588,7 @@ _CITY_TIMEZONE: dict[str, str] = {
     "nairobi": "UTC+03:00",
     "new york": "UTC-05:00",
     "paris": "UTC+01:00",
+    "perth": "UTC+08:00",
     "san francisco": "UTC-08:00",
     "seattle": "UTC-08:00",
     "seoul": "UTC+09:00",
@@ -597,6 +597,7 @@ _CITY_TIMEZONE: dict[str, str] = {
     "tokyo": "UTC+09:00",
 }
 _AMBIGUOUS_COUNTRY_TIMEZONE = frozenset({"australia", "canada", "united states"})
+_AMBIGUOUS_STATE_TIMEZONE = frozenset({"texas"})
 
 
 def infer_timezone_from_location(
@@ -608,7 +609,10 @@ def infer_timezone_from_location(
         if city_tz:
             return city_tz
     if state:
-        state_tz = _STATE_TIMEZONE.get(state.strip().lower())
+        state_key = state.strip().lower()
+        if state_key in _AMBIGUOUS_STATE_TIMEZONE:
+            return None
+        state_tz = _STATE_TIMEZONE.get(state_key)
         if state_tz:
             return state_tz
     if country:
