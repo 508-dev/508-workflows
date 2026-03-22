@@ -4,7 +4,12 @@ from typing import Any
 
 import pytest
 
-from five08.crm_contacts import Contact, FROM_LOCATION, EspoContactRepository
+from five08.crm_contacts import (
+    Contact,
+    FROM_LOCATION,
+    EspoContactRepository,
+    FilterExpression,
+)
 
 
 class FakeEspoClient:
@@ -68,7 +73,10 @@ def test_search_builds_remote_filters_and_applies_local_location_filter() -> Non
     )
 
     assert [contact.id for contact in contacts] == ["contact-1"]
-    assert "where" not in client.list_calls[0]
+    assert client.list_calls[0]["where"] == [
+        {"attribute": "cTimezone", "type": "isNull"},
+        {"attribute": "type", "type": "equals", "value": "Member"},
+    ]
 
 
 def test_search_filters_by_role_and_phone_country_code_locally() -> None:
@@ -163,6 +171,9 @@ def test_search_supports_generic_field_operator_filters() -> None:
     )
 
     assert [contact.id for contact in contacts] == ["contact-1"]
+    assert client.list_calls[0]["where"] == [
+        {"attribute": "cSeniority", "type": "notEquals", "value": "junior"},
+    ]
 
 
 def test_search_supports_like_wildcards() -> None:
@@ -182,6 +193,12 @@ def test_search_supports_like_wildcards() -> None:
     contacts = repo.search(phone__not_like="+1%")
 
     assert [contact.id for contact in contacts] == ["contact-2"]
+
+
+def test_filter_expression_caches_like_regex() -> None:
+    expression = FilterExpression.from_key_value("phone__like", "+1%")
+
+    assert expression._compiled_like_regex is not None
 
 
 def test_search_supports_compound_location_filters() -> None:
@@ -256,6 +273,33 @@ def test_search_adds_required_fields_to_custom_select() -> None:
 
     assert [contact.id for contact in contacts] == ["contact-1"]
     assert client.list_calls[0]["select"] == "id,name,phoneNumber"
+
+
+def test_search_adds_required_fields_for_compound_local_filters() -> None:
+    client = FakeEspoClient(
+        pages=[
+            {
+                "list": [
+                    {
+                        "id": "contact-1",
+                        "name": "Alice",
+                        "addressCity": "Berlin",
+                        "addressCountry": "Germany",
+                    }
+                ],
+                "total": 1,
+            }
+        ]
+    )
+    repo = EspoContactRepository(client)
+
+    contacts = repo.search(select="id,name", location__contains="berlin")
+
+    assert [contact.id for contact in contacts] == ["contact-1"]
+    assert (
+        client.list_calls[0]["select"]
+        == "id,name,addressCity,addressCountry,addressState"
+    )
 
 
 def test_batch_update_infers_timezone_from_location() -> None:

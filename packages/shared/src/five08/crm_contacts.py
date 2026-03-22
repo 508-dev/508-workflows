@@ -7,6 +7,7 @@ import re
 from typing import Any, Final, Protocol
 
 from five08.crm_normalization import (
+    infer_timezone_from_location,
     normalize_city,
     normalize_country,
     normalize_roles,
@@ -202,11 +203,7 @@ def _best_effort_timezone_value(value: Any) -> str | None:
 def infer_timezone_from_location_helper(
     *, city: str | None, state: str | None, country: str | None
 ) -> str | None:
-    from five08.resume_extractor import (
-        _infer_timezone_from_location,
-    )
-
-    return _infer_timezone_from_location(
+    return infer_timezone_from_location(
         city=city,
         state=state,
         country=country,
@@ -293,6 +290,15 @@ class FilterExpression:
     field: str
     operator: str
     value: Any = None
+    _compiled_like_regex: re.Pattern[str] | None = None
+
+    def __post_init__(self) -> None:
+        if self.operator in {"like", "notLike"} and self.value is not None:
+            object.__setattr__(
+                self,
+                "_compiled_like_regex",
+                _like_pattern_to_regex(str(self.value)),
+            )
 
     @classmethod
     def from_key_value(cls, key: str, value: Any) -> "FilterExpression":
@@ -353,9 +359,9 @@ class FilterExpression:
         if operator == "endsWith":
             return self._ends_with(actual, expected)
         if operator == "like":
-            return self._like(actual, expected)
+            return self._like(actual, expected, self._compiled_like_regex)
         if operator == "notLike":
-            return not self._like(actual, expected)
+            return not self._like(actual, expected, self._compiled_like_regex)
         if operator == "in":
             return self._in(actual, expected)
         if operator == "notIn":
@@ -408,10 +414,14 @@ class FilterExpression:
         return str(actual).casefold().endswith(str(expected).casefold())
 
     @staticmethod
-    def _like(actual: Any, expected: Any) -> bool:
+    def _like(
+        actual: Any,
+        expected: Any,
+        compiled_regex: re.Pattern[str] | None = None,
+    ) -> bool:
         if expected is None:
             return False
-        regex = _like_pattern_to_regex(str(expected))
+        regex = compiled_regex or _like_pattern_to_regex(str(expected))
         if isinstance(actual, list):
             return any(regex.match(str(item)) for item in actual)
         return regex.match(str(actual)) is not None
@@ -554,7 +564,71 @@ class SearchCriteria:
             )
 
     def to_remote_filters(self) -> list[dict[str, Any]]:
-        return []
+        filters: list[dict[str, Any]] = []
+
+        if self.timezone is not None:
+            timezone_value = _best_effort_timezone_value(self.timezone)
+            if timezone_value is not None:
+                filters.append(
+                    {
+                        "attribute": "cTimezone",
+                        "type": "equals",
+                        "value": timezone_value,
+                    }
+                )
+
+        if self.timezone_empty is True:
+            filters.append({"attribute": "cTimezone", "type": "isNull"})
+        elif self.timezone_empty is False:
+            filters.append({"attribute": "cTimezone", "type": "isNotNull"})
+
+        if self.member_types:
+            if len(self.member_types) == 1:
+                filters.append(
+                    {
+                        "attribute": "type",
+                        "type": "equals",
+                        "value": self.member_types[0],
+                    }
+                )
+
+        if self.seniorities:
+            if len(self.seniorities) == 1:
+                filters.append(
+                    {
+                        "attribute": "cSeniority",
+                        "type": "equals",
+                        "value": self.seniorities[0],
+                    }
+                )
+
+        if self.roles_empty is True:
+            filters.append({"attribute": "cRoles", "type": "isNull"})
+        elif self.roles_empty is False:
+            filters.append({"attribute": "cRoles", "type": "isNotNull"})
+
+        unary_operators = {"isNull", "isNotNull", "isTrue", "isFalse"}
+        unsupported_remote_operators = {"in", "notIn"}
+        for expression in self.filters:
+            if expression.field in COMPOUND_FIELDS:
+                continue
+            if expression.field == "phone":
+                continue
+            if expression.operator in unsupported_remote_operators:
+                continue
+
+            filter_value = _normalize_scalar_for_field(
+                expression.field, expression.value
+            )
+            filter_dict: dict[str, Any] = {
+                "attribute": _resolve_field_name(expression.field),
+                "type": expression.operator,
+            }
+            if expression.operator not in unary_operators:
+                filter_dict["value"] = filter_value
+            filters.append(filter_dict)
+
+        return filters
 
     def required_fields(self) -> set[str]:
         fields = {"id"}

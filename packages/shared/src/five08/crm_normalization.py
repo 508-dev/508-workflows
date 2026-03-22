@@ -550,6 +550,77 @@ def normalize_city(value: Any, *, strip_parenthetical: bool = False) -> str | No
     return _title_case_location(normalized)
 
 
+_COUNTRY_TIMEZONE: dict[str, str] = {
+    "australia": "UTC+10:00",
+    "china": "UTC+08:00",
+    "france": "UTC+01:00",
+    "germany": "UTC+01:00",
+    "india": "UTC+05:30",
+    "japan": "UTC+09:00",
+    "kenya": "UTC+03:00",
+    "nepal": "UTC+05:45",
+    "singapore": "UTC+08:00",
+    "south korea": "UTC+09:00",
+    "spain": "UTC+01:00",
+    "taiwan": "UTC+08:00",
+    "ukraine": "UTC+02:00",
+    "united kingdom": "UTC+00:00",
+    "united states": None,  # type: ignore[dict-item]
+}
+_STATE_TIMEZONE: dict[str, str] = {
+    "california": "UTC-08:00",
+    "texas": "UTC-06:00",
+    "new york": "UTC-05:00",
+    "north carolina": "UTC-05:00",
+    "washington": "UTC-08:00",
+}
+_CITY_TIMEZONE: dict[str, str] = {
+    "berlin": "UTC+01:00",
+    "beijing": "UTC+08:00",
+    "boston": "UTC-05:00",
+    "chicago": "UTC-06:00",
+    "dallas": "UTC-06:00",
+    "denver": "UTC-07:00",
+    "dubai": "UTC+04:00",
+    "garland": "UTC-06:00",
+    "houston": "UTC-06:00",
+    "london": "UTC+00:00",
+    "madrid": "UTC+01:00",
+    "melbourne": "UTC+10:00",
+    "mumbai": "UTC+05:30",
+    "nairobi": "UTC+03:00",
+    "new york": "UTC-05:00",
+    "paris": "UTC+01:00",
+    "san francisco": "UTC-08:00",
+    "seattle": "UTC-08:00",
+    "seoul": "UTC+09:00",
+    "singapore": "UTC+08:00",
+    "sydney": "UTC+10:00",
+    "tokyo": "UTC+09:00",
+}
+_AMBIGUOUS_COUNTRY_TIMEZONE = frozenset({"canada", "united states"})
+
+
+def infer_timezone_from_location(
+    *, country: str | None, state: str | None = None, city: str | None = None
+) -> str | None:
+    """Best-effort UTC offset from normalized city/state/country values."""
+    if city:
+        city_tz = _CITY_TIMEZONE.get(city.strip().lower())
+        if city_tz:
+            return city_tz
+    if state:
+        state_tz = _STATE_TIMEZONE.get(state.strip().lower())
+        if state_tz:
+            return state_tz
+    if country:
+        country_key = country.strip().lower()
+        if country_key in _AMBIGUOUS_COUNTRY_TIMEZONE:
+            return None
+        return _COUNTRY_TIMEZONE.get(country_key)
+    return None
+
+
 def normalize_seniority(value: Any, *, empty_as_unknown: bool = False) -> str | None:
     if not isinstance(value, str):
         return None
