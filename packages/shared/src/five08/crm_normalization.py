@@ -551,7 +551,6 @@ def normalize_city(value: Any, *, strip_parenthetical: bool = False) -> str | No
 
 
 _COUNTRY_TIMEZONE: dict[str, str] = {
-    "australia": "UTC+10:00",
     "china": "UTC+08:00",
     "france": "UTC+01:00",
     "germany": "UTC+01:00",
@@ -597,7 +596,7 @@ _CITY_TIMEZONE: dict[str, str] = {
     "sydney": "UTC+10:00",
     "tokyo": "UTC+09:00",
 }
-_AMBIGUOUS_COUNTRY_TIMEZONE = frozenset({"canada", "united states"})
+_AMBIGUOUS_COUNTRY_TIMEZONE = frozenset({"australia", "canada", "united states"})
 
 
 def infer_timezone_from_location(

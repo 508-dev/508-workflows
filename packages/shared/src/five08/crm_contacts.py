@@ -1092,6 +1092,8 @@ class EspoContactRepository:
 
     @staticmethod
     def _normalize_plain_string(value: Any) -> str | None:
+        if not isinstance(value, str):
+            raise ValueError(f"Invalid text value: {value!r}")
         text = str(value).strip()
         return text or None
 

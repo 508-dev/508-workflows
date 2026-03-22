@@ -10,6 +10,7 @@ from five08.crm_contacts import (
     EspoContactRepository,
     FilterExpression,
 )
+from five08.crm_normalization import infer_timezone_from_location
 
 
 class FakeEspoClient:
@@ -434,6 +435,28 @@ def test_prepare_contact_updates_rejects_invalid_seniority_type() -> None:
         )
 
 
+def test_prepare_contact_updates_rejects_invalid_plain_text_type() -> None:
+    client = FakeEspoClient()
+    repo = EspoContactRepository(client)
+
+    with pytest.raises(ValueError, match="Invalid text value"):
+        repo.prepare_contact_updates(
+            current_values={"type": "Member"},
+            updates={"member_type": True},
+        )
+
+
+def test_prepare_contact_updates_rejects_invalid_plain_text_phone() -> None:
+    client = FakeEspoClient()
+    repo = EspoContactRepository(client)
+
+    with pytest.raises(ValueError, match="Invalid text value"):
+        repo.prepare_contact_updates(
+            current_values={"phoneNumber": "+1 5551212"},
+            updates={"phone": True},
+        )
+
+
 def test_prepare_contact_updates_rejects_from_location_for_non_timezone_fields() -> (
     None
 ):
@@ -447,6 +470,14 @@ def test_prepare_contact_updates_rejects_from_location_for_non_timezone_fields()
             current_values={"addressCity": "Berlin"},
             updates={"city": FROM_LOCATION},
         )
+
+
+def test_infer_timezone_from_location_treats_australia_as_ambiguous_without_city() -> (
+    None
+):
+    assert (
+        infer_timezone_from_location(country="Australia", state=None, city=None) is None
+    )
 
 
 def test_search_by_phone_country_code_defaults_to_present_prefix() -> None:
