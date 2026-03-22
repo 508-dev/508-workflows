@@ -30,11 +30,19 @@ def validate_app_command_descriptions(
     invalid_commands: list[str] = []
 
     for command in tree.walk_commands():
-        description = getattr(command, "description", "")
+        description = getattr(command, "description", "") or ""
+        if not isinstance(description, str):
+            description = str(description)
+
         if len(description) <= DISCORD_COMMAND_DESCRIPTION_LIMIT:
             continue
 
-        qualified_name = getattr(command, "qualified_name", command.name)
+        qualified_name = getattr(command, "qualified_name", None) or getattr(
+            command, "name", "<unknown>"
+        )
+        if not isinstance(qualified_name, str):
+            qualified_name = str(qualified_name)
+
         invalid_commands.append(
             f"/{qualified_name} description has {len(description)} characters"
         )

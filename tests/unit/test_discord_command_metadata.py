@@ -4,9 +4,8 @@ from pathlib import Path
 from five08.discord_bot.bot import DISCORD_COMMAND_DESCRIPTION_LIMIT
 
 
-COGS_DIR = (
-    Path(__file__).resolve().parents[2] / "apps/discord_bot/src/five08/discord_bot/cogs"
-)
+REPO_ROOT = Path(__file__).resolve().parents[2]
+COGS_DIR = REPO_ROOT / "apps/discord_bot/src/five08/discord_bot/cogs"
 
 
 def _command_descriptions() -> list[tuple[Path, int, str, str]]:
@@ -29,12 +28,15 @@ def _command_descriptions() -> list[tuple[Path, int, str, str]]:
                 command_name = node.name
                 description: str | None = None
                 for keyword in decorator.keywords:
-                    if keyword.arg == "name":
+                    try:
                         value = ast.literal_eval(keyword.value)
+                    except (ValueError, SyntaxError, TypeError):
+                        continue
+
+                    if keyword.arg == "name":
                         if isinstance(value, str):
                             command_name = value
                     if keyword.arg == "description":
-                        value = ast.literal_eval(keyword.value)
                         if isinstance(value, str):
                             description = value
 
@@ -47,7 +49,7 @@ def _command_descriptions() -> list[tuple[Path, int, str, str]]:
 def test_discord_app_command_descriptions_fit_discord_limit() -> None:
     violations = [
         (
-            f"{path.relative_to(Path.cwd())}:{lineno} "
+            f"{path.relative_to(REPO_ROOT)}:{lineno} "
             f"/{name} has {len(description)} characters"
         )
         for path, lineno, name, description in _command_descriptions()

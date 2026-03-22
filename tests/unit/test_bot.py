@@ -5,6 +5,7 @@ Unit tests for the main bot class.
 import pytest
 from unittest.mock import Mock, AsyncMock, patch
 from pathlib import Path
+from types import SimpleNamespace
 import discord
 
 from five08.discord_bot.bot import (
@@ -141,22 +142,41 @@ class TestBot508:
         assert config.discord_sendmsg_character_limit == 2000
 
     def test_validate_app_command_descriptions_accepts_valid_lengths(self):
+        """Test that valid command descriptions pass validation."""
         tree = Mock()
-        tree.walk_commands.return_value = [
-            Mock(name="valid", qualified_name="valid", description="short"),
-        ]
+        cmd = SimpleNamespace(
+            name="valid",
+            qualified_name="valid",
+            description="short",
+        )
+        tree.walk_commands.return_value = [cmd]
 
         validate_app_command_descriptions(tree)
 
     def test_validate_app_command_descriptions_rejects_over_limit(self):
+        """Test that overlong command descriptions raise a clear error."""
         tree = Mock()
-        tree.walk_commands.return_value = [
-            Mock(
-                name="too-long",
-                qualified_name="too-long",
-                description="x" * (DISCORD_COMMAND_DESCRIPTION_LIMIT + 1),
-            ),
-        ]
+        cmd = SimpleNamespace(
+            name="too-long",
+            qualified_name="too-long",
+            description="x" * (DISCORD_COMMAND_DESCRIPTION_LIMIT + 1),
+        )
+        tree.walk_commands.return_value = [cmd]
+
+        with pytest.raises(
+            ValueError,
+            match=r"/too-long description has 101 characters",
+        ):
+            validate_app_command_descriptions(tree)
+
+    def test_validate_app_command_descriptions_falls_back_to_name(self):
+        """Test that missing qualified names fall back to the command name."""
+        tree = Mock()
+        cmd = SimpleNamespace(
+            name="too-long",
+            description="x" * (DISCORD_COMMAND_DESCRIPTION_LIMIT + 1),
+        )
+        tree.walk_commands.return_value = [cmd]
 
         with pytest.raises(
             ValueError,
