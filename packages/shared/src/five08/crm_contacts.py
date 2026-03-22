@@ -394,23 +394,40 @@ class FilterExpression:
             return False
         if isinstance(actual, list):
             expected_text = str(expected).casefold()
-            return any(expected_text in str(item).casefold() for item in actual)
+            items = [str(item) for item in actual if not _is_blank(item)]
+            if not items:
+                return False
+            return any(expected_text in item.casefold() for item in items)
+        if _is_blank(actual):
+            return False
         return str(expected).casefold() in str(actual).casefold()
 
     @staticmethod
     def _starts_with(actual: Any, expected: Any) -> bool:
+        if expected is None:
+            return False
         if isinstance(actual, list):
             expected_text = str(expected).casefold()
-            return any(
-                str(item).casefold().startswith(expected_text) for item in actual
-            )
+            items = [str(item) for item in actual if not _is_blank(item)]
+            if not items:
+                return False
+            return any(item.casefold().startswith(expected_text) for item in items)
+        if _is_blank(actual):
+            return False
         return str(actual).casefold().startswith(str(expected).casefold())
 
     @staticmethod
     def _ends_with(actual: Any, expected: Any) -> bool:
+        if expected is None:
+            return False
         if isinstance(actual, list):
             expected_text = str(expected).casefold()
-            return any(str(item).casefold().endswith(expected_text) for item in actual)
+            items = [str(item) for item in actual if not _is_blank(item)]
+            if not items:
+                return False
+            return any(item.casefold().endswith(expected_text) for item in items)
+        if _is_blank(actual):
+            return False
         return str(actual).casefold().endswith(str(expected).casefold())
 
     @staticmethod
@@ -423,7 +440,12 @@ class FilterExpression:
             return False
         regex = compiled_regex or _like_pattern_to_regex(str(expected))
         if isinstance(actual, list):
-            return any(regex.match(str(item)) for item in actual)
+            items = [str(item) for item in actual if not _is_blank(item)]
+            if not items:
+                return False
+            return any(regex.match(item) for item in items)
+        if _is_blank(actual):
+            return False
         return regex.match(str(actual)) is not None
 
     @staticmethod
@@ -967,9 +989,11 @@ class EspoContactRepository:
 
         for field_name, value in updates.items():
             raw_field_name = _resolve_field_name(field_name)
-            if raw_field_name == "cTimezone" and (
-                value is FROM_LOCATION or value == "@location"
-            ):
+            if value is FROM_LOCATION or value == "@location":
+                if raw_field_name != "cTimezone":
+                    raise ValueError(
+                        "FROM_LOCATION is only supported for timezone updates"
+                    )
                 pending_timezone_value = value
                 continue
             normalized[raw_field_name] = self._normalize_update_value(

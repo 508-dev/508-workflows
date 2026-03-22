@@ -124,6 +124,33 @@ def test_crmctl_batch_update_parses_assignments(
     assert '"applied": false' in capsys.readouterr().out
 
 
+def test_crmctl_parses_scalar_literals_in_where_and_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = FakeRepository()
+    monkeypatch.setattr(crm_cli, "_load_repository", lambda: repo)
+
+    exit_code = crm_cli.run(
+        [
+            "batch-update",
+            "--where",
+            "age__gte=65",
+            "--update",
+            "score=10",
+        ]
+    )
+
+    assert exit_code == 0
+    assert repo.batch_update_calls == [
+        {
+            "where": {"age__gte": 65},
+            "update": {"score": 10},
+            "limit": 100,
+            "apply": False,
+        }
+    ]
+
+
 def test_crmctl_search_accepts_value_style_filters(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -188,6 +215,35 @@ def test_crmctl_batch_update_reports_invalid_timezone_update(
 
     assert exit_code == 1
     assert "Invalid timezone value" in capsys.readouterr().err
+
+
+def test_crmctl_batch_update_reports_invalid_from_location_target(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = FakeRepository()
+    monkeypatch.setattr(crm_cli, "_load_repository", lambda: repo)
+
+    def _raise_batch_update(**kwargs: Any) -> BatchUpdateResult:
+        raise ValueError("FROM_LOCATION is only supported for timezone updates")
+
+    repo.batch_update = _raise_batch_update  # type: ignore[assignment]
+
+    exit_code = crm_cli.run(
+        [
+            "batch-update",
+            "--where",
+            "timezone__is_null=true",
+            "--update",
+            "city=@location",
+        ]
+    )
+
+    assert exit_code == 1
+    assert (
+        "FROM_LOCATION is only supported for timezone updates"
+        in capsys.readouterr().err
+    )
 
 
 def test_crmctl_reports_runtime_error(

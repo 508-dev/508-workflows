@@ -195,6 +195,33 @@ def test_search_supports_like_wildcards() -> None:
     assert [contact.id for contact in contacts] == ["contact-2"]
 
 
+def test_text_operators_ignore_blank_source_values() -> None:
+    def _search_ids(**criteria: Any) -> list[str]:
+        client = FakeEspoClient(
+            pages=[
+                {
+                    "list": [
+                        {"id": "contact-1", "name": "Alice", "phoneNumber": None},
+                        {"id": "contact-2", "name": "Bob", "phoneNumber": "   "},
+                        {
+                            "id": "contact-3",
+                            "name": "Carol",
+                            "phoneNumber": ["", None, "+1 5551212"],
+                        },
+                    ],
+                    "total": 3,
+                }
+            ]
+        )
+        repo = EspoContactRepository(client)
+        return [contact.id for contact in repo.search(**criteria)]
+
+    assert _search_ids(phone__contains="+1") == ["contact-3"]
+    assert _search_ids(phone__starts_with="+1") == ["contact-3"]
+    assert _search_ids(phone__ends_with="1212") == ["contact-3"]
+    assert _search_ids(phone__like="+1%") == ["contact-3"]
+
+
 def test_filter_expression_caches_like_regex() -> None:
     expression = FilterExpression.from_key_value("phone__like", "+1%")
 
@@ -374,6 +401,21 @@ def test_prepare_contact_updates_rejects_invalid_roles_type() -> None:
         repo.prepare_contact_updates(
             current_values={"cRoles": ["developer"]},
             updates={"roles": True},
+        )
+
+
+def test_prepare_contact_updates_rejects_from_location_for_non_timezone_fields() -> (
+    None
+):
+    client = FakeEspoClient()
+    repo = EspoContactRepository(client)
+
+    with pytest.raises(
+        ValueError, match="FROM_LOCATION is only supported for timezone updates"
+    ):
+        repo.prepare_contact_updates(
+            current_values={"addressCity": "Berlin"},
+            updates={"city": FROM_LOCATION},
         )
 
 

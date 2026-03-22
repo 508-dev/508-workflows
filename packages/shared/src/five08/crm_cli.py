@@ -190,24 +190,17 @@ def _parse_assignment(raw_assignment: str) -> tuple[str, Any]:
         )
 
     value_text = raw_value.strip()
-    lowered = value_text.lower()
     if value_text == "@location":
         value: Any = FROM_LOCATION
-    elif lowered == "null":
-        value = None
-    elif lowered == "true":
-        value = True
-    elif lowered == "false":
-        value = False
-    elif value_text.startswith("[") or value_text.startswith("{"):
+    else:
         try:
             value = json.loads(value_text)
         except ValueError as exc:
-            raise argparse.ArgumentTypeError(
-                f"Invalid JSON value for assignment {raw_assignment!r}"
-            ) from exc
-    else:
-        value = value_text
+            if value_text.startswith("[") or value_text.startswith("{"):
+                raise argparse.ArgumentTypeError(
+                    f"Invalid JSON value for assignment {raw_assignment!r}"
+                ) from exc
+            value = value_text
     return field_name, value
 
 
