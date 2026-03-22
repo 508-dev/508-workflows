@@ -56,6 +56,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Maximum contacts to scan (default: 100). Use 0 for all.",
     )
     batch_parser.add_argument(
+        "--update",
         "--set",
         dest="assignments",
         action="append",
@@ -74,20 +75,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _add_search_arguments(parser: argparse.ArgumentParser) -> None:
-    timezone_group = parser.add_mutually_exclusive_group()
-    timezone_group.add_argument(
+    parser.add_argument(
         "--timezone",
-        help="Exact timezone match, e.g. UTC-05:00.",
-    )
-    timezone_group.add_argument(
-        "--timezone-empty",
-        action="store_true",
-        help="Match contacts with an empty timezone.",
+        help="Timezone filter. Use a specific value like UTC-05:00 or a state like empty/present.",
     )
     parser.add_argument(
-        "--location-present",
-        action="store_true",
-        help="Require city, state, or country to be present.",
+        "--location",
+        choices=["present", "empty"],
+        help="Location filter based on whether city, state, or country is present.",
     )
     parser.add_argument(
         "--member-type",
@@ -99,31 +94,19 @@ def _add_search_arguments(parser: argparse.ArgumentParser) -> None:
         action="append",
         help="Repeatable seniority filter, e.g. senior or staff.",
     )
-    role_group = parser.add_mutually_exclusive_group()
-    role_group.add_argument(
-        "--role",
+    parser.add_argument(
+        "--roles",
         action="append",
-        help="Repeatable role filter. Matches any requested role.",
-    )
-    role_group.add_argument(
-        "--roles-empty",
-        action="store_true",
-        help="Match contacts with empty roles.",
+        help="Repeatable roles filter. Use a role name or a state like empty/present.",
     )
     parser.add_argument(
         "--phone-country-code",
-        help="Phone prefix to validate, e.g. +1.",
+        help="Phone prefix to validate, e.g. +1. By default this matches numbers with that prefix.",
     )
-    phone_prefix_group = parser.add_mutually_exclusive_group()
-    phone_prefix_group.add_argument(
-        "--phone-missing-country-code",
-        action="store_true",
-        help="Require phone numbers to be present and not start with --phone-country-code.",
-    )
-    phone_prefix_group.add_argument(
-        "--phone-has-country-code",
-        action="store_true",
-        help="Require phone numbers to be present and start with --phone-country-code.",
+    parser.add_argument(
+        "--phone-country-code-match",
+        choices=["present", "missing"],
+        help="How to interpret --phone-country-code. Use missing to find numbers without the prefix.",
     )
 
 
@@ -138,24 +121,25 @@ def _criteria_from_args(args: argparse.Namespace) -> dict[str, Any]:
     criteria: dict[str, Any] = {}
     if args.timezone:
         criteria["timezone"] = args.timezone
-    if args.timezone_empty:
-        criteria["timezone_empty"] = True
-    if args.location_present:
-        criteria["location_present"] = True
+    if args.location:
+        criteria["location"] = args.location
     if args.member_type:
         criteria["member_type"] = args.member_type
     if args.seniority:
         criteria["seniority"] = args.seniority
-    if args.role:
-        criteria["role"] = args.role
-    if args.roles_empty:
-        criteria["roles_empty"] = True
+    if args.roles:
+        if len(args.roles) == 1 and args.roles[0].strip().casefold() in {
+            "empty",
+            "present",
+        }:
+            criteria["roles"] = args.roles[0]
+        else:
+            criteria["roles"] = args.roles
     if args.phone_country_code:
         criteria["phone_country_code"] = args.phone_country_code
-    if args.phone_missing_country_code:
-        criteria["phone_missing_country_code"] = True
-    if args.phone_has_country_code:
-        criteria["phone_missing_country_code"] = False
+        criteria["phone_country_code_match"] = (
+            args.phone_country_code_match or "present"
+        )
     return criteria
 
 
@@ -224,14 +208,11 @@ def _validate_args(
     if getattr(args, "command", None) not in {"search", "batch-update"}:
         return args
 
-    if getattr(args, "phone_country_code", None) is None and (
-        getattr(args, "phone_missing_country_code", False)
-        or getattr(args, "phone_has_country_code", False)
+    if (
+        getattr(args, "phone_country_code", None) is None
+        and getattr(args, "phone_country_code_match", None) is not None
     ):
-        parser.error(
-            "--phone-country-code is required with "
-            "--phone-missing-country-code or --phone-has-country-code"
-        )
+        parser.error("--phone-country-code is required with --phone-country-code-match")
 
     return args
 
@@ -261,12 +242,16 @@ def _handle_repl(_args: argparse.Namespace) -> int:
 
     def batch_update(
         *,
+        where: dict[str, Any] | None = None,
+        update: dict[str, Any] | None = None,
         search: dict[str, Any] | None = None,
-        updates: dict[str, Any],
+        updates: dict[str, Any] | None = None,
         limit: int | None = 100,
         apply: bool = False,
     ) -> BatchUpdateResult:
         return repo.batch_update(
+            where=where,
+            update=update,
             search=search,
             updates=updates,
             limit=limit,
@@ -280,18 +265,18 @@ Available objects:
   repo
   search(**criteria)
   get(contact_id)
-  batch_update(search={...}, updates={...}, apply=False)
+  batch_update(where={...}, update={...}, apply=False)
   FROM_LOCATION
   pprint
 
 Examples:
-  contacts = search(timezone_empty=True, location_present=True, member_type=["Member"])
+  contacts = search(timezone="empty", location="present", member_type=["Member"])
   contact = contacts[0]
   contact.timezone = contact.infer_timezone()
   contact.save()
   batch_update(
-      search={"timezone_empty": True, "location_present": True},
-      updates={"timezone": FROM_LOCATION},
+      where={"timezone": "empty", "location": "present"},
+      update={"timezone": FROM_LOCATION},
       apply=False,
   )
 """.strip()
@@ -323,8 +308,8 @@ def _handle_search(args: argparse.Namespace) -> int:
 def _handle_batch_update(args: argparse.Namespace) -> int:
     repo = _load_repository()
     result = repo.batch_update(
-        search=_criteria_from_args(args),
-        updates=_parse_assignments(args.assignments),
+        where=_criteria_from_args(args),
+        update=_parse_assignments(args.assignments),
         limit=_limit_value(args.limit),
         apply=args.apply,
     )

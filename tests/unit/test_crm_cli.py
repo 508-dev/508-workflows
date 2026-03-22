@@ -51,13 +51,16 @@ def test_crmctl_search_passes_expected_criteria(
     exit_code = crm_cli.run(
         [
             "search",
-            "--timezone-empty",
-            "--location-present",
+            "--timezone",
+            "empty",
+            "--location",
+            "present",
             "--member-type",
             "Member",
             "--phone-country-code",
             "+1",
-            "--phone-missing-country-code",
+            "--phone-country-code-match",
+            "missing",
             "--limit",
             "5",
         ]
@@ -67,11 +70,11 @@ def test_crmctl_search_passes_expected_criteria(
     assert repo.search_calls == [
         {
             "limit": 5,
-            "timezone_empty": True,
-            "location_present": True,
+            "timezone": "empty",
+            "location": "present",
             "member_type": ["Member"],
             "phone_country_code": "+1",
-            "phone_missing_country_code": True,
+            "phone_country_code_match": "missing",
         }
     ]
     assert '"count": 1' in capsys.readouterr().out
@@ -89,16 +92,19 @@ def test_crmctl_batch_update_parses_assignments(
             "batch-update",
             "--limit",
             "0",
+            "--timezone",
+            "empty",
+            "--location",
+            "present",
             "--phone-country-code",
             "+1",
-            "--phone-has-country-code",
-            "--set",
+            "--update",
             "timezone=@location",
-            "--set",
+            "--update",
             'roles=["developer","designer"]',
-            "--set",
+            "--update",
             "member_type=Member",
-            "--set",
+            "--update",
             "seniority=null",
         ]
     )
@@ -106,11 +112,13 @@ def test_crmctl_batch_update_parses_assignments(
     assert exit_code == 0
     assert repo.batch_update_calls == [
         {
-            "search": {
+            "where": {
+                "timezone": "empty",
+                "location": "present",
                 "phone_country_code": "+1",
-                "phone_missing_country_code": False,
+                "phone_country_code_match": "present",
             },
-            "updates": {
+            "update": {
                 "timezone": FROM_LOCATION,
                 "roles": ["developer", "designer"],
                 "member_type": "Member",
@@ -123,23 +131,30 @@ def test_crmctl_batch_update_parses_assignments(
     assert '"applied": false' in capsys.readouterr().out
 
 
-def test_crmctl_search_rejects_conflicting_timezone_flags() -> None:
-    with pytest.raises(SystemExit) as exc_info:
-        crm_cli.run(["search", "--timezone", "UTC-05:00", "--timezone-empty"])
+def test_crmctl_search_accepts_value_style_filters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = FakeRepository()
+    monkeypatch.setattr(crm_cli, "_load_repository", lambda: repo)
 
-    assert exc_info.value.code == 2
+    exit_code = crm_cli.run(["search", "--timezone", "UTC-05:00", "--roles", "empty"])
+
+    assert exit_code == 0
+    assert repo.search_calls == [
+        {"limit": 100, "timezone": "UTC-05:00", "roles": "empty"}
+    ]
 
 
 def test_crmctl_search_requires_phone_country_code_for_prefix_filters() -> None:
     with pytest.raises(SystemExit) as exc_info:
-        crm_cli.run(["search", "--phone-missing-country-code"])
+        crm_cli.run(["search", "--phone-country-code-match", "missing"])
 
     assert exc_info.value.code == 2
 
 
 def test_crmctl_batch_update_rejects_invalid_assignment() -> None:
     with pytest.raises(SystemExit) as exc_info:
-        crm_cli.run(["batch-update", "--set", "timezone"])
+        crm_cli.run(["batch-update", "--update", "timezone"])
 
     assert exc_info.value.code == 2
 

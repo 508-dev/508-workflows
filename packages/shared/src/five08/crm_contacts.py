@@ -54,10 +54,12 @@ LOCATION_FIELDS: Final[tuple[str, ...]] = (
     "addressCountry",
 )
 SEARCH_CRITERIA_KEYS: Final[set[str]] = {
+    "location",
     "location_present",
     "member_type",
     "member_types",
     "phone_country_code",
+    "phone_country_code_match",
     "phone_missing_country_code",
     "role",
     "roles",
@@ -168,6 +170,28 @@ def _build_or_equals(attribute: str, values: tuple[str, ...]) -> dict[str, Any]:
     }
 
 
+def _presence_keyword_to_bool(
+    value: Any,
+    *,
+    field_name: str,
+    allow_other: bool = False,
+) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().casefold()
+    if not text:
+        return None
+    if text == "present":
+        return True
+    if text == "empty":
+        return False
+    if allow_other:
+        return None
+    raise ValueError(f"{field_name} must be 'present' or 'empty'")
+
+
 @dataclass(slots=True)
 class SearchCriteria:
     timezone: str | None = None
@@ -192,16 +216,42 @@ class SearchCriteria:
 
         timezone_raw = criteria.get("timezone")
         timezone = None
+        timezone_empty_from_value = None
         if timezone_raw is not None:
             timezone_text = str(timezone_raw).strip()
             if timezone_text:
-                timezone = normalize_timezone(timezone_text) or timezone_text
+                timezone_presence = _presence_keyword_to_bool(
+                    timezone_text,
+                    field_name="timezone",
+                    allow_other=True,
+                )
+                if timezone_presence is None:
+                    timezone = normalize_timezone(timezone_text) or timezone_text
+                else:
+                    timezone_empty_from_value = not timezone_presence
+
+        location_present_from_value = _presence_keyword_to_bool(
+            criteria.get("location"),
+            field_name="location",
+        )
 
         member_types = _normalize_member_types(
             criteria.get("member_types", criteria.get("member_type"))
         )
         seniorities = _normalize_seniorities(criteria.get("seniority"))
-        roles = tuple(normalize_roles(criteria.get("roles", criteria.get("role"))))
+        roles_raw = criteria.get("roles", criteria.get("role"))
+        roles: tuple[str, ...] = ()
+        roles_empty_from_value = None
+        if roles_raw is not None:
+            roles_presence = _presence_keyword_to_bool(
+                roles_raw,
+                field_name="roles",
+                allow_other=True,
+            )
+            if roles_presence is None:
+                roles = tuple(normalize_roles(roles_raw))
+            else:
+                roles_empty_from_value = not roles_presence
 
         phone_country_code = criteria.get("phone_country_code")
         if phone_country_code is not None:
@@ -209,24 +259,44 @@ class SearchCriteria:
             if not phone_country_code:
                 phone_country_code = None
 
+        phone_missing_country_code = _coerce_bool(
+            criteria.get("phone_missing_country_code"),
+            "phone_missing_country_code",
+        )
+        phone_country_code_match = criteria.get("phone_country_code_match")
+        if phone_country_code_match is not None:
+            phone_match_text = str(phone_country_code_match).strip().casefold()
+            if phone_match_text == "present":
+                phone_missing_country_code = False
+            elif phone_match_text == "missing":
+                phone_missing_country_code = True
+            else:
+                raise ValueError(
+                    "phone_country_code_match must be 'present' or 'missing'"
+                )
+
         parsed = cls(
             timezone=timezone,
-            timezone_empty=_coerce_bool(
-                criteria.get("timezone_empty"), "timezone_empty"
+            timezone_empty=(
+                timezone_empty_from_value
+                if timezone_empty_from_value is not None
+                else _coerce_bool(criteria.get("timezone_empty"), "timezone_empty")
             ),
-            location_present=_coerce_bool(
-                criteria.get("location_present"),
-                "location_present",
+            location_present=(
+                location_present_from_value
+                if location_present_from_value is not None
+                else _coerce_bool(criteria.get("location_present"), "location_present")
             ),
             member_types=member_types,
             seniorities=seniorities,
             roles=roles,
-            roles_empty=_coerce_bool(criteria.get("roles_empty"), "roles_empty"),
-            phone_country_code=phone_country_code,
-            phone_missing_country_code=_coerce_bool(
-                criteria.get("phone_missing_country_code"),
-                "phone_missing_country_code",
+            roles_empty=(
+                roles_empty_from_value
+                if roles_empty_from_value is not None
+                else _coerce_bool(criteria.get("roles_empty"), "roles_empty")
             ),
+            phone_country_code=phone_country_code,
+            phone_missing_country_code=phone_missing_country_code,
         )
         parsed.validate()
         return parsed
@@ -306,7 +376,7 @@ class SearchCriteria:
             has_prefix = phone_number.startswith(self.phone_country_code)
             if self.phone_missing_country_code is True and has_prefix:
                 return False
-            if self.phone_missing_country_code is False and not has_prefix:
+            if self.phone_missing_country_code in {False, None} and not has_prefix:
                 return False
 
         return True
@@ -507,14 +577,21 @@ class EspoContactRepository:
     def batch_update(
         self,
         *,
+        where: dict[str, Any] | None = None,
+        update: dict[str, Any] | None = None,
         search: dict[str, Any] | None = None,
-        updates: dict[str, Any],
+        updates: dict[str, Any] | None = None,
         limit: int | None = 100,
         apply: bool = False,
     ) -> BatchUpdateResult:
+        effective_where = where if where is not None else search
+        effective_update = update if update is not None else updates
+        if effective_update is None:
+            raise ValueError("batch_update requires update or updates")
+
         previews: list[ContactUpdatePreview] = []
-        for contact in self.search(limit=limit, **(search or {})):
-            changed = contact.preview_updates(**updates)
+        for contact in self.search(limit=limit, **(effective_where or {})):
+            changed = contact.preview_updates(**effective_update)
             if not changed:
                 continue
 
@@ -526,7 +603,7 @@ class EspoContactRepository:
             previews.append(preview)
 
             if apply:
-                contact.set(**updates)
+                contact.set(**effective_update)
                 contact.save()
 
         return BatchUpdateResult(previews=previews, applied=apply)

@@ -60,8 +60,8 @@ def test_search_builds_remote_filters_and_applies_local_location_filter() -> Non
     repo = EspoContactRepository(client)
 
     contacts = repo.search(
-        timezone_empty=True,
-        location_present=True,
+        timezone="empty",
+        location="present",
         member_type=["Member"],
     )
 
@@ -102,7 +102,7 @@ def test_search_filters_by_role_and_phone_country_code_locally() -> None:
     repo = EspoContactRepository(client)
 
     contacts = repo.search(
-        role="developer",
+        roles="developer",
         phone_country_code="+1",
         phone_missing_country_code=True,
     )
@@ -150,8 +150,8 @@ def test_batch_update_infers_timezone_from_location() -> None:
     repo = EspoContactRepository(client)
 
     result = repo.batch_update(
-        search={"timezone_empty": True, "location_present": True},
-        updates={"timezone": FROM_LOCATION},
+        where={"timezone": "empty", "location": "present"},
+        update={"timezone": FROM_LOCATION},
         apply=True,
     )
 
@@ -170,6 +170,25 @@ def test_prepare_contact_updates_skips_timezone_when_inference_fails() -> None:
     )
 
     assert "cTimezone" not in updates
+
+
+def test_search_by_phone_country_code_defaults_to_present_prefix() -> None:
+    client = FakeEspoClient(
+        pages=[
+            {
+                "list": [
+                    {"id": "contact-1", "name": "Alice", "phoneNumber": "5551212"},
+                    {"id": "contact-2", "name": "Bob", "phoneNumber": "+1 5551212"},
+                ],
+                "total": 2,
+            }
+        ]
+    )
+    repo = EspoContactRepository(client)
+
+    contacts = repo.search(phone_country_code="+1")
+
+    assert [contact.id for contact in contacts] == ["contact-2"]
 
 
 def test_contact_object_tracks_alias_updates_and_saves_normalized_roles() -> None:
