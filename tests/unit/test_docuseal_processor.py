@@ -9,6 +9,7 @@ from five08.worker.crm.docuseal_processor import (
     DocusealAgreementProcessingError,
     DocusealAgreementProcessor,
 )
+from five08.clients.discord_bot import DiscordBotAPIError
 from five08.worker.masking import mask_email
 
 
@@ -16,14 +17,22 @@ def test_docuseal_processor_marks_member_agreement_signed_timestamp() -> None:
     """Processor should update the member agreement signed-at timestamp."""
     mock_api = Mock()
     mock_api.request.side_effect = [
-        {"list": [{"id": "contact-1"}]},
+        {"list": [{"id": "contact-1", "name": "Jane Doe", "cDiscordUserID": "1234"}]},
         {"updated": True},
     ]
     expected_email = "member@508.dev"
     expected_masked = mask_email(expected_email)
 
-    with patch(
-        "five08.worker.crm.docuseal_processor.EspoClient", return_value=mock_api
+    with (
+        patch("five08.worker.crm.docuseal_processor.EspoClient", return_value=mock_api),
+        patch(
+            "five08.worker.crm.docuseal_processor.settings.api_shared_secret",
+            "top-secret",
+        ),
+        patch(
+            "five08.worker.crm.docuseal_processor.grant_member_role_for_signed_agreement",
+            return_value={"status": "applied", "role": "Member"},
+        ) as mock_grant_role,
     ):
         processor = DocusealAgreementProcessor()
         result = processor.process_agreement(
@@ -42,6 +51,17 @@ def test_docuseal_processor_marks_member_agreement_signed_timestamp() -> None:
     assert result["contact_id"] == "contact-1"
     assert result["submission_id"] == 416
     assert result["completed_at"] == "2026-02-25 12:00:00"
+    assert result["discord_user_id"] == "1234"
+    assert result["member_role"]["status"] == "applied"
+    mock_grant_role.assert_called_once_with(
+        base_url="http://discord_bot:3000",
+        api_secret="top-secret",
+        discord_user_id="1234",
+        contact_id="contact-1",
+        contact_name="Jane Doe",
+        submission_id=416,
+        completed_at="2026-02-25 12:00:00",
+    )
     assert "email" not in result
 
 
@@ -53,8 +73,11 @@ def test_docuseal_processor_normalizes_completed_at_to_utc_timestamp() -> None:
         {"updated": True},
     ]
 
-    with patch(
-        "five08.worker.crm.docuseal_processor.EspoClient", return_value=mock_api
+    with (
+        patch("five08.worker.crm.docuseal_processor.EspoClient", return_value=mock_api),
+        patch(
+            "five08.worker.crm.docuseal_processor.grant_member_role_for_signed_agreement"
+        ) as mock_grant_role,
     ):
         processor = DocusealAgreementProcessor()
         result = processor.process_agreement(
@@ -67,6 +90,8 @@ def test_docuseal_processor_normalizes_completed_at_to_utc_timestamp() -> None:
         "cMemberAgreementSignedAt": "2026-03-02 08:02:30",
     }
     assert result["completed_at"] == "2026-03-02 08:02:30"
+    assert result["member_role"]["status"] == "not_linked"
+    mock_grant_role.assert_not_called()
 
 
 def test_docuseal_processor_raises_on_invalid_completed_at() -> None:
@@ -159,3 +184,35 @@ def test_docuseal_processor_raises_on_update_failure() -> None:
         str(exc_info.value)
         == "CRM update failed for contact_id=contact-1: write failed"
     )
+
+
+def test_docuseal_processor_role_assignment_error_is_best_effort() -> None:
+    """CRM success should survive bot role assignment failures."""
+    mock_api = Mock()
+    mock_api.request.side_effect = [
+        {"list": [{"id": "contact-1", "cDiscordUserID": "1234"}]},
+        {"updated": True},
+    ]
+
+    with (
+        patch("five08.worker.crm.docuseal_processor.EspoClient", return_value=mock_api),
+        patch(
+            "five08.worker.crm.docuseal_processor.settings.api_shared_secret",
+            "top-secret",
+        ),
+        patch(
+            "five08.worker.crm.docuseal_processor.grant_member_role_for_signed_agreement",
+            side_effect=DiscordBotAPIError("status code is 403"),
+        ),
+    ):
+        processor = DocusealAgreementProcessor()
+        result = processor.process_agreement(
+            email="member@508.dev",
+            completed_at="2026-02-25T12:00:00Z",
+            submission_id=9001,
+        )
+
+    assert result["success"] is True
+    assert result["member_role"]["status"] == "error"
+    assert result["member_role"]["discord_user_id"] == "1234"
+    assert "status code is 403" in result["member_role"]["error"]

@@ -108,6 +108,7 @@ PY
 - `POST /webhooks/espocrm`: EspoCRM webhook endpoint (expects array payload).
 - `POST /webhooks/espocrm/people-sync`: EspoCRM contact-change webhook for people cache sync.
 - `POST /webhooks/docuseal`: Docuseal agreement webhook endpoint.
+  - After the worker marks `cMemberAgreementSignedAt`, it also makes a best-effort call to the Discord bot internal API to add the `Member` role when the CRM contact has a linked `cDiscordUserID`.
 - `POST /process-contact/{contact_id}`: Manually enqueue one contact skills job.
 - `POST /sync/people`: Manually enqueue a full CRM->people cache sync.
 - `POST /audit/events`: Persist one human audit event (`discord` or `admin_dashboard`).

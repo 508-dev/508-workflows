@@ -78,7 +78,7 @@ Use `.env.example` as the source of defaults.
 
 ## Discord Admin Deep-Link Validation
 
-- `Optional`: `DISCORD_ADMIN_GUILD_ID` (required for Discord API fallback role checks)
+- `Optional`: `DISCORD_SERVER_ID` (required for Discord API fallback role checks)
 - `Optional`: `DISCORD_ADMIN_ROLES` (default: `Admin,Owner,Steering Committee`)
 - `Optional`: `DISCORD_API_TIMEOUT_SECONDS` (default: `8.0`)
 - `Optional`: `DISCORD_LINK_TTL_SECONDS` (default: `600`)

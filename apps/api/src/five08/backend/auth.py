@@ -587,7 +587,7 @@ class DiscordAdminVerifier:
         http_client: httpx.AsyncClient,
     ) -> bool:
         bot_token = (self.settings.discord_bot_token or "").strip()
-        guild_id = (self.settings.discord_admin_guild_id or "").strip()
+        guild_id = (self.settings.discord_server_id or "").strip()
         role_names = self.settings.discord_admin_role_names
         if not bot_token or not guild_id or not role_names:
             return False

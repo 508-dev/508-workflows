@@ -4,6 +4,10 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from five08.clients.discord_bot import (
+    DiscordBotAPIError,
+    grant_member_role_for_signed_agreement,
+)
 from five08.clients.espo import EspoAPIError, EspoClient
 from five08.worker.config import settings
 from five08.worker.masking import mask_email
@@ -35,6 +39,57 @@ class DocusealAgreementProcessor:
             parsed = parsed.astimezone(timezone.utc)
         return parsed.strftime("%Y-%m-%d %H:%M:%S")
 
+    def _grant_member_role(
+        self,
+        *,
+        contact_id: str,
+        contact_name: str | None,
+        discord_user_id: str | None,
+        submission_id: int,
+        completed_at: str,
+    ) -> dict[str, Any]:
+        """Best-effort Discord role assignment after CRM write succeeds."""
+        normalized_user_id = str(discord_user_id or "").strip()
+        if not normalized_user_id:
+            return {"status": "not_linked"}
+
+        base_url = settings.discord_bot_internal_base_url.strip()
+        if not base_url:
+            return {"status": "bot_endpoint_not_configured"}
+
+        api_secret = str(settings.api_shared_secret or "").strip()
+        if not api_secret:
+            return {"status": "api_secret_not_configured"}
+
+        try:
+            result = grant_member_role_for_signed_agreement(
+                base_url=base_url,
+                api_secret=api_secret,
+                discord_user_id=normalized_user_id,
+                contact_id=contact_id,
+                contact_name=contact_name,
+                submission_id=submission_id,
+                completed_at=completed_at,
+            )
+        except DiscordBotAPIError as exc:
+            logger.warning(
+                "Best-effort Member role assignment failed contact_id=%s discord_user_id=%s: %s",
+                contact_id,
+                normalized_user_id,
+                exc,
+            )
+            return {
+                "status": "error",
+                "discord_user_id": normalized_user_id,
+                "error": str(exc),
+            }
+
+        return {
+            "status": str(result.get("status") or "unknown"),
+            "discord_user_id": normalized_user_id,
+            "result": result,
+        }
+
     def process_agreement(
         self,
         email: str,
@@ -61,7 +116,7 @@ class DocusealAgreementProcessor:
                         }
                     ],
                     "maxSize": 1,
-                    "select": "id,name,emailAddress",
+                    "select": "id,name,emailAddress,cDiscordUserID",
                 },
             )
         except EspoAPIError as exc:
@@ -85,6 +140,8 @@ class DocusealAgreementProcessor:
 
         contact = contacts[0]
         contact_id = contact["id"]
+        contact_name = str(contact.get("name") or "").strip() or None
+        discord_user_id = str(contact.get("cDiscordUserID") or "").strip() or None
 
         try:
             crm_completed_at = self._normalize_completed_at(completed_at)
@@ -113,6 +170,14 @@ class DocusealAgreementProcessor:
                 f"CRM update failed for contact_id={contact_id}: {exc}"
             ) from exc
 
+        member_role = self._grant_member_role(
+            contact_id=contact_id,
+            contact_name=contact_name,
+            discord_user_id=discord_user_id,
+            submission_id=submission_id,
+            completed_at=crm_completed_at,
+        )
+
         logger.info(
             "Marked member agreement signed contact_id=%s masked_email=%s",
             contact_id,
@@ -124,4 +189,6 @@ class DocusealAgreementProcessor:
             "contact_id": contact_id,
             "submission_id": submission_id,
             "completed_at": crm_completed_at,
+            "discord_user_id": discord_user_id,
+            "member_role": member_role,
         }

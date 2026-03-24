@@ -14,10 +14,7 @@ from discord.ext import commands
 
 from five08.discord_bot.config import settings
 from five08.discord_webhook import DiscordWebhookLogger
-from five08.discord_bot.utils.healthcheck import (
-    HealthcheckServer,
-    start_healthcheck_server,
-)
+from five08.discord_bot.utils.bot_http import BotHTTPServer, start_bot_http_server
 
 logger = logging.getLogger(__name__)
 DISCORD_COMMAND_DESCRIPTION_LIMIT = 100
@@ -69,17 +66,17 @@ class Bot508(commands.Bot):
         super().__init__(command_prefix="$508$", intents=intents)
         # Remove the default help command since we're using slash commands
         self.remove_command("help")
-        self.healthcheck_server: Optional[HealthcheckServer] = None
+        self.http_server: Optional[BotHTTPServer] = None
 
     async def setup_hook(self) -> None:
         """Load all cogs automatically."""
         await self.load_extensions()
 
-        # Start healthcheck server
+        # Start shared bot HTTP server
         try:
-            self.healthcheck_server = await start_healthcheck_server(self)
+            self.http_server = await start_bot_http_server(self)
         except Exception as e:
-            logger.error(f"Failed to start healthcheck server: {e}")
+            logger.error(f"Failed to start bot HTTP server: {e}")
 
     async def load_extensions(self) -> None:
         """Load all cog files from the cogs directory."""
@@ -125,9 +122,9 @@ class Bot508(commands.Bot):
                 return
 
     async def close(self) -> None:
-        """Clean shutdown of bot and healthcheck server."""
-        if self.healthcheck_server:
-            await self.healthcheck_server.stop()
+        """Clean shutdown of bot and bot HTTP server."""
+        if self.http_server:
+            await self.http_server.stop()
         await super().close()
 
 

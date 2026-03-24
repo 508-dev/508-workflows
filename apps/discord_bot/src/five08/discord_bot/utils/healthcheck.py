@@ -1,35 +1,25 @@
-"""
-Healthcheck HTTP server for monitoring Discord bot status.
-
-Provides a simple HTTP endpoint for health monitoring and status checks.
-"""
+"""Healthcheck route helpers for the Discord bot."""
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional
 
 from aiohttp import web
 from discord.ext import commands
 
-from five08.discord_bot.config import settings
-
 logger = logging.getLogger(__name__)
 
 
-class HealthcheckServer:
-    """HTTP server for bot health monitoring."""
+class HealthcheckRoutes:
+    """Healthcheck-only route collection."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        self.port = settings.healthcheck_port
-        self.app = web.Application()
-        self.runner: Optional[web.AppRunner] = None
-        self.site: Optional[web.TCPSite] = None
         self.start_time = datetime.now(timezone.utc)
 
-        # Setup routes
-        self.app.router.add_get("/health", self.health_handler)
-        self.app.router.add_get("/", self.health_handler)  # Root also returns health
+    def register(self, app: web.Application) -> None:
+        """Register healthcheck routes on the shared aiohttp app."""
+        app.router.add_get("/health", self.health_handler)
+        app.router.add_get("/", self.health_handler)
 
     async def health_handler(self, request: web.Request) -> web.Response:
         """Handle health check requests."""
@@ -91,39 +81,3 @@ class HealthcheckServer:
                 },
                 status=500,
             )
-
-    async def start(self) -> None:
-        """Start the healthcheck HTTP server."""
-        try:
-            self.runner = web.AppRunner(self.app)
-            await self.runner.setup()
-
-            self.site = web.TCPSite(self.runner, "0.0.0.0", self.port)
-            await self.site.start()
-
-            logger.info(f"Healthcheck server started on port {self.port}")
-            logger.info(f"Health endpoint: http://localhost:{self.port}/health")
-
-        except Exception as e:
-            logger.error(f"Failed to start healthcheck server: {e}")
-            raise
-
-    async def stop(self) -> None:
-        """Stop the healthcheck HTTP server."""
-        try:
-            if self.site:
-                await self.site.stop()
-                logger.info("Healthcheck server stopped")
-
-            if self.runner:
-                await self.runner.cleanup()
-
-        except Exception as e:
-            logger.error(f"Error stopping healthcheck server: {e}")
-
-
-async def start_healthcheck_server(bot: commands.Bot) -> HealthcheckServer:
-    """Start the healthcheck server for the bot."""
-    server = HealthcheckServer(bot)
-    await server.start()
-    return server

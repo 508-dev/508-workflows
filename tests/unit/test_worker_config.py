@@ -90,6 +90,15 @@ def test_docuseal_template_id_accepts_numeric_string() -> None:
     assert settings.docuseal_member_agreement_template_id == 68
 
 
+def test_discord_bot_internal_base_url_defaults_to_compose_service() -> None:
+    settings = WorkerSettings(
+        espo_base_url="https://crm.test.com",
+        espo_api_key="test-key",
+    )
+
+    assert settings.discord_bot_internal_base_url == "http://discord_bot:3000"
+
+
 def test_google_forms_allowed_form_ids_parses_as_set() -> None:
     """Allowed form IDs should be parsed into a normalized set."""
     settings = WorkerSettings(
