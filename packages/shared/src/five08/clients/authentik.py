@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import requests
@@ -9,6 +10,9 @@ import requests
 
 class AuthentikAPIError(Exception):
     """Raised when an Authentik API call fails."""
+
+
+logger = logging.getLogger(__name__)
 
 
 def _normalize_api_base_url(base_url: str) -> str:
@@ -83,6 +87,13 @@ class AuthentikClient:
     ) -> Any:
         """Send one request to the Authentik admin API."""
         url = f"{self.base_url}/{path.lstrip('/')}"
+        logger.debug(
+            "Authentik request method=%s path=%s params=%s payload_keys=%s",
+            method.upper(),
+            path,
+            params,
+            sorted(payload.keys()) if isinstance(payload, dict) else None,
+        )
 
         try:
             response = requests.request(
@@ -97,8 +108,21 @@ class AuthentikClient:
             raise AuthentikAPIError(f"HTTP request failed: {exc}") from exc
 
         self.status_code = response.status_code
+        logger.debug(
+            "Authentik response method=%s path=%s status=%s",
+            method.upper(),
+            path,
+            response.status_code,
+        )
         if not 200 <= response.status_code < 300:
             message = self._response_error_summary(response)
+            logger.debug(
+                "Authentik error method=%s path=%s status=%s summary=%s",
+                method.upper(),
+                path,
+                response.status_code,
+                message,
+            )
             raise AuthentikAPIError(
                 f"Authentik request failed with status {response.status_code}: {message}"
             )
@@ -179,6 +203,12 @@ class AuthentikClient:
         email_stage: str,
         token_duration: str | None = None,
     ) -> None:
+        logger.debug(
+            "Authentik send_recovery_email user_id=%s email_stage=%s token_duration_present=%s",
+            user_id,
+            email_stage,
+            bool(token_duration),
+        )
         payload: dict[str, Any] = {"email_stage": email_stage}
         if token_duration:
             payload["token_duration"] = token_duration
@@ -204,12 +234,22 @@ class AuthentikClient:
     ) -> str:
         """Resolve one Authentik Email Stage UUID, preferring an explicit override."""
         if isinstance(stage_id, str) and stage_id.strip():
-            return stage_id.strip()
+            normalized_stage_id = stage_id.strip()
+            logger.debug(
+                "Authentik resolve_email_stage_id using explicit override stage_id=%s",
+                normalized_stage_id,
+            )
+            return normalized_stage_id
 
         normalized_name = stage_name.strip()
         if not normalized_name:
             raise AuthentikAPIError("Authentik email stage name must not be empty.")
 
+        logger.debug(
+            "Authentik resolve_email_stage_id searching by name=%s page_size=%s",
+            normalized_name,
+            page_size,
+        )
         response = self.list_email_stages(
             params={"name": normalized_name, "page_size": page_size}
         )
@@ -231,7 +271,13 @@ class AuthentikClient:
                 f"Multiple Authentik email stages matched '{normalized_name}'."
             )
 
-        return self._stage_pk(matches[0])
+        resolved_stage_id = self._stage_pk(matches[0])
+        logger.debug(
+            "Authentik resolve_email_stage_id resolved name=%s stage_id=%s",
+            normalized_name,
+            resolved_stage_id,
+        )
+        return resolved_stage_id
 
     def find_users_by_username_or_email(
         self,

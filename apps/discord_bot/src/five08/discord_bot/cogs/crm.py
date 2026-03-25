@@ -6495,17 +6495,32 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                         expected_email=email,
                     )
                 else:
+                    configured_stage_id = self._contact_text_value(
+                        settings.authentik_recovery_email_stage_id
+                    )
+                    configured_stage_name = (
+                        self._contact_text_value(
+                            settings.authentik_recovery_email_stage_name
+                        )
+                        or "default-recovery-email"
+                    )
+                    logger.debug(
+                        "create_sso_user resolving recovery stage contact_id=%s username=%s override_present=%s stage_name=%s",
+                        contact_id,
+                        username,
+                        bool(configured_stage_id),
+                        configured_stage_name,
+                    )
                     recovery_email_stage_id = await asyncio.to_thread(
                         client.resolve_email_stage_id,
-                        stage_id=self._contact_text_value(
-                            settings.authentik_recovery_email_stage_id
-                        ),
-                        stage_name=(
-                            self._contact_text_value(
-                                settings.authentik_recovery_email_stage_name
-                            )
-                            or "default-recovery-email"
-                        ),
+                        stage_id=configured_stage_id,
+                        stage_name=configured_stage_name,
+                    )
+                    logger.debug(
+                        "create_sso_user resolved recovery stage contact_id=%s username=%s stage_id=%s",
+                        contact_id,
+                        username,
+                        recovery_email_stage_id,
                     )
                     created_user = await asyncio.to_thread(
                         client.create_user,
@@ -6527,6 +6542,14 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                             email_stage=recovery_email_stage_id,
                         )
                     except AuthentikAPIError as exc:
+                        logger.warning(
+                            "create_sso_user recovery email failed contact_id=%s username=%s user_id=%s stage_id=%s error=%s",
+                            contact_id,
+                            username,
+                            user_id,
+                            recovery_email_stage_id,
+                            exc,
+                        )
                         recovery_email_error = self._sanitize_error_message_for_discord(
                             exc
                         )
