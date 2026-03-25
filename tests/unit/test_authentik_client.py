@@ -1,0 +1,117 @@
+"""Unit tests for the shared Authentik client."""
+
+from unittest.mock import Mock, patch
+
+import pytest
+
+from five08.clients.authentik import AuthentikAPIError, AuthentikClient
+
+
+def test_create_user_posts_expected_payload() -> None:
+    """User creation should post a minimal non-superuser payload."""
+    mock_response = Mock()
+    mock_response.status_code = 201
+    mock_response.content = b'{"pk": 42}'
+    mock_response.json.return_value = {"pk": 42}
+
+    with patch(
+        "five08.clients.authentik.requests.request",
+        return_value=mock_response,
+    ) as mock_request:
+        result = AuthentikClient(
+            "https://authentik.example.com",
+            "secret",
+        ).create_user(
+            username="jane",
+            name="Jane Doe",
+            email="jane@508.dev",
+        )
+
+    assert result == {"pk": 42}
+    mock_request.assert_called_once_with(
+        "POST",
+        "https://authentik.example.com/api/v3/core/users/",
+        headers={
+            "Accept": "application/json",
+            "Authorization": "Bearer secret",
+            "Content-Type": "application/json",
+        },
+        params=None,
+        json={
+            "username": "jane",
+            "name": "Jane Doe",
+            "is_active": True,
+            "type": "internal",
+            "email": "jane@508.dev",
+        },
+        timeout=20.0,
+    )
+
+
+def test_send_recovery_email_posts_required_stage() -> None:
+    """Recovery emails should use the Authentik stage UUID payload."""
+    mock_response = Mock()
+    mock_response.status_code = 204
+    mock_response.content = b""
+    mock_response.text = ""
+
+    with patch(
+        "five08.clients.authentik.requests.request",
+        return_value=mock_response,
+    ) as mock_request:
+        AuthentikClient(
+            "https://authentik.example.com/api/v3",
+            "secret",
+        ).send_recovery_email(
+            user_id=42,
+            email_stage="3fa85f64-5717-4562-b3fc-2c963f66afa6",
+        )
+
+    mock_request.assert_called_once_with(
+        "POST",
+        "https://authentik.example.com/api/v3/core/users/42/recovery_email/",
+        headers={
+            "Accept": "application/json",
+            "Authorization": "Bearer secret",
+            "Content-Type": "application/json",
+        },
+        params=None,
+        json={"email_stage": "3fa85f64-5717-4562-b3fc-2c963f66afa6"},
+        timeout=20.0,
+    )
+
+
+def test_find_users_by_username_or_email_deduplicates_matches() -> None:
+    """Username and email lookups should return unique users by id."""
+    client = AuthentikClient("https://authentik.example.com", "secret")
+
+    with patch.object(
+        client,
+        "list_users",
+        side_effect=[
+            {"results": [{"pk": 42, "username": "jane", "email": "jane@508.dev"}]},
+            {"results": [{"pk": 42, "username": "jane", "email": "jane@508.dev"}]},
+        ],
+    ) as mock_list:
+        result = client.find_users_by_username_or_email(
+            username="jane",
+            email="jane@508.dev",
+        )
+
+    assert result == [{"pk": 42, "username": "jane", "email": "jane@508.dev"}]
+    assert mock_list.call_count == 2
+
+
+def test_request_raises_on_non_success_status() -> None:
+    """Non-2xx Authentik responses should raise a shared API error."""
+    mock_response = Mock()
+    mock_response.status_code = 403
+    mock_response.text = '{"detail":"forbidden"}'
+    mock_response.content = b'{"detail":"forbidden"}'
+
+    with patch(
+        "five08.clients.authentik.requests.request",
+        return_value=mock_response,
+    ):
+        with pytest.raises(AuthentikAPIError, match="status code is 403"):
+            AuthentikClient("https://authentik.example.com", "secret").get_user(42)

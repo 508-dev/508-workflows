@@ -48,6 +48,10 @@ class SharedSettings(BaseSettings):
     docuseal_base_url: str | None = None
     docuseal_api_key: str | None = None
     docuseal_member_agreement_template_id: int | None = None
+    authentik_api_base_url: str | None = None
+    authentik_api_token: str | None = None
+    authentik_api_timeout_seconds: float = 20.0
+    authentik_recovery_email_stage_id: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

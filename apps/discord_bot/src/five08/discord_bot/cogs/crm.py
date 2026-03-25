@@ -20,6 +20,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from five08.discord_bot.config import settings
+from five08.clients.authentik import AuthentikAPIError, AuthentikClient
 from five08.clients import espo
 from five08.clients.docuseal import (
     DocusealAPIError,
@@ -63,6 +64,7 @@ ID_VERIFIED_TYPE_FIELD = "cVerifiedIdType"
 MEMBER_AGREEMENT_SIGNED_AT_FIELD = "cMemberAgreementSignedAt"
 ONBOARDING_STATUS_FIELD = "cOnboardingState"
 ONBOARDER_FIELD = "cOnboarder"
+SSO_ID_FIELD = "cSsoID"
 _DISCORD_ROLES_PROTECTED_FROM_APPLY: frozenset[str] = frozenset(
     {"Member", "Admin", "Steering Committee"}
 )
@@ -2796,6 +2798,97 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             if value:
                 return value
         return None
+
+    def _authentik_client(self) -> AuthentikClient:
+        """Build an Authentik admin API client from shared settings."""
+        base_url = self._contact_text_value(settings.authentik_api_base_url)
+        if not base_url:
+            raise ValueError("AUTHENTIK_API_BASE_URL is not configured.")
+
+        api_token = self._contact_text_value(settings.authentik_api_token)
+        if not api_token:
+            raise ValueError("AUTHENTIK_API_TOKEN is not configured.")
+
+        return AuthentikClient(
+            base_url=base_url,
+            api_token=api_token,
+            timeout_seconds=max(1.0, float(settings.authentik_api_timeout_seconds)),
+        )
+
+    @staticmethod
+    def _normalize_508_email(value: Any) -> str | None:
+        text = str(value or "").strip().lower()
+        if not text or not text.endswith("@508.dev"):
+            return None
+        return text
+
+    def _contact_508_email(self, contact: dict[str, Any]) -> str | None:
+        for field_name in ("c508Email", "emailAddress"):
+            candidate = self._normalize_508_email(contact.get(field_name))
+            if candidate:
+                return candidate
+        return None
+
+    def _resolve_sso_identity_for_contact(
+        self, contact: dict[str, Any]
+    ) -> tuple[str, str]:
+        """Derive the Authentik username and email from CRM's 508 email."""
+        email = self._contact_508_email(contact)
+        if not email:
+            raise ValueError("Selected contact does not have a @508.dev email in CRM.")
+
+        username = self._normalize_508_username(email)
+        if not username:
+            raise ValueError("Unable to derive a 508 username from the CRM email.")
+        return username, email
+
+    @staticmethod
+    def _authentik_user_pk(user: dict[str, Any]) -> int:
+        raw_value = user.get("pk")
+        if isinstance(raw_value, int) and not isinstance(raw_value, bool):
+            return raw_value
+        if isinstance(raw_value, str) and raw_value.strip().isdigit():
+            return int(raw_value.strip())
+        raise ValueError("Authentik response did not include a numeric user id.")
+
+    def _crm_sso_id(self, contact: dict[str, Any]) -> int | None:
+        raw_value = self._contact_text_value(contact.get(SSO_ID_FIELD))
+        if raw_value is None:
+            return None
+        if raw_value.isdigit():
+            return int(raw_value)
+        raise ValueError(f"{SSO_ID_FIELD} must be a numeric Authentik user id.")
+
+    def _validate_authentik_user_for_contact(
+        self,
+        user: dict[str, Any],
+        *,
+        expected_username: str,
+        expected_email: str,
+    ) -> int:
+        """Ensure the located Authentik user matches the CRM-derived identity."""
+        if bool(user.get("is_superuser")):
+            raise ValueError("Refusing to use an Authentik superuser for this command.")
+
+        actual_username = self._normalize_508_username(user.get("username"))
+        if actual_username != expected_username:
+            raise ValueError(
+                "Matched Authentik username does not match the CRM-derived 508 username."
+            )
+
+        actual_email = self._normalize_508_email(user.get("email"))
+        if actual_email != expected_email:
+            raise ValueError(
+                "Matched Authentik email does not match the CRM-derived @508.dev email."
+            )
+
+        return self._authentik_user_pk(user)
+
+    def _authentik_recovery_email_stage_id(self) -> str:
+        stage_id = self._contact_text_value(settings.authentik_recovery_email_stage_id)
+        if not stage_id:
+            raise ValueError("AUTHENTIK_RECOVERY_EMAIL_STAGE_ID is not configured.")
+        return stage_id
 
     async def _create_member_agreement_submission_for_contact(
         self,
@@ -6320,6 +6413,243 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
             await interaction.followup.send(
                 "❌ An unexpected error occurred while marking ID verification."
+            )
+
+    @app_commands.command(
+        name="create-sso-user",
+        description="Create or link an Authentik SSO user for a CRM contact.",
+    )
+    @app_commands.describe(search_term="Email, 508 username, or contact ID.")
+    @require_role("Admin")
+    async def create_sso_user(
+        self,
+        interaction: discord.Interaction,
+        search_term: str,
+    ) -> None:
+        """Create or link an Authentik SSO user for a CRM contact."""
+        created_user: dict[str, Any] | None = None
+        try:
+            await interaction.response.defer(ephemeral=True)
+
+            contacts = await self._search_contacts_for_lookup(
+                search_term,
+                max_size=5,
+                select=(
+                    f"id,name,emailAddress,c508Email,cDiscordUsername,{SSO_ID_FIELD}"
+                ),
+            )
+            if not contacts:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.create_sso_user",
+                    result="success",
+                    metadata={"search_term": search_term, "contacts_found": 0},
+                )
+                await interaction.followup.send(
+                    f"❌ No contact found for: `{search_term}`"
+                )
+                return
+
+            if len(contacts) > 1:
+                options = []
+                for contact in contacts[:5]:
+                    name = str(contact.get("name") or "Unknown")
+                    contact_id = str(contact.get("id") or "")
+                    email = self._contact_508_email(contact) or (
+                        self._contact_preferred_email(contact) or "No email"
+                    )
+                    options.append(f"- {name} ({email}, CRM `{contact_id}`)")
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.create_sso_user",
+                    result="success",
+                    metadata={
+                        "search_term": search_term,
+                        "contacts_found": len(contacts),
+                        "requires_selection": True,
+                    },
+                )
+                await interaction.followup.send(
+                    "❌ Multiple CRM contacts matched. Use a more specific search.\n"
+                    + "\n".join(options)
+                )
+                return
+
+            contact = contacts[0]
+            contact_id = str(contact.get("id") or "")
+            contact_name = self._contact_text_value(contact.get("name")) or "Unknown"
+            username, email = self._resolve_sso_identity_for_contact(contact)
+            client = self._authentik_client()
+
+            user: dict[str, Any]
+            user_id: int
+            crm_updated = False
+            created = False
+            recovery_email_error: str | None = None
+
+            linked_sso_id = self._crm_sso_id(contact)
+            if linked_sso_id is not None:
+                user = await asyncio.to_thread(client.get_user, linked_sso_id)
+                user_id = self._validate_authentik_user_for_contact(
+                    user,
+                    expected_username=username,
+                    expected_email=email,
+                )
+            else:
+                matches = await asyncio.to_thread(
+                    client.find_users_by_username_or_email,
+                    username=username,
+                    email=email,
+                )
+                if len(matches) > 1:
+                    raise ValueError(
+                        "Multiple Authentik users matched this CRM contact. "
+                        "Resolve the duplicate manually before linking."
+                    )
+
+                if matches:
+                    user = matches[0]
+                    user_id = self._validate_authentik_user_for_contact(
+                        user,
+                        expected_username=username,
+                        expected_email=email,
+                    )
+                else:
+                    recovery_email_stage_id = self._authentik_recovery_email_stage_id()
+                    created_user = await asyncio.to_thread(
+                        client.create_user,
+                        username=username,
+                        name=contact_name,
+                        email=email,
+                    )
+                    created = True
+                    user = created_user
+                    user_id = self._validate_authentik_user_for_contact(
+                        user,
+                        expected_username=username,
+                        expected_email=email,
+                    )
+                    try:
+                        await asyncio.to_thread(
+                            client.send_recovery_email,
+                            user_id=user_id,
+                            email_stage=recovery_email_stage_id,
+                        )
+                    except AuthentikAPIError as exc:
+                        recovery_email_error = self._sanitize_error_message_for_discord(
+                            exc
+                        )
+
+                self.espo_api.request(
+                    "PUT",
+                    f"Contact/{contact_id}",
+                    {SSO_ID_FIELD: str(user_id)},
+                )
+                crm_updated = True
+
+            message_lines = [
+                (
+                    "✅ Created SSO user and linked the CRM contact."
+                    if created
+                    else (
+                        "✅ Linked the existing SSO user to the CRM contact."
+                        if crm_updated
+                        else "✅ CRM contact is already linked to the matching SSO user."
+                    )
+                ),
+                f"Contact: `{contact_name}`",
+                f"CRM ID: `{contact_id}`",
+                f"SSO user ID: `{user_id}`",
+                f"Username: `{username}`",
+                f"Email: `{email}`",
+            ]
+            if created:
+                if recovery_email_error is None:
+                    message_lines.append("Recovery email: sent.")
+                else:
+                    message_lines.append(
+                        f"Recovery email failed: `{recovery_email_error}`"
+                    )
+            else:
+                message_lines.append(
+                    "Recovery email not sent because the user already existed."
+                )
+
+            self._audit_command(
+                interaction=interaction,
+                action="crm.create_sso_user",
+                result="success",
+                metadata={
+                    "search_term": search_term,
+                    "contact_id": contact_id,
+                    "username": username,
+                    "email": email,
+                    "sso_user_id": user_id,
+                    "created": created,
+                    "crm_updated": crm_updated,
+                    "recovery_email_error": recovery_email_error,
+                },
+                resource_type="crm_contact",
+                resource_id=contact_id,
+            )
+            await interaction.followup.send("\n".join(message_lines))
+        except ValueError as exc:
+            message = self._sanitize_error_message_for_discord(exc)
+            self._audit_command(
+                interaction=interaction,
+                action="crm.create_sso_user",
+                result="denied",
+                metadata={"search_term": search_term, "reason": message},
+            )
+            await interaction.followup.send(f"❌ {message}")
+        except EspoAPIError as exc:
+            message = self._sanitize_error_message_for_discord(exc)
+            if created_user is not None:
+                partial_user_id = self._authentik_user_pk(created_user)
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.create_sso_user",
+                    result="error",
+                    metadata={
+                        "search_term": search_term,
+                        "partial_user_id": partial_user_id,
+                        "error": message,
+                        "partial_success": "sso_created_crm_update_failed",
+                    },
+                )
+                await interaction.followup.send(
+                    "⚠️ Created the SSO user, but failed to update CRM "
+                    f"`{SSO_ID_FIELD}`.\nSSO user ID: `{partial_user_id}`\n"
+                    f"Error: `{message}`"
+                )
+                return
+
+            self._audit_command(
+                interaction=interaction,
+                action="crm.create_sso_user",
+                result="error",
+                metadata={"search_term": search_term, "error": message},
+            )
+            await interaction.followup.send(f"❌ CRM API error: {message}")
+        except AuthentikAPIError as exc:
+            message = self._sanitize_error_message_for_discord(exc)
+            self._audit_command(
+                interaction=interaction,
+                action="crm.create_sso_user",
+                result="error",
+                metadata={"search_term": search_term, "error": message},
+            )
+            await interaction.followup.send(f"❌ Authentik API error: {message}")
+        except Exception as exc:
+            logger.error(f"Unexpected error in create_sso_user: {exc}")
+            self._audit_command(
+                interaction=interaction,
+                action="crm.create_sso_user",
+                result="error",
+                metadata={"search_term": search_term, "error": str(exc)},
+            )
+            await interaction.followup.send(
+                "❌ An unexpected error occurred while creating the SSO user."
             )
 
     @app_commands.command(
