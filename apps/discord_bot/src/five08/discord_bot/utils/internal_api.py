@@ -93,8 +93,31 @@ class InternalAPIRoutes:
         if member is None:
             try:
                 member = await guild.fetch_member(discord_user_id)
-            except Exception:
+            except discord.NotFound:
                 member = None
+            except discord.Forbidden:
+                logger.warning(
+                    "Failed fetching guild member guild_id=%s contact_id=%s: forbidden",
+                    guild.id,
+                    payload.contact_id,
+                )
+                return {
+                    "error": "member_lookup_forbidden",
+                    "guild_id": str(guild.id),
+                    "discord_user_id": str(payload.discord_user_id),
+                }, 403
+            except discord.HTTPException as exc:
+                logger.warning(
+                    "Failed fetching guild member guild_id=%s contact_id=%s: %s",
+                    guild.id,
+                    payload.contact_id,
+                    exc,
+                )
+                return {
+                    "error": "member_lookup_failed",
+                    "guild_id": str(guild.id),
+                    "discord_user_id": str(payload.discord_user_id),
+                }, 502
         if member is None:
             return {
                 "error": "member_not_in_guild",

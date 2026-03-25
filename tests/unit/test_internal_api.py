@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import json
 from unittest.mock import AsyncMock, Mock
 
+import discord
 import pytest
 
 from five08.discord_bot.utils.internal_api import (
@@ -116,6 +117,74 @@ class TestInternalAPIRoutes:
 
         assert response.status == 401
         assert json.loads(response.body.decode("utf-8")) == {"error": "unauthorized"}
+
+    @pytest.mark.asyncio
+    async def test_grant_member_role_returns_forbidden_when_fetch_forbidden(
+        self, internal_api_routes, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Discord permission failures during member fetch should stay distinct."""
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.settings.discord_server_id",
+            "123",
+        )
+
+        guild = Mock()
+        guild.id = 123
+        member_role = Mock()
+        member_role.name = "Member"
+        guild.roles = [member_role]
+        guild.get_member.return_value = None
+        guild.fetch_member = AsyncMock(
+            side_effect=discord.Forbidden(
+                response=Mock(status=403, reason="Forbidden"),
+                message="forbidden",
+            )
+        )
+        internal_api_routes.bot.get_guild.return_value = guild
+
+        payload = MemberAgreementRoleRequest(
+            discord_user_id="456",
+            contact_id="contact-1",
+        )
+
+        result, status_code = await internal_api_routes._grant_member_role(payload)
+
+        assert status_code == 403
+        assert result["error"] == "member_lookup_forbidden"
+
+    @pytest.mark.asyncio
+    async def test_grant_member_role_returns_bad_gateway_when_fetch_http_error(
+        self, internal_api_routes, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Discord API failures during member fetch should not become 404s."""
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.settings.discord_server_id",
+            "123",
+        )
+
+        guild = Mock()
+        guild.id = 123
+        member_role = Mock()
+        member_role.name = "Member"
+        guild.roles = [member_role]
+        guild.get_member.return_value = None
+        guild.fetch_member = AsyncMock(
+            side_effect=discord.HTTPException(
+                response=Mock(status=503, reason="Service Unavailable"),
+                message="discord unavailable",
+            )
+        )
+        internal_api_routes.bot.get_guild.return_value = guild
+
+        payload = MemberAgreementRoleRequest(
+            discord_user_id="456",
+            contact_id="contact-1",
+        )
+
+        result, status_code = await internal_api_routes._grant_member_role(payload)
+
+        assert status_code == 502
+        assert result["error"] == "member_lookup_failed"
 
     def test_resolve_target_guild_uses_only_connected_guild_when_unconfigured(
         self, internal_api_routes, monkeypatch: pytest.MonkeyPatch

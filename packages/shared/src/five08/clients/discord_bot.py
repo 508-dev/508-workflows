@@ -36,14 +36,17 @@ class DiscordBotClient:
             "X-API-Secret": self.api_secret,
         }
 
+        request_kwargs: dict[str, Any] = {
+            "method": method.upper(),
+            "url": url,
+            "headers": headers,
+            "timeout": self.timeout_seconds,
+        }
+        if payload is not None:
+            request_kwargs["json"] = payload
+
         try:
-            response = requests.request(
-                method.upper(),
-                url,
-                headers=headers,
-                json=payload,
-                timeout=self.timeout_seconds,
-            )
+            response = requests.request(**request_kwargs)
         except requests.RequestException as exc:
             raise DiscordBotAPIError(f"HTTP request failed: {exc}") from exc
 
