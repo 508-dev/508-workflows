@@ -166,7 +166,7 @@ Use `.env.example` as the source of truth for defaults.
 
 ### Discord Admin Deep-Link Validation
 
-- `Optional`: `DISCORD_ADMIN_GUILD_ID` (required for Discord API fallback role checks)
+- `Optional`: `DISCORD_SERVER_ID` (required for Discord API fallback role checks)
 - `Optional`: `DISCORD_ADMIN_ROLES` (default: `Admin,Owner,Steering Committee`)
 - `Optional`: `DISCORD_API_TIMEOUT_SECONDS` (default: `8.0`)
 - `Optional`: `DISCORD_LINK_TTL_SECONDS` (default: `600`)
@@ -175,6 +175,7 @@ Use `.env.example` as the source of truth for defaults.
 ### Worker Consumer
 
 - `Optional`: `WORKER_NAME` (default: `worker`)
+- `Optional`: `DISCORD_BOT_INTERNAL_BASE_URL` (default: `http://discord_bot:3000`; used for best-effort Member role grants after Docuseal signatures)
 - `Optional`: `WORKER_QUEUE_NAMES` (default: `jobs.default`, comma-separated)
 - `Optional`: `WORKER_BURST` (default: `false`)
 

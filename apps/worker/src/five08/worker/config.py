@@ -15,6 +15,7 @@ class WorkerSettings(SharedSettings):
     worker_name: str = "worker"
     worker_queue_names: str = "jobs.default"
     worker_burst: bool = False
+    discord_bot_internal_base_url: str = "http://discord_bot:3000"
 
     espo_base_url: str
     espo_api_key: str
@@ -71,7 +72,7 @@ class WorkerSettings(SharedSettings):
     dashboard_default_path: str = "/dashboard"
     dashboard_public_base_url: str | None = None
     discord_bot_token: str | None = None
-    discord_admin_guild_id: str | None = None
+    discord_server_id: str | None = None
     discord_admin_roles: str = "Admin,Owner"
     discord_api_timeout_seconds: float = 8.0
     discord_link_ttl_seconds: int = 600
