@@ -4813,6 +4813,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         search_filters.append(
             {"type": "contains", "attribute": "name", "value": normalized}
         )
+        search_filters.extend(self._build_structured_name_search_filters(normalized))
         if not has_space:
             search_filters.append(
                 {
@@ -4827,6 +4828,85 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         """Return whether the provided value looks like a Discord snowflake."""
         normalized = value.strip()
         return normalized.isdigit() and len(normalized) >= 15
+
+    @staticmethod
+    def _split_contact_lookup_name_tokens(value: str) -> list[str]:
+        """Split a free-form lookup string into non-empty name tokens."""
+        return [token.strip() for token in re.split(r"\s+", value) if token.strip()]
+
+    def _build_structured_name_search_filters(
+        self, normalized_search_term: str
+    ) -> list[dict[str, Any]]:
+        """Build field-aware name filters for lookups that may omit middle names."""
+        tokens = self._split_contact_lookup_name_tokens(normalized_search_term)
+        if len(tokens) < 2:
+            return []
+
+        first_name = tokens[0]
+        last_name = tokens[-1]
+        filters: list[dict[str, Any]] = [
+            {
+                "type": "and",
+                "value": [
+                    {
+                        "type": "contains",
+                        "attribute": "firstName",
+                        "value": first_name,
+                    },
+                    {
+                        "type": "contains",
+                        "attribute": "lastName",
+                        "value": last_name,
+                    },
+                ],
+            }
+        ]
+
+        if len(tokens) == 2:
+            filters.append(
+                {
+                    "type": "and",
+                    "value": [
+                        {
+                            "type": "contains",
+                            "attribute": "middleName",
+                            "value": first_name,
+                        },
+                        {
+                            "type": "contains",
+                            "attribute": "lastName",
+                            "value": last_name,
+                        },
+                    ],
+                }
+            )
+            return filters
+
+        middle_name = " ".join(tokens[1:-1]).strip()
+        if middle_name:
+            filters.append(
+                {
+                    "type": "and",
+                    "value": [
+                        {
+                            "type": "contains",
+                            "attribute": "firstName",
+                            "value": first_name,
+                        },
+                        {
+                            "type": "contains",
+                            "attribute": "middleName",
+                            "value": middle_name,
+                        },
+                        {
+                            "type": "contains",
+                            "attribute": "lastName",
+                            "value": last_name,
+                        },
+                    ],
+                }
+            )
+        return filters
 
     async def _search_contacts_for_lookup(
         self,
@@ -4864,10 +4944,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 }
             )
 
-        has_at = "@" in normalized_search_term
-        has_space = " " in normalized_search_term
         if max_size is None:
-            max_size = 1 if has_space and not has_at else 10
+            max_size = 10
             if self._extract_discord_id_from_mention(
                 normalized_search_term
             ) or self._looks_like_discord_user_id(normalized_search_term):

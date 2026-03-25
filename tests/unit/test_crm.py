@@ -3638,6 +3638,46 @@ class TestCRMCog:
             "value": "john@508.dev",
         } in filters
 
+    def test_build_contact_search_filters_two_part_name(self, crm_cog):
+        """Two-part names should search both first+last and middle+last variants."""
+        filters = crm_cog._build_contact_search_filters("John Doe")
+
+        assert {"type": "contains", "attribute": "name", "value": "John Doe"} in filters
+        assert {
+            "type": "and",
+            "value": [
+                {"type": "contains", "attribute": "firstName", "value": "John"},
+                {"type": "contains", "attribute": "lastName", "value": "Doe"},
+            ],
+        } in filters
+        assert {
+            "type": "and",
+            "value": [
+                {"type": "contains", "attribute": "middleName", "value": "John"},
+                {"type": "contains", "attribute": "lastName", "value": "Doe"},
+            ],
+        } in filters
+
+    def test_build_contact_search_filters_three_part_name(self, crm_cog):
+        """Three-part names should include a first+middle+last structured filter."""
+        filters = crm_cog._build_contact_search_filters("John Wei Doe")
+
+        assert {
+            "type": "and",
+            "value": [
+                {"type": "contains", "attribute": "firstName", "value": "John"},
+                {"type": "contains", "attribute": "lastName", "value": "Doe"},
+            ],
+        } in filters
+        assert {
+            "type": "and",
+            "value": [
+                {"type": "contains", "attribute": "firstName", "value": "John"},
+                {"type": "contains", "attribute": "middleName", "value": "Wei"},
+                {"type": "contains", "attribute": "lastName", "value": "Doe"},
+            ],
+        } in filters
+
     def test_build_contact_search_filters_trailing_at(self, crm_cog):
         """Build shared search filters for trailing 508 usernames."""
         filters = crm_cog._build_contact_search_filters("john@")
@@ -3759,6 +3799,18 @@ class TestCRMCog:
             "attribute": "cDiscordUsername",
             "value": "john",
         } in where_filters
+
+    @pytest.mark.asyncio
+    async def test_search_contacts_for_lookup_spaced_name_uses_wider_default_max_size(
+        self, crm_cog
+    ):
+        """Spaced-name lookups should return multiple candidates for disambiguation."""
+        crm_cog.espo_api.request.return_value = {"list": []}
+
+        await crm_cog._search_contacts_for_lookup("John Doe")
+
+        call = crm_cog.espo_api.request.call_args.args
+        assert call[2]["maxSize"] == 10
 
     @pytest.mark.asyncio
     async def test_search_contacts_by_field_includes_requested_field_and_excludes_default(
