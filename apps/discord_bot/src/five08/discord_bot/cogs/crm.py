@@ -348,20 +348,6 @@ class CreateSSOUserSelectionButton(discord.ui.Button["CreateSSOUserSelectionView
                 return
 
             await interaction.response.defer(ephemeral=True)
-            contact_id = str(self.contact.get("id") or "")
-            self.view.crm_cog._audit_command_safe(
-                interaction=interaction,
-                action="crm.create_sso_user.select_contact",
-                result="success",
-                metadata={
-                    "search_term": self.view.search_term,
-                    "requires_selection": True,
-                    "selection_result": "selected",
-                    "selected_contact_id": contact_id or None,
-                },
-                resource_type="crm_contact" if contact_id else "discord_command",
-                resource_id=contact_id or None,
-            )
             await self.view.crm_cog._create_or_link_sso_user_for_contact(
                 interaction=interaction,
                 contact=self.contact,
@@ -433,16 +419,6 @@ class CreateSSOUserSelectionView(discord.ui.View):
                 logger.warning(
                     "Failed to disable create_sso_user selection view: %s", exc
                 )
-        self.crm_cog._audit_command_safe(
-            interaction=self.original_interaction,
-            action="crm.create_sso_user.selection_timeout",
-            result="denied",
-            metadata={
-                "search_term": self.search_term,
-                "requires_selection": True,
-                "selection_result": "timeout",
-            },
-        )
 
 
 class MarkIdVerifiedSelectionButton(discord.ui.Button["MarkIdVerifiedSelectionView"]):
@@ -6527,12 +6503,35 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                         username,
                         recovery_email_stage_id,
                     )
-                    created_user = await asyncio.to_thread(
-                        client.create_user,
-                        username=username,
-                        name=contact_name,
-                        email=email,
-                    )
+                    try:
+                        created_user = await asyncio.to_thread(
+                            client.create_user,
+                            username=username,
+                            name=contact_name,
+                            email=email,
+                        )
+                    except AuthentikAPIError as exc:
+                        logger.warning(
+                            "create_sso_user create_user failed contact_id=%s username=%s status=%s error=%s; checking for reconciled user",
+                            contact_id,
+                            username,
+                            client.status_code,
+                            exc,
+                        )
+                        reconciled_matches = await asyncio.to_thread(
+                            client.find_users_by_username_or_email,
+                            username=username,
+                            email=email,
+                        )
+                        if len(reconciled_matches) > 1:
+                            raise ValueError(
+                                "Multiple Authentik users matched this CRM contact after "
+                                "the create attempt. Resolve the duplicate manually "
+                                "before linking."
+                            ) from exc
+                        if not reconciled_matches:
+                            raise
+                        created_user = reconciled_matches[0]
                     created = True
                     user = created_user
                     user_id = self._validate_authentik_user_for_contact(
@@ -6883,12 +6882,6 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 ),
             )
             if not contacts:
-                self._audit_command(
-                    interaction=interaction,
-                    action="crm.create_sso_user.lookup",
-                    result="success",
-                    metadata={"search_term": search_term, "contacts_found": 0},
-                )
                 await interaction.followup.send(
                     f"❌ No contact found for: `{search_term}`",
                     ephemeral=True,
@@ -6896,16 +6889,6 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 return
 
             if len(contacts) > 1:
-                self._audit_command(
-                    interaction=interaction,
-                    action="crm.create_sso_user.lookup",
-                    result="success",
-                    metadata={
-                        "search_term": search_term,
-                        "contacts_found": len(contacts),
-                        "requires_selection": True,
-                    },
-                )
                 await self._show_create_sso_user_contact_choices(
                     interaction=interaction,
                     search_term=search_term,

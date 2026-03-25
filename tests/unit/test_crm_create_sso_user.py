@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from five08.discord_bot.cogs.crm import CRMCog
+from five08.clients.authentik import AuthentikAPIError
 from five08.clients.espo import EspoAPIError
 
 
@@ -298,3 +299,59 @@ async def test_create_sso_user_reports_partial_success_when_local_validation_fai
     audit_metadata = mock_audit.call_args.kwargs["metadata"]
     assert audit_metadata["partial_user_id"] == 42
     assert audit_metadata["partial_success"] == "sso_created_validation_failed"
+
+
+@pytest.mark.asyncio
+async def test_create_sso_user_reconciles_user_after_create_error(
+    cog: CRMCog, mock_interaction: AsyncMock, mock_espo_api: Mock
+) -> None:
+    contact = {
+        "id": "crm-123",
+        "name": "Jane Doe",
+        "c508Email": "jane@508.dev",
+        "cSsoID": None,
+    }
+    reconciled_user = {
+        "pk": 42,
+        "username": "jane",
+        "email": "jane@508.dev",
+        "name": "Jane Doe",
+        "is_superuser": False,
+    }
+    authentik_client = Mock()
+    authentik_client.find_users_by_username_or_email.side_effect = [
+        [],
+        [reconciled_user],
+    ]
+    authentik_client.create_user.side_effect = AuthentikAPIError(
+        "Authentik request failed with status 405: Method Not Allowed"
+    )
+    authentik_client.resolve_email_stage_id.return_value = "stage-id"
+    authentik_client.send_recovery_email.return_value = None
+    authentik_client.status_code = 405
+
+    with (
+        patch.object(
+            cog,
+            "_search_contacts_for_lookup",
+            new=AsyncMock(return_value=[contact]),
+        ),
+        patch.object(cog, "_authentik_client", return_value=authentik_client),
+        patch.object(cog, "_audit_command_safe") as mock_audit,
+    ):
+        mock_espo_api.request.return_value = {"id": "crm-123"}
+        await cog.create_sso_user.callback(cog, mock_interaction, search_term="jane")
+
+    authentik_client.send_recovery_email.assert_called_once_with(
+        user_id=42,
+        email_stage="stage-id",
+    )
+    mock_espo_api.request.assert_called_once_with(
+        "PUT",
+        "Contact/crm-123",
+        {"cSsoID": "42"},
+    )
+    message = mock_interaction.followup.send.call_args.args[0]
+    assert "Created SSO user" in message
+    assert mock_interaction.followup.send.call_args.kwargs["ephemeral"] is True
+    mock_audit.assert_called_once()
