@@ -6419,7 +6419,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         name="create-sso-user",
         description="Create or link an Authentik SSO user for a CRM contact.",
     )
-    @app_commands.describe(search_term="Email, 508 username, or contact ID.")
+    @app_commands.describe(
+        search_term="Discord mention, email, 508 username, or contact ID."
+    )
     @require_role("Admin")
     async def create_sso_user(
         self,
