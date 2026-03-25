@@ -94,6 +94,115 @@ def test_docuseal_processor_normalizes_completed_at_to_utc_timestamp() -> None:
     mock_grant_role.assert_not_called()
 
 
+def test_docuseal_processor_skips_role_grant_without_bot_base_url() -> None:
+    """Missing bot base URL should be reported without calling the bot client."""
+    mock_api = Mock()
+    mock_api.request.side_effect = [
+        {"list": [{"id": "contact-1", "cDiscordUserID": "1234"}]},
+        {"updated": True},
+    ]
+
+    with (
+        patch("five08.worker.crm.docuseal_processor.EspoClient", return_value=mock_api),
+        patch(
+            "five08.worker.crm.docuseal_processor.settings.discord_bot_internal_base_url",
+            " ",
+        ),
+        patch(
+            "five08.worker.crm.docuseal_processor.settings.api_shared_secret",
+            "top-secret",
+        ),
+        patch(
+            "five08.worker.crm.docuseal_processor.grant_member_role_for_signed_agreement"
+        ) as mock_grant_role,
+    ):
+        processor = DocusealAgreementProcessor()
+        result = processor.process_agreement(
+            email="member@508.dev",
+            completed_at="2026-02-25T12:00:00Z",
+            submission_id=417,
+        )
+
+    assert result["success"] is True
+    assert result["member_role"]["status"] == "bot_endpoint_not_configured"
+    mock_grant_role.assert_not_called()
+
+
+def test_docuseal_processor_skips_role_grant_without_api_secret() -> None:
+    """Missing shared API secret should be reported without calling the bot client."""
+    mock_api = Mock()
+    mock_api.request.side_effect = [
+        {"list": [{"id": "contact-1", "cDiscordUserID": "1234"}]},
+        {"updated": True},
+    ]
+
+    with (
+        patch("five08.worker.crm.docuseal_processor.EspoClient", return_value=mock_api),
+        patch(
+            "five08.worker.crm.docuseal_processor.settings.api_shared_secret",
+            " ",
+        ),
+        patch(
+            "five08.worker.crm.docuseal_processor.grant_member_role_for_signed_agreement"
+        ) as mock_grant_role,
+    ):
+        processor = DocusealAgreementProcessor()
+        result = processor.process_agreement(
+            email="member@508.dev",
+            completed_at="2026-02-25T12:00:00Z",
+            submission_id=418,
+        )
+
+    assert result["success"] is True
+    assert result["member_role"]["status"] == "api_secret_not_configured"
+    mock_grant_role.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("cDiscordUserId", "111"),
+        ("discordUserId", "222"),
+        ("cDiscordID", "333"),
+        ("cDiscordId", "444"),
+        ("cDiscordUserID", "555"),
+    ],
+)
+def test_docuseal_processor_reads_supported_discord_id_aliases(
+    field_name: str,
+    field_value: str,
+) -> None:
+    """All supported Discord ID aliases should trigger the role-grant path."""
+    mock_api = Mock()
+    mock_api.request.side_effect = [
+        {"list": [{"id": "contact-1", field_name: field_value}]},
+        {"updated": True},
+    ]
+
+    with (
+        patch("five08.worker.crm.docuseal_processor.EspoClient", return_value=mock_api),
+        patch(
+            "five08.worker.crm.docuseal_processor.settings.api_shared_secret",
+            "top-secret",
+        ),
+        patch(
+            "five08.worker.crm.docuseal_processor.grant_member_role_for_signed_agreement",
+            return_value={"status": "applied"},
+        ) as mock_grant_role,
+    ):
+        processor = DocusealAgreementProcessor()
+        result = processor.process_agreement(
+            email="member@508.dev",
+            completed_at="2026-02-25T12:00:00Z",
+            submission_id=419,
+        )
+
+    assert result["success"] is True
+    assert result["discord_user_id"] == field_value
+    assert result["member_role"]["status"] == "applied"
+    assert mock_grant_role.call_args.kwargs["discord_user_id"] == field_value
+
+
 def test_docuseal_processor_raises_on_invalid_completed_at() -> None:
     """Processor should raise so the job runner can mark the job non-retryable/dead."""
     mock_api = Mock()

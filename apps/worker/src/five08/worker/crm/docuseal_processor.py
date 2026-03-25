@@ -13,6 +13,13 @@ from five08.worker.config import settings
 from five08.worker.masking import mask_email
 
 logger = logging.getLogger(__name__)
+_DISCORD_USER_ID_FIELDS = (
+    "cDiscordUserId",
+    "discordUserId",
+    "cDiscordID",
+    "cDiscordId",
+    "cDiscordUserID",
+)
 
 
 class DocusealAgreementProcessingError(RuntimeError):
@@ -38,6 +45,15 @@ class DocusealAgreementProcessor:
         else:
             parsed = parsed.astimezone(timezone.utc)
         return parsed.strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _contact_discord_user_id(contact: dict[str, Any]) -> str | None:
+        """Read the linked Discord user id from the supported CRM aliases."""
+        for key in _DISCORD_USER_ID_FIELDS:
+            candidate = str(contact.get(key) or "").strip()
+            if candidate:
+                return candidate
+        return None
 
     def _grant_member_role(
         self,
@@ -116,7 +132,10 @@ class DocusealAgreementProcessor:
                         }
                     ],
                     "maxSize": 1,
-                    "select": "id,name,emailAddress,cDiscordUserID",
+                    "select": (
+                        "id,name,emailAddress,cDiscordUsername,"
+                        + ",".join(_DISCORD_USER_ID_FIELDS)
+                    ),
                 },
             )
         except EspoAPIError as exc:
@@ -141,7 +160,7 @@ class DocusealAgreementProcessor:
         contact = contacts[0]
         contact_id = contact["id"]
         contact_name = str(contact.get("name") or "").strip() or None
-        discord_user_id = str(contact.get("cDiscordUserID") or "").strip() or None
+        discord_user_id = self._contact_discord_user_id(contact)
 
         try:
             crm_completed_at = self._normalize_completed_at(completed_at)
