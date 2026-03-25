@@ -81,6 +81,39 @@ def test_send_recovery_email_posts_required_stage() -> None:
     )
 
 
+def test_send_recovery_email_retries_with_query_params_after_400() -> None:
+    """Recovery email should retry with query params for older Authentik versions."""
+    client = AuthentikClient("https://authentik.example.com/api/v3", "secret")
+
+    with patch.object(
+        client,
+        "request",
+        side_effect=[
+            AuthentikAPIError(
+                "Authentik request failed with status 400: Bad Request (Email stage does not exist.)"
+            ),
+            {},
+        ],
+    ) as mock_request:
+        client.status_code = 400
+        client.send_recovery_email(
+            user_id=42,
+            email_stage="3fa85f64-5717-4562-b3fc-2c963f66afa6",
+        )
+
+    assert mock_request.call_count == 2
+    first_call = mock_request.call_args_list[0]
+    second_call = mock_request.call_args_list[1]
+    assert first_call.args == ("POST", "core/users/42/recovery_email/")
+    assert first_call.kwargs == {
+        "payload": {"email_stage": "3fa85f64-5717-4562-b3fc-2c963f66afa6"}
+    }
+    assert second_call.args == ("POST", "core/users/42/recovery_email/")
+    assert second_call.kwargs == {
+        "params": {"email_stage": "3fa85f64-5717-4562-b3fc-2c963f66afa6"}
+    }
+
+
 def test_resolve_email_stage_id_returns_explicit_override_without_lookup() -> None:
     """An explicit stage UUID should bypass the list call."""
     client = AuthentikClient("https://authentik.example.com", "secret")

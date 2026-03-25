@@ -210,13 +210,29 @@ class AuthentikClient:
             bool(token_duration),
         )
         payload: dict[str, Any] = {"email_stage": email_stage}
+        params: dict[str, Any] = {"email_stage": email_stage}
         if token_duration:
             payload["token_duration"] = token_duration
-        self.request(
-            "POST",
-            f"core/users/{user_id}/recovery_email/",
-            payload=payload,
-        )
+            params["token_duration"] = token_duration
+        try:
+            self.request(
+                "POST",
+                f"core/users/{user_id}/recovery_email/",
+                payload=payload,
+            )
+        except AuthentikAPIError:
+            if self.status_code != 400:
+                raise
+            logger.debug(
+                "Authentik send_recovery_email retrying with query params user_id=%s email_stage=%s",
+                user_id,
+                email_stage,
+            )
+            self.request(
+                "POST",
+                f"core/users/{user_id}/recovery_email/",
+                params=params,
+            )
 
     @staticmethod
     def _stage_pk(stage: dict[str, Any]) -> str:
