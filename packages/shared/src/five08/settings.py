@@ -52,6 +52,7 @@ class SharedSettings(BaseSettings):
     authentik_api_token: str | None = None
     authentik_api_timeout_seconds: float = 20.0
     authentik_recovery_email_stage_id: str | None = None
+    authentik_recovery_email_stage_name: str = "default-recovery-email"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

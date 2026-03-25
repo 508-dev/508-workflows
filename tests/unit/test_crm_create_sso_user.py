@@ -46,6 +46,7 @@ async def test_create_sso_user_creates_links_and_sends_recovery_email(
         "name": "Jane Doe",
         "is_superuser": False,
     }
+    authentik_client.resolve_email_stage_id.return_value = "stage-id"
     authentik_client.send_recovery_email.return_value = None
 
     with (
@@ -55,9 +56,6 @@ async def test_create_sso_user_creates_links_and_sends_recovery_email(
             new=AsyncMock(return_value=[contact]),
         ),
         patch.object(cog, "_authentik_client", return_value=authentik_client),
-        patch.object(
-            cog, "_authentik_recovery_email_stage_id", return_value="stage-id"
-        ),
         patch.object(cog, "_audit_command") as mock_audit,
         patch.object(
             cog.espo_api, "request", return_value={"id": "crm-123"}
@@ -70,6 +68,10 @@ async def test_create_sso_user_creates_links_and_sends_recovery_email(
         username="jane",
         name="Jane Doe",
         email="jane@508.dev",
+    )
+    authentik_client.resolve_email_stage_id.assert_called_once_with(
+        stage_id=None,
+        stage_name="default-recovery-email",
     )
     authentik_client.send_recovery_email.assert_called_once_with(
         user_id=42,

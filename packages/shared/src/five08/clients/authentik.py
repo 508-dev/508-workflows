@@ -97,6 +97,12 @@ class AuthentikClient:
             raise AuthentikAPIError("API response is not a JSON object")
         return response
 
+    def list_email_stages(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        response = self.request("GET", "stages/email/", params=params)
+        if not isinstance(response, dict):
+            raise AuthentikAPIError("API response is not a JSON object")
+        return response
+
     def create_user(
         self,
         *,
@@ -147,6 +153,51 @@ class AuthentikClient:
             f"core/users/{user_id}/recovery_email/",
             payload=payload,
         )
+
+    @staticmethod
+    def _stage_pk(stage: dict[str, Any]) -> str:
+        raw_value = stage.get("pk")
+        if isinstance(raw_value, str) and raw_value.strip():
+            return raw_value.strip()
+        raise AuthentikAPIError("Authentik stage response did not include a UUID.")
+
+    def resolve_email_stage_id(
+        self,
+        *,
+        stage_name: str,
+        stage_id: str | None = None,
+        page_size: int = 20,
+    ) -> str:
+        """Resolve one Authentik Email Stage UUID, preferring an explicit override."""
+        if isinstance(stage_id, str) and stage_id.strip():
+            return stage_id.strip()
+
+        normalized_name = stage_name.strip()
+        if not normalized_name:
+            raise AuthentikAPIError("Authentik email stage name must not be empty.")
+
+        response = self.list_email_stages(
+            params={"name": normalized_name, "page_size": page_size}
+        )
+        raw_results = response.get("results")
+        results = raw_results if isinstance(raw_results, list) else []
+        matches = [
+            stage
+            for stage in results
+            if isinstance(stage, dict)
+            and str(stage.get("name") or "").strip() == normalized_name
+        ]
+
+        if not matches:
+            raise AuthentikAPIError(
+                f"No Authentik email stage found named '{normalized_name}'."
+            )
+        if len(matches) > 1:
+            raise AuthentikAPIError(
+                f"Multiple Authentik email stages matched '{normalized_name}'."
+            )
+
+        return self._stage_pk(matches[0])
 
     def find_users_by_username_or_email(
         self,

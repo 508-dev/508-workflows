@@ -2884,12 +2884,6 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
 
         return self._authentik_user_pk(user)
 
-    def _authentik_recovery_email_stage_id(self) -> str:
-        stage_id = self._contact_text_value(settings.authentik_recovery_email_stage_id)
-        if not stage_id:
-            raise ValueError("AUTHENTIK_RECOVERY_EMAIL_STAGE_ID is not configured.")
-        return stage_id
-
     async def _create_member_agreement_submission_for_contact(
         self,
         contact: dict[str, Any],
@@ -6517,7 +6511,18 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                         expected_email=email,
                     )
                 else:
-                    recovery_email_stage_id = self._authentik_recovery_email_stage_id()
+                    recovery_email_stage_id = await asyncio.to_thread(
+                        client.resolve_email_stage_id,
+                        stage_id=self._contact_text_value(
+                            settings.authentik_recovery_email_stage_id
+                        ),
+                        stage_name=(
+                            self._contact_text_value(
+                                settings.authentik_recovery_email_stage_name
+                            )
+                            or "default-recovery-email"
+                        ),
+                    )
                     created_user = await asyncio.to_thread(
                         client.create_user,
                         username=username,
