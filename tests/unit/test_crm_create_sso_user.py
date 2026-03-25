@@ -23,13 +23,21 @@ def mock_interaction() -> AsyncMock:
 
 
 @pytest.fixture
-def cog() -> CRMCog:
+def mock_espo_api() -> Mock:
+    with patch("five08.discord_bot.cogs.crm.EspoClient") as mock_client_class:
+        mock_api = Mock()
+        mock_client_class.return_value = mock_api
+        yield mock_api
+
+
+@pytest.fixture
+def cog(mock_espo_api: Mock) -> CRMCog:
     return CRMCog(Mock())
 
 
 @pytest.mark.asyncio
 async def test_create_sso_user_creates_links_and_sends_recovery_email(
-    cog: CRMCog, mock_interaction: AsyncMock
+    cog: CRMCog, mock_interaction: AsyncMock, mock_espo_api: Mock
 ) -> None:
     contact = {
         "id": "crm-123",
@@ -56,11 +64,9 @@ async def test_create_sso_user_creates_links_and_sends_recovery_email(
             new=AsyncMock(return_value=[contact]),
         ),
         patch.object(cog, "_authentik_client", return_value=authentik_client),
-        patch.object(cog, "_audit_command") as mock_audit,
-        patch.object(
-            cog.espo_api, "request", return_value={"id": "crm-123"}
-        ) as mock_espo,
+        patch.object(cog, "_audit_command_safe") as mock_audit,
     ):
+        mock_espo_api.request.return_value = {"id": "crm-123"}
         await cog.create_sso_user.callback(cog, mock_interaction, search_term="jane")
 
     mock_interaction.response.defer.assert_awaited_once_with(ephemeral=True)
@@ -77,7 +83,7 @@ async def test_create_sso_user_creates_links_and_sends_recovery_email(
         user_id=42,
         email_stage="stage-id",
     )
-    mock_espo.assert_called_once_with(
+    mock_espo_api.request.assert_called_once_with(
         "PUT",
         "Contact/crm-123",
         {"cSsoID": "42"},
@@ -90,7 +96,7 @@ async def test_create_sso_user_creates_links_and_sends_recovery_email(
 
 @pytest.mark.asyncio
 async def test_create_sso_user_links_existing_user_without_recovery_email(
-    cog: CRMCog, mock_interaction: AsyncMock
+    cog: CRMCog, mock_interaction: AsyncMock, mock_espo_api: Mock
 ) -> None:
     contact = {
         "id": "crm-123",
@@ -116,9 +122,9 @@ async def test_create_sso_user_links_existing_user_without_recovery_email(
             new=AsyncMock(return_value=[contact]),
         ),
         patch.object(cog, "_authentik_client", return_value=authentik_client),
-        patch.object(cog, "_audit_command"),
-        patch.object(cog.espo_api, "request", return_value={"id": "crm-123"}),
+        patch.object(cog, "_audit_command_safe"),
     ):
+        mock_espo_api.request.return_value = {"id": "crm-123"}
         await cog.create_sso_user.callback(cog, mock_interaction, search_term="jane")
 
     authentik_client.create_user.assert_not_called()
@@ -153,9 +159,47 @@ async def test_create_sso_user_rejects_superuser_match(
             new=AsyncMock(return_value=[contact]),
         ),
         patch.object(cog, "_authentik_client", return_value=authentik_client),
-        patch.object(cog, "_audit_command"),
+        patch.object(cog, "_audit_command_safe"),
     ):
         await cog.create_sso_user.callback(cog, mock_interaction, search_term="jane")
 
     message = mock_interaction.followup.send.call_args.args[0]
     assert "superuser" in message
+
+
+@pytest.mark.asyncio
+async def test_create_sso_user_respects_already_linked_non_superuser(
+    cog: CRMCog, mock_interaction: AsyncMock, mock_espo_api: Mock
+) -> None:
+    contact = {
+        "id": "crm-123",
+        "name": "Jane Doe",
+        "c508Email": "jane@508.dev",
+        "cSsoID": "42",
+    }
+    authentik_client = Mock()
+    authentik_client.get_user.return_value = {
+        "pk": 42,
+        "username": "jane",
+        "email": "jane@508.dev",
+        "name": "Jane Doe",
+        "is_superuser": False,
+    }
+
+    with (
+        patch.object(
+            cog,
+            "_search_contacts_for_lookup",
+            new=AsyncMock(return_value=[contact]),
+        ),
+        patch.object(cog, "_authentik_client", return_value=authentik_client),
+        patch.object(cog, "_audit_command_safe"),
+    ):
+        await cog.create_sso_user.callback(cog, mock_interaction, search_term="jane")
+
+    authentik_client.get_user.assert_called_once_with(42)
+    authentik_client.create_user.assert_not_called()
+    authentik_client.send_recovery_email.assert_not_called()
+    mock_espo_api.request.assert_not_called()
+    message = mock_interaction.followup.send.call_args.args[0]
+    assert "already linked to the matching SSO user" in message

@@ -64,9 +64,11 @@ class AuthentikClient:
 
         self.status_code = response.status_code
         if not 200 <= response.status_code < 300:
-            message = " ".join((response.text or "").split()).strip() or "Unknown Error"
+            message = str(getattr(response, "reason", "") or "").strip()
+            if not message:
+                message = "Upstream error"
             raise AuthentikAPIError(
-                f"Wrong request, status code is {response.status_code}, reason is {message}"
+                f"Authentik request failed with status {response.status_code}: {message}"
             )
 
         if not response.content:
@@ -209,16 +211,24 @@ class AuthentikClient:
         """Search exact username and exact email, deduplicated by user id."""
         matches: list[dict[str, Any]] = []
         seen_keys: set[str] = set()
+        normalized_username = username.casefold()
+        normalized_email = email.casefold()
 
-        for params in (
-            {"username": username, "page_size": page_size},
-            {"email": email, "page_size": page_size},
+        for params, field_name, expected in (
+            (
+                {"username": username, "page_size": page_size},
+                "username",
+                normalized_username,
+            ),
+            ({"email": email, "page_size": page_size}, "email", normalized_email),
         ):
             response = self.list_users(params=params)
             raw_results = response.get("results")
             results = raw_results if isinstance(raw_results, list) else []
             for user in results:
                 if not isinstance(user, dict):
+                    continue
+                if str(user.get(field_name) or "").casefold() != expected:
                     continue
                 key = str(
                     user.get("pk")

@@ -154,10 +154,44 @@ def test_find_users_by_username_or_email_deduplicates_matches() -> None:
     assert mock_list.call_count == 2
 
 
+def test_find_users_by_username_or_email_filters_non_exact_matches() -> None:
+    """Search results should be filtered locally to exact username/email matches."""
+    client = AuthentikClient("https://authentik.example.com", "secret")
+
+    with patch.object(
+        client,
+        "list_users",
+        side_effect=[
+            {
+                "results": [
+                    {"pk": 1, "username": "jane-dev", "email": "jane@508.dev"},
+                    {"pk": 2, "username": "jane", "email": "jane-other@508.dev"},
+                ]
+            },
+            {
+                "results": [
+                    {"pk": 3, "username": "other", "email": "other@508.dev"},
+                    {"pk": 4, "username": "jane", "email": "jane@508.dev"},
+                ]
+            },
+        ],
+    ):
+        result = client.find_users_by_username_or_email(
+            username="jane",
+            email="jane@508.dev",
+        )
+
+    assert result == [
+        {"pk": 2, "username": "jane", "email": "jane-other@508.dev"},
+        {"pk": 4, "username": "jane", "email": "jane@508.dev"},
+    ]
+
+
 def test_request_raises_on_non_success_status() -> None:
     """Non-2xx Authentik responses should raise a shared API error."""
     mock_response = Mock()
     mock_response.status_code = 403
+    mock_response.reason = "Forbidden"
     mock_response.text = '{"detail":"forbidden"}'
     mock_response.content = b'{"detail":"forbidden"}'
 
@@ -165,5 +199,8 @@ def test_request_raises_on_non_success_status() -> None:
         "five08.clients.authentik.requests.request",
         return_value=mock_response,
     ):
-        with pytest.raises(AuthentikAPIError, match="status code is 403"):
+        with pytest.raises(
+            AuthentikAPIError,
+            match="Authentik request failed with status 403: Forbidden",
+        ):
             AuthentikClient("https://authentik.example.com", "secret").get_user(42)
