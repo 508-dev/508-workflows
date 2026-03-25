@@ -45,7 +45,51 @@ def test_create_user_posts_expected_payload() -> None:
             "email": "jane@508.dev",
         },
         timeout=20.0,
+        allow_redirects=False,
     )
+
+
+def test_create_user_preserves_post_across_redirect() -> None:
+    """POST create-user should preserve method/body when Authentik returns a 301."""
+    redirect_response = Mock()
+    redirect_response.status_code = 301
+    redirect_response.headers = {"Location": "/api/v3/core/users/"}
+    redirect_response.content = b""
+    redirect_response.text = ""
+
+    success_response = Mock()
+    success_response.status_code = 201
+    success_response.content = b'{"pk": 42}'
+    success_response.json.return_value = {"pk": 42}
+
+    with patch(
+        "five08.clients.authentik.requests.request",
+        side_effect=[redirect_response, success_response],
+    ) as mock_request:
+        result = AuthentikClient(
+            "https://authentik.example.com",
+            "secret",
+        ).create_user(
+            username="jane",
+            name="Jane Doe",
+            email="jane@508.dev",
+        )
+
+    assert result == {"pk": 42}
+    assert mock_request.call_count == 2
+    first_call = mock_request.call_args_list[0]
+    second_call = mock_request.call_args_list[1]
+    assert first_call.args == (
+        "POST",
+        "https://authentik.example.com/api/v3/core/users/",
+    )
+    assert second_call.args == (
+        "POST",
+        "https://authentik.example.com/api/v3/core/users/",
+    )
+    assert first_call.kwargs["json"] == second_call.kwargs["json"]
+    assert first_call.kwargs["allow_redirects"] is False
+    assert second_call.kwargs["allow_redirects"] is False
 
 
 def test_send_recovery_email_posts_required_stage() -> None:
@@ -78,6 +122,7 @@ def test_send_recovery_email_posts_required_stage() -> None:
         params=None,
         json={"email_stage": "3fa85f64-5717-4562-b3fc-2c963f66afa6"},
         timeout=20.0,
+        allow_redirects=False,
     )
 
 

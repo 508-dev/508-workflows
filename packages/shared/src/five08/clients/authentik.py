@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from urllib.parse import urljoin
 
 import requests
 
@@ -42,6 +43,14 @@ class AuthentikClient:
             "Authorization": f"Bearer {self.api_token}",
             "Content-Type": "application/json",
         }
+
+    @staticmethod
+    def _redirect_location(response: requests.Response) -> str | None:
+        location = response.headers.get("Location")
+        if not isinstance(location, str):
+            return None
+        normalized = location.strip()
+        return normalized or None
 
     @staticmethod
     def _normalize_error_text(value: Any) -> str:
@@ -87,30 +96,59 @@ class AuthentikClient:
     ) -> Any:
         """Send one request to the Authentik admin API."""
         url = f"{self.base_url}/{path.lstrip('/')}"
-        logger.debug(
-            "Authentik request method=%s path=%s params=%s payload_keys=%s",
-            method.upper(),
-            path,
-            params,
-            sorted(payload.keys()) if isinstance(payload, dict) else None,
-        )
+        response: requests.Response | None = None
+        request_method = method.upper()
+        redirect_limit = 5
 
-        try:
-            response = requests.request(
-                method.upper(),
-                url,
-                headers=self._headers(),
-                params=params,
-                json=payload,
-                timeout=self.timeout_seconds,
+        for redirect_count in range(redirect_limit):
+            logger.debug(
+                "Authentik request method=%s path=%s params=%s payload_keys=%s redirect_count=%s",
+                request_method,
+                path,
+                params,
+                sorted(payload.keys()) if isinstance(payload, dict) else None,
+                redirect_count,
             )
-        except requests.RequestException as exc:
-            raise AuthentikAPIError(f"HTTP request failed: {exc}") from exc
+
+            try:
+                response = requests.request(
+                    request_method,
+                    url,
+                    headers=self._headers(),
+                    params=params,
+                    json=payload,
+                    timeout=self.timeout_seconds,
+                    allow_redirects=False,
+                )
+            except requests.RequestException as exc:
+                raise AuthentikAPIError(f"HTTP request failed: {exc}") from exc
+
+            if response.status_code not in {301, 302, 307, 308}:
+                break
+
+            location = self._redirect_location(response)
+            if not location:
+                break
+
+            redirected_url = urljoin(url, location)
+            logger.debug(
+                "Authentik redirect method=%s from=%s to=%s status=%s",
+                request_method,
+                url,
+                redirected_url,
+                response.status_code,
+            )
+            url = redirected_url
+        else:
+            raise AuthentikAPIError("Too many redirects from Authentik API.")
+
+        if response is None:
+            raise AuthentikAPIError("No response received from Authentik API.")
 
         self.status_code = response.status_code
         logger.debug(
             "Authentik response method=%s path=%s status=%s",
-            method.upper(),
+            request_method,
             path,
             response.status_code,
         )
@@ -118,7 +156,7 @@ class AuthentikClient:
             message = self._response_error_summary(response)
             logger.debug(
                 "Authentik error method=%s path=%s status=%s summary=%s",
-                method.upper(),
+                request_method,
                 path,
                 response.status_code,
                 message,
