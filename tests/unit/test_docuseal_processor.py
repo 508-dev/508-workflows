@@ -104,6 +104,7 @@ def test_docuseal_processor_skips_role_grant_without_bot_base_url() -> None:
 
     with (
         patch("five08.worker.crm.docuseal_processor.EspoClient", return_value=mock_api),
+        patch("five08.worker.crm.docuseal_processor.logger.warning") as mock_warning,
         patch(
             "five08.worker.crm.docuseal_processor.settings.discord_bot_internal_base_url",
             " ",
@@ -126,6 +127,11 @@ def test_docuseal_processor_skips_role_grant_without_bot_base_url() -> None:
     assert result["success"] is True
     assert result["member_role"]["status"] == "bot_endpoint_not_configured"
     mock_grant_role.assert_not_called()
+    mock_warning.assert_called_once_with(
+        "Skipping Member role grant for contact_id=%s: "
+        "DISCORD_BOT_INTERNAL_BASE_URL is not configured",
+        "contact-1",
+    )
 
 
 def test_docuseal_processor_skips_role_grant_without_api_secret() -> None:
@@ -138,6 +144,7 @@ def test_docuseal_processor_skips_role_grant_without_api_secret() -> None:
 
     with (
         patch("five08.worker.crm.docuseal_processor.EspoClient", return_value=mock_api),
+        patch("five08.worker.crm.docuseal_processor.logger.warning") as mock_warning,
         patch(
             "five08.worker.crm.docuseal_processor.settings.api_shared_secret",
             " ",
@@ -156,6 +163,11 @@ def test_docuseal_processor_skips_role_grant_without_api_secret() -> None:
     assert result["success"] is True
     assert result["member_role"]["status"] == "api_secret_not_configured"
     mock_grant_role.assert_not_called()
+    mock_warning.assert_called_once_with(
+        "Skipping Member role grant for contact_id=%s: "
+        "API_SHARED_SECRET is not configured",
+        "contact-1",
+    )
 
 
 @pytest.mark.parametrize(
@@ -201,6 +213,45 @@ def test_docuseal_processor_reads_supported_discord_id_aliases(
     assert result["discord_user_id"] == field_value
     assert result["member_role"]["status"] == "applied"
     assert mock_grant_role.call_args.kwargs["discord_user_id"] == field_value
+
+
+def test_docuseal_processor_reads_discord_id_from_username_fallback() -> None:
+    """Mention-style cDiscordUsername values should still resolve to an ID."""
+    mock_api = Mock()
+    mock_api.request.side_effect = [
+        {
+            "list": [
+                {
+                    "id": "contact-1",
+                    "cDiscordUsername": "janedoe (ID: 987654321)",
+                }
+            ]
+        },
+        {"updated": True},
+    ]
+
+    with (
+        patch("five08.worker.crm.docuseal_processor.EspoClient", return_value=mock_api),
+        patch(
+            "five08.worker.crm.docuseal_processor.settings.api_shared_secret",
+            "top-secret",
+        ),
+        patch(
+            "five08.worker.crm.docuseal_processor.grant_member_role_for_signed_agreement",
+            return_value={"status": "applied"},
+        ) as mock_grant_role,
+    ):
+        processor = DocusealAgreementProcessor()
+        result = processor.process_agreement(
+            email="member@508.dev",
+            completed_at="2026-02-25T12:00:00Z",
+            submission_id=420,
+        )
+
+    assert result["success"] is True
+    assert result["discord_user_id"] == "987654321"
+    assert result["member_role"]["status"] == "applied"
+    assert mock_grant_role.call_args.kwargs["discord_user_id"] == "987654321"
 
 
 def test_docuseal_processor_raises_on_invalid_completed_at() -> None:
@@ -305,6 +356,7 @@ def test_docuseal_processor_role_assignment_error_is_best_effort() -> None:
 
     with (
         patch("five08.worker.crm.docuseal_processor.EspoClient", return_value=mock_api),
+        patch("five08.worker.crm.docuseal_processor.logger.warning") as mock_warning,
         patch(
             "five08.worker.crm.docuseal_processor.settings.api_shared_secret",
             "top-secret",
@@ -325,3 +377,11 @@ def test_docuseal_processor_role_assignment_error_is_best_effort() -> None:
     assert result["member_role"]["status"] == "error"
     assert result["member_role"]["discord_user_id"] == "1234"
     assert "status code is 403" in result["member_role"]["error"]
+    mock_warning.assert_called_once()
+    warning_args = mock_warning.call_args.args
+    assert (
+        warning_args[0] == "Best-effort Member role assignment failed contact_id=%s: %s"
+    )
+    assert warning_args[1] == "contact-1"
+    assert "1234" not in str(warning_args[2])
+    assert "status code is 403" in str(warning_args[2])

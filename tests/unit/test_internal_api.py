@@ -117,16 +117,27 @@ class TestInternalAPIRoutes:
         assert response.status == 401
         assert json.loads(response.body.decode("utf-8")) == {"error": "unauthorized"}
 
-    def test_resolve_target_guild_falls_back_to_first_guild(
+    def test_resolve_target_guild_uses_only_connected_guild_when_unconfigured(
         self, internal_api_routes, monkeypatch: pytest.MonkeyPatch
     ):
-        """Without configured guild id, the first connected guild is used."""
+        """Without a configured guild id, one connected guild is unambiguous."""
         monkeypatch.setattr(
             "five08.discord_bot.utils.internal_api.settings.discord_server_id",
             None,
         )
-        first_guild = Mock()
-        second_guild = Mock()
-        internal_api_routes.bot.guilds = [first_guild, second_guild]
+        only_guild = Mock()
+        internal_api_routes.bot.guilds = [only_guild]
 
-        assert internal_api_routes._resolve_target_guild() is first_guild
+        assert internal_api_routes._resolve_target_guild() is only_guild
+
+    def test_resolve_target_guild_returns_none_when_unconfigured_and_ambiguous(
+        self, internal_api_routes, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Without a configured guild id, multiple connected guilds should fail closed."""
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.settings.discord_server_id",
+            None,
+        )
+        internal_api_routes.bot.guilds = [Mock(), Mock()]
+
+        assert internal_api_routes._resolve_target_guild() is None

@@ -61,7 +61,7 @@ class InternalAPIRoutes:
             except ValueError:
                 return None
 
-        if self.bot.guilds:
+        if len(self.bot.guilds) == 1:
             return self.bot.guilds[0]
         return None
 

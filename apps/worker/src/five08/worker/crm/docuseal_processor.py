@@ -1,6 +1,7 @@
 """Docuseal member agreement processing workflow."""
 
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -13,6 +14,7 @@ from five08.worker.config import settings
 from five08.worker.masking import mask_email
 
 logger = logging.getLogger(__name__)
+_DISCORD_ID_RE = re.compile(r"\(ID:\s*(\d+)\)")
 _DISCORD_USER_ID_FIELDS = (
     "cDiscordUserId",
     "discordUserId",
@@ -53,7 +55,13 @@ class DocusealAgreementProcessor:
             candidate = str(contact.get(key) or "").strip()
             if candidate:
                 return candidate
-        return None
+        raw_username = str(contact.get("cDiscordUsername") or "").strip()
+        if not raw_username:
+            return None
+        match = _DISCORD_ID_RE.search(raw_username)
+        if match is None:
+            return None
+        return match.group(1)
 
     def _grant_member_role(
         self,
@@ -71,10 +79,20 @@ class DocusealAgreementProcessor:
 
         base_url = settings.discord_bot_internal_base_url.strip()
         if not base_url:
+            logger.warning(
+                "Skipping Member role grant for contact_id=%s: "
+                "DISCORD_BOT_INTERNAL_BASE_URL is not configured",
+                contact_id,
+            )
             return {"status": "bot_endpoint_not_configured"}
 
         api_secret = str(settings.api_shared_secret or "").strip()
         if not api_secret:
+            logger.warning(
+                "Skipping Member role grant for contact_id=%s: "
+                "API_SHARED_SECRET is not configured",
+                contact_id,
+            )
             return {"status": "api_secret_not_configured"}
 
         try:
@@ -89,9 +107,8 @@ class DocusealAgreementProcessor:
             )
         except DiscordBotAPIError as exc:
             logger.warning(
-                "Best-effort Member role assignment failed contact_id=%s discord_user_id=%s: %s",
+                "Best-effort Member role assignment failed contact_id=%s: %s",
                 contact_id,
-                normalized_user_id,
                 exc,
             )
             return {
