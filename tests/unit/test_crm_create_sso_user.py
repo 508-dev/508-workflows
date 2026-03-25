@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from five08.discord_bot.cogs.crm import CRMCog
+from five08.clients.espo import EspoAPIError
 
 
 @pytest.fixture
@@ -88,9 +89,11 @@ async def test_create_sso_user_creates_links_and_sends_recovery_email(
         "Contact/crm-123",
         {"cSsoID": "42"},
     )
+    followup_kwargs = mock_interaction.followup.send.call_args.kwargs
     message = mock_interaction.followup.send.call_args.args[0]
     assert "Created SSO user" in message
     assert "Recovery email: sent." in message
+    assert followup_kwargs["ephemeral"] is True
     mock_audit.assert_called_once()
 
 
@@ -129,8 +132,14 @@ async def test_create_sso_user_links_existing_user_without_recovery_email(
 
     authentik_client.create_user.assert_not_called()
     authentik_client.send_recovery_email.assert_not_called()
+    mock_espo_api.request.assert_called_once_with(
+        "PUT",
+        "Contact/crm-123",
+        {"cSsoID": "42"},
+    )
     message = mock_interaction.followup.send.call_args.args[0]
     assert "Linked the existing SSO user" in message
+    assert mock_interaction.followup.send.call_args.kwargs["ephemeral"] is True
 
 
 @pytest.mark.asyncio
@@ -165,6 +174,7 @@ async def test_create_sso_user_rejects_superuser_match(
 
     message = mock_interaction.followup.send.call_args.args[0]
     assert "superuser" in message
+    assert mock_interaction.followup.send.call_args.kwargs["ephemeral"] is True
 
 
 @pytest.mark.asyncio
@@ -203,3 +213,88 @@ async def test_create_sso_user_respects_already_linked_non_superuser(
     mock_espo_api.request.assert_not_called()
     message = mock_interaction.followup.send.call_args.args[0]
     assert "already linked to the matching SSO user" in message
+    assert mock_interaction.followup.send.call_args.kwargs["ephemeral"] is True
+
+
+@pytest.mark.asyncio
+async def test_create_sso_user_reports_partial_success_when_crm_update_fails(
+    cog: CRMCog, mock_interaction: AsyncMock, mock_espo_api: Mock
+) -> None:
+    contact = {
+        "id": "crm-123",
+        "name": "Jane Doe",
+        "c508Email": "jane@508.dev",
+        "cSsoID": None,
+    }
+    authentik_client = Mock()
+    authentik_client.find_users_by_username_or_email.return_value = []
+    authentik_client.create_user.return_value = {
+        "pk": 42,
+        "username": "jane",
+        "email": "jane@508.dev",
+        "name": "Jane Doe",
+        "is_superuser": False,
+    }
+    authentik_client.resolve_email_stage_id.return_value = "stage-id"
+    authentik_client.send_recovery_email.return_value = None
+    mock_espo_api.request.side_effect = EspoAPIError("crm update failed")
+
+    with (
+        patch.object(
+            cog,
+            "_search_contacts_for_lookup",
+            new=AsyncMock(return_value=[contact]),
+        ),
+        patch.object(cog, "_authentik_client", return_value=authentik_client),
+        patch.object(cog, "_audit_command_safe") as mock_audit,
+    ):
+        await cog.create_sso_user.callback(cog, mock_interaction, search_term="jane")
+
+    message = mock_interaction.followup.send.call_args.args[0]
+    assert "Created the SSO user, but failed to update CRM" in message
+    assert "SSO user ID: `42`" in message
+    assert mock_interaction.followup.send.call_args.kwargs["ephemeral"] is True
+    audit_metadata = mock_audit.call_args.kwargs["metadata"]
+    assert audit_metadata["partial_user_id"] == 42
+    assert audit_metadata["partial_success"] == "sso_created_crm_update_failed"
+
+
+@pytest.mark.asyncio
+async def test_create_sso_user_reports_partial_success_when_local_validation_fails(
+    cog: CRMCog, mock_interaction: AsyncMock
+) -> None:
+    contact = {
+        "id": "crm-123",
+        "name": "Jane Doe",
+        "c508Email": "jane@508.dev",
+        "cSsoID": None,
+    }
+    authentik_client = Mock()
+    authentik_client.find_users_by_username_or_email.return_value = []
+    authentik_client.create_user.return_value = {
+        "pk": 42,
+        "username": "other-user",
+        "email": "jane@508.dev",
+        "name": "Jane Doe",
+        "is_superuser": False,
+    }
+    authentik_client.resolve_email_stage_id.return_value = "stage-id"
+
+    with (
+        patch.object(
+            cog,
+            "_search_contacts_for_lookup",
+            new=AsyncMock(return_value=[contact]),
+        ),
+        patch.object(cog, "_authentik_client", return_value=authentik_client),
+        patch.object(cog, "_audit_command_safe") as mock_audit,
+    ):
+        await cog.create_sso_user.callback(cog, mock_interaction, search_term="jane")
+
+    message = mock_interaction.followup.send.call_args.args[0]
+    assert "Created the SSO user, but failed to validate" in message
+    assert "SSO user ID: `42`" in message
+    assert mock_interaction.followup.send.call_args.kwargs["ephemeral"] is True
+    audit_metadata = mock_audit.call_args.kwargs["metadata"]
+    assert audit_metadata["partial_user_id"] == 42
+    assert audit_metadata["partial_success"] == "sso_created_validation_failed"

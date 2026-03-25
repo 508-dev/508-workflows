@@ -161,6 +161,59 @@ class AuthentikClient:
             raise AuthentikAPIError("API response is not a JSON object")
         return response
 
+    @staticmethod
+    def _pagination_next_page(response: dict[str, Any]) -> int | None:
+        pagination = response.get("pagination")
+        if not isinstance(pagination, dict):
+            return None
+
+        raw_next = pagination.get("next")
+        if isinstance(raw_next, int):
+            return raw_next if raw_next > 0 else None
+        if isinstance(raw_next, str):
+            normalized = raw_next.strip()
+            if normalized.isdigit():
+                next_page = int(normalized)
+                return next_page if next_page > 0 else None
+
+        raw_current = pagination.get("current")
+        raw_total_pages = pagination.get("total_pages")
+        if isinstance(raw_current, int) and isinstance(raw_total_pages, int):
+            if raw_current < raw_total_pages:
+                return raw_current + 1
+
+        return None
+
+    def _paginated_results(
+        self,
+        *,
+        list_method: Any,
+        params: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        normalized_params = dict(params or {})
+        page = 1
+        results: list[dict[str, Any]] = []
+        seen_pages: set[int] = set()
+
+        while True:
+            page_params = dict(normalized_params)
+            page_params["page"] = page
+            response = list_method(params=page_params)
+            raw_results = response.get("results")
+            page_results = raw_results if isinstance(raw_results, list) else []
+            for item in page_results:
+                if isinstance(item, dict):
+                    results.append(item)
+
+            next_page = self._pagination_next_page(response)
+            if next_page is None or next_page in seen_pages:
+                break
+
+            seen_pages.add(page)
+            page = next_page
+
+        return results
+
     def create_user(
         self,
         *,
@@ -266,11 +319,10 @@ class AuthentikClient:
             normalized_name,
             page_size,
         )
-        response = self.list_email_stages(
-            params={"name": normalized_name, "page_size": page_size}
+        results = self._paginated_results(
+            list_method=self.list_email_stages,
+            params={"name": normalized_name, "page_size": page_size},
         )
-        raw_results = response.get("results")
-        results = raw_results if isinstance(raw_results, list) else []
         matches = [
             stage
             for stage in results
@@ -316,9 +368,10 @@ class AuthentikClient:
             ),
             ({"email": email, "page_size": page_size}, "email", normalized_email),
         ):
-            response = self.list_users(params=params)
-            raw_results = response.get("results")
-            results = raw_results if isinstance(raw_results, list) else []
+            results = self._paginated_results(
+                list_method=self.list_users,
+                params=params,
+            )
             for user in results:
                 if not isinstance(user, dict):
                     continue

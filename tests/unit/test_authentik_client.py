@@ -150,8 +150,44 @@ def test_resolve_email_stage_id_looks_up_exact_stage_name() -> None:
 
     assert result == "3fa85f64-5717-4562-b3fc-2c963f66afa6"
     mock_list.assert_called_once_with(
-        params={"name": "default-recovery-email", "page_size": 20}
+        params={"name": "default-recovery-email", "page_size": 20, "page": 1}
     )
+
+
+def test_resolve_email_stage_id_checks_later_pages() -> None:
+    """Stage lookup should continue pagination before declaring a stage missing."""
+    client = AuthentikClient("https://authentik.example.com", "secret")
+
+    with patch.object(
+        client,
+        "list_email_stages",
+        side_effect=[
+            {
+                "pagination": {"current": 1, "total_pages": 2, "next": 2},
+                "results": [{"pk": "ignore", "name": "other-stage"}],
+            },
+            {
+                "pagination": {"current": 2, "total_pages": 2, "next": 0},
+                "results": [
+                    {
+                        "pk": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                        "name": "default-recovery-email",
+                    }
+                ],
+            },
+        ],
+    ) as mock_list:
+        result = client.resolve_email_stage_id(
+            stage_name="default-recovery-email",
+        )
+
+    assert result == "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+    assert mock_list.call_args_list[0].kwargs == {
+        "params": {"name": "default-recovery-email", "page_size": 20, "page": 1}
+    }
+    assert mock_list.call_args_list[1].kwargs == {
+        "params": {"name": "default-recovery-email", "page_size": 20, "page": 2}
+    }
 
 
 def test_resolve_email_stage_id_raises_when_stage_name_missing() -> None:
@@ -185,6 +221,45 @@ def test_find_users_by_username_or_email_deduplicates_matches() -> None:
 
     assert result == [{"pk": 42, "username": "jane", "email": "jane@508.dev"}]
     assert mock_list.call_count == 2
+
+
+def test_find_users_by_username_or_email_checks_later_pages() -> None:
+    """User search should continue pagination before deciding no exact match exists."""
+    client = AuthentikClient("https://authentik.example.com", "secret")
+
+    with patch.object(
+        client,
+        "list_users",
+        side_effect=[
+            {
+                "pagination": {"current": 1, "total_pages": 2, "next": 2},
+                "results": [{"pk": 1, "username": "other", "email": "other@508.dev"}],
+            },
+            {
+                "pagination": {"current": 2, "total_pages": 2, "next": 0},
+                "results": [{"pk": 42, "username": "jane", "email": "jane@508.dev"}],
+            },
+            {
+                "pagination": {"current": 1, "total_pages": 1, "next": 0},
+                "results": [],
+            },
+        ],
+    ) as mock_list:
+        result = client.find_users_by_username_or_email(
+            username="jane",
+            email="jane@508.dev",
+        )
+
+    assert result == [{"pk": 42, "username": "jane", "email": "jane@508.dev"}]
+    assert mock_list.call_args_list[0].kwargs == {
+        "params": {"username": "jane", "page_size": 20, "page": 1}
+    }
+    assert mock_list.call_args_list[1].kwargs == {
+        "params": {"username": "jane", "page_size": 20, "page": 2}
+    }
+    assert mock_list.call_args_list[2].kwargs == {
+        "params": {"email": "jane@508.dev", "page_size": 20, "page": 1}
+    }
 
 
 def test_find_users_by_username_or_email_filters_non_exact_matches() -> None:

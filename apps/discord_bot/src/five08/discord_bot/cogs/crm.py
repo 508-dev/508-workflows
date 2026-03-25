@@ -335,7 +335,10 @@ class CreateSSOUserSelectionButton(discord.ui.Button["CreateSSOUserSelectionView
         """Handle contact selection and continue SSO provisioning."""
         try:
             if not self.view:
-                await interaction.response.send_message("❌ View not found.")
+                await interaction.response.send_message(
+                    "❌ View not found.",
+                    ephemeral=True,
+                )
                 return
             if interaction.user.id != self.requester_id:
                 await interaction.response.send_message(
@@ -379,7 +382,8 @@ class CreateSSOUserSelectionButton(discord.ui.Button["CreateSSOUserSelectionView
         except Exception as exc:
             logger.error("Error in create_sso_user selection callback: %s", exc)
             await interaction.followup.send(
-                "❌ An error occurred while handling the selection."
+                "❌ An error occurred while handling the selection.",
+                ephemeral=True,
             )
 
 
@@ -431,8 +435,8 @@ class CreateSSOUserSelectionView(discord.ui.View):
                 )
         self.crm_cog._audit_command_safe(
             interaction=self.original_interaction,
-            action="crm.create_sso_user.select_contact",
-            result="success",
+            action="crm.create_sso_user.selection_timeout",
+            result="denied",
             metadata={
                 "search_term": self.search_term,
                 "requires_selection": True,
@@ -6453,7 +6457,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     },
                 )
                 await interaction.followup.send(
-                    "❌ Selected contact is missing a CRM ID."
+                    "❌ Selected contact is missing a CRM ID.",
+                    ephemeral=True,
                 )
                 return
 
@@ -6607,16 +6612,49 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 resource_type="crm_contact",
                 resource_id=contact_id,
             )
-            await interaction.followup.send("\n".join(message_lines))
+            await interaction.followup.send(
+                "\n".join(message_lines),
+                ephemeral=True,
+            )
         except ValueError as exc:
             message = self._sanitize_error_message_for_discord(exc)
+            if created_user is not None:
+                try:
+                    partial_user_id = self._authentik_user_pk(created_user)
+                except ValueError:
+                    partial_user_id = None
+                self._audit_command_safe(
+                    interaction=interaction,
+                    action="crm.create_sso_user",
+                    result="error",
+                    metadata={
+                        "search_term": search_term,
+                        "partial_user_id": partial_user_id,
+                        "error": message,
+                        "partial_success": "sso_created_validation_failed",
+                    },
+                )
+                partial_id_line = (
+                    f"\nSSO user ID: `{partial_user_id}`"
+                    if partial_user_id is not None
+                    else ""
+                )
+                await interaction.followup.send(
+                    "⚠️ Created the SSO user, but failed to validate the Authentik "
+                    f"response locally.{partial_id_line}\nError: `{message}`",
+                    ephemeral=True,
+                )
+                return
             self._audit_command_safe(
                 interaction=interaction,
                 action="crm.create_sso_user",
                 result="error",
                 metadata={"search_term": search_term, "reason": message},
             )
-            await interaction.followup.send(f"❌ {message}")
+            await interaction.followup.send(
+                f"❌ {message}",
+                ephemeral=True,
+            )
         except EspoAPIError as exc:
             message = self._sanitize_error_message_for_discord(exc)
             if created_user is not None:
@@ -6635,7 +6673,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 await interaction.followup.send(
                     "⚠️ Created the SSO user, but failed to update CRM "
                     f"`{SSO_ID_FIELD}`.\nSSO user ID: `{partial_user_id}`\n"
-                    f"Error: `{message}`"
+                    f"Error: `{message}`",
+                    ephemeral=True,
                 )
                 return
 
@@ -6645,7 +6684,10 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 result="error",
                 metadata={"search_term": search_term, "error": message},
             )
-            await interaction.followup.send(f"❌ CRM API error: {message}")
+            await interaction.followup.send(
+                f"❌ CRM API error: {message}",
+                ephemeral=True,
+            )
         except AuthentikAPIError as exc:
             message = self._sanitize_error_message_for_discord(exc)
             self._audit_command_safe(
@@ -6654,7 +6696,10 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 result="error",
                 metadata={"search_term": search_term, "error": message},
             )
-            await interaction.followup.send(f"❌ Authentik API error: {message}")
+            await interaction.followup.send(
+                f"❌ Authentik API error: {message}",
+                ephemeral=True,
+            )
         except Exception as exc:
             logger.error("Unexpected error in create_sso_user: %s", exc)
             self._audit_command_safe(
@@ -6664,7 +6709,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 metadata={"search_term": search_term, "error": str(exc)},
             )
             await interaction.followup.send(
-                "❌ An unexpected error occurred while creating the SSO user."
+                "❌ An unexpected error occurred while creating the SSO user.",
+                ephemeral=True,
             )
 
     @app_commands.command(
@@ -6844,7 +6890,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     metadata={"search_term": search_term, "contacts_found": 0},
                 )
                 await interaction.followup.send(
-                    f"❌ No contact found for: `{search_term}`"
+                    f"❌ No contact found for: `{search_term}`",
+                    ephemeral=True,
                 )
                 return
 
@@ -6880,7 +6927,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 metadata={"search_term": search_term, "error": str(exc)},
             )
             await interaction.followup.send(
-                "❌ An unexpected error occurred while preparing the SSO user flow."
+                "❌ An unexpected error occurred while preparing the SSO user flow.",
+                ephemeral=True,
             )
 
     @app_commands.command(
