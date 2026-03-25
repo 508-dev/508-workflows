@@ -194,6 +194,7 @@ def test_request_raises_on_non_success_status() -> None:
     mock_response.reason = "Forbidden"
     mock_response.text = '{"detail":"forbidden"}'
     mock_response.content = b'{"detail":"forbidden"}'
+    mock_response.json.return_value = {"detail": "forbidden"}
 
     with patch(
         "five08.clients.authentik.requests.request",
@@ -201,6 +202,6 @@ def test_request_raises_on_non_success_status() -> None:
     ):
         with pytest.raises(
             AuthentikAPIError,
-            match="Authentik request failed with status 403: Forbidden",
+            match="Authentik request failed with status 403: Forbidden \\(forbidden\\)",
         ):
             AuthentikClient("https://authentik.example.com", "secret").get_user(42)

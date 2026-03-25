@@ -39,6 +39,40 @@ class AuthentikClient:
             "Content-Type": "application/json",
         }
 
+    @staticmethod
+    def _normalize_error_text(value: Any) -> str:
+        text = " ".join(str(value or "").split()).strip()
+        if len(text) > 200:
+            return text[:200].rstrip() + "..."
+        return text
+
+    @classmethod
+    def _response_error_summary(cls, response: requests.Response) -> str:
+        reason = str(getattr(response, "reason", "") or "").strip() or "Upstream error"
+        try:
+            payload = response.json()
+        except ValueError:
+            return reason
+
+        detail = ""
+        if isinstance(payload, dict):
+            if "detail" in payload:
+                detail = cls._normalize_error_text(payload.get("detail"))
+            elif "non_field_errors" in payload:
+                detail = cls._normalize_error_text(payload.get("non_field_errors"))
+            else:
+                for key, value in payload.items():
+                    normalized_value = cls._normalize_error_text(value)
+                    if normalized_value:
+                        detail = f"{key}: {normalized_value}"
+                        break
+        elif isinstance(payload, list) and payload:
+            detail = cls._normalize_error_text(payload[0])
+
+        if not detail:
+            return reason
+        return f"{reason} ({detail})"
+
     def request(
         self,
         method: str,
@@ -64,9 +98,7 @@ class AuthentikClient:
 
         self.status_code = response.status_code
         if not 200 <= response.status_code < 300:
-            message = str(getattr(response, "reason", "") or "").strip()
-            if not message:
-                message = "Upstream error"
+            message = self._response_error_summary(response)
             raise AuthentikAPIError(
                 f"Authentik request failed with status {response.status_code}: {message}"
             )

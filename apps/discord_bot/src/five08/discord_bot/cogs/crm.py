@@ -348,7 +348,7 @@ class CreateSSOUserSelectionButton(discord.ui.Button["CreateSSOUserSelectionView
             contact_id = str(self.contact.get("id") or "")
             self.view.crm_cog._audit_command_safe(
                 interaction=interaction,
-                action="crm.create_sso_user",
+                action="crm.create_sso_user.select_contact",
                 result="success",
                 metadata={
                     "search_term": self.view.search_term,
@@ -431,7 +431,7 @@ class CreateSSOUserSelectionView(discord.ui.View):
                 )
         self.crm_cog._audit_command_safe(
             interaction=self.original_interaction,
-            action="crm.create_sso_user",
+            action="crm.create_sso_user.select_contact",
             result="success",
             metadata={
                 "search_term": self.search_term,
@@ -6816,7 +6816,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             if not contacts:
                 self._audit_command(
                     interaction=interaction,
-                    action="crm.create_sso_user",
+                    action="crm.create_sso_user.lookup",
                     result="success",
                     metadata={"search_term": search_term, "contacts_found": 0},
                 )
@@ -6828,7 +6828,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             if len(contacts) > 1:
                 self._audit_command(
                     interaction=interaction,
-                    action="crm.create_sso_user",
+                    action="crm.create_sso_user.lookup",
                     result="success",
                     metadata={
                         "search_term": search_term,
