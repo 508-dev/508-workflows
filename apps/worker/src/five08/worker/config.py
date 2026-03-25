@@ -2,7 +2,7 @@
 
 from urllib.parse import urlparse
 
-from pydantic import Field, PrivateAttr, field_validator, model_validator
+from pydantic import Field, PrivateAttr, model_validator
 
 from five08.settings import SharedSettings
 
@@ -10,7 +10,6 @@ from five08.settings import SharedSettings
 class WorkerSettings(SharedSettings):
     """Worker-specific settings layered on top of shared stack settings."""
 
-    _crm_linkedin_field: str = PrivateAttr(default="cLinkedIn")
     _crm_intake_completed_field: str = PrivateAttr(default="")
 
     worker_name: str = "worker"
@@ -27,10 +26,8 @@ class WorkerSettings(SharedSettings):
     resume_ai_model: str = "gpt-5-mini"
     resume_extractor_max_tokens: int = 2000
     resume_extractor_version: str = "v1"
-    docuseal_member_agreement_template_id: int | None = None
-
     max_file_size_mb: int = 10
-    allowed_file_types: str = "pdf,docx,txt"
+    allowed_file_types: str = "pdf,docx"
     max_attachments_per_contact: int = 3
     crm_sync_enabled: bool = True
     crm_sync_interval_seconds: int = 900
@@ -109,37 +106,10 @@ class WorkerSettings(SharedSettings):
             )
         return self
 
-    @field_validator("docuseal_member_agreement_template_id", mode="before")
-    @classmethod
-    def _normalize_docuseal_member_agreement_template_id(
-        cls,
-        value: object,
-    ) -> int | None:
-        if value is None:
-            return None
-        if isinstance(value, int):
-            return value
-        if isinstance(value, str):
-            normalized = value.strip()
-            if not normalized:
-                return None
-            return int(normalized)
-        raise TypeError("DOCUSEAL_MEMBER_AGREEMENT_TEMPLATE_ID must be an integer")
-
     @property
     def allowed_file_extensions(self) -> set[str]:
         """Allowed resume file extensions."""
         return {ext.strip().lower() for ext in self.allowed_file_types.split(",")}
-
-    @property
-    def crm_linkedin_field(self) -> str:
-        """Resume/profile sync always writes LinkedIn URLs to the canonical CRM field."""
-        return self._crm_linkedin_field
-
-    @crm_linkedin_field.setter
-    def crm_linkedin_field(self, value: str) -> None:
-        """Allow controlled runtime overrides without reintroducing env loading."""
-        self._crm_linkedin_field = value
 
     @property
     def crm_intake_completed_field(self) -> str:

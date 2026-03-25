@@ -550,6 +550,195 @@ def normalize_city(value: Any, *, strip_parenthetical: bool = False) -> str | No
     return _title_case_location(normalized)
 
 
+_COUNTRY_TIMEZONE: dict[str, str] = {
+    "afghanistan": "UTC+04:30",
+    "algeria": "UTC+01:00",
+    "argentina": "UTC-03:00",
+    "armenia": "UTC+04:00",
+    "austria": "UTC+01:00",
+    "azerbaijan": "UTC+04:00",
+    "bangladesh": "UTC+06:00",
+    "belgium": "UTC+01:00",
+    "bolivia": "UTC-04:00",
+    "bulgaria": "UTC+02:00",
+    "cameroon": "UTC+01:00",
+    "cambodia": "UTC+07:00",
+    "chile": "UTC-04:00",
+    "china": "UTC+08:00",
+    "colombia": "UTC-05:00",
+    "croatia": "UTC+01:00",
+    "czech republic": "UTC+01:00",
+    "czechia": "UTC+01:00",
+    "denmark": "UTC+01:00",
+    "ecuador": "UTC-05:00",
+    "egypt": "UTC+02:00",
+    "estonia": "UTC+02:00",
+    "ethiopia": "UTC+03:00",
+    "finland": "UTC+02:00",
+    "france": "UTC+01:00",
+    "georgia": "UTC+04:00",
+    "germany": "UTC+01:00",
+    "ghana": "UTC+00:00",
+    "greece": "UTC+02:00",
+    "hong kong": "UTC+08:00",
+    "hungary": "UTC+01:00",
+    "india": "UTC+05:30",
+    "iran": "UTC+03:30",
+    "iraq": "UTC+03:00",
+    "ireland": "UTC+00:00",
+    "israel": "UTC+02:00",
+    "italy": "UTC+01:00",
+    "ivory coast": "UTC+00:00",
+    "japan": "UTC+09:00",
+    "kenya": "UTC+03:00",
+    "korea": "UTC+09:00",
+    "laos": "UTC+07:00",
+    "latvia": "UTC+02:00",
+    "lithuania": "UTC+02:00",
+    "malaysia": "UTC+08:00",
+    "mongolia": "UTC+08:00",
+    "morocco": "UTC+01:00",
+    "myanmar": "UTC+06:30",
+    "nepal": "UTC+05:45",
+    "netherlands": "UTC+01:00",
+    "new zealand": "UTC+12:00",
+    "nigeria": "UTC+01:00",
+    "norway": "UTC+01:00",
+    "pakistan": "UTC+05:00",
+    "paraguay": "UTC-04:00",
+    "peru": "UTC-05:00",
+    "philippines": "UTC+08:00",
+    "poland": "UTC+01:00",
+    "portugal": "UTC+00:00",
+    "romania": "UTC+02:00",
+    "rwanda": "UTC+02:00",
+    "saudi arabia": "UTC+03:00",
+    "senegal": "UTC+00:00",
+    "serbia": "UTC+01:00",
+    "singapore": "UTC+08:00",
+    "south africa": "UTC+02:00",
+    "south korea": "UTC+09:00",
+    "spain": "UTC+01:00",
+    "sri lanka": "UTC+05:30",
+    "sweden": "UTC+01:00",
+    "switzerland": "UTC+01:00",
+    "taiwan": "UTC+08:00",
+    "tanzania": "UTC+03:00",
+    "thailand": "UTC+07:00",
+    "tunisia": "UTC+01:00",
+    "turkey": "UTC+03:00",
+    "uae": "UTC+04:00",
+    "uganda": "UTC+03:00",
+    "uk": "UTC+00:00",
+    "ukraine": "UTC+02:00",
+    "united arab emirates": "UTC+04:00",
+    "united kingdom": "UTC+00:00",
+    "uruguay": "UTC-03:00",
+    "uzbekistan": "UTC+05:00",
+    "venezuela": "UTC-04:00",
+    "vietnam": "UTC+07:00",
+    "zambia": "UTC+02:00",
+    "zimbabwe": "UTC+02:00",
+}
+_STATE_TIMEZONE: dict[str, str] = {
+    "arizona": "UTC-07:00",
+    "california": "UTC-08:00",
+    "colorado": "UTC-07:00",
+    "district of columbia": "UTC-05:00",
+    "georgia": "UTC-05:00",
+    "illinois": "UTC-06:00",
+    "massachusetts": "UTC-05:00",
+    "minnesota": "UTC-06:00",
+    "new york": "UTC-05:00",
+    "north carolina": "UTC-05:00",
+    "pennsylvania": "UTC-05:00",
+    "utah": "UTC-07:00",
+    "washington": "UTC-08:00",
+}
+_CITY_TIMEZONE: dict[str, str] = {
+    "atlanta": "UTC-05:00",
+    "berlin": "UTC+01:00",
+    "beijing": "UTC+08:00",
+    "brisbane": "UTC+10:00",
+    "boston": "UTC-05:00",
+    "calgary": "UTC-07:00",
+    "chicago": "UTC-06:00",
+    "dallas": "UTC-06:00",
+    "denver": "UTC-07:00",
+    "dubai": "UTC+04:00",
+    "garland": "UTC-06:00",
+    "houston": "UTC-06:00",
+    "london": "UTC+00:00",
+    "madrid": "UTC+01:00",
+    "melbourne": "UTC+10:00",
+    "mexico city": "UTC-06:00",
+    "miami": "UTC-05:00",
+    "minneapolis": "UTC-06:00",
+    "montreal": "UTC-05:00",
+    "moscow": "UTC+03:00",
+    "mumbai": "UTC+05:30",
+    "nairobi": "UTC+03:00",
+    "new york": "UTC-05:00",
+    "paris": "UTC+01:00",
+    "perth": "UTC+08:00",
+    "philadelphia": "UTC-05:00",
+    "phoenix": "UTC-07:00",
+    "rio de janeiro": "UTC-03:00",
+    "saint petersburg": "UTC+03:00",
+    "san francisco": "UTC-08:00",
+    "san diego": "UTC-08:00",
+    "salt lake city": "UTC-07:00",
+    "seattle": "UTC-08:00",
+    "seoul": "UTC+09:00",
+    "singapore": "UTC+08:00",
+    "sao paulo": "UTC-03:00",
+    "st. petersburg": "UTC+03:00",
+    "sydney": "UTC+10:00",
+    "tijuana": "UTC-08:00",
+    "tokyo": "UTC+09:00",
+    "toronto": "UTC-05:00",
+    "vancouver": "UTC-08:00",
+    "são paulo": "UTC-03:00",
+}
+_AMBIGUOUS_COUNTRY_TIMEZONE = frozenset(
+    {
+        "australia",
+        "brazil",
+        "canada",
+        "indonesia",
+        "mexico",
+        "russia",
+        "united states",
+        "us",
+        "usa",
+    }
+)
+_AMBIGUOUS_STATE_TIMEZONE = frozenset({"texas"})
+
+
+def infer_timezone_from_location(
+    *, country: str | None, state: str | None = None, city: str | None = None
+) -> str | None:
+    """Best-effort UTC offset from normalized city/state/country values."""
+    if city:
+        city_tz = _CITY_TIMEZONE.get(city.strip().lower())
+        if city_tz:
+            return city_tz
+    if state:
+        state_key = state.strip().lower()
+        if state_key in _AMBIGUOUS_STATE_TIMEZONE:
+            return None
+        state_tz = _STATE_TIMEZONE.get(state_key)
+        if state_tz:
+            return state_tz
+    if country:
+        country_key = country.strip().lower()
+        if country_key in _AMBIGUOUS_COUNTRY_TIMEZONE:
+            return None
+        return _COUNTRY_TIMEZONE.get(country_key)
+    return None
+
+
 def normalize_seniority(value: Any, *, empty_as_unknown: bool = False) -> str | None:
     if not isinstance(value, str):
         return None
@@ -600,6 +789,28 @@ def normalize_seniority(value: Any, *, empty_as_unknown: bool = False) -> str | 
     if normalized.startswith("lead "):
         return "senior"
     return "unknown"
+
+
+def format_seniority_label(
+    value: Any, *, default: str | None = "Unknown"
+) -> str | None:
+    """Return a human-friendly seniority label from a raw or normalized value."""
+    if value is None:
+        return default
+    normalized = str(value).strip().lower().replace("_", "-")
+    if not normalized:
+        return default
+    labels = {
+        "junior": "Junior",
+        "midlevel": "Mid-level",
+        "mid-level": "Mid-level",
+        "senior": "Senior",
+        "staff": "Staff",
+        "unknown": "Unknown",
+    }
+    if normalized in labels:
+        return labels[normalized]
+    return normalized.title()
 
 
 def normalize_role(value: Any, role_map: dict[str, str] | None = None) -> str | None:
@@ -707,3 +918,36 @@ def normalize_website_url(
     elif normalized.startswith("http://www."):
         normalized = normalized.replace("http://www.", "http://", 1)
     return normalized
+
+
+def normalized_website_identity_key(normalized_url: str) -> str | None:
+    try:
+        parsed = urlsplit(normalized_url)
+    except Exception:
+        return normalized_url.casefold()
+
+    netloc = parsed.netloc.casefold()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    path = re.sub(r"/+", "/", parsed.path or "").rstrip("/").casefold()
+    query = parsed.query.casefold()
+    key = f"{netloc}{path}"
+    if query:
+        key = f"{key}?{query}"
+    return key
+
+
+def website_identity_key(
+    value: str,
+    *,
+    allow_scheme_less: bool = True,
+    disallowed_host_predicate: Callable[[str], bool] | None = None,
+) -> str | None:
+    normalized = normalize_website_url(
+        value,
+        allow_scheme_less=allow_scheme_less,
+        disallowed_host_predicate=disallowed_host_predicate,
+    )
+    if normalized is None:
+        return None
+    return normalized_website_identity_key(normalized)

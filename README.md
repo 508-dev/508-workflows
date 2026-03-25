@@ -90,6 +90,11 @@ uv run --package worker worker-consumer
 uv run --package worker jobsctl --help
 # recent jobs (past hour by default):
 uv run --package worker jobsctl recent
+
+# EspoCRM REPL / search / batch updates
+uv run --package five08 crmctl repl
+uv run --package five08 crmctl search --where timezone__is_null=true --where location__is_not_null=true
+uv run --package five08 crmctl batch-update --where timezone__is_null=true --where location__is_not_null=true --update timezone=@location
 ```
 
 Or run the full stack with Docker Compose:
@@ -229,6 +234,49 @@ Use `.env.example` as the source of truth for defaults.
 
 # type check
 ./scripts/mypy.sh
+```
+
+## CRM REPL And Batch Updates
+
+For EspoCRM cleanup and bulk edits outside the Discord UI, use `crmctl` from the shared package.
+
+The REPL entrypoint is:
+
+```bash
+uv run --package five08 crmctl repl
+```
+
+Inside the REPL you get:
+
+- `search(**criteria)` for contact lookups
+- `get(contact_id)` for a mutable contact object
+- `contact.save()` to persist pending changes
+- `batch_update(where={...}, update={...}, apply=False)` for preview/apply flows
+- `FROM_LOCATION` to infer `cTimezone` from location fields
+- `field__operator=value` filters for both CLI `--where` and Python kwargs
+
+Examples:
+
+```bash
+uv run --package five08 crmctl search \
+  --where timezone__is_null=true \
+  --where location__is_not_null=true \
+  --where member_type__in=Member,Prospect
+
+uv run --package five08 crmctl search \
+  --where roles__contains=developer \
+  --where phone__not_like=+1%
+
+uv run --package five08 crmctl batch-update \
+  --where timezone__is_null=true \
+  --where location__is_not_null=true \
+  --update timezone=@location
+
+uv run --package five08 crmctl batch-update \
+  --where timezone__is_null=true \
+  --where location__is_not_null=true \
+  --update timezone=@location \
+  --apply
 ```
 
 For Discord bot docs, see [`Discord Bot`](./apps/discord_bot/README.md).

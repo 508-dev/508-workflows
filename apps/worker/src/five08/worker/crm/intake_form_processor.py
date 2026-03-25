@@ -20,6 +20,7 @@ from five08.crm_normalization import (
     normalize_role,
     normalize_roles,
     normalize_seniority,
+    normalize_state,
     normalize_timezone,
     normalize_website_url,
 )
@@ -33,6 +34,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+LINKEDIN_FIELD = "cLinkedIn"
 
 DESCRIPTION_SECTIONS = {
     "primary_skills_interests": "Primary skills and interests",
@@ -42,10 +44,11 @@ DESCRIPTION_SECTIONS = {
 FIELD_MAP = {
     "phone": "phoneNumber",
     "discord_username": "cDiscordUsername",
-    "linkedin_url": settings.crm_linkedin_field,
+    "linkedin_url": LINKEDIN_FIELD,
     "github_username": "cGitHubUsername",
     "address_country": "addressCountry",
     "address_city": "addressCity",
+    "address_state": "addressState",
     "timezone": "cTimezone",
     "primary_role": "cRoles",
     "availability": "cAvailableTimes",
@@ -431,6 +434,9 @@ class IntakeFormProcessor:
             profile_city = self._normalize_city(
                 getattr(extracted_profile, "address_city", None)
             )
+            profile_state = self._normalize_state(
+                getattr(extracted_profile, "address_state", None)
+            )
             profile_availability = self._normalize_text(
                 getattr(extracted_profile, "availability", None)
             )
@@ -448,11 +454,13 @@ class IntakeFormProcessor:
             if profile_github:
                 updates["cGitHubUsername"] = profile_github
             if profile_linkedin:
-                updates[settings.crm_linkedin_field] = profile_linkedin
+                updates[LINKEDIN_FIELD] = profile_linkedin
             if profile_timezone:
                 updates.setdefault("cTimezone", profile_timezone)
             if profile_city:
                 updates.setdefault("addressCity", profile_city)
+            if profile_state:
+                updates.setdefault("addressState", profile_state)
             profile_country = self._normalize_text(extracted_profile.address_country)
             if profile_country:
                 updates.setdefault("addressCountry", profile_country)
@@ -736,6 +744,9 @@ class IntakeFormProcessor:
 
     def _normalize_city(self, value: object) -> str | None:
         return normalize_city(value, strip_parenthetical=False)
+
+    def _normalize_state(self, value: object) -> str | None:
+        return normalize_state(value)
 
     def _normalize_github_username(self, value: object) -> str | None:
         normalized = self._normalize_text(value)

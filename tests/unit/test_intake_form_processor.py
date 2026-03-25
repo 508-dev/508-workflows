@@ -219,6 +219,7 @@ def test_build_resume_updates_uses_extracted_profile_fields_for_form_fields() ->
         availability="10-15 hours/week",
         rate_range="$80 - $120",
         referred_by="Referral Source",
+        address_state="California",
         address_country=None,
         confidence=0.95,
         source="gpt-4o-mini",
@@ -250,6 +251,7 @@ def test_build_resume_updates_uses_extracted_profile_fields_for_form_fields() ->
     assert updates["cAvailableTimes"] == "10-15 hours/week"
     assert updates["cRateRange"] == "$80 - $120"
     assert updates["cReferredBy"] == "Referral Source"
+    assert updates["addressState"] == "California"
 
 
 def test_build_resume_updates_rejects_non_https_resume_url() -> None:

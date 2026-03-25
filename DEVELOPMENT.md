@@ -44,6 +44,9 @@ uv run --package api backend-api
 
 # job consumer
 uv run --package worker worker-consumer
+
+# EspoCRM search / REPL / batch updates
+uv run --package five08 crmctl repl
 ```
 
 ## Docker Compose Workflow
@@ -111,6 +114,27 @@ async def setup(bot: commands.Bot) -> None:
   - update contact skills field in EspoCRM
 - Manual queueing is available via `POST /process-contact/{contact_id}`.
 - Human action audit ingest is available at `POST /audit/events`.
+
+## CRM Cleanup CLI
+
+Use `crmctl` when you want direct EspoCRM contact search/update control outside the Discord UI.
+
+Examples:
+
+```bash
+uv run --package five08 crmctl search --where timezone__is_null=true --where location__is_not_null=true
+uv run --package five08 crmctl batch-update --where timezone__is_null=true --where location__is_not_null=true --update timezone=@location
+uv run --package five08 crmctl batch-update --where timezone__is_null=true --where location__is_not_null=true --update timezone=@location --apply
+```
+
+Inside `uv run --package five08 crmctl repl`, contacts are mutable Python objects:
+
+```python
+contacts = search(timezone__is_null=True, location__is_not_null=True)
+contact = contacts[0]
+contact.timezone = contact.infer_timezone()
+contact.save()
+```
 
 ## Discord CRM Audit Flow
 

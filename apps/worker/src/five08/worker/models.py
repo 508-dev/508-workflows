@@ -7,7 +7,23 @@ from typing import Any
 from five08.resume_extractor import (
     ResumeExtractedProfile as SharedResumeExtractedProfile,
 )
+from five08.resume_processing_models import (
+    ExtractedSkills as SharedExtractedSkills,
+    ResumeApplyResult as SharedResumeApplyResult,
+    ResumeExtractionResult as SharedResumeExtractionResult,
+    ResumeFieldChange as SharedResumeFieldChange,
+    ResumeSkipReason as SharedResumeSkipReason,
+    SkillAttributes as SharedSkillAttributes,
+)
 from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
+
+ExtractedSkills = SharedExtractedSkills
+ResumeApplyResult = SharedResumeApplyResult
+ResumeExtractionResult = SharedResumeExtractionResult
+ResumeFieldChange = SharedResumeFieldChange
+ResumeSkipReason = SharedResumeSkipReason
+SkillAttributes = SharedSkillAttributes
+ResumeExtractedProfile = SharedResumeExtractedProfile
 
 
 class WebhookEvent(BaseModel):
@@ -40,21 +56,6 @@ class ContactData(BaseModel):
     skills: str | None = None
 
 
-class ExtractedSkills(BaseModel):
-    """Skills extraction response."""
-
-    skills: list[str]
-    skill_attrs: dict[str, "SkillAttributes"] = Field(default_factory=dict)
-    confidence: float = Field(..., ge=0.0, le=1.0)
-    source: str
-
-
-class SkillAttributes(BaseModel):
-    """Structured per-skill metadata for CRM persistence."""
-
-    strength: int = Field(..., ge=1, le=5)
-
-
 class SkillsExtractionResult(BaseModel):
     """End-to-end processing result."""
 
@@ -63,53 +64,6 @@ class SkillsExtractionResult(BaseModel):
     existing_skills: list[str]
     new_skills: list[str]
     updated_skills: list[str]
-    success: bool
-    error: str | None = None
-
-
-ResumeExtractedProfile = SharedResumeExtractedProfile
-
-
-class ResumeFieldChange(BaseModel):
-    """Single proposed CRM field update."""
-
-    field: str
-    label: str
-    current: str | None = None
-    proposed: str
-    reason: str
-
-
-class ResumeSkipReason(BaseModel):
-    """Field extraction skip explanation for preview UX."""
-
-    field: str
-    value: str
-    reason: str
-
-
-class ResumeExtractionResult(BaseModel):
-    """Worker output used by bot preview/confirmation flow."""
-
-    contact_id: str
-    attachment_id: str
-    proposed_updates: dict[str, Any]
-    proposed_changes: list[ResumeFieldChange]
-    skipped: list[ResumeSkipReason]
-    extracted_profile: ResumeExtractedProfile
-    extracted_skills: list[str] = Field(default_factory=list)
-    new_skills: list[str] = Field(default_factory=list)
-    success: bool
-    error: str | None = None
-
-
-class ResumeApplyResult(BaseModel):
-    """CRM apply-phase result."""
-
-    contact_id: str
-    updated_fields: list[str]
-    updated_values: dict[str, Any] = Field(default_factory=dict)
-    link_discord_applied: bool = False
     success: bool
     error: str | None = None
 

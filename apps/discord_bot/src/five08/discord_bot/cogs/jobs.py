@@ -20,6 +20,7 @@ from discord.ext import commands
 
 from five08.audit import update_person_discord_roles, upsert_discord_member
 from five08.candidate_search import search_candidates
+from five08.crm_normalization import format_seniority_label
 from five08.document_text import document_file_extension, extract_document_text
 from five08.discord_bot.config import settings
 from five08.discord_bot.utils.audit import DiscordAuditCogMixin
@@ -72,10 +73,26 @@ MATCH_CANDIDATES_JD_URL_HINTS = (
     "notion.site",
 )
 AUTO_MATCH_DEDUPE_MAX = 10_000
+MATCH_CANDIDATES_PRIVATE_TRUTHY = frozenset({"true", "1", "yes", "y", "on"})
 # Exclude known-bad resume artifact from auto-match rendering.
 AUTO_MATCH_EXCLUDED_RESUME_NAMES = frozenset({"Vladyslav_Stryzhak.pdf"})
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 JobWatchChannel = discord.ForumChannel
+
+
+def _parse_match_candidates_private(private_flag: str | None) -> bool | None:
+    """Parse the `private` arg into a bool, or return None for invalid values."""
+    if private_flag is None:
+        return False
+
+    normalized = private_flag.strip().lower()
+    if not normalized:
+        return None
+
+    if normalized in MATCH_CANDIDATES_PRIVATE_TRUTHY:
+        return True
+
+    return None
 
 
 class MatchResumeSelectView(discord.ui.View):
@@ -545,12 +562,12 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             else:
                 display_name = resolved_name
 
-            parts = [f"{i}. {label} {display_name}"]
+            header_parts = [f"{i}. {label} {display_name}"]
             if discord_username:
-                parts.append(f"`@{discord_username}`")
+                header_parts.append(f"`@{discord_username}`")
 
             if candidate.linkedin:
-                parts.append(f"[LinkedIn](<{candidate.linkedin}>)")
+                header_parts.append(f"[LinkedIn](<{candidate.linkedin}>)")
             if (
                 candidate.latest_resume_id
                 and candidate.latest_resume_name
@@ -563,7 +580,31 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                     (resolved_name, candidate.latest_resume_id, safe_resume_name)
                 )
 
+            raw_city = (
+                candidate.address_city.strip()
+                if isinstance(getattr(candidate, "address_city", None), str)
+                and candidate.address_city.strip()
+                else None
+            )
+            raw_state = (
+                candidate.address_state.strip()
+                if isinstance(getattr(candidate, "address_state", None), str)
+                and candidate.address_state.strip()
+                else None
+            )
+            raw_country = (
+                candidate.address_country.strip()
+                if isinstance(getattr(candidate, "address_country", None), str)
+                and candidate.address_country.strip()
+                else None
+            )
+            location = ", ".join(
+                discord.utils.escape_mentions(part)
+                for part in (raw_city, raw_state, raw_country)
+                if part
+            )
             skill_info: list[str] = []
+            location_info: list[str] = []
             match_score = getattr(candidate, "match_score", None)
             if isinstance(match_score, (int, float)):
                 skill_info.append(f"score: {match_score:.1f}")
@@ -576,15 +617,23 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 skill_info.append(
                     "🏷️ " + ", ".join(f"`{r}`" for r in candidate.matched_discord_roles)
                 )
-            if candidate.seniority:
-                skill_info.append(f"seniority: `{candidate.seniority}`")
+            seniority_label = format_seniority_label(
+                getattr(candidate, "seniority", None),
+                default=None,
+            )
+            if seniority_label:
+                skill_info.append(f"seniority: **{seniority_label}**")
+            if location:
+                location_info.append(f"location: **{location}**")
             if candidate.timezone:
-                skill_info.append(f"tz: `{candidate.timezone}`")
+                location_info.append(f"tz: `{candidate.timezone}`")
+            line = " ".join(header_parts)
             if skill_info:
-                parts.append("   " + " · ".join(skill_info))
+                line += "\n   " + " · ".join(skill_info)
+            if location_info:
+                line += "\n   " + " · ".join(location_info)
 
-            lines.append("\n".join(parts))
-
+            lines.append(line)
         return lines, resume_options
 
     @staticmethod
@@ -1439,18 +1488,30 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
 
     @app_commands.command(
         name="match-candidates",
-        description="Reads this thread's opening message, attachments, and JD links, then returns ranked matching candidates.",
+        description="Rank matching candidates from this thread's job details.",
+    )
+    @app_commands.describe(
+        private="Set to `true`, `1`, `yes`, `y`, or `on` to post privately."
     )
     @require_role("Member")
     async def match_candidates(
         self,
         interaction: discord.Interaction,
+        private: str | None = None,
     ) -> None:
         """Parse the thread's starter message and find matching candidates ranked by fit.
 
         Must be invoked inside a thread. The starter message is used as the job posting text.
         The response is posted publicly in the thread.
         """
+        is_private = _parse_match_candidates_private(private)
+        if is_private is None:
+            await interaction.response.send_message(
+                "⚠️ Invalid value for `private`. Use `true`, `1`, `yes`, `y`, or `on`.",
+                ephemeral=True,
+            )
+            return
+
         if not isinstance(interaction.channel, discord.Thread) or not isinstance(
             interaction.channel.parent, discord.ForumChannel
         ):
@@ -1498,7 +1559,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
-        await interaction.response.defer(ephemeral=False)
+        await interaction.response.defer(ephemeral=is_private)
 
         posting, posting_metadata = await self._build_match_candidates_posting(starter)
         if not posting.strip():
@@ -1581,8 +1642,13 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
+        async def _send_match_result(message: str, **kwargs: Any) -> None:
+            if is_private:
+                kwargs["ephemeral"] = True
+            await interaction.followup.send(message, **kwargs)
+
         await self._publish_match_results(
-            send=interaction.followup.send,
+            send=_send_match_result,
             requirements=requirements,
             candidates=candidates,
             guild=interaction.guild,

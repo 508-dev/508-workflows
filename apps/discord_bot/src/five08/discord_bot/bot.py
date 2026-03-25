@@ -20,6 +20,39 @@ from five08.discord_bot.utils.healthcheck import (
 )
 
 logger = logging.getLogger(__name__)
+DISCORD_COMMAND_DESCRIPTION_LIMIT = 100
+
+
+def validate_app_command_descriptions(
+    tree: discord.app_commands.CommandTree[commands.Bot],
+) -> None:
+    """Fail fast when registered slash command descriptions exceed Discord limits."""
+    invalid_commands: list[str] = []
+
+    for command in tree.walk_commands():
+        description = getattr(command, "description", "") or ""
+        if not isinstance(description, str):
+            description = str(description)
+
+        if len(description) <= DISCORD_COMMAND_DESCRIPTION_LIMIT:
+            continue
+
+        qualified_name = getattr(command, "qualified_name", None) or getattr(
+            command, "name", "<unknown>"
+        )
+        if not isinstance(qualified_name, str):
+            qualified_name = str(qualified_name)
+
+        invalid_commands.append(
+            f"/{qualified_name} description has {len(description)} characters"
+        )
+
+    if invalid_commands:
+        raise ValueError(
+            "Discord app command descriptions must be "
+            f"{DISCORD_COMMAND_DESCRIPTION_LIMIT} characters or fewer: "
+            + "; ".join(invalid_commands)
+        )
 
 
 class Bot508(commands.Bot):
@@ -62,6 +95,7 @@ class Bot508(commands.Bot):
 
         # Sync slash commands after loading all cogs
         try:
+            validate_app_command_descriptions(self.tree)
             synced = await self.tree.sync()
             logger.info(f"Synced {len(synced)} slash commands")
             for cmd in synced:

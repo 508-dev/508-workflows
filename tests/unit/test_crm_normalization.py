@@ -1,6 +1,8 @@
 """Unit tests for shared CRM normalization helpers."""
 
 from five08.crm_normalization import (
+    format_seniority_label,
+    infer_timezone_from_location,
     normalize_city,
     normalize_country,
     normalize_role,
@@ -9,6 +11,7 @@ from five08.crm_normalization import (
     normalize_state,
     normalize_timezone,
     normalize_website_url,
+    website_identity_key,
 )
 
 
@@ -44,6 +47,12 @@ def test_normalize_website_url_respects_disallowed_host_predicate() -> None:
             disallowed_host_predicate=lambda host: host.casefold() == "node.js",
         )
         is None
+    )
+
+
+def test_website_identity_key_ignores_scheme_and_path_casing() -> None:
+    assert website_identity_key("http://Example.com/About") == website_identity_key(
+        "https://example.com/about/"
     )
 
 
@@ -85,8 +94,23 @@ def test_normalize_seniority_modes() -> None:
     assert normalize_seniority("  ", empty_as_unknown=True) == "unknown"
 
 
+def test_format_seniority_label_humanizes_values() -> None:
+    assert format_seniority_label("midlevel") == "Mid-level"
+    assert format_seniority_label("mid_level") == "Mid-level"
+    assert format_seniority_label(None) == "Unknown"
+    assert format_seniority_label("", default=None) is None
+
+
 def test_normalize_roles_skips_non_string_items() -> None:
     assert normalize_roles(["Developer", None, 42, " Biz Dev "]) == [
         "developer",
         "biz dev",
     ]
+
+
+def test_infer_timezone_from_location_preserves_resume_extractor_coverage() -> None:
+    assert infer_timezone_from_location(country="Portugal") == "UTC+00:00"
+    assert (
+        infer_timezone_from_location(country="Australia", city="Perth") == "UTC+08:00"
+    )
+    assert infer_timezone_from_location(country="United States", state="Texas") is None

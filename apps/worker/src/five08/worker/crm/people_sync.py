@@ -14,6 +14,7 @@ from five08.worker.config import settings
 logger = logging.getLogger(__name__)
 
 _DISCORD_ID_RE = re.compile(r"\(ID:\s*(\d+)\)")
+LINKEDIN_FIELD = "cLinkedIn"
 
 
 class EspoPeopleSyncClient:
@@ -30,8 +31,9 @@ class EspoPeopleSyncClient:
             "id,name,emailAddress,emailAddressData,c508Email,"
             "cDiscordUsername,cDiscordUserId,cDiscordRoles,cDiscordUserID,"
             "cGithubUsername,githubUsername,type,contactType,"
-            "addressCountry,addressCity,cTimezone,cSeniority,cMemberAgreementSignedAt,"
-            f"{settings.crm_linkedin_field},skills,cSkillAttrs,resumeIds,resumeNames"
+            "addressCountry,addressCity,addressState,cTimezone,cSeniority,"
+            "cMemberAgreementSignedAt,"
+            f"{LINKEDIN_FIELD},skills,cSkillAttrs,resumeIds,resumeNames"
         )
         raw = self.api.request(
             "GET",
@@ -189,6 +191,7 @@ class PeopleSyncProcessor:
             is_member=self._is_member(raw_contact),
             address_country=_text_or_none(raw_contact.get("addressCountry")),
             address_city=_text_or_none(raw_contact.get("addressCity")),
+            address_state=_text_or_none(raw_contact.get("addressState")),
             timezone=_text_or_none(raw_contact.get("cTimezone")),
             seniority=_text_or_none(raw_contact.get("cSeniority")),
             linkedin=self._coerce_linkedin(raw_contact),
@@ -323,8 +326,7 @@ class PeopleSyncProcessor:
         return None
 
     def _coerce_linkedin(self, raw_contact: dict[str, Any]) -> str | None:
-        configured_field = settings.crm_linkedin_field
-        for key in (configured_field, "cLinkedIn", "linkedin"):
+        for key in (LINKEDIN_FIELD, "linkedin"):
             value = _text_or_none(raw_contact.get(key))
             if value:
                 return value

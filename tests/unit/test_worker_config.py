@@ -168,7 +168,6 @@ def test_fixed_worker_defaults_ignore_legacy_env_vars(
         espo_api_key="test-key",
     )
 
-    assert settings.crm_linkedin_field == "cLinkedIn"
     assert settings.crm_intake_completed_field == ""
     assert settings.parsed_resume_keywords == {"resume", "cv", "curriculum"}
     assert settings.oidc_http_timeout_seconds == 8.0
