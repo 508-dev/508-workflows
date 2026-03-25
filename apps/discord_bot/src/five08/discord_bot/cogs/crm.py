@@ -406,7 +406,7 @@ class CreateSSOUserSelectionView(discord.ui.View):
         self._message = message
 
     async def on_timeout(self) -> None:
-        """Disable controls and audit selection timeout."""
+        """Disable controls when the selection times out and update the message."""
         for item in self.children:
             if isinstance(item, discord.ui.Button):
                 item.disabled = True
@@ -2970,7 +2970,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         if bool(user.get("is_superuser")):
             raise ValueError("Refusing to use an Authentik superuser for this command.")
 
-        actual_username = self._normalize_508_username(user.get("username"))
+        actual_username = self._contact_text_value(user.get("username"))
         if actual_username != expected_username:
             raise ValueError(
                 "Matched Authentik username does not match the CRM-derived 508 username."
@@ -6446,6 +6446,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             user_id: int
             crm_updated = False
             created = False
+            freshly_created = False
+            recovered_existing_after_create_error = False
             recovery_email_error: str | None = None
 
             linked_sso_id = self._crm_sso_id(contact)
@@ -6510,6 +6512,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                             name=contact_name,
                             email=email,
                         )
+                        created = True
+                        freshly_created = True
                     except AuthentikAPIError as exc:
                         logger.warning(
                             "create_sso_user create_user failed contact_id=%s username=%s status=%s error=%s; checking for reconciled user",
@@ -6532,31 +6536,32 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                         if not reconciled_matches:
                             raise
                         created_user = reconciled_matches[0]
-                    created = True
+                        recovered_existing_after_create_error = True
                     user = created_user
                     user_id = self._validate_authentik_user_for_contact(
                         user,
                         expected_username=username,
                         expected_email=email,
                     )
-                    try:
-                        await asyncio.to_thread(
-                            client.send_recovery_email,
-                            user_id=user_id,
-                            email_stage=recovery_email_stage_id,
-                        )
-                    except AuthentikAPIError as exc:
-                        logger.warning(
-                            "create_sso_user recovery email failed contact_id=%s username=%s user_id=%s stage_id=%s error=%s",
-                            contact_id,
-                            username,
-                            user_id,
-                            recovery_email_stage_id,
-                            exc,
-                        )
-                        recovery_email_error = self._sanitize_error_message_for_discord(
-                            exc
-                        )
+                    if freshly_created:
+                        try:
+                            await asyncio.to_thread(
+                                client.send_recovery_email,
+                                user_id=user_id,
+                                email_stage=recovery_email_stage_id,
+                            )
+                        except AuthentikAPIError as exc:
+                            logger.warning(
+                                "create_sso_user recovery email failed contact_id=%s username=%s user_id=%s stage_id=%s error=%s",
+                                contact_id,
+                                username,
+                                user_id,
+                                recovery_email_stage_id,
+                                exc,
+                            )
+                            recovery_email_error = (
+                                self._sanitize_error_message_for_discord(exc)
+                            )
 
                 await asyncio.to_thread(
                     self.espo_api.request,
@@ -6605,6 +6610,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     "email": email,
                     "sso_user_id": user_id,
                     "created": created,
+                    "freshly_created": freshly_created,
+                    "recovered_existing_after_create_error": recovered_existing_after_create_error,
                     "crm_updated": crm_updated,
                     "recovery_email_error": recovery_email_error,
                 },
@@ -6617,7 +6624,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
         except ValueError as exc:
             message = self._sanitize_error_message_for_discord(exc)
-            if created_user is not None:
+            if freshly_created and created_user is not None:
                 try:
                     partial_user_id = self._authentik_user_pk(created_user)
                 except ValueError:
@@ -6656,7 +6663,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
         except EspoAPIError as exc:
             message = self._sanitize_error_message_for_discord(exc)
-            if created_user is not None:
+            if freshly_created and created_user is not None:
                 partial_user_id = self._authentik_user_pk(created_user)
                 self._audit_command_safe(
                     interaction=interaction,

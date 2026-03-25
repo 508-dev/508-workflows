@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from five08.discord_bot.cogs.crm import CRMCog
+from five08.discord_bot.cogs.crm import CRMCog, CreateSSOUserSelectionView
 from five08.clients.authentik import AuthentikAPIError
 from five08.clients.espo import EspoAPIError
 
@@ -96,6 +96,7 @@ async def test_create_sso_user_creates_links_and_sends_recovery_email(
     assert "Recovery email: sent." in message
     assert followup_kwargs["ephemeral"] is True
     mock_audit.assert_called_once()
+    assert mock_audit.call_args.kwargs["metadata"]["freshly_created"] is True
 
 
 @pytest.mark.asyncio
@@ -215,6 +216,40 @@ async def test_create_sso_user_respects_already_linked_non_superuser(
     message = mock_interaction.followup.send.call_args.args[0]
     assert "already linked to the matching SSO user" in message
     assert mock_interaction.followup.send.call_args.kwargs["ephemeral"] is True
+
+
+@pytest.mark.asyncio
+async def test_create_sso_user_rejects_mismatched_email_style_username(
+    cog: CRMCog, mock_interaction: AsyncMock
+) -> None:
+    contact = {
+        "id": "crm-123",
+        "name": "Jane Doe",
+        "c508Email": "jane@508.dev",
+        "cSsoID": "42",
+    }
+    authentik_client = Mock()
+    authentik_client.get_user.return_value = {
+        "pk": 42,
+        "username": "jane@contractor.com",
+        "email": "jane@508.dev",
+        "name": "Jane Doe",
+        "is_superuser": False,
+    }
+
+    with (
+        patch.object(
+            cog,
+            "_search_contacts_for_lookup",
+            new=AsyncMock(return_value=[contact]),
+        ),
+        patch.object(cog, "_authentik_client", return_value=authentik_client),
+        patch.object(cog, "_audit_command_safe"),
+    ):
+        await cog.create_sso_user.callback(cog, mock_interaction, search_term="jane")
+
+    message = mock_interaction.followup.send.call_args.args[0]
+    assert "Matched Authentik username does not match" in message
 
 
 @pytest.mark.asyncio
@@ -342,16 +377,49 @@ async def test_create_sso_user_reconciles_user_after_create_error(
         mock_espo_api.request.return_value = {"id": "crm-123"}
         await cog.create_sso_user.callback(cog, mock_interaction, search_term="jane")
 
-    authentik_client.send_recovery_email.assert_called_once_with(
-        user_id=42,
-        email_stage="stage-id",
-    )
+    authentik_client.send_recovery_email.assert_not_called()
     mock_espo_api.request.assert_called_once_with(
         "PUT",
         "Contact/crm-123",
         {"cSsoID": "42"},
     )
     message = mock_interaction.followup.send.call_args.args[0]
-    assert "Created SSO user" in message
+    assert "Linked the existing SSO user" in message
     assert mock_interaction.followup.send.call_args.kwargs["ephemeral"] is True
+    assert mock_audit.call_args.kwargs["metadata"]["freshly_created"] is False
     mock_audit.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_create_sso_user_shows_selection_view_for_multiple_contacts(
+    cog: CRMCog, mock_interaction: AsyncMock
+) -> None:
+    contacts = [
+        {
+            "id": "crm-123",
+            "name": "Jane Doe",
+            "c508Email": "jane@508.dev",
+        },
+        {
+            "id": "crm-456",
+            "name": "John Doe",
+            "c508Email": "john@508.dev",
+        },
+    ]
+
+    with patch.object(
+        cog,
+        "_search_contacts_for_lookup",
+        new=AsyncMock(return_value=contacts),
+    ):
+        sent_message = Mock()
+        mock_interaction.followup.send = AsyncMock(return_value=sent_message)
+        await cog.create_sso_user.callback(cog, mock_interaction, search_term="doe")
+
+    mock_interaction.followup.send.assert_awaited_once()
+    kwargs = mock_interaction.followup.send.call_args.kwargs
+    assert kwargs["ephemeral"] is True
+    view = kwargs["view"]
+    assert isinstance(view, CreateSSOUserSelectionView)
+    labels = [item.label for item in view.children if hasattr(item, "label")]
+    assert labels == ["Jane Doe", "John Doe"]
