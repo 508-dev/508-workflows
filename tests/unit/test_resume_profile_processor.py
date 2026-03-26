@@ -645,6 +645,63 @@ def test_extract_profile_proposal_keeps_confirmation_needed_for_new_site_with_ex
     assert result.source_enrichments[1].url == "https://newsite.example.com"
 
 
+def test_extract_profile_proposal_keeps_confirmation_needed_for_new_site_after_existing_links() -> (
+    None
+):
+    """The website cap should apply after skipping CRM sites, not before."""
+    processor = ResumeProfileProcessor()
+    processor.crm = Mock()
+    processor.extractor = Mock()
+    processor.skills_extractor = Mock()
+    processor.document_processor = Mock()
+    processor._record_processing_run = Mock()
+    processor._fetch_external_profile_source_text = Mock(return_value="Existing site")
+    processor.skills_extractor.canonicalize_skill.side_effect = lambda v: (
+        str(v).strip().lower()
+    )
+
+    processor.crm.get_contact.return_value = {
+        "emailAddress": "member@example.com",
+        "cWebsiteLink": ["https://existing-a.com", "https://existing-b.com"],
+    }
+    processor.crm.download_attachment.return_value = b"resume-bytes"
+    processor.document_processor.extract_text.return_value = "resume text"
+    processor.document_processor.get_content_hash.return_value = "hash-existing-tail"
+    processor.extractor.extract.return_value = ResumeExtractedProfile(
+        email=None,
+        github_username=None,
+        linkedin_url=None,
+        phone=None,
+        website_links=[
+            "https://existing-a.com",
+            "https://existing-b.com",
+            "https://newsite.example.com",
+        ],
+        confidence=0.8,
+        source="gpt-4o-mini",
+    )
+    processor.skills_extractor.extract_skills.return_value = ExtractedSkills(
+        skills=[],
+        skill_attrs={},
+        confidence=0.8,
+        source="gpt-4o-mini",
+    )
+
+    result = processor.extract_profile_proposal(
+        contact_id="contact-existing-tail",
+        attachment_id="att-existing-tail",
+        filename="resume.pdf",
+    )
+
+    assert result.success is True
+    assert [item.status for item in result.source_enrichments] == [
+        "used",
+        "used",
+        "confirmation_needed",
+    ]
+    assert result.source_enrichments[2].url == "https://newsite.example.com"
+
+
 def test_extract_text_from_html_reads_meta_description_regardless_of_order() -> None:
     """Meta description extraction should not depend on HTML attribute order."""
     processor = ResumeProfileProcessor()
@@ -714,6 +771,16 @@ def test_is_public_ip_rejects_non_global_addresses() -> None:
 
     assert processor._is_public_ip(ipaddress.ip_address("100.64.0.1")) is False
     assert processor._is_public_ip(ipaddress.ip_address("93.184.216.34")) is True
+
+
+def test_resolve_public_profile_request_target_rejects_nonstandard_ports() -> None:
+    """Explicit nonstandard ports should be rejected before any network fetch."""
+    processor = ResumeProfileProcessor()
+
+    assert (
+        processor._resolve_public_profile_request_target("https://example.com:22")
+        == "Profile URL port must be 80 or 443"
+    )
 
 
 def test_extract_profile_proposal_deduplicates_existing_and_extracted_websites_by_scheme() -> (

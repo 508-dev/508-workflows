@@ -887,7 +887,25 @@ class ResumeEditWebsitesModal(discord.ui.Modal, title="Edit Websites"):
         raw = self.websites_input.value or ""
         links = [line.strip() for line in raw.splitlines() if line.strip()]
         self.confirmation_view.website_edits_override_inferred_candidates = True
-        if links:
+        submitted_links = self.confirmation_view._normalize_website_links_for_reparse(
+            links
+        )
+        existing_links = self.confirmation_view._normalize_website_links_for_reparse(
+            self.confirmation_view.existing_websites
+        )
+        submitted_keys = [
+            normalized_website_identity_key(url)
+            for url in submitted_links
+            if normalized_website_identity_key(url)
+        ]
+        existing_keys = [
+            normalized_website_identity_key(url)
+            for url in existing_links
+            if normalized_website_identity_key(url)
+        ]
+        if submitted_keys == existing_keys:
+            self.confirmation_view.proposed_updates.pop("cWebsiteLink", None)
+        elif links:
             self.confirmation_view.proposed_updates["cWebsiteLink"] = links
         else:
             self.confirmation_view.proposed_updates.pop("cWebsiteLink", None)

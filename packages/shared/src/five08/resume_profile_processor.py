@@ -61,6 +61,7 @@ PROFILE_SOURCE_MAX_REDIRECTS = 3
 PROFILE_SOURCE_MAX_BYTES = 512 * 1024
 PROFILE_SOURCE_MAX_TEXT_CHARS = 12000
 PROFILE_SOURCE_MAX_WEBSITES = 2
+PROFILE_SOURCE_ALLOWED_PORTS = frozenset({80, 443})
 PROFILE_SOURCE_USER_AGENT = "five08-resume-parser/1.0"
 PROFILE_SOURCE_IMPERSONATE: BrowserTypeLiteral = "chrome131_android"
 PROFILE_SOURCE_ALLOWED_CONTENT_TYPES = (
@@ -1131,7 +1132,8 @@ class ResumeProfileProcessor:
             if normalized_website_identity_key(url)
         }
 
-        for website_url in extracted.website_links[:PROFILE_SOURCE_MAX_WEBSITES]:
+        added_count = 0
+        for website_url in extracted.website_links:
             source_key = normalized_website_identity_key(website_url)
             if not source_key:
                 continue
@@ -1152,6 +1154,9 @@ class ResumeProfileProcessor:
                 )
             )
             seen_source_keys.add(dedupe_source_key)
+            added_count += 1
+            if added_count >= PROFILE_SOURCE_MAX_WEBSITES:
+                break
 
     def _build_initial_external_source_candidates(
         self,
@@ -1220,7 +1225,8 @@ class ResumeProfileProcessor:
             for url in existing_website_links
             if normalized_website_identity_key(url)
         }
-        for website_url in extracted.website_links[:PROFILE_SOURCE_MAX_WEBSITES]:
+        added_count = 0
+        for website_url in extracted.website_links:
             source_key = normalized_website_identity_key(website_url)
             if not source_key or source_key in existing_website_keys:
                 continue
@@ -1247,6 +1253,9 @@ class ResumeProfileProcessor:
                 )
             )
             seen_source_keys.add(dedupe_source_key)
+            added_count += 1
+            if added_count >= PROFILE_SOURCE_MAX_WEBSITES:
+                break
 
         existing_github_username = self._normalize_github_username(
             contact.get("cGitHubUsername")
@@ -1544,6 +1553,8 @@ class ResumeProfileProcessor:
             return "Profile URL port is invalid"
         if port is None:
             port = 443 if scheme == "https" else 80
+        if port not in PROFILE_SOURCE_ALLOWED_PORTS:
+            return "Profile URL port must be 80 or 443"
 
         if host in {"localhost", "localhost.localdomain"}:
             return "Profile URL host resolves to a non-public address"

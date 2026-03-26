@@ -1172,6 +1172,28 @@ class TestCRMCog:
         mock_interaction.followup.send.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_edit_websites_modal_submit_skips_noop_existing_websites(
+        self, crm_cog, mock_interaction
+    ):
+        """Submitting the unchanged existing websites should not create a no-op update."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+            existing_websites=["https://old.com"],
+        )
+        modal = ResumeEditWebsitesModal(confirmation_view=view)
+        modal.websites_input._value = "https://old.com/\n"
+
+        await modal.on_submit(mock_interaction)
+
+        assert "cWebsiteLink" not in view.proposed_updates
+        mock_interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        mock_interaction.followup.send.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_edit_roles_modal_submit_updates_proposed(
         self, crm_cog, mock_interaction
     ):
