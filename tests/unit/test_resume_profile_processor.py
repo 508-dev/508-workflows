@@ -674,11 +674,11 @@ def test_fetch_external_profile_source_text_pins_resolved_public_ips() -> None:
         ipaddress.ip_address("93.184.216.35"),
     ]
     response = MagicMock()
-    response.__enter__.return_value = response
     response.status_code = 200
     response.headers = {"Content-Type": "text/plain"}
     response.iter_content.return_value = [b"Profile body"]
     response.raise_for_status = Mock()
+    response.close = Mock()
     session = MagicMock()
     session.__enter__.return_value = session
     session.get.return_value = response
@@ -705,6 +705,7 @@ def test_fetch_external_profile_source_text_pins_resolved_public_ips() -> None:
         ]
     }
     session.get.assert_called_once()
+    response.close.assert_called_once()
 
 
 def test_is_public_ip_rejects_non_global_addresses() -> None:

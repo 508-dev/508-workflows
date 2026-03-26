@@ -1335,14 +1335,15 @@ class ResumeProfileProcessor:
 
             try:
                 if host_is_ip_literal:
-                    with curl_requests.get(
+                    response = curl_requests.get(
                         current_url,
                         headers=headers,
                         timeout=PROFILE_SOURCE_FETCH_TIMEOUT_SECONDS,
                         allow_redirects=False,
                         stream=True,
                         impersonate=PROFILE_SOURCE_IMPERSONATE,
-                    ) as response:
+                    )
+                    try:
                         if response.status_code in {301, 302, 303, 307, 308}:
                             redirect_to = response.headers.get("Location")
                             if not redirect_to:
@@ -1380,6 +1381,8 @@ class ResumeProfileProcessor:
                             body=bytes(payload),
                             content_type=content_type,
                         )
+                    finally:
+                        response.close()
                 else:
                     resolve_entries = [
                         f"{host}:{port}:{_format_curl_resolve_address(ip)}"
@@ -1389,14 +1392,15 @@ class ResumeProfileProcessor:
                         curl_options={CurlOpt.RESOLVE: resolve_entries}
                     )
                     with session:
-                        with session.get(
+                        response = session.get(
                             current_url,
                             headers=headers,
                             timeout=PROFILE_SOURCE_FETCH_TIMEOUT_SECONDS,
                             allow_redirects=False,
                             stream=True,
                             impersonate=PROFILE_SOURCE_IMPERSONATE,
-                        ) as response:
+                        )
+                        try:
                             if response.status_code in {301, 302, 303, 307, 308}:
                                 redirect_to = response.headers.get("Location")
                                 if not redirect_to:
@@ -1434,6 +1438,8 @@ class ResumeProfileProcessor:
                                 body=bytes(payload),
                                 content_type=content_type,
                             )
+                        finally:
+                            response.close()
             except RequestsError as exc:
                 raise ValueError(f"Profile fetch failed: {exc}") from exc
 

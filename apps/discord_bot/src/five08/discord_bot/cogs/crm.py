@@ -8179,7 +8179,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             filename=display_filename,
         )
         await interaction.followup.send(
-            f"⚠️ Reprocess resume `{display_filename}` for `{contact_name}`?",
+            f"⚠️ Reprocess resume `{display_filename}` for `{contact_name}` "
+            "and include any fetchable website or GitHub profile sources?",
             view=view,
             ephemeral=True,
         )

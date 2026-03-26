@@ -5808,9 +5808,14 @@ class TestCRMCog:
             )
 
         mock_interaction.followup.send.assert_called_once()
+        confirmation_message = mock_interaction.followup.send.call_args.args[0]
         followup_kwargs = mock_interaction.followup.send.call_args.kwargs
         assert "view" in followup_kwargs
         assert isinstance(followup_kwargs["view"], ResumeReprocessConfirmationView)
+        assert (
+            "include any fetchable website or GitHub profile sources"
+            in confirmation_message
+        )
         view = followup_kwargs["view"]
         assert view.contact_id == "contact123"
         assert view.contact_name == "Candidate User"
