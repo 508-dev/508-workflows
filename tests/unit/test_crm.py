@@ -1146,7 +1146,8 @@ class TestCRMCog:
             "https://new.com",
             "https://other.com",
         ]
-        mock_interaction.response.send_message.assert_called_once()
+        mock_interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        mock_interaction.followup.send.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_edit_roles_modal_submit_updates_proposed(

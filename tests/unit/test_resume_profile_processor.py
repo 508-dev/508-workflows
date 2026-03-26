@@ -362,7 +362,7 @@ def test_extract_profile_proposal_reruns_with_inferred_github_only() -> None:
             github_username="octocat",
             linkedin_url=None,
             phone=None,
-            website_links=["https://blog.example.com"],
+            website_links=[],
             description="Enriched profile",
             confidence=0.9,
             source="gpt-4o-mini",
@@ -397,14 +397,8 @@ def test_extract_profile_proposal_reruns_with_inferred_github_only() -> None:
         ),
     }
     assert result.extracted_profile.description == "Enriched profile"
-    assert [item.status for item in result.source_enrichments] == [
-        "confirmation_needed",
-        "used",
-    ]
-    assert [item.origin for item in result.source_enrichments] == [
-        "resume_inference",
-        "resume_inference",
-    ]
+    assert [item.status for item in result.source_enrichments] == ["used"]
+    assert [item.origin for item in result.source_enrichments] == ["resume_inference"]
 
 
 def test_extract_profile_proposal_reruns_with_confirmed_personal_website() -> None:
@@ -494,7 +488,10 @@ def test_extract_text_from_html_reads_meta_description_regardless_of_order() -> 
 def test_fetch_external_profile_source_text_pins_resolved_public_ips() -> None:
     """External website fetches should connect only to the validated public IPs."""
     processor = ResumeProfileProcessor()
-    resolved_ip = ipaddress.ip_address("93.184.216.34")
+    resolved_ips = [
+        ipaddress.ip_address("93.184.216.34"),
+        ipaddress.ip_address("93.184.216.35"),
+    ]
     response = MagicMock()
     response.__enter__.return_value = response
     response.status_code = 200
@@ -509,7 +506,7 @@ def test_fetch_external_profile_source_text_pins_resolved_public_ips() -> None:
         patch.object(
             processor,
             "_resolve_public_profile_request_target",
-            return_value=("example.com", 443, [resolved_ip], False),
+            return_value=("example.com", 443, resolved_ips, False),
         ),
         patch(
             "five08.resume_profile_processor.curl_requests.Session",
@@ -521,7 +518,10 @@ def test_fetch_external_profile_source_text_pins_resolved_public_ips() -> None:
     assert text == "Profile body"
     session_cls.assert_called_once()
     assert session_cls.call_args.kwargs["curl_options"] == {
-        CurlOpt.RESOLVE: ["example.com:443:93.184.216.34"]
+        CurlOpt.RESOLVE: [
+            "example.com:443:93.184.216.34",
+            "example.com:443:93.184.216.35",
+        ]
     }
     session.get.assert_called_once()
 

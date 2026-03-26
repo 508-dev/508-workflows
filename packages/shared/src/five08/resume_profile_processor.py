@@ -1086,7 +1086,65 @@ class ResumeProfileProcessor:
             resume_text,
             extra_sources=extra_sources,
         )
+        self._refresh_inferred_website_confirmation_enrichments(
+            contact=contact,
+            extracted=extracted,
+            confirmed_personal_website_keys=confirmed_personal_website_keys,
+            enrichments=enrichments,
+            seen_source_keys=seen_source_keys,
+        )
         return extracted, enrichments
+
+    def _refresh_inferred_website_confirmation_enrichments(
+        self,
+        *,
+        contact: dict[str, Any],
+        extracted: ResumeExtractedProfile,
+        confirmed_personal_website_keys: set[str],
+        enrichments: list[ResumeSourceEnrichment],
+        seen_source_keys: set[str],
+    ) -> None:
+        stale_website_keys: set[str] = set()
+        retained_enrichments: list[ResumeSourceEnrichment] = []
+        for enrichment in enrichments:
+            is_inferred_website_confirmation = (
+                enrichment.label == "Personal Website"
+                and enrichment.origin == "resume_inference"
+                and enrichment.status == "confirmation_needed"
+            )
+            if not is_inferred_website_confirmation:
+                retained_enrichments.append(enrichment)
+                continue
+            source_key = normalized_website_identity_key(enrichment.url)
+            if source_key:
+                stale_website_keys.add(f"website:{source_key}")
+        if stale_website_keys:
+            seen_source_keys.difference_update(stale_website_keys)
+            enrichments[:] = retained_enrichments
+
+        existing_website_links = self._coerce_website_links(contact.get("cWebsiteLink"))
+        if existing_website_links:
+            return
+
+        for website_url in extracted.website_links[:PROFILE_SOURCE_MAX_WEBSITES]:
+            source_key = normalized_website_identity_key(website_url)
+            if not source_key:
+                continue
+            dedupe_source_key = f"website:{source_key}"
+            if dedupe_source_key in seen_source_keys:
+                continue
+            if source_key in confirmed_personal_website_keys:
+                continue
+            enrichments.append(
+                ResumeSourceEnrichment(
+                    label="Personal Website",
+                    url=website_url,
+                    origin="resume_inference",
+                    status="confirmation_needed",
+                    detail="Inferred from the resume. Confirm to fetch and reparse.",
+                )
+            )
+            seen_source_keys.add(dedupe_source_key)
 
     def _build_initial_external_source_candidates(
         self,
@@ -1312,11 +1370,12 @@ class ResumeProfileProcessor:
                             content_type=content_type,
                         )
                 else:
-                    resolve_entry = f"{host}:{port}:" + ",".join(
-                        _format_curl_resolve_address(ip) for ip in resolved_ips
-                    )
+                    resolve_entries = [
+                        f"{host}:{port}:{_format_curl_resolve_address(ip)}"
+                        for ip in resolved_ips
+                    ]
                     session: curl_requests.Session = curl_requests.Session(
-                        curl_options={CurlOpt.RESOLVE: [resolve_entry]}
+                        curl_options={CurlOpt.RESOLVE: resolve_entries}
                     )
                     with session:
                         with session.get(

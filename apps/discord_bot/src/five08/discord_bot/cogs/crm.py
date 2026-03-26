@@ -881,6 +881,7 @@ class ResumeEditWebsitesModal(discord.ui.Modal, title="Edit Websites"):
         self.websites_input.default = default
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
         raw = self.websites_input.value or ""
         links = [line.strip() for line in raw.splitlines() if line.strip()]
         self.confirmation_view.website_edits_override_inferred_candidates = True
@@ -895,7 +896,7 @@ class ResumeEditWebsitesModal(discord.ui.Modal, title="Edit Websites"):
             action_hint = " Click **Reparse With Websites** to refresh the extraction."
         else:
             action_hint = " Click **Confirm Updates** to apply."
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"✅ Websites updated to {count} link{'s' if count != 1 else ''}. "
             + action_hint,
             ephemeral=True,
