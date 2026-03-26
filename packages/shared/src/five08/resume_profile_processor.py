@@ -1612,6 +1612,8 @@ class ResumeProfileProcessor:
         if ip_literal is not None:
             if not self._is_public_ip(ip_literal):
                 return "Profile URL host resolves to a non-public address"
+            if ip_literal.version != 4:
+                return "Profile URL host must resolve to a public IPv4 address"
             return host, port, [ip_literal], True
 
         try:
@@ -1628,16 +1630,18 @@ class ResumeProfileProcessor:
             parsed_ip = self._parse_ip_literal(str(sockaddr[0]).strip())
             if parsed_ip is None:
                 continue
+            if parsed_ip.version != 4:
+                continue
+            if not self._is_public_ip(parsed_ip):
+                return "Profile URL host resolves to a non-public address"
             resolved_ips.add(parsed_ip)
 
         if not resolved_ips:
-            return "Profile URL host resolves to a non-public address"
-        if not all(self._is_public_ip(parsed_ip) for parsed_ip in resolved_ips):
-            return "Profile URL host resolves to a non-public address"
+            return "Profile URL host must resolve to a public IPv4 address"
 
         ordered_ips = sorted(
             resolved_ips,
-            key=lambda parsed_ip: (parsed_ip.version != 4, parsed_ip.compressed),
+            key=lambda parsed_ip: parsed_ip.compressed,
         )
         return host, port, ordered_ips, False
 

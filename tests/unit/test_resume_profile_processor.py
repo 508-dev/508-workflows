@@ -989,6 +989,45 @@ def test_resolve_public_profile_request_target_rejects_nonstandard_ports() -> No
     )
 
 
+def test_resolve_public_profile_request_target_uses_public_ipv4_only() -> None:
+    """Dual-stack hosts should ignore IPv6 and pin only public IPv4 addresses."""
+    processor = ResumeProfileProcessor()
+
+    with patch(
+        "five08.resume_profile_processor.socket.getaddrinfo",
+        return_value=[
+            (None, None, None, None, ("2606:50c0:8002::153", 443, 0, 0)),
+            (None, None, None, None, ("93.184.216.35", 443)),
+            (None, None, None, None, ("93.184.216.34", 443)),
+        ],
+    ):
+        resolved = processor._resolve_public_profile_request_target(
+            "https://example.com"
+        )
+
+    assert resolved == (
+        "example.com",
+        443,
+        [
+            ipaddress.IPv4Address("93.184.216.34"),
+            ipaddress.IPv4Address("93.184.216.35"),
+        ],
+        False,
+    )
+
+
+def test_resolve_public_profile_request_target_rejects_ipv6_literal() -> None:
+    """IPv6-only profile URLs should be rejected when outbound IPv6 is unavailable."""
+    processor = ResumeProfileProcessor()
+
+    assert (
+        processor._resolve_public_profile_request_target(
+            "https://[2606:50c0:8002::153]/portfolio"
+        )
+        == "Profile URL host must resolve to a public IPv4 address"
+    )
+
+
 def test_extract_profile_proposal_deduplicates_existing_and_extracted_websites_by_scheme() -> (
     None
 ):
