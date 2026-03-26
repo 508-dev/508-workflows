@@ -1593,7 +1593,7 @@ class ResumeProfileProcessor:
         except ImportError as exc:
             raise ValueError("JavaScript browser fallback is unavailable") from exc
 
-        validation_error = self._validate_public_profile_url(url)
+        validation_error = self._validate_browser_profile_navigation_url(url)
         if validation_error:
             raise ValueError(validation_error)
 
@@ -1607,6 +1607,12 @@ class ResumeProfileProcessor:
                 wait_until="networkidle",
                 timeout=PROFILE_SOURCE_BROWSER_TIMEOUT_MS,
             )
+            final_page_url = str(getattr(page, "url", "")).strip()
+            validation_error = self._validate_browser_profile_navigation_url(
+                final_page_url
+            )
+            if validation_error:
+                raise ValueError(validation_error)
             rendered_html = page.content()
         except Exception as exc:
             raise ValueError(f"JavaScript profile fetch failed: {exc}") from exc
@@ -1709,6 +1715,14 @@ class ResumeProfileProcessor:
         scheme = urlsplit(candidate_url).scheme.lower()
         if scheme and scheme not in {"http", "https"}:
             return None
+        return self._validate_public_profile_url(candidate_url)
+
+    def _validate_browser_profile_navigation_url(
+        self, candidate_url: str
+    ) -> str | None:
+        parsed = urlsplit(candidate_url)
+        if parsed.scheme.lower() not in {"http", "https"}:
+            return "Profile URL must use http or https"
         return self._validate_public_profile_url(candidate_url)
 
     def _extract_rendered_profile_source_text(self, rendered_html: str) -> str:

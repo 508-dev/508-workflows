@@ -805,6 +805,26 @@ def test_validate_browser_profile_request_url_blocks_non_public_http_targets() -
     )
 
 
+def test_validate_browser_profile_navigation_url_rejects_non_http_scheme() -> None:
+    """Top-level browser navigation should remain limited to http(s) URLs."""
+    processor = ResumeProfileProcessor()
+
+    assert (
+        processor._validate_browser_profile_navigation_url("data:text/plain,hello")
+        == "Profile URL must use http or https"
+    )
+
+
+def test_validate_browser_profile_navigation_url_blocks_non_public_target() -> None:
+    """Top-level browser navigation should reject non-public HTTP(S) targets."""
+    processor = ResumeProfileProcessor()
+
+    assert (
+        processor._validate_browser_profile_navigation_url("http://127.0.0.1/internal")
+        == "Profile URL host resolves to a non-public address"
+    )
+
+
 def test_extract_rendered_profile_source_text_enforces_size_limit() -> None:
     """Rendered browser HTML should honor the same size cap as curl fetches."""
     processor = ResumeProfileProcessor()
