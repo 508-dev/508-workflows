@@ -13,6 +13,7 @@ from five08.clients.espo import EspoAPIError
 from five08.resume_profile_processor import (
     ResumeProcessorConfig,
     _ExternalProfileSourceCandidate,
+    _FetchedProfileSourceResponse,
 )
 from five08.worker.crm.resume_profile_processor import ResumeProfileProcessor
 from five08.worker.models import ExtractedSkills, ResumeExtractedProfile
@@ -266,7 +267,7 @@ def test_extract_profile_proposal_fetches_crm_website_and_github_sources() -> No
     processor.document_processor = Mock()
     processor._record_processing_run = Mock()
     processor._fetch_external_profile_source_text = Mock(
-        side_effect=lambda url: {
+        side_effect=lambda url, **_: {
             "https://portfolio.example.com": "Portfolio content",
             "https://github.com/octocat": "GitHub profile content",
         }[url]
@@ -335,7 +336,7 @@ def test_extract_profile_proposal_reruns_with_inferred_github_only() -> None:
     processor.document_processor = Mock()
     processor._record_processing_run = Mock()
     processor._fetch_external_profile_source_text = Mock(
-        side_effect=lambda url: {
+        side_effect=lambda url, **_: {
             "https://blog.example.com": "Blog content",
             "https://github.com/octocat": "GitHub profile content",
         }[url]
@@ -468,7 +469,7 @@ def test_extract_profile_proposal_fetches_confirmed_website_and_github_together(
     processor.document_processor = Mock()
     processor._record_processing_run = Mock()
     processor._fetch_external_profile_source_text = Mock(
-        side_effect=lambda url: {
+        side_effect=lambda url, **_: {
             "https://blog.example.com": "Blog content",
             "https://github.com/octocat": "GitHub profile content",
         }[url]
@@ -598,7 +599,7 @@ def test_extract_profile_proposal_without_resume_uses_crm_external_sources() -> 
     processor.document_processor = Mock()
     processor._record_processing_run = Mock()
     processor._fetch_external_profile_source_text = Mock(
-        side_effect=lambda url: {
+        side_effect=lambda url, **_: {
             "https://portfolio.example.com": "Portfolio content",
             "https://github.com/octocat": "GitHub profile content",
         }[url]
@@ -724,6 +725,69 @@ def test_fetch_external_profile_sources_retries_alternate_candidate_after_failur
         )
     }
     assert [item.status for item in enrichments] == ["failed", "used"]
+
+
+def test_fetch_external_profile_source_text_uses_browser_for_sparse_personal_site() -> (
+    None
+):
+    """Sparse app-shell HTML should retry personal websites with browser rendering."""
+    processor = ResumeProfileProcessor()
+    processor._fetch_external_profile_source_response = Mock(
+        return_value=_FetchedProfileSourceResponse(
+            final_url="https://example.com/about",
+            body=(
+                b"<html><head><title>Jane Doe</title></head><body>"
+                b"<div id='__next'></div><script>window.__NEXT_DATA__={};</script>"
+                b"</body></html>"
+            ),
+            content_type="text/html; charset=utf-8",
+        )
+    )
+    processor._fetch_external_profile_source_text_with_browser = Mock(
+        return_value="Jane Doe is a software engineer based in Tokyo building data products."
+    )
+
+    extracted = processor._fetch_external_profile_source_text(
+        "https://example.com",
+        allow_javascript_fallback=True,
+    )
+
+    assert extracted == (
+        "Jane Doe is a software engineer based in Tokyo building data products."
+    )
+    processor._fetch_external_profile_source_text_with_browser.assert_called_once_with(
+        "https://example.com/about"
+    )
+
+
+def test_fetch_external_profile_source_text_skips_browser_for_github_sources() -> None:
+    """Non-website profile sources should stay on the curl path even if sparse."""
+    processor = ResumeProfileProcessor()
+    processor._fetch_external_profile_source_response = Mock(
+        return_value=_FetchedProfileSourceResponse(
+            final_url="https://github.com/octocat",
+            body=(
+                b"<html><head><title>octocat</title></head><body>"
+                b"<div id='__next'></div><script>window.__NEXT_DATA__={};</script>"
+                b"</body></html>"
+            ),
+            content_type="text/html; charset=utf-8",
+        )
+    )
+    processor._fetch_external_profile_source_text_with_browser = Mock(
+        return_value="should not be used"
+    )
+
+    extracted = processor._fetch_external_profile_source_text(
+        "https://github.com/octocat",
+        allow_javascript_fallback=False,
+    )
+
+    assert extracted == "Title: octocat\noctocat"
+    processor._fetch_external_profile_source_text_with_browser.assert_not_called()
+    processor._fetch_external_profile_source_response.assert_called_once_with(
+        "https://github.com/octocat"
+    )
 
 
 def test_extract_profile_proposal_reruns_with_confirmed_personal_website() -> None:

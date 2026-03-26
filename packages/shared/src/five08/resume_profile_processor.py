@@ -57,6 +57,8 @@ SUPPORTED_RESUME_FILE_EXTENSIONS = ("pdf", "docx")
 DEFAULT_RESUME_MAX_FILE_SIZE_MB = 10
 LINKEDIN_FIELD = "cLinkedIn"
 PROFILE_SOURCE_FETCH_TIMEOUT_SECONDS = 10.0
+PROFILE_SOURCE_BROWSER_TIMEOUT_SECONDS = 20.0
+PROFILE_SOURCE_BROWSER_TIMEOUT_MS = int(PROFILE_SOURCE_BROWSER_TIMEOUT_SECONDS * 1000)
 PROFILE_SOURCE_MAX_REDIRECTS = 3
 PROFILE_SOURCE_MAX_BYTES = 512 * 1024
 PROFILE_SOURCE_MAX_TEXT_CHARS = 12000
@@ -69,6 +71,29 @@ PROFILE_SOURCE_ALLOWED_CONTENT_TYPES = (
     "text/plain",
     "application/xhtml+xml",
     "text/markdown",
+)
+PROFILE_SOURCE_JS_SPARSE_TEXT_MAX_CHARS = 250
+PROFILE_SOURCE_JS_SPARSE_TEXT_MAX_WORDS = 40
+PROFILE_SOURCE_JS_HTML_MIN_CHARS = 2000
+PROFILE_SOURCE_JS_RENDER_MARKERS = (
+    'id="__next"',
+    "id='__next'",
+    'id="__nuxt"',
+    "id='__nuxt'",
+    'id="root"',
+    "id='root'",
+    'id="app"',
+    "id='app'",
+    "data-reactroot",
+    "__next_data__",
+    "__next_f",
+    "__nuxt__",
+    "window.__next_data__",
+    "window.__nuxt__",
+    "enable javascript",
+    "requires javascript",
+    "javascript to run this app",
+    "please turn on javascript",
 )
 _HTML_BLOCK_RE = re.compile(
     r"(?is)<(script|style|noscript|svg|nav|header|footer)[^>]*>.*?</\1>"
@@ -220,6 +245,13 @@ class _ExternalProfileSourceCandidate:
     url: str
     origin: str
     source_key: str
+
+
+@dataclass(frozen=True)
+class _FetchedProfileSourceResponse:
+    final_url: str
+    body: bytes
+    content_type: str
 
 
 class ResumeProfileProcessor:
@@ -1338,7 +1370,10 @@ class ResumeProfileProcessor:
                 continue
 
             try:
-                fetched = self._fetch_external_profile_source_text(candidate.url)
+                fetched = self._fetch_external_profile_source_text(
+                    candidate.url,
+                    allow_javascript_fallback=candidate.label == "Personal Website",
+                )
             except Exception as exc:
                 enrichments.append(
                     ResumeSourceEnrichment(
@@ -1378,7 +1413,54 @@ class ResumeProfileProcessor:
 
         return extra_sources, enrichments
 
-    def _fetch_external_profile_source_text(self, url: str) -> str:
+    def _fetch_external_profile_source_text(
+        self,
+        url: str,
+        *,
+        allow_javascript_fallback: bool = False,
+    ) -> str:
+        response = self._fetch_external_profile_source_response(url)
+        extracted = ""
+        extraction_error: ValueError | None = None
+        try:
+            extracted = self._extract_profile_source_text(
+                body=response.body,
+                content_type=response.content_type,
+            )
+        except ValueError as exc:
+            extraction_error = exc
+
+        if allow_javascript_fallback and self._should_retry_profile_source_with_browser(
+            body=response.body,
+            content_type=response.content_type,
+            extracted_text=extracted,
+        ):
+            try:
+                rendered_text = self._fetch_external_profile_source_text_with_browser(
+                    response.final_url
+                )
+            except ValueError as exc:
+                logger.info(
+                    "Profile JS fallback failed url=%s error=%s",
+                    response.final_url,
+                    exc,
+                )
+            else:
+                if self._rendered_profile_source_text_is_better(
+                    rendered_text=rendered_text,
+                    extracted_text=extracted,
+                ):
+                    return rendered_text
+
+        if extracted:
+            return extracted
+        if extraction_error is not None:
+            raise extraction_error
+        raise ValueError("Profile page did not contain usable text")
+
+    def _fetch_external_profile_source_response(
+        self, url: str
+    ) -> _FetchedProfileSourceResponse:
         current_url = url
         headers = {
             "User-Agent": PROFILE_SOURCE_USER_AGENT,
@@ -1435,7 +1517,8 @@ class ResumeProfileProcessor:
                             if len(payload) > PROFILE_SOURCE_MAX_BYTES:
                                 raise ValueError("Profile page exceeds size limit")
 
-                        return self._extract_profile_source_text(
+                        return _FetchedProfileSourceResponse(
+                            final_url=current_url,
                             body=bytes(payload),
                             content_type=content_type,
                         )
@@ -1492,7 +1575,8 @@ class ResumeProfileProcessor:
                                 if len(payload) > PROFILE_SOURCE_MAX_BYTES:
                                     raise ValueError("Profile page exceeds size limit")
 
-                            return self._extract_profile_source_text(
+                            return _FetchedProfileSourceResponse(
+                                final_url=current_url,
                                 body=bytes(payload),
                                 content_type=content_type,
                             )
@@ -1502,6 +1586,36 @@ class ResumeProfileProcessor:
                 raise ValueError(f"Profile fetch failed: {exc}") from exc
 
         raise ValueError("Profile URL exceeded redirect limit")
+
+    def _fetch_external_profile_source_text_with_browser(self, url: str) -> str:
+        try:
+            from cloakbrowser import launch  # type: ignore[import-untyped]
+        except ImportError as exc:
+            raise ValueError("JavaScript browser fallback is unavailable") from exc
+
+        browser = None
+        try:
+            browser = launch()
+            page = browser.new_page()
+            page.goto(
+                url,
+                wait_until="networkidle",
+                timeout=PROFILE_SOURCE_BROWSER_TIMEOUT_MS,
+            )
+            rendered_html = page.content()
+        except Exception as exc:
+            raise ValueError(f"JavaScript profile fetch failed: {exc}") from exc
+        finally:
+            if browser is not None:
+                try:
+                    browser.close()
+                except Exception:
+                    logger.debug("Failed to close CloakBrowser for %s", url)
+
+        return self._extract_profile_source_text(
+            body=rendered_html.encode("utf-8"),
+            content_type="text/html",
+        )
 
     def _extract_profile_source_text(self, *, body: bytes, content_type: str) -> str:
         normalized_type = content_type.split(";", 1)[0].strip().lower()
@@ -1523,6 +1637,57 @@ class ResumeProfileProcessor:
         if not extracted:
             raise ValueError("Profile page did not contain usable text")
         return extracted[:PROFILE_SOURCE_MAX_TEXT_CHARS]
+
+    def _should_retry_profile_source_with_browser(
+        self,
+        *,
+        body: bytes,
+        content_type: str,
+        extracted_text: str,
+    ) -> bool:
+        normalized_type = content_type.split(";", 1)[0].strip().lower()
+        decoded = body.decode("utf-8", errors="ignore")
+        html_lower = decoded.casefold()
+        is_html = normalized_type in {"text/html", "application/xhtml+xml"} or (
+            "<html" in html_lower
+        )
+        if not is_html:
+            return False
+
+        stripped_text = extracted_text.strip()
+        word_count = len(re.findall(r"\w+", stripped_text))
+        is_sparse = (
+            len(stripped_text) <= PROFILE_SOURCE_JS_SPARSE_TEXT_MAX_CHARS
+            and word_count <= PROFILE_SOURCE_JS_SPARSE_TEXT_MAX_WORDS
+        )
+        if not is_sparse:
+            return False
+
+        if any(marker in html_lower for marker in PROFILE_SOURCE_JS_RENDER_MARKERS):
+            return True
+        return (
+            len(decoded) >= PROFILE_SOURCE_JS_HTML_MIN_CHARS and "<script" in html_lower
+        )
+
+    def _rendered_profile_source_text_is_better(
+        self,
+        *,
+        rendered_text: str,
+        extracted_text: str,
+    ) -> bool:
+        rendered = rendered_text.strip()
+        extracted = extracted_text.strip()
+        if not rendered:
+            return False
+        if not extracted:
+            return True
+
+        rendered_words = len(re.findall(r"\w+", rendered))
+        extracted_words = len(re.findall(r"\w+", extracted))
+        return (
+            len(rendered) >= len(extracted) + 20
+            or rendered_words >= extracted_words + 5
+        )
 
     def _render_external_profile_source_text(
         self,
