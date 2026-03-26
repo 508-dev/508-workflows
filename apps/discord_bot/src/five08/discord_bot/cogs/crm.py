@@ -883,6 +883,7 @@ class ResumeEditWebsitesModal(discord.ui.Modal, title="Edit Websites"):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         raw = self.websites_input.value or ""
         links = [line.strip() for line in raw.splitlines() if line.strip()]
+        self.confirmation_view.website_edits_override_inferred_candidates = True
         if links:
             self.confirmation_view.proposed_updates["cWebsiteLink"] = links
         else:
@@ -1714,7 +1715,7 @@ class ResumeConfirmInferredWebsitesButton(
         if not reparse_succeeded:
             return
         for item in view.children:
-            if isinstance(item, discord.ui.Button):
+            if isinstance(item, (discord.ui.Button, discord.ui.Select)):
                 item.disabled = True
         if interaction.message:
             try:
@@ -1772,6 +1773,7 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         parsed_seniority: str | None = None,
         existing_websites: list[str] | None = None,
         source_enrichments: list[dict[str, Any]] | None = None,
+        preview_result: dict[str, Any] | None = None,
         discord_role_suggestions: list[str] | None = None,
         discord_role_target_user_id: str | None = None,
         can_apply_discord_roles: bool = False,
@@ -1790,6 +1792,7 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         self.parsed_seniority = parsed_seniority
         self.existing_websites = existing_websites or []
         self.source_enrichments = source_enrichments or []
+        self.preview_result = dict(preview_result or {})
         self.discord_role_target_user_id = discord_role_target_user_id
         self.can_apply_discord_roles = bool(
             can_apply_discord_roles
@@ -1800,8 +1803,11 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             dict.fromkeys(discord_role_suggestions or [])
         )
         self.preview_message: discord.Message | discord.WebhookMessage | None = None
+        self.preview_embeds: list[discord.Embed] = []
         self.website_reparse_candidates: list[str] = []
+        self.website_edits_override_inferred_candidates = False
         self.seniority_override: str | None = None
+        self.current_field_values = self._extract_current_field_values()
 
         self._refresh_website_reparse_candidates()
         self.add_item(ResumeEditWebsitesButton())
@@ -1865,6 +1871,11 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         proposed_links = self._normalize_website_links_for_reparse(
             self.proposed_updates.get("cWebsiteLink")
         )
+        proposed_keys = {
+            normalized_website_identity_key(url)
+            for url in proposed_links
+            if normalized_website_identity_key(url)
+        }
         proposed_additions = [
             url
             for url in proposed_links
@@ -1873,6 +1884,12 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         inferred_candidates = self._normalize_website_links_for_reparse(
             self._current_inferred_reparse_websites()
         )
+        if self.website_edits_override_inferred_candidates:
+            inferred_candidates = [
+                url
+                for url in inferred_candidates
+                if normalized_website_identity_key(url) in proposed_keys
+            ]
         combined = self._normalize_website_links_for_reparse(
             [*proposed_additions, *inferred_candidates]
         )
@@ -1899,11 +1916,94 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         if self.preview_message is None:
             return
         try:
-            await self.preview_message.edit(view=self)
+            preview_embed = self._build_preview_embed()
+            embeds = [preview_embed, *self.preview_embeds[1:]]
+            self.preview_embeds = embeds
+            await self.preview_message.edit(view=self, embeds=embeds)
         except discord.NotFound:
             self.preview_message = None
         except discord.HTTPException as exc:
             logger.warning("Failed to update confirmation view: %s", exc)
+
+    def _extract_current_field_values(self) -> dict[str, Any]:
+        values: dict[str, Any] = {}
+        proposed_changes = self.preview_result.get("proposed_changes")
+        if isinstance(proposed_changes, list):
+            for change in proposed_changes:
+                if not isinstance(change, dict):
+                    continue
+                field_name = str(change.get("field", "")).strip()
+                if not field_name:
+                    continue
+                values[field_name] = change.get("current")
+        if "cWebsiteLink" not in values and self.existing_websites:
+            values["cWebsiteLink"] = list(self.existing_websites)
+        return values
+
+    def _build_current_proposed_changes(self) -> list[dict[str, Any]]:
+        changes: list[dict[str, Any]] = []
+        for field_name, proposed in self.proposed_updates.items():
+            if proposed is None:
+                continue
+            if isinstance(proposed, str) and not proposed.strip():
+                continue
+            if isinstance(proposed, (list, tuple, set, dict)) and len(proposed) == 0:
+                continue
+            current = self.current_field_values.get(field_name)
+            if field_name == "cWebsiteLink" and current is None:
+                current = list(self.existing_websites)
+            changes.append(
+                {
+                    "field": field_name,
+                    "current": current,
+                    "proposed": proposed,
+                }
+            )
+        return changes
+
+    def _current_source_enrichments(self) -> list[dict[str, Any]]:
+        enrichments = [
+            dict(item) for item in self.source_enrichments if isinstance(item, dict)
+        ]
+        if not self.website_edits_override_inferred_candidates:
+            return enrichments
+
+        proposed_keys = {
+            normalized_website_identity_key(url)
+            for url in self._normalize_website_links_for_reparse(
+                self.proposed_updates.get("cWebsiteLink")
+            )
+            if normalized_website_identity_key(url)
+        }
+        filtered: list[dict[str, Any]] = []
+        for item in enrichments:
+            is_inferred_website = (
+                str(item.get("label", "")).strip().casefold() == "personal website"
+                and str(item.get("status", "")).strip().casefold()
+                == "confirmation_needed"
+            )
+            if not is_inferred_website:
+                filtered.append(item)
+                continue
+            url_key = normalized_website_identity_key(str(item.get("url", "")).strip())
+            if url_key and url_key in proposed_keys:
+                filtered.append(item)
+        return filtered
+
+    def _build_preview_embed(self) -> discord.Embed:
+        result = dict(self.preview_result)
+        result["proposed_updates"] = dict(self.proposed_updates)
+        result["proposed_changes"] = self._build_current_proposed_changes()
+        result["existing_websites"] = list(self.existing_websites)
+        result["source_enrichments"] = self._current_source_enrichments()
+        embed, _ = self.crm_cog._build_resume_preview_embed(
+            contact_id=self.contact_id,
+            contact_name=self.contact_name,
+            result=result,
+            link_member=self.link_member,
+            link_discord=self.link_discord,
+        )
+        return embed
 
     def _set_seniority_override(self, value: str) -> str:
         self.seniority_override = value
@@ -4249,6 +4349,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 parsed_seniority=parsed_seniority,
                 existing_websites=existing_websites,
                 source_enrichments=source_enrichments,
+                preview_result=result,
                 discord_role_suggestions=suggested_discord_roles,
                 discord_role_target_user_id=discord_role_target_user_id,
                 can_apply_discord_roles=can_apply_discord_roles,
@@ -4279,6 +4380,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 wait=True,
             )
             view.preview_message = preview_message
+            view.preview_embeds = list(embeds)
             return True
 
         view = ResumeUpdateConfirmationView(
@@ -4295,6 +4397,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             parsed_seniority=parsed_seniority,
             existing_websites=existing_websites,
             source_enrichments=source_enrichments,
+            preview_result=result,
             discord_role_suggestions=suggested_discord_roles,
             discord_role_target_user_id=discord_role_target_user_id,
             can_apply_discord_roles=can_apply_discord_roles,
@@ -4325,6 +4428,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             wait=True,
         )
         view.preview_message = preview_message
+        view.preview_embeds = list(embeds)
         return True
 
     async def _download_and_send_resume(

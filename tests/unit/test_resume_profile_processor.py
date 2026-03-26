@@ -526,6 +526,14 @@ def test_fetch_external_profile_source_text_pins_resolved_public_ips() -> None:
     session.get.assert_called_once()
 
 
+def test_is_public_ip_rejects_non_global_addresses() -> None:
+    """Special-use ranges that are not globally routable should be rejected."""
+    processor = ResumeProfileProcessor()
+
+    assert processor._is_public_ip(ipaddress.ip_address("100.64.0.1")) is False
+    assert processor._is_public_ip(ipaddress.ip_address("93.184.216.34")) is True
+
+
 def test_extract_profile_proposal_deduplicates_existing_and_extracted_websites_by_scheme() -> (
     None
 ):

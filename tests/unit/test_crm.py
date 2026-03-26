@@ -599,6 +599,38 @@ class TestCRMCog:
         )
 
     @pytest.mark.asyncio
+    async def test_resume_update_view_website_edits_override_inferred_candidates(
+        self, crm_cog
+    ):
+        """Removing inferred websites in the editor should keep them out of reparses."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+            source_enrichments=[
+                {
+                    "label": "Personal Website",
+                    "status": "confirmation_needed",
+                    "origin": "resume_inference",
+                    "url": "https://example.com",
+                }
+            ],
+        )
+
+        assert view.website_reparse_candidates == ["https://example.com"]
+
+        view.website_edits_override_inferred_candidates = True
+        view._refresh_website_reparse_candidates()
+
+        assert view.website_reparse_candidates == []
+        assert not any(
+            isinstance(child, ResumeConfirmInferredWebsitesButton)
+            for child in view.children
+        )
+
+    @pytest.mark.asyncio
     async def test_resume_update_view_adds_social_links_button_when_social_links_proposed(
         self, crm_cog
     ):
@@ -6056,6 +6088,7 @@ class TestCRMCog:
             link_discord={"user_id": "101", "username": "Operator#0001"},
             link_member=linked_member,
             preview_action="crm.reprocess_resume",
+            parsed_seniority="senior",
             source_enrichments=[
                 {
                     "label": "Personal Website",
@@ -6088,6 +6121,11 @@ class TestCRMCog:
         assert (
             kwargs["status_message"]
             == "🔄 Re-running profile extraction with website content..."
+        )
+        assert all(
+            child.disabled
+            for child in view.children
+            if isinstance(child, (discord.ui.Button, discord.ui.Select))
         )
         confirm_interaction.message.edit.assert_awaited_once()
 
@@ -6138,9 +6176,70 @@ class TestCRMCog:
         assert all(
             not child.disabled
             for child in view.children
-            if isinstance(child, discord.ui.Button)
+            if isinstance(child, (discord.ui.Button, discord.ui.Select))
         )
         confirm_interaction.message.edit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_sync_message_view_rebuilds_preview_embed_for_websites(self, crm_cog):
+        """Website edits should refresh the preview embed, not only the controls."""
+        role_embed = discord.Embed(title="Role Suggestions")
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={"cWebsiteLink": ["https://existing.com"]},
+            existing_websites=["https://existing.com"],
+            source_enrichments=[
+                {
+                    "label": "Personal Website",
+                    "status": "confirmation_needed",
+                    "origin": "resume_inference",
+                    "url": "https://portfolio.example.com",
+                }
+            ],
+            preview_result={
+                "proposed_updates": {"cWebsiteLink": ["https://existing.com"]},
+                "proposed_changes": [
+                    {
+                        "field": "cWebsiteLink",
+                        "current": ["https://existing.com"],
+                        "proposed": ["https://existing.com"],
+                    }
+                ],
+                "existing_websites": ["https://existing.com"],
+                "source_enrichments": [
+                    {
+                        "label": "Personal Website",
+                        "status": "confirmation_needed",
+                        "origin": "resume_inference",
+                        "url": "https://portfolio.example.com",
+                    }
+                ],
+            },
+        )
+        view.preview_message = AsyncMock()
+        view.preview_message.edit = AsyncMock()
+        view.preview_embeds = [discord.Embed(title="Old Preview"), role_embed]
+        view.website_edits_override_inferred_candidates = True
+        view.proposed_updates["cWebsiteLink"] = [
+            "https://existing.com",
+            "https://new.com",
+        ]
+        view._refresh_website_reparse_candidates()
+
+        await view._sync_message_view()
+
+        edit_kwargs = view.preview_message.edit.await_args.kwargs
+        assert edit_kwargs["view"] is view
+        embeds = edit_kwargs["embeds"]
+        assert embeds[1] is role_embed
+        reparse_field = next(
+            field for field in embeds[0].fields if field.name == "Website Reparse"
+        )
+        assert "Reparse With Websites" in reparse_field.value
+        assert all(field.name != "External Sources" for field in embeds[0].fields)
 
     @pytest.mark.asyncio
     async def test_run_resume_extract_and_preview_calls_direct_extract_for_reprocess(

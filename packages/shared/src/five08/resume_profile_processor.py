@@ -1514,14 +1514,7 @@ class ResumeProfileProcessor:
 
     @staticmethod
     def _is_public_ip(value: IPAddress) -> bool:
-        return not (
-            value.is_private
-            or value.is_loopback
-            or value.is_link_local
-            or value.is_multicast
-            or value.is_reserved
-            or value.is_unspecified
-        )
+        return value.is_global
 
     @staticmethod
     def _normalize_github_username(value: Any) -> str | None:
