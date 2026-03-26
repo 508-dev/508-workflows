@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html import unescape
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urljoin, urlsplit
 
 from curl_cffi import CurlOpt, requests as curl_requests
@@ -61,6 +61,7 @@ PROFILE_SOURCE_BROWSER_TIMEOUT_SECONDS = 20.0
 PROFILE_SOURCE_BROWSER_TIMEOUT_MS = int(PROFILE_SOURCE_BROWSER_TIMEOUT_SECONDS * 1000)
 PROFILE_SOURCE_MAX_REDIRECTS = 3
 PROFILE_SOURCE_MAX_BYTES = 512 * 1024
+PROFILE_SOURCE_BROWSER_RESOURCE_MAX_BYTES = 10 * 1024 * 1024
 PROFILE_SOURCE_MAX_TEXT_CHARS = 12000
 PROFILE_SOURCE_MAX_WEBSITES = 2
 PROFILE_SOURCE_ALLOWED_PORTS = frozenset({80, 443})
@@ -1515,11 +1516,49 @@ class ResumeProfileProcessor:
     def _fetch_external_profile_source_response(
         self, url: str
     ) -> ProfileSourceHttpResponse:
-        current_url = url
-        headers = {
-            "User-Agent": PROFILE_SOURCE_USER_AGENT,
-            "Accept": ", ".join(PROFILE_SOURCE_ALLOWED_CONTENT_TYPES),
+        return self._request_profile_http_response(
+            url,
+            method="GET",
+            headers={
+                "User-Agent": PROFILE_SOURCE_USER_AGENT,
+                "Accept": ", ".join(PROFILE_SOURCE_ALLOWED_CONTENT_TYPES),
+            },
+            body=None,
+            max_bytes=PROFILE_SOURCE_MAX_BYTES,
+            require_success=True,
+            size_limit_error="Profile page exceeds size limit",
+        )
+
+    def _fetch_browser_profile_request_response(
+        self, request: Any
+    ) -> ProfileSourceHttpResponse:
+        request_headers = {
+            str(key): str(value)
+            for key, value in getattr(request, "headers", {}).items()
+            if str(key).strip().lower() not in {"host", "content-length"}
         }
+        return self._request_profile_http_response(
+            str(getattr(request, "url", "")).strip(),
+            method=str(getattr(request, "method", "GET")).upper(),
+            headers=request_headers,
+            body=getattr(request, "post_data_buffer", None),
+            max_bytes=PROFILE_SOURCE_BROWSER_RESOURCE_MAX_BYTES,
+            require_success=False,
+            size_limit_error="Browser profile resource exceeds size limit",
+        )
+
+    def _request_profile_http_response(
+        self,
+        url: str,
+        *,
+        method: str,
+        headers: dict[str, str],
+        body: bytes | None,
+        max_bytes: int,
+        require_success: bool,
+        size_limit_error: str,
+    ) -> ProfileSourceHttpResponse:
+        current_url = url
 
         for _ in range(PROFILE_SOURCE_MAX_REDIRECTS + 1):
             resolution = self._resolve_public_profile_request_target(current_url)
@@ -1529,9 +1568,11 @@ class ResumeProfileProcessor:
 
             try:
                 if host_is_ip_literal:
-                    response = curl_requests.get(
+                    response = curl_requests.request(
+                        cast(Any, method),
                         current_url,
                         headers=headers,
+                        data=body,
                         timeout=PROFILE_SOURCE_FETCH_TIMEOUT_SECONDS,
                         allow_redirects=False,
                         stream=True,
@@ -1547,27 +1588,13 @@ class ResumeProfileProcessor:
                             current_url = urljoin(current_url, redirect_to)
                             continue
 
-                        response.raise_for_status()
-                        content_length = response.headers.get("Content-Length")
-                        if content_length:
-                            try:
-                                content_length_value = int(content_length)
-                            except (TypeError, ValueError):
-                                content_length_value = None
-                            if (
-                                content_length_value is not None
-                                and content_length_value > PROFILE_SOURCE_MAX_BYTES
-                            ):
-                                raise ValueError("Profile page exceeds size limit")
-
-                        payload = bytearray()
-                        for chunk in response.iter_content(chunk_size=8192):
-                            if not chunk:
-                                continue
-                            payload.extend(chunk)
-                            if len(payload) > PROFILE_SOURCE_MAX_BYTES:
-                                raise ValueError("Profile page exceeds size limit")
-
+                        if require_success:
+                            response.raise_for_status()
+                        payload = self._read_profile_http_response_body(
+                            response,
+                            max_bytes=max_bytes,
+                            size_limit_error=size_limit_error,
+                        )
                         return ProfileSourceHttpResponse(
                             final_url=current_url,
                             status_code=int(response.status_code),
@@ -1575,7 +1602,7 @@ class ResumeProfileProcessor:
                                 str(key).lower(): str(value)
                                 for key, value in response.headers.items()
                             },
-                            body=bytes(payload),
+                            body=payload,
                         )
                     finally:
                         response.close()
@@ -1588,9 +1615,11 @@ class ResumeProfileProcessor:
                         curl_options={CurlOpt.RESOLVE: resolve_entries}
                     )
                     with session:
-                        response = session.get(
+                        response = session.request(
+                            cast(Any, method),
                             current_url,
                             headers=headers,
+                            data=body,
                             timeout=PROFILE_SOURCE_FETCH_TIMEOUT_SECONDS,
                             allow_redirects=False,
                             stream=True,
@@ -1606,27 +1635,13 @@ class ResumeProfileProcessor:
                                 current_url = urljoin(current_url, redirect_to)
                                 continue
 
-                            response.raise_for_status()
-                            content_length = response.headers.get("Content-Length")
-                            if content_length:
-                                try:
-                                    content_length_value = int(content_length)
-                                except (TypeError, ValueError):
-                                    content_length_value = None
-                                if (
-                                    content_length_value is not None
-                                    and content_length_value > PROFILE_SOURCE_MAX_BYTES
-                                ):
-                                    raise ValueError("Profile page exceeds size limit")
-
-                            payload = bytearray()
-                            for chunk in response.iter_content(chunk_size=8192):
-                                if not chunk:
-                                    continue
-                                payload.extend(chunk)
-                                if len(payload) > PROFILE_SOURCE_MAX_BYTES:
-                                    raise ValueError("Profile page exceeds size limit")
-
+                            if require_success:
+                                response.raise_for_status()
+                            payload = self._read_profile_http_response_body(
+                                response,
+                                max_bytes=max_bytes,
+                                size_limit_error=size_limit_error,
+                            )
                             return ProfileSourceHttpResponse(
                                 final_url=current_url,
                                 status_code=int(response.status_code),
@@ -1634,7 +1649,7 @@ class ResumeProfileProcessor:
                                     str(key).lower(): str(value)
                                     for key, value in response.headers.items()
                                 },
-                                body=bytes(payload),
+                                body=payload,
                             )
                         finally:
                             response.close()
@@ -1642,6 +1657,31 @@ class ResumeProfileProcessor:
                 raise ValueError(f"Profile fetch failed: {exc}") from exc
 
         raise ValueError("Profile URL exceeded redirect limit")
+
+    def _read_profile_http_response_body(
+        self,
+        response: Any,
+        *,
+        max_bytes: int,
+        size_limit_error: str,
+    ) -> bytes:
+        content_length = response.headers.get("Content-Length")
+        if content_length:
+            try:
+                content_length_value = int(content_length)
+            except (TypeError, ValueError):
+                content_length_value = None
+            if content_length_value is not None and content_length_value > max_bytes:
+                raise ValueError(size_limit_error)
+
+        payload = bytearray()
+        for chunk in response.iter_content(chunk_size=8192):
+            if not chunk:
+                continue
+            payload.extend(chunk)
+            if len(payload) > max_bytes:
+                raise ValueError(size_limit_error)
+        return bytes(payload)
 
     def _fetch_external_profile_source_text_with_browser(
         self,
@@ -1786,18 +1826,12 @@ class ResumeProfileProcessor:
             route.continue_()
             return
 
-        response = response_cache.get(request_url)
+        request_method = str(getattr(request, "method", "GET")).upper()
+        response = response_cache.get(request_url) if request_method == "GET" else None
         if response is None:
-            response = self._fetch_external_profile_source_response(request_url)
-            response_cache[request_url] = response
-            response_cache.setdefault(response.final_url, response)
-
-        if response.final_url != request_url:
-            route.fulfill(
-                status=302,
-                headers={"location": response.final_url},
-            )
-            return
+            response = self._fetch_browser_profile_request_response(request)
+            if request_method == "GET":
+                response_cache[request_url] = response
 
         route.fulfill(
             status=response.status_code,

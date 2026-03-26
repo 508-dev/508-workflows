@@ -12,6 +12,7 @@ from curl_cffi import CurlOpt
 
 from five08.clients.espo import EspoAPIError
 from five08.resume_profile_processor import (
+    PROFILE_SOURCE_BROWSER_RESOURCE_MAX_BYTES,
     PROFILE_SOURCE_MAX_BYTES,
     ProfileSourceHttpResponse,
     ResumeProcessorConfig,
@@ -835,6 +836,46 @@ def test_validate_browser_profile_navigation_url_blocks_non_public_target() -> N
     )
 
 
+def test_fetch_browser_profile_request_response_preserves_request_shape() -> None:
+    """Browser subrequests should replay the original method, headers, and body."""
+    processor = ResumeProfileProcessor()
+    processor._request_profile_http_response = Mock(
+        return_value=ProfileSourceHttpResponse(
+            final_url="https://example.com/api/profile",
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body=b"{}",
+        )
+    )
+    request = SimpleNamespace(
+        url="https://example.com/api/profile",
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "X-Test": "1",
+            "Host": "example.com",
+            "Content-Length": "2",
+        },
+        post_data_buffer=b"{}",
+    )
+
+    response = processor._fetch_browser_profile_request_response(request)
+
+    assert response.final_url == "https://example.com/api/profile"
+    processor._request_profile_http_response.assert_called_once_with(
+        "https://example.com/api/profile",
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "X-Test": "1",
+        },
+        body=b"{}",
+        max_bytes=PROFILE_SOURCE_BROWSER_RESOURCE_MAX_BYTES,
+        require_success=False,
+        size_limit_error="Browser profile resource exceeds size limit",
+    )
+
+
 def test_extract_rendered_profile_source_text_enforces_size_limit() -> None:
     """Rendered browser HTML should honor the same size cap as curl fetches."""
     processor = ResumeProfileProcessor()
@@ -1064,7 +1105,7 @@ def test_fetch_external_profile_source_text_pins_resolved_public_ips() -> None:
     response.close = Mock()
     session = MagicMock()
     session.__enter__.return_value = session
-    session.get.return_value = response
+    session.request.return_value = response
 
     with (
         patch.object(
@@ -1087,7 +1128,7 @@ def test_fetch_external_profile_source_text_pins_resolved_public_ips() -> None:
             "example.com:443:93.184.216.35",
         ]
     }
-    session.get.assert_called_once()
+    session.request.assert_called_once()
     response.close.assert_called_once()
 
 
