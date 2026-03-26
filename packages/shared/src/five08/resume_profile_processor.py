@@ -1613,7 +1613,7 @@ class ResumeProfileProcessor:
             if not self._is_public_ip(ip_literal):
                 return "Profile URL host resolves to a non-public address"
             if ip_literal.version != 4:
-                return "Profile URL host must resolve to a public IPv4 address"
+                return "Profile URL host must be a public IPv4 address"
             return host, port, [ip_literal], True
 
         try:

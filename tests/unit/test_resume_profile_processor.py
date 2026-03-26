@@ -1024,7 +1024,7 @@ def test_resolve_public_profile_request_target_rejects_ipv6_literal() -> None:
         processor._resolve_public_profile_request_target(
             "https://[2606:50c0:8002::153]/portfolio"
         )
-        == "Profile URL host must resolve to a public IPv4 address"
+        == "Profile URL host must be a public IPv4 address"
     )
 
 
