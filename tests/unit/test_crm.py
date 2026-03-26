@@ -824,6 +824,28 @@ class TestCRMCog:
         )
 
     @pytest.mark.asyncio
+    async def test_edit_websites_modal_falls_back_to_existing_websites(self, crm_cog):
+        """Existing CRM websites should seed the editor when no website update is proposed."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+            existing_websites=[
+                "https://example.com",
+                "https://blog.example.com",
+            ],
+        )
+
+        modal = ResumeEditWebsitesModal(confirmation_view=view)
+
+        assert (
+            modal.websites_input.default
+            == "https://example.com\nhttps://blog.example.com"
+        )
+
+    @pytest.mark.asyncio
     async def test_edit_social_links_modal_prepopulates_list_values(self, crm_cog):
         """Edit Social Links modal should pre-fill with proposed social link list."""
         view = ResumeUpdateConfirmationView(

@@ -871,7 +871,9 @@ class ResumeEditWebsitesModal(discord.ui.Modal, title="Edit Websites"):
     def __init__(self, *, confirmation_view: "ResumeUpdateConfirmationView") -> None:
         super().__init__()
         self.confirmation_view = confirmation_view
-        current = confirmation_view.proposed_updates.get("cWebsiteLink", [])
+        current = confirmation_view.proposed_updates.get("cWebsiteLink")
+        if current is None:
+            current = confirmation_view.existing_websites
         if isinstance(current, list):
             default = "\n".join(str(u) for u in current if str(u).strip())
         elif isinstance(current, str):
