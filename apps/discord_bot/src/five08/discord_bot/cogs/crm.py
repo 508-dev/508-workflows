@@ -29,7 +29,9 @@ from five08.clients.docuseal import (
 from five08.document_text import document_file_extension, extract_document_text
 from five08.crm_normalization import (
     format_seniority_label as shared_format_seniority_label,
+    normalized_website_identity_key,
     normalize_roles,
+    normalize_website_url,
 )
 from five08.resume_extractor import (
     ResumeExtractedProfile,
@@ -885,10 +887,16 @@ class ResumeEditWebsitesModal(discord.ui.Modal, title="Edit Websites"):
             self.confirmation_view.proposed_updates["cWebsiteLink"] = links
         else:
             self.confirmation_view.proposed_updates.pop("cWebsiteLink", None)
+        self.confirmation_view._refresh_website_reparse_candidates()
+        await self.confirmation_view._sync_message_view()
         count = len(links)
+        if self.confirmation_view.website_reparse_candidates:
+            action_hint = " Click **Reparse With Websites** to refresh the extraction."
+        else:
+            action_hint = " Click **Confirm Updates** to apply."
         await interaction.response.send_message(
             f"✅ Websites updated to {count} link{'s' if count != 1 else ''}. "
-            "Click **Confirm Updates** to apply.",
+            + action_hint,
             ephemeral=True,
         )
 
@@ -1662,6 +1670,50 @@ class ResumeEditLocationButton(discord.ui.Button["ResumeUpdateConfirmationView"]
         )
 
 
+class ResumeConfirmInferredWebsitesButton(
+    discord.ui.Button["ResumeUpdateConfirmationView"]
+):
+    """Button that re-runs extraction using newly added website URLs."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            label="Reparse With Websites",
+            style=discord.ButtonStyle.primary,
+            custom_id="resume_reparse_with_websites",
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if not isinstance(view, ResumeUpdateConfirmationView):
+            await interaction.response.send_message(
+                "❌ Unable to confirm inferred websites.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await view.crm_cog._run_resume_extract_and_preview(
+            interaction=interaction,
+            contact_id=view.contact_id,
+            contact_name=view.contact_name,
+            attachment_id=view.attachment_id,
+            filename=view.filename,
+            link_member=None,
+            action="crm.upload_resume",
+            status_message=("🔄 Re-running profile extraction with website content..."),
+            confirmed_personal_websites=view.website_reparse_candidates,
+            link_discord_payload=view.link_discord,
+        )
+        for item in view.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+        if interaction.message:
+            try:
+                await interaction.message.edit(view=view)
+            except discord.NotFound:
+                pass
+            except discord.HTTPException as exc:
+                logger.warning("Failed to update confirmation view: %s", exc)
+
+
 class ResumeUpdateConfirmationView(discord.ui.View):
     """Confirm extracted profile updates before writing to CRM."""
 
@@ -1701,8 +1753,12 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         contact_id: str,
         contact_name: str,
         proposed_updates: dict[str, Any],
+        attachment_id: str = "",
+        filename: str = "",
         link_discord: dict[str, str] | None = None,
         parsed_seniority: str | None = None,
+        existing_websites: list[str] | None = None,
+        source_enrichments: list[dict[str, Any]] | None = None,
         discord_role_suggestions: list[str] | None = None,
         discord_role_target_user_id: str | None = None,
         can_apply_discord_roles: bool = False,
@@ -1712,9 +1768,13 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         self.requester_id = requester_id
         self.contact_id = contact_id
         self.contact_name = contact_name
+        self.attachment_id = attachment_id
+        self.filename = filename
         self.proposed_updates = proposed_updates
         self.link_discord = link_discord
         self.parsed_seniority = parsed_seniority
+        self.existing_websites = existing_websites or []
+        self.source_enrichments = source_enrichments or []
         self.discord_role_target_user_id = discord_role_target_user_id
         self.can_apply_discord_roles = bool(
             can_apply_discord_roles
@@ -1724,8 +1784,11 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         self.discord_role_suggestions = list(
             dict.fromkeys(discord_role_suggestions or [])
         )
+        self.preview_message: discord.Message | None = None
+        self.website_reparse_candidates: list[str] = []
         self.seniority_override: str | None = None
 
+        self._refresh_website_reparse_candidates()
         if proposed_updates.get("cWebsiteLink"):
             self.add_item(ResumeEditWebsitesButton())
         if proposed_updates.get("cSocialLinks"):
@@ -1747,6 +1810,86 @@ class ResumeUpdateConfirmationView(discord.ui.View):
                     parsed_seniority=parsed_seniority,
                 )
             )
+
+    @staticmethod
+    def _normalize_website_links_for_reparse(value: Any) -> list[str]:
+        if isinstance(value, str):
+            raw_values = [item.strip() for item in value.split(",") if item.strip()]
+        elif isinstance(value, (list, tuple, set)):
+            raw_values = [str(item).strip() for item in value if str(item).strip()]
+        else:
+            raw_values = []
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw_value in raw_values:
+            normalized_url = normalize_website_url(raw_value, allow_scheme_less=True)
+            if not normalized_url:
+                continue
+            identity_key = normalized_website_identity_key(normalized_url)
+            if not identity_key or identity_key in seen:
+                continue
+            seen.add(identity_key)
+            normalized.append(normalized_url)
+        return normalized
+
+    def _current_inferred_reparse_websites(self) -> list[str]:
+        return [
+            str(item.get("url", "")).strip()
+            for item in self.source_enrichments
+            if isinstance(item, dict)
+            and str(item.get("label", "")).strip().casefold() == "personal website"
+            and str(item.get("status", "")).strip().casefold() == "confirmation_needed"
+            and str(item.get("url", "")).strip()
+        ]
+
+    def _refresh_website_reparse_candidates(self) -> None:
+        existing_by_key = {
+            normalized_website_identity_key(url): url
+            for url in self._normalize_website_links_for_reparse(self.existing_websites)
+        }
+        proposed_links = self._normalize_website_links_for_reparse(
+            self.proposed_updates.get("cWebsiteLink")
+        )
+        proposed_additions = [
+            url
+            for url in proposed_links
+            if normalized_website_identity_key(url) not in existing_by_key
+        ]
+        inferred_candidates = self._normalize_website_links_for_reparse(
+            self._current_inferred_reparse_websites()
+        )
+        combined = self._normalize_website_links_for_reparse(
+            [*proposed_additions, *inferred_candidates]
+        )
+        self.website_reparse_candidates = combined
+        self._ensure_website_reparse_button()
+
+    def _ensure_website_reparse_button(self) -> None:
+        existing_button = next(
+            (
+                child
+                for child in self.children
+                if isinstance(child, ResumeConfirmInferredWebsitesButton)
+            ),
+            None,
+        )
+        if self.website_reparse_candidates:
+            if existing_button is None:
+                self.add_item(ResumeConfirmInferredWebsitesButton())
+            return
+        if existing_button is not None:
+            self.remove_item(existing_button)
+
+    async def _sync_message_view(self) -> None:
+        if self.preview_message is None:
+            return
+        try:
+            await self.preview_message.edit(view=self)
+        except discord.NotFound:
+            self.preview_message = None
+        except discord.HTTPException as exc:
+            logger.warning("Failed to update confirmation view: %s", exc)
 
     def _set_seniority_override(self, value: str) -> str:
         self.seniority_override = value
@@ -3038,6 +3181,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         contact_id: str,
         attachment_id: str,
         filename: str,
+        confirmed_personal_websites: list[str] | None = None,
     ) -> dict[str, Any]:
         processor = self._create_resume_profile_processor()
         result = await asyncio.to_thread(
@@ -3045,6 +3189,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             contact_id=contact_id,
             attachment_id=attachment_id,
             filename=filename,
+            confirmed_personal_websites=confirmed_personal_websites,
         )
         return result.model_dump()
 
@@ -3296,6 +3441,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         contact_name: str,
         result: dict[str, Any],
         link_member: discord.Member | None,
+        link_discord: dict[str, str] | None = None,
     ) -> tuple[discord.Embed, dict[str, Any]]:
         """Render backend extraction result as a Discord preview embed."""
 
@@ -3327,6 +3473,11 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             limit: int = ResumeUpdateConfirmationView._EMBED_FIELD_LIMIT,
         ) -> str:
             return ResumeUpdateConfirmationView._truncate_embed_field(value, limit)
+
+        def parse_website_values(value: Any) -> list[str]:
+            return ResumeUpdateConfirmationView._normalize_website_links_for_reparse(
+                value
+            )
 
         def parse_skill_snapshot(value: Any) -> dict[str, tuple[str, int | None]]:
             if value is None:
@@ -3420,6 +3571,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         changes = result.get("proposed_changes")
         new_skills = result.get("new_skills")
         skipped = result.get("skipped")
+        source_enrichments = result.get("source_enrichments")
+        existing_websites = result.get("existing_websites")
         extracted_profile = result.get("extracted_profile")
 
         embed = discord.Embed(
@@ -3543,6 +3696,55 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     inline=False,
                 )
 
+        if isinstance(source_enrichments, list) and source_enrichments:
+            enrichment_lines: list[str] = []
+            for item in source_enrichments[:4]:
+                if not isinstance(item, dict):
+                    continue
+                label = str(item.get("label", "External Source")).strip()
+                origin = str(item.get("origin", "external")).strip().replace("_", " ")
+                status = str(item.get("status", "")).strip().lower()
+                url = str(item.get("url", "")).strip()
+                detail = str(item.get("detail", "")).strip()
+                if status == "used":
+                    prefix = "Used"
+                elif status == "confirmation_needed":
+                    prefix = "Confirm"
+                else:
+                    prefix = "Failed"
+                line = f"{prefix} {origin} {label}"
+                if url:
+                    line += f": {url}"
+                if detail:
+                    line += f" ({detail})"
+                enrichment_lines.append(line)
+            if enrichment_lines:
+                embed.add_field(
+                    name="External Sources",
+                    value=truncate_field_value("\n".join(enrichment_lines)),
+                    inline=False,
+                )
+
+        proposed_websites = parse_website_values(proposed_updates.get("cWebsiteLink"))
+        baseline_websites = parse_website_values(existing_websites)
+        baseline_website_keys = {
+            normalized_website_identity_key(url) for url in baseline_websites
+        }
+        added_websites = [
+            url
+            for url in proposed_websites
+            if normalized_website_identity_key(url) not in baseline_website_keys
+        ]
+        if added_websites:
+            embed.add_field(
+                name="Website Reparse",
+                value=truncate_field_value(
+                    "New website links were added. Use **Reparse With Websites** "
+                    "before confirming if you want website content included."
+                ),
+                inline=False,
+            )
+
         if isinstance(extracted_profile, dict):
             confidence = extracted_profile.get("confidence")
             source = extracted_profile.get("source")
@@ -3621,6 +3823,14 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 ),
                 inline=False,
             )
+        elif isinstance(link_discord, dict):
+            username = str(link_discord.get("username", "")).strip()
+            if username:
+                embed.add_field(
+                    name="Discord Link",
+                    value=truncate_field_value(f"Will link contact to `{username}`"),
+                    inline=False,
+                )
 
         profile_url = f"{self.base_url}/#Contact/view/{contact_id}"
         embed.add_field(name="🔗 CRM Profile", value=f"[View in CRM]({profile_url})")
@@ -3657,6 +3867,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             },
             "proposed_updates": result.get("proposed_updates") or {},
             "proposed_changes": result.get("proposed_changes") or [],
+            "source_enrichments": result.get("source_enrichments") or [],
         }
         payload_bytes = json.dumps(
             debug_payload,
@@ -3795,12 +4006,19 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         *,
         action: str = "crm.upload_resume",
         status_message: str | None = None,
+        confirmed_personal_websites: list[str] | None = None,
+        link_discord_payload: dict[str, str] | None = None,
     ) -> None:
         """Run extraction directly and show confirmation preview."""
         action_name = action
         status_text = (
             status_message or "📥 Resume uploaded. Extracting profile fields now..."
         )
+        if link_discord_payload is None and link_member is not None:
+            link_discord_payload = {
+                "user_id": str(link_member.id),
+                "username": str(link_member),
+            }
 
         await interaction.followup.send(
             status_text,
@@ -3812,6 +4030,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 contact_id=contact_id,
                 attachment_id=attachment_id,
                 filename=filename,
+                confirmed_personal_websites=confirmed_personal_websites,
             )
         except Exception as exc:
             logger.error(
@@ -3891,8 +4110,32 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             contact_name=contact_name,
             result=result,
             link_member=link_member,
+            link_discord=link_discord_payload,
         )
         parsed_seniority = _extract_parsed_seniority(result.get("extracted_profile"))
+        existing_websites = result.get("existing_websites") or []
+        source_enrichments = result.get("source_enrichments") or []
+        proposed_websites = (
+            ResumeUpdateConfirmationView._normalize_website_links_for_reparse(
+                proposed_updates.get("cWebsiteLink")
+            )
+        )
+        existing_website_keys = {
+            normalized_website_identity_key(url)
+            for url in ResumeUpdateConfirmationView._normalize_website_links_for_reparse(
+                existing_websites
+            )
+        }
+        has_added_websites = any(
+            normalized_website_identity_key(url) not in existing_website_keys
+            for url in proposed_websites
+        )
+        has_confirmable_website_sources = any(
+            isinstance(item, dict)
+            and str(item.get("label", "")).strip().casefold() == "personal website"
+            and str(item.get("status", "")).strip().casefold() == "confirmation_needed"
+            for item in source_enrichments
+        )
 
         # Build role suggestions embed for reprocess actions or uploads with a linked user.
         role_suggestions_embed: discord.Embed | None = None
@@ -3949,7 +4192,14 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 can_apply_discord_roles=can_apply_discord_roles,
             )
 
-        if not proposed_updates and not link_member and not parsed_seniority:
+        if (
+            not proposed_updates
+            and not link_member
+            and not link_discord_payload
+            and not parsed_seniority
+            and not has_added_websites
+            and not has_confirmable_website_sources
+        ):
             if role_suggestions_embed is None:
                 if action_name != "crm.reprocess_resume":
                     self._audit_command(
@@ -3976,8 +4226,12 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 requester_id=interaction.user.id,
                 contact_id=contact_id,
                 contact_name=contact_name,
+                attachment_id=attachment_id,
+                filename=filename,
                 proposed_updates=proposed_updates,
                 parsed_seniority=parsed_seniority,
+                existing_websites=existing_websites,
+                source_enrichments=source_enrichments,
                 discord_role_suggestions=suggested_discord_roles,
                 discord_role_target_user_id=discord_role_target_user_id,
                 can_apply_discord_roles=can_apply_discord_roles,
@@ -4000,29 +4254,29 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             embeds = [embed]
             if role_suggestions_embed:
                 embeds.append(role_suggestions_embed)
-            await interaction.followup.send(
+            preview_message = await interaction.followup.send(
                 embeds=embeds,
                 file=debug_file,
                 view=view,
                 ephemeral=True,
+                wait=True,
             )
+            if isinstance(preview_message, discord.Message):
+                view.preview_message = preview_message
             return
-
-        link_discord_payload: dict[str, str] | None = None
-        if link_member:
-            link_discord_payload = {
-                "user_id": str(link_member.id),
-                "username": str(link_member),
-            }
 
         view = ResumeUpdateConfirmationView(
             crm_cog=self,
             requester_id=interaction.user.id,
             contact_id=contact_id,
             contact_name=contact_name,
+            attachment_id=attachment_id,
+            filename=filename,
             proposed_updates=proposed_updates,
             link_discord=link_discord_payload,
             parsed_seniority=parsed_seniority,
+            existing_websites=existing_websites,
+            source_enrichments=source_enrichments,
             discord_role_suggestions=suggested_discord_roles,
             discord_role_target_user_id=discord_role_target_user_id,
             can_apply_discord_roles=can_apply_discord_roles,
@@ -4045,12 +4299,15 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         embeds = [embed]
         if role_suggestions_embed:
             embeds.append(role_suggestions_embed)
-        await interaction.followup.send(
+        preview_message = await interaction.followup.send(
             embeds=embeds,
             file=debug_file,
             view=view,
             ephemeral=True,
+            wait=True,
         )
+        if isinstance(preview_message, discord.Message):
+            view.preview_message = preview_message
 
     async def _download_and_send_resume(
         self, interaction: discord.Interaction, contact_name: str, resume_id: str

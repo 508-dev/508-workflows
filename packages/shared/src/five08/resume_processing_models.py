@@ -64,6 +64,16 @@ class ResumeSkipReason(BaseModel):
     reason: str
 
 
+class ResumeSourceEnrichment(BaseModel):
+    """External source fetch attempt used to enrich resume parsing."""
+
+    label: str
+    url: str
+    origin: str
+    status: str
+    detail: str | None = None
+
+
 class ResumeExtractionResult(BaseModel):
     """Resume extraction output used by preview/confirmation flows."""
 
@@ -72,6 +82,8 @@ class ResumeExtractionResult(BaseModel):
     proposed_updates: dict[str, Any]
     proposed_changes: list[ResumeFieldChange]
     skipped: list[ResumeSkipReason]
+    source_enrichments: list[ResumeSourceEnrichment] = Field(default_factory=list)
+    existing_websites: list[str] = Field(default_factory=list)
     extracted_profile: ResumeExtractedProfile
     extracted_skills: list[str] = Field(default_factory=list)
     new_skills: list[str] = Field(default_factory=list)

@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import ast
+import ipaddress
 import json
 import logging
+import re
+import socket
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from html import unescape
 from typing import Any
+from urllib.parse import urljoin, urlsplit
 
+from curl_cffi import requests as curl_requests
+from curl_cffi.requests import BrowserTypeLiteral, RequestsError
 from psycopg import connect
 
 from five08.clients.espo import EspoAPIError, EspoClient
@@ -39,6 +46,7 @@ from five08.resume_processing_models import (
     ResumeExtractionResult,
     ResumeFieldChange,
     ResumeSkipReason,
+    ResumeSourceEnrichment,
     SkillAttributes,
 )
 from five08.resume_skills_extractor import SkillsExtractor
@@ -48,6 +56,38 @@ DEFAULT_SKILL_STRENGTH = 3
 SUPPORTED_RESUME_FILE_EXTENSIONS = ("pdf", "docx")
 DEFAULT_RESUME_MAX_FILE_SIZE_MB = 10
 LINKEDIN_FIELD = "cLinkedIn"
+PROFILE_SOURCE_FETCH_TIMEOUT_SECONDS = 10.0
+PROFILE_SOURCE_MAX_REDIRECTS = 3
+PROFILE_SOURCE_MAX_BYTES = 512 * 1024
+PROFILE_SOURCE_MAX_TEXT_CHARS = 12000
+PROFILE_SOURCE_MAX_WEBSITES = 2
+PROFILE_SOURCE_USER_AGENT = "five08-resume-parser/1.0"
+PROFILE_SOURCE_IMPERSONATE: BrowserTypeLiteral = "chrome131_android"
+PROFILE_SOURCE_ALLOWED_CONTENT_TYPES = (
+    "text/html",
+    "text/plain",
+    "application/xhtml+xml",
+    "text/markdown",
+)
+_HTML_BLOCK_RE = re.compile(
+    r"(?is)<(script|style|noscript|svg|nav|header|footer)[^>]*>.*?</\1>"
+)
+_HTML_TAG_RE = re.compile(r"(?s)<[^>]+>")
+_HTML_BREAK_RE = re.compile(r"(?i)<br\s*/?>")
+_HTML_BLOCK_CLOSE_RE = re.compile(
+    r"(?i)</(p|div|section|article|main|li|ul|ol|h[1-6])>"
+)
+_HTML_TITLE_RE = re.compile(r"(?is)<title[^>]*>(.*?)</title>")
+_HTML_META_DESC_RE = re.compile(
+    r'(?is)<meta[^>]+(?:name|property)\s*=\s*["\'](?:description|og:description)["\'][^>]+content\s*=\s*["\'](.*?)["\']'
+)
+_GITHUB_USERNAME_RE = re.compile(
+    r"(?:https?://)?(?:www\.)?github\.com/([A-Za-z0-9-]{1,39})",
+    flags=re.IGNORECASE,
+)
+
+
+IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 
 
 def _normalize_allowed_resume_extensions(value: Any) -> set[str]:
@@ -150,6 +190,14 @@ class ResumeProcessorConfig:
         )
 
 
+@dataclass(frozen=True)
+class _ExternalProfileSourceCandidate:
+    label: str
+    url: str
+    origin: str
+    source_key: str
+
+
 class ResumeProfileProcessor:
     """End-to-end extraction and apply operations for uploaded resumes."""
 
@@ -178,6 +226,7 @@ class ResumeProfileProcessor:
         contact_id: str,
         attachment_id: str,
         filename: str,
+        confirmed_personal_websites: list[str] | None = None,
     ) -> ResumeExtractionResult:
         """Build preview proposal from an uploaded resume attachment."""
         content_hash: str | None = None
@@ -187,7 +236,11 @@ class ResumeProfileProcessor:
             content = self.crm.download_attachment(attachment_id)
             content_hash = self.document_processor.get_content_hash(content, filename)
             text = self.document_processor.extract_text(content, filename)
-            extracted = self.extractor.extract(text)
+            extracted, source_enrichments = self._extract_profile_with_external_sources(
+                resume_text=text,
+                contact=contact,
+                confirmed_personal_websites=confirmed_personal_websites,
+            )
             model_name = extracted.source
             extracted_skills_result = self._coerce_profile_skill_result(extracted, text)
             extracted_skills = extracted_skills_result.skills
@@ -415,6 +468,8 @@ class ResumeProfileProcessor:
                 proposed_updates=proposed_updates,
                 proposed_changes=proposed_changes,
                 skipped=skipped,
+                source_enrichments=source_enrichments,
+                existing_websites=existing_websites,
                 extracted_profile=extracted,
                 extracted_skills=extracted_skills,
                 new_skills=new_skills,
@@ -441,6 +496,8 @@ class ResumeProfileProcessor:
                 proposed_updates={},
                 proposed_changes=[],
                 skipped=[],
+                source_enrichments=[],
+                existing_websites=[],
                 extracted_profile=ResumeExtractedProfile(
                     email=None,
                     github_username=None,
@@ -946,6 +1003,440 @@ class ResumeProfileProcessor:
     def _normalize_skill(self, value: Any) -> str | None:
         normalized = normalize_skill(str(value))
         return normalized or None
+
+    def _extract_profile_with_external_sources(
+        self,
+        *,
+        resume_text: str,
+        contact: dict[str, Any],
+        confirmed_personal_websites: list[str] | None = None,
+    ) -> tuple[ResumeExtractedProfile, list[ResumeSourceEnrichment]]:
+        extra_sources: dict[str, str] = {}
+        enrichments: list[ResumeSourceEnrichment] = []
+        seen_source_keys: set[str] = set()
+        source_label_counts: dict[str, int] = {}
+        confirmed_personal_website_keys: set[str] = set()
+        for url in confirmed_personal_websites or []:
+            identity_key = normalized_website_identity_key(url)
+            if identity_key:
+                confirmed_personal_website_keys.add(identity_key)
+
+        initial_candidates = self._build_initial_external_source_candidates(
+            contact=contact,
+            explicit_personal_websites=confirmed_personal_websites,
+        )
+        if initial_candidates:
+            initial_sources, initial_enrichments = self._fetch_external_profile_sources(
+                initial_candidates,
+                seen_source_keys=seen_source_keys,
+                source_label_counts=source_label_counts,
+            )
+            extra_sources.update(initial_sources)
+            enrichments.extend(initial_enrichments)
+
+        extracted = self.extractor.extract(
+            resume_text,
+            extra_sources=extra_sources or None,
+        )
+
+        inferred_candidates = self._build_inferred_external_source_candidates(
+            contact=contact,
+            extracted=extracted,
+            confirmed_personal_website_keys=confirmed_personal_website_keys,
+            enrichments=enrichments,
+            seen_source_keys=seen_source_keys,
+        )
+        if not inferred_candidates:
+            return extracted, enrichments
+
+        inferred_sources, inferred_enrichments = self._fetch_external_profile_sources(
+            inferred_candidates,
+            seen_source_keys=seen_source_keys,
+            source_label_counts=source_label_counts,
+        )
+        enrichments.extend(inferred_enrichments)
+        if not inferred_sources:
+            return extracted, enrichments
+
+        extra_sources.update(inferred_sources)
+        extracted = self.extractor.extract(
+            resume_text,
+            extra_sources=extra_sources,
+        )
+        return extracted, enrichments
+
+    def _build_initial_external_source_candidates(
+        self,
+        *,
+        contact: dict[str, Any],
+        explicit_personal_websites: list[str] | None = None,
+    ) -> list[_ExternalProfileSourceCandidate]:
+        candidates: list[_ExternalProfileSourceCandidate] = []
+        explicit_website_links = self._coerce_website_links(explicit_personal_websites)
+        for website_url in explicit_website_links[:PROFILE_SOURCE_MAX_WEBSITES]:
+            source_key = normalized_website_identity_key(website_url)
+            if not source_key:
+                continue
+            candidates.append(
+                _ExternalProfileSourceCandidate(
+                    label="Personal Website",
+                    url=website_url,
+                    origin="resume_confirmation",
+                    source_key=f"website:{source_key}",
+                )
+            )
+
+        website_links = self._coerce_website_links(contact.get("cWebsiteLink"))[
+            :PROFILE_SOURCE_MAX_WEBSITES
+        ]
+        for website_url in website_links:
+            source_key = normalized_website_identity_key(website_url)
+            if not source_key:
+                continue
+            candidates.append(
+                _ExternalProfileSourceCandidate(
+                    label="Personal Website",
+                    url=website_url,
+                    origin="crm",
+                    source_key=f"website:{source_key}",
+                )
+            )
+
+        github_username = self._normalize_github_username(
+            contact.get("cGitHubUsername")
+        )
+        if github_username:
+            candidates.append(
+                _ExternalProfileSourceCandidate(
+                    label="GitHub Profile",
+                    url=f"https://github.com/{github_username}",
+                    origin="crm",
+                    source_key=f"github:{github_username.casefold()}",
+                )
+            )
+        return candidates
+
+    def _build_inferred_external_source_candidates(
+        self,
+        *,
+        contact: dict[str, Any],
+        extracted: ResumeExtractedProfile,
+        confirmed_personal_website_keys: set[str],
+        enrichments: list[ResumeSourceEnrichment],
+        seen_source_keys: set[str],
+    ) -> list[_ExternalProfileSourceCandidate]:
+        candidates: list[_ExternalProfileSourceCandidate] = []
+        existing_website_links = self._coerce_website_links(contact.get("cWebsiteLink"))
+        if not existing_website_links:
+            for website_url in extracted.website_links[:PROFILE_SOURCE_MAX_WEBSITES]:
+                source_key = normalized_website_identity_key(website_url)
+                if not source_key:
+                    continue
+                dedupe_source_key = f"website:{source_key}"
+                if dedupe_source_key in seen_source_keys:
+                    continue
+                if source_key in confirmed_personal_website_keys:
+                    candidates.append(
+                        _ExternalProfileSourceCandidate(
+                            label="Personal Website",
+                            url=website_url,
+                            origin="resume_confirmation",
+                            source_key=dedupe_source_key,
+                        )
+                    )
+                    continue
+                enrichments.append(
+                    ResumeSourceEnrichment(
+                        label="Personal Website",
+                        url=website_url,
+                        origin="resume_inference",
+                        status="confirmation_needed",
+                        detail="Inferred from the resume. Confirm to fetch and reparse.",
+                    )
+                )
+                seen_source_keys.add(dedupe_source_key)
+
+        existing_github_username = self._normalize_github_username(
+            contact.get("cGitHubUsername")
+        )
+        inferred_github_username = self._normalize_github_username(
+            extracted.github_username
+        )
+        if not existing_github_username and inferred_github_username:
+            candidates.append(
+                _ExternalProfileSourceCandidate(
+                    label="GitHub Profile",
+                    url=f"https://github.com/{inferred_github_username}",
+                    origin="resume_inference",
+                    source_key=f"github:{inferred_github_username.casefold()}",
+                )
+            )
+        return candidates
+
+    def _fetch_external_profile_sources(
+        self,
+        candidates: list[_ExternalProfileSourceCandidate],
+        *,
+        seen_source_keys: set[str],
+        source_label_counts: dict[str, int],
+    ) -> tuple[dict[str, str], list[ResumeSourceEnrichment]]:
+        extra_sources: dict[str, str] = {}
+        enrichments: list[ResumeSourceEnrichment] = []
+
+        for candidate in candidates:
+            if candidate.source_key in seen_source_keys:
+                continue
+            seen_source_keys.add(candidate.source_key)
+
+            try:
+                fetched = self._fetch_external_profile_source_text(candidate.url)
+            except Exception as exc:
+                enrichments.append(
+                    ResumeSourceEnrichment(
+                        label=candidate.label,
+                        url=candidate.url,
+                        origin=candidate.origin,
+                        status="failed",
+                        detail=str(exc),
+                    )
+                )
+                continue
+
+            label_base = (
+                "github_profile"
+                if candidate.label.casefold() == "github profile"
+                else "personal_website"
+            )
+            next_index = source_label_counts.get(label_base, 0) + 1
+            source_label_counts[label_base] = next_index
+            source_label = (
+                label_base if next_index == 1 else f"{label_base}_{next_index}"
+            )
+            extra_sources[source_label] = self._render_external_profile_source_text(
+                label=candidate.label,
+                url=candidate.url,
+                content=fetched,
+            )
+            enrichments.append(
+                ResumeSourceEnrichment(
+                    label=candidate.label,
+                    url=candidate.url,
+                    origin=candidate.origin,
+                    status="used",
+                )
+            )
+
+        return extra_sources, enrichments
+
+    def _fetch_external_profile_source_text(self, url: str) -> str:
+        current_url = url
+        headers = {
+            "User-Agent": PROFILE_SOURCE_USER_AGENT,
+            "Accept": ", ".join(PROFILE_SOURCE_ALLOWED_CONTENT_TYPES),
+        }
+
+        for _ in range(PROFILE_SOURCE_MAX_REDIRECTS + 1):
+            validation_error = self._validate_public_profile_url(current_url)
+            if validation_error:
+                raise ValueError(validation_error)
+
+            try:
+                with curl_requests.get(
+                    current_url,
+                    headers=headers,
+                    timeout=PROFILE_SOURCE_FETCH_TIMEOUT_SECONDS,
+                    allow_redirects=False,
+                    stream=True,
+                    impersonate=PROFILE_SOURCE_IMPERSONATE,
+                ) as response:
+                    if response.status_code in {301, 302, 303, 307, 308}:
+                        redirect_to = response.headers.get("Location")
+                        if not redirect_to:
+                            raise ValueError(
+                                "Profile URL redirect missing Location header"
+                            )
+                        current_url = urljoin(current_url, redirect_to)
+                        continue
+
+                    response.raise_for_status()
+                    content_type = str(response.headers.get("Content-Type", "")).lower()
+                    content_length = response.headers.get("Content-Length")
+                    if content_length:
+                        try:
+                            content_length_value = int(content_length)
+                        except (TypeError, ValueError):
+                            content_length_value = None
+                        if (
+                            content_length_value is not None
+                            and content_length_value > PROFILE_SOURCE_MAX_BYTES
+                        ):
+                            raise ValueError("Profile page exceeds size limit")
+
+                    payload = bytearray()
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if not chunk:
+                            continue
+                        payload.extend(chunk)
+                        if len(payload) > PROFILE_SOURCE_MAX_BYTES:
+                            raise ValueError("Profile page exceeds size limit")
+
+                    return self._extract_profile_source_text(
+                        body=bytes(payload),
+                        content_type=content_type,
+                    )
+            except RequestsError as exc:
+                raise ValueError(f"Profile fetch failed: {exc}") from exc
+
+        raise ValueError("Profile URL exceeded redirect limit")
+
+    def _extract_profile_source_text(self, *, body: bytes, content_type: str) -> str:
+        normalized_type = content_type.split(";", 1)[0].strip().lower()
+        if (
+            normalized_type
+            and normalized_type not in PROFILE_SOURCE_ALLOWED_CONTENT_TYPES
+        ):
+            if not normalized_type.startswith("text/"):
+                raise ValueError(f"Unsupported profile content type: {normalized_type}")
+
+        decoded = body.decode("utf-8", errors="ignore")
+        if normalized_type in {"text/html", "application/xhtml+xml"} or (
+            "<html" in decoded.casefold()
+        ):
+            extracted = self._extract_text_from_html(decoded)
+        else:
+            extracted = re.sub(r"\s+", " ", decoded).strip()
+
+        if not extracted:
+            raise ValueError("Profile page did not contain usable text")
+        return extracted[:PROFILE_SOURCE_MAX_TEXT_CHARS]
+
+    def _render_external_profile_source_text(
+        self,
+        *,
+        label: str,
+        url: str,
+        content: str,
+    ) -> str:
+        return "\n".join(
+            (
+                f"Source: {label}",
+                f"URL: {url}",
+                "Content:",
+                content,
+            )
+        )
+
+    def _extract_text_from_html(self, value: str) -> str:
+        main_match = re.search(r"(?is)<main[^>]*>(.*?)</main>", value)
+        html_value = main_match.group(1) if main_match else value
+        title_match = _HTML_TITLE_RE.search(value)
+        meta_description_match = _HTML_META_DESC_RE.search(value)
+
+        normalized = _HTML_BLOCK_RE.sub(" ", html_value)
+        normalized = _HTML_BREAK_RE.sub("\n", normalized)
+        normalized = _HTML_BLOCK_CLOSE_RE.sub("\n", normalized)
+        normalized = _HTML_TAG_RE.sub(" ", normalized)
+        normalized = unescape(normalized)
+        normalized = re.sub(r"[ \t\r\f\v]+", " ", normalized)
+        normalized = re.sub(r"\n{2,}", "\n", normalized)
+        normalized = normalized.strip()
+
+        text_parts: list[str] = []
+        if title_match:
+            title = re.sub(r"\s+", " ", unescape(title_match.group(1))).strip()
+            if title:
+                text_parts.append(f"Title: {title}")
+        if meta_description_match:
+            description = re.sub(
+                r"\s+",
+                " ",
+                unescape(meta_description_match.group(1)),
+            ).strip()
+            if description:
+                text_parts.append(f"Description: {description}")
+        if normalized:
+            text_parts.append(normalized)
+        return "\n".join(text_parts).strip()
+
+    def _validate_public_profile_url(self, candidate_url: str) -> str | None:
+        try:
+            parsed = urlsplit(candidate_url)
+        except Exception:
+            return "Profile URL is invalid"
+
+        if parsed.scheme.lower() not in {"http", "https"}:
+            return "Profile URL must use http or https"
+        if parsed.username or parsed.password:
+            return "Profile URL must not include credentials"
+
+        host = (parsed.hostname or "").strip().lower().rstrip(".")
+        if not host:
+            return "Profile URL must include a hostname"
+        if not self._hostname_resolves_publicly(host):
+            return "Profile URL host resolves to a non-public address"
+        return None
+
+    def _hostname_resolves_publicly(self, host: str) -> bool:
+        if host in {"localhost", "localhost.localdomain"}:
+            return False
+
+        ip_literal = self._parse_ip_literal(host)
+        if ip_literal is not None:
+            return self._is_public_ip(ip_literal)
+
+        try:
+            addr_infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+        except socket.gaierror:
+            return False
+        except Exception:
+            return False
+
+        resolved_ips: set[IPAddress] = set()
+        for _, _, _, _, sockaddr in addr_infos:
+            if not sockaddr:
+                continue
+            parsed_ip = self._parse_ip_literal(str(sockaddr[0]).strip())
+            if parsed_ip is None:
+                continue
+            resolved_ips.add(parsed_ip)
+
+        if not resolved_ips:
+            return False
+        return all(self._is_public_ip(parsed_ip) for parsed_ip in resolved_ips)
+
+    @staticmethod
+    def _parse_ip_literal(value: str) -> IPAddress | None:
+        try:
+            return ipaddress.ip_address(value)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _is_public_ip(value: IPAddress) -> bool:
+        return not (
+            value.is_private
+            or value.is_loopback
+            or value.is_link_local
+            or value.is_multicast
+            or value.is_reserved
+            or value.is_unspecified
+        )
+
+    @staticmethod
+    def _normalize_github_username(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        candidate = value.strip().strip("/")
+        if not candidate:
+            return None
+        match = _GITHUB_USERNAME_RE.search(candidate)
+        if match:
+            candidate = match.group(1)
+        elif candidate.startswith("@"):
+            candidate = candidate[1:]
+        if not re.fullmatch(r"[A-Za-z0-9-]{1,39}", candidate):
+            return None
+        return candidate
 
     def _coerce_profile_skill_result(
         self,

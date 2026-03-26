@@ -20,6 +20,7 @@ from five08.discord_bot.cogs.crm import (
     ResumeEditLocationButton,
     ResumeEditLocationModal,
     ResumeEditWebsitesButton,
+    ResumeConfirmInferredWebsitesButton,
     ResumeEditSocialLinksButton,
     ResumeEditWebsitesModal,
     ResumeEditSocialLinksModal,
@@ -548,6 +549,56 @@ class TestCRMCog:
         )
 
     @pytest.mark.asyncio
+    async def test_resume_update_view_adds_confirm_websites_button_when_needed(
+        self, crm_cog
+    ):
+        """Website reparse button should appear for inferred personal website candidates."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            attachment_id="att-1",
+            filename="resume.pdf",
+            proposed_updates={},
+            source_enrichments=[
+                {
+                    "label": "Personal Website",
+                    "status": "confirmation_needed",
+                    "origin": "resume_inference",
+                    "url": "https://example.com",
+                }
+            ],
+        )
+
+        assert any(
+            isinstance(child, ResumeConfirmInferredWebsitesButton)
+            for child in view.children
+        )
+
+    @pytest.mark.asyncio
+    async def test_resume_update_view_adds_reparse_button_for_new_websites(
+        self, crm_cog
+    ):
+        """Website reparse button should appear when proposed websites add new links."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={
+                "cWebsiteLink": ["https://existing.com", "https://new.com"]
+            },
+            existing_websites=["https://existing.com"],
+        )
+
+        assert view.website_reparse_candidates == ["https://new.com"]
+        assert any(
+            isinstance(child, ResumeConfirmInferredWebsitesButton)
+            for child in view.children
+        )
+
+    @pytest.mark.asyncio
     async def test_resume_update_view_adds_social_links_button_when_social_links_proposed(
         self, crm_cog
     ):
@@ -1048,6 +1099,7 @@ class TestCRMCog:
             contact_id="contact-1",
             contact_name="Test User",
             proposed_updates={"cWebsiteLink": ["https://old.com"]},
+            existing_websites=["https://old.com"],
         )
         modal = ResumeEditWebsitesModal(confirmation_view=view)
         modal.websites_input._value = "https://new.com\nhttps://other.com"
@@ -1055,6 +1107,10 @@ class TestCRMCog:
         await modal.on_submit(mock_interaction)
 
         assert view.proposed_updates["cWebsiteLink"] == [
+            "https://new.com",
+            "https://other.com",
+        ]
+        assert view.website_reparse_candidates == [
             "https://new.com",
             "https://other.com",
         ]
@@ -1192,6 +1248,7 @@ class TestCRMCog:
             contact_id="contact-1",
             contact_name="Test User",
             proposed_updates={"cWebsiteLink": ["https://example.com"]},
+            existing_websites=["https://example.com"],
         )
         modal = ResumeEditWebsitesModal(confirmation_view=view)
         modal.websites_input._value = "   \n  \n  "
@@ -1199,6 +1256,7 @@ class TestCRMCog:
         await modal.on_submit(mock_interaction)
 
         assert "cWebsiteLink" not in view.proposed_updates
+        assert view.website_reparse_candidates == []
 
     @pytest.mark.asyncio
     async def test_edit_social_links_modal_submit_removes_field_when_blank(
@@ -1421,6 +1479,88 @@ class TestCRMCog:
         assert "current role" in evidence_field.value
         assert "developer profile" in evidence_field.value
 
+    def test_resume_preview_embed_includes_external_sources(self, crm_cog):
+        """Preview embeds should show external website/GitHub enrichment attempts."""
+        embed, _ = crm_cog._build_resume_preview_embed(
+            contact_id="contact-1",
+            contact_name="Test User",
+            result={
+                "proposed_changes": [],
+                "source_enrichments": [
+                    {
+                        "label": "Personal Website",
+                        "origin": "crm",
+                        "status": "used",
+                        "url": "https://portfolio.example.com",
+                    },
+                    {
+                        "label": "GitHub Profile",
+                        "origin": "resume_inference",
+                        "status": "failed",
+                        "url": "https://github.com/octocat",
+                        "detail": "404 Client Error",
+                    },
+                ],
+            },
+            link_member=None,
+        )
+
+        external_sources_field = next(
+            field for field in embed.fields if field.name == "External Sources"
+        )
+        assert "Used crm Personal Website" in external_sources_field.value
+        assert "https://portfolio.example.com" in external_sources_field.value
+        assert "Failed resume inference GitHub Profile" in external_sources_field.value
+        assert "404 Client Error" in external_sources_field.value
+
+    def test_resume_preview_embed_marks_confirmation_needed_sources(self, crm_cog):
+        """Preview embeds should distinguish confirm-before-reparse website candidates."""
+        embed, _ = crm_cog._build_resume_preview_embed(
+            contact_id="contact-1",
+            contact_name="Test User",
+            result={
+                "proposed_changes": [],
+                "source_enrichments": [
+                    {
+                        "label": "Personal Website",
+                        "origin": "resume_inference",
+                        "status": "confirmation_needed",
+                        "url": "https://portfolio.example.com",
+                        "detail": "Inferred from the resume. Confirm to fetch and reparse.",
+                    }
+                ],
+            },
+            link_member=None,
+        )
+
+        external_sources_field = next(
+            field for field in embed.fields if field.name == "External Sources"
+        )
+        assert (
+            "Confirm resume inference Personal Website" in external_sources_field.value
+        )
+        assert "Confirm to fetch and reparse" in external_sources_field.value
+
+    def test_resume_preview_embed_prompts_for_new_website_reparse(self, crm_cog):
+        """Preview embeds should prompt for reparsing when websites were newly added."""
+        embed, _ = crm_cog._build_resume_preview_embed(
+            contact_id="contact-1",
+            contact_name="Test User",
+            result={
+                "proposed_updates": {
+                    "cWebsiteLink": ["https://existing.com", "https://new.com"]
+                },
+                "existing_websites": ["https://existing.com"],
+                "proposed_changes": [],
+            },
+            link_member=None,
+        )
+
+        reparse_field = next(
+            field for field in embed.fields if field.name == "Website Reparse"
+        )
+        assert "Reparse With Websites" in reparse_field.value
+
     def test_build_resume_extract_debug_file_serializes_raw_payload(self, crm_cog):
         """The debug attachment should include raw and normalized extraction payloads."""
         debug_file = crm_cog._build_resume_extract_debug_file(
@@ -1440,6 +1580,14 @@ class TestCRMCog:
                     "address_city": "Berlin",
                     "address_country": "Germany",
                 },
+                "source_enrichments": [
+                    {
+                        "label": "Personal Website",
+                        "origin": "crm",
+                        "status": "used",
+                        "url": "https://portfolio.example.com",
+                    }
+                ],
             },
         )
 
@@ -1448,6 +1596,9 @@ class TestCRMCog:
         assert payload["raw_llm_output"] == '{"address_city":"Berlin"}'
         assert payload["raw_llm_json"]["address_city"] == "Berlin"
         assert payload["normalized_extracted_profile"]["address_country"] == "Germany"
+        assert (
+            payload["source_enrichments"][0]["url"] == "https://portfolio.example.com"
+        )
 
     @pytest.mark.asyncio
     async def test_edit_websites_button_callback_opens_modal(
@@ -5876,6 +6027,61 @@ class TestCRMCog:
         )
 
     @pytest.mark.asyncio
+    async def test_confirm_inferred_websites_button_reruns_preview(self, crm_cog):
+        """Confirming inferred websites should rerun extraction with those URLs."""
+        crm_cog._run_resume_extract_and_preview = AsyncMock()
+
+        confirm_interaction = AsyncMock()
+        confirm_interaction.user = Mock()
+        confirm_interaction.user.id = 101
+        confirm_interaction.response = AsyncMock()
+        confirm_interaction.response.defer = AsyncMock()
+        confirm_interaction.followup = AsyncMock()
+        confirm_interaction.followup.send = AsyncMock()
+        confirm_interaction.message = None
+
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=101,
+            contact_id="contact123",
+            contact_name="Candidate User",
+            attachment_id="resume123",
+            filename="candidate.pdf",
+            proposed_updates={},
+            link_discord={"user_id": "101", "username": "Operator#0001"},
+            source_enrichments=[
+                {
+                    "label": "Personal Website",
+                    "origin": "resume_inference",
+                    "status": "confirmation_needed",
+                    "url": "https://portfolio.example.com",
+                }
+            ],
+        )
+        confirm_button = next(
+            child
+            for child in view.children
+            if isinstance(child, discord.ui.Button)
+            and child.label == "Reparse With Websites"
+        )
+
+        await confirm_button.callback(confirm_interaction)
+
+        crm_cog._run_resume_extract_and_preview.assert_awaited_once()
+        kwargs = crm_cog._run_resume_extract_and_preview.await_args.kwargs
+        assert kwargs["confirmed_personal_websites"] == [
+            "https://portfolio.example.com"
+        ]
+        assert kwargs["link_discord_payload"] == {
+            "user_id": "101",
+            "username": "Operator#0001",
+        }
+        assert (
+            kwargs["status_message"]
+            == "🔄 Re-running profile extraction with website content..."
+        )
+
+    @pytest.mark.asyncio
     async def test_run_resume_extract_and_preview_calls_direct_extract_for_reprocess(
         self, crm_cog, mock_interaction
     ):
@@ -5901,6 +6107,7 @@ class TestCRMCog:
             contact_id="contact123",
             attachment_id="resume123",
             filename="candidate.pdf",
+            confirmed_personal_websites=None,
         )
 
     @pytest.mark.asyncio

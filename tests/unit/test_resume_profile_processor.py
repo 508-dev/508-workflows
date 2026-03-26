@@ -251,6 +251,222 @@ def test_extract_profile_proposal_merges_and_serializes_social_links() -> None:
     ]
 
 
+def test_extract_profile_proposal_fetches_crm_website_and_github_sources() -> None:
+    """Existing CRM website and GitHub profile text should be passed into extraction."""
+    processor = ResumeProfileProcessor()
+    processor.crm = Mock()
+    processor.extractor = Mock()
+    processor.skills_extractor = Mock()
+    processor.document_processor = Mock()
+    processor._record_processing_run = Mock()
+    processor._fetch_external_profile_source_text = Mock(
+        side_effect=lambda url: {
+            "https://portfolio.example.com": "Portfolio content",
+            "https://github.com/octocat": "GitHub profile content",
+        }[url]
+    )
+    processor.skills_extractor.canonicalize_skill.side_effect = lambda v: (
+        str(v).strip().lower()
+    )
+
+    processor.crm.get_contact.return_value = {
+        "emailAddress": "member@example.com",
+        "cWebsiteLink": ["https://portfolio.example.com"],
+        "cGitHubUsername": "octocat",
+    }
+    processor.crm.download_attachment.return_value = b"resume-bytes"
+    processor.document_processor.extract_text.return_value = "resume text"
+    processor.document_processor.get_content_hash.return_value = "hash-external-crm"
+    processor.extractor.extract.return_value = ResumeExtractedProfile(
+        email=None,
+        github_username="octocat",
+        linkedin_url=None,
+        phone=None,
+        confidence=0.9,
+        source="gpt-4o-mini",
+    )
+    processor.skills_extractor.extract_skills.return_value = ExtractedSkills(
+        skills=[],
+        skill_attrs={},
+        confidence=0.8,
+        source="gpt-4o-mini",
+    )
+
+    result = processor.extract_profile_proposal(
+        contact_id="contact-external-crm",
+        attachment_id="att-external-crm",
+        filename="resume.pdf",
+    )
+
+    assert result.success is True
+    assert processor.extractor.extract.call_count == 1
+    extract_call = processor.extractor.extract.call_args
+    assert extract_call.args == ("resume text",)
+    assert extract_call.kwargs["extra_sources"] == {
+        "personal_website": (
+            "Source: Personal Website\n"
+            "URL: https://portfolio.example.com\n"
+            "Content:\n"
+            "Portfolio content"
+        ),
+        "github_profile": (
+            "Source: GitHub Profile\n"
+            "URL: https://github.com/octocat\n"
+            "Content:\n"
+            "GitHub profile content"
+        ),
+    }
+    assert [item.status for item in result.source_enrichments] == ["used", "used"]
+    assert [item.origin for item in result.source_enrichments] == ["crm", "crm"]
+
+
+def test_extract_profile_proposal_reruns_with_inferred_github_only() -> None:
+    """Inferred GitHub should rerun automatically while websites wait for confirmation."""
+    processor = ResumeProfileProcessor()
+    processor.crm = Mock()
+    processor.extractor = Mock()
+    processor.skills_extractor = Mock()
+    processor.document_processor = Mock()
+    processor._record_processing_run = Mock()
+    processor._fetch_external_profile_source_text = Mock(
+        side_effect=lambda url: {
+            "https://blog.example.com": "Blog content",
+            "https://github.com/octocat": "GitHub profile content",
+        }[url]
+    )
+    processor.skills_extractor.canonicalize_skill.side_effect = lambda v: (
+        str(v).strip().lower()
+    )
+
+    processor.crm.get_contact.return_value = {
+        "emailAddress": "member@example.com",
+    }
+    processor.crm.download_attachment.return_value = b"resume-bytes"
+    processor.document_processor.extract_text.return_value = "resume text"
+    processor.document_processor.get_content_hash.return_value = "hash-external-rerun"
+    processor.extractor.extract.side_effect = [
+        ResumeExtractedProfile(
+            email=None,
+            github_username="octocat",
+            linkedin_url=None,
+            phone=None,
+            website_links=["https://blog.example.com"],
+            confidence=0.7,
+            source="gpt-4o-mini",
+        ),
+        ResumeExtractedProfile(
+            email=None,
+            github_username="octocat",
+            linkedin_url=None,
+            phone=None,
+            website_links=["https://blog.example.com"],
+            description="Enriched profile",
+            confidence=0.9,
+            source="gpt-4o-mini",
+        ),
+    ]
+    processor.skills_extractor.extract_skills.return_value = ExtractedSkills(
+        skills=[],
+        skill_attrs={},
+        confidence=0.8,
+        source="gpt-4o-mini",
+    )
+
+    result = processor.extract_profile_proposal(
+        contact_id="contact-external-rerun",
+        attachment_id="att-external-rerun",
+        filename="resume.pdf",
+    )
+
+    assert result.success is True
+    assert processor.extractor.extract.call_count == 2
+    first_call = processor.extractor.extract.call_args_list[0]
+    second_call = processor.extractor.extract.call_args_list[1]
+    assert first_call.args == ("resume text",)
+    assert first_call.kwargs["extra_sources"] is None
+    assert second_call.args == ("resume text",)
+    assert second_call.kwargs["extra_sources"] == {
+        "github_profile": (
+            "Source: GitHub Profile\n"
+            "URL: https://github.com/octocat\n"
+            "Content:\n"
+            "GitHub profile content"
+        ),
+    }
+    assert result.extracted_profile.description == "Enriched profile"
+    assert [item.status for item in result.source_enrichments] == [
+        "confirmation_needed",
+        "used",
+    ]
+    assert [item.origin for item in result.source_enrichments] == [
+        "resume_inference",
+        "resume_inference",
+    ]
+
+
+def test_extract_profile_proposal_reruns_with_confirmed_personal_website() -> None:
+    """Confirmed inferred personal websites should be fetched on a rerun."""
+    processor = ResumeProfileProcessor()
+    processor.crm = Mock()
+    processor.extractor = Mock()
+    processor.skills_extractor = Mock()
+    processor.document_processor = Mock()
+    processor._record_processing_run = Mock()
+    processor._fetch_external_profile_source_text = Mock(return_value="Blog content")
+    processor.skills_extractor.canonicalize_skill.side_effect = lambda v: (
+        str(v).strip().lower()
+    )
+
+    processor.crm.get_contact.return_value = {
+        "emailAddress": "member@example.com",
+    }
+    processor.crm.download_attachment.return_value = b"resume-bytes"
+    processor.document_processor.extract_text.return_value = "resume text"
+    processor.document_processor.get_content_hash.return_value = (
+        "hash-external-confirmed"
+    )
+    processor.extractor.extract.return_value = ResumeExtractedProfile(
+        email=None,
+        github_username=None,
+        linkedin_url=None,
+        phone=None,
+        website_links=["https://blog.example.com"],
+        description="Confirmed website enrichment",
+        confidence=0.9,
+        source="gpt-4o-mini",
+    )
+    processor.skills_extractor.extract_skills.return_value = ExtractedSkills(
+        skills=[],
+        skill_attrs={},
+        confidence=0.8,
+        source="gpt-4o-mini",
+    )
+
+    result = processor.extract_profile_proposal(
+        contact_id="contact-external-confirmed",
+        attachment_id="att-external-confirmed",
+        filename="resume.pdf",
+        confirmed_personal_websites=["https://blog.example.com"],
+    )
+
+    assert result.success is True
+    assert processor.extractor.extract.call_count == 1
+    first_call = processor.extractor.extract.call_args_list[0]
+    assert first_call.kwargs["extra_sources"] == {
+        "personal_website": (
+            "Source: Personal Website\n"
+            "URL: https://blog.example.com\n"
+            "Content:\n"
+            "Blog content"
+        )
+    }
+    assert result.extracted_profile.description == "Confirmed website enrichment"
+    assert [item.status for item in result.source_enrichments] == ["used"]
+    assert [item.origin for item in result.source_enrichments] == [
+        "resume_confirmation"
+    ]
+
+
 def test_extract_profile_proposal_deduplicates_existing_and_extracted_websites_by_scheme() -> (
     None
 ):
