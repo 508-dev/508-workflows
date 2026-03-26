@@ -451,6 +451,10 @@ def test_extract_profile_proposal_fails_open_when_initial_enrichment_extract_err
         )
     }
     assert processor.extractor.extract.call_args_list[1].kwargs["extra_sources"] is None
+    assert [item.status for item in result.source_enrichments] == ["failed"]
+    assert "fell back without this source" in (
+        result.source_enrichments[0].detail or ""
+    )
 
 
 def test_extract_profile_proposal_fetches_confirmed_website_and_github_together() -> (
@@ -527,6 +531,62 @@ def test_extract_profile_proposal_fetches_confirmed_website_and_github_together(
         "resume_confirmation",
         "resume_confirmation",
     ]
+
+
+def test_extract_profile_proposal_reopens_confirmed_source_after_fail_open() -> None:
+    """Confirmed sources should become re-confirmable if parsing fell back without them."""
+    processor = ResumeProfileProcessor()
+    processor.crm = Mock()
+    processor.extractor = Mock()
+    processor.skills_extractor = Mock()
+    processor.document_processor = Mock()
+    processor._record_processing_run = Mock()
+    processor._fetch_external_profile_source_text = Mock(return_value="Blog content")
+    processor.skills_extractor.canonicalize_skill.side_effect = lambda v: (
+        str(v).strip().lower()
+    )
+
+    processor.crm.get_contact.return_value = {
+        "emailAddress": "member@example.com",
+    }
+    processor.crm.download_attachment.return_value = b"resume-bytes"
+    processor.document_processor.extract_text.return_value = "resume text"
+    processor.document_processor.get_content_hash.return_value = (
+        "hash-fail-open-confirm"
+    )
+    processor.extractor.extract.side_effect = [
+        RuntimeError("llm enrichment explode"),
+        ResumeExtractedProfile(
+            email=None,
+            github_username=None,
+            linkedin_url=None,
+            phone=None,
+            website_links=["https://blog.example.com"],
+            description="Fallback profile",
+            confidence=0.7,
+            source="gpt-4o-mini",
+        ),
+    ]
+    processor.skills_extractor.extract_skills.return_value = ExtractedSkills(
+        skills=[],
+        skill_attrs={},
+        confidence=0.8,
+        source="gpt-4o-mini",
+    )
+
+    result = processor.extract_profile_proposal(
+        contact_id="contact-fail-open-confirm",
+        attachment_id="att-fail-open-confirm",
+        filename="resume.pdf",
+        confirmed_personal_websites=["https://blog.example.com"],
+    )
+
+    assert result.success is True
+    assert [item.status for item in result.source_enrichments] == [
+        "confirmation_needed"
+    ]
+    assert [item.origin for item in result.source_enrichments] == ["resume_inference"]
+    assert "Confirm to fetch and reparse" in (result.source_enrichments[0].detail or "")
 
 
 def test_extract_profile_proposal_without_resume_uses_crm_external_sources() -> None:

@@ -1104,16 +1104,22 @@ class ResumeProfileProcessor:
             extra_sources.update(initial_sources)
             enrichments.extend(initial_enrichments)
 
-        extracted = self._extract_resume_profile_fail_open(
+        extracted, used_extra_sources = self._extract_resume_profile_fail_open(
             resume_text=resume_text,
             extra_sources=extra_sources or None,
             fallback_extracted=None,
         )
+        if extra_sources and not used_extra_sources:
+            self._reset_unused_source_enrichments(enrichments)
         self._refresh_inferred_confirmation_enrichments(
             contact=contact,
             extracted=extracted,
-            confirmed_personal_website_keys=confirmed_personal_website_keys,
-            confirmed_github_keys=confirmed_github_keys,
+            confirmed_personal_website_keys=(
+                confirmed_personal_website_keys if used_extra_sources else set()
+            ),
+            confirmed_github_keys=(
+                confirmed_github_keys if used_extra_sources else set()
+            ),
             enrichments=enrichments,
             seen_source_keys=seen_source_keys,
         )
@@ -1662,25 +1668,44 @@ class ResumeProfileProcessor:
             return None
         return candidate
 
+    @staticmethod
+    def _reset_unused_source_enrichments(
+        enrichments: list[ResumeSourceEnrichment],
+    ) -> None:
+        for enrichment in enrichments:
+            if enrichment.status != "used":
+                continue
+            if enrichment.origin == "resume_confirmation":
+                enrichment.origin = "resume_inference"
+                enrichment.status = "confirmation_needed"
+                enrichment.detail = "Fetched successfully, but parsing fell back without this source. Confirm to retry."
+                continue
+            enrichment.status = "failed"
+            enrichment.detail = (
+                "Fetched successfully, but parsing fell back without this source."
+            )
+
     def _extract_resume_profile_fail_open(
         self,
         *,
         resume_text: str,
         extra_sources: dict[str, str] | None,
         fallback_extracted: ResumeExtractedProfile | None,
-    ) -> ResumeExtractedProfile:
+    ) -> tuple[ResumeExtractedProfile, bool]:
         if not extra_sources:
-            return self.extractor.extract(resume_text, extra_sources=None)
+            return self.extractor.extract(resume_text, extra_sources=None), False
         try:
-            return self.extractor.extract(resume_text, extra_sources=extra_sources)
+            return self.extractor.extract(
+                resume_text, extra_sources=extra_sources
+            ), True
         except Exception as exc:
             logger.warning(
                 "Resume enrichment extract failed; falling back to last successful extraction: %s",
                 exc,
             )
             if fallback_extracted is not None:
-                return fallback_extracted
-            return self.extractor.extract(resume_text, extra_sources=None)
+                return fallback_extracted, True
+            return self.extractor.extract(resume_text, extra_sources=None), False
 
     def _coerce_profile_skill_result(
         self,

@@ -1944,6 +1944,14 @@ class ResumeProfileExtractor:
         )
         text = source_texts.get("resume", "")
         if not text:
+            non_resume_sources = {
+                label: value
+                for label, value in source_texts.items()
+                if label != "resume" and value.strip()
+            }
+            if non_resume_sources:
+                text = self._build_source_blob(non_resume_sources).strip()
+        if not text:
             return self._heuristic_extract(
                 source_texts,
                 llm_fallback_reason="No resume text available for LLM extraction",

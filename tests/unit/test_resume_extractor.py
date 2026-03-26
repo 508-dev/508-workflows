@@ -371,6 +371,66 @@ def test_extract_profile_backfills_website_and_social_urls_from_markdown() -> No
     assert result.social_links == ["https://x.com/wumwu"]
 
 
+def test_extract_uses_llm_when_only_external_sources_are_available() -> None:
+    """External-source-only extraction should still use the LLM path."""
+
+    class _FakeChatCompletions:
+        called = False
+
+        @classmethod
+        def create(cls, **_: object) -> object:
+            cls.called = True
+            return type(
+                "Response",
+                (),
+                {
+                    "choices": [
+                        type(
+                            "Choice",
+                            (),
+                            {
+                                "message": type(
+                                    "Message",
+                                    (),
+                                    {
+                                        "content": (
+                                            '{"name": null, "email": null, '
+                                            '"github_username": "octocat", '
+                                            '"linkedin_url": null, '
+                                            '"website_links": ["https://portfolio.example.com"], '
+                                            '"social_links": [], '
+                                            '"phone": null, "skills": [], '
+                                            '"skill_attrs": null, "confidence": 0.8}'
+                                        )
+                                    },
+                                )(),
+                                "finish_reason": "stop",
+                            },
+                        )()
+                    ]
+                },
+            )()
+
+    extractor = ResumeProfileExtractor(api_key="test-key")
+    extractor.client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": _FakeChatCompletions()})()},
+    )()
+    extractor.model = "fake-model"
+
+    result = extractor.extract(
+        "",
+        extra_sources={
+            "github_profile": "Source: GitHub Profile\nURL: https://github.com/octocat"
+        },
+    )
+
+    assert _FakeChatCompletions.called is True
+    assert result.github_username == "octocat"
+    assert result.llm_fallback_reason is None
+
+
 def test_extract_backfills_linkedin_and_website_when_llm_omits_them() -> None:
     """LLM mode should backfill missing links from the resume text heuristics."""
 

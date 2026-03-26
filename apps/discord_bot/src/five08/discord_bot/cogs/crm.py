@@ -908,15 +908,24 @@ class ResumeEditWebsitesModal(discord.ui.Modal, title="Edit Websites"):
         if submitted_keys == existing_keys:
             self.confirmation_view.website_edits_override_inferred_candidates = False
             self.confirmation_view.proposed_updates.pop("cWebsiteLink", None)
-        elif links:
+            count = len(existing_links)
+            success_message = (
+                f"✅ Websites unchanged at {count} link{'s' if count != 1 else ''}."
+            )
+        elif submitted_links:
             self.confirmation_view.website_edits_override_inferred_candidates = True
-            self.confirmation_view.proposed_updates["cWebsiteLink"] = links
+            self.confirmation_view.proposed_updates["cWebsiteLink"] = submitted_links
+            count = len(submitted_links)
+            success_message = (
+                f"✅ Websites updated to {count} link{'s' if count != 1 else ''}."
+            )
         else:
             self.confirmation_view.website_edits_override_inferred_candidates = True
             self.confirmation_view.proposed_updates.pop("cWebsiteLink", None)
+            count = 0
+            success_message = "✅ Websites cleared."
         self.confirmation_view._refresh_website_reparse_candidates()
         await self.confirmation_view._sync_message_view()
-        count = len(links)
         if self.confirmation_view.has_reparse_candidates:
             action_hint = (
                 " Click **Reparse With New Sources** to refresh the extraction."
@@ -924,8 +933,7 @@ class ResumeEditWebsitesModal(discord.ui.Modal, title="Edit Websites"):
         else:
             action_hint = " Click **Confirm Updates** to apply."
         await interaction.followup.send(
-            f"✅ Websites updated to {count} link{'s' if count != 1 else ''}. "
-            + action_hint,
+            success_message + action_hint,
             ephemeral=True,
         )
 
@@ -8077,16 +8085,19 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
 
     @staticmethod
     def _contact_has_external_profile_sources(contact: dict[str, Any]) -> bool:
-        website_links = contact.get("cWebsiteLink")
-        if isinstance(website_links, str):
-            if any(item.strip() for item in website_links.split(",")):
-                return True
-        elif isinstance(website_links, (list, tuple, set)):
-            if any(str(item).strip() for item in website_links):
-                return True
-
-        github_username = str(contact.get("cGitHubUsername") or "").strip()
-        return bool(github_username)
+        website_links = (
+            ResumeUpdateConfirmationView._normalize_website_links_for_reparse(
+                contact.get("cWebsiteLink")
+            )
+        )
+        if website_links:
+            return True
+        return (
+            ResumeProfileProcessor._normalize_github_username(
+                contact.get("cGitHubUsername")
+            )
+            is not None
+        )
 
     def _bulk_resume_missing_flags(self, contact: dict[str, Any]) -> dict[str, bool]:
         missing_country = self._is_blank_crm_field(contact.get("addressCountry"))

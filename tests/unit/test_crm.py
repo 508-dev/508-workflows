@@ -1200,6 +1200,7 @@ class TestCRMCog:
         ]
         mock_interaction.response.defer.assert_awaited_once_with(ephemeral=True)
         mock_interaction.followup.send.assert_awaited_once()
+        assert "updated to 2 links" in mock_interaction.followup.send.await_args.args[0]
 
     @pytest.mark.asyncio
     async def test_edit_websites_modal_submit_skips_noop_existing_websites(
@@ -1223,6 +1224,7 @@ class TestCRMCog:
         assert view.website_edits_override_inferred_candidates is False
         mock_interaction.response.defer.assert_awaited_once_with(ephemeral=True)
         mock_interaction.followup.send.assert_awaited_once()
+        assert "Websites unchanged" in mock_interaction.followup.send.await_args.args[0]
 
     @pytest.mark.asyncio
     async def test_edit_websites_modal_submit_skips_reordered_noop_existing_websites(
@@ -1245,6 +1247,7 @@ class TestCRMCog:
         assert "cWebsiteLink" not in view.proposed_updates
         assert view.website_edits_override_inferred_candidates is False
         mock_interaction.followup.send.assert_awaited_once()
+        assert "Websites unchanged" in mock_interaction.followup.send.await_args.args[0]
 
     @pytest.mark.asyncio
     async def test_edit_websites_modal_noop_keeps_inferred_reparse_candidates(
@@ -1273,6 +1276,28 @@ class TestCRMCog:
         await modal.on_submit(mock_interaction)
 
         assert view.website_reparse_candidates == ["https://portfolio.example.com"]
+
+    @pytest.mark.asyncio
+    async def test_edit_websites_modal_submit_stores_normalized_links(
+        self, crm_cog, mock_interaction
+    ):
+        """Website edits should store normalized links, not raw modal input."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+        )
+        modal = ResumeEditWebsitesModal(confirmation_view=view)
+        modal.websites_input._value = "new.com/\nhttps://other.com/\n"
+
+        await modal.on_submit(mock_interaction)
+
+        assert view.proposed_updates["cWebsiteLink"] == [
+            "https://new.com",
+            "https://other.com",
+        ]
 
     @pytest.mark.asyncio
     async def test_edit_roles_modal_submit_updates_proposed(
@@ -6168,6 +6193,47 @@ class TestCRMCog:
                             "name": "Candidate User",
                             "resumeIds": [],
                             "resumeNames": {},
+                        }
+                    ]
+                ),
+            ),
+        ):
+            await crm_cog.reprocess_profile.callback(
+                crm_cog, mock_interaction, "candidate"
+            )
+
+        crm_cog._prompt_upload_resume_for_contact.assert_awaited_once()
+        crm_cog._prompt_reprocess_resume_confirmation.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reprocess_profile_invalid_github_without_resume_hands_off_to_upload(
+        self, crm_cog, mock_interaction
+    ):
+        """Invalid GitHub values should not incorrectly enable source-only reprocess."""
+        mock_interaction.user.id = 101
+        crm_cog._prompt_reprocess_resume_confirmation = AsyncMock()
+        crm_cog._prompt_upload_resume_for_contact = AsyncMock()
+        with (
+            patch(
+                "five08.discord_bot.cogs.crm.settings.api_shared_secret",
+                "test-shared-secret",
+            ),
+            patch(
+                "five08.discord_bot.cogs.crm.check_user_roles_with_hierarchy",
+                return_value=True,
+            ),
+            patch.object(
+                crm_cog,
+                "_search_contacts_for_reprocess_resume",
+                new=AsyncMock(
+                    return_value=[
+                        {
+                            "id": "contact123",
+                            "name": "Candidate User",
+                            "resumeIds": [],
+                            "resumeNames": {},
+                            "cWebsiteLink": [],
+                            "cGitHubUsername": "github.com/acme/platform",
                         }
                     ]
                 ),
