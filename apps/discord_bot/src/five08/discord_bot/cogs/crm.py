@@ -120,10 +120,10 @@ def _truncate_component_label(value: str, *, limit: int = 80) -> str:
     return value[: limit - 3].rstrip() + "..."
 
 
-def _format_reprocess_resume_button_label(
-    contact_name: str, *, has_resume: bool
+def _format_reprocess_profile_button_label(
+    contact_name: str, *, has_resume: bool, has_profile_sources: bool
 ) -> str:
-    if has_resume:
+    if has_resume or has_profile_sources:
         return _truncate_component_label(contact_name)
     prefix = "Upload Resume: "
     return prefix + _truncate_component_label(
@@ -521,7 +521,7 @@ class MarkIdVerifiedSelectionView(discord.ui.View):
 
 
 class ReprocessResumeSelectionButton(discord.ui.Button["ReprocessResumeSelectionView"]):
-    """Button for selecting a contact to reprocess a resume."""
+    """Button for selecting a contact to reprocess a profile."""
 
     def __init__(self, contact: dict[str, Any], requester_id: int) -> None:
         contact_name = str(contact.get("name", "Unknown"))
@@ -529,17 +529,20 @@ class ReprocessResumeSelectionButton(discord.ui.Button["ReprocessResumeSelection
         self.has_resume = isinstance(resume_ids, list) and any(
             str(item).strip() for item in resume_ids
         )
+        self.has_profile_sources = CRMCog._contact_has_external_profile_sources(contact)
+        can_reprocess_profile = self.has_resume or self.has_profile_sources
         super().__init__(
             style=(
                 discord.ButtonStyle.primary
-                if self.has_resume
+                if can_reprocess_profile
                 else discord.ButtonStyle.secondary
             ),
-            label=_format_reprocess_resume_button_label(
+            label=_format_reprocess_profile_button_label(
                 contact_name,
                 has_resume=self.has_resume,
+                has_profile_sources=self.has_profile_sources,
             ),
-            emoji="🔄" if self.has_resume else "📤",
+            emoji="🔄" if can_reprocess_profile else "📤",
         )
         self.contact = contact
         self.requester_id = requester_id
@@ -557,7 +560,7 @@ class ReprocessResumeSelectionButton(discord.ui.Button["ReprocessResumeSelection
                 return
 
             await interaction.response.defer(ephemeral=True)
-            if self.has_resume:
+            if self.has_resume or self.has_profile_sources:
                 await self.view.crm_cog._start_resume_reprocess_from_contact(
                     interaction=interaction,
                     contact=self.contact,
@@ -886,28 +889,30 @@ class ResumeEditWebsitesModal(discord.ui.Modal, title="Edit Websites"):
         await interaction.response.defer(ephemeral=True)
         raw = self.websites_input.value or ""
         links = [line.strip() for line in raw.splitlines() if line.strip()]
-        self.confirmation_view.website_edits_override_inferred_candidates = True
         submitted_links = self.confirmation_view._normalize_website_links_for_reparse(
             links
         )
         existing_links = self.confirmation_view._normalize_website_links_for_reparse(
             self.confirmation_view.existing_websites
         )
-        submitted_keys = [
+        submitted_keys = {
             normalized_website_identity_key(url)
             for url in submitted_links
             if normalized_website_identity_key(url)
-        ]
-        existing_keys = [
+        }
+        existing_keys = {
             normalized_website_identity_key(url)
             for url in existing_links
             if normalized_website_identity_key(url)
-        ]
+        }
         if submitted_keys == existing_keys:
+            self.confirmation_view.website_edits_override_inferred_candidates = False
             self.confirmation_view.proposed_updates.pop("cWebsiteLink", None)
         elif links:
+            self.confirmation_view.website_edits_override_inferred_candidates = True
             self.confirmation_view.proposed_updates["cWebsiteLink"] = links
         else:
+            self.confirmation_view.website_edits_override_inferred_candidates = True
             self.confirmation_view.proposed_updates.pop("cWebsiteLink", None)
         self.confirmation_view._refresh_website_reparse_candidates()
         await self.confirmation_view._sync_message_view()
@@ -2829,7 +2834,7 @@ class ResumeUpdateConfirmationView(discord.ui.View):
 
 
 class ResumeReprocessConfirmationView(discord.ui.View):
-    """Confirm reprocessing a contact's resume from existing attachment."""
+    """Confirm reprocessing a contact profile from a resume or CRM sources."""
 
     def __init__(
         self,
@@ -2840,6 +2845,7 @@ class ResumeReprocessConfirmationView(discord.ui.View):
         contact_name: str,
         attachment_id: str,
         filename: str,
+        has_resume: bool = True,
     ) -> None:
         super().__init__(timeout=180)
         self.crm_cog = crm_cog
@@ -2848,6 +2854,7 @@ class ResumeReprocessConfirmationView(discord.ui.View):
         self.contact_name = contact_name
         self.attachment_id = attachment_id
         self.filename = filename
+        self.has_resume = has_resume
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """Allow only the original requester to confirm reprocessing."""
@@ -2859,13 +2866,13 @@ class ResumeReprocessConfirmationView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Reprocess Resume", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Reprocess Profile", style=discord.ButtonStyle.primary)
     async def confirm_reprocess(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button["ResumeReprocessConfirmationView"],
     ) -> None:
-        """Re-run resume extraction for the selected resume attachment."""
+        """Re-run profile extraction for the selected contact inputs."""
         await interaction.response.defer(ephemeral=True, thinking=True)
         await self.crm_cog._run_resume_extract_and_preview(
             interaction=interaction,
@@ -2874,8 +2881,10 @@ class ResumeReprocessConfirmationView(discord.ui.View):
             attachment_id=self.attachment_id,
             filename=self.filename,
             link_member=None,
-            action="crm.reprocess_resume",
-            status_message="🔄 Reprocessing resume and extracting profile fields now...",
+            action="crm.reprocess_profile",
+            status_message=(
+                "🔄 Reprocessing profile inputs and extracting profile fields now..."
+            ),
         )
         for item in self.children:
             if isinstance(item, discord.ui.Button):
@@ -3362,8 +3371,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         self,
         *,
         contact_id: str,
-        attachment_id: str,
-        filename: str,
+        attachment_id: str | None,
+        filename: str | None,
         confirmed_personal_websites: list[str] | None = None,
         confirmed_github_usernames: list[str] | None = None,
     ) -> dict[str, Any]:
@@ -3761,7 +3770,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         extracted_profile = result.get("extracted_profile")
 
         embed = discord.Embed(
-            title="🧾 Resume Parsed",
+            title="🧾 Profile Parsed",
             description=f"Review extracted updates for **{contact_name}**.",
             color=0x0099FF,
         )
@@ -4195,8 +4204,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         interaction: discord.Interaction,
         contact_id: str,
         contact_name: str,
-        attachment_id: str,
-        filename: str,
+        attachment_id: str | None,
+        filename: str | None,
         link_member: discord.Member | None,
         *,
         action: str = "crm.upload_resume",
@@ -4207,8 +4216,11 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
     ) -> bool:
         """Run extraction directly and show confirmation preview."""
         action_name = action
+        normalized_attachment_id = str(attachment_id or "")
+        normalized_filename = str(filename or "")
         status_text = (
-            status_message or "📥 Resume uploaded. Extracting profile fields now..."
+            status_message
+            or "📥 Profile input received. Extracting profile fields with any fetchable website or GitHub sources now..."
         )
         if link_discord_payload is None and link_member is not None:
             link_discord_payload = {
@@ -4250,7 +4262,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 resource_id=str(contact_id),
             )
             await interaction.followup.send(
-                "⚠️ Resume uploaded, but extraction failed.",
+                "⚠️ Profile input was received, but extraction failed.",
                 ephemeral=True,
             )
             return False
@@ -4276,8 +4288,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         debug_file = self._build_resume_extract_debug_file(
             contact_id=contact_id,
             contact_name=contact_name,
-            attachment_id=attachment_id,
-            filename=filename,
+            attachment_id=normalized_attachment_id,
+            filename=normalized_filename,
             result=result,
         )
 
@@ -4340,12 +4352,12 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         suggested_discord_roles: list[str] = []
         discord_role_target_user_id: str | None = None
         can_apply_discord_roles = False
-        if action_name == "crm.reprocess_resume" or (
+        if action_name == "crm.reprocess_profile" or (
             action_name == "crm.upload_resume" and link_member
         ):
             extracted_profile = result.get("extracted_profile") or {}
             current_discord_roles: list[str] | None = None
-            if action_name == "crm.reprocess_resume":
+            if action_name == "crm.reprocess_profile":
                 try:
                     discord_user_id = await asyncio.to_thread(
                         get_discord_user_id_for_contact,
@@ -4399,14 +4411,14 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             and not has_confirmable_external_sources
         ):
             if role_suggestions_embed is None:
-                if action_name != "crm.reprocess_resume":
+                if action_name != "crm.reprocess_profile":
                     self._audit_command(
                         interaction=interaction,
                         action=action_name,
                         result="success",
                         metadata={
-                            "filename": filename,
-                            "attachment_id": attachment_id,
+                            "filename": normalized_filename,
+                            "attachment_id": normalized_attachment_id,
                             "stage": "preview_no_changes",
                         },
                         resource_type="crm_contact",
@@ -4424,8 +4436,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 requester_id=interaction.user.id,
                 contact_id=contact_id,
                 contact_name=contact_name,
-                attachment_id=attachment_id,
-                filename=filename,
+                attachment_id=normalized_attachment_id,
+                filename=normalized_filename,
                 proposed_updates=proposed_updates,
                 link_discord=link_discord_payload,
                 link_member=link_member,
@@ -4438,14 +4450,14 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 discord_role_target_user_id=discord_role_target_user_id,
                 can_apply_discord_roles=can_apply_discord_roles,
             )
-            if action_name != "crm.reprocess_resume":
+            if action_name != "crm.reprocess_profile":
                 self._audit_command(
                     interaction=interaction,
                     action=action_name,
                     result="success",
                     metadata={
-                        "filename": filename,
-                        "attachment_id": attachment_id,
+                        "filename": normalized_filename,
+                        "attachment_id": normalized_attachment_id,
                         "stage": "preview_ready",
                         "proposed_updates_count": len(proposed_updates),
                         "role_suggestions_count": len(suggested_discord_roles),
@@ -4472,8 +4484,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             requester_id=interaction.user.id,
             contact_id=contact_id,
             contact_name=contact_name,
-            attachment_id=attachment_id,
-            filename=filename,
+            attachment_id=normalized_attachment_id,
+            filename=normalized_filename,
             proposed_updates=proposed_updates,
             link_discord=link_discord_payload,
             link_member=link_member,
@@ -4486,14 +4498,14 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             discord_role_target_user_id=discord_role_target_user_id,
             can_apply_discord_roles=can_apply_discord_roles,
         )
-        if action_name != "crm.reprocess_resume":
+        if action_name != "crm.reprocess_profile":
             self._audit_command(
                 interaction=interaction,
                 action=action_name,
                 result="success",
                 metadata={
-                    "filename": filename,
-                    "attachment_id": attachment_id,
+                    "filename": normalized_filename,
+                    "attachment_id": normalized_attachment_id,
                     "stage": "preview_ready",
                     "proposed_updates_count": len(proposed_updates),
                     "link_member_requested": bool(link_member),
@@ -6915,7 +6927,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             title="🔍 Multiple Contacts Found",
             description=(
                 f"Found {len(contacts)} contacts for `{search_term}`. "
-                "Select the correct person to reprocess their resume."
+                "Select the correct person to reprocess their profile inputs."
             ),
             color=0xFFA500,
         )
@@ -6933,10 +6945,15 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             contact_id = contact.get("id", "")
             resume_name = self._extract_latest_resume_name_from_contact(contact)
             has_resume = self._contact_has_resume(contact)
+            has_profile_sources = self._contact_has_external_profile_sources(contact)
             resume_status = resume_name or ("on file" if has_resume else "missing")
+            source_status = (
+                "website or GitHub on file" if has_profile_sources else "none"
+            )
             contact_info = (
                 f"📧 {email}\n🏢 508 Email: {email_508}\n"
-                f"📄 Resume: {resume_status}\n🆔 ID: `{contact_id}`"
+                f"📄 Resume: {resume_status}\n"
+                f"🌐 External Sources: {source_status}\n🆔 ID: `{contact_id}`"
             )
             embed.add_field(name=f"{i}. {name}", value=contact_info, inline=True)
             view.add_contact_button(contact)
@@ -6945,7 +6962,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             name="💡 Tip",
             value=(
                 "Select the contact button to continue. Contacts without a resume "
-                "will hand off to `/upload-resume`."
+                "and without CRM website or GitHub sources will hand off to `/upload-resume`."
             ),
             inline=False,
         )
@@ -7998,7 +8015,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
     ) -> list[dict[str, Any]]:
         """Resolve search term for resume reprocessing lookup."""
         select_fields = (
-            "id,name,emailAddress,c508Email,cDiscordUsername,resumeIds,resumeNames"
+            "id,name,emailAddress,c508Email,cDiscordUsername,resumeIds,resumeNames,"
+            "cWebsiteLink,cGitHubUsername"
         )
         mention_user_id = self._extract_discord_id_from_mention(search_term)
         if mention_user_id:
@@ -8056,6 +8074,19 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         if not isinstance(resume_ids, list):
             return False
         return any(str(item).strip() for item in resume_ids)
+
+    @staticmethod
+    def _contact_has_external_profile_sources(contact: dict[str, Any]) -> bool:
+        website_links = contact.get("cWebsiteLink")
+        if isinstance(website_links, str):
+            if any(item.strip() for item in website_links.split(",")):
+                return True
+        elif isinstance(website_links, (list, tuple, set)):
+            if any(str(item).strip() for item in website_links):
+                return True
+
+        github_username = str(contact.get("cGitHubUsername") or "").strip()
+        return bool(github_username)
 
     def _bulk_resume_missing_flags(self, contact: dict[str, Any]) -> dict[str, bool]:
         missing_country = self._is_blank_crm_field(contact.get("addressCountry"))
@@ -8210,13 +8241,13 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         contact: dict[str, Any],
         search_term: str,
     ) -> None:
-        """Prompt for confirmation to reprocess the selected contact's resume."""
+        """Prompt for confirmation to reprocess the selected contact's profile."""
         raw_contact_id = contact.get("id")
         contact_id = str(raw_contact_id).strip() if raw_contact_id is not None else ""
         if not contact_id:
             self._audit_command(
                 interaction=interaction,
-                action="crm.reprocess_resume",
+                action="crm.reprocess_profile",
                 result="error",
                 metadata={
                     "search_term": search_term,
@@ -8231,10 +8262,11 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             attachment_id,
             filename,
         ) = await self._get_latest_resume_attachment_for_contact(contact_id)
-        if not attachment_id:
+        has_profile_sources = self._contact_has_external_profile_sources(contact)
+        if not attachment_id and not has_profile_sources:
             self._audit_command(
                 interaction=interaction,
-                action="crm.reprocess_resume",
+                action="crm.reprocess_profile",
                 result="denied",
                 metadata={
                     "search_term": search_term,
@@ -8250,18 +8282,27 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
-        display_filename = filename or "latest resume"
+        has_resume = bool(attachment_id)
+        display_filename = filename or (
+            "latest resume" if has_resume else "CRM website/GitHub sources"
+        )
         view = ResumeReprocessConfirmationView(
             crm_cog=self,
             interaction=interaction,
             contact_id=contact_id,
             contact_name=contact_name,
-            attachment_id=attachment_id,
+            attachment_id=attachment_id or "",
             filename=display_filename,
+            has_resume=has_resume,
+        )
+        confirmation_message = (
+            f"⚠️ Reprocess profile for `{contact_name}` from resume `{display_filename}` "
+            "and include any fetchable website or GitHub profile sources?"
+            if has_resume
+            else f"⚠️ Reprocess profile for `{contact_name}` from CRM website or GitHub sources?"
         )
         await interaction.followup.send(
-            f"⚠️ Reprocess resume `{display_filename}` for `{contact_name}` "
-            "and include any fetchable website or GitHub profile sources?",
+            confirmation_message,
             view=view,
             ephemeral=True,
         )
@@ -8272,13 +8313,13 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         contact: dict[str, Any],
         search_term: str,
     ) -> None:
-        """Start resume reprocessing for a selected contact without extra confirmation."""
+        """Start profile reprocessing for a selected contact without extra confirmation."""
         raw_contact_id = contact.get("id")
         contact_id = str(raw_contact_id).strip() if raw_contact_id is not None else ""
         if not contact_id:
             self._audit_command(
                 interaction=interaction,
-                action="crm.reprocess_resume",
+                action="crm.reprocess_profile",
                 result="error",
                 metadata={
                     "search_term": search_term,
@@ -8293,7 +8334,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             attachment_id,
             filename,
         ) = await self._get_latest_resume_attachment_for_contact(contact_id)
-        if not attachment_id:
+        has_profile_sources = self._contact_has_external_profile_sources(contact)
+        if not attachment_id and not has_profile_sources:
             await self._prompt_upload_resume_for_contact(
                 interaction=interaction,
                 contact=contact,
@@ -8301,16 +8343,21 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
-        display_filename = filename or "latest resume"
+        has_resume = bool(attachment_id)
+        display_filename = filename or (
+            "latest resume" if has_resume else "CRM website/GitHub sources"
+        )
         await self._run_resume_extract_and_preview(
             interaction=interaction,
             contact_id=contact_id,
             contact_name=contact_name,
-            attachment_id=attachment_id,
+            attachment_id=attachment_id or "",
             filename=display_filename,
             link_member=None,
-            action="crm.reprocess_resume",
-            status_message="🔄 Reprocessing resume and extracting profile fields now...",
+            action="crm.reprocess_profile",
+            status_message=(
+                "🔄 Reprocessing profile inputs and extracting profile fields now..."
+            ),
         )
 
     async def _prompt_upload_resume_for_contact(
@@ -8325,7 +8372,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         if not contact_id:
             self._audit_command(
                 interaction=interaction,
-                action="crm.reprocess_resume",
+                action="crm.reprocess_profile",
                 result="error",
                 metadata={
                     "search_term": search_term,
@@ -8339,7 +8386,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         contact_name = str(contact.get("name", "Unknown"))
         self._audit_command(
             interaction=interaction,
-            action="crm.reprocess_resume",
+            action="crm.reprocess_profile",
             result="success",
             metadata={
                 "search_term": search_term,
@@ -9839,14 +9886,14 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
 
     @app_commands.command(
-        name="reprocess-resume",
-        description="Reprocess a resume and re-run profile extraction",
+        name="reprocess-profile",
+        description="Reprocess a profile from the latest resume or CRM website/GitHub",
     )
     @app_commands.describe(search_term="Email, 508 username, 508 email, or contact ID.")
-    async def reprocess_resume(
+    async def reprocess_profile(
         self, interaction: discord.Interaction, search_term: str
     ) -> None:
-        """Re-run resume extraction for a contact's latest resume."""
+        """Re-run profile extraction for a contact's latest inputs."""
         try:
             await interaction.response.defer(ephemeral=True)
 
@@ -9858,7 +9905,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             if not is_steering:
                 self._audit_command(
                     interaction=interaction,
-                    action="crm.reprocess_resume",
+                    action="crm.reprocess_profile",
                     result="denied",
                     metadata={
                         "search_term": search_term,
@@ -9867,7 +9914,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     },
                 )
                 await interaction.followup.send(
-                    "❌ You must have Steering Committee role or higher to reprocess another resume."
+                    "❌ You must have Steering Committee role or higher to reprocess another profile."
                 )
                 return
 
@@ -9875,7 +9922,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             if not contacts:
                 self._audit_command(
                     interaction=interaction,
-                    action="crm.reprocess_resume",
+                    action="crm.reprocess_profile",
                     result="denied",
                     metadata={
                         "search_term": search_term,
@@ -9897,7 +9944,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 return
 
             contact = contacts[0]
-            if self._contact_has_resume(contact):
+            if self._contact_has_resume(
+                contact
+            ) or self._contact_has_external_profile_sources(contact):
                 await self._prompt_reprocess_resume_confirmation(
                     interaction=interaction,
                     contact=contact,
@@ -9910,10 +9959,10 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     search_term=search_term,
                 )
         except Exception as e:
-            logger.error("Unexpected error in reprocess_resume: %s", e)
+            logger.error("Unexpected error in reprocess_profile: %s", e)
             self._audit_command(
                 interaction=interaction,
-                action="crm.reprocess_resume",
+                action="crm.reprocess_profile",
                 result="error",
                 metadata={
                     "search_term": search_term,
@@ -9921,7 +9970,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 },
             )
             await interaction.followup.send(
-                "❌ An unexpected error occurred while reprocessing the resume."
+                "❌ An unexpected error occurred while reprocessing the profile."
             )
 
     @app_commands.command(

@@ -248,19 +248,36 @@ class ResumeProfileProcessor:
         self,
         *,
         contact_id: str,
-        attachment_id: str,
-        filename: str,
+        attachment_id: str | None,
+        filename: str | None,
         confirmed_personal_websites: list[str] | None = None,
         confirmed_github_usernames: list[str] | None = None,
     ) -> ResumeExtractionResult:
-        """Build preview proposal from an uploaded resume attachment."""
+        """Build preview proposal from an uploaded resume attachment or CRM sources."""
         content_hash: str | None = None
         model_name = self._configured_model_name()
+        normalized_attachment_id = str(attachment_id or "").strip()
+        normalized_filename = str(filename or "").strip()
         try:
             contact = self.crm.get_contact(contact_id)
-            content = self.crm.download_attachment(attachment_id)
-            content_hash = self.document_processor.get_content_hash(content, filename)
-            text = self.document_processor.extract_text(content, filename)
+            has_external_profile_sources = self._contact_has_external_profile_sources(
+                contact=contact,
+                explicit_personal_websites=confirmed_personal_websites,
+                explicit_github_usernames=confirmed_github_usernames,
+            )
+            if normalized_attachment_id:
+                content = self.crm.download_attachment(normalized_attachment_id)
+                content_hash = self.document_processor.get_content_hash(
+                    content, normalized_filename
+                )
+                text = self.document_processor.extract_text(
+                    content, normalized_filename
+                )
+            else:
+                if not has_external_profile_sources:
+                    raise ValueError("No resume or external profile sources available")
+                text = ""
+                normalized_filename = normalized_filename or "crm-profile-sources"
             extracted, source_enrichments = self._extract_profile_with_external_sources(
                 resume_text=text,
                 contact=contact,
@@ -323,7 +340,11 @@ class ResumeProfileProcessor:
                         label="Additional Emails",
                         current=None,
                         proposed=", ".join(extracted.additional_emails),
-                        reason="Extracted additional emails from uploaded resume",
+                        reason=(
+                            "Extracted additional emails from uploaded resume"
+                            if normalized_attachment_id
+                            else "Extracted additional emails from profile sources"
+                        ),
                     )
                 )
             self._collect_change(
@@ -410,7 +431,11 @@ class ResumeProfileProcessor:
                         label="Roles",
                         current=", ".join(existing_roles),
                         proposed=", ".join(extracted_roles),
-                        reason="Extracted from uploaded resume",
+                        reason=(
+                            "Extracted from uploaded resume"
+                            if normalized_attachment_id
+                            else "Extracted from profile sources"
+                        ),
                     )
                 )
             current_seniority = self._normalize_seniority(contact.get("cSeniority"))
@@ -452,7 +477,11 @@ class ResumeProfileProcessor:
                         proposed=self._format_skills_with_strength(
                             merged_skills, merged_skill_attrs
                         ),
-                        reason="Added skills from resume extraction",
+                        reason=(
+                            "Added skills from resume extraction"
+                            if normalized_attachment_id
+                            else "Added skills from profile-source extraction"
+                        ),
                     )
                 )
 
@@ -464,7 +493,11 @@ class ResumeProfileProcessor:
                         label="Website",
                         current=", ".join(existing_websites),
                         proposed=", ".join(merged_websites),
-                        reason="Extracted from uploaded resume",
+                        reason=(
+                            "Extracted from uploaded resume"
+                            if normalized_attachment_id
+                            else "Extracted from profile sources"
+                        ),
                     )
                 )
 
@@ -476,13 +509,17 @@ class ResumeProfileProcessor:
                         label="Social Links",
                         current=", ".join(existing_social_links),
                         proposed=", ".join(merged_social_links),
-                        reason="Extracted from uploaded resume",
+                        reason=(
+                            "Extracted from uploaded resume"
+                            if normalized_attachment_id
+                            else "Extracted from profile sources"
+                        ),
                     )
                 )
 
             self._record_processing_run(
                 contact_id=contact_id,
-                attachment_id=attachment_id,
+                attachment_id=normalized_attachment_id,
                 content_hash=content_hash,
                 model_name=model_name,
                 status="succeeded",
@@ -490,7 +527,7 @@ class ResumeProfileProcessor:
 
             return ResumeExtractionResult(
                 contact_id=contact_id,
-                attachment_id=attachment_id,
+                attachment_id=normalized_attachment_id,
                 proposed_updates=proposed_updates,
                 proposed_changes=proposed_changes,
                 skipped=skipped,
@@ -505,12 +542,12 @@ class ResumeProfileProcessor:
             logger.error(
                 "Resume extraction proposal failed contact_id=%s attachment_id=%s error=%s",
                 contact_id,
-                attachment_id,
+                normalized_attachment_id,
                 exc,
             )
             self._record_processing_run(
                 contact_id=contact_id,
-                attachment_id=attachment_id,
+                attachment_id=normalized_attachment_id,
                 content_hash=content_hash,
                 model_name=model_name,
                 status="failed",
@@ -518,7 +555,7 @@ class ResumeProfileProcessor:
             )
             return ResumeExtractionResult(
                 contact_id=contact_id,
-                attachment_id=attachment_id,
+                attachment_id=normalized_attachment_id,
                 proposed_updates={},
                 proposed_changes=[],
                 skipped=[],
@@ -1189,11 +1226,18 @@ class ResumeProfileProcessor:
         explicit_github_usernames: list[str] | None = None,
     ) -> list[_ExternalProfileSourceCandidate]:
         candidates: list[_ExternalProfileSourceCandidate] = []
+        added_website_source_keys: set[str] = set()
+        website_budget = PROFILE_SOURCE_MAX_WEBSITES
+
         explicit_website_links = self._coerce_website_links(explicit_personal_websites)
-        for website_url in explicit_website_links[:PROFILE_SOURCE_MAX_WEBSITES]:
+        for website_url in explicit_website_links:
             source_key = normalized_website_identity_key(website_url)
-            if not source_key:
+            if not source_key or source_key in added_website_source_keys:
                 continue
+            if website_budget <= 0:
+                break
+            added_website_source_keys.add(source_key)
+            website_budget -= 1
             candidates.append(
                 _ExternalProfileSourceCandidate(
                     label="Personal Website",
@@ -1203,13 +1247,15 @@ class ResumeProfileProcessor:
                 )
             )
 
-        website_links = self._coerce_website_links(contact.get("cWebsiteLink"))[
-            :PROFILE_SOURCE_MAX_WEBSITES
-        ]
+        website_links = self._coerce_website_links(contact.get("cWebsiteLink"))
         for website_url in website_links:
             source_key = normalized_website_identity_key(website_url)
-            if not source_key:
+            if not source_key or source_key in added_website_source_keys:
                 continue
+            if website_budget <= 0:
+                break
+            added_website_source_keys.add(source_key)
+            website_budget -= 1
             candidates.append(
                 _ExternalProfileSourceCandidate(
                     label="Personal Website",
@@ -1251,6 +1297,26 @@ class ResumeProfileProcessor:
             )
         return candidates
 
+    def _contact_has_external_profile_sources(
+        self,
+        *,
+        contact: dict[str, Any],
+        explicit_personal_websites: list[str] | None = None,
+        explicit_github_usernames: list[str] | None = None,
+    ) -> bool:
+        if self._coerce_website_links(explicit_personal_websites):
+            return True
+        if any(
+            self._normalize_github_username(username)
+            for username in explicit_github_usernames or []
+        ):
+            return True
+        if self._coerce_website_links(contact.get("cWebsiteLink")):
+            return True
+        return (
+            self._normalize_github_username(contact.get("cGitHubUsername")) is not None
+        )
+
     def _fetch_external_profile_sources(
         self,
         candidates: list[_ExternalProfileSourceCandidate],
@@ -1264,7 +1330,6 @@ class ResumeProfileProcessor:
         for candidate in candidates:
             if candidate.source_key in seen_source_keys:
                 continue
-            seen_source_keys.add(candidate.source_key)
 
             try:
                 fetched = self._fetch_external_profile_source_text(candidate.url)
@@ -1279,6 +1344,7 @@ class ResumeProfileProcessor:
                     )
                 )
                 continue
+            seen_source_keys.add(candidate.source_key)
 
             label_base = (
                 "github_profile"

@@ -1220,8 +1220,59 @@ class TestCRMCog:
         await modal.on_submit(mock_interaction)
 
         assert "cWebsiteLink" not in view.proposed_updates
+        assert view.website_edits_override_inferred_candidates is False
         mock_interaction.response.defer.assert_awaited_once_with(ephemeral=True)
         mock_interaction.followup.send.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_edit_websites_modal_submit_skips_reordered_noop_existing_websites(
+        self, crm_cog, mock_interaction
+    ):
+        """Reordering unchanged websites should still count as a no-op."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+            existing_websites=["https://old.com", "https://other.com"],
+        )
+        modal = ResumeEditWebsitesModal(confirmation_view=view)
+        modal.websites_input._value = "https://other.com\nhttps://old.com\n"
+
+        await modal.on_submit(mock_interaction)
+
+        assert "cWebsiteLink" not in view.proposed_updates
+        assert view.website_edits_override_inferred_candidates is False
+        mock_interaction.followup.send.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_edit_websites_modal_noop_keeps_inferred_reparse_candidates(
+        self, crm_cog, mock_interaction
+    ):
+        """No-op website edits should not hide inferred website reparse candidates."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+            existing_websites=["https://old.com"],
+            source_enrichments=[
+                {
+                    "label": "Personal Website",
+                    "status": "confirmation_needed",
+                    "origin": "resume_inference",
+                    "url": "https://portfolio.example.com",
+                }
+            ],
+        )
+        modal = ResumeEditWebsitesModal(confirmation_view=view)
+        modal.websites_input._value = "https://old.com\n"
+
+        await modal.on_submit(mock_interaction)
+
+        assert view.website_reparse_candidates == ["https://portfolio.example.com"]
 
     @pytest.mark.asyncio
     async def test_edit_roles_modal_submit_updates_proposed(
@@ -5826,8 +5877,10 @@ class TestCRMCog:
         assert len(sanitized) <= 1900
 
     @pytest.mark.asyncio
-    async def test_reprocess_resume_shows_confirmation(self, crm_cog, mock_interaction):
-        """Show a confirmation view before reprocessing a contact's latest resume."""
+    async def test_reprocess_profile_shows_confirmation(
+        self, crm_cog, mock_interaction
+    ):
+        """Show a confirmation view before reprocessing a contact profile."""
         mock_interaction.user.id = 101
         mock_interaction.user.name = "Operator"
 
@@ -5860,7 +5913,7 @@ class TestCRMCog:
                 new=AsyncMock(return_value=("resume123", "candidate.pdf")),
             ),
         ):
-            await crm_cog.reprocess_resume.callback(
+            await crm_cog.reprocess_profile.callback(
                 crm_cog, mock_interaction, "candidate"
             )
 
@@ -5878,9 +5931,55 @@ class TestCRMCog:
         assert view.contact_name == "Candidate User"
         assert view.attachment_id == "resume123"
         assert view.filename == "candidate.pdf"
+        assert view.has_resume is True
 
     @pytest.mark.asyncio
-    async def test_reprocess_resume_shows_no_contact_message(
+    async def test_reprocess_profile_without_resume_uses_crm_sources(
+        self, crm_cog, mock_interaction
+    ):
+        """Contacts without a resume can still reprocess from CRM website/GitHub sources."""
+        mock_interaction.user.id = 101
+
+        with (
+            patch(
+                "five08.discord_bot.cogs.crm.settings.api_shared_secret",
+                "test-shared-secret",
+            ),
+            patch(
+                "five08.discord_bot.cogs.crm.check_user_roles_with_hierarchy",
+                return_value=True,
+            ),
+            patch.object(
+                crm_cog,
+                "_search_contacts_for_reprocess_resume",
+                new=AsyncMock(
+                    return_value=[
+                        {
+                            "id": "contact123",
+                            "name": "Candidate User",
+                            "resumeIds": [],
+                            "resumeNames": {},
+                            "cWebsiteLink": ["https://candidate.example.com"],
+                            "cGitHubUsername": "octocat",
+                        },
+                    ]
+                ),
+            ),
+        ):
+            await crm_cog.reprocess_profile.callback(
+                crm_cog, mock_interaction, "candidate"
+            )
+
+        confirmation_message = mock_interaction.followup.send.call_args.args[0]
+        followup_kwargs = mock_interaction.followup.send.call_args.kwargs
+        assert "CRM website or GitHub sources" in confirmation_message
+        view = followup_kwargs["view"]
+        assert view.attachment_id == ""
+        assert view.filename == "CRM website/GitHub sources"
+        assert view.has_resume is False
+
+    @pytest.mark.asyncio
+    async def test_reprocess_profile_shows_no_contact_message(
         self, crm_cog, mock_interaction
     ):
         """Error when no contact matches the reprocess search term."""
@@ -5900,7 +5999,7 @@ class TestCRMCog:
                 new=AsyncMock(return_value=[]),
             ),
         ):
-            await crm_cog.reprocess_resume.callback(
+            await crm_cog.reprocess_profile.callback(
                 crm_cog, mock_interaction, "missing-user"
             )
 
@@ -5909,7 +6008,7 @@ class TestCRMCog:
         )
 
     @pytest.mark.asyncio
-    async def test_reprocess_resume_shows_multiple_contacts_selector(
+    async def test_reprocess_profile_shows_multiple_contacts_selector(
         self, crm_cog, mock_interaction
     ):
         """Show selection view when multiple contacts match the reprocess search term."""
@@ -5933,18 +6032,22 @@ class TestCRMCog:
                             "name": "John Doe",
                             "resumeIds": ["resume123"],
                             "resumeNames": {},
+                            "cWebsiteLink": [],
+                            "cGitHubUsername": "",
                         },
                         {
                             "id": "contact456",
                             "name": "John Smith",
                             "resumeIds": [],
                             "resumeNames": {},
+                            "cWebsiteLink": [],
+                            "cGitHubUsername": "",
                         },
                     ]
                 ),
             ),
         ):
-            await crm_cog.reprocess_resume.callback(crm_cog, mock_interaction, "john")
+            await crm_cog.reprocess_profile.callback(crm_cog, mock_interaction, "john")
 
         mock_interaction.followup.send.assert_called_once()
         followup_kwargs = mock_interaction.followup.send.call_args.kwargs
@@ -5961,7 +6064,7 @@ class TestCRMCog:
         assert "📄 Resume: missing" in embed.fields[1].value
 
     @pytest.mark.asyncio
-    async def test_reprocess_resume_selection_button_without_resume_hands_off_to_upload(
+    async def test_reprocess_profile_selection_button_without_resume_hands_off_to_upload(
         self, crm_cog
     ):
         """No-resume selections should route to the upload-resume handoff."""
@@ -6039,7 +6142,7 @@ class TestCRMCog:
         )
 
     @pytest.mark.asyncio
-    async def test_reprocess_resume_exact_match_without_resume_hands_off_to_upload(
+    async def test_reprocess_profile_exact_match_without_resume_hands_off_to_upload(
         self, crm_cog, mock_interaction
     ):
         """Exact-match reprocess requests should use the upload handoff when needed."""
@@ -6070,7 +6173,7 @@ class TestCRMCog:
                 ),
             ),
         ):
-            await crm_cog.reprocess_resume.callback(
+            await crm_cog.reprocess_profile.callback(
                 crm_cog, mock_interaction, "candidate"
             )
 
@@ -6078,8 +6181,8 @@ class TestCRMCog:
         crm_cog._prompt_reprocess_resume_confirmation.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_reprocess_resume_requires_steering(self, crm_cog, mock_interaction):
-        """Non-steering users cannot reprocess resumes."""
+    async def test_reprocess_profile_requires_steering(self, crm_cog, mock_interaction):
+        """Non-steering users cannot reprocess profiles."""
         mock_interaction.user.id = 101
         with (
             patch(
@@ -6091,7 +6194,7 @@ class TestCRMCog:
                 return_value=False,
             ),
         ):
-            await crm_cog.reprocess_resume.callback(
+            await crm_cog.reprocess_profile.callback(
                 crm_cog, mock_interaction, "candidate"
             )
 
@@ -6102,7 +6205,7 @@ class TestCRMCog:
     async def test_reprocess_confirmation_view_calls_reprocess_preview(
         self, crm_cog, mock_interaction
     ):
-        """Confirming resume reprocessing triggers resume extraction with reprocess action."""
+        """Confirming profile reprocessing triggers extraction with reprocess action."""
         original_interaction = Mock()
         original_interaction.user = Mock()
         original_interaction.user.id = 101
@@ -6131,16 +6234,16 @@ class TestCRMCog:
             child
             for child in view.children
             if isinstance(child, discord.ui.Button)
-            and child.label == "Reprocess Resume"
+            and child.label == "Reprocess Profile"
         )
         await confirm_button.callback(confirm_interaction)
 
         crm_cog._run_resume_extract_and_preview.assert_awaited_once()
         kwargs = crm_cog._run_resume_extract_and_preview.await_args.kwargs
-        assert kwargs["action"] == "crm.reprocess_resume"
+        assert kwargs["action"] == "crm.reprocess_profile"
         assert (
             kwargs["status_message"]
-            == "🔄 Reprocessing resume and extracting profile fields now..."
+            == "🔄 Reprocessing profile inputs and extracting profile fields now..."
         )
 
     @pytest.mark.asyncio
@@ -6172,7 +6275,7 @@ class TestCRMCog:
             proposed_updates={},
             link_discord={"user_id": "101", "username": "Operator#0001"},
             link_member=linked_member,
-            preview_action="crm.reprocess_resume",
+            preview_action="crm.reprocess_profile",
             parsed_seniority="senior",
             source_enrichments=[
                 {
@@ -6204,7 +6307,7 @@ class TestCRMCog:
             "https://portfolio.example.com"
         ]
         assert kwargs["confirmed_github_usernames"] == ["octocat"]
-        assert kwargs["action"] == "crm.reprocess_resume"
+        assert kwargs["action"] == "crm.reprocess_profile"
         assert kwargs["link_member"] is linked_member
         assert kwargs["link_discord_payload"] == {
             "user_id": "101",
@@ -6351,7 +6454,7 @@ class TestCRMCog:
             attachment_id="resume123",
             filename="candidate.pdf",
             link_member=None,
-            action="crm.reprocess_resume",
+            action="crm.reprocess_profile",
             status_message="🔄 Reprocessing resume and extracting profile fields now...",
         )
 

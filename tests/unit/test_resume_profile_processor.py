@@ -10,7 +10,10 @@ from unittest.mock import MagicMock, Mock, patch
 from curl_cffi import CurlOpt
 
 from five08.clients.espo import EspoAPIError
-from five08.resume_profile_processor import ResumeProcessorConfig
+from five08.resume_profile_processor import (
+    ResumeProcessorConfig,
+    _ExternalProfileSourceCandidate,
+)
 from five08.worker.crm.resume_profile_processor import ResumeProfileProcessor
 from five08.worker.models import ExtractedSkills, ResumeExtractedProfile
 
@@ -524,6 +527,143 @@ def test_extract_profile_proposal_fetches_confirmed_website_and_github_together(
         "resume_confirmation",
         "resume_confirmation",
     ]
+
+
+def test_extract_profile_proposal_without_resume_uses_crm_external_sources() -> None:
+    """Profile reprocessing should work without a resume when CRM sources exist."""
+    processor = ResumeProfileProcessor()
+    processor.crm = Mock()
+    processor.extractor = Mock()
+    processor.skills_extractor = Mock()
+    processor.document_processor = Mock()
+    processor._record_processing_run = Mock()
+    processor._fetch_external_profile_source_text = Mock(
+        side_effect=lambda url: {
+            "https://portfolio.example.com": "Portfolio content",
+            "https://github.com/octocat": "GitHub profile content",
+        }[url]
+    )
+    processor.skills_extractor.canonicalize_skill.side_effect = lambda v: (
+        str(v).strip().lower()
+    )
+
+    processor.crm.get_contact.return_value = {
+        "emailAddress": "member@example.com",
+        "cWebsiteLink": ["https://portfolio.example.com"],
+        "cGitHubUsername": "octocat",
+    }
+    processor.extractor.extract.return_value = ResumeExtractedProfile(
+        email=None,
+        github_username="octocat",
+        linkedin_url=None,
+        phone=None,
+        description="External-source-only profile",
+        confidence=0.8,
+        source="gpt-4o-mini",
+    )
+    processor.skills_extractor.extract_skills.return_value = ExtractedSkills(
+        skills=[],
+        skill_attrs={},
+        confidence=0.8,
+        source="gpt-4o-mini",
+    )
+
+    result = processor.extract_profile_proposal(
+        contact_id="contact-profile-only",
+        attachment_id=None,
+        filename=None,
+    )
+
+    assert result.success is True
+    processor.crm.download_attachment.assert_not_called()
+    processor.document_processor.extract_text.assert_not_called()
+    assert processor.extractor.extract.call_args.kwargs["extra_sources"] == {
+        "personal_website": (
+            "Source: Personal Website\n"
+            "URL: https://portfolio.example.com\n"
+            "Content:\n"
+            "Portfolio content"
+        ),
+        "github_profile": (
+            "Source: GitHub Profile\n"
+            "URL: https://github.com/octocat\n"
+            "Content:\n"
+            "GitHub profile content"
+        ),
+    }
+    assert result.attachment_id == ""
+
+
+def test_build_initial_external_source_candidates_caps_websites_globally() -> None:
+    """Initial website fetch budgeting should apply across explicit and CRM websites."""
+    processor = ResumeProfileProcessor()
+
+    candidates = processor._build_initial_external_source_candidates(
+        contact={
+            "cWebsiteLink": [
+                "https://crm-one.example.com",
+                "https://crm-two.example.com",
+            ],
+            "cGitHubUsername": "octocat",
+        },
+        explicit_personal_websites=[
+            "https://explicit-one.example.com",
+            "https://explicit-two.example.com",
+        ],
+    )
+
+    website_urls = [
+        candidate.url
+        for candidate in candidates
+        if candidate.label == "Personal Website"
+    ]
+    github_urls = [
+        candidate.url for candidate in candidates if candidate.label == "GitHub Profile"
+    ]
+    assert website_urls == [
+        "https://explicit-one.example.com",
+        "https://explicit-two.example.com",
+    ]
+    assert github_urls == ["https://github.com/octocat"]
+
+
+def test_fetch_external_profile_sources_retries_alternate_candidate_after_failure() -> (
+    None
+):
+    """A failed candidate should not block a later candidate with the same source key."""
+    processor = ResumeProfileProcessor()
+    processor._fetch_external_profile_source_text = Mock(
+        side_effect=[RuntimeError("primary failed"), "secondary worked"]
+    )
+
+    extra_sources, enrichments = processor._fetch_external_profile_sources(
+        [
+            _ExternalProfileSourceCandidate(
+                label="Personal Website",
+                url="https://example.com",
+                origin="crm",
+                source_key="website:example.com",
+            ),
+            _ExternalProfileSourceCandidate(
+                label="Personal Website",
+                url="http://example.com",
+                origin="crm",
+                source_key="website:example.com",
+            ),
+        ],
+        seen_source_keys=set(),
+        source_label_counts={},
+    )
+
+    assert extra_sources == {
+        "personal_website": (
+            "Source: Personal Website\n"
+            "URL: http://example.com\n"
+            "Content:\n"
+            "secondary worked"
+        )
+    }
+    assert [item.status for item in enrichments] == ["failed", "used"]
 
 
 def test_extract_profile_proposal_reruns_with_confirmed_personal_website() -> None:
