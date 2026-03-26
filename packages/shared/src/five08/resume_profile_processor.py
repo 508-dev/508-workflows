@@ -88,7 +88,7 @@ _HTML_META_CONTENT_ATTR_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _GITHUB_USERNAME_RE = re.compile(
-    r"(?:https?://)?(?:www\.)?github\.com/([A-Za-z0-9-]{1,39})",
+    r"^(?:https?://)?(?:www\.)?github\.com/([A-Za-z0-9-]{1,39})/?(?:[?#].*)?$",
     flags=re.IGNORECASE,
 )
 
@@ -1057,9 +1057,10 @@ class ResumeProfileProcessor:
             extra_sources.update(initial_sources)
             enrichments.extend(initial_enrichments)
 
-        extracted = self.extractor.extract(
-            resume_text,
+        extracted = self._extract_resume_profile_fail_open(
+            resume_text=resume_text,
             extra_sources=extra_sources or None,
+            fallback_extracted=None,
         )
 
         inferred_candidates = self._build_inferred_external_source_candidates(
@@ -1082,9 +1083,10 @@ class ResumeProfileProcessor:
             return extracted, enrichments
 
         extra_sources.update(inferred_sources)
-        extracted = self.extractor.extract(
-            resume_text,
+        extracted = self._extract_resume_profile_fail_open(
+            resume_text=resume_text,
             extra_sources=extra_sources,
+            fallback_extracted=extracted,
         )
         self._refresh_inferred_website_confirmation_enrichments(
             contact=contact,
@@ -1123,12 +1125,17 @@ class ResumeProfileProcessor:
             enrichments[:] = retained_enrichments
 
         existing_website_links = self._coerce_website_links(contact.get("cWebsiteLink"))
-        if existing_website_links:
-            return
+        existing_website_keys = {
+            normalized_website_identity_key(url)
+            for url in existing_website_links
+            if normalized_website_identity_key(url)
+        }
 
         for website_url in extracted.website_links[:PROFILE_SOURCE_MAX_WEBSITES]:
             source_key = normalized_website_identity_key(website_url)
             if not source_key:
+                continue
+            if source_key in existing_website_keys:
                 continue
             dedupe_source_key = f"website:{source_key}"
             if dedupe_source_key in seen_source_keys:
@@ -1208,34 +1215,38 @@ class ResumeProfileProcessor:
     ) -> list[_ExternalProfileSourceCandidate]:
         candidates: list[_ExternalProfileSourceCandidate] = []
         existing_website_links = self._coerce_website_links(contact.get("cWebsiteLink"))
-        if not existing_website_links:
-            for website_url in extracted.website_links[:PROFILE_SOURCE_MAX_WEBSITES]:
-                source_key = normalized_website_identity_key(website_url)
-                if not source_key:
-                    continue
-                dedupe_source_key = f"website:{source_key}"
-                if dedupe_source_key in seen_source_keys:
-                    continue
-                if source_key in confirmed_personal_website_keys:
-                    candidates.append(
-                        _ExternalProfileSourceCandidate(
-                            label="Personal Website",
-                            url=website_url,
-                            origin="resume_confirmation",
-                            source_key=dedupe_source_key,
-                        )
-                    )
-                    continue
-                enrichments.append(
-                    ResumeSourceEnrichment(
+        existing_website_keys = {
+            normalized_website_identity_key(url)
+            for url in existing_website_links
+            if normalized_website_identity_key(url)
+        }
+        for website_url in extracted.website_links[:PROFILE_SOURCE_MAX_WEBSITES]:
+            source_key = normalized_website_identity_key(website_url)
+            if not source_key or source_key in existing_website_keys:
+                continue
+            dedupe_source_key = f"website:{source_key}"
+            if dedupe_source_key in seen_source_keys:
+                continue
+            if source_key in confirmed_personal_website_keys:
+                candidates.append(
+                    _ExternalProfileSourceCandidate(
                         label="Personal Website",
                         url=website_url,
-                        origin="resume_inference",
-                        status="confirmation_needed",
-                        detail="Inferred from the resume. Confirm to fetch and reparse.",
+                        origin="resume_confirmation",
+                        source_key=dedupe_source_key,
                     )
                 )
-                seen_source_keys.add(dedupe_source_key)
+                continue
+            enrichments.append(
+                ResumeSourceEnrichment(
+                    label="Personal Website",
+                    url=website_url,
+                    origin="resume_inference",
+                    status="confirmation_needed",
+                    detail="Inferred from the resume. Confirm to fetch and reparse.",
+                )
+            )
+            seen_source_keys.add(dedupe_source_key)
 
         existing_github_username = self._normalize_github_username(
             contact.get("cGitHubUsername")
@@ -1582,7 +1593,7 @@ class ResumeProfileProcessor:
         candidate = value.strip().strip("/")
         if not candidate:
             return None
-        match = _GITHUB_USERNAME_RE.search(candidate)
+        match = _GITHUB_USERNAME_RE.fullmatch(candidate)
         if match:
             candidate = match.group(1)
         elif candidate.startswith("@"):
@@ -1590,6 +1601,26 @@ class ResumeProfileProcessor:
         if not re.fullmatch(r"[A-Za-z0-9-]{1,39}", candidate):
             return None
         return candidate
+
+    def _extract_resume_profile_fail_open(
+        self,
+        *,
+        resume_text: str,
+        extra_sources: dict[str, str] | None,
+        fallback_extracted: ResumeExtractedProfile | None,
+    ) -> ResumeExtractedProfile:
+        if not extra_sources:
+            return self.extractor.extract(resume_text, extra_sources=None)
+        try:
+            return self.extractor.extract(resume_text, extra_sources=extra_sources)
+        except Exception as exc:
+            logger.warning(
+                "Resume enrichment extract failed; falling back to last successful extraction: %s",
+                exc,
+            )
+            if fallback_extracted is not None:
+                return fallback_extracted
+            return self.extractor.extract(resume_text, extra_sources=None)
 
     def _coerce_profile_skill_result(
         self,
