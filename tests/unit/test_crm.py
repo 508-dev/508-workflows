@@ -1585,10 +1585,14 @@ class TestCRMCog:
         external_sources_field = next(
             field for field in embed.fields if field.name == "External Sources"
         )
-        assert "Used crm Personal Website" in external_sources_field.value
+        assert "Used Personal Website" in external_sources_field.value
         assert "https://portfolio.example.com" in external_sources_field.value
-        assert "Failed resume inference GitHub Profile" in external_sources_field.value
+        assert (
+            "Failed GitHub Profile from resume inference"
+            in external_sources_field.value
+        )
         assert "404 Client Error" in external_sources_field.value
+        assert "(None)" not in external_sources_field.value
 
     def test_resume_preview_embed_marks_confirmation_needed_sources(self, crm_cog):
         """Preview embeds should distinguish confirm-before-reparse website candidates."""
@@ -1614,7 +1618,8 @@ class TestCRMCog:
             field for field in embed.fields if field.name == "External Sources"
         )
         assert (
-            "Confirm resume inference Personal Website" in external_sources_field.value
+            "Confirm Personal Website from resume inference"
+            in external_sources_field.value
         )
         assert "Confirm to fetch and reparse" in external_sources_field.value
 

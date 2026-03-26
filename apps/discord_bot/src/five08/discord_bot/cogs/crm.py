@@ -3840,14 +3840,18 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 origin = str(item.get("origin", "external")).strip().replace("_", " ")
                 status = str(item.get("status", "")).strip().lower()
                 url = str(item.get("url", "")).strip()
-                detail = str(item.get("detail", "")).strip()
+                detail_raw = item.get("detail")
+                detail = str(detail_raw).strip() if isinstance(detail_raw, str) else ""
                 if status == "used":
-                    prefix = "Used"
+                    line = f"Used {label}"
                 elif status == "confirmation_needed":
-                    prefix = "Confirm"
+                    line = f"Confirm {label}"
+                    if origin:
+                        line += f" from {origin}"
                 else:
-                    prefix = "Failed"
-                line = f"{prefix} {origin} {label}"
+                    line = f"Failed {label}"
+                    if origin:
+                        line += f" from {origin}"
                 if url:
                     line += f": {url}"
                 if detail:
