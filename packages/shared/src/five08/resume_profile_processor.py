@@ -15,7 +15,7 @@ from html import unescape
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
-from curl_cffi import requests as curl_requests
+from curl_cffi import CurlOpt, requests as curl_requests
 from curl_cffi.requests import BrowserTypeLiteral, RequestsError
 from psycopg import connect
 
@@ -78,8 +78,14 @@ _HTML_BLOCK_CLOSE_RE = re.compile(
     r"(?i)</(p|div|section|article|main|li|ul|ol|h[1-6])>"
 )
 _HTML_TITLE_RE = re.compile(r"(?is)<title[^>]*>(.*?)</title>")
-_HTML_META_DESC_RE = re.compile(
-    r'(?is)<meta[^>]+(?:name|property)\s*=\s*["\'](?:description|og:description)["\'][^>]+content\s*=\s*["\'](.*?)["\']'
+_HTML_META_TAG_RE = re.compile(r"(?is)<meta\s+([^>]+)>")
+_HTML_META_DESC_ATTR_RE = re.compile(
+    r'(?:name|property)\s*=\s*["\'](?:description|og:description)["\']',
+    flags=re.IGNORECASE,
+)
+_HTML_META_CONTENT_ATTR_RE = re.compile(
+    r'content\s*=\s*["\']([^"\']*)["\']',
+    flags=re.IGNORECASE,
 )
 _GITHUB_USERNAME_RE = re.compile(
     r"(?:https?://)?(?:www\.)?github\.com/([A-Za-z0-9-]{1,39})",
@@ -107,6 +113,23 @@ def _normalize_allowed_resume_extensions(value: Any) -> set[str]:
         ext for ext in normalized if ext in set(SUPPORTED_RESUME_FILE_EXTENSIONS)
     }
     return supported or set(SUPPORTED_RESUME_FILE_EXTENSIONS)
+
+
+def _extract_meta_description(html: str) -> str | None:
+    for match in _HTML_META_TAG_RE.finditer(html):
+        attrs = match.group(1)
+        if not _HTML_META_DESC_ATTR_RE.search(attrs):
+            continue
+        content_match = _HTML_META_CONTENT_ATTR_RE.search(attrs)
+        if content_match:
+            return content_match.group(1)
+    return None
+
+
+def _format_curl_resolve_address(value: IPAddress) -> str:
+    if value.version == 6:
+        return f"[{value.compressed}]"
+    return value.compressed
 
 
 @dataclass(frozen=True)
@@ -1236,54 +1259,111 @@ class ResumeProfileProcessor:
         }
 
         for _ in range(PROFILE_SOURCE_MAX_REDIRECTS + 1):
-            validation_error = self._validate_public_profile_url(current_url)
-            if validation_error:
-                raise ValueError(validation_error)
+            resolution = self._resolve_public_profile_request_target(current_url)
+            if isinstance(resolution, str):
+                raise ValueError(resolution)
+            host, port, resolved_ips, host_is_ip_literal = resolution
 
             try:
-                with curl_requests.get(
-                    current_url,
-                    headers=headers,
-                    timeout=PROFILE_SOURCE_FETCH_TIMEOUT_SECONDS,
-                    allow_redirects=False,
-                    stream=True,
-                    impersonate=PROFILE_SOURCE_IMPERSONATE,
-                ) as response:
-                    if response.status_code in {301, 302, 303, 307, 308}:
-                        redirect_to = response.headers.get("Location")
-                        if not redirect_to:
-                            raise ValueError(
-                                "Profile URL redirect missing Location header"
-                            )
-                        current_url = urljoin(current_url, redirect_to)
-                        continue
-
-                    response.raise_for_status()
-                    content_type = str(response.headers.get("Content-Type", "")).lower()
-                    content_length = response.headers.get("Content-Length")
-                    if content_length:
-                        try:
-                            content_length_value = int(content_length)
-                        except (TypeError, ValueError):
-                            content_length_value = None
-                        if (
-                            content_length_value is not None
-                            and content_length_value > PROFILE_SOURCE_MAX_BYTES
-                        ):
-                            raise ValueError("Profile page exceeds size limit")
-
-                    payload = bytearray()
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if not chunk:
+                if host_is_ip_literal:
+                    with curl_requests.get(
+                        current_url,
+                        headers=headers,
+                        timeout=PROFILE_SOURCE_FETCH_TIMEOUT_SECONDS,
+                        allow_redirects=False,
+                        stream=True,
+                        impersonate=PROFILE_SOURCE_IMPERSONATE,
+                    ) as response:
+                        if response.status_code in {301, 302, 303, 307, 308}:
+                            redirect_to = response.headers.get("Location")
+                            if not redirect_to:
+                                raise ValueError(
+                                    "Profile URL redirect missing Location header"
+                                )
+                            current_url = urljoin(current_url, redirect_to)
                             continue
-                        payload.extend(chunk)
-                        if len(payload) > PROFILE_SOURCE_MAX_BYTES:
-                            raise ValueError("Profile page exceeds size limit")
 
-                    return self._extract_profile_source_text(
-                        body=bytes(payload),
-                        content_type=content_type,
+                        response.raise_for_status()
+                        content_type = str(
+                            response.headers.get("Content-Type", "")
+                        ).lower()
+                        content_length = response.headers.get("Content-Length")
+                        if content_length:
+                            try:
+                                content_length_value = int(content_length)
+                            except (TypeError, ValueError):
+                                content_length_value = None
+                            if (
+                                content_length_value is not None
+                                and content_length_value > PROFILE_SOURCE_MAX_BYTES
+                            ):
+                                raise ValueError("Profile page exceeds size limit")
+
+                        payload = bytearray()
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if not chunk:
+                                continue
+                            payload.extend(chunk)
+                            if len(payload) > PROFILE_SOURCE_MAX_BYTES:
+                                raise ValueError("Profile page exceeds size limit")
+
+                        return self._extract_profile_source_text(
+                            body=bytes(payload),
+                            content_type=content_type,
+                        )
+                else:
+                    resolve_entry = f"{host}:{port}:" + ",".join(
+                        _format_curl_resolve_address(ip) for ip in resolved_ips
                     )
+                    session: curl_requests.Session = curl_requests.Session(
+                        curl_options={CurlOpt.RESOLVE: [resolve_entry]}
+                    )
+                    with session:
+                        with session.get(
+                            current_url,
+                            headers=headers,
+                            timeout=PROFILE_SOURCE_FETCH_TIMEOUT_SECONDS,
+                            allow_redirects=False,
+                            stream=True,
+                            impersonate=PROFILE_SOURCE_IMPERSONATE,
+                        ) as response:
+                            if response.status_code in {301, 302, 303, 307, 308}:
+                                redirect_to = response.headers.get("Location")
+                                if not redirect_to:
+                                    raise ValueError(
+                                        "Profile URL redirect missing Location header"
+                                    )
+                                current_url = urljoin(current_url, redirect_to)
+                                continue
+
+                            response.raise_for_status()
+                            content_type = str(
+                                response.headers.get("Content-Type", "")
+                            ).lower()
+                            content_length = response.headers.get("Content-Length")
+                            if content_length:
+                                try:
+                                    content_length_value = int(content_length)
+                                except (TypeError, ValueError):
+                                    content_length_value = None
+                                if (
+                                    content_length_value is not None
+                                    and content_length_value > PROFILE_SOURCE_MAX_BYTES
+                                ):
+                                    raise ValueError("Profile page exceeds size limit")
+
+                            payload = bytearray()
+                            for chunk in response.iter_content(chunk_size=8192):
+                                if not chunk:
+                                    continue
+                                payload.extend(chunk)
+                                if len(payload) > PROFILE_SOURCE_MAX_BYTES:
+                                    raise ValueError("Profile page exceeds size limit")
+
+                            return self._extract_profile_source_text(
+                                body=bytes(payload),
+                                content_type=content_type,
+                            )
             except RequestsError as exc:
                 raise ValueError(f"Profile fetch failed: {exc}") from exc
 
@@ -1330,7 +1410,7 @@ class ResumeProfileProcessor:
         main_match = re.search(r"(?is)<main[^>]*>(.*?)</main>", value)
         html_value = main_match.group(1) if main_match else value
         title_match = _HTML_TITLE_RE.search(value)
-        meta_description_match = _HTML_META_DESC_RE.search(value)
+        meta_description = _extract_meta_description(value)
 
         normalized = _HTML_BLOCK_RE.sub(" ", html_value)
         normalized = _HTML_BREAK_RE.sub("\n", normalized)
@@ -1346,11 +1426,11 @@ class ResumeProfileProcessor:
             title = re.sub(r"\s+", " ", unescape(title_match.group(1))).strip()
             if title:
                 text_parts.append(f"Title: {title}")
-        if meta_description_match:
+        if meta_description:
             description = re.sub(
                 r"\s+",
                 " ",
-                unescape(meta_description_match.group(1)),
+                unescape(meta_description),
             ).strip()
             if description:
                 text_parts.append(f"Description: {description}")
@@ -1359,12 +1439,21 @@ class ResumeProfileProcessor:
         return "\n".join(text_parts).strip()
 
     def _validate_public_profile_url(self, candidate_url: str) -> str | None:
+        resolution = self._resolve_public_profile_request_target(candidate_url)
+        if isinstance(resolution, str):
+            return resolution
+        return None
+
+    def _resolve_public_profile_request_target(
+        self, candidate_url: str
+    ) -> tuple[str, int, list[IPAddress], bool] | str:
         try:
             parsed = urlsplit(candidate_url)
         except Exception:
             return "Profile URL is invalid"
 
-        if parsed.scheme.lower() not in {"http", "https"}:
+        scheme = parsed.scheme.lower()
+        if scheme not in {"http", "https"}:
             return "Profile URL must use http or https"
         if parsed.username or parsed.password:
             return "Profile URL must not include credentials"
@@ -1372,24 +1461,29 @@ class ResumeProfileProcessor:
         host = (parsed.hostname or "").strip().lower().rstrip(".")
         if not host:
             return "Profile URL must include a hostname"
-        if not self._hostname_resolves_publicly(host):
-            return "Profile URL host resolves to a non-public address"
-        return None
 
-    def _hostname_resolves_publicly(self, host: str) -> bool:
+        try:
+            port = parsed.port
+        except ValueError:
+            return "Profile URL port is invalid"
+        if port is None:
+            port = 443 if scheme == "https" else 80
+
         if host in {"localhost", "localhost.localdomain"}:
-            return False
+            return "Profile URL host resolves to a non-public address"
 
         ip_literal = self._parse_ip_literal(host)
         if ip_literal is not None:
-            return self._is_public_ip(ip_literal)
+            if not self._is_public_ip(ip_literal):
+                return "Profile URL host resolves to a non-public address"
+            return host, port, [ip_literal], True
 
         try:
-            addr_infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+            addr_infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
         except socket.gaierror:
-            return False
+            return "Profile URL host resolves to a non-public address"
         except Exception:
-            return False
+            return "Profile URL host resolves to a non-public address"
 
         resolved_ips: set[IPAddress] = set()
         for _, _, _, _, sockaddr in addr_infos:
@@ -1401,8 +1495,15 @@ class ResumeProfileProcessor:
             resolved_ips.add(parsed_ip)
 
         if not resolved_ips:
-            return False
-        return all(self._is_public_ip(parsed_ip) for parsed_ip in resolved_ips)
+            return "Profile URL host resolves to a non-public address"
+        if not all(self._is_public_ip(parsed_ip) for parsed_ip in resolved_ips):
+            return "Profile URL host resolves to a non-public address"
+
+        ordered_ips = sorted(
+            resolved_ips,
+            key=lambda parsed_ip: (parsed_ip.version != 4, parsed_ip.compressed),
+        )
+        return host, port, ordered_ips, False
 
     @staticmethod
     def _parse_ip_literal(value: str) -> IPAddress | None:

@@ -1690,18 +1690,29 @@ class ResumeConfirmInferredWebsitesButton(
             )
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
-        await view.crm_cog._run_resume_extract_and_preview(
+        link_member = view.link_member
+        if (
+            link_member is None
+            and interaction.guild is not None
+            and isinstance(view.link_discord, dict)
+        ):
+            user_id = str(view.link_discord.get("user_id", "")).strip()
+            if user_id.isdigit():
+                link_member = interaction.guild.get_member(int(user_id))
+        reparse_succeeded = await view.crm_cog._run_resume_extract_and_preview(
             interaction=interaction,
             contact_id=view.contact_id,
             contact_name=view.contact_name,
             attachment_id=view.attachment_id,
             filename=view.filename,
-            link_member=None,
-            action="crm.upload_resume",
+            link_member=link_member,
+            action=view.preview_action,
             status_message=("🔄 Re-running profile extraction with website content..."),
             confirmed_personal_websites=view.website_reparse_candidates,
             link_discord_payload=view.link_discord,
         )
+        if not reparse_succeeded:
+            return
         for item in view.children:
             if isinstance(item, discord.ui.Button):
                 item.disabled = True
@@ -1756,6 +1767,8 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         attachment_id: str = "",
         filename: str = "",
         link_discord: dict[str, str] | None = None,
+        link_member: discord.Member | None = None,
+        preview_action: str = "crm.upload_resume",
         parsed_seniority: str | None = None,
         existing_websites: list[str] | None = None,
         source_enrichments: list[dict[str, Any]] | None = None,
@@ -1772,6 +1785,8 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         self.filename = filename
         self.proposed_updates = proposed_updates
         self.link_discord = link_discord
+        self.link_member = link_member
+        self.preview_action = preview_action
         self.parsed_seniority = parsed_seniority
         self.existing_websites = existing_websites or []
         self.source_enrichments = source_enrichments or []
@@ -1784,13 +1799,12 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         self.discord_role_suggestions = list(
             dict.fromkeys(discord_role_suggestions or [])
         )
-        self.preview_message: discord.Message | None = None
+        self.preview_message: discord.Message | discord.WebhookMessage | None = None
         self.website_reparse_candidates: list[str] = []
         self.seniority_override: str | None = None
 
         self._refresh_website_reparse_candidates()
-        if proposed_updates.get("cWebsiteLink"):
-            self.add_item(ResumeEditWebsitesButton())
+        self.add_item(ResumeEditWebsitesButton())
         if proposed_updates.get("cSocialLinks"):
             self.add_item(ResumeEditSocialLinksButton())
         if proposed_updates.get("skills") or proposed_updates.get("cSkillAttrs"):
@@ -4008,7 +4022,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         status_message: str | None = None,
         confirmed_personal_websites: list[str] | None = None,
         link_discord_payload: dict[str, str] | None = None,
-    ) -> None:
+    ) -> bool:
         """Run extraction directly and show confirmation preview."""
         action_name = action
         status_text = (
@@ -4056,7 +4070,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 "⚠️ Resume uploaded, but extraction failed.",
                 ephemeral=True,
             )
-            return
+            return False
         if not isinstance(result, dict):
             self._audit_command(
                 interaction=interaction,
@@ -4074,7 +4088,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 "❌ Extraction result was empty or malformed.",
                 ephemeral=True,
             )
-            return
+            return False
 
         debug_file = self._build_resume_extract_debug_file(
             contact_id=contact_id,
@@ -4103,7 +4117,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 file=debug_file,
                 ephemeral=True,
             )
-            return
+            return False
 
         embed, proposed_updates = self._build_resume_preview_embed(
             contact_id=contact_id,
@@ -4219,7 +4233,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     file=debug_file,
                     ephemeral=True,
                 )
-                return
+                return True
 
             view = ResumeUpdateConfirmationView(
                 crm_cog=self,
@@ -4229,6 +4243,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 attachment_id=attachment_id,
                 filename=filename,
                 proposed_updates=proposed_updates,
+                link_discord=link_discord_payload,
+                link_member=link_member,
+                preview_action=action_name,
                 parsed_seniority=parsed_seniority,
                 existing_websites=existing_websites,
                 source_enrichments=source_enrichments,
@@ -4261,9 +4278,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 ephemeral=True,
                 wait=True,
             )
-            if isinstance(preview_message, discord.Message):
-                view.preview_message = preview_message
-            return
+            view.preview_message = preview_message
+            return True
 
         view = ResumeUpdateConfirmationView(
             crm_cog=self,
@@ -4274,6 +4290,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             filename=filename,
             proposed_updates=proposed_updates,
             link_discord=link_discord_payload,
+            link_member=link_member,
+            preview_action=action_name,
             parsed_seniority=parsed_seniority,
             existing_websites=existing_websites,
             source_enrichments=source_enrichments,
@@ -4306,8 +4324,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             ephemeral=True,
             wait=True,
         )
-        if isinstance(preview_message, discord.Message):
-            view.preview_message = preview_message
+        view.preview_message = preview_message
+        return True
 
     async def _download_and_send_resume(
         self, interaction: discord.Interaction, contact_name: str, resume_id: str

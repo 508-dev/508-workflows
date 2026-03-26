@@ -1,10 +1,13 @@
 """Unit tests for resume profile worker processor."""
 
+import ipaddress
 import json
 from datetime import datetime
 from types import SimpleNamespace
 
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock, patch
+
+from curl_cffi import CurlOpt
 
 from five08.clients.espo import EspoAPIError
 from five08.resume_profile_processor import ResumeProcessorConfig
@@ -465,6 +468,62 @@ def test_extract_profile_proposal_reruns_with_confirmed_personal_website() -> No
     assert [item.origin for item in result.source_enrichments] == [
         "resume_confirmation"
     ]
+
+
+def test_extract_text_from_html_reads_meta_description_regardless_of_order() -> None:
+    """Meta description extraction should not depend on HTML attribute order."""
+    processor = ResumeProfileProcessor()
+
+    rendered = processor._extract_text_from_html(
+        """
+        <html>
+          <head>
+            <title>Portfolio</title>
+            <meta content="Builder of useful things" name="description">
+          </head>
+          <body><main>Body copy</main></body>
+        </html>
+        """
+    )
+
+    assert "Title: Portfolio" in rendered
+    assert "Description: Builder of useful things" in rendered
+    assert "Body copy" in rendered
+
+
+def test_fetch_external_profile_source_text_pins_resolved_public_ips() -> None:
+    """External website fetches should connect only to the validated public IPs."""
+    processor = ResumeProfileProcessor()
+    resolved_ip = ipaddress.ip_address("93.184.216.34")
+    response = MagicMock()
+    response.__enter__.return_value = response
+    response.status_code = 200
+    response.headers = {"Content-Type": "text/plain"}
+    response.iter_content.return_value = [b"Profile body"]
+    response.raise_for_status = Mock()
+    session = MagicMock()
+    session.__enter__.return_value = session
+    session.get.return_value = response
+
+    with (
+        patch.object(
+            processor,
+            "_resolve_public_profile_request_target",
+            return_value=("example.com", 443, [resolved_ip], False),
+        ),
+        patch(
+            "five08.resume_profile_processor.curl_requests.Session",
+            return_value=session,
+        ) as session_cls,
+    ):
+        text = processor._fetch_external_profile_source_text("https://example.com")
+
+    assert text == "Profile body"
+    session_cls.assert_called_once()
+    assert session_cls.call_args.kwargs["curl_options"] == {
+        CurlOpt.RESOLVE: ["example.com:443:93.184.216.34"]
+    }
+    session.get.assert_called_once()
 
 
 def test_extract_profile_proposal_deduplicates_existing_and_extracted_websites_by_scheme() -> (

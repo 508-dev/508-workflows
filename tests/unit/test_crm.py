@@ -532,10 +532,10 @@ class TestCRMCog:
         )
 
     @pytest.mark.asyncio
-    async def test_resume_update_view_no_websites_button_without_websites(
+    async def test_resume_update_view_adds_websites_button_without_websites(
         self, crm_cog
     ):
-        """Edit Websites button should not appear when cWebsiteLink is absent."""
+        """Edit Websites button should still appear so users can add websites."""
         view = ResumeUpdateConfirmationView(
             crm_cog=crm_cog,
             requester_id=123,
@@ -544,7 +544,7 @@ class TestCRMCog:
             proposed_updates={},
         )
 
-        assert not any(
+        assert any(
             isinstance(child, ResumeEditWebsitesButton) for child in view.children
         )
 
@@ -6029,7 +6029,7 @@ class TestCRMCog:
     @pytest.mark.asyncio
     async def test_confirm_inferred_websites_button_reruns_preview(self, crm_cog):
         """Confirming inferred websites should rerun extraction with those URLs."""
-        crm_cog._run_resume_extract_and_preview = AsyncMock()
+        crm_cog._run_resume_extract_and_preview = AsyncMock(return_value=True)
 
         confirm_interaction = AsyncMock()
         confirm_interaction.user = Mock()
@@ -6038,7 +6038,12 @@ class TestCRMCog:
         confirm_interaction.response.defer = AsyncMock()
         confirm_interaction.followup = AsyncMock()
         confirm_interaction.followup.send = AsyncMock()
-        confirm_interaction.message = None
+        confirm_interaction.message = AsyncMock()
+        confirm_interaction.message.edit = AsyncMock()
+
+        linked_member = Mock()
+        linked_member.id = 202
+        linked_member.roles = []
 
         view = ResumeUpdateConfirmationView(
             crm_cog=crm_cog,
@@ -6049,6 +6054,8 @@ class TestCRMCog:
             filename="candidate.pdf",
             proposed_updates={},
             link_discord={"user_id": "101", "username": "Operator#0001"},
+            link_member=linked_member,
+            preview_action="crm.reprocess_resume",
             source_enrichments=[
                 {
                     "label": "Personal Website",
@@ -6072,6 +6079,8 @@ class TestCRMCog:
         assert kwargs["confirmed_personal_websites"] == [
             "https://portfolio.example.com"
         ]
+        assert kwargs["action"] == "crm.reprocess_resume"
+        assert kwargs["link_member"] is linked_member
         assert kwargs["link_discord_payload"] == {
             "user_id": "101",
             "username": "Operator#0001",
@@ -6080,6 +6089,58 @@ class TestCRMCog:
             kwargs["status_message"]
             == "🔄 Re-running profile extraction with website content..."
         )
+        confirm_interaction.message.edit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_confirm_inferred_websites_button_keeps_view_on_reparse_failure(
+        self, crm_cog
+    ):
+        """Failed website reparses should leave the current confirmation view usable."""
+        crm_cog._run_resume_extract_and_preview = AsyncMock(return_value=False)
+
+        confirm_interaction = AsyncMock()
+        confirm_interaction.user = Mock()
+        confirm_interaction.user.id = 101
+        confirm_interaction.response = AsyncMock()
+        confirm_interaction.response.defer = AsyncMock()
+        confirm_interaction.followup = AsyncMock()
+        confirm_interaction.followup.send = AsyncMock()
+        confirm_interaction.message = AsyncMock()
+        confirm_interaction.message.edit = AsyncMock()
+
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=101,
+            contact_id="contact123",
+            contact_name="Candidate User",
+            attachment_id="resume123",
+            filename="candidate.pdf",
+            proposed_updates={},
+            source_enrichments=[
+                {
+                    "label": "Personal Website",
+                    "origin": "resume_inference",
+                    "status": "confirmation_needed",
+                    "url": "https://portfolio.example.com",
+                }
+            ],
+        )
+        confirm_button = next(
+            child
+            for child in view.children
+            if isinstance(child, discord.ui.Button)
+            and child.label == "Reparse With Websites"
+        )
+
+        await confirm_button.callback(confirm_interaction)
+
+        crm_cog._run_resume_extract_and_preview.assert_awaited_once()
+        assert all(
+            not child.disabled
+            for child in view.children
+            if isinstance(child, discord.ui.Button)
+        )
+        confirm_interaction.message.edit.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_run_resume_extract_and_preview_calls_direct_extract_for_reprocess(
