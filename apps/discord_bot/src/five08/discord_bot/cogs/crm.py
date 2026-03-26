@@ -912,8 +912,10 @@ class ResumeEditWebsitesModal(discord.ui.Modal, title="Edit Websites"):
         self.confirmation_view._refresh_website_reparse_candidates()
         await self.confirmation_view._sync_message_view()
         count = len(links)
-        if self.confirmation_view.website_reparse_candidates:
-            action_hint = " Click **Reparse With Websites** to refresh the extraction."
+        if self.confirmation_view.has_reparse_candidates:
+            action_hint = (
+                " Click **Reparse With New Sources** to refresh the extraction."
+            )
         else:
             action_hint = " Click **Confirm Updates** to apply."
         await interaction.followup.send(
@@ -1695,11 +1697,11 @@ class ResumeEditLocationButton(discord.ui.Button["ResumeUpdateConfirmationView"]
 class ResumeConfirmInferredWebsitesButton(
     discord.ui.Button["ResumeUpdateConfirmationView"]
 ):
-    """Button that re-runs extraction using newly added website URLs."""
+    """Button that re-runs extraction using newly confirmed external sources."""
 
     def __init__(self) -> None:
         super().__init__(
-            label="Reparse With Websites",
+            label="Reparse With New Sources",
             style=discord.ButtonStyle.primary,
             custom_id="resume_reparse_with_websites",
         )
@@ -1729,8 +1731,11 @@ class ResumeConfirmInferredWebsitesButton(
             filename=view.filename,
             link_member=link_member,
             action=view.preview_action,
-            status_message=("🔄 Re-running profile extraction with website content..."),
+            status_message=(
+                "🔄 Re-running profile extraction with confirmed website and GitHub content..."
+            ),
             confirmed_personal_websites=view.website_reparse_candidates,
+            confirmed_github_usernames=view.github_reparse_candidates,
             link_discord_payload=view.link_discord,
         )
         if not reparse_succeeded:
@@ -1826,6 +1831,7 @@ class ResumeUpdateConfirmationView(discord.ui.View):
         self.preview_message: discord.Message | discord.WebhookMessage | None = None
         self.preview_embeds: list[discord.Embed] = []
         self.website_reparse_candidates: list[str] = []
+        self.github_reparse_candidates: list[str] = []
         self.website_edits_override_inferred_candidates = False
         self.seniority_override: str | None = None
         self.current_field_values = self._extract_current_field_values()
@@ -1884,6 +1890,41 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             and str(item.get("url", "")).strip()
         ]
 
+    @staticmethod
+    def _normalize_github_usernames_for_reparse(value: Any) -> list[str]:
+        if isinstance(value, str):
+            raw_values = [item.strip() for item in value.split(",") if item.strip()]
+        elif isinstance(value, (list, tuple, set)):
+            raw_values = [str(item).strip() for item in value if str(item).strip()]
+        else:
+            raw_values = []
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw_value in raw_values:
+            normalized_username = ResumeProfileProcessor._normalize_github_username(
+                raw_value
+            )
+            if not normalized_username:
+                continue
+            normalized_key = normalized_username.casefold()
+            if normalized_key in seen:
+                continue
+            seen.add(normalized_key)
+            normalized.append(normalized_username)
+        return normalized
+
+    def _current_inferred_reparse_github_usernames(self) -> list[str]:
+        github_urls = [
+            str(item.get("url", "")).strip()
+            for item in self.source_enrichments
+            if isinstance(item, dict)
+            and str(item.get("label", "")).strip().casefold() == "github profile"
+            and str(item.get("status", "")).strip().casefold() == "confirmation_needed"
+            and str(item.get("url", "")).strip()
+        ]
+        return self._normalize_github_usernames_for_reparse(github_urls)
+
     def _refresh_website_reparse_candidates(self) -> None:
         existing_by_key = {
             normalized_website_identity_key(url): url
@@ -1915,7 +1956,14 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             [*proposed_additions, *inferred_candidates]
         )
         self.website_reparse_candidates = combined
+        self.github_reparse_candidates = (
+            self._current_inferred_reparse_github_usernames()
+        )
         self._ensure_website_reparse_button()
+
+    @property
+    def has_reparse_candidates(self) -> bool:
+        return bool(self.website_reparse_candidates or self.github_reparse_candidates)
 
     def _ensure_website_reparse_button(self) -> None:
         existing_button = next(
@@ -1926,7 +1974,7 @@ class ResumeUpdateConfirmationView(discord.ui.View):
             ),
             None,
         )
-        if self.website_reparse_candidates:
+        if self.has_reparse_candidates:
             if existing_button is None:
                 self.add_item(ResumeConfirmInferredWebsitesButton())
             return
@@ -3317,6 +3365,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         attachment_id: str,
         filename: str,
         confirmed_personal_websites: list[str] | None = None,
+        confirmed_github_usernames: list[str] | None = None,
     ) -> dict[str, Any]:
         processor = self._create_resume_profile_processor()
         result = await asyncio.to_thread(
@@ -3325,6 +3374,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             attachment_id=attachment_id,
             filename=filename,
             confirmed_personal_websites=confirmed_personal_websites,
+            confirmed_github_usernames=confirmed_github_usernames,
         )
         return result.model_dump()
 
@@ -3706,7 +3756,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         changes = result.get("proposed_changes")
         new_skills = result.get("new_skills")
         skipped = result.get("skipped")
-        source_enrichments = result.get("source_enrichments")
+        source_enrichments = result.get("source_enrichments") or []
         existing_websites = result.get("existing_websites")
         extracted_profile = result.get("extracted_profile")
 
@@ -3874,12 +3924,18 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             for url in proposed_websites
             if normalized_website_identity_key(url) not in baseline_website_keys
         ]
-        if added_websites:
+        confirmable_source_labels = {
+            str(item.get("label", "")).strip().casefold()
+            for item in source_enrichments
+            if isinstance(item, dict)
+            and str(item.get("status", "")).strip().casefold() == "confirmation_needed"
+        }
+        if added_websites or confirmable_source_labels:
             embed.add_field(
-                name="Website Reparse",
+                name="Source Reparse",
                 value=truncate_field_value(
-                    "New website links were added. Use **Reparse With Websites** "
-                    "before confirming if you want website content included."
+                    "New external sources were found. Use **Reparse With New Sources** "
+                    "before confirming if you want website or GitHub content included."
                 ),
                 inline=False,
             )
@@ -4146,6 +4202,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         action: str = "crm.upload_resume",
         status_message: str | None = None,
         confirmed_personal_websites: list[str] | None = None,
+        confirmed_github_usernames: list[str] | None = None,
         link_discord_payload: dict[str, str] | None = None,
     ) -> bool:
         """Run extraction directly and show confirmation preview."""
@@ -4170,6 +4227,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 attachment_id=attachment_id,
                 filename=filename,
                 confirmed_personal_websites=confirmed_personal_websites,
+                confirmed_github_usernames=confirmed_github_usernames,
             )
         except Exception as exc:
             logger.error(
@@ -4269,9 +4327,10 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             normalized_website_identity_key(url) not in existing_website_keys
             for url in proposed_websites
         )
-        has_confirmable_website_sources = any(
+        has_confirmable_external_sources = any(
             isinstance(item, dict)
-            and str(item.get("label", "")).strip().casefold() == "personal website"
+            and str(item.get("label", "")).strip().casefold()
+            in {"personal website", "github profile"}
             and str(item.get("status", "")).strip().casefold() == "confirmation_needed"
             for item in source_enrichments
         )
@@ -4337,7 +4396,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             and not link_discord_payload
             and not parsed_seniority
             and not has_added_websites
-            and not has_confirmable_website_sources
+            and not has_confirmable_external_sources
         ):
             if role_suggestions_embed is None:
                 if action_name != "crm.reprocess_resume":

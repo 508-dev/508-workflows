@@ -324,7 +324,7 @@ def test_extract_profile_proposal_fetches_crm_website_and_github_sources() -> No
 
 
 def test_extract_profile_proposal_reruns_with_inferred_github_only() -> None:
-    """Inferred GitHub should rerun automatically while websites wait for confirmation."""
+    """Inferred websites and GitHub should wait for confirmation in one set."""
     processor = ResumeProfileProcessor()
     processor.crm = Mock()
     processor.extractor = Mock()
@@ -347,27 +347,15 @@ def test_extract_profile_proposal_reruns_with_inferred_github_only() -> None:
     processor.crm.download_attachment.return_value = b"resume-bytes"
     processor.document_processor.extract_text.return_value = "resume text"
     processor.document_processor.get_content_hash.return_value = "hash-external-rerun"
-    processor.extractor.extract.side_effect = [
-        ResumeExtractedProfile(
-            email=None,
-            github_username="octocat",
-            linkedin_url=None,
-            phone=None,
-            website_links=["https://blog.example.com"],
-            confidence=0.7,
-            source="gpt-4o-mini",
-        ),
-        ResumeExtractedProfile(
-            email=None,
-            github_username="octocat",
-            linkedin_url=None,
-            phone=None,
-            website_links=[],
-            description="Enriched profile",
-            confidence=0.9,
-            source="gpt-4o-mini",
-        ),
-    ]
+    processor.extractor.extract.return_value = ResumeExtractedProfile(
+        email=None,
+        github_username="octocat",
+        linkedin_url=None,
+        phone=None,
+        website_links=["https://blog.example.com"],
+        confidence=0.7,
+        source="gpt-4o-mini",
+    )
     processor.skills_extractor.extract_skills.return_value = ExtractedSkills(
         skills=[],
         skill_attrs={},
@@ -382,23 +370,22 @@ def test_extract_profile_proposal_reruns_with_inferred_github_only() -> None:
     )
 
     assert result.success is True
-    assert processor.extractor.extract.call_count == 2
-    first_call = processor.extractor.extract.call_args_list[0]
-    second_call = processor.extractor.extract.call_args_list[1]
-    assert first_call.args == ("resume text",)
-    assert first_call.kwargs["extra_sources"] is None
-    assert second_call.args == ("resume text",)
-    assert second_call.kwargs["extra_sources"] == {
-        "github_profile": (
-            "Source: GitHub Profile\n"
-            "URL: https://github.com/octocat\n"
-            "Content:\n"
-            "GitHub profile content"
-        ),
-    }
-    assert result.extracted_profile.description == "Enriched profile"
-    assert [item.status for item in result.source_enrichments] == ["used"]
-    assert [item.origin for item in result.source_enrichments] == ["resume_inference"]
+    assert processor.extractor.extract.call_count == 1
+    extract_call = processor.extractor.extract.call_args
+    assert extract_call.args == ("resume text",)
+    assert extract_call.kwargs["extra_sources"] is None
+    assert [item.status for item in result.source_enrichments] == [
+        "confirmation_needed",
+        "confirmation_needed",
+    ]
+    assert [item.label for item in result.source_enrichments] == [
+        "Personal Website",
+        "GitHub Profile",
+    ]
+    assert [item.origin for item in result.source_enrichments] == [
+        "resume_inference",
+        "resume_inference",
+    ]
 
 
 def test_extract_profile_proposal_fails_open_when_initial_enrichment_extract_errors() -> (
@@ -463,10 +450,10 @@ def test_extract_profile_proposal_fails_open_when_initial_enrichment_extract_err
     assert processor.extractor.extract.call_args_list[1].kwargs["extra_sources"] is None
 
 
-def test_extract_profile_proposal_fails_open_when_second_enrichment_extract_errors() -> (
+def test_extract_profile_proposal_fetches_confirmed_website_and_github_together() -> (
     None
 ):
-    """Second-pass enrichment extraction should keep the last successful result."""
+    """Confirmed website and GitHub sources should be fetched in one pass."""
     processor = ResumeProfileProcessor()
     processor.crm = Mock()
     processor.extractor = Mock()
@@ -474,7 +461,10 @@ def test_extract_profile_proposal_fails_open_when_second_enrichment_extract_erro
     processor.document_processor = Mock()
     processor._record_processing_run = Mock()
     processor._fetch_external_profile_source_text = Mock(
-        return_value="GitHub profile content"
+        side_effect=lambda url: {
+            "https://blog.example.com": "Blog content",
+            "https://github.com/octocat": "GitHub profile content",
+        }[url]
     )
     processor.skills_extractor.canonicalize_skill.side_effect = lambda v: (
         str(v).strip().lower()
@@ -485,20 +475,17 @@ def test_extract_profile_proposal_fails_open_when_second_enrichment_extract_erro
     }
     processor.crm.download_attachment.return_value = b"resume-bytes"
     processor.document_processor.extract_text.return_value = "resume text"
-    processor.document_processor.get_content_hash.return_value = "hash-fail-open-2"
-    processor.extractor.extract.side_effect = [
-        ResumeExtractedProfile(
-            email=None,
-            github_username="octocat",
-            linkedin_url=None,
-            phone=None,
-            website_links=["https://blog.example.com"],
-            description="First extraction",
-            confidence=0.7,
-            source="gpt-4o-mini",
-        ),
-        RuntimeError("llm second-pass explode"),
-    ]
+    processor.document_processor.get_content_hash.return_value = "hash-confirmed-both"
+    processor.extractor.extract.return_value = ResumeExtractedProfile(
+        email=None,
+        github_username="octocat",
+        linkedin_url=None,
+        phone=None,
+        website_links=["https://blog.example.com"],
+        description="Confirmed source enrichment",
+        confidence=0.7,
+        source="gpt-4o-mini",
+    )
     processor.skills_extractor.extract_skills.return_value = ExtractedSkills(
         skills=[],
         skill_attrs={},
@@ -507,16 +494,35 @@ def test_extract_profile_proposal_fails_open_when_second_enrichment_extract_erro
     )
 
     result = processor.extract_profile_proposal(
-        contact_id="contact-fail-open-2",
-        attachment_id="att-fail-open-2",
+        contact_id="contact-confirmed-both",
+        attachment_id="att-confirmed-both",
         filename="resume.pdf",
+        confirmed_personal_websites=["https://blog.example.com"],
+        confirmed_github_usernames=["octocat"],
     )
 
     assert result.success is True
-    assert result.extracted_profile.description == "First extraction"
-    assert [item.status for item in result.source_enrichments] == [
-        "used",
-        "confirmation_needed",
+    assert processor.extractor.extract.call_count == 1
+    extract_call = processor.extractor.extract.call_args
+    assert extract_call.kwargs["extra_sources"] == {
+        "personal_website": (
+            "Source: Personal Website\n"
+            "URL: https://blog.example.com\n"
+            "Content:\n"
+            "Blog content"
+        ),
+        "github_profile": (
+            "Source: GitHub Profile\n"
+            "URL: https://github.com/octocat\n"
+            "Content:\n"
+            "GitHub profile content"
+        ),
+    }
+    assert result.extracted_profile.description == "Confirmed source enrichment"
+    assert [item.status for item in result.source_enrichments] == ["used", "used"]
+    assert [item.origin for item in result.source_enrichments] == [
+        "resume_confirmation",
+        "resume_confirmation",
     ]
 
 

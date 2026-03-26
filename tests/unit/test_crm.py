@@ -597,6 +597,36 @@ class TestCRMCog:
             isinstance(child, ResumeConfirmInferredWebsitesButton)
             for child in view.children
         )
+        assert view.has_reparse_candidates is True
+
+    @pytest.mark.asyncio
+    async def test_resume_update_view_adds_reparse_button_for_inferred_github(
+        self, crm_cog
+    ):
+        """GitHub-only confirmation candidates should still offer a reparse."""
+        view = ResumeUpdateConfirmationView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            contact_id="contact-1",
+            contact_name="Test User",
+            proposed_updates={},
+            source_enrichments=[
+                {
+                    "label": "GitHub Profile",
+                    "status": "confirmation_needed",
+                    "origin": "resume_inference",
+                    "url": "https://github.com/octocat",
+                }
+            ],
+        )
+
+        assert view.website_reparse_candidates == []
+        assert view.github_reparse_candidates == ["octocat"]
+        assert view.has_reparse_candidates is True
+        assert any(
+            isinstance(child, ResumeConfirmInferredWebsitesButton)
+            for child in view.children
+        )
 
     @pytest.mark.asyncio
     async def test_resume_update_view_website_edits_override_inferred_candidates(
@@ -1639,9 +1669,9 @@ class TestCRMCog:
         )
 
         reparse_field = next(
-            field for field in embed.fields if field.name == "Website Reparse"
+            field for field in embed.fields if field.name == "Source Reparse"
         )
-        assert "Reparse With Websites" in reparse_field.value
+        assert "Reparse With New Sources" in reparse_field.value
 
     def test_build_resume_extract_debug_file_serializes_raw_payload(self, crm_cog):
         """The debug attachment should include raw and normalized extraction payloads."""
@@ -6150,14 +6180,20 @@ class TestCRMCog:
                     "origin": "resume_inference",
                     "status": "confirmation_needed",
                     "url": "https://portfolio.example.com",
-                }
+                },
+                {
+                    "label": "GitHub Profile",
+                    "origin": "resume_inference",
+                    "status": "confirmation_needed",
+                    "url": "https://github.com/octocat",
+                },
             ],
         )
         confirm_button = next(
             child
             for child in view.children
             if isinstance(child, discord.ui.Button)
-            and child.label == "Reparse With Websites"
+            and child.label == "Reparse With New Sources"
         )
 
         await confirm_button.callback(confirm_interaction)
@@ -6167,6 +6203,7 @@ class TestCRMCog:
         assert kwargs["confirmed_personal_websites"] == [
             "https://portfolio.example.com"
         ]
+        assert kwargs["confirmed_github_usernames"] == ["octocat"]
         assert kwargs["action"] == "crm.reprocess_resume"
         assert kwargs["link_member"] is linked_member
         assert kwargs["link_discord_payload"] == {
@@ -6175,7 +6212,7 @@ class TestCRMCog:
         }
         assert (
             kwargs["status_message"]
-            == "🔄 Re-running profile extraction with website content..."
+            == "🔄 Re-running profile extraction with confirmed website and GitHub content..."
         )
         assert all(
             child.disabled
@@ -6222,7 +6259,7 @@ class TestCRMCog:
             child
             for child in view.children
             if isinstance(child, discord.ui.Button)
-            and child.label == "Reparse With Websites"
+            and child.label == "Reparse With New Sources"
         )
 
         await confirm_button.callback(confirm_interaction)
@@ -6291,9 +6328,9 @@ class TestCRMCog:
         embeds = edit_kwargs["embeds"]
         assert embeds[1] is role_embed
         reparse_field = next(
-            field for field in embeds[0].fields if field.name == "Website Reparse"
+            field for field in embeds[0].fields if field.name == "Source Reparse"
         )
-        assert "Reparse With Websites" in reparse_field.value
+        assert "Reparse With New Sources" in reparse_field.value
         assert all(field.name != "External Sources" for field in embeds[0].fields)
 
     @pytest.mark.asyncio
@@ -6323,6 +6360,7 @@ class TestCRMCog:
             attachment_id="resume123",
             filename="candidate.pdf",
             confirmed_personal_websites=None,
+            confirmed_github_usernames=None,
         )
 
     @pytest.mark.asyncio

@@ -251,6 +251,7 @@ class ResumeProfileProcessor:
         attachment_id: str,
         filename: str,
         confirmed_personal_websites: list[str] | None = None,
+        confirmed_github_usernames: list[str] | None = None,
     ) -> ResumeExtractionResult:
         """Build preview proposal from an uploaded resume attachment."""
         content_hash: str | None = None
@@ -264,6 +265,7 @@ class ResumeProfileProcessor:
                 resume_text=text,
                 contact=contact,
                 confirmed_personal_websites=confirmed_personal_websites,
+                confirmed_github_usernames=confirmed_github_usernames,
             )
             model_name = extracted.source
             extracted_skills_result = self._coerce_profile_skill_result(extracted, text)
@@ -1034,20 +1036,27 @@ class ResumeProfileProcessor:
         resume_text: str,
         contact: dict[str, Any],
         confirmed_personal_websites: list[str] | None = None,
+        confirmed_github_usernames: list[str] | None = None,
     ) -> tuple[ResumeExtractedProfile, list[ResumeSourceEnrichment]]:
         extra_sources: dict[str, str] = {}
         enrichments: list[ResumeSourceEnrichment] = []
         seen_source_keys: set[str] = set()
         source_label_counts: dict[str, int] = {}
         confirmed_personal_website_keys: set[str] = set()
+        confirmed_github_keys: set[str] = set()
         for url in confirmed_personal_websites or []:
             identity_key = normalized_website_identity_key(url)
             if identity_key:
                 confirmed_personal_website_keys.add(identity_key)
+        for username in confirmed_github_usernames or []:
+            normalized_username = self._normalize_github_username(username)
+            if normalized_username:
+                confirmed_github_keys.add(normalized_username.casefold())
 
         initial_candidates = self._build_initial_external_source_candidates(
             contact=contact,
             explicit_personal_websites=confirmed_personal_websites,
+            explicit_github_usernames=confirmed_github_usernames,
         )
         if initial_candidates:
             initial_sources, initial_enrichments = self._fetch_external_profile_sources(
@@ -1063,66 +1072,47 @@ class ResumeProfileProcessor:
             extra_sources=extra_sources or None,
             fallback_extracted=None,
         )
-
-        inferred_candidates = self._build_inferred_external_source_candidates(
+        self._refresh_inferred_confirmation_enrichments(
             contact=contact,
             extracted=extracted,
             confirmed_personal_website_keys=confirmed_personal_website_keys,
-            enrichments=enrichments,
-            seen_source_keys=seen_source_keys,
-        )
-        if not inferred_candidates:
-            return extracted, enrichments
-
-        inferred_sources, inferred_enrichments = self._fetch_external_profile_sources(
-            inferred_candidates,
-            seen_source_keys=seen_source_keys,
-            source_label_counts=source_label_counts,
-        )
-        enrichments.extend(inferred_enrichments)
-        if not inferred_sources:
-            return extracted, enrichments
-
-        extra_sources.update(inferred_sources)
-        extracted = self._extract_resume_profile_fail_open(
-            resume_text=resume_text,
-            extra_sources=extra_sources,
-            fallback_extracted=extracted,
-        )
-        self._refresh_inferred_website_confirmation_enrichments(
-            contact=contact,
-            extracted=extracted,
-            confirmed_personal_website_keys=confirmed_personal_website_keys,
+            confirmed_github_keys=confirmed_github_keys,
             enrichments=enrichments,
             seen_source_keys=seen_source_keys,
         )
         return extracted, enrichments
 
-    def _refresh_inferred_website_confirmation_enrichments(
+    def _refresh_inferred_confirmation_enrichments(
         self,
         *,
         contact: dict[str, Any],
         extracted: ResumeExtractedProfile,
         confirmed_personal_website_keys: set[str],
+        confirmed_github_keys: set[str],
         enrichments: list[ResumeSourceEnrichment],
         seen_source_keys: set[str],
     ) -> None:
-        stale_website_keys: set[str] = set()
+        stale_confirmation_keys: set[str] = set()
         retained_enrichments: list[ResumeSourceEnrichment] = []
         for enrichment in enrichments:
-            is_inferred_website_confirmation = (
-                enrichment.label == "Personal Website"
+            is_inferred_confirmation = (
+                enrichment.label in {"Personal Website", "GitHub Profile"}
                 and enrichment.origin == "resume_inference"
                 and enrichment.status == "confirmation_needed"
             )
-            if not is_inferred_website_confirmation:
+            if not is_inferred_confirmation:
                 retained_enrichments.append(enrichment)
                 continue
-            source_key = normalized_website_identity_key(enrichment.url)
-            if source_key:
-                stale_website_keys.add(f"website:{source_key}")
-        if stale_website_keys:
-            seen_source_keys.difference_update(stale_website_keys)
+            if enrichment.label == "Personal Website":
+                source_key = normalized_website_identity_key(enrichment.url)
+                if source_key:
+                    stale_confirmation_keys.add(f"website:{source_key}")
+            else:
+                github_username = self._normalize_github_username(enrichment.url)
+                if github_username:
+                    stale_confirmation_keys.add(f"github:{github_username.casefold()}")
+        if stale_confirmation_keys:
+            seen_source_keys.difference_update(stale_confirmation_keys)
             enrichments[:] = retained_enrichments
 
         existing_website_links = self._coerce_website_links(contact.get("cWebsiteLink"))
@@ -1158,11 +1148,45 @@ class ResumeProfileProcessor:
             if added_count >= PROFILE_SOURCE_MAX_WEBSITES:
                 break
 
+        existing_github_username = self._normalize_github_username(
+            contact.get("cGitHubUsername")
+        )
+        existing_github_key = (
+            existing_github_username.casefold() if existing_github_username else None
+        )
+        inferred_github_username = self._normalize_github_username(
+            extracted.github_username
+        )
+        if not inferred_github_username:
+            return
+
+        inferred_github_key = inferred_github_username.casefold()
+        if inferred_github_key == existing_github_key:
+            return
+
+        dedupe_source_key = f"github:{inferred_github_key}"
+        if dedupe_source_key in seen_source_keys:
+            return
+        if inferred_github_key in confirmed_github_keys:
+            return
+
+        enrichments.append(
+            ResumeSourceEnrichment(
+                label="GitHub Profile",
+                url=f"https://github.com/{inferred_github_username}",
+                origin="resume_inference",
+                status="confirmation_needed",
+                detail="Inferred from the resume. Confirm to fetch and reparse.",
+            )
+        )
+        seen_source_keys.add(dedupe_source_key)
+
     def _build_initial_external_source_candidates(
         self,
         *,
         contact: dict[str, Any],
         explicit_personal_websites: list[str] | None = None,
+        explicit_github_usernames: list[str] | None = None,
     ) -> list[_ExternalProfileSourceCandidate]:
         candidates: list[_ExternalProfileSourceCandidate] = []
         explicit_website_links = self._coerce_website_links(explicit_personal_websites)
@@ -1195,6 +1219,24 @@ class ResumeProfileProcessor:
                 )
             )
 
+        explicit_github_keys: set[str] = set()
+        for username in explicit_github_usernames or []:
+            normalized_username = self._normalize_github_username(username)
+            if not normalized_username:
+                continue
+            github_key = normalized_username.casefold()
+            if github_key in explicit_github_keys:
+                continue
+            explicit_github_keys.add(github_key)
+            candidates.append(
+                _ExternalProfileSourceCandidate(
+                    label="GitHub Profile",
+                    url=f"https://github.com/{normalized_username}",
+                    origin="resume_confirmation",
+                    source_key=f"github:{github_key}",
+                )
+            )
+
         github_username = self._normalize_github_username(
             contact.get("cGitHubUsername")
         )
@@ -1205,71 +1247,6 @@ class ResumeProfileProcessor:
                     url=f"https://github.com/{github_username}",
                     origin="crm",
                     source_key=f"github:{github_username.casefold()}",
-                )
-            )
-        return candidates
-
-    def _build_inferred_external_source_candidates(
-        self,
-        *,
-        contact: dict[str, Any],
-        extracted: ResumeExtractedProfile,
-        confirmed_personal_website_keys: set[str],
-        enrichments: list[ResumeSourceEnrichment],
-        seen_source_keys: set[str],
-    ) -> list[_ExternalProfileSourceCandidate]:
-        candidates: list[_ExternalProfileSourceCandidate] = []
-        existing_website_links = self._coerce_website_links(contact.get("cWebsiteLink"))
-        existing_website_keys = {
-            normalized_website_identity_key(url)
-            for url in existing_website_links
-            if normalized_website_identity_key(url)
-        }
-        added_count = 0
-        for website_url in extracted.website_links:
-            source_key = normalized_website_identity_key(website_url)
-            if not source_key or source_key in existing_website_keys:
-                continue
-            dedupe_source_key = f"website:{source_key}"
-            if dedupe_source_key in seen_source_keys:
-                continue
-            if source_key in confirmed_personal_website_keys:
-                candidates.append(
-                    _ExternalProfileSourceCandidate(
-                        label="Personal Website",
-                        url=website_url,
-                        origin="resume_confirmation",
-                        source_key=dedupe_source_key,
-                    )
-                )
-                continue
-            enrichments.append(
-                ResumeSourceEnrichment(
-                    label="Personal Website",
-                    url=website_url,
-                    origin="resume_inference",
-                    status="confirmation_needed",
-                    detail="Inferred from the resume. Confirm to fetch and reparse.",
-                )
-            )
-            seen_source_keys.add(dedupe_source_key)
-            added_count += 1
-            if added_count >= PROFILE_SOURCE_MAX_WEBSITES:
-                break
-
-        existing_github_username = self._normalize_github_username(
-            contact.get("cGitHubUsername")
-        )
-        inferred_github_username = self._normalize_github_username(
-            extracted.github_username
-        )
-        if not existing_github_username and inferred_github_username:
-            candidates.append(
-                _ExternalProfileSourceCandidate(
-                    label="GitHub Profile",
-                    url=f"https://github.com/{inferred_github_username}",
-                    origin="resume_inference",
-                    source_key=f"github:{inferred_github_username.casefold()}",
                 )
             )
         return candidates
