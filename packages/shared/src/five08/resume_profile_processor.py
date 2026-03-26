@@ -1593,10 +1593,15 @@ class ResumeProfileProcessor:
         except ImportError as exc:
             raise ValueError("JavaScript browser fallback is unavailable") from exc
 
+        validation_error = self._validate_public_profile_url(url)
+        if validation_error:
+            raise ValueError(validation_error)
+
         browser = None
         try:
             browser = launch()
             page = browser.new_page()
+            page.route("**/*", self._handle_browser_profile_request_route)
             page.goto(
                 url,
                 wait_until="networkidle",
@@ -1612,10 +1617,7 @@ class ResumeProfileProcessor:
                 except Exception:
                     logger.debug("Failed to close CloakBrowser for %s", url)
 
-        return self._extract_profile_source_text(
-            body=rendered_html.encode("utf-8"),
-            content_type="text/html",
-        )
+        return self._extract_rendered_profile_source_text(rendered_html)
 
     def _extract_profile_source_text(self, *, body: bytes, content_type: str) -> str:
         normalized_type = content_type.split(";", 1)[0].strip().lower()
@@ -1687,6 +1689,35 @@ class ResumeProfileProcessor:
         return (
             len(rendered) >= len(extracted) + 20
             or rendered_words >= extracted_words + 5
+        )
+
+    def _handle_browser_profile_request_route(self, route: Any) -> None:
+        request = route.request
+        request_url = str(getattr(request, "url", "")).strip()
+        validation_error = self._validate_browser_profile_request_url(request_url)
+        if validation_error:
+            logger.info(
+                "Blocked non-public browser profile request url=%s error=%s",
+                request_url,
+                validation_error,
+            )
+            route.abort()
+            return
+        route.continue_()
+
+    def _validate_browser_profile_request_url(self, candidate_url: str) -> str | None:
+        scheme = urlsplit(candidate_url).scheme.lower()
+        if scheme and scheme not in {"http", "https"}:
+            return None
+        return self._validate_public_profile_url(candidate_url)
+
+    def _extract_rendered_profile_source_text(self, rendered_html: str) -> str:
+        rendered_body = rendered_html.encode("utf-8")
+        if len(rendered_body) > PROFILE_SOURCE_MAX_BYTES:
+            raise ValueError("Rendered profile page exceeds size limit")
+        return self._extract_profile_source_text(
+            body=rendered_body,
+            content_type="text/html",
         )
 
     def _render_external_profile_source_text(

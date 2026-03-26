@@ -5,12 +5,14 @@ import json
 from datetime import datetime
 from types import SimpleNamespace
 
+import pytest
 from unittest.mock import MagicMock, Mock, patch
 
 from curl_cffi import CurlOpt
 
 from five08.clients.espo import EspoAPIError
 from five08.resume_profile_processor import (
+    PROFILE_SOURCE_MAX_BYTES,
     ResumeProcessorConfig,
     _ExternalProfileSourceCandidate,
     _FetchedProfileSourceResponse,
@@ -788,6 +790,30 @@ def test_fetch_external_profile_source_text_skips_browser_for_github_sources() -
     processor._fetch_external_profile_source_response.assert_called_once_with(
         "https://github.com/octocat"
     )
+
+
+def test_validate_browser_profile_request_url_blocks_non_public_http_targets() -> None:
+    """Browser fallback requests should reject non-public HTTP(S) targets."""
+    processor = ResumeProfileProcessor()
+
+    assert (
+        processor._validate_browser_profile_request_url("http://127.0.0.1/internal")
+        == "Profile URL host resolves to a non-public address"
+    )
+    assert (
+        processor._validate_browser_profile_request_url("data:text/plain,hello") is None
+    )
+
+
+def test_extract_rendered_profile_source_text_enforces_size_limit() -> None:
+    """Rendered browser HTML should honor the same size cap as curl fetches."""
+    processor = ResumeProfileProcessor()
+    oversized_html = (
+        "<html><body>" + ("a" * PROFILE_SOURCE_MAX_BYTES) + "</body></html>"
+    )
+
+    with pytest.raises(ValueError, match="Rendered profile page exceeds size limit"):
+        processor._extract_rendered_profile_source_text(oversized_html)
 
 
 def test_extract_profile_proposal_reruns_with_confirmed_personal_website() -> None:

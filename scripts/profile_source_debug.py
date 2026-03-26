@@ -147,10 +147,7 @@ def _run_url(
         content_type=(
             processor.last_response.content_type if processor.last_response else None
         ),
-        curl_text_preview=_shorten(
-            _extract_curl_preview(processor, preview_chars),
-            preview_chars,
-        ),
+        curl_text_preview=_extract_curl_preview(processor, preview_chars),
         browser_attempted=processor.last_browser_attempted,
         browser_used=browser_used,
         browser_text_preview=_shorten(processor.last_browser_text, preview_chars),
