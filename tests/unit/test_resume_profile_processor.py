@@ -13,9 +13,9 @@ from curl_cffi import CurlOpt
 from five08.clients.espo import EspoAPIError
 from five08.resume_profile_processor import (
     PROFILE_SOURCE_MAX_BYTES,
+    ProfileSourceHttpResponse,
     ResumeProcessorConfig,
     _ExternalProfileSourceCandidate,
-    _FetchedProfileSourceResponse,
 )
 from five08.worker.crm.resume_profile_processor import ResumeProfileProcessor
 from five08.worker.models import ExtractedSkills, ResumeExtractedProfile
@@ -735,14 +735,15 @@ def test_fetch_external_profile_source_text_uses_browser_for_sparse_personal_sit
     """Sparse app-shell HTML should retry personal websites with browser rendering."""
     processor = ResumeProfileProcessor()
     processor._fetch_external_profile_source_response = Mock(
-        return_value=_FetchedProfileSourceResponse(
+        return_value=ProfileSourceHttpResponse(
             final_url="https://example.com/about",
+            status_code=200,
+            headers={"content-type": "text/html; charset=utf-8"},
             body=(
                 b"<html><head><title>Jane Doe</title></head><body>"
                 b"<div id='__next'></div><script>window.__NEXT_DATA__={};</script>"
                 b"</body></html>"
             ),
-            content_type="text/html; charset=utf-8",
         )
     )
     processor._fetch_external_profile_source_text_with_browser = Mock(
@@ -757,23 +758,24 @@ def test_fetch_external_profile_source_text_uses_browser_for_sparse_personal_sit
     assert extracted == (
         "Jane Doe is a software engineer based in Tokyo building data products."
     )
-    processor._fetch_external_profile_source_text_with_browser.assert_called_once_with(
-        "https://example.com/about"
-    )
+    processor._fetch_external_profile_source_text_with_browser.assert_called_once()
+    browser_call = processor._fetch_external_profile_source_text_with_browser.call_args
+    assert browser_call.args[0].final_url == "https://example.com/about"
 
 
 def test_fetch_external_profile_source_text_skips_browser_for_github_sources() -> None:
     """Non-website profile sources should stay on the curl path even if sparse."""
     processor = ResumeProfileProcessor()
     processor._fetch_external_profile_source_response = Mock(
-        return_value=_FetchedProfileSourceResponse(
+        return_value=ProfileSourceHttpResponse(
             final_url="https://github.com/octocat",
+            status_code=200,
+            headers={"content-type": "text/html; charset=utf-8"},
             body=(
                 b"<html><head><title>octocat</title></head><body>"
                 b"<div id='__next'></div><script>window.__NEXT_DATA__={};</script>"
                 b"</body></html>"
             ),
-            content_type="text/html; charset=utf-8",
         )
     )
     processor._fetch_external_profile_source_text_with_browser = Mock(
@@ -802,6 +804,14 @@ def test_validate_browser_profile_request_url_blocks_non_public_http_targets() -
     )
     assert (
         processor._validate_browser_profile_request_url("data:text/plain,hello") is None
+    )
+    assert (
+        processor._validate_browser_profile_request_url("file:///etc/passwd")
+        == "Profile request URL scheme 'file' is not allowed"
+    )
+    assert (
+        processor._validate_browser_profile_request_url("ws://example.com/socket")
+        == "Profile request URL scheme 'ws' is not allowed"
     )
 
 

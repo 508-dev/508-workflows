@@ -11,7 +11,6 @@ from urllib.parse import urlsplit
 from five08.resume_profile_processor import (
     ResumeProcessorConfig,
     ResumeProfileProcessor,
-    _FetchedProfileSourceResponse,
 )
 
 
@@ -37,27 +36,6 @@ class DebugResumeProfileProcessor(ResumeProfileProcessor):
                 espo_api_key="debug",
             )
         )
-        self.last_response: _FetchedProfileSourceResponse | None = None
-        self.last_browser_attempted = False
-        self.last_browser_text: str | None = None
-
-    def reset_debug_state(self) -> None:
-        self.last_response = None
-        self.last_browser_attempted = False
-        self.last_browser_text = None
-
-    def _fetch_external_profile_source_response(
-        self, url: str
-    ) -> _FetchedProfileSourceResponse:
-        response = super()._fetch_external_profile_source_response(url)
-        self.last_response = response
-        return response
-
-    def _fetch_external_profile_source_text_with_browser(self, url: str) -> str:
-        self.last_browser_attempted = True
-        rendered = super()._fetch_external_profile_source_text_with_browser(url)
-        self.last_browser_text = rendered
-        return rendered
 
 
 def _parse_args() -> argparse.Namespace:
@@ -108,13 +86,10 @@ def _run_url(
     url: str,
     *,
     source_type: str,
-    preview_chars: int,
 ) -> DebugResult:
-    processor.reset_debug_state()
     allow_javascript_fallback = source_type == "website"
-
     try:
-        extracted = processor._fetch_external_profile_source_text(
+        diagnostics = processor.inspect_profile_source_fetch(
             url,
             allow_javascript_fallback=allow_javascript_fallback,
         )
@@ -122,53 +97,27 @@ def _run_url(
         return DebugResult(
             url=url,
             source_type=source_type,
-            final_url=(
-                processor.last_response.final_url if processor.last_response else None
-            ),
-            content_type=(
-                processor.last_response.content_type
-                if processor.last_response
-                else None
-            ),
-            browser_attempted=processor.last_browser_attempted,
             decision="error",
             error=str(exc),
         )
-
-    browser_used = (
-        processor.last_browser_attempted
-        and processor.last_browser_text is not None
-        and extracted == processor.last_browser_text
-    )
     return DebugResult(
         url=url,
         source_type=source_type,
-        final_url=processor.last_response.final_url if processor.last_response else url,
-        content_type=(
-            processor.last_response.content_type if processor.last_response else None
+        final_url=diagnostics.final_url or url,
+        content_type=diagnostics.content_type,
+        curl_text_preview=diagnostics.curl_text,
+        browser_attempted=diagnostics.browser_attempted,
+        browser_used=diagnostics.browser_used,
+        browser_text_preview=diagnostics.browser_text,
+        decision=(
+            "error"
+            if diagnostics.error and not diagnostics.selected_text
+            else "browser"
+            if diagnostics.browser_used
+            else "curl"
         ),
-        curl_text_preview=_extract_curl_preview(processor, preview_chars),
-        browser_attempted=processor.last_browser_attempted,
-        browser_used=browser_used,
-        browser_text_preview=_shorten(processor.last_browser_text, preview_chars),
-        decision="browser" if browser_used else "curl",
-        error=None,
+        error=diagnostics.error,
     )
-
-
-def _extract_curl_preview(
-    processor: DebugResumeProfileProcessor, preview_chars: int
-) -> str | None:
-    if processor.last_response is None:
-        return None
-    try:
-        extracted = processor._extract_profile_source_text(
-            body=processor.last_response.body,
-            content_type=processor.last_response.content_type,
-        )
-    except Exception as exc:
-        return f"<curl extract error: {exc}>"
-    return _shorten(extracted, preview_chars)
 
 
 def _print_pretty(results: list[DebugResult]) -> None:
@@ -200,10 +149,16 @@ def main() -> None:
             processor,
             url,
             source_type=_infer_source_type(url, args.source_type),
-            preview_chars=args.preview_chars,
         )
         for url in args.urls
     ]
+    for result in results:
+        result.curl_text_preview = _shorten(
+            result.curl_text_preview, args.preview_chars
+        )
+        result.browser_text_preview = _shorten(
+            result.browser_text_preview, args.preview_chars
+        )
     if args.json:
         _print_json(results)
     else:
