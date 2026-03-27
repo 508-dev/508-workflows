@@ -691,6 +691,78 @@ class MarkIdVerifiedOverwriteConfirmationView(discord.ui.View):
                 pass
 
 
+class DiscordLinkOverwriteConfirmationView(discord.ui.View):
+    """View for confirming Discord link overwrite when the stored ID differs."""
+
+    def __init__(
+        self,
+        crm_cog: "CRMCog",
+        contact: dict[str, Any],
+        user: discord.Member,
+        requester_id: int,
+    ) -> None:
+        super().__init__(timeout=300)
+        self.crm_cog = crm_cog
+        self.contact = contact
+        self.user = user
+        self.requester_id = requester_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Allow only the original requester to confirm/cancel."""
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "❌ Only the command requester can confirm this action.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Overwrite", style=discord.ButtonStyle.danger, emoji="⚠️")
+    async def confirm_overwrite(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button["DiscordLinkOverwriteConfirmationView"],
+    ) -> None:
+        """Overwrite the existing Discord link."""
+        await interaction.response.defer(ephemeral=True)
+        await self.crm_cog._perform_discord_linking(
+            interaction=interaction,
+            user=self.user,
+            contact=self.contact,
+            allow_overwrite=True,
+        )
+        for item in self.children:
+            if isinstance(item, (discord.ui.Button, discord.ui.Select)):
+                item.disabled = True
+
+        if interaction.message:
+            try:
+                await interaction.message.edit(view=self)
+            except discord.NotFound:
+                pass
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
+    async def cancel_overwrite(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button["DiscordLinkOverwriteConfirmationView"],
+    ) -> None:
+        """Cancel overwrite and leave the contact unchanged."""
+        await interaction.response.send_message(
+            "✅ Discord link overwrite cancelled. No changes were made.",
+            ephemeral=True,
+        )
+        for item in self.children:
+            if isinstance(item, (discord.ui.Button, discord.ui.Select)):
+                item.disabled = True
+
+        if interaction.message:
+            try:
+                await interaction.message.edit(view=self)
+            except discord.NotFound:
+                pass
+
+
 class ResumeConfirmationView(discord.ui.View):
     """View for confirming resume upload when duplicate is detected."""
 
@@ -6122,6 +6194,28 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             "cDiscordUserID": str(user.id),
         }
 
+    def _contact_discord_user_id(self, contact: dict[str, Any]) -> str | None:
+        """Return the stored Discord user ID when present."""
+        raw_value = contact.get("cDiscordUserID")
+        if raw_value is None:
+            return None
+        normalized = str(raw_value).strip()
+        if not normalized or normalized == "No Discord":
+            return None
+        return normalized
+
+    def _contact_discord_username(self, contact: dict[str, Any]) -> str | None:
+        """Return the stored Discord username without legacy embedded IDs."""
+        raw_value = contact.get("cDiscordUsername")
+        if raw_value is None:
+            return None
+        normalized = str(raw_value).strip()
+        if not normalized or normalized == "No Discord":
+            return None
+        if " (ID: " in normalized:
+            normalized = normalized.split(" (ID: ", 1)[0].strip()
+        return normalized or None
+
     def _fallback_contact_name_for_discord_user(self, user: discord.Member) -> str:
         display_name = str(getattr(user, "display_name", "")).strip()
         if display_name:
@@ -6292,6 +6386,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         interaction: discord.Interaction,
         user: discord.Member,
         contact: dict[str, Any],
+        allow_overwrite: bool = False,
     ) -> bool:
         """Shared method to perform Discord user linking to a contact."""
         try:
@@ -6300,6 +6395,66 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
 
             # Prepare the Discord username for storage (without ID) and display
             discord_display = self._discord_display_name(user)
+            discord_user_id = str(user.id)
+            existing_discord_user_id = self._contact_discord_user_id(contact)
+            existing_discord_username = self._contact_discord_username(contact)
+
+            if (
+                existing_discord_user_id == discord_user_id
+                and existing_discord_username == discord_display
+            ):
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.link_discord_user.execute",
+                    result="success",
+                    metadata={
+                        "linked_user_id": discord_user_id,
+                        "linked_username": user.name,
+                        "contact_name": contact_name,
+                        "no_op": True,
+                    },
+                    resource_type="crm_contact",
+                    resource_id=str(contact_id),
+                )
+                await interaction.followup.send(
+                    f"ℹ️ Nothing changed. **{contact_name}** is already linked to "
+                    f"{user.mention} ({discord_display})."
+                )
+                return True
+
+            if (
+                existing_discord_user_id is not None
+                and existing_discord_user_id != discord_user_id
+                and not allow_overwrite
+            ):
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.link_discord_user.execute",
+                    result="success",
+                    metadata={
+                        "linked_user_id": discord_user_id,
+                        "linked_username": user.name,
+                        "contact_name": contact_name,
+                        "overwrite_confirmation_required": True,
+                        "existing_linked_user_id": existing_discord_user_id,
+                    },
+                    resource_type="crm_contact",
+                    resource_id=str(contact_id),
+                )
+                await interaction.followup.send(
+                    "⚠️ This contact is already linked to a different Discord user: "
+                    f"`{existing_discord_username or 'Unknown user'}` "
+                    f"(ID: `{existing_discord_user_id}`). Click **Overwrite** only if "
+                    f"you want to replace it with {user.mention} ({discord_display}, "
+                    f"ID: `{discord_user_id}`).",
+                    view=DiscordLinkOverwriteConfirmationView(
+                        crm_cog=self,
+                        contact=contact,
+                        user=user,
+                        requester_id=interaction.user.id,
+                    ),
+                )
+                return False
 
             # Update the contact's Discord username and user ID
             update_data = self._discord_link_fields(user)

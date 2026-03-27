@@ -10,6 +10,7 @@ import pytest
 
 from five08.discord_bot.cogs.crm import (
     CRMCog,
+    DiscordLinkOverwriteConfirmationView,
     ResumeButtonView,
     ResumeCreateContactView,
     ResumeUpdateConfirmationView,
@@ -3514,7 +3515,7 @@ class TestCRMCog:
     async def test_link_discord_user_success(
         self, crm_cog, mock_interaction, mock_admin_role
     ):
-        """Test successful Discord user linking."""
+        """Test successful Discord user linking when only the username changes."""
         mock_interaction.user.roles = [mock_admin_role]
 
         # Mock Discord user
@@ -3532,7 +3533,8 @@ class TestCRMCog:
                     "name": "John Doe",
                     "emailAddress": "john@example.com",
                     "c508Email": "john@508.dev",
-                    "cDiscordUsername": "olduser#0000 (ID: 987654321)",
+                    "cDiscordUsername": "olduser#0000",
+                    "cDiscordUserID": "123456789",
                 }
             ]
         }
@@ -3568,6 +3570,76 @@ class TestCRMCog:
         mock_interaction.followup.send.assert_called_once()
         call_args = mock_interaction.followup.send.call_args
         assert "embed" in call_args[1]
+
+    @pytest.mark.asyncio
+    async def test_link_discord_user_no_change_when_same_discord_info(
+        self, crm_cog, mock_interaction, mock_admin_role
+    ):
+        """Skip CRM updates when the contact is already linked to the same user."""
+        mock_interaction.user.roles = [mock_admin_role]
+
+        mock_discord_user = Mock()
+        mock_discord_user.name = "johndoe"
+        mock_discord_user.id = 123456789
+        mock_discord_user.mention = "<@123456789>"
+        mock_discord_user.discriminator = "1234"
+
+        crm_cog.espo_api.request.return_value = {
+            "list": [
+                {
+                    "id": "contact123",
+                    "name": "John Doe",
+                    "emailAddress": "john@example.com",
+                    "cDiscordUsername": "johndoe#1234 (ID: 123456789)",
+                    "cDiscordUserID": "123456789",
+                }
+            ]
+        }
+
+        await crm_cog.link_discord_user.callback(
+            crm_cog, mock_interaction, mock_discord_user, "john"
+        )
+
+        assert crm_cog.espo_api.request.call_count == 1
+        mock_interaction.followup.send.assert_called_once()
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert "Nothing changed" in message
+
+    @pytest.mark.asyncio
+    async def test_link_discord_user_requires_confirmation_for_different_discord_id(
+        self, crm_cog, mock_interaction, mock_admin_role
+    ):
+        """Require confirmation before replacing a different Discord user ID."""
+        mock_interaction.user.roles = [mock_admin_role]
+
+        mock_discord_user = Mock()
+        mock_discord_user.name = "johndoe"
+        mock_discord_user.id = 123456789
+        mock_discord_user.mention = "<@123456789>"
+        mock_discord_user.discriminator = "1234"
+
+        crm_cog.espo_api.request.return_value = {
+            "list": [
+                {
+                    "id": "contact123",
+                    "name": "John Doe",
+                    "emailAddress": "john@example.com",
+                    "cDiscordUsername": "otheruser#9999",
+                    "cDiscordUserID": "987654321",
+                }
+            ]
+        }
+
+        await crm_cog.link_discord_user.callback(
+            crm_cog, mock_interaction, mock_discord_user, "john"
+        )
+
+        assert crm_cog.espo_api.request.call_count == 1
+        mock_interaction.followup.send.assert_called_once()
+        message = mock_interaction.followup.send.call_args[0][0]
+        view = mock_interaction.followup.send.call_args.kwargs["view"]
+        assert "already linked to a different Discord user" in message
+        assert isinstance(view, DiscordLinkOverwriteConfirmationView)
 
     @pytest.mark.asyncio
     async def test_link_discord_user_contact_not_found(
