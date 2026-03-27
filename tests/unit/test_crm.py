@@ -3556,6 +3556,7 @@ class TestCRMCog:
         search_call = crm_cog.espo_api.request.call_args_list[0]
         assert search_call[0][0] == "GET"
         assert search_call[0][1] == "Contact"
+        assert "cDiscordUserID" in search_call[0][2]["select"]
 
         # Verify update call
         update_call = crm_cog.espo_api.request.call_args_list[1]
@@ -3592,6 +3593,39 @@ class TestCRMCog:
                     "emailAddress": "john@example.com",
                     "cDiscordUsername": "johndoe#1234 (ID: 123456789)",
                     "cDiscordUserID": "123456789",
+                }
+            ]
+        }
+
+        await crm_cog.link_discord_user.callback(
+            crm_cog, mock_interaction, mock_discord_user, "john"
+        )
+
+        assert crm_cog.espo_api.request.call_count == 1
+        mock_interaction.followup.send.assert_called_once()
+        message = mock_interaction.followup.send.call_args[0][0]
+        assert "Nothing changed" in message
+
+    @pytest.mark.asyncio
+    async def test_link_discord_user_no_change_when_legacy_username_embeds_id(
+        self, crm_cog, mock_interaction, mock_admin_role
+    ):
+        """Treat legacy username records with embedded IDs as already linked."""
+        mock_interaction.user.roles = [mock_admin_role]
+
+        mock_discord_user = Mock()
+        mock_discord_user.name = "johndoe"
+        mock_discord_user.id = 123456789
+        mock_discord_user.mention = "<@123456789>"
+        mock_discord_user.discriminator = "1234"
+
+        crm_cog.espo_api.request.return_value = {
+            "list": [
+                {
+                    "id": "contact123",
+                    "name": "John Doe",
+                    "emailAddress": "john@example.com",
+                    "cDiscordUsername": "johndoe#1234 (ID: 123456789)",
                 }
             ]
         }

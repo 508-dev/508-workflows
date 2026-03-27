@@ -6195,14 +6195,27 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         }
 
     def _contact_discord_user_id(self, contact: dict[str, Any]) -> str | None:
-        """Return the stored Discord user ID when present."""
+        """Return the stored Discord user ID when present.
+
+        Fall back to legacy usernames that embed the Discord ID as
+        ``... (ID: 123456789)`` when ``cDiscordUserID`` is missing.
+        """
         raw_value = contact.get("cDiscordUserID")
-        if raw_value is None:
+        if raw_value is not None:
+            normalized = str(raw_value).strip()
+            if normalized and normalized != "No Discord":
+                return normalized
+
+        legacy_username = str(contact.get("cDiscordUsername") or "").strip()
+        if not legacy_username or legacy_username == "No Discord":
             return None
-        normalized = str(raw_value).strip()
-        if not normalized or normalized == "No Discord":
+
+        legacy_match = re.search(r"\(ID:\s*(\d+)\)\s*$", legacy_username)
+        if legacy_match is None:
             return None
-        return normalized
+
+        legacy_id = legacy_match.group(1).strip()
+        return legacy_id or None
 
     def _contact_discord_username(self, contact: dict[str, Any]) -> str | None:
         """Return the stored Discord username without legacy embedded IDs."""
@@ -6403,7 +6416,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 existing_discord_user_id == discord_user_id
                 and existing_discord_username == discord_display
             ):
-                self._audit_command(
+                self._audit_command_safe(
                     interaction=interaction,
                     action="crm.link_discord_user.execute",
                     result="success",
@@ -6427,7 +6440,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 and existing_discord_user_id != discord_user_id
                 and not allow_overwrite
             ):
-                self._audit_command(
+                self._audit_command_safe(
                     interaction=interaction,
                     action="crm.link_discord_user.execute",
                     result="success",
@@ -7830,7 +7843,10 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             await interaction.response.defer(ephemeral=True)
 
             # Determine search strategy based on search_term format
-            contacts = await self._search_contacts_for_lookup(search_term)
+            contacts = await self._search_contacts_for_lookup(
+                search_term,
+                select="id,name,emailAddress,c508Email,cDiscordUsername,cDiscordUserID",
+            )
 
             if not contacts:
                 self._audit_command(
