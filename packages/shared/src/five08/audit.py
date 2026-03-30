@@ -5,12 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
+import re
 from typing import Any
 from uuid import uuid4
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from five08.clients.espo import EspoAPIError, EspoClient
 from five08.queue import get_postgres_connection
 from five08.settings import SharedSettings
 
@@ -336,9 +338,34 @@ def get_discord_user_id_for_contact(
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(query, (crm_contact_id,))
             row = cursor.fetchone()
-    if row is None:
+    if row is not None:
+        discord_user_id = str(row["discord_user_id"] or "").strip()
+        if discord_user_id:
+            return discord_user_id
+
+    espo_base_url = str(getattr(settings, "espo_base_url", "") or "").strip()
+    espo_api_key = str(getattr(settings, "espo_api_key", "") or "").strip()
+    if not espo_base_url or not espo_api_key:
         return None
-    return row["discord_user_id"]
+
+    try:
+        crm = EspoClient(espo_base_url, espo_api_key)
+        contact = crm.get_contact(crm_contact_id)
+    except (EspoAPIError, KeyError, TypeError, ValueError):
+        return None
+
+    direct_user_id = str(contact.get("cDiscordUserID") or "").strip()
+    if direct_user_id and direct_user_id != "No Discord":
+        return direct_user_id
+
+    legacy_username = str(contact.get("cDiscordUsername") or "").strip()
+    if not legacy_username or legacy_username == "No Discord":
+        return None
+
+    legacy_match = re.search(r"\(ID:\s*(\d+)\)\s*$", legacy_username)
+    if legacy_match is None:
+        return None
+    return legacy_match.group(1).strip() or None
 
 
 def insert_audit_event(
