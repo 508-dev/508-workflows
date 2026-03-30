@@ -340,7 +340,7 @@ def get_discord_user_id_for_contact(
             row = cursor.fetchone()
     if row is not None:
         discord_user_id = str(row["discord_user_id"] or "").strip()
-        if discord_user_id:
+        if discord_user_id and discord_user_id != "No Discord":
             return discord_user_id
 
     espo_base_url = str(getattr(settings, "espo_base_url", "") or "").strip()

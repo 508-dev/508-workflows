@@ -32,6 +32,26 @@ def test_get_discord_user_id_for_contact_uses_people_cache() -> None:
     mock_espo_client.assert_not_called()
 
 
+def test_get_discord_user_id_for_contact_ignores_cached_no_discord() -> None:
+    """The cache sentinel should not be returned as a valid Discord ID."""
+    settings = MagicMock()
+    settings.espo_base_url = ""
+    settings.espo_api_key = ""
+    connection = _mock_connection({"discord_user_id": "No Discord"})
+
+    with (
+        patch("five08.audit.get_postgres_connection") as mock_get_connection,
+        patch("five08.audit.EspoClient") as mock_espo_client,
+    ):
+        mock_get_connection.return_value.__enter__.return_value = connection
+        mock_get_connection.return_value.__exit__.return_value = None
+
+        result = get_discord_user_id_for_contact(settings, "contact-1")
+
+    assert result is None
+    mock_espo_client.assert_not_called()
+
+
 def test_get_discord_user_id_for_contact_falls_back_to_crm_contact() -> None:
     """When people sync is stale, fall back to the live CRM contact fields."""
     settings = MagicMock()
