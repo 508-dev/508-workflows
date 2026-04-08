@@ -3259,6 +3259,9 @@ class TestCRMCog:
             {
                 "id": "contact123",
                 "name": "John Doe",
+                "emailAddress": "john@example.com",
+                "type": "Member",
+                "c508Email": "john@508.dev",
                 "cSkillAttrs": '{"python":{"strength":4},"go":{"strength":5}}',
                 "skills": ["python", "go"],
             },
@@ -3272,8 +3275,16 @@ class TestCRMCog:
         embed = call_args[1]["embed"]
         assert embed.title == "🛠️ CRM Skills"
         assert "Skills for **John Doe**" in embed.description
-        assert "go (5)" in embed.fields[0].value
-        assert "python (4)" in embed.fields[0].value
+        # issue #61: profile field should show full contact info
+        profile_field = embed.fields[0]
+        assert profile_field.name == "👤 Profile"
+        assert "john@example.com" in profile_field.value
+        assert "Member" in profile_field.value
+        assert "john@508.dev" in profile_field.value
+        # skills should still be present
+        skills_field = embed.fields[1]
+        assert "go (5)" in skills_field.value
+        assert "python (4)" in skills_field.value
 
     @pytest.mark.asyncio
     async def test_view_skills_falls_back_to_skills_when_attrs_unrecoverable(
@@ -3298,9 +3309,9 @@ class TestCRMCog:
         mock_interaction.followup.send.assert_called_once()
         call_args = mock_interaction.followup.send.call_args
         embed = call_args[1]["embed"]
-        assert "python" in embed.fields[0].value
-        assert "sql" in embed.fields[0].value
-        assert "/5" not in embed.fields[0].value
+        assert "python" in embed.fields[1].value
+        assert "sql" in embed.fields[1].value
+        assert "/5" not in embed.fields[1].value
 
     @pytest.mark.asyncio
     async def test_search_contacts_for_view_skills_delegates_to_linking(self, crm_cog):

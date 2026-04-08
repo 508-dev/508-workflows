@@ -8714,11 +8714,13 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 )
                 return
 
+            contact_card = self._format_contact_card(full_contact, interaction)
             embed = discord.Embed(
                 title="🛠️ CRM Skills",
                 description=f"Skills for **{contact_name}**",
                 color=0x0099FF,
             )
+            embed.add_field(name="👤 Profile", value=contact_card, inline=False)
             skill_lines: list[str] = []
             for skill, strength in skills[:25]:
                 if strength is None:
@@ -8728,11 +8730,6 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             if len(skills) > 25:
                 skill_lines.append(f"...and {len(skills) - 25} more.")
             embed.add_field(name="Skills", value=", ".join(skill_lines), inline=False)
-            embed.add_field(
-                name="🔗 CRM Profile",
-                value=f"[View in CRM]({self.base_url}/#Contact/view/{contact_id})",
-                inline=False,
-            )
 
             await interaction.followup.send(embed=embed)
             self._audit_command(
