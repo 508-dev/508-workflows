@@ -103,6 +103,11 @@ Or run the full stack with Docker Compose:
 docker compose up --build
 ```
 
+## License
+
+This repository is licensed under the GNU Affero General Public License v3.0.
+See [LICENSE](./LICENSE).
+
 ## Environment Variables
 
 Use `.env.example` as the source of truth for defaults.
