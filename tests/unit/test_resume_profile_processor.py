@@ -875,6 +875,26 @@ def test_inspect_profile_source_fetch_uses_stripped_host_as_www_fallback() -> No
     ]
 
 
+def test_iter_profile_source_fetch_urls_keeps_https_only() -> None:
+    """TLS retries should stay on HTTPS host variants without downgrading transport."""
+    processor = ResumeProfileProcessor()
+
+    assert processor._iter_profile_source_fetch_urls(
+        "https://example.com/about",
+        allow_javascript_fallback=True,
+    ) == [
+        "https://example.com/about",
+        "https://www.example.com/about",
+    ]
+    assert processor._iter_profile_source_fetch_urls(
+        "https://www.example.com/about",
+        allow_javascript_fallback=True,
+    ) == [
+        "https://www.example.com/about",
+        "https://example.com/about",
+    ]
+
+
 def test_inspect_profile_source_fetch_does_not_retry_non_tls_errors() -> None:
     """Non-TLS fetch failures should keep the existing error behavior."""
     processor = ResumeProfileProcessor()

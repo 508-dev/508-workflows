@@ -1562,23 +1562,6 @@ class ResumeProfileProcessor:
                 seen.add(alternate_https_candidate)
                 candidates.append(alternate_https_candidate)
 
-        if parsed.port in {None, 443}:
-            http_candidate = urlunsplit(
-                parsed._replace(
-                    scheme="http",
-                    netloc=self._swap_url_port(parsed, new_port=None),
-                )
-            )
-            if http_candidate not in seen:
-                seen.add(http_candidate)
-                candidates.append(http_candidate)
-            if alternate_netloc:
-                alternate_http_candidate = urlunsplit(
-                    parsed._replace(scheme="http", netloc=alternate_netloc)
-                )
-                if alternate_http_candidate not in seen:
-                    candidates.append(alternate_http_candidate)
-
         return candidates
 
     @staticmethod
