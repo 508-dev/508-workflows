@@ -6,7 +6,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, Mock, call, patch
 
 from curl_cffi import CurlOpt
 
@@ -691,6 +691,20 @@ def test_build_initial_external_source_candidates_caps_websites_globally() -> No
     assert github_urls == ["https://github.com/octocat"]
 
 
+def test_build_initial_external_source_candidates_preserves_www_host_from_crm() -> None:
+    """CRM website candidates should keep the stored host for the first fetch."""
+    processor = ResumeProfileProcessor()
+
+    candidates = processor._build_initial_external_source_candidates(
+        contact={"cWebsiteLink": ["https://www.example.com/about"]},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].label == "Personal Website"
+    assert candidates[0].url == "https://www.example.com/about"
+    assert candidates[0].source_key == "website:example.com/about"
+
+
 def test_fetch_external_profile_sources_retries_alternate_candidate_after_failure() -> (
     None
 ):
@@ -790,6 +804,112 @@ def test_fetch_external_profile_source_text_skips_browser_for_github_sources() -
 
     assert extracted == "Title: octocat\noctocat"
     processor._fetch_external_profile_source_text_with_browser.assert_not_called()
+    processor._fetch_external_profile_source_response.assert_called_once_with(
+        "https://github.com/octocat"
+    )
+
+
+def test_inspect_profile_source_fetch_retries_personal_site_tls_variants() -> None:
+    """Personal website fetches should recover from apex TLS failures."""
+    processor = ResumeProfileProcessor()
+    http_response = ProfileSourceHttpResponse(
+        final_url="https://www.example.com/about",
+        status_code=200,
+        headers={"content-type": "text/html; charset=utf-8"},
+        body=b"<html><head><title>Portfolio</title></head><body>Builder</body></html>",
+    )
+    processor._fetch_external_profile_source_response = Mock(
+        side_effect=[
+            ValueError(
+                "Profile fetch failed: Failed to perform, curl: (35) TLS connect "
+                "error: error:10000438:SSL routines:OPENSSL_internal:"
+                "TLSV1_ALERT_INTERNAL_ERROR."
+            ),
+            http_response,
+        ]
+    )
+
+    diagnostics = processor.inspect_profile_source_fetch(
+        "https://example.com/about",
+        allow_javascript_fallback=True,
+    )
+
+    assert diagnostics.final_url == "https://www.example.com/about"
+    assert diagnostics.selected_text == "Title: Portfolio\nPortfolio Builder"
+    assert processor._fetch_external_profile_source_response.call_args_list == [
+        call("https://example.com/about"),
+        call("https://www.example.com/about"),
+    ]
+
+
+def test_inspect_profile_source_fetch_uses_stripped_host_as_www_fallback() -> None:
+    """Stored www hosts should fall back to the apex host after TLS failures."""
+    processor = ResumeProfileProcessor()
+    http_response = ProfileSourceHttpResponse(
+        final_url="https://example.com/about",
+        status_code=200,
+        headers={"content-type": "text/html; charset=utf-8"},
+        body=b"<html><head><title>Portfolio</title></head><body>Builder</body></html>",
+    )
+    processor._fetch_external_profile_source_response = Mock(
+        side_effect=[
+            ValueError(
+                "Profile fetch failed: Failed to perform, curl: (35) TLS connect "
+                "error: error:10000438:SSL routines:OPENSSL_internal:"
+                "TLSV1_ALERT_INTERNAL_ERROR."
+            ),
+            http_response,
+        ]
+    )
+
+    diagnostics = processor.inspect_profile_source_fetch(
+        "https://www.example.com/about",
+        allow_javascript_fallback=True,
+    )
+
+    assert diagnostics.final_url == "https://example.com/about"
+    assert diagnostics.selected_text == "Title: Portfolio\nPortfolio Builder"
+    assert processor._fetch_external_profile_source_response.call_args_list == [
+        call("https://www.example.com/about"),
+        call("https://example.com/about"),
+    ]
+
+
+def test_inspect_profile_source_fetch_does_not_retry_non_tls_errors() -> None:
+    """Non-TLS fetch failures should keep the existing error behavior."""
+    processor = ResumeProfileProcessor()
+    processor._fetch_external_profile_source_response = Mock(
+        side_effect=ValueError("Profile fetch failed: 404 Client Error")
+    )
+
+    with pytest.raises(ValueError, match="404 Client Error"):
+        processor.inspect_profile_source_fetch(
+            "https://example.com/about",
+            allow_javascript_fallback=True,
+        )
+
+    processor._fetch_external_profile_source_response.assert_called_once_with(
+        "https://example.com/about"
+    )
+
+
+def test_inspect_profile_source_fetch_does_not_retry_github_tls_failures() -> None:
+    """GitHub-style sources should not try personal-website recovery variants."""
+    processor = ResumeProfileProcessor()
+    processor._fetch_external_profile_source_response = Mock(
+        side_effect=ValueError(
+            "Profile fetch failed: Failed to perform, curl: (35) TLS connect "
+            "error: error:10000438:SSL routines:OPENSSL_internal:"
+            "TLSV1_ALERT_INTERNAL_ERROR."
+        )
+    )
+
+    with pytest.raises(ValueError, match="TLS connect error"):
+        processor.inspect_profile_source_fetch(
+            "https://github.com/octocat",
+            allow_javascript_fallback=False,
+        )
+
     processor._fetch_external_profile_source_response.assert_called_once_with(
         "https://github.com/octocat"
     )
