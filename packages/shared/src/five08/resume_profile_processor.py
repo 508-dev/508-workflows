@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html import unescape
 from typing import Any, cast
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from curl_cffi import CurlOpt, requests as curl_requests
 from curl_cffi.requests import BrowserTypeLiteral, RequestsError
@@ -1286,9 +1286,10 @@ class ResumeProfileProcessor:
         added_website_source_keys: set[str] = set()
         website_budget = PROFILE_SOURCE_MAX_WEBSITES
 
-        explicit_website_links = self._coerce_website_links(explicit_personal_websites)
-        for website_url in explicit_website_links:
-            source_key = normalized_website_identity_key(website_url)
+        explicit_website_links = self._coerce_fetchable_website_links(
+            explicit_personal_websites
+        )
+        for website_url, source_key in explicit_website_links:
             if not source_key or source_key in added_website_source_keys:
                 continue
             if website_budget <= 0:
@@ -1304,9 +1305,10 @@ class ResumeProfileProcessor:
                 )
             )
 
-        website_links = self._coerce_website_links(contact.get("cWebsiteLink"))
-        for website_url in website_links:
-            source_key = normalized_website_identity_key(website_url)
+        website_links = self._coerce_fetchable_website_links(
+            contact.get("cWebsiteLink")
+        )
+        for website_url, source_key in website_links:
             if not source_key or source_key in added_website_source_keys:
                 continue
             if website_budget <= 0:
@@ -1454,7 +1456,22 @@ class ResumeProfileProcessor:
         *,
         allow_javascript_fallback: bool = False,
     ) -> ProfileSourceFetchDiagnostics:
-        response = self._fetch_external_profile_source_response(url)
+        response: ProfileSourceHttpResponse | None = None
+        last_fetch_error: ValueError | None = None
+        for candidate_url in self._iter_profile_source_fetch_urls(
+            url,
+            allow_javascript_fallback=allow_javascript_fallback,
+        ):
+            try:
+                response = self._fetch_external_profile_source_response(candidate_url)
+                break
+            except ValueError as exc:
+                last_fetch_error = exc
+                if not self._is_retryable_profile_fetch_error(str(exc)):
+                    raise
+
+        if response is None:
+            raise last_fetch_error or ValueError("Profile fetch failed")
         extracted = ""
         extraction_error: ValueError | None = None
         try:
@@ -1512,6 +1529,82 @@ class ResumeProfileProcessor:
             browser_text=browser_text,
             error=error,
         )
+
+    def _iter_profile_source_fetch_urls(
+        self,
+        url: str,
+        *,
+        allow_javascript_fallback: bool,
+    ) -> list[str]:
+        candidates = [url]
+        if not allow_javascript_fallback:
+            return candidates
+
+        try:
+            parsed = urlsplit(url)
+        except Exception:
+            return candidates
+
+        if parsed.scheme.lower() != "https":
+            return candidates
+
+        host = (parsed.hostname or "").strip()
+        if not host:
+            return candidates
+
+        seen = {url}
+        alternate_netloc = self._alternate_profile_host_netloc(parsed)
+        if parsed.port in {None, 443} and alternate_netloc:
+            alternate_https_candidate = urlunsplit(
+                parsed._replace(netloc=alternate_netloc)
+            )
+            if alternate_https_candidate not in seen:
+                seen.add(alternate_https_candidate)
+                candidates.append(alternate_https_candidate)
+
+        return candidates
+
+    @staticmethod
+    def _is_retryable_profile_fetch_error(error: str) -> bool:
+        normalized = error.casefold()
+        return "profile fetch failed:" in normalized and any(
+            marker in normalized
+            for marker in (
+                "tls connect error",
+                "tlsv1_alert_internal_error",
+                "tlsv1 alert internal error",
+                "ssl:",
+            )
+        )
+
+    @staticmethod
+    def _alternate_profile_host_netloc(parsed: Any) -> str | None:
+        host = (parsed.hostname or "").strip()
+        if not host:
+            return None
+        if host.casefold().startswith("www."):
+            alternate_host = host[4:]
+        else:
+            alternate_host = f"www.{host}"
+        return ResumeProfileProcessor._swap_url_port(
+            parsed,
+            new_host=alternate_host,
+            new_port=parsed.port,
+        )
+
+    @staticmethod
+    def _swap_url_port(
+        parsed: Any,
+        *,
+        new_host: str | None = None,
+        new_port: int | None,
+    ) -> str:
+        host = new_host or (parsed.hostname or "").strip()
+        if not host:
+            return parsed.netloc
+        if new_port is None:
+            return host
+        return f"{host}:{new_port}"
 
     def _fetch_external_profile_source_response(
         self, url: str
@@ -2274,6 +2367,37 @@ class ResumeProfileProcessor:
 
         return normalized
 
+    def _coerce_fetchable_website_links(self, value: Any) -> list[tuple[str, str]]:
+        if value is None:
+            return []
+
+        if isinstance(value, str):
+            raw_values = [item for item in value.split(",") if item.strip()]
+        elif isinstance(value, (list, tuple, set)):
+            raw_values = list(value)
+        else:
+            return []
+
+        normalized: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for raw_value in raw_values:
+            if not isinstance(raw_value, str):
+                continue
+            raw_candidate = raw_value.strip()
+            normalized_link = self._normalize_website_url(raw_candidate)
+            if normalized_link is None:
+                continue
+            fetchable_link = self._normalize_fetchable_website_url(raw_candidate)
+            if fetchable_link is None:
+                continue
+            dedupe_key = normalized_website_identity_key(normalized_link)
+            if dedupe_key is None or dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            normalized.append((fetchable_link, dedupe_key))
+
+        return normalized
+
     def _merge_website_links(
         self, *, existing: list[str], extracted: list[str]
     ) -> list[str]:
@@ -2309,6 +2433,34 @@ class ResumeProfileProcessor:
     @staticmethod
     def _normalize_website_url(value: str) -> str | None:
         return normalize_website_url(value, allow_scheme_less=True)
+
+    @staticmethod
+    def _normalize_fetchable_website_url(value: str) -> str | None:
+        candidate = value.strip().strip(")]},.;:")
+        if not candidate:
+            return None
+
+        lower_candidate = candidate.lower()
+        if lower_candidate.startswith("www."):
+            candidate = f"https://{candidate}"
+        elif not lower_candidate.startswith(("http://", "https://")):
+            if not re.match(
+                r"(?i)^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?:[/?#].*)?$",
+                candidate,
+            ):
+                return None
+            candidate = f"https://{candidate}"
+
+        try:
+            parsed = urlsplit(candidate)
+        except Exception:
+            return None
+
+        if "@" in parsed.netloc:
+            return None
+        if not (parsed.hostname or "").strip():
+            return None
+        return parsed.geturl().rstrip("/")
 
     def _normalize_email_address(self, value: Any) -> str | None:
         if not isinstance(value, str):
