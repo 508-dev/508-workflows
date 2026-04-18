@@ -124,9 +124,9 @@ uv run --package five08 crmctl search --where timezone__is_null=true --where loc
 uv run --package five08 crmctl batch-update --where timezone__is_null=true --where location__is_not_null=true --update timezone=@location
 ```
 
-`./scripts/dev.sh` pins localhost ports to the standard defaults used by the
-app settings. Use the lower-level Compose wrapper when you want deterministic
-per-worktree ports or full containerized parity.
+`./scripts/dev.sh` exports deterministic per-worktree localhost ports and
+service URLs so the apps can run on the host without manual overrides. Use
+the lower-level Compose wrapper when you want full containerized parity.
 
 For full containerized runs, including Coolify-style deployment parity:
 
@@ -164,7 +164,7 @@ Use `.env.example` as the source of truth for defaults.
 - `Optional`: `REDIS_QUEUE_NAME` (default: `jobs.default`)
 - `Optional`: `REDIS_KEY_PREFIX` (default: `jobs`)
 - `Optional`: `REDIS_HOST_BIND` (default: `127.0.0.1`)
-- `Optional`: `REDIS_HOST_PORT` (default: `6379` when using `./scripts/dev.sh`; `./scripts/docker-compose.sh` computes a deterministic per-worktree value when unset)
+- `Optional`: `REDIS_HOST_PORT` (default when unset: deterministic per-worktree value `12000 + WORKTREE_ENV_SLOT`; set `REDIS_HOST_PORT=6379` in your shell or `.env` to pin it to `6379`)
 - `Optional`: `JOB_TIMEOUT_SECONDS` (default: `600`)
 - `Optional`: `JOB_RESULT_TTL_SECONDS` (default: `3600`)
 - `Optional`: `JOB_MAX_ATTEMPTS` (default: `8`)
@@ -178,7 +178,7 @@ Use `.env.example` as the source of truth for defaults.
 - `Optional` (Compose DB container): `POSTGRES_USER` (default: `postgres`)
 - `Optional` (Compose DB container): `POSTGRES_PASSWORD` (default: `postgres`)
 - `Optional` (Compose host bind): `POSTGRES_HOST_BIND` (default: `127.0.0.1`)
-- `Optional` (Compose host port): `POSTGRES_HOST_PORT` (default: `5432` when using `./scripts/dev.sh`; `./scripts/docker-compose.sh` computes a deterministic per-worktree value when unset, see `./scripts/docker-compose.sh print-ports`)
+- `Optional` (Compose host port): `POSTGRES_HOST_PORT` (default when unset: deterministic per-worktree value `15432 + WORKTREE_ENV_SLOT`; use `5432` only if you explicitly pin it, e.g. `POSTGRES_HOST_PORT=5432`; see `./scripts/docker-compose.sh print-ports`)
 
 ### MinIO + Internal Transfers
 
@@ -187,8 +187,8 @@ Use `.env.example` as the source of truth for defaults.
 - `Optional`: `MINIO_INTERNAL_BUCKET` (default: `internal-transfers`)
 - `Optional`: `MINIO_ROOT_USER` (default: `internal`)
 - `Optional`: `MINIO_HOST_BIND` (default: `127.0.0.1`; set `0.0.0.0` to expose externally)
-- `Optional`: `MINIO_API_HOST_PORT` (default: `9000` when using `./scripts/dev.sh`; `./scripts/docker-compose.sh` computes a deterministic per-worktree value when unset, see `./scripts/docker-compose.sh print-ports`)
-- `Optional`: `MINIO_CONSOLE_HOST_PORT` (default: `9001` when using `./scripts/dev.sh`; `./scripts/docker-compose.sh` computes a deterministic per-worktree value when unset, see `./scripts/docker-compose.sh print-ports`)
+- `Optional`: `MINIO_API_HOST_PORT` (default when unset: deterministic per-worktree value `24000 + WORKTREE_ENV_SLOT`; set `MINIO_API_HOST_PORT=9000` to pin it to `9000`; see `./scripts/docker-compose.sh print-ports`)
+- `Optional`: `MINIO_CONSOLE_HOST_PORT` (default when unset: deterministic per-worktree value `28000 + WORKTREE_ENV_SLOT`; set `MINIO_CONSOLE_HOST_PORT=9001` to pin it to `9001`; see `./scripts/docker-compose.sh print-ports`)
 - Note: `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` are `SharedSettings` alias properties (`minio_access_key`, `minio_secret_key`) and are not env-loaded fields.
 - Note: use `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` as the actual env vars.
 

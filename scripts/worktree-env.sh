@@ -89,6 +89,7 @@ worktree_env_resolve_shell_or_default() {
 
 worktree_env_load() {
   script_dir=$1
+  mode=${2:-host}
 
   WORKTREE_ENV_REPO_ROOT=$(CDPATH= cd "$script_dir/.." && pwd)
   WORKTREE_ENV_FILE="$WORKTREE_ENV_REPO_ROOT/.env"
@@ -108,10 +109,6 @@ worktree_env_load() {
   MINIO_API_HOST_PORT=$(worktree_env_resolve_value MINIO_API_HOST_PORT "$((24000 + WORKTREE_ENV_SLOT))" "$WORKTREE_ENV_FILE")
   MINIO_CONSOLE_HOST_PORT=$(worktree_env_resolve_value MINIO_CONSOLE_HOST_PORT "$((28000 + WORKTREE_ENV_SLOT))" "$WORKTREE_ENV_FILE")
 
-  # Host-run app ports are launcher-managed and intentionally ignore .env defaults.
-  WEBHOOK_INGEST_PORT=$(worktree_env_resolve_shell_or_default WEBHOOK_INGEST_PORT "$((32080 + WORKTREE_ENV_SLOT))")
-  HEALTHCHECK_PORT=$(worktree_env_resolve_shell_or_default HEALTHCHECK_PORT "$((36000 + WORKTREE_ENV_SLOT))")
-
   export WORKTREE_ENV_REPO_ROOT
   export WORKTREE_ENV_FILE
   export WORKTREE_ENV_SLOT
@@ -121,6 +118,16 @@ worktree_env_load() {
   export WEBHOOK_INGEST_HOST_PORT
   export MINIO_API_HOST_PORT
   export MINIO_CONSOLE_HOST_PORT
-  export WEBHOOK_INGEST_PORT
-  export HEALTHCHECK_PORT
+
+  if [ "$mode" = "host" ]; then
+    # Host-run app ports are launcher-managed and intentionally ignore .env
+    # defaults so each worktree gets its own API and bot ports.
+    WEBHOOK_INGEST_PORT=$(worktree_env_resolve_shell_or_default WEBHOOK_INGEST_PORT "$((32080 + WORKTREE_ENV_SLOT))")
+    HEALTHCHECK_PORT=$(worktree_env_resolve_shell_or_default HEALTHCHECK_PORT "$((36000 + WORKTREE_ENV_SLOT))")
+    export WEBHOOK_INGEST_PORT
+    export HEALTHCHECK_PORT
+  else
+    unset WEBHOOK_INGEST_PORT
+    unset HEALTHCHECK_PORT
+  fi
 }

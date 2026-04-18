@@ -25,7 +25,7 @@ Use `.env.example` as the source of defaults.
 - `Optional`: `REDIS_QUEUE_NAME` (default: `jobs.default`)
 - `Optional`: `REDIS_KEY_PREFIX` (default: `jobs`)
 - `Optional`: `REDIS_HOST_BIND` (default: `127.0.0.1`)
-- `Optional`: `REDIS_HOST_PORT` (default: `6379` when using `./scripts/dev.sh`; `./scripts/docker-compose.sh` computes a deterministic per-worktree value when unset, see `./scripts/docker-compose.sh print-ports`)
+- `Optional`: `REDIS_HOST_PORT` (default: computed per worktree as `12000 + WORKTREE_ENV_SLOT` when unset; use `6379` only if explicitly pinned via env/.env; see `./scripts/docker-compose.sh print-ports`)
 - `Optional`: `JOB_TIMEOUT_SECONDS` (default: `600`)
 - `Optional`: `JOB_RESULT_TTL_SECONDS` (default: `3600`)
 - `Optional`: `JOB_MAX_ATTEMPTS` (default: `8`)
@@ -39,7 +39,7 @@ Use `.env.example` as the source of defaults.
 - `Optional` (Compose DB container): `POSTGRES_USER` (default: `postgres`)
 - `Optional` (Compose DB container): `POSTGRES_PASSWORD` (default: `postgres`)
 - `Optional` (Compose host bind): `POSTGRES_HOST_BIND` (default: `127.0.0.1`)
-- `Optional` (Compose host port): `POSTGRES_HOST_PORT` (default: `5432` when using `./scripts/dev.sh`; `./scripts/docker-compose.sh` computes a deterministic per-worktree value when unset, see `./scripts/docker-compose.sh print-ports`)
+- `Optional` (Compose host port): `POSTGRES_HOST_PORT` (default when unset: deterministic per-worktree value `15432 + WORKTREE_ENV_SLOT`; set `POSTGRES_HOST_PORT=5432` to pin it to `5432`; see `./scripts/docker-compose.sh print-ports`)
 
 ## MinIO + Internal Transfers
 
@@ -47,8 +47,8 @@ Use `.env.example` as the source of defaults.
 - `Optional`: `MINIO_INTERNAL_BUCKET` (default: `internal-transfers`)
 - `Optional`: `MINIO_ROOT_USER` (default: `internal`)
 - `Optional`: `MINIO_HOST_BIND` (default: `127.0.0.1`; set `0.0.0.0` to expose externally)
-- `Optional`: `MINIO_API_HOST_PORT` (default: `9000` when using `./scripts/dev.sh`; `./scripts/docker-compose.sh` computes a deterministic per-worktree value when unset, see `./scripts/docker-compose.sh print-ports`)
-- `Optional`: `MINIO_CONSOLE_HOST_PORT` (default: `9001` when using `./scripts/dev.sh`; `./scripts/docker-compose.sh` computes a deterministic per-worktree value when unset, see `./scripts/docker-compose.sh print-ports`)
+- `Optional`: `MINIO_API_HOST_PORT` (default when unset: deterministic per-worktree value `24000 + WORKTREE_ENV_SLOT`; set `MINIO_API_HOST_PORT=9000` to pin it to `9000`; see `./scripts/docker-compose.sh print-ports`)
+- `Optional`: `MINIO_CONSOLE_HOST_PORT` (default when unset: deterministic per-worktree value `28000 + WORKTREE_ENV_SLOT`; set `MINIO_CONSOLE_HOST_PORT=9001` to pin it to `9001`; see `./scripts/docker-compose.sh print-ports`)
 
 ### Notes
 

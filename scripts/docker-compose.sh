@@ -3,7 +3,7 @@ set -eu
 
 script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
 . "$script_dir/worktree-env.sh"
-worktree_env_load "$script_dir"
+worktree_env_load "$script_dir" compose
 repo_root=$WORKTREE_ENV_REPO_ROOT
 
 export COMPOSE_PROJECT_NAME
@@ -12,6 +12,11 @@ export POSTGRES_HOST_PORT
 export WEBHOOK_INGEST_HOST_PORT
 export MINIO_API_HOST_PORT
 export MINIO_CONSOLE_HOST_PORT
+
+# Host-run-only app ports must not leak into Compose interpolation, or the API
+# container can start on a high worktree port while peers still target :8090.
+unset WEBHOOK_INGEST_PORT
+unset HEALTHCHECK_PORT
 
 if [ "${1:-}" = "print-ports" ]; then
   cat <<EOF

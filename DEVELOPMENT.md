@@ -78,10 +78,9 @@ uv run --package five08 crmctl repl
 ## Docker Compose Workflow
 
 For day-to-day development, prefer `./scripts/dev.sh` plus host-run app
-services. That entrypoint pins standard localhost ports so the app defaults
-work without extra overrides. Use the Compose wrapper when you need
-deterministic per-worktree ports or full container parity, including
-Coolify-style runs.
+services. That entrypoint exports deterministic per-worktree localhost ports
+and service URLs so the apps work without manual overrides. Use the Compose
+wrapper when you need full container parity, including Coolify-style runs.
 
 Start full stack (discord_bot + api + worker + redis + postgres + minio):
 
