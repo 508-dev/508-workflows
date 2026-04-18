@@ -61,6 +61,7 @@ PROFILE_SOURCE_BROWSER_TIMEOUT_SECONDS = 20.0
 PROFILE_SOURCE_BROWSER_TIMEOUT_MS = int(PROFILE_SOURCE_BROWSER_TIMEOUT_SECONDS * 1000)
 PROFILE_SOURCE_MAX_REDIRECTS = 3
 PROFILE_SOURCE_MAX_BYTES = 512 * 1024
+PROFILE_SOURCE_LINKEDIN_MAX_BYTES = 2 * 1024 * 1024
 PROFILE_SOURCE_BROWSER_RESOURCE_MAX_BYTES = 10 * 1024 * 1024
 PROFILE_SOURCE_MAX_TEXT_CHARS = 12000
 PROFILE_SOURCE_MAX_WEBSITES = 2
@@ -134,6 +135,13 @@ _HTML_META_CONTENT_ATTR_RE = re.compile(
 _GITHUB_USERNAME_RE = re.compile(
     r"^(?:https?://)?(?:www\.)?github\.com/([A-Za-z0-9-]{1,39})/?(?:[?#].*)?$",
     flags=re.IGNORECASE,
+)
+_LINKEDIN_PROFILE_RE = re.compile(
+    r"^(?:https?://)?(?:[\w.-]+\.)?linkedin\.com/in/([A-Za-z0-9_%-]+)/?(?:[?#].*)?$",
+    flags=re.IGNORECASE,
+)
+_DOMAIN_LINE_RE = re.compile(
+    r"(?i)^(?:https?://)?(?:www\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?:[/?#].*)?$"
 )
 
 
@@ -1341,6 +1349,19 @@ class ResumeProfileProcessor:
                 )
             )
 
+        linkedin_profile_url = self._normalize_linkedin_profile_url(
+            contact.get(LINKEDIN_FIELD)
+        )
+        if linkedin_profile_url:
+            candidates.append(
+                _ExternalProfileSourceCandidate(
+                    label="LinkedIn Profile",
+                    url=linkedin_profile_url,
+                    origin="crm",
+                    source_key=f"linkedin:{linkedin_profile_url.casefold()}",
+                )
+            )
+
         explicit_github_keys: set[str] = set()
         for username in explicit_github_usernames or []:
             normalized_username = self._normalize_github_username(username)
@@ -1381,6 +1402,8 @@ class ResumeProfileProcessor:
         explicit_github_usernames: list[str] | None = None,
     ) -> bool:
         if self._coerce_website_links(explicit_personal_websites):
+            return True
+        if self._normalize_linkedin_profile_url(contact.get(LINKEDIN_FIELD)):
             return True
         if any(
             self._normalize_github_username(username)
@@ -1428,6 +1451,8 @@ class ResumeProfileProcessor:
             label_base = (
                 "github_profile"
                 if candidate.label.casefold() == "github profile"
+                else "linkedin_profile"
+                if candidate.label.casefold() == "linkedin profile"
                 else "personal_website"
             )
             next_index = source_label_counts.get(label_base, 0) + 1
@@ -1650,7 +1675,7 @@ class ResumeProfileProcessor:
                 "Accept": ", ".join(PROFILE_SOURCE_ALLOWED_CONTENT_TYPES),
             },
             body=None,
-            max_bytes=PROFILE_SOURCE_MAX_BYTES,
+            max_bytes=self._profile_source_max_bytes_for_url(url),
             require_success=True,
             size_limit_error="Profile page exceeds size limit",
             detect_blocked=True,
@@ -1809,6 +1834,12 @@ class ResumeProfileProcessor:
             if len(payload) > max_bytes:
                 raise ValueError(size_limit_error)
         return bytes(payload)
+
+    def _profile_source_max_bytes_for_url(self, url: str) -> int:
+        host = (urlsplit(url).hostname or "").strip().casefold()
+        if host == "linkedin.com" or host.endswith(".linkedin.com"):
+            return PROFILE_SOURCE_LINKEDIN_MAX_BYTES
+        return PROFILE_SOURCE_MAX_BYTES
 
     def _fetch_external_profile_source_text_with_browser(
         self,
@@ -2157,6 +2188,10 @@ class ResumeProfileProcessor:
         )
 
     def _extract_text_from_html(self, value: str) -> str:
+        linkedin_text = self._extract_text_from_linkedin_html(value)
+        if linkedin_text:
+            return linkedin_text
+
         main_match = re.search(r"(?is)<main[^>]*>(.*?)</main>", value)
         html_value = main_match.group(1) if main_match else value
         title_match = _HTML_TITLE_RE.search(value)
@@ -2187,6 +2222,238 @@ class ResumeProfileProcessor:
         if normalized:
             text_parts.append(normalized)
         return "\n".join(text_parts).strip()
+
+    def _extract_text_from_linkedin_html(self, value: str) -> str | None:
+        if not self._is_linkedin_public_profile_html(value):
+            return None
+
+        lines = self._extract_html_text_lines(value)
+        if not lines:
+            return None
+        filtered_lines = self._dedupe_lines(
+            line for line in lines if not self._is_linkedin_noise_line(line)
+        )
+        if not filtered_lines:
+            return None
+
+        title_match = _HTML_TITLE_RE.search(value)
+        name: str | None = None
+        headline: str | None = None
+        if title_match:
+            title = re.sub(r"\s+", " ", unescape(title_match.group(1))).strip()
+            if title:
+                title_root = title.removesuffix(" | LinkedIn").strip()
+                name, _, headline_part = title_root.partition(" - ")
+                name = name.strip() or None
+                headline = headline_part.strip() or None
+
+        location = self._extract_linkedin_location(filtered_lines)
+        if not location:
+            location = self._extract_linkedin_location_from_html(value)
+
+        sections = self._extract_linkedin_sections(filtered_lines)
+        websites = self._format_linkedin_websites(sections.pop("Websites", []))
+
+        parts: list[str] = []
+        if name:
+            parts.append(f"Name: {name}")
+        if headline:
+            parts.append(f"Headline: {headline}")
+        if location:
+            parts.append(f"Location: {location}")
+
+        if websites:
+            if parts:
+                parts.append("")
+            parts.append("Websites:")
+            parts.extend(f"- {item}" for item in websites)
+
+        for heading in (
+            "Experience",
+            "Education",
+            "Publications",
+            "Patents",
+            "Honors & Awards",
+            "Languages",
+        ):
+            section_lines = sections.get(heading, [])
+            if not section_lines:
+                continue
+            if parts:
+                parts.append("")
+            parts.append(f"{heading}:")
+            parts.extend(section_lines)
+
+        return "\n".join(parts).strip() or None
+
+    @staticmethod
+    def _is_linkedin_public_profile_html(value: str) -> bool:
+        lowered = value.casefold()
+        has_profile_marker = (
+            "linkedin.com/in/" in lowered or "public_profile_v3" in lowered
+        )
+        if not has_profile_marker:
+            return False
+        return (
+            "linkedin:pagetag" in lowered
+            or "| linkedin</title>" in lowered
+            or "public_profile_v3" in lowered
+        )
+
+    def _extract_html_text_lines(self, value: str) -> list[str]:
+        main_match = re.search(r"(?is)<main[^>]*>(.*?)</main>", value)
+        html_value = main_match.group(1) if main_match else value
+        normalized = re.sub(r"(?is)<!--.*?-->", " ", html_value)
+        normalized = _HTML_BLOCK_RE.sub(" ", normalized)
+        normalized = _HTML_BREAK_RE.sub("\n", normalized)
+        normalized = _HTML_BLOCK_CLOSE_RE.sub("\n", normalized)
+        normalized = _HTML_TAG_RE.sub("\n", normalized)
+        normalized = unescape(normalized)
+        normalized = normalized.replace("\xa0", " ")
+        return [
+            re.sub(r"\s+", " ", line).strip()
+            for line in normalized.splitlines()
+            if re.sub(r"\s+", " ", line).strip()
+        ]
+
+    @staticmethod
+    def _dedupe_lines(lines: Any) -> list[str]:
+        deduped: list[str] = []
+        previous: str | None = None
+        for raw_line in lines:
+            line = str(raw_line).strip()
+            if not line or line == previous:
+                continue
+            deduped.append(line)
+            previous = line
+        return deduped
+
+    @staticmethod
+    def _is_linkedin_noise_line(line: str) -> bool:
+        lowered = line.casefold()
+        if re.search(r"\*]:|\[&|group-hover:|text-color-|font-|leading-\[", line):
+            return True
+        if line.endswith(" Graphic"):
+            return True
+        return any(
+            marker in lowered
+            for marker in (
+                "skip to main content",
+                "join now",
+                "sign in",
+                "join with email",
+                "already on linkedin",
+                "user agreement",
+                "privacy policy",
+                "cookie policy",
+                "view mutual connections",
+                "see your mutual connections",
+                "view michael’s full profile",
+                "view michael's full profile",
+                "report this",
+                "close menu",
+                "copy",
+                "facebook",
+                "top content",
+                "people",
+                "learning",
+                "jobs",
+                "games",
+                "contact info",
+                "email or phone",
+                "password",
+                "forgot password",
+                "show all activity",
+                "other similar profiles",
+                "message",
+                "view profile",
+                "public_profile__posts",
+            )
+        )
+
+    def _extract_linkedin_sections(self, lines: list[str]) -> dict[str, list[str]]:
+        headings = (
+            "Websites",
+            "Experience",
+            "Education",
+            "Publications",
+            "Patents",
+            "Honors & Awards",
+            "Languages",
+        )
+        indexed_headings = [
+            (index, line) for index, line in enumerate(lines) if line in headings
+        ]
+        sections: dict[str, list[str]] = {}
+        for position, (start_index, heading) in enumerate(indexed_headings):
+            end_index = (
+                indexed_headings[position + 1][0]
+                if position + 1 < len(indexed_headings)
+                else len(lines)
+            )
+            section_lines = self._dedupe_lines(
+                line
+                for line in lines[start_index + 1 : end_index]
+                if not self._is_linkedin_noise_line(line)
+            )
+            if not section_lines:
+                continue
+            if heading == "Websites":
+                trimmed_lines: list[str] = []
+                for line in section_lines:
+                    if "similar profiles" in line.casefold():
+                        break
+                    trimmed_lines.append(line)
+                section_lines = trimmed_lines
+            sections[heading] = section_lines
+        return sections
+
+    @staticmethod
+    def _format_linkedin_websites(lines: list[str]) -> list[str]:
+        allowed_labels = {
+            "blog",
+            "company website",
+            "other",
+            "personal website",
+            "portfolio",
+            "rss feed",
+            "website",
+        }
+        formatted: list[str] = []
+        index = 0
+        while index < len(lines):
+            current = lines[index]
+            if current.casefold().startswith("other similar profiles"):
+                break
+            if index + 1 < len(lines) and _DOMAIN_LINE_RE.fullmatch(lines[index + 1]):
+                if current.casefold() not in allowed_labels:
+                    break
+                formatted.append(f"{current}: {lines[index + 1]}")
+                index += 2
+                continue
+            if _DOMAIN_LINE_RE.fullmatch(current):
+                formatted.append(current)
+            index += 1
+        return formatted
+
+    @staticmethod
+    def _extract_linkedin_location(lines: list[str]) -> str | None:
+        for line in lines:
+            if re.fullmatch(r"[A-Za-z .'-]+,\s*[A-Za-z .'-]+", line):
+                return line
+        return None
+
+    @staticmethod
+    def _extract_linkedin_location_from_html(html: str) -> str | None:
+        for match in re.finditer(
+            r'"addressLocality"\s*:\s*"([^"]+)"',
+            html,
+            flags=re.IGNORECASE,
+        ):
+            candidate = re.sub(r"\s+", " ", unescape(match.group(1))).strip()
+            if candidate:
+                return candidate
+        return None
 
     def _validate_public_profile_url(self, candidate_url: str) -> str | None:
         resolution = self._resolve_public_profile_request_target(candidate_url)
@@ -2287,6 +2554,32 @@ class ResumeProfileProcessor:
         if not re.fullmatch(r"[A-Za-z0-9-]{1,39}", candidate):
             return None
         return candidate
+
+    @staticmethod
+    def _normalize_linkedin_profile_url(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        candidate = value.strip()
+        if not candidate:
+            return None
+        if candidate.casefold().startswith("www."):
+            candidate = f"https://{candidate}"
+        elif not candidate.casefold().startswith(("http://", "https://")):
+            candidate = f"https://{candidate}"
+        try:
+            parsed = urlsplit(candidate)
+        except Exception:
+            return None
+        if "@" in parsed.netloc:
+            return None
+        host = (parsed.hostname or "").strip().casefold()
+        if host != "linkedin.com" and not host.endswith(".linkedin.com"):
+            return None
+        normalized_path = re.sub(r"/{2,}", "/", parsed.path or "").rstrip("/")
+        match = _LINKEDIN_PROFILE_RE.fullmatch(f"https://linkedin.com{normalized_path}")
+        if not match:
+            return None
+        return f"https://linkedin.com/in/{match.group(1)}"
 
     @staticmethod
     def _reset_unused_source_enrichments(

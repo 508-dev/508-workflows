@@ -262,7 +262,7 @@ def test_extract_profile_proposal_merges_and_serializes_social_links() -> None:
 
 
 def test_extract_profile_proposal_fetches_crm_website_and_github_sources() -> None:
-    """Existing CRM website and GitHub profile text should be passed into extraction."""
+    """Existing CRM website, LinkedIn, and GitHub profile text should be passed into extraction."""
     processor = ResumeProfileProcessor()
     processor.crm = Mock()
     processor.extractor = Mock()
@@ -272,6 +272,7 @@ def test_extract_profile_proposal_fetches_crm_website_and_github_sources() -> No
     processor._fetch_external_profile_source_text = Mock(
         side_effect=lambda url, **_: {
             "https://portfolio.example.com": "Portfolio content",
+            "https://linkedin.com/in/octocat": "LinkedIn profile content",
             "https://github.com/octocat": "GitHub profile content",
         }[url]
     )
@@ -282,6 +283,7 @@ def test_extract_profile_proposal_fetches_crm_website_and_github_sources() -> No
     processor.crm.get_contact.return_value = {
         "emailAddress": "member@example.com",
         "cWebsiteLink": ["https://portfolio.example.com"],
+        "cLinkedIn": "https://www.linkedin.com/in/octocat/",
         "cGitHubUsername": "octocat",
     }
     processor.crm.download_attachment.return_value = b"resume-bytes"
@@ -325,9 +327,23 @@ def test_extract_profile_proposal_fetches_crm_website_and_github_sources() -> No
             "Content:\n"
             "GitHub profile content"
         ),
+        "linkedin_profile": (
+            "Source: LinkedIn Profile\n"
+            "URL: https://linkedin.com/in/octocat\n"
+            "Content:\n"
+            "LinkedIn profile content"
+        ),
     }
-    assert [item.status for item in result.source_enrichments] == ["used", "used"]
-    assert [item.origin for item in result.source_enrichments] == ["crm", "crm"]
+    assert [item.status for item in result.source_enrichments] == [
+        "used",
+        "used",
+        "used",
+    ]
+    assert [item.origin for item in result.source_enrichments] == [
+        "crm",
+        "crm",
+        "crm",
+    ]
 
 
 def test_extract_profile_proposal_reruns_with_inferred_github_only() -> None:
@@ -1321,6 +1337,88 @@ def test_extract_text_from_html_reads_meta_description_regardless_of_order() -> 
     assert "Title: Portfolio" in rendered
     assert "Description: Builder of useful things" in rendered
     assert "Body copy" in rendered
+
+
+def test_profile_source_max_bytes_for_linkedin_pages_is_larger() -> None:
+    """LinkedIn public profiles should be allowed a larger response budget."""
+    processor = ResumeProfileProcessor()
+
+    assert (
+        processor._profile_source_max_bytes_for_url(
+            "https://www.linkedin.com/in/wumichaelm/"
+        )
+        > PROFILE_SOURCE_MAX_BYTES
+    )
+    assert (
+        processor._profile_source_max_bytes_for_url("https://example.com/about")
+        == PROFILE_SOURCE_MAX_BYTES
+    )
+
+
+def test_extract_text_from_html_compacts_linkedin_public_profile_sections() -> None:
+    """LinkedIn public profile HTML should be reduced to the useful header and sections."""
+    processor = ResumeProfileProcessor()
+
+    rendered = processor._extract_text_from_html(
+        """
+        <html>
+          <head>
+            <meta name="pageKey" content="public_profile_v3_desktop">
+            <title>Michael Wu - Software Engineer, Fractional CTO, Founder, Investor, World Traveler based in Taipei / Tokyo | LinkedIn</title>
+          </head>
+          <body>
+            <main>
+              <div>Michael Wu</div>
+              <div>Software Engineer, Fractional CTO, Founder, Investor, World Traveler based in Taipei / Tokyo</div>
+              <div>Tokyo, Japan</div>
+              <section>
+                <h2>Websites</h2>
+                <div>Blog</div>
+                <div>michaelinasia.com</div>
+                <div>Blog</div>
+                <div>demflyers.com</div>
+              </section>
+              <section>
+                <h2>Experience</h2>
+                <div>Senior Software Engineer</div>
+                <div>Stripe</div>
+                <div>Feb 2020 - Dec 2022 2 years 11 months</div>
+                <div>Tokyo, Japan</div>
+                <div>Implemented cost pipelines for card transactions in Japan.</div>
+              </section>
+              <section>
+                <h2>Education</h2>
+                <div>Stanford University</div>
+                <div>Master of Science (MS) Electrical Engineering</div>
+              </section>
+              <section>
+                <h2>Languages</h2>
+                <div>Japanese</div>
+                <div>Limited working proficiency</div>
+              </section>
+            </main>
+          </body>
+        </html>
+        """
+    )
+
+    assert "Name: Michael Wu" in rendered
+    assert (
+        "Headline: Software Engineer, Fractional CTO, Founder, Investor, "
+        "World Traveler based in Taipei / Tokyo" in rendered
+    )
+    assert "Location: Tokyo, Japan" in rendered
+    assert "Websites:" in rendered
+    assert "- Blog: michaelinasia.com" in rendered
+    assert "- Blog: demflyers.com" in rendered
+    assert "Experience:" in rendered
+    assert "Senior Software Engineer" in rendered
+    assert "Stripe" in rendered
+    assert "Implemented cost pipelines for card transactions in Japan." in rendered
+    assert "Education:" in rendered
+    assert "Stanford University" in rendered
+    assert "Languages:" in rendered
+    assert "Japanese" in rendered
 
 
 def test_fetch_external_profile_source_text_pins_resolved_public_ips() -> None:
