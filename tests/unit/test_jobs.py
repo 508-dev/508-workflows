@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -133,6 +133,88 @@ def test_build_match_candidate_lines_omits_crm_link_for_prospect() -> None:
     assert "`@michaelmwu`" in lines[0]
     assert "<https://crm.example/#Contact/view/" not in lines[0]
     assert "<@" not in lines[0]
+
+
+def test_build_candidate_search_plan_relaxes_hard_requirements() -> None:
+    requirements = JobRequirements(
+        hard_required_skills=["webflow", "figma", "hubspot"],
+        discord_role_types=["Designer"],
+    )
+
+    plan = JobsCog._build_candidate_search_plan(requirements, min_match_score=8.0)
+
+    assert len(plan) == 3
+    assert plan[0][0].hard_required_skills == ["webflow", "figma"]
+    assert plan[0][1] == 8.0
+    assert plan[0][2] is None
+    assert plan[1][0].hard_required_skills == ["webflow"]
+    assert plan[1][0].soft_required_skills == ["figma", "hubspot"]
+    assert "anchor hard need `webflow`" in (plan[1][2] or "")
+    assert plan[2][0].hard_required_skills == []
+    assert plan[2][0].soft_required_skills == ["webflow", "figma", "hubspot"]
+    assert plan[2][1] == 0.0
+
+
+def test_build_job_match_header_uses_single_skills_line_when_hard_is_empty() -> None:
+    cog = JobsCog(Mock())
+    requirements = JobRequirements(
+        hard_required_skills=[],
+        soft_required_skills=["product design", "ux design"],
+        title="Product Designer",
+    )
+
+    header_lines, *_ = cog._build_job_match_header_and_mentions(
+        requirements=requirements,
+        candidates_count=2,
+        guild=None,
+        search_note="Search note: broadened matching.",
+    )
+
+    assert "Skills: `product design`, `ux design`" in header_lines[1]
+    assert "Other needs:" not in header_lines[1]
+    assert header_lines[2] == "Search note: broadened matching."
+    assert header_lines[3] == "Found **2** candidate(s)."
+
+
+def test_search_and_rerank_candidates_retries_with_relaxed_requirements() -> None:
+    cog = JobsCog(Mock())
+    candidate = _make_candidate(crm_name="Jamie", match_score=18.0)
+    requirements = JobRequirements(
+        hard_required_skills=["webflow", "figma", "hubspot"],
+        discord_role_types=["Designer"],
+    )
+
+    with (
+        patch(
+            "five08.discord_bot.cogs.jobs.search_candidates",
+            side_effect=[[], [candidate]],
+        ) as search_candidates_mock,
+        patch.object(
+            cog,
+            "_rerank_candidates",
+            AsyncMock(return_value=[candidate]),
+        ) as rerank_mock,
+    ):
+        outcome = asyncio.run(
+            cog._search_and_rerank_candidates(
+                posting="Webflow role",
+                requirements=requirements,
+                guild_id="123",
+                limit=20,
+                min_match_score=8.0,
+            )
+        )
+
+    assert search_candidates_mock.call_count == 2
+    first_requirements = search_candidates_mock.call_args_list[0].args[1]
+    second_requirements = search_candidates_mock.call_args_list[1].args[1]
+    assert first_requirements.hard_required_skills == ["webflow", "figma"]
+    assert second_requirements.hard_required_skills == ["webflow"]
+    assert second_requirements.soft_required_skills == ["figma", "hubspot"]
+    rerank_mock.assert_awaited_once()
+    assert outcome.candidates == [candidate]
+    assert outcome.effective_requirements.hard_required_skills == ["webflow"]
+    assert "anchor hard need `webflow`" in (outcome.search_note or "")
 
 
 def test_build_match_candidate_lines_keeps_name_discord_and_linkedin_on_first_line() -> (

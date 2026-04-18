@@ -240,6 +240,24 @@ def test_job_requirements_dedupes_soft_and_preferred_against_hard() -> None:
     assert requirements.preferred_skills == ["hubspot"]
 
 
+def test_job_requirements_caps_hard_skills_and_normalizes_searchable_aliases() -> None:
+    requirements = JobRequirements(
+        hard_required_skills=[
+            "Webflow",
+            "Figma",
+            "HubSpot integration",
+            "Webflow automations",
+        ],
+        soft_required_skills=["Agent UX"],
+        preferred_skills=["AI native design"],
+    )
+
+    assert requirements.hard_required_skills == ["webflow", "figma"]
+    assert requirements.soft_required_skills == ["hubspot", "ux design"]
+    assert requirements.required_skills == ["webflow", "figma", "hubspot", "ux design"]
+    assert requirements.preferred_skills == ["product design"]
+
+
 def test_extract_us_only_regex_overrides_remote_any() -> None:
     """Regex US-only detection must override the LLM returning remote_any."""
     payload = {
@@ -332,6 +350,12 @@ def test_build_prompt_includes_anchor_skill_instruction() -> None:
     prompt = _build_prompt("text", {})
     assert "anchor skill first" in prompt
     assert '"webflow" before adjacent skills like "figma"' in prompt
+
+
+def test_build_prompt_requests_searchable_skill_names() -> None:
+    prompt = _build_prompt("text", {})
+    assert "searchable skill likely to appear verbatim" in prompt
+    assert '"agent ux" -> "ux design"' in prompt
 
 
 def test_rerank_shortlisted_candidates_parses_structured_response() -> None:

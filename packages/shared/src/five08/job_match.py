@@ -9,9 +9,37 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from five08.discord_webhook import DiscordWebhookLogger
-from five08.skills import normalize_skill_list
+from five08.skills import normalize_skill, normalize_skill_list
 
 logger = logging.getLogger(__name__)
+
+_MAX_HARD_REQUIRED_SKILLS = 2
+
+# Normalize abstract or overly compound job-post phrases into concise, searchable
+# skill terms that are more likely to line up with CRM/resume skill records.
+_JOB_MATCH_SKILL_ALIASES: dict[str, str] = {
+    "product designer": "product design",
+    "ux designer": "ux design",
+    "ui designer": "ui design",
+    "user experience design": "ux design",
+    "user interface design": "ui design",
+    "agent ux": "ux design",
+    "agentic ux": "ux design",
+    "ai native ux": "ux design",
+    "ai native design": "product design",
+    "ai native product design": "product design",
+    "agentic design": "product design",
+    "figma to webflow": "webflow",
+    "webflow interaction": "webflow",
+    "webflow interactions": "webflow",
+    "webflow automation": "webflow",
+    "webflow automations": "webflow",
+    "hubspot integration": "hubspot",
+    "hubspot integrations": "hubspot",
+    "hubspot automation": "hubspot",
+    "hubspot automations": "hubspot",
+    "hubspot workflows": "hubspot",
+}
 
 # Canonical Discord role names used for skill/type classification.
 # These match the actual role names in the 508.dev Discord server.
@@ -387,6 +415,25 @@ _SENIORITY_RE = re.compile(
 SENIORITY_ORDER = ["junior", "midlevel", "senior", "staff"]
 
 
+def _normalize_job_skill_list(values: list[str]) -> list[str]:
+    """Normalize job-post skills toward short, searchable CRM terms."""
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        skill = normalize_skill(raw)
+        if not skill:
+            continue
+        skill = normalize_skill(_JOB_MATCH_SKILL_ALIASES.get(skill, skill))
+        if not skill:
+            continue
+        key = skill.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(skill)
+    return normalized
+
+
 @dataclass(frozen=True)
 class JobRequirements:
     """Normalized requirements extracted from a job posting."""
@@ -406,9 +453,13 @@ class JobRequirements:
     title: str | None = None
 
     def __post_init__(self) -> None:
-        hard_required_skills = normalize_skill_list(list(self.hard_required_skills))
-        soft_required_skills = normalize_skill_list(list(self.soft_required_skills))
-        legacy_required_skills = normalize_skill_list(list(self.required_skills))
+        hard_required_skills = _normalize_job_skill_list(
+            list(self.hard_required_skills)
+        )
+        soft_required_skills = _normalize_job_skill_list(
+            list(self.soft_required_skills)
+        )
+        legacy_required_skills = _normalize_job_skill_list(list(self.required_skills))
 
         if (
             not hard_required_skills
@@ -429,6 +480,12 @@ class JobRequirements:
                 if skill.casefold() not in hard_required_skill_keys
             ]
 
+        if len(hard_required_skills) > _MAX_HARD_REQUIRED_SKILLS:
+            soft_required_skills = (
+                hard_required_skills[_MAX_HARD_REQUIRED_SKILLS:] + soft_required_skills
+            )
+            hard_required_skills = hard_required_skills[:_MAX_HARD_REQUIRED_SKILLS]
+
         hard_required_skill_keys = {item.casefold() for item in hard_required_skills}
         soft_required_skills = [
             skill
@@ -439,7 +496,7 @@ class JobRequirements:
         required_skill_keys = {item.casefold() for item in required_skills}
         preferred_skills = [
             skill
-            for skill in normalize_skill_list(list(self.preferred_skills))
+            for skill in _normalize_job_skill_list(list(self.preferred_skills))
             if skill.casefold() not in required_skill_keys
         ]
 
@@ -525,10 +582,16 @@ def _build_prompt(posting_text: str, hints: dict[str, Any]) -> str:
         '- "hard_required_skills": array of strings — hard must-have TECHNICAL skills. '
         'Use concise canonical names (1-3 words, e.g. "webflow", "typescript", '
         '"postgresql"). Only include skills that should block a candidate if missing. '
-        "If the posting clearly hinges on one platform or tool, put that anchor skill "
-        'first (e.g. "webflow" before adjacent skills like "figma").\n'
+        "Keep this list short: usually 1 anchor skill, occasionally 2 when both are "
+        "clear blockers. Avoid custom compounds or conceptual phrases; rewrite them "
+        "to the closest searchable skill likely to appear verbatim in resumes/CRM "
+        'records (e.g. "ai native design" -> "product design", "agent ux" -> '
+        '"ux design", "hubspot integration" -> "hubspot"). If the posting clearly '
+        "hinges on one platform or tool, put that anchor skill first "
+        '(e.g. "webflow" before adjacent skills like "figma").\n'
         '- "soft_required_skills": array of strings — technical skills that matter a lot '
-        "but should not automatically disqualify a candidate if missing.\n"
+        "but should not automatically disqualify a candidate if missing. Use the same "
+        "search-friendly canonical naming rules.\n"
         '- "preferred_skills": array of strings — secondary technical skills, same format.\n'
         '- "required_evidence": array of strings — non-skill proof items the hiring team '
         'explicitly asks for, like "live webflow projects", "portfolio", or '
