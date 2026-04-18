@@ -65,13 +65,30 @@ PROFILE_SOURCE_BROWSER_RESOURCE_MAX_BYTES = 10 * 1024 * 1024
 PROFILE_SOURCE_MAX_TEXT_CHARS = 12000
 PROFILE_SOURCE_MAX_WEBSITES = 2
 PROFILE_SOURCE_ALLOWED_PORTS = frozenset({80, 443})
-PROFILE_SOURCE_USER_AGENT = "five08-resume-parser/1.0"
+PROFILE_SOURCE_USER_AGENT = (
+    "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+)
+PROFILE_SOURCE_BROWSER_VIEWPORT = {"width": 412, "height": 915}
+PROFILE_SOURCE_BROWSER_DEVICE_SCALE_FACTOR = 2.625
 PROFILE_SOURCE_IMPERSONATE: BrowserTypeLiteral = "chrome131_android"
 PROFILE_SOURCE_ALLOWED_CONTENT_TYPES = (
     "text/html",
     "text/plain",
     "application/xhtml+xml",
     "text/markdown",
+)
+PROFILE_SOURCE_BLOCKED_STATUS_CODES = frozenset({401, 403, 429, 503})
+PROFILE_SOURCE_BLOCKED_MARKERS = (
+    "access denied",
+    "attention required",
+    "captcha",
+    "cf-chl",
+    "challenge-platform",
+    "checking your browser",
+    "enable javascript and cookies",
+    "unusual traffic",
+    "verify you are human",
 )
 PROFILE_SOURCE_JS_SPARSE_TEXT_MAX_CHARS = 250
 PROFILE_SOURCE_JS_SPARSE_TEXT_MAX_WORDS = 40
@@ -1456,79 +1473,92 @@ class ResumeProfileProcessor:
         *,
         allow_javascript_fallback: bool = False,
     ) -> ProfileSourceFetchDiagnostics:
-        response: ProfileSourceHttpResponse | None = None
-        last_fetch_error: ValueError | None = None
-        for candidate_url in self._iter_profile_source_fetch_urls(
-            url,
-            allow_javascript_fallback=allow_javascript_fallback,
-        ):
-            try:
-                response = self._fetch_external_profile_source_response(candidate_url)
-                break
-            except ValueError as exc:
-                last_fetch_error = exc
-                if not self._is_retryable_profile_fetch_error(str(exc)):
-                    raise
-
-        if response is None:
-            raise last_fetch_error or ValueError("Profile fetch failed")
-        extracted = ""
-        extraction_error: ValueError | None = None
+        session = self._create_profile_source_http_session()
         try:
-            extracted = self._extract_profile_source_text(
-                body=response.body,
-                content_type=response.content_type,
-            )
-        except ValueError as exc:
-            extraction_error = exc
+            response: ProfileSourceHttpResponse | None = None
+            last_fetch_error: ValueError | None = None
+            for candidate_url in self._iter_profile_source_fetch_urls(
+                url,
+                allow_javascript_fallback=allow_javascript_fallback,
+            ):
+                try:
+                    response = self._fetch_external_profile_source_response(
+                        candidate_url,
+                        session=session,
+                    )
+                    break
+                except ValueError as exc:
+                    last_fetch_error = exc
+                    if not self._is_retryable_profile_fetch_error(str(exc)):
+                        raise
 
-        browser_attempted = False
-        browser_used = False
-        browser_text: str | None = None
-        if allow_javascript_fallback and self._should_retry_profile_source_with_browser(
-            body=response.body,
-            content_type=response.content_type,
-            extracted_text=extracted,
-        ):
-            browser_attempted = True
+            if response is None:
+                raise last_fetch_error or ValueError("Profile fetch failed")
+            extracted = ""
+            extraction_error: ValueError | None = None
             try:
-                browser_text = self._fetch_external_profile_source_text_with_browser(
-                    response
+                extracted = self._extract_profile_source_text(
+                    body=response.body,
+                    content_type=response.content_type,
                 )
             except ValueError as exc:
-                logger.info(
-                    "Profile JS fallback failed url=%s error=%s",
-                    response.final_url,
-                    exc,
-                )
-            else:
-                browser_used = self._rendered_profile_source_text_is_better(
-                    rendered_text=browser_text,
+                extraction_error = exc
+
+            browser_attempted = False
+            browser_used = False
+            browser_text: str | None = None
+            if (
+                allow_javascript_fallback
+                and self._should_retry_profile_source_with_browser(
+                    body=response.body,
+                    content_type=response.content_type,
                     extracted_text=extracted,
                 )
+            ):
+                browser_attempted = True
+                try:
+                    browser_text = (
+                        self._fetch_external_profile_source_text_with_browser(
+                            response,
+                            session=session,
+                        )
+                    )
+                except ValueError as exc:
+                    logger.info(
+                        "Profile JS fallback failed url=%s error=%s",
+                        response.final_url,
+                        exc,
+                    )
+                else:
+                    browser_used = self._rendered_profile_source_text_is_better(
+                        rendered_text=browser_text,
+                        extracted_text=extracted,
+                    )
 
-        selected_text: str | None = None
-        error: str | None = None
-        if browser_used and browser_text:
-            selected_text = browser_text
-        elif extracted:
-            selected_text = extracted
-        elif extraction_error is not None:
-            error = str(extraction_error)
-        else:
-            error = "Profile page did not contain usable text"
+            selected_text: str | None = None
+            error: str | None = None
+            if browser_used and browser_text:
+                selected_text = browser_text
+            elif extracted:
+                selected_text = extracted
+            elif extraction_error is not None:
+                error = str(extraction_error)
+            else:
+                error = "Profile page did not contain usable text"
 
-        return ProfileSourceFetchDiagnostics(
-            url=url,
-            final_url=response.final_url,
-            content_type=response.content_type,
-            selected_text=selected_text,
-            curl_text=extracted or None,
-            browser_attempted=browser_attempted,
-            browser_used=browser_used,
-            browser_text=browser_text,
-            error=error,
-        )
+            return ProfileSourceFetchDiagnostics(
+                url=url,
+                final_url=response.final_url,
+                content_type=response.content_type,
+                selected_text=selected_text,
+                curl_text=extracted or None,
+                browser_attempted=browser_attempted,
+                browser_used=browser_used,
+                browser_text=browser_text,
+                error=error,
+            )
+        finally:
+            session.close()
 
     def _iter_profile_source_fetch_urls(
         self,
@@ -1607,7 +1637,10 @@ class ResumeProfileProcessor:
         return f"{host}:{new_port}"
 
     def _fetch_external_profile_source_response(
-        self, url: str
+        self,
+        url: str,
+        *,
+        session: curl_requests.Session | None = None,
     ) -> ProfileSourceHttpResponse:
         return self._request_profile_http_response(
             url,
@@ -1620,10 +1653,14 @@ class ResumeProfileProcessor:
             max_bytes=PROFILE_SOURCE_MAX_BYTES,
             require_success=True,
             size_limit_error="Profile page exceeds size limit",
+            session=session,
         )
 
     def _fetch_browser_profile_request_response(
-        self, request: Any
+        self,
+        request: Any,
+        *,
+        session: curl_requests.Session,
     ) -> ProfileSourceHttpResponse:
         request_headers = {
             str(key): str(value)
@@ -1638,6 +1675,7 @@ class ResumeProfileProcessor:
             max_bytes=PROFILE_SOURCE_BROWSER_RESOURCE_MAX_BYTES,
             require_success=False,
             size_limit_error="Browser profile resource exceeds size limit",
+            session=session,
         )
 
     def _request_profile_http_response(
@@ -1650,18 +1688,31 @@ class ResumeProfileProcessor:
         max_bytes: int,
         require_success: bool,
         size_limit_error: str,
+        session: curl_requests.Session | None = None,
     ) -> ProfileSourceHttpResponse:
         current_url = url
+        owns_session = session is None
+        active_session = session or self._create_profile_source_http_session()
 
-        for _ in range(PROFILE_SOURCE_MAX_REDIRECTS + 1):
-            resolution = self._resolve_public_profile_request_target(current_url)
-            if isinstance(resolution, str):
-                raise ValueError(resolution)
-            host, port, resolved_ips, host_is_ip_literal = resolution
+        try:
+            for _ in range(PROFILE_SOURCE_MAX_REDIRECTS + 1):
+                resolution = self._resolve_public_profile_request_target(current_url)
+                if isinstance(resolution, str):
+                    raise ValueError(resolution)
+                host, port, resolved_ips, host_is_ip_literal = resolution
 
-            try:
-                if host_is_ip_literal:
-                    response = curl_requests.request(
+                try:
+                    resolve_entries = None
+                    if not host_is_ip_literal:
+                        resolve_entries = [
+                            f"{host}:{port}:{_format_curl_resolve_address(ip)}"
+                            for ip in resolved_ips
+                        ]
+                    self._configure_profile_source_http_session(
+                        active_session,
+                        resolve_entries=resolve_entries,
+                    )
+                    response = active_session.request(
                         cast(Any, method),
                         current_url,
                         headers=headers,
@@ -1669,7 +1720,6 @@ class ResumeProfileProcessor:
                         timeout=PROFILE_SOURCE_FETCH_TIMEOUT_SECONDS,
                         allow_redirects=False,
                         stream=True,
-                        impersonate=PROFILE_SOURCE_IMPERSONATE,
                     )
                     try:
                         if response.status_code in {301, 302, 303, 307, 308}:
@@ -1681,14 +1731,12 @@ class ResumeProfileProcessor:
                             current_url = urljoin(current_url, redirect_to)
                             continue
 
-                        if require_success:
-                            response.raise_for_status()
                         payload = self._read_profile_http_response_body(
                             response,
                             max_bytes=max_bytes,
                             size_limit_error=size_limit_error,
                         )
-                        return ProfileSourceHttpResponse(
+                        result = ProfileSourceHttpResponse(
                             final_url=current_url,
                             status_code=int(response.status_code),
                             headers={
@@ -1697,59 +1745,39 @@ class ResumeProfileProcessor:
                             },
                             body=payload,
                         )
+                        if self._profile_source_response_looks_blocked(result):
+                            raise ValueError(
+                                "Profile fetch hit a scraping block; reset session"
+                            )
+                        if require_success:
+                            response.raise_for_status()
+                        return result
                     finally:
                         response.close()
-                else:
-                    resolve_entries = [
-                        f"{host}:{port}:{_format_curl_resolve_address(ip)}"
-                        for ip in resolved_ips
-                    ]
-                    session: curl_requests.Session = curl_requests.Session(
-                        curl_options={CurlOpt.RESOLVE: resolve_entries}
-                    )
-                    with session:
-                        response = session.request(
-                            cast(Any, method),
-                            current_url,
-                            headers=headers,
-                            data=body,
-                            timeout=PROFILE_SOURCE_FETCH_TIMEOUT_SECONDS,
-                            allow_redirects=False,
-                            stream=True,
-                            impersonate=PROFILE_SOURCE_IMPERSONATE,
-                        )
-                        try:
-                            if response.status_code in {301, 302, 303, 307, 308}:
-                                redirect_to = response.headers.get("Location")
-                                if not redirect_to:
-                                    raise ValueError(
-                                        "Profile URL redirect missing Location header"
-                                    )
-                                current_url = urljoin(current_url, redirect_to)
-                                continue
-
-                            if require_success:
-                                response.raise_for_status()
-                            payload = self._read_profile_http_response_body(
-                                response,
-                                max_bytes=max_bytes,
-                                size_limit_error=size_limit_error,
-                            )
-                            return ProfileSourceHttpResponse(
-                                final_url=current_url,
-                                status_code=int(response.status_code),
-                                headers={
-                                    str(key).lower(): str(value)
-                                    for key, value in response.headers.items()
-                                },
-                                body=payload,
-                            )
-                        finally:
-                            response.close()
-            except RequestsError as exc:
-                raise ValueError(f"Profile fetch failed: {exc}") from exc
+                except RequestsError as exc:
+                    raise ValueError(f"Profile fetch failed: {exc}") from exc
+        finally:
+            if owns_session:
+                active_session.close()
 
         raise ValueError("Profile URL exceeded redirect limit")
+
+    def _create_profile_source_http_session(self) -> curl_requests.Session:
+        return curl_requests.Session(
+            headers={"User-Agent": PROFILE_SOURCE_USER_AGENT},
+            impersonate=PROFILE_SOURCE_IMPERSONATE,
+        )
+
+    @staticmethod
+    def _configure_profile_source_http_session(
+        session: curl_requests.Session,
+        *,
+        resolve_entries: list[str] | None,
+    ) -> None:
+        if resolve_entries:
+            session.curl_options = {CurlOpt.RESOLVE: resolve_entries}
+            return
+        session.curl_options = {}
 
     def _read_profile_http_response_body(
         self,
@@ -1779,9 +1807,11 @@ class ResumeProfileProcessor:
     def _fetch_external_profile_source_text_with_browser(
         self,
         initial_response: ProfileSourceHttpResponse,
+        *,
+        session: curl_requests.Session,
     ) -> str:
         try:
-            from cloakbrowser import launch  # type: ignore[import-untyped]
+            from cloakbrowser import launch_context  # type: ignore[import-untyped]
         except ImportError as exc:
             raise ValueError("JavaScript browser fallback is unavailable") from exc
 
@@ -1789,18 +1819,67 @@ class ResumeProfileProcessor:
         validation_error = self._validate_browser_profile_navigation_url(navigation_url)
         if validation_error:
             raise ValueError(validation_error)
+        retry_with_fresh_session = False
+        try:
+            return self._fetch_external_profile_source_text_with_browser_once(
+                initial_response,
+                session=session,
+                launch_context=launch_context,
+            )
+        except ValueError as exc:
+            retry_with_fresh_session = self._should_reset_profile_source_session(
+                str(exc)
+            )
+            if not retry_with_fresh_session:
+                raise
 
+        logger.info("Resetting shared profile fetch session for %s", navigation_url)
+        fresh_session = self._create_profile_source_http_session()
+        try:
+            fresh_response = self._fetch_external_profile_source_response(
+                navigation_url,
+                session=fresh_session,
+            )
+            return self._fetch_external_profile_source_text_with_browser_once(
+                fresh_response,
+                session=fresh_session,
+                launch_context=launch_context,
+            )
+        finally:
+            fresh_session.close()
+
+    def _fetch_external_profile_source_text_with_browser_once(
+        self,
+        initial_response: ProfileSourceHttpResponse,
+        *,
+        session: curl_requests.Session,
+        launch_context: Callable[..., Any],
+    ) -> str:
+        navigation_url = initial_response.final_url
         response_cache: dict[str, ProfileSourceHttpResponse] = {
             initial_response.final_url: initial_response
         }
-        browser = None
+        context = None
         try:
-            browser = launch()
-            page = browser.new_page()
+            context = launch_context(
+                user_agent=PROFILE_SOURCE_USER_AGENT,
+                viewport=PROFILE_SOURCE_BROWSER_VIEWPORT,
+                is_mobile=True,
+                has_touch=True,
+                device_scale_factor=PROFILE_SOURCE_BROWSER_DEVICE_SCALE_FACTOR,
+            )
+            self._seed_browser_profile_session(
+                context,
+                session=session,
+                navigation_url=navigation_url,
+            )
+            page = context.new_page()
             page.route(
                 "**/*",
                 lambda route: self._handle_browser_profile_request_route(
-                    route, response_cache
+                    route,
+                    response_cache,
+                    session=session,
                 ),
             )
             page.goto(
@@ -1815,12 +1894,14 @@ class ResumeProfileProcessor:
             if validation_error:
                 raise ValueError(validation_error)
             rendered_html = page.content()
+            if self._profile_source_html_looks_blocked(rendered_html):
+                raise ValueError("JavaScript profile fetch hit a scraping block")
         except Exception as exc:
             raise ValueError(f"JavaScript profile fetch failed: {exc}") from exc
         finally:
-            if browser is not None:
+            if context is not None:
                 try:
-                    browser.close()
+                    context.close()
                 except Exception:
                     logger.debug("Failed to close CloakBrowser for %s", navigation_url)
 
@@ -1902,6 +1983,8 @@ class ResumeProfileProcessor:
         self,
         route: Any,
         response_cache: dict[str, ProfileSourceHttpResponse],
+        *,
+        session: curl_requests.Session,
     ) -> None:
         request = route.request
         request_url = str(getattr(request, "url", "")).strip()
@@ -1922,7 +2005,10 @@ class ResumeProfileProcessor:
         request_method = str(getattr(request, "method", "GET")).upper()
         response = response_cache.get(request_url) if request_method == "GET" else None
         if response is None:
-            response = self._fetch_browser_profile_request_response(request)
+            response = self._fetch_browser_profile_request_response(
+                request,
+                session=session,
+            )
             if request_method == "GET":
                 response_cache[request_url] = response
 
@@ -1971,7 +2057,82 @@ class ResumeProfileProcessor:
         cache_control = str(response.headers.get("cache-control", "")).strip()
         if cache_control:
             headers["cache-control"] = cache_control
+        set_cookie = str(response.headers.get("set-cookie", "")).strip()
+        if set_cookie:
+            headers["set-cookie"] = set_cookie
         return headers
+
+    def _seed_browser_profile_session(
+        self,
+        context: Any,
+        *,
+        session: curl_requests.Session,
+        navigation_url: str,
+    ) -> None:
+        cookies: list[dict[str, Any]] = []
+        for cookie in session.cookies.jar:
+            cookie_payload = self._browser_cookie_from_curl_cookie(
+                cookie,
+                navigation_url=navigation_url,
+            )
+            if cookie_payload is not None:
+                cookies.append(cookie_payload)
+        if cookies:
+            context.add_cookies(cookies)
+
+    @staticmethod
+    def _browser_cookie_from_curl_cookie(
+        cookie: Any,
+        *,
+        navigation_url: str,
+    ) -> dict[str, Any] | None:
+        name = str(getattr(cookie, "name", "")).strip()
+        value = str(getattr(cookie, "value", ""))
+        if not name:
+            return None
+
+        payload: dict[str, Any] = {
+            "name": name,
+            "value": value,
+            "path": str(getattr(cookie, "path", "/") or "/"),
+            "secure": bool(getattr(cookie, "secure", False)),
+        }
+        domain = str(getattr(cookie, "domain", "") or "").strip()
+        if domain:
+            payload["domain"] = domain
+        else:
+            payload["url"] = navigation_url
+        expires = getattr(cookie, "expires", None)
+        if isinstance(expires, (int, float)) and expires > 0:
+            payload["expires"] = float(expires)
+        return payload
+
+    @staticmethod
+    def _should_reset_profile_source_session(error: str) -> bool:
+        normalized = error.casefold()
+        return any(
+            marker in normalized
+            for marker in (
+                "scraping block",
+                "timed out",
+                "timeout",
+            )
+        )
+
+    @staticmethod
+    def _profile_source_html_looks_blocked(rendered_html: str) -> bool:
+        normalized = rendered_html.casefold()
+        return any(marker in normalized for marker in PROFILE_SOURCE_BLOCKED_MARKERS)
+
+    @staticmethod
+    def _profile_source_response_looks_blocked(
+        response: ProfileSourceHttpResponse,
+    ) -> bool:
+        if response.status_code in PROFILE_SOURCE_BLOCKED_STATUS_CODES:
+            return True
+        return ResumeProfileProcessor._profile_source_html_looks_blocked(
+            response.body.decode("utf-8", errors="ignore")
+        )
 
     def _render_external_profile_source_text(
         self,

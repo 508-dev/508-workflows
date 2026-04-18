@@ -6,7 +6,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
-from unittest.mock import MagicMock, Mock, call, patch
+from unittest.mock import ANY, MagicMock, Mock, call, patch
 
 from curl_cffi import CurlOpt
 
@@ -805,7 +805,8 @@ def test_fetch_external_profile_source_text_skips_browser_for_github_sources() -
     assert extracted == "Title: octocat\noctocat"
     processor._fetch_external_profile_source_text_with_browser.assert_not_called()
     processor._fetch_external_profile_source_response.assert_called_once_with(
-        "https://github.com/octocat"
+        "https://github.com/octocat",
+        session=ANY,
     )
 
 
@@ -837,8 +838,8 @@ def test_inspect_profile_source_fetch_retries_personal_site_tls_variants() -> No
     assert diagnostics.final_url == "https://www.example.com/about"
     assert diagnostics.selected_text == "Title: Portfolio\nPortfolio Builder"
     assert processor._fetch_external_profile_source_response.call_args_list == [
-        call("https://example.com/about"),
-        call("https://www.example.com/about"),
+        call("https://example.com/about", session=ANY),
+        call("https://www.example.com/about", session=ANY),
     ]
 
 
@@ -870,8 +871,8 @@ def test_inspect_profile_source_fetch_uses_stripped_host_as_www_fallback() -> No
     assert diagnostics.final_url == "https://example.com/about"
     assert diagnostics.selected_text == "Title: Portfolio\nPortfolio Builder"
     assert processor._fetch_external_profile_source_response.call_args_list == [
-        call("https://www.example.com/about"),
-        call("https://example.com/about"),
+        call("https://www.example.com/about", session=ANY),
+        call("https://example.com/about", session=ANY),
     ]
 
 
@@ -909,7 +910,8 @@ def test_inspect_profile_source_fetch_does_not_retry_non_tls_errors() -> None:
         )
 
     processor._fetch_external_profile_source_response.assert_called_once_with(
-        "https://example.com/about"
+        "https://example.com/about",
+        session=ANY,
     )
 
 
@@ -931,7 +933,8 @@ def test_inspect_profile_source_fetch_does_not_retry_github_tls_failures() -> No
         )
 
     processor._fetch_external_profile_source_response.assert_called_once_with(
-        "https://github.com/octocat"
+        "https://github.com/octocat",
+        session=ANY,
     )
 
 
@@ -979,6 +982,7 @@ def test_validate_browser_profile_navigation_url_blocks_non_public_target() -> N
 def test_fetch_browser_profile_request_response_preserves_request_shape() -> None:
     """Browser subrequests should replay the original method, headers, and body."""
     processor = ResumeProfileProcessor()
+    session = Mock()
     processor._request_profile_http_response = Mock(
         return_value=ProfileSourceHttpResponse(
             final_url="https://example.com/api/profile",
@@ -999,7 +1003,9 @@ def test_fetch_browser_profile_request_response_preserves_request_shape() -> Non
         post_data_buffer=b"{}",
     )
 
-    response = processor._fetch_browser_profile_request_response(request)
+    response = processor._fetch_browser_profile_request_response(
+        request, session=session
+    )
 
     assert response.final_url == "https://example.com/api/profile"
     processor._request_profile_http_response.assert_called_once_with(
@@ -1013,6 +1019,7 @@ def test_fetch_browser_profile_request_response_preserves_request_shape() -> Non
         max_bytes=PROFILE_SOURCE_BROWSER_RESOURCE_MAX_BYTES,
         require_success=False,
         size_limit_error="Browser profile resource exceeds size limit",
+        session=session,
     )
 
 
@@ -1244,8 +1251,8 @@ def test_fetch_external_profile_source_text_pins_resolved_public_ips() -> None:
     response.raise_for_status = Mock()
     response.close = Mock()
     session = MagicMock()
-    session.__enter__.return_value = session
     session.request.return_value = response
+    session.close = Mock()
 
     with (
         patch.object(
@@ -1253,23 +1260,118 @@ def test_fetch_external_profile_source_text_pins_resolved_public_ips() -> None:
             "_resolve_public_profile_request_target",
             return_value=("example.com", 443, resolved_ips, False),
         ),
-        patch(
-            "five08.resume_profile_processor.curl_requests.Session",
+        patch.object(
+            processor,
+            "_create_profile_source_http_session",
             return_value=session,
-        ) as session_cls,
+        ),
     ):
         text = processor._fetch_external_profile_source_text("https://example.com")
 
     assert text == "Profile body"
-    session_cls.assert_called_once()
-    assert session_cls.call_args.kwargs["curl_options"] == {
+    assert session.curl_options == {
         CurlOpt.RESOLVE: [
             "example.com:443:93.184.216.34",
             "example.com:443:93.184.216.35",
         ]
     }
     session.request.assert_called_once()
+    session.close.assert_called_once()
     response.close.assert_called_once()
+
+
+def test_seed_browser_profile_session_transfers_curl_cookies() -> None:
+    """Browser fallback should inherit cookies already established by curl."""
+    processor = ResumeProfileProcessor()
+    session = processor._create_profile_source_http_session()
+    session.cookies.set("cf_clearance", "token", domain=".example.com", path="/")
+    context = Mock()
+
+    processor._seed_browser_profile_session(
+        context,
+        session=session,
+        navigation_url="https://example.com/about",
+    )
+
+    context.add_cookies.assert_called_once_with(
+        [
+            {
+                "name": "cf_clearance",
+                "value": "token",
+                "domain": ".example.com",
+                "path": "/",
+                "secure": False,
+            }
+        ]
+    )
+    session.close()
+
+
+def test_fetch_external_profile_source_text_with_browser_retries_with_fresh_session() -> (
+    None
+):
+    """Browser fallback should reset the shared session after timeout-style failures."""
+    processor = ResumeProfileProcessor()
+    stale_session = Mock()
+    fresh_session = Mock()
+    fresh_session.close = Mock()
+    initial_response = ProfileSourceHttpResponse(
+        final_url="https://example.com/about",
+        status_code=200,
+        headers={"content-type": "text/html"},
+        body=b"<html></html>",
+    )
+    fresh_response = ProfileSourceHttpResponse(
+        final_url="https://example.com/about",
+        status_code=200,
+        headers={"content-type": "text/html"},
+        body=b"<html><body>Fresh session</body></html>",
+    )
+
+    with (
+        patch.object(
+            processor,
+            "_fetch_external_profile_source_text_with_browser_once",
+            side_effect=[
+                ValueError("JavaScript profile fetch failed: Timeout 20000ms exceeded"),
+                "Fresh session text",
+            ],
+        ) as fetch_once,
+        patch.object(
+            processor,
+            "_create_profile_source_http_session",
+            return_value=fresh_session,
+        ) as create_session,
+        patch.object(
+            processor,
+            "_fetch_external_profile_source_response",
+            return_value=fresh_response,
+        ) as fetch_response,
+    ):
+        text = processor._fetch_external_profile_source_text_with_browser(
+            initial_response,
+            session=stale_session,
+        )
+
+    assert text == "Fresh session text"
+    create_session.assert_called_once_with()
+    fetch_response.assert_called_once_with(
+        "https://example.com/about",
+        session=fresh_session,
+    )
+    assert fetch_once.call_args_list == [
+        call(
+            initial_response,
+            session=stale_session,
+            launch_context=fetch_once.call_args_list[0].kwargs["launch_context"],
+        ),
+        call(
+            fresh_response,
+            session=fresh_session,
+            launch_context=fetch_once.call_args_list[1].kwargs["launch_context"],
+        ),
+    ]
+    fresh_session.close.assert_called_once()
 
 
 def test_is_public_ip_rejects_non_global_addresses() -> None:
