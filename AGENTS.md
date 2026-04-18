@@ -63,7 +63,7 @@ uv run --package worker worker-consumer
 Run stack with Compose:
 
 ```bash
-docker compose up --build
+./scripts/docker-compose.sh up --build
 ```
 
 ## Bot Feature Pattern
