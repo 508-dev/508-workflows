@@ -80,16 +80,16 @@ PROFILE_SOURCE_ALLOWED_CONTENT_TYPES = (
     "text/markdown",
 )
 PROFILE_SOURCE_BLOCKED_STATUS_CODES = frozenset({401, 403, 429, 503})
-PROFILE_SOURCE_BLOCKED_MARKERS = (
-    "access denied",
-    "attention required",
-    "captcha",
-    "cf-chl",
-    "challenge-platform",
-    "checking your browser",
-    "enable javascript and cookies",
-    "unusual traffic",
-    "verify you are human",
+PROFILE_SOURCE_BLOCKED_PATTERNS = (
+    re.compile(r"access denied", re.IGNORECASE),
+    re.compile(r"attention required", re.IGNORECASE),
+    re.compile(r"\bcaptcha\b", re.IGNORECASE),
+    re.compile(r"_cf_chl_opt", re.IGNORECASE),
+    re.compile(r"/cdn-cgi/challenge-platform", re.IGNORECASE),
+    re.compile(r"checking your browser", re.IGNORECASE),
+    re.compile(r"enable javascript and cookies(?: to continue)?", re.IGNORECASE),
+    re.compile(r"unusual traffic", re.IGNORECASE),
+    re.compile(r"verify you are human", re.IGNORECASE),
 )
 PROFILE_SOURCE_JS_SPARSE_TEXT_MAX_CHARS = 250
 PROFILE_SOURCE_JS_SPARSE_TEXT_MAX_WORDS = 40
@@ -1942,7 +1942,10 @@ class ResumeProfileProcessor:
                 except Exception:
                     logger.debug("Failed to close CloakBrowser for %s", navigation_url)
 
-        return self._extract_rendered_profile_source_text(rendered_html)
+        return self._extract_rendered_profile_source_text(
+            rendered_html,
+            navigation_url=navigation_url,
+        )
 
     def _extract_profile_source_text(self, *, body: bytes, content_type: str) -> str:
         normalized_type = content_type.split(";", 1)[0].strip().lower()
@@ -2074,9 +2077,16 @@ class ResumeProfileProcessor:
             return "Profile URL must use http or https"
         return self._validate_public_profile_url(candidate_url)
 
-    def _extract_rendered_profile_source_text(self, rendered_html: str) -> str:
+    def _extract_rendered_profile_source_text(
+        self,
+        rendered_html: str,
+        *,
+        navigation_url: str | None = None,
+    ) -> str:
         rendered_body = rendered_html.encode("utf-8")
-        if len(rendered_body) > PROFILE_SOURCE_MAX_BYTES:
+        if len(rendered_body) > self._profile_source_max_bytes_for_url(
+            navigation_url or ""
+        ):
             raise ValueError("Rendered profile page exceeds size limit")
         return self._extract_profile_source_text(
             body=rendered_body,
@@ -2158,8 +2168,9 @@ class ResumeProfileProcessor:
 
     @staticmethod
     def _profile_source_html_looks_blocked(rendered_html: str) -> bool:
-        normalized = rendered_html.casefold()
-        return any(marker in normalized for marker in PROFILE_SOURCE_BLOCKED_MARKERS)
+        return any(
+            pattern.search(rendered_html) for pattern in PROFILE_SOURCE_BLOCKED_PATTERNS
+        )
 
     @staticmethod
     def _profile_source_response_looks_blocked(
@@ -2335,41 +2346,45 @@ class ResumeProfileProcessor:
             return True
         if line.endswith(" Graphic"):
             return True
-        return any(
-            marker in lowered
-            for marker in (
-                "skip to main content",
-                "join now",
-                "sign in",
-                "join with email",
-                "already on linkedin",
-                "user agreement",
-                "privacy policy",
-                "cookie policy",
-                "view mutual connections",
-                "see your mutual connections",
-                "view michael’s full profile",
-                "view michael's full profile",
-                "report this",
-                "close menu",
-                "copy",
-                "facebook",
-                "top content",
-                "people",
-                "learning",
-                "jobs",
-                "games",
-                "contact info",
-                "email or phone",
-                "password",
-                "forgot password",
-                "show all activity",
-                "other similar profiles",
-                "message",
-                "view profile",
-                "public_profile__posts",
-            )
-        )
+        if re.fullmatch(r"sign in to view .+ full profile", lowered):
+            return True
+        exact_noise_tokens = {
+            "skip to main content",
+            "join now",
+            "sign in",
+            "join with email",
+            "already on linkedin? sign in",
+            "user agreement",
+            "privacy policy",
+            "cookie policy",
+            "view mutual connections",
+            "see your mutual connections",
+            "report this post",
+            "report this profile",
+            "report this",
+            "close menu",
+            "copy",
+            "copy link",
+            "facebook",
+            "x",
+            "top content",
+            "people",
+            "learning",
+            "jobs",
+            "games",
+            "contact info",
+            "email or phone",
+            "password",
+            "forgot password?",
+            "forgot password",
+            "show all activity",
+            "other similar profiles",
+            "message",
+            "send message",
+            "view profile",
+            "public_profile__posts",
+        }
+        return lowered in exact_noise_tokens
 
     def _extract_linkedin_sections(self, lines: list[str]) -> dict[str, list[str]]:
         headings = (

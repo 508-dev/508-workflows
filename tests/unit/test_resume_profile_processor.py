@@ -261,7 +261,9 @@ def test_extract_profile_proposal_merges_and_serializes_social_links() -> None:
     ]
 
 
-def test_extract_profile_proposal_fetches_crm_website_and_github_sources() -> None:
+def test_extract_profile_proposal_fetches_crm_website_linkedin_and_github_sources() -> (
+    None
+):
     """Existing CRM website, LinkedIn, and GitHub profile text should be passed into extraction."""
     processor = ResumeProfileProcessor()
     processor.crm = Mock()
@@ -1125,6 +1127,41 @@ def test_request_profile_http_response_allows_blocked_browser_subrequests() -> N
     response.close.assert_called_once()
 
 
+def test_profile_source_html_looks_blocked_ignores_recaptcha_feature_flags() -> None:
+    """Normal pages should not be flagged by recaptcha-related config keys."""
+    processor = ResumeProfileProcessor()
+
+    assert (
+        processor._profile_source_html_looks_blocked(
+            '<meta data-recaptcha-v3-integration-lix-value="control">'
+        )
+        is False
+    )
+    assert (
+        processor._profile_source_html_looks_blocked(
+            '<script>window.features = ["octocaptcha_origin_optimization"]</script>'
+        )
+        is False
+    )
+
+
+def test_profile_source_html_looks_blocked_detects_cloudflare_challenge() -> None:
+    """Cloudflare challenge pages should still be recognized as blocked."""
+    processor = ResumeProfileProcessor()
+
+    assert (
+        processor._profile_source_html_looks_blocked(
+            """
+            <html><body>
+            <script>window._cf_chl_opt = {};</script>
+            <span>Enable JavaScript and cookies to continue</span>
+            </body></html>
+            """
+        )
+        is True
+    )
+
+
 def test_extract_rendered_profile_source_text_enforces_size_limit() -> None:
     """Rendered browser HTML should honor the same size cap as curl fetches."""
     processor = ResumeProfileProcessor()
@@ -1134,6 +1171,34 @@ def test_extract_rendered_profile_source_text_enforces_size_limit() -> None:
 
     with pytest.raises(ValueError, match="Rendered profile page exceeds size limit"):
         processor._extract_rendered_profile_source_text(oversized_html)
+
+
+def test_extract_rendered_profile_source_text_allows_larger_linkedin_pages() -> None:
+    """Rendered LinkedIn pages should use the larger LinkedIn size limit."""
+    processor = ResumeProfileProcessor()
+    oversized_html = (
+        "<html><body>" + ("a" * PROFILE_SOURCE_MAX_BYTES) + "</body></html>"
+    )
+
+    rendered = processor._extract_rendered_profile_source_text(
+        oversized_html,
+        navigation_url="https://www.linkedin.com/in/wumichaelm/",
+    )
+
+    assert rendered
+
+
+def test_is_linkedin_noise_line_uses_exact_ui_labels() -> None:
+    """Noise filtering should not drop legitimate profile content by substring."""
+    processor = ResumeProfileProcessor()
+
+    assert processor._is_linkedin_noise_line("Copy") is True
+    assert processor._is_linkedin_noise_line("Facebook") is True
+    assert processor._is_linkedin_noise_line("Copywriter") is False
+    assert processor._is_linkedin_noise_line("Facebook") is True
+    assert processor._is_linkedin_noise_line("Facebook / Meta") is False
+    assert processor._is_linkedin_noise_line("People Operations Lead") is False
+    assert processor._is_linkedin_noise_line("Jobs to Be Done Researcher") is False
 
 
 def test_extract_profile_proposal_reruns_with_confirmed_personal_website() -> None:
