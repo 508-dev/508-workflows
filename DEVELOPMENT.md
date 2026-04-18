@@ -36,7 +36,27 @@ The backend API process runs Alembic migrations on startup (`apps/worker/src/fiv
 3. Start local infrastructure:
 
 ```bash
-./scripts/dev-up.sh
+./scripts/dev.sh infra
+./scripts/dev.sh api
+./scripts/dev.sh worker
+./scripts/dev.sh discord-bot
+```
+
+`infra` brings up only the Docker infra. Use the host-service subcommands to run
+the app processes with per-worktree ports and derived localhost URLs.
+
+To launch infra plus all host-run services together with prefixed logs:
+
+```bash
+./scripts/dev.sh all
+```
+
+Show, export, or stop the local dev environment:
+
+```bash
+./scripts/dev.sh ports
+./scripts/dev.sh env
+./scripts/dev.sh down
 ```
 
 4. Run services on the host:
@@ -57,8 +77,10 @@ uv run --package five08 crmctl repl
 
 ## Docker Compose Workflow
 
-For day-to-day development, prefer `./scripts/dev-up.sh` plus host-run app
-services. Use full Docker Compose when you need container parity, including
+For day-to-day development, prefer `./scripts/dev.sh` plus host-run app
+services. That entrypoint pins standard localhost ports so the app defaults
+work without extra overrides. Use the Compose wrapper when you need
+deterministic per-worktree ports or full container parity, including
 Coolify-style runs.
 
 Start full stack (discord_bot + api + worker + redis + postgres + minio):

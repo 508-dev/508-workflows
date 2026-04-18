@@ -1,12 +1,9 @@
-#!/bin/bash
-set -e
+#!/bin/sh
+set -eu
 
-echo "Starting local infrastructure containers..."
-docker compose up -d redis postgres minio minio-init
+script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
+if [ "$#" -eq 0 ]; then
+  exec "$script_dir/dev.sh" infra
+fi
 
-echo
-echo "Infrastructure is starting in Docker."
-echo "Run app services on the host with:"
-echo "  uv run --package api backend-api"
-echo "  uv run --package worker worker-consumer"
-echo "  uv run --package discord_bot discord-bot"
+exec "$script_dir/dev.sh" "$@"

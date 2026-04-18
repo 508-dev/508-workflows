@@ -63,13 +63,15 @@ uv run --package worker worker-consumer
 Run stack with Compose:
 
 ```bash
-./scripts/dev-up.sh
-uv run --package discord_bot discord-bot
-uv run --package api backend-api
-uv run --package worker worker-consumer
+./scripts/dev.sh infra
+./scripts/dev.sh discord-bot
+./scripts/dev.sh api
+./scripts/dev.sh worker
+./scripts/dev.sh all
 ```
 
-Full container parity remains available with:
+`./scripts/dev.sh` is the primary local-dev entrypoint. Full container parity
+remains available with:
 
 ```bash
 ./scripts/docker-compose.sh up --build
