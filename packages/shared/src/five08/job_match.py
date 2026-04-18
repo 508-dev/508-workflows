@@ -418,16 +418,18 @@ class JobRequirements:
             hard_required_skills = legacy_required_skills[:1]
             soft_required_skills = legacy_required_skills[1:]
 
-        required_skills = hard_required_skills + [
+        hard_required_skill_keys = {item.casefold() for item in hard_required_skills}
+        soft_required_skills = [
             skill
             for skill in soft_required_skills
-            if skill.casefold()
-            not in {item.casefold() for item in hard_required_skills}
+            if skill.casefold() not in hard_required_skill_keys
         ]
+        required_skills = hard_required_skills + soft_required_skills
+        required_skill_keys = {item.casefold() for item in required_skills}
         preferred_skills = [
             skill
             for skill in normalize_skill_list(list(self.preferred_skills))
-            if skill.casefold() not in {item.casefold() for item in required_skills}
+            if skill.casefold() not in required_skill_keys
         ]
 
         object.__setattr__(
@@ -647,7 +649,11 @@ def rerank_shortlisted_candidates(
     try:
         data = _parse_llm_response(raw_content)
     except (json.JSONDecodeError, ValueError) as exc:
-        logger.error("Failed to parse LLM rerank response: %s", raw_content)
+        logger.error(
+            "Failed to parse LLM rerank response length=%d error=%s",
+            len(raw_content),
+            exc,
+        )
         raise RuntimeError(f"LLM rerank returned unparseable response: {exc}") from exc
 
     ranked_payload = data.get("ranked_candidates")

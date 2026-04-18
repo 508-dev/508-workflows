@@ -202,6 +202,25 @@ def test_search_candidates_binds_anchor_required_skill() -> None:
     assert execute_params[1] == ["figma", "hubspot"]
 
 
+def test_search_candidates_guards_non_numeric_skill_attr_casts() -> None:
+    row = _make_row(skills=["webflow", "figma"], skill_attrs={"webflow": "expert"})
+    conn = _patch_db([row])
+    reqs = _make_requirements(
+        hard_required_skills=["webflow"],
+        soft_required_skills=["figma"],
+    )
+    settings = MagicMock()
+
+    with patch("five08.candidate_search.get_postgres_connection", return_value=conn):
+        search_candidates(settings, reqs)
+
+    executed_query = conn.cursor.return_value.execute.call_args[0][0]
+    assert executed_query.count("~ '^-?[0-9]+$'") >= 2
+    assert "GREATEST((COALESCE(p.skill_attrs, '{}'::jsonb) ->> s)::int, 0)" in (
+        executed_query
+    )
+
+
 # ---------------------------------------------------------------------------
 # search_candidates — DB rows → CandidateMatch mapping and secondary sort
 # ---------------------------------------------------------------------------

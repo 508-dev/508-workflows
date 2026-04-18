@@ -533,6 +533,35 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         return messages
 
     @staticmethod
+    def _sanitize_match_text(value: str) -> str:
+        normalized = re.sub(r"\s+", " ", value).strip()
+        escaped_mentions = discord.utils.escape_mentions(normalized).replace(
+            "@", "@\u200b"
+        )
+        return discord.utils.escape_markdown(escaped_mentions)
+
+    @classmethod
+    def _format_match_inline_code(cls, value: str) -> str:
+        normalized = re.sub(r"\s+", " ", value).strip()
+        escaped_mentions = discord.utils.escape_mentions(normalized).replace(
+            "@", "@\u200b"
+        )
+        return f"`{escaped_mentions.replace('`', 'ˋ')}`"
+
+    @staticmethod
+    def _build_rerank_evidence(candidate: Any) -> list[str]:
+        evidence: list[str] = []
+        if getattr(candidate, "linkedin", None):
+            evidence.append("linkedin profile on file")
+        if getattr(candidate, "github_username", None):
+            evidence.append("github profile on file")
+        if getattr(candidate, "latest_resume_name", None):
+            evidence.append("resume on file")
+        if getattr(candidate, "matched_discord_roles", None):
+            evidence.append("relevant discord role match")
+        return evidence
+
+    @staticmethod
     def _build_match_candidate_lines(
         *,
         candidates: list[Any],
@@ -651,25 +680,42 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             if matched_hard_required_skills:
                 skill_info.append(
                     "hard: "
-                    + ", ".join(f"`{s}`" for s in matched_hard_required_skills[:4])
+                    + ", ".join(
+                        JobsCog._format_match_inline_code(s)
+                        for s in matched_hard_required_skills[:4]
+                    )
                 )
             if matched_soft_required_skills:
                 skill_info.append(
                     "soft: "
-                    + ", ".join(f"`{s}`" for s in matched_soft_required_skills[:4])
+                    + ", ".join(
+                        JobsCog._format_match_inline_code(s)
+                        for s in matched_soft_required_skills[:4]
+                    )
                 )
             elif matched_required_skills and not matched_hard_required_skills:
                 skill_info.append(
-                    "✅ " + ", ".join(f"`{s}`" for s in matched_required_skills[:5])
+                    "✅ "
+                    + ", ".join(
+                        JobsCog._format_match_inline_code(s)
+                        for s in matched_required_skills[:5]
+                    )
                 )
             if matched_preferred_skills:
                 skill_info.append(
                     "preferred: "
-                    + ", ".join(f"`{s}`" for s in matched_preferred_skills[:3])
+                    + ", ".join(
+                        JobsCog._format_match_inline_code(s)
+                        for s in matched_preferred_skills[:3]
+                    )
                 )
             if candidate.matched_discord_roles:
                 skill_info.append(
-                    "🏷️ " + ", ".join(f"`{r}`" for r in candidate.matched_discord_roles)
+                    "🏷️ "
+                    + ", ".join(
+                        JobsCog._format_match_inline_code(r)
+                        for r in candidate.matched_discord_roles
+                    )
                 )
             seniority_label = format_seniority_label(
                 getattr(candidate, "seniority", None),
@@ -680,16 +726,21 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             if location:
                 location_info.append(f"location: **{location}**")
             if candidate.timezone:
-                location_info.append(f"tz: `{candidate.timezone}`")
+                location_info.append(
+                    f"tz: {JobsCog._format_match_inline_code(candidate.timezone)}"
+                )
             if evidence_signals:
-                followup_info.append("evidence: " + " · ".join(evidence_signals[:4]))
+                followup_info.append(
+                    "evidence: "
+                    + " · ".join(
+                        JobsCog._sanitize_match_text(signal)
+                        for signal in evidence_signals[:4]
+                    )
+                )
             llm_summary = getattr(candidate, "llm_summary", None)
             if isinstance(llm_summary, str) and llm_summary.strip():
                 followup_info.append(
-                    "summary: "
-                    + discord.utils.escape_mentions(
-                        re.sub(r"\s+", " ", llm_summary).strip()
-                    )
+                    "summary: " + JobsCog._sanitize_match_text(llm_summary)
                 )
             missing_items = missing_hard_required_skills + [
                 item
@@ -698,13 +749,17 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             ]
             if missing_items:
                 followup_info.append(
-                    "missing: " + " · ".join(f"`{item}`" for item in missing_items[:4])
+                    "missing: "
+                    + " · ".join(
+                        JobsCog._format_match_inline_code(item)
+                        for item in missing_items[:4]
+                    )
                 )
             elif llm_risks:
                 followup_info.append(
                     "risks: "
                     + " · ".join(
-                        discord.utils.escape_mentions(item) for item in llm_risks[:3]
+                        JobsCog._sanitize_match_text(item) for item in llm_risks[:3]
                     )
                 )
             line = " ".join(header_parts)
@@ -720,14 +775,6 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
 
     @staticmethod
     def _candidate_rerank_id(candidate: Any, index: int) -> str:
-        crm_contact_id = getattr(candidate, "crm_contact_id", None)
-        if isinstance(crm_contact_id, str) and crm_contact_id.strip():
-            return f"crm:{crm_contact_id.strip()}"
-
-        discord_user_id = getattr(candidate, "discord_user_id", None)
-        if isinstance(discord_user_id, str) and discord_user_id.strip():
-            return f"discord:{discord_user_id.strip()}"
-
         return f"candidate:{index}"
 
     @classmethod
@@ -737,22 +784,14 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         candidate: Any,
         index: int,
     ) -> dict[str, Any]:
-        location_parts = [
-            part.strip()
-            for part in (
-                getattr(candidate, "address_city", None),
-                getattr(candidate, "address_state", None),
-                getattr(candidate, "address_country", None),
-            )
-            if isinstance(part, str) and part.strip()
-        ]
+        country = getattr(candidate, "address_country", None)
         return {
             "candidate_id": cls._candidate_rerank_id(candidate, index),
-            "name": getattr(candidate, "crm_name", None)
-            or getattr(candidate, "name", None),
             "is_member": bool(getattr(candidate, "is_member", False)),
             "seniority": getattr(candidate, "seniority", None),
-            "location": ", ".join(location_parts) if location_parts else None,
+            "country": country.strip()
+            if isinstance(country, str) and country.strip()
+            else None,
             "timezone": getattr(candidate, "timezone", None),
             "hard_required_matches": list(
                 getattr(candidate, "matched_hard_required_skills", []) or []
@@ -769,10 +808,10 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             "matched_discord_roles": list(
                 getattr(candidate, "matched_discord_roles", []) or []
             ),
-            "evidence": list(getattr(candidate, "evidence_signals", []) or []),
-            "linkedin": getattr(candidate, "linkedin", None),
-            "github_username": getattr(candidate, "github_username", None),
-            "resume_name": getattr(candidate, "latest_resume_name", None),
+            "evidence": cls._build_rerank_evidence(candidate),
+            "has_linkedin": bool(getattr(candidate, "linkedin", None)),
+            "has_github": bool(getattr(candidate, "github_username", None)),
+            "has_resume": bool(getattr(candidate, "latest_resume_name", None)),
             "deterministic_match_score": getattr(candidate, "match_score", None),
         }
 
@@ -820,30 +859,70 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             return candidates
 
         result_map = {result.candidate_id: result for result in rerank_results}
-        reranked_shortlist: list[Any] = []
+        result_rank = {
+            result.candidate_id: rank for rank, result in enumerate(rerank_results)
+        }
+        reranked_shortlist: list[tuple[Any, str, int]] = []
         for index, candidate in enumerate(shortlist, start=1):
-            result = result_map.get(self._candidate_rerank_id(candidate, index))
+            candidate_id = self._candidate_rerank_id(candidate, index)
+            result = result_map.get(candidate_id)
             if result is None:
-                reranked_shortlist.append(candidate)
+                reranked_shortlist.append((candidate, candidate_id, index))
                 continue
             reranked_shortlist.append(
-                self._apply_candidate_overrides(
-                    candidate,
-                    llm_fit_score=result.fit_score,
-                    llm_summary=result.summary,
-                    llm_risks=result.risks,
-                    llm_missing_requirements=result.missing_requirements,
+                (
+                    self._apply_candidate_overrides(
+                        candidate,
+                        llm_fit_score=result.fit_score,
+                        llm_summary=result.summary,
+                        llm_risks=result.risks,
+                        llm_missing_requirements=result.missing_requirements,
+                    ),
+                    candidate_id,
+                    index,
                 )
             )
 
         reranked_shortlist.sort(
-            key=lambda candidate: (
-                getattr(candidate, "llm_fit_score", None) is None,
-                -(float(getattr(candidate, "llm_fit_score", 0.0) or 0.0)),
-                -(float(getattr(candidate, "match_score", 0.0) or 0.0)),
+            key=lambda entry: (
+                getattr(entry[0], "llm_fit_score", None) is None,
+                -(float(getattr(entry[0], "llm_fit_score", 0.0) or 0.0)),
+                result_rank.get(entry[1], len(result_rank)),
+                -(float(getattr(entry[0], "match_score", 0.0) or 0.0)),
+                entry[2],
             )
         )
-        return reranked_shortlist + candidates[len(shortlist) :]
+        return [candidate for candidate, _, _ in reranked_shortlist] + candidates[
+            len(shortlist) :
+        ]
+
+    @staticmethod
+    def _has_match_requirements(requirements: JobRequirements) -> bool:
+        return bool(requirements.required_skills or requirements.discord_role_types)
+
+    async def _search_and_rerank_candidates(
+        self,
+        *,
+        posting: str,
+        requirements: JobRequirements,
+        guild_id: str | None,
+        limit: int,
+        min_match_score: float = 0.0,
+    ) -> list[Any]:
+        candidates = await asyncio.to_thread(
+            search_candidates,
+            settings,
+            requirements,
+            guild_id=guild_id,
+            limit=limit,
+            min_match_score=min_match_score,
+        )
+
+        return await self._rerank_candidates(
+            posting=posting,
+            requirements=requirements,
+            candidates=candidates,
+        )
 
     @staticmethod
     def _resume_file_extension(filename: str | None) -> str:
@@ -1332,7 +1411,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
-        if not requirements.required_skills and not requirements.discord_role_types:
+        if not self._has_match_requirements(requirements):
             await self._unmark_thread_auto_matched(thread.id)
             await thread.send(
                 "⚠️ No useful hard/soft skills or role types could be extracted automatically. "
@@ -1341,10 +1420,9 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             return
 
         try:
-            candidates = await asyncio.to_thread(
-                search_candidates,
-                settings,
-                requirements,
+            candidates = await self._search_and_rerank_candidates(
+                posting=posting,
+                requirements=requirements,
                 guild_id=str(thread.guild.id) if thread.guild else None,
                 limit=10,
             )
@@ -1362,12 +1440,6 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 "Run `/match-candidates` manually in this thread."
             )
             return
-
-        candidates = await self._rerank_candidates(
-            posting=posting,
-            requirements=requirements,
-            candidates=candidates,
-        )
 
         await self._publish_match_results(
             send=thread.send,
@@ -1820,7 +1892,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
-        if not requirements.required_skills and not requirements.discord_role_types:
+        if not self._has_match_requirements(requirements):
             self._audit_command_safe(
                 interaction=interaction,
                 action="crm.match_candidates",
@@ -1835,10 +1907,9 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             return
 
         try:
-            candidates = await asyncio.to_thread(
-                search_candidates,
-                settings,
-                requirements,
+            candidates = await self._search_and_rerank_candidates(
+                posting=posting,
+                requirements=requirements,
                 guild_id=str(interaction.guild.id) if interaction.guild else None,
                 limit=20,
                 min_match_score=8.0,
@@ -1856,12 +1927,6 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 ephemeral=True,
             )
             return
-
-        candidates = await self._rerank_candidates(
-            posting=posting,
-            requirements=requirements,
-            candidates=candidates,
-        )
 
         async def _send_match_result(message: str, **kwargs: Any) -> None:
             if is_private:

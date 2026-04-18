@@ -262,7 +262,7 @@ def search_candidates(
     7. Discord role type matched (1 if any discord role matches the required role types).
     8. Required skill strength score (sum of skill_attrs values).
     9. Preferred skill count matched.
-    9. Seniority score (applied in Python after the query).
+    10. Seniority score (applied in Python after the query).
 
     Candidates must match every hard-required skill when hard requirements exist.
     When there are no hard requirements, candidates are included if they match any
@@ -358,10 +358,14 @@ def search_candidates(
                 -- Weighted score: sum of strength attrs for matched hard-required skills
                 (SELECT COALESCE(
                     SUM(
-                        LEAST(
-                            COALESCE((COALESCE(p.skill_attrs, '{}'::jsonb) ->> s)::int, 1),
-                            5
-                        )
+                        CASE
+                          WHEN (COALESCE(p.skill_attrs, '{}'::jsonb) ->> s) ~ '^-?[0-9]+$'
+                            THEN LEAST(
+                              GREATEST((COALESCE(p.skill_attrs, '{}'::jsonb) ->> s)::int, 0),
+                              5
+                            )
+                          ELSE 1
+                        END
                     ),
                     0
                  )::int
@@ -376,10 +380,14 @@ def search_candidates(
                 -- Weighted score: sum of strength attrs for matched soft-required skills
                 (SELECT COALESCE(
                     SUM(
-                        LEAST(
-                            COALESCE((COALESCE(p.skill_attrs, '{}'::jsonb) ->> s)::int, 1),
-                            5
-                        )
+                        CASE
+                          WHEN (COALESCE(p.skill_attrs, '{}'::jsonb) ->> s) ~ '^-?[0-9]+$'
+                            THEN LEAST(
+                              GREATEST((COALESCE(p.skill_attrs, '{}'::jsonb) ->> s)::int, 0),
+                              5
+                            )
+                          ELSE 1
+                        END
                     ),
                     0
                  )::int
@@ -580,8 +588,9 @@ def search_candidates(
         ]
         matched_req = [s for s in candidate_skills if s in required_set]
         matched_pref = [s for s in candidate_skills if s in preferred_set]
+        candidate_skills_set = set(candidate_skills)
         missing_hard = [
-            s for s in hard_required_skills if s not in set(candidate_skills)
+            s for s in hard_required_skills if s not in candidate_skills_set
         ]
 
         raw_discord_roles = row.get("discord_roles") or []
