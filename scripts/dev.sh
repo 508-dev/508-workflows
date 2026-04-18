@@ -6,16 +6,22 @@ script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
 worktree_env_load "$script_dir"
 
 export REDIS_URL="redis://127.0.0.1:${REDIS_HOST_PORT}/0"
-export POSTGRES_URL="postgresql://postgres:postgres@127.0.0.1:${POSTGRES_HOST_PORT}/workflows"
+if [ -z "${POSTGRES_URL-}" ]; then
+  export POSTGRES_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:${POSTGRES_HOST_PORT}/${POSTGRES_DB}"
+fi
 export MINIO_ENDPOINT="http://127.0.0.1:${MINIO_API_HOST_PORT}"
 export BACKEND_API_BASE_URL="http://127.0.0.1:${WEBHOOK_INGEST_PORT}"
 export WORKER_API_BASE_URL="http://127.0.0.1:${WEBHOOK_INGEST_PORT}"
 export DISCORD_BOT_INTERNAL_BASE_URL="http://127.0.0.1:${HEALTHCHECK_PORT}"
 
+start_infra() {
+  "$script_dir/docker-compose.sh" up -d --wait redis postgres minio minio-init
+}
+
 command=${1:-infra}
 case "$command" in
   infra)
-    "$script_dir/docker-compose.sh" up -d redis postgres minio minio-init
+    start_infra
     cat <<EOF
 
 Infrastructure is running in Docker on localhost:
@@ -36,7 +42,7 @@ Run app services on the host with:
 EOF
     ;;
   all)
-    "$script_dir/docker-compose.sh" up -d redis postgres minio minio-init
+    start_infra
     exec python3 "$script_dir/dev_mux.py"
     ;;
   down)
@@ -56,6 +62,9 @@ EOF
     cat <<EOF
 export REDIS_HOST_PORT=$REDIS_HOST_PORT
 export POSTGRES_HOST_PORT=$POSTGRES_HOST_PORT
+export POSTGRES_USER=$POSTGRES_USER
+export POSTGRES_PASSWORD=$POSTGRES_PASSWORD
+export POSTGRES_DB=$POSTGRES_DB
 export MINIO_API_HOST_PORT=$MINIO_API_HOST_PORT
 export MINIO_CONSOLE_HOST_PORT=$MINIO_CONSOLE_HOST_PORT
 export WEBHOOK_INGEST_PORT=$WEBHOOK_INGEST_PORT

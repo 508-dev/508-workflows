@@ -105,6 +105,9 @@ worktree_env_load() {
   COMPOSE_PROJECT_NAME=$(worktree_env_resolve_value COMPOSE_PROJECT_NAME "${project_name}-$(printf '%04d' "$WORKTREE_ENV_SLOT")" "$WORKTREE_ENV_FILE")
   REDIS_HOST_PORT=$(worktree_env_resolve_value REDIS_HOST_PORT "$((12000 + WORKTREE_ENV_SLOT))" "$WORKTREE_ENV_FILE")
   POSTGRES_HOST_PORT=$(worktree_env_resolve_value POSTGRES_HOST_PORT "$((15432 + WORKTREE_ENV_SLOT))" "$WORKTREE_ENV_FILE")
+  POSTGRES_USER=$(worktree_env_resolve_value POSTGRES_USER "postgres" "$WORKTREE_ENV_FILE")
+  POSTGRES_PASSWORD=$(worktree_env_resolve_value POSTGRES_PASSWORD "postgres" "$WORKTREE_ENV_FILE")
+  POSTGRES_DB=$(worktree_env_resolve_value POSTGRES_DB "workflows" "$WORKTREE_ENV_FILE")
   WEBHOOK_INGEST_HOST_PORT=$(worktree_env_resolve_value WEBHOOK_INGEST_HOST_PORT "$((20080 + WORKTREE_ENV_SLOT))" "$WORKTREE_ENV_FILE")
   MINIO_API_HOST_PORT=$(worktree_env_resolve_value MINIO_API_HOST_PORT "$((24000 + WORKTREE_ENV_SLOT))" "$WORKTREE_ENV_FILE")
   MINIO_CONSOLE_HOST_PORT=$(worktree_env_resolve_value MINIO_CONSOLE_HOST_PORT "$((28000 + WORKTREE_ENV_SLOT))" "$WORKTREE_ENV_FILE")
@@ -115,6 +118,9 @@ worktree_env_load() {
   export COMPOSE_PROJECT_NAME
   export REDIS_HOST_PORT
   export POSTGRES_HOST_PORT
+  export POSTGRES_USER
+  export POSTGRES_PASSWORD
+  export POSTGRES_DB
   export WEBHOOK_INGEST_HOST_PORT
   export MINIO_API_HOST_PORT
   export MINIO_CONSOLE_HOST_PORT
