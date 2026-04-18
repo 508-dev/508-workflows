@@ -1653,6 +1653,7 @@ class ResumeProfileProcessor:
             max_bytes=PROFILE_SOURCE_MAX_BYTES,
             require_success=True,
             size_limit_error="Profile page exceeds size limit",
+            detect_blocked=True,
             session=session,
         )
 
@@ -1675,6 +1676,7 @@ class ResumeProfileProcessor:
             max_bytes=PROFILE_SOURCE_BROWSER_RESOURCE_MAX_BYTES,
             require_success=False,
             size_limit_error="Browser profile resource exceeds size limit",
+            detect_blocked=False,
             session=session,
         )
 
@@ -1688,6 +1690,7 @@ class ResumeProfileProcessor:
         max_bytes: int,
         require_success: bool,
         size_limit_error: str,
+        detect_blocked: bool,
         session: curl_requests.Session | None = None,
     ) -> ProfileSourceHttpResponse:
         current_url = url
@@ -1745,7 +1748,10 @@ class ResumeProfileProcessor:
                             },
                             body=payload,
                         )
-                        if self._profile_source_response_looks_blocked(result):
+                        if (
+                            detect_blocked
+                            and self._profile_source_response_looks_blocked(result)
+                        ):
                             raise ValueError(
                                 "Profile fetch hit a scraping block; reset session"
                             )

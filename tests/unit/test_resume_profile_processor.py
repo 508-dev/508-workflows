@@ -1019,8 +1019,94 @@ def test_fetch_browser_profile_request_response_preserves_request_shape() -> Non
         max_bytes=PROFILE_SOURCE_BROWSER_RESOURCE_MAX_BYTES,
         require_success=False,
         size_limit_error="Browser profile resource exceeds size limit",
+        detect_blocked=False,
         session=session,
     )
+
+
+def test_request_profile_http_response_detects_blocked_top_level_fetch() -> None:
+    """Top-level profile fetches should still fail fast on challenge responses."""
+    processor = ResumeProfileProcessor()
+    response = MagicMock()
+    response.status_code = 403
+    response.headers = {"Content-Type": "text/html"}
+    response.iter_content.return_value = [b"<html><body>captcha</body></html>"]
+    response.close = Mock()
+    session = Mock()
+    session.request.return_value = response
+    session.close = Mock()
+
+    with (
+        patch.object(
+            processor,
+            "_create_profile_source_http_session",
+            return_value=session,
+        ),
+        patch.object(
+            processor,
+            "_resolve_public_profile_request_target",
+            return_value=(
+                "example.com",
+                443,
+                [ipaddress.ip_address("93.184.216.34")],
+                False,
+            ),
+        ),
+        pytest.raises(ValueError, match="scraping block"),
+    ):
+        processor._request_profile_http_response(
+            "https://example.com",
+            method="GET",
+            headers={"Accept": "text/html"},
+            body=None,
+            max_bytes=PROFILE_SOURCE_MAX_BYTES,
+            require_success=True,
+            size_limit_error="Profile page exceeds size limit",
+            detect_blocked=True,
+        )
+
+    session.request.assert_called_once()
+    response.close.assert_called_once()
+    session.close.assert_called_once()
+
+
+def test_request_profile_http_response_allows_blocked_browser_subrequests() -> None:
+    """Browser subrequests should fulfill challenge responses back to the page."""
+    processor = ResumeProfileProcessor()
+    response = MagicMock()
+    response.status_code = 403
+    response.headers = {"Content-Type": "text/html"}
+    response.iter_content.return_value = [b"<html><body>captcha</body></html>"]
+    response.close = Mock()
+    session = Mock()
+    session.request.return_value = response
+
+    with patch.object(
+        processor,
+        "_resolve_public_profile_request_target",
+        return_value=(
+            "example.com",
+            443,
+            [ipaddress.ip_address("93.184.216.34")],
+            False,
+        ),
+    ):
+        result = processor._request_profile_http_response(
+            "https://example.com/challenge.js",
+            method="GET",
+            headers={"Accept": "text/html"},
+            body=None,
+            max_bytes=PROFILE_SOURCE_BROWSER_RESOURCE_MAX_BYTES,
+            require_success=False,
+            size_limit_error="Browser profile resource exceeds size limit",
+            detect_blocked=False,
+            session=session,
+        )
+
+    assert result.status_code == 403
+    assert result.body == b"<html><body>captcha</body></html>"
+    session.request.assert_called_once()
+    response.close.assert_called_once()
 
 
 def test_extract_rendered_profile_source_text_enforces_size_limit() -> None:
