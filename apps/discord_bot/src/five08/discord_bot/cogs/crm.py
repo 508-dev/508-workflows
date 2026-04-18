@@ -1817,7 +1817,7 @@ class ResumeConfirmInferredWebsitesButton(
             link_member=link_member,
             action=view.preview_action,
             status_message=(
-                "🔄 Re-running profile extraction with confirmed website and GitHub content..."
+                "🔄 Re-running profile extraction with confirmed profile-source content..."
             ),
             confirmed_personal_websites=view.website_reparse_candidates,
             confirmed_github_usernames=view.github_reparse_candidates,
@@ -4024,7 +4024,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 name="Source Reparse",
                 value=truncate_field_value(
                     "New external sources were found. Use **Reparse With New Sources** "
-                    "before confirming if you want website or GitHub content included."
+                    "before confirming if you want profile-source content included."
                 ),
                 inline=False,
             )
@@ -4300,7 +4300,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         normalized_filename = str(filename or "")
         status_text = (
             status_message
-            or "📥 Profile input received. Extracting profile fields with any fetchable website or GitHub sources now..."
+            or "📥 Profile input received. Extracting profile fields with any fetchable profile sources now..."
         )
         if link_discord_payload is None and link_member is not None:
             link_discord_payload = {
@@ -7123,9 +7123,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             has_resume = self._contact_has_resume(contact)
             has_profile_sources = self._contact_has_external_profile_sources(contact)
             resume_status = resume_name or ("on file" if has_resume else "missing")
-            source_status = (
-                "website or GitHub on file" if has_profile_sources else "none"
-            )
+            source_status = "profile sources on file" if has_profile_sources else "none"
             contact_info = (
                 f"📧 {email}\n🏢 508 Email: {email_508}\n"
                 f"📄 Resume: {resume_status}\n"
@@ -7138,7 +7136,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             name="💡 Tip",
             value=(
                 "Select the contact button to continue. Contacts without a resume "
-                "and without CRM website or GitHub sources will hand off to `/upload-resume`."
+                "and without CRM profile sources will hand off to `/upload-resume`."
             ),
             inline=False,
         )
@@ -8466,7 +8464,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
 
         has_resume = bool(attachment_id)
         display_filename = filename or (
-            "latest resume" if has_resume else "CRM website/GitHub sources"
+            "latest resume" if has_resume else "CRM profile sources"
         )
         view = ResumeReprocessConfirmationView(
             crm_cog=self,
@@ -8479,9 +8477,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         )
         confirmation_message = (
             f"⚠️ Reprocess profile for `{contact_name}` from resume `{display_filename}` "
-            "and include any fetchable website or GitHub profile sources?"
+            "and include any fetchable profile sources?"
             if has_resume
-            else f"⚠️ Reprocess profile for `{contact_name}` from CRM website or GitHub sources?"
+            else f"⚠️ Reprocess profile for `{contact_name}` from CRM profile sources?"
         )
         await interaction.followup.send(
             confirmation_message,
@@ -8527,7 +8525,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
 
         has_resume = bool(attachment_id)
         display_filename = filename or (
-            "latest resume" if has_resume else "CRM website/GitHub sources"
+            "latest resume" if has_resume else "CRM profile sources"
         )
         await self._run_resume_extract_and_preview(
             interaction=interaction,
@@ -10066,7 +10064,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
 
     @app_commands.command(
         name="reprocess-profile",
-        description="Reprocess a profile from the latest resume or CRM website/GitHub",
+        description="Reprocess a profile from the latest resume or CRM profile sources",
     )
     @app_commands.describe(search_term="Email, 508 username, 508 email, or contact ID.")
     async def reprocess_profile(
