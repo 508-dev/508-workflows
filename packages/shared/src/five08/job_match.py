@@ -417,6 +417,17 @@ class JobRequirements:
         ):
             hard_required_skills = legacy_required_skills[:1]
             soft_required_skills = legacy_required_skills[1:]
+        elif (
+            hard_required_skills and not soft_required_skills and legacy_required_skills
+        ):
+            hard_required_skill_keys = {
+                item.casefold() for item in hard_required_skills
+            }
+            soft_required_skills = [
+                skill
+                for skill in legacy_required_skills
+                if skill.casefold() not in hard_required_skill_keys
+            ]
 
         hard_required_skill_keys = {item.casefold() for item in hard_required_skills}
         soft_required_skills = [

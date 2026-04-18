@@ -201,6 +201,32 @@ def test_extract_backfills_hard_and_soft_from_legacy_required_skills() -> None:
     assert result.soft_required_skills == ["figma", "hubspot"]
 
 
+def test_extract_backfills_soft_from_legacy_required_skills_when_hard_present() -> None:
+    payload = {
+        "hard_required_skills": ["Webflow"],
+        "required_skills": ["Webflow", "Figma", "HubSpot"],
+        "preferred_skills": [],
+        "required_evidence": [],
+        "seniority": None,
+        "location_type": "remote_any",
+        "preferred_timezones": [],
+        "raw_location_text": None,
+        "title": None,
+    }
+    with patch("openai.OpenAI") as mock_openai_cls:
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value = _make_openai_response(
+            payload
+        )
+
+        result = extract_job_requirements("Webflow role", api_key="test-key")
+
+    assert result.hard_required_skills == ["webflow"]
+    assert result.soft_required_skills == ["figma", "hubspot"]
+    assert result.required_skills == ["webflow", "figma", "hubspot"]
+
+
 def test_job_requirements_dedupes_soft_and_preferred_against_hard() -> None:
     requirements = JobRequirements(
         hard_required_skills=["Webflow"],
