@@ -15,13 +15,16 @@ def test_normalize_skill_prefers_discord_friendly_canonical_forms() -> None:
     assert normalize_skill("GTM") == "go to market"
     assert normalize_skill("CRM") == "customer relationship management"
     assert normalize_skill("SEO") == "search engine optimization"
+    assert normalize_skill("Webflow CMS") == "webflow"
 
 
 def test_normalize_skill_list_dedupes_after_aliasing() -> None:
     """List normalization should dedupe across equivalent aliases."""
-    normalized = normalize_skill_list(["node.js", "node", "A/B Testing", "ab testing"])
+    normalized = normalize_skill_list(
+        ["node.js", "node", "A/B Testing", "ab testing", "webflow cms", "webflow"]
+    )
 
-    assert normalized == ["node", "ab testing"]
+    assert normalized == ["node", "ab testing", "webflow"]
 
 
 def test_normalize_skill_payload_merges_inline_and_structured_strengths() -> None:

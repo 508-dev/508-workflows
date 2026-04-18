@@ -131,7 +131,7 @@ class TestCRMCog:
 
         assert header_lines[0] == "## Job Match Results"
         assert "Full Stack Engineer" in header_lines[1]
-        assert "Skills: `python`" in header_lines[1]
+        assert "Hard needs: `python`" in header_lines[1]
         assert header_lines[-1] == "Found **3** candidate(s)."
         assert role_line == "Discord roles: `Full Stack`"
         assert role_ids == []
@@ -2016,15 +2016,16 @@ class TestCRMCog:
         thread_instance.starter_message = starter_msg
         mock_interaction.channel = thread_instance
 
-        requirements = Mock()
-        requirements.title = "Frontend Engineer"
-        requirements.discord_role_types = [" Frontend ", "Senior"]
-        requirements.raw_location_text = "USA"
-        requirements.preferred_timezones = []
-        requirements.location_type = "us_only"
-        requirements.required_skills = ["python"]
-        requirements.preferred_skills = []
-        requirements.seniority = "Senior"
+        requirements = JobRequirements(
+            required_skills=["python"],
+            preferred_skills=[],
+            discord_role_types=[" Frontend ", "Senior"],
+            seniority="senior",
+            location_type="us_only",
+            preferred_timezones=[],
+            raw_location_text="USA",
+            title="Frontend Engineer",
+        )
 
         candidate = Mock()
         candidate.is_member = True
@@ -2039,7 +2040,17 @@ class TestCRMCog:
         candidate.latest_resume_name = None
         candidate.match_score = 9.2
         candidate.matched_required_skills = ["python"]
+        candidate.matched_hard_required_skills = ["python"]
+        candidate.matched_soft_required_skills = []
         candidate.matched_discord_roles = ["Frontend"]
+        candidate.matched_preferred_skills = []
+        candidate.missing_hard_required_skills = []
+        candidate.evidence_signals = ["hard skill `python`"]
+        candidate.llm_fit_score = None
+        candidate.llm_summary = None
+        candidate.llm_risks = []
+        candidate.llm_missing_requirements = []
+        candidate.github_username = None
         candidate.seniority = "Senior"
         candidate.timezone = "America/New_York"
 
@@ -2150,15 +2161,16 @@ class TestCRMCog:
         thread_instance.starter_message = starter_msg
         mock_interaction.channel = thread_instance
 
-        requirements = Mock()
-        requirements.title = "Frontend Engineer"
-        requirements.discord_role_types = [" Frontend ", "Senior"]
-        requirements.raw_location_text = "USA"
-        requirements.preferred_timezones = []
-        requirements.location_type = "us_only"
-        requirements.required_skills = ["python"]
-        requirements.preferred_skills = []
-        requirements.seniority = "Senior"
+        requirements = JobRequirements(
+            required_skills=["python"],
+            preferred_skills=[],
+            discord_role_types=[" Frontend ", "Senior"],
+            seniority="senior",
+            location_type="us_only",
+            preferred_timezones=[],
+            raw_location_text="USA",
+            title="Frontend Engineer",
+        )
 
         candidate = Mock()
         candidate.is_member = True
@@ -2173,7 +2185,17 @@ class TestCRMCog:
         candidate.latest_resume_name = None
         candidate.match_score = 9.2
         candidate.matched_required_skills = ["python"]
+        candidate.matched_hard_required_skills = ["python"]
+        candidate.matched_soft_required_skills = []
         candidate.matched_discord_roles = ["Frontend"]
+        candidate.matched_preferred_skills = []
+        candidate.missing_hard_required_skills = []
+        candidate.evidence_signals = ["hard skill `python`"]
+        candidate.llm_fit_score = None
+        candidate.llm_summary = None
+        candidate.llm_risks = []
+        candidate.llm_missing_requirements = []
+        candidate.github_username = None
         candidate.seniority = "Senior"
         candidate.timezone = "America/New_York"
 
