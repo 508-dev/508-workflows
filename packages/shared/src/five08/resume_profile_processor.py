@@ -1956,6 +1956,10 @@ class ResumeProfileProcessor:
                 device_scale_factor=PROFILE_SOURCE_BROWSER_DEVICE_SCALE_FACTOR,
             )
             page = context.new_page()
+            page.route(
+                "**/*",
+                lambda route: self._handle_browser_profile_request_route_direct(route),
+            )
             page.goto(
                 navigation_url,
                 wait_until="domcontentloaded",
@@ -1982,6 +1986,20 @@ class ResumeProfileProcessor:
                     context.close()
                 except Exception:
                     logger.debug("Failed to close CloakBrowser for %s", navigation_url)
+
+    def _handle_browser_profile_request_route_direct(self, route: Any) -> None:
+        request = route.request
+        request_url = str(getattr(request, "url", "")).strip()
+        validation_error = self._validate_browser_profile_request_url(request_url)
+        if validation_error:
+            logger.info(
+                "Blocked non-public direct browser profile request url=%s error=%s",
+                request_url,
+                validation_error,
+            )
+            route.abort()
+            return
+        route.continue_()
 
     def _fetch_external_profile_source_text_with_browser_once(
         self,

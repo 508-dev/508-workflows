@@ -2,7 +2,9 @@
 
 import ipaddress
 import json
+import sys
 from datetime import datetime
+from typing import Any
 from types import SimpleNamespace
 
 import pytest
@@ -822,6 +824,86 @@ def test_inspect_profile_source_fetch_uses_direct_browser_on_initial_block() -> 
     processor._fetch_external_profile_source_text_with_browser_direct.assert_called_once_with(
         "https://michaelmwu.com/"
     )
+
+
+def test_fetch_external_profile_source_text_with_browser_direct_validates_routed_requests() -> (
+    None
+):
+    """Direct browser fallback should still abort non-public requests via route validation."""
+    processor = ResumeProfileProcessor()
+    page = Mock()
+    page.url = "https://beacons.ai/michaelmwu"
+    page.content.return_value = "<html><body>Michael Wu</body></html>"
+    route_handler: Any = None
+
+    def capture_route(pattern: str, handler: object) -> None:
+        nonlocal route_handler
+        assert pattern == "**/*"
+        route_handler = handler
+
+    page.route.side_effect = capture_route
+    context = Mock()
+    context.new_page.return_value = page
+
+    def validate(url: str) -> str | None:
+        allowed_urls = {
+            "https://michaelmwu.com/",
+            "https://beacons.ai/michaelmwu",
+            "https://beacons.ai/assets/app.js",
+        }
+        return None if url in allowed_urls else "blocked"
+
+    with (
+        patch.dict(
+            sys.modules,
+            {
+                "cloakbrowser": SimpleNamespace(
+                    launch_context=Mock(return_value=context)
+                )
+            },
+        ),
+        patch.object(
+            processor,
+            "_validate_browser_profile_navigation_url",
+            return_value=None,
+        ),
+        patch.object(
+            processor,
+            "_validate_browser_profile_request_url",
+            side_effect=validate,
+        ) as validate_url,
+        patch.object(
+            processor,
+            "_extract_browser_rendered_profile_source_text",
+            return_value="Michael Wu",
+        ),
+    ):
+        final_url, text = (
+            processor._fetch_external_profile_source_text_with_browser_direct(
+                "https://michaelmwu.com/"
+            )
+        )
+
+        assert route_handler is not None
+
+        blocked_route = Mock()
+        blocked_route.request = SimpleNamespace(url="http://127.0.0.1/internal")
+        route_handler(blocked_route)
+        blocked_route.abort.assert_called_once_with()
+        blocked_route.continue_.assert_not_called()
+
+        allowed_route = Mock()
+        allowed_route.request = SimpleNamespace(url="https://beacons.ai/assets/app.js")
+        route_handler(allowed_route)
+        allowed_route.continue_.assert_called_once_with()
+        allowed_route.abort.assert_not_called()
+
+    assert final_url == "https://beacons.ai/michaelmwu"
+    assert text == "Michael Wu"
+    assert validate_url.call_args_list == [
+        call("http://127.0.0.1/internal"),
+        call("https://beacons.ai/assets/app.js"),
+    ]
 
 
 def test_fetch_external_profile_source_text_skips_browser_for_github_sources() -> None:
