@@ -106,7 +106,7 @@ services:
       minio-init:
         condition: service_completed_successfully
     ports:
-      - "${WEBHOOK_INGEST_HOST_PORT:-8090}:${WEBHOOK_INGEST_PORT:-8090}"
+      - "${WEBHOOK_INGEST_HOST_BIND:-127.0.0.1}:${WEBHOOK_INGEST_HOST_PORT:-8090}:${WEBHOOK_INGEST_PORT:-8090}"
 
   worker:
     build:

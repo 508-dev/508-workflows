@@ -66,8 +66,11 @@ Stop stack:
 Show the deterministic host ports assigned to the current worktree:
 
 ```bash
-./scripts/docker-compose.sh ports
+./scripts/docker-compose.sh print-ports
 ```
+
+Set `*_HOST_PORT` or `COMPOSE_PROJECT_NAME` in `.env` or the invoking shell if you
+need fixed values; otherwise the wrapper computes deterministic per-worktree ones.
 
 ## Testing and Quality
 
