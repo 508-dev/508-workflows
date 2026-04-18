@@ -1502,6 +1502,7 @@ class ResumeProfileProcessor:
         try:
             response: ProfileSourceHttpResponse | None = None
             last_fetch_error: ValueError | None = None
+            browser_attempted = False
             for candidate_url in self._iter_profile_source_fetch_urls(
                 url,
                 allow_javascript_fallback=allow_javascript_fallback,
@@ -1514,6 +1515,34 @@ class ResumeProfileProcessor:
                     break
                 except ValueError as exc:
                     last_fetch_error = exc
+                    if (
+                        allow_javascript_fallback
+                        and self._should_reset_profile_source_session(str(exc))
+                    ):
+                        browser_attempted = True
+                        try:
+                            (
+                                browser_final_url,
+                                direct_browser_text,
+                            ) = self._fetch_external_profile_source_text_with_browser_direct(
+                                candidate_url
+                            )
+                        except ValueError as browser_exc:
+                            last_fetch_error = browser_exc
+                            if not self._is_retryable_profile_fetch_error(str(exc)):
+                                raise browser_exc
+                        else:
+                            return ProfileSourceFetchDiagnostics(
+                                url=url,
+                                final_url=browser_final_url,
+                                content_type="text/html",
+                                selected_text=direct_browser_text,
+                                curl_text=None,
+                                browser_attempted=True,
+                                browser_used=True,
+                                browser_text=direct_browser_text,
+                                error=None,
+                            )
                     if not self._is_retryable_profile_fetch_error(str(exc)):
                         raise
 
@@ -1529,7 +1558,6 @@ class ResumeProfileProcessor:
             except ValueError as exc:
                 extraction_error = exc
 
-            browser_attempted = False
             browser_used = False
             browser_text: str | None = None
             if (
@@ -1885,6 +1913,56 @@ class ResumeProfileProcessor:
         finally:
             fresh_session.close()
 
+    def _fetch_external_profile_source_text_with_browser_direct(
+        self,
+        navigation_url: str,
+    ) -> tuple[str, str]:
+        try:
+            from cloakbrowser import launch_context  # type: ignore[import-untyped]
+        except ImportError as exc:
+            raise ValueError("JavaScript browser fallback is unavailable") from exc
+
+        validation_error = self._validate_browser_profile_navigation_url(navigation_url)
+        if validation_error:
+            raise ValueError(validation_error)
+
+        context = None
+        try:
+            context = launch_context(
+                user_agent=PROFILE_SOURCE_USER_AGENT,
+                viewport=PROFILE_SOURCE_BROWSER_VIEWPORT,
+                is_mobile=True,
+                has_touch=True,
+                device_scale_factor=PROFILE_SOURCE_BROWSER_DEVICE_SCALE_FACTOR,
+            )
+            page = context.new_page()
+            page.goto(
+                navigation_url,
+                wait_until="domcontentloaded",
+                timeout=PROFILE_SOURCE_BROWSER_TIMEOUT_MS,
+            )
+            page.wait_for_timeout(5000)
+            final_page_url = str(getattr(page, "url", "")).strip()
+            validation_error = self._validate_browser_profile_navigation_url(
+                final_page_url
+            )
+            if validation_error:
+                raise ValueError(validation_error)
+            rendered_html = page.content()
+            rendered_text = self._extract_browser_rendered_profile_source_text(
+                rendered_html,
+                navigation_url=final_page_url,
+            )
+            return final_page_url, rendered_text
+        except Exception as exc:
+            raise ValueError(f"JavaScript profile fetch failed: {exc}") from exc
+        finally:
+            if context is not None:
+                try:
+                    context.close()
+                except Exception:
+                    logger.debug("Failed to close CloakBrowser for %s", navigation_url)
+
     def _fetch_external_profile_source_text_with_browser_once(
         self,
         initial_response: ProfileSourceHttpResponse,
@@ -1931,8 +2009,6 @@ class ResumeProfileProcessor:
             if validation_error:
                 raise ValueError(validation_error)
             rendered_html = page.content()
-            if self._profile_source_html_looks_blocked(rendered_html):
-                raise ValueError("JavaScript profile fetch hit a scraping block")
         except Exception as exc:
             raise ValueError(f"JavaScript profile fetch failed: {exc}") from exc
         finally:
@@ -1942,7 +2018,7 @@ class ResumeProfileProcessor:
                 except Exception:
                     logger.debug("Failed to close CloakBrowser for %s", navigation_url)
 
-        return self._extract_rendered_profile_source_text(
+        return self._extract_browser_rendered_profile_source_text(
             rendered_html,
             navigation_url=navigation_url,
         )
@@ -2092,6 +2168,28 @@ class ResumeProfileProcessor:
             body=rendered_body,
             content_type="text/html",
         )
+
+    def _extract_browser_rendered_profile_source_text(
+        self,
+        rendered_html: str,
+        *,
+        navigation_url: str | None = None,
+    ) -> str:
+        rendered_text = self._extract_rendered_profile_source_text(
+            rendered_html,
+            navigation_url=navigation_url,
+        )
+        if not self._profile_source_html_looks_blocked(rendered_html):
+            return rendered_text
+
+        stripped_text = rendered_text.strip()
+        word_count = len(re.findall(r"\w+", stripped_text))
+        if self._profile_source_html_looks_blocked(stripped_text) or (
+            len(stripped_text) <= PROFILE_SOURCE_JS_SPARSE_TEXT_MAX_CHARS
+            and word_count <= PROFILE_SOURCE_JS_SPARSE_TEXT_MAX_WORDS
+        ):
+            raise ValueError("JavaScript profile fetch hit a scraping block")
+        return rendered_text
 
     @staticmethod
     def _browser_route_response_headers(

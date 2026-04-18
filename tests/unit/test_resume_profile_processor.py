@@ -796,6 +796,34 @@ def test_fetch_external_profile_source_text_uses_browser_for_sparse_personal_sit
     assert browser_call.args[0].final_url == "https://example.com/about"
 
 
+def test_inspect_profile_source_fetch_uses_direct_browser_on_initial_block() -> None:
+    """Blocked personal websites should still get a direct browser fallback attempt."""
+    processor = ResumeProfileProcessor()
+    processor._fetch_external_profile_source_response = Mock(
+        side_effect=ValueError("Profile fetch hit a scraping block; reset session")
+    )
+    processor._fetch_external_profile_source_text_with_browser_direct = Mock(
+        return_value=(
+            "https://beacons.ai/michaelmwu",
+            "Michael Wu\nMichael in Asia\nDEM Flyers",
+        )
+    )
+
+    diagnostics = processor.inspect_profile_source_fetch(
+        "https://michaelmwu.com/",
+        allow_javascript_fallback=True,
+    )
+
+    assert diagnostics.final_url == "https://beacons.ai/michaelmwu"
+    assert diagnostics.selected_text == "Michael Wu\nMichael in Asia\nDEM Flyers"
+    assert diagnostics.browser_attempted is True
+    assert diagnostics.browser_used is True
+    assert diagnostics.curl_text is None
+    processor._fetch_external_profile_source_text_with_browser_direct.assert_called_once_with(
+        "https://michaelmwu.com/"
+    )
+
+
 def test_fetch_external_profile_source_text_skips_browser_for_github_sources() -> None:
     """Non-website profile sources should stay on the curl path even if sparse."""
     processor = ResumeProfileProcessor()
