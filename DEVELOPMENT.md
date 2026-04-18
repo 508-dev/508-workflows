@@ -54,13 +54,19 @@ uv run --package five08 crmctl repl
 Start full stack (discord_bot + api + worker + redis + postgres + minio):
 
 ```bash
-docker compose up --build
+./scripts/docker-compose.sh up --build
 ```
 
 Stop stack:
 
 ```bash
-docker compose down
+./scripts/docker-compose.sh down
+```
+
+Show the deterministic host ports assigned to the current worktree:
+
+```bash
+./scripts/docker-compose.sh ports
 ```
 
 ## Testing and Quality

@@ -100,7 +100,13 @@ uv run --package five08 crmctl batch-update --where timezone__is_null=true --whe
 Or run the full stack with Docker Compose:
 
 ```bash
-docker compose up --build
+./scripts/docker-compose.sh up --build
+```
+
+Show the deterministic host ports for the current worktree:
+
+```bash
+./scripts/docker-compose.sh ports
 ```
 
 ## License
@@ -136,7 +142,7 @@ Use `.env.example` as the source of truth for defaults.
 - `Optional` (Compose DB container): `POSTGRES_USER` (default: `postgres`)
 - `Optional` (Compose DB container): `POSTGRES_PASSWORD` (default: `postgres`)
 - `Optional` (Compose host bind): `POSTGRES_HOST_BIND` (default: `127.0.0.1`)
-- `Optional` (Compose host port): `POSTGRES_PORT` (default: `5432`)
+- `Optional` (Compose host port): `POSTGRES_HOST_PORT` (default: `5432`)
 
 ### MinIO + Internal Transfers
 
@@ -145,8 +151,8 @@ Use `.env.example` as the source of truth for defaults.
 - `Optional`: `MINIO_INTERNAL_BUCKET` (default: `internal-transfers`)
 - `Optional`: `MINIO_ROOT_USER` (default: `internal`)
 - `Optional`: `MINIO_HOST_BIND` (default: `127.0.0.1`; set `0.0.0.0` to expose externally)
-- `Optional`: `MINIO_API_PORT` (default: `9000`)
-- `Optional`: `MINIO_CONSOLE_PORT` (default: `9001`)
+- `Optional`: `MINIO_API_HOST_PORT` (default: `9000`)
+- `Optional`: `MINIO_CONSOLE_HOST_PORT` (default: `9001`)
 - Note: `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` are `SharedSettings` alias properties (`minio_access_key`, `minio_secret_key`) and are not env-loaded fields.
 - Note: use `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` as the actual env vars.
 
@@ -154,7 +160,8 @@ Use `.env.example` as the source of truth for defaults.
 
 - `Required` for protected endpoints: `API_SHARED_SECRET` (ingest requests are rejected when unset)
 - `Optional`: `WEBHOOK_INGEST_HOST` (default: `0.0.0.0`)
-- `Optional`: `WEBHOOK_INGEST_PORT` (default: `8090`)
+- `Optional`: `WEBHOOK_INGEST_PORT` (default: `8090`; API listen port inside the container)
+- `Optional`: `WEBHOOK_INGEST_HOST_PORT` (default: `8090`; host-exposed Compose port)
 
 ### Backend API OIDC Session Auth
 

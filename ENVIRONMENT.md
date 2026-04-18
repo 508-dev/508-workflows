@@ -37,7 +37,7 @@ Use `.env.example` as the source of defaults.
 - `Optional` (Compose DB container): `POSTGRES_USER` (default: `postgres`)
 - `Optional` (Compose DB container): `POSTGRES_PASSWORD` (default: `postgres`)
 - `Optional` (Compose host bind): `POSTGRES_HOST_BIND` (default: `127.0.0.1`)
-- `Optional` (Compose host port): `POSTGRES_PORT` (default: `5432`)
+- `Optional` (Compose host port): `POSTGRES_HOST_PORT` (default: `5432`)
 
 ## MinIO + Internal Transfers
 
@@ -45,8 +45,8 @@ Use `.env.example` as the source of defaults.
 - `Optional`: `MINIO_INTERNAL_BUCKET` (default: `internal-transfers`)
 - `Optional`: `MINIO_ROOT_USER` (default: `internal`)
 - `Optional`: `MINIO_HOST_BIND` (default: `127.0.0.1`; set `0.0.0.0` to expose externally)
-- `Optional`: `MINIO_API_PORT` (default: `9000`)
-- `Optional`: `MINIO_CONSOLE_PORT` (default: `9001`)
+- `Optional`: `MINIO_API_HOST_PORT` (default: `9000`)
+- `Optional`: `MINIO_CONSOLE_HOST_PORT` (default: `9001`)
 
 ### Notes
 
@@ -56,7 +56,8 @@ Use `.env.example` as the source of defaults.
 ## Backend API Ingest
 
 - `Optional`: `WEBHOOK_INGEST_HOST` (default: `0.0.0.0`)
-- `Optional`: `WEBHOOK_INGEST_PORT` (default: `8090`)
+- `Optional`: `WEBHOOK_INGEST_PORT` (default: `8090`; API listen port inside the container)
+- `Optional`: `WEBHOOK_INGEST_HOST_PORT` (default: `8090`; host-exposed Compose port)
 - `Required`: `API_SHARED_SECRET` (global shared secret for protected endpoints and webhooks)
 
 ## Backend API OIDC Session Auth
