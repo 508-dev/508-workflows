@@ -18,11 +18,47 @@ get_env_file_value() {
   [ -f "$env_file" ] || return 1
 
   awk -F= -v key="$key" '
+    function parse_value(raw,    first, quote, value, i, c, escaped) {
+      sub(/^[[:space:]]*/, "", raw)
+
+      first = substr(raw, 1, 1)
+      if (first == "\"" || first == "'\''") {
+        quote = first
+        value = ""
+        escaped = 0
+
+        for (i = 2; i <= length(raw); i++) {
+          c = substr(raw, i, 1)
+
+          if (quote == "\"" && escaped) {
+            value = value c
+            escaped = 0
+            continue
+          }
+
+          if (quote == "\"" && c == "\\") {
+            escaped = 1
+            continue
+          }
+
+          if (c == quote) {
+            return value
+          }
+
+          value = value c
+        }
+
+        return value
+      }
+
+      sub(/[[:space:]]+#.*$/, "", raw)
+      sub(/[[:space:]]*$/, "", raw)
+      return raw
+    }
+
     /^[[:space:]]*#/ { next }
     $0 ~ "^[[:space:]]*" key "=" {
-      value = substr($0, index($0, "=") + 1)
-      sub(/^[[:space:]]*/, "", value)
-      sub(/[[:space:]]*$/, "", value)
+      value = parse_value(substr($0, index($0, "=") + 1))
       print value
       found = 1
       exit
