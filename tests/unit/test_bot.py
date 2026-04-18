@@ -141,6 +141,17 @@ class TestBot508:
 
         assert config.discord_sendmsg_character_limit == 2000
 
+    def test_backend_api_base_url_defaults_to_host_runtime(self):
+        config = Settings(
+            discord_bot_token="token",
+            espo_api_key="espo-key",
+            espo_base_url="https://crm.example.com",
+            kimai_base_url="https://kimai.example.com",
+            kimai_api_token="kimai-token",
+        )
+
+        assert config.backend_api_base_url == "http://127.0.0.1:8090"
+
     def test_validate_app_command_descriptions_accepts_valid_lengths(self):
         """Test that valid command descriptions pass validation."""
         tree = Mock()

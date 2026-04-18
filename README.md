@@ -18,7 +18,7 @@ This repository follows a service-oriented monorepo layout:
 ├── packages/
 │   └── shared/
 │       └── src/five08/      # Shared settings, queue helpers, shared clients
-├── docker-compose.yml      # discord_bot + api + worker + redis + postgres + minio
+├── docker-compose.yml      # full container stack for Coolify/local parity
 ├── tests/                  # Unit and integration tests
 └── pyproject.toml          # uv workspace root
 ```
@@ -72,9 +72,16 @@ cp .env.example .env
 # then edit .env
 ```
 
-### 3. Run services
+### 3. Start local infrastructure
 
-Run directly with uv:
+For development, run Redis, Postgres, and MinIO in Docker and run the app
+processes on the host:
+
+```bash
+./scripts/dev-up.sh
+```
+
+### 4. Run app services on the host
 
 ```bash
 # Discord bot
@@ -97,7 +104,7 @@ uv run --package five08 crmctl search --where timezone__is_null=true --where loc
 uv run --package five08 crmctl batch-update --where timezone__is_null=true --where location__is_not_null=true --update timezone=@location
 ```
 
-Or run the full stack with Docker Compose:
+For full containerized runs, including Coolify-style deployment parity:
 
 ```bash
 docker compose up --build
@@ -120,7 +127,7 @@ Use `.env.example` as the source of truth for defaults.
 
 ### Queue + Job Runtime
 
-- `Optional`: `REDIS_URL` (default: `redis://redis:6379/0`)
+- `Optional`: `REDIS_URL` (default: `redis://127.0.0.1:6379/0` for host-run app services; Compose injects `redis://redis:6379/0`)
 - `Optional`: `REDIS_QUEUE_NAME` (default: `jobs.default`)
 - `Optional`: `REDIS_KEY_PREFIX` (default: `jobs`)
 - `Optional`: `JOB_TIMEOUT_SECONDS` (default: `600`)
@@ -131,7 +138,7 @@ Use `.env.example` as the source of truth for defaults.
 
 ### Postgres + Compose Exposure
 
-- `Optional`: `POSTGRES_URL` (default: `postgresql://postgres@postgres:5432/workflows`)
+- `Optional`: `POSTGRES_URL` (default: `postgresql://postgres:postgres@127.0.0.1:5432/workflows` for host-run app services; Compose injects a Docker-network URL)
 - `Optional` (Compose DB container): `POSTGRES_DB` (default: `workflows`)
 - `Optional` (Compose DB container): `POSTGRES_USER` (default: `postgres`)
 - `Optional` (Compose DB container): `POSTGRES_PASSWORD` (default: `postgres`)
@@ -141,7 +148,7 @@ Use `.env.example` as the source of truth for defaults.
 ### MinIO + Internal Transfers
 
 - `Required` in non-local environments: `MINIO_ROOT_PASSWORD`
-- `Optional`: `MINIO_ENDPOINT` (default: `http://minio:9000`)
+- `Optional`: `MINIO_ENDPOINT` (default: `http://127.0.0.1:9000` for host-run app services; Compose injects `http://minio:9000`)
 - `Optional`: `MINIO_INTERNAL_BUCKET` (default: `internal-transfers`)
 - `Optional`: `MINIO_ROOT_USER` (default: `internal`)
 - `Optional`: `MINIO_HOST_BIND` (default: `127.0.0.1`; set `0.0.0.0` to expose externally)
@@ -180,7 +187,7 @@ Use `.env.example` as the source of truth for defaults.
 ### Worker Consumer
 
 - `Optional`: `WORKER_NAME` (default: `worker`)
-- `Optional`: `DISCORD_BOT_INTERNAL_BASE_URL` (default: `http://discord_bot:3000`; used for best-effort Member role grants after Docuseal signatures)
+- `Optional`: `DISCORD_BOT_INTERNAL_BASE_URL` (default: `http://127.0.0.1:3000` for host-run app services; Compose injects `http://discord_bot:3000`)
 - `Optional`: `WORKER_QUEUE_NAMES` (default: `jobs.default`, comma-separated)
 - `Optional`: `WORKER_BURST` (default: `false`)
 
@@ -211,7 +218,7 @@ Use `.env.example` as the source of truth for defaults.
 ### Discord Bot Core
 
 - `Required`: `DISCORD_BOT_TOKEN`
-- `Optional`: `BACKEND_API_BASE_URL` (default: `http://api:8090`)
+- `Optional`: `BACKEND_API_BASE_URL` (default: `http://127.0.0.1:8090` for host-run app services; Compose injects `http://api:8090`)
 - `Optional`: `HEALTHCHECK_PORT` (default: `3000`)
 - Note: bot message chunking uses Discord's 2000 character limit in code.
 

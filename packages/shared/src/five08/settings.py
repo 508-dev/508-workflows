@@ -24,18 +24,20 @@ class SharedSettings(BaseSettings):
     sentry_send_default_pii: bool = False
     sentry_debug: bool = False
 
-    redis_url: str = "redis://redis:6379/0"  # Docker Compose default; set REDIS_URL when running outside Compose.
+    # Local development defaults to host-run app services. Containerized runtimes
+    # should inject Docker-network service URLs explicitly.
+    redis_url: str = "redis://127.0.0.1:6379/0"
     redis_queue_name: str = "jobs.default"
     redis_key_prefix: str = "jobs"
     redis_socket_connect_timeout: float | None = 5.0
     redis_socket_timeout: float | None = 5.0
-    postgres_url: str = "postgresql://postgres@postgres:5432/workflows"
+    postgres_url: str = "postgresql://postgres:postgres@127.0.0.1:5432/workflows"
     job_max_attempts: int = 8
     job_retry_base_seconds: int = 5
     job_retry_max_seconds: int = 300
     job_timeout_seconds: int = 600
     job_result_ttl_seconds: int = 3600
-    minio_endpoint: str = "http://minio:9000"
+    minio_endpoint: str = "http://127.0.0.1:9000"
     minio_root_user: str = "internal"
     minio_root_password: str = ""
     minio_internal_bucket: str = "internal-transfers"

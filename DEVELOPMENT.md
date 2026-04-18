@@ -33,7 +33,13 @@ cp .env.example .env
 
 The backend API process runs Alembic migrations on startup (`apps/worker/src/five08/worker/db_migrations.py`) so the `jobs` table is created or upgraded before requests are accepted.
 
-3. Run services:
+3. Start local infrastructure:
+
+```bash
+./scripts/dev-up.sh
+```
+
+4. Run services on the host:
 
 ```bash
 # bot
@@ -50,6 +56,10 @@ uv run --package five08 crmctl repl
 ```
 
 ## Docker Compose Workflow
+
+For day-to-day development, prefer `./scripts/dev-up.sh` plus host-run app
+services. Use full Docker Compose when you need container parity, including
+Coolify-style runs.
 
 Start full stack (discord_bot + api + worker + redis + postgres + minio):
 
@@ -146,7 +156,7 @@ contact.save()
 
 Use `.env.example` as source of truth. Key categories:
 
-- Shared queue/runtime: `REDIS_URL`, `REDIS_QUEUE_NAME`, `POSTGRES_URL`, `JOB_MAX_ATTEMPTS`, `JOB_RETRY_BASE_SECONDS`, `JOB_RETRY_MAX_SECONDS`, `LOG_LEVEL`, webhook settings
+- Shared queue/runtime: `REDIS_URL`, `REDIS_QUEUE_NAME`, `POSTGRES_URL`, `JOB_MAX_ATTEMPTS`, `JOB_RETRY_BASE_SECONDS`, `JOB_RETRY_MAX_SECONDS`, `LOG_LEVEL`, webhook settings. Local defaults target host-run services; `docker-compose.yml` injects Docker-network URLs for containerized runs.
 - Bot credentials/integrations: Discord, email, Espo, Kimai
 - Discord CRM audit writer: `AUDIT_API_BASE_URL`, `AUDIT_API_TIMEOUT_SECONDS` (plus shared `API_SHARED_SECRET`)
 - Worker controls: `WORKER_NAME`, `WORKER_QUEUE_NAMES`, `WORKER_BURST`

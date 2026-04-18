@@ -67,8 +67,9 @@ services:
     env_file:
       - .env
     environment:
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REDIS_URL: redis://redis:6379/0
       REDIS_QUEUE_NAME: ${REDIS_QUEUE_NAME:-jobs.default}
+      BACKEND_API_BASE_URL: http://api:8090
     restart: unless-stopped
     depends_on:
       redis:
@@ -82,16 +83,16 @@ services:
     env_file:
       - .env
     environment:
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REDIS_URL: redis://redis:6379/0
       REDIS_QUEUE_NAME: ${REDIS_QUEUE_NAME:-jobs.default}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-workflows}
-      POSTGRES_URL: ${POSTGRES_URL:-postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-workflows}}
+      POSTGRES_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-workflows}
       JOB_MAX_ATTEMPTS: ${JOB_MAX_ATTEMPTS:-8}
       JOB_RETRY_BASE_SECONDS: ${JOB_RETRY_BASE_SECONDS:-5}
       JOB_RETRY_MAX_SECONDS: ${JOB_RETRY_MAX_SECONDS:-300}
-      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://minio:9000}
+      MINIO_ENDPOINT: http://minio:9000
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-internal}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me}
       MINIO_INTERNAL_BUCKET: ${MINIO_INTERNAL_BUCKET:-internal-transfers}
@@ -121,21 +122,22 @@ services:
     env_file:
       - .env
     environment:
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REDIS_URL: redis://redis:6379/0
       REDIS_QUEUE_NAME: ${REDIS_QUEUE_NAME:-jobs.default}
-      WORKER_API_BASE_URL: ${WORKER_API_BASE_URL:-}
+      WORKER_API_BASE_URL: http://api:8090
       WORKER_QUEUE_NAMES: ${WORKER_QUEUE_NAMES:-jobs.default}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-workflows}
-      POSTGRES_URL: ${POSTGRES_URL:-postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-workflows}}
+      POSTGRES_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-workflows}
       JOB_MAX_ATTEMPTS: ${JOB_MAX_ATTEMPTS:-8}
       JOB_RETRY_BASE_SECONDS: ${JOB_RETRY_BASE_SECONDS:-5}
       JOB_RETRY_MAX_SECONDS: ${JOB_RETRY_MAX_SECONDS:-300}
-      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://minio:9000}
+      MINIO_ENDPOINT: http://minio:9000
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-internal}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me}
       MINIO_INTERNAL_BUCKET: ${MINIO_INTERNAL_BUCKET:-internal-transfers}
+      DISCORD_BOT_INTERNAL_BASE_URL: http://discord_bot:3000
     restart: unless-stopped
     depends_on:
       api:
