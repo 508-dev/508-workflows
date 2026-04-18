@@ -54,7 +54,7 @@ def test_docuseal_processor_marks_member_agreement_signed_timestamp() -> None:
     assert result["discord_user_id"] == "1234"
     assert result["member_role"]["status"] == "applied"
     mock_grant_role.assert_called_once_with(
-        base_url="http://discord_bot:3000",
+        base_url="http://127.0.0.1:3000",
         api_secret="top-secret",
         discord_user_id="1234",
         contact_id="contact-1",
