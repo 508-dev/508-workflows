@@ -826,6 +826,51 @@ def test_inspect_profile_source_fetch_uses_direct_browser_on_initial_block() -> 
     )
 
 
+def test_inspect_profile_source_fetch_raises_non_retryable_direct_browser_error() -> (
+    None
+):
+    """Non-retryable direct browser failures should stop candidate iteration immediately."""
+    processor = ResumeProfileProcessor()
+    processor._fetch_external_profile_source_response = Mock(
+        side_effect=[
+            ValueError("Profile fetch hit a scraping block; reset session"),
+            ProfileSourceHttpResponse(
+                final_url="https://candidate-two.example.com",
+                status_code=200,
+                headers={"content-type": "text/html"},
+                body=b"<html><body>candidate two</body></html>",
+            ),
+        ]
+    )
+    processor._fetch_external_profile_source_text_with_browser_direct = Mock(
+        side_effect=ValueError(
+            "JavaScript profile fetch failed: Profile URL is invalid"
+        )
+    )
+    processor._iter_profile_source_fetch_urls = Mock(
+        return_value=iter(
+            [
+                "https://candidate-one.example.com",
+                "https://candidate-two.example.com",
+            ]
+        )
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="JavaScript profile fetch failed: Profile URL is invalid",
+    ):
+        processor.inspect_profile_source_fetch(
+            "https://example.com/",
+            allow_javascript_fallback=True,
+        )
+
+    processor._fetch_external_profile_source_response.assert_called_once_with(
+        "https://candidate-one.example.com",
+        session=ANY,
+    )
+
+
 def test_fetch_external_profile_source_text_with_browser_direct_validates_routed_requests() -> (
     None
 ):
@@ -1513,6 +1558,34 @@ def test_extract_text_from_html_reads_meta_description_regardless_of_order() -> 
     assert "Body copy" in rendered
 
 
+def test_extract_text_from_html_filters_template_and_jsonish_noise() -> None:
+    """Generic HTML extraction should drop template and hydration-style junk lines."""
+    processor = ResumeProfileProcessor()
+
+    rendered = processor._extract_text_from_html(
+        """
+        <html>
+          <head><title>Profile</title></head>
+          <body>
+            <main>
+              <div>Michael Wu</div>
+              <div>Software Engineer</div>
+              <div>%7B%22foo%22%3A%22bar%22%7D</div>
+              <div>{"props":{"page":"profile"}}</div>
+              <template>{"hydration":true}</template>
+            </main>
+          </body>
+        </html>
+        """
+    )
+
+    assert "Michael Wu" in rendered
+    assert "Software Engineer" in rendered
+    assert "%7B%22foo%22%3A%22bar%22%7D" not in rendered
+    assert '{"props":{"page":"profile"}}' not in rendered
+    assert '{"hydration":true}' not in rendered
+
+
 def test_profile_source_max_bytes_for_linkedin_pages_is_larger() -> None:
     """LinkedIn public profiles should be allowed a larger response budget."""
     processor = ResumeProfileProcessor()
@@ -1618,6 +1691,60 @@ def test_is_linkedin_public_profile_html_requires_profile_canonical_url() -> Non
     )
 
 
+def test_is_linkedin_public_profile_html_handles_swapped_attribute_order() -> None:
+    """LinkedIn profile detection should not depend on HTML attribute order."""
+    processor = ResumeProfileProcessor()
+
+    assert (
+        processor._is_linkedin_public_profile_html(
+            """
+            <html>
+              <head>
+                <meta content="public_profile_v3_desktop" name="pageKey">
+                <link href="https://www.linkedin.com/in/wumichaelm/" rel="canonical">
+                <title>Michael Wu - Software Engineer | LinkedIn</title>
+              </head>
+            </html>
+            """
+        )
+        is True
+    )
+
+
+def test_extract_text_from_html_falls_back_when_linkedin_sections_are_localized() -> (
+    None
+):
+    """Localized LinkedIn headings should keep generic body text instead of header-only compaction."""
+    processor = ResumeProfileProcessor()
+
+    rendered = processor._extract_text_from_html(
+        """
+        <html>
+          <head>
+            <meta name="pageKey" content="public_profile_v3_desktop">
+            <link rel="canonical" href="https://www.linkedin.com/in/wumichaelm/">
+            <title>Michael Wu - Software Engineer | LinkedIn</title>
+          </head>
+          <body>
+            <main>
+              <div>Michael Wu</div>
+              <div>Software Engineer</div>
+              <div>Tokyo, Japan</div>
+              <section>
+                <h2>経験</h2>
+                <div>Stripe</div>
+                <div>Implemented cost pipelines for card transactions in Japan.</div>
+              </section>
+            </main>
+          </body>
+        </html>
+        """
+    )
+
+    assert "Implemented cost pipelines for card transactions in Japan." in rendered
+    assert "Name: Michael Wu" not in rendered
+
+
 def test_format_linkedin_websites_keeps_parsing_after_unknown_label() -> None:
     """Unexpected LinkedIn website labels should not suppress later website entries."""
     processor = ResumeProfileProcessor()
@@ -1662,6 +1789,29 @@ def test_extract_linkedin_location_uses_header_lines_only() -> None:
             ]
         )
         == "San Francisco Bay Area"
+    )
+    assert (
+        processor._extract_linkedin_location(
+            [
+                "Michael Wu",
+                "Founder, Acme",
+                "Tokyo, Japan",
+                "500+ connections",
+                "Experience",
+            ]
+        )
+        == "Tokyo, Japan"
+    )
+    assert (
+        processor._extract_linkedin_location(
+            [
+                "Michael Wu",
+                "Founder, Acme",
+                "500+ connections",
+                "Experience",
+            ]
+        )
+        is None
     )
 
 

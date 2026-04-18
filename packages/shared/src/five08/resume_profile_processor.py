@@ -115,7 +115,7 @@ PROFILE_SOURCE_JS_RENDER_MARKERS = (
     "please turn on javascript",
 )
 _HTML_BLOCK_RE = re.compile(
-    r"(?is)<(script|style|noscript|svg|nav|header|footer)[^>]*>.*?</\1>"
+    r"(?is)<(script|style|noscript|svg|nav|header|footer|template)[^>]*>.*?</\1>"
 )
 _HTML_TAG_RE = re.compile(r"(?s)<[^>]+>")
 _HTML_BREAK_RE = re.compile(r"(?i)<br\s*/?>")
@@ -133,13 +133,13 @@ _HTML_META_CONTENT_ATTR_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _LINKEDIN_PROFILE_PAGEKEY_RE = re.compile(
-    r'(?is)<meta[^>]+name=["\']pagekey["\'][^>]+content=["\']public_profile_v3[^"\']*["\']'
+    r'(?is)<meta\b(?=[^>]*\bname=["\']pagekey["\'])(?=[^>]*\bcontent=["\']public_profile_v3[^"\']*["\'])[^>]*>'
 )
 _LINKEDIN_PROFILE_CANONICAL_URL_RE = re.compile(
     r"(?is)(?:"
-    r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\']https?://(?:[\w.-]+\.)?linkedin\.com/in/[^"\']+["\']'
-    r'|<meta[^>]+property=["\']og:url["\'][^>]+content=["\']https?://(?:[\w.-]+\.)?linkedin\.com/in/[^"\']+["\']'
-    r'|<meta[^>]+property=["\']al:(?:android|ios):url["\'][^>]+content=["\']https?://(?:[\w.-]+\.)?linkedin\.com/in/[^"\']+["\']'
+    r'<link\b(?=[^>]*\brel=["\']canonical["\'])(?=[^>]*\bhref=["\']https?://(?:[\w.-]+\.)?linkedin\.com/in/[^"\']+["\'])[^>]*>'
+    r'|<meta\b(?=[^>]*\bproperty=["\']og:url["\'])(?=[^>]*\bcontent=["\']https?://(?:[\w.-]+\.)?linkedin\.com/in/[^"\']+["\'])[^>]*>'
+    r'|<meta\b(?=[^>]*\bproperty=["\']al:(?:android|ios):url["\'])(?=[^>]*\bcontent=["\']https?://(?:[\w.-]+\.)?linkedin\.com/in/[^"\']+["\'])[^>]*>'
     r")"
 )
 _LINKEDIN_BAY_AREA_RE = re.compile(r"(?i)^(?:greater\s+)?[A-Za-z .'-]+ area$")
@@ -162,6 +162,33 @@ _LINKEDIN_SECTION_HEADINGS = (
     "Patents",
     "Honors & Awards",
     "Languages",
+)
+_LINKEDIN_SECTION_HEADINGS_BY_CASEFOLD = {
+    heading.casefold(): heading for heading in _LINKEDIN_SECTION_HEADINGS
+}
+_LINKEDIN_LOCATION_NEGATIVE_TERMS = (
+    "founder",
+    "co-founder",
+    "engineer",
+    "developer",
+    "designer",
+    "manager",
+    "director",
+    "consultant",
+    "software",
+    "product",
+    "marketing",
+    "science",
+    "scientist",
+    "master",
+    "bachelor",
+    "degree",
+    "university",
+    "college",
+    "investor",
+    "blogger",
+    "writer",
+    "researcher",
 )
 
 
@@ -1549,7 +1576,9 @@ class ResumeProfileProcessor:
                             )
                         except ValueError as browser_exc:
                             last_fetch_error = browser_exc
-                            if not self._is_retryable_profile_fetch_error(str(exc)):
+                            if not self._is_retryable_profile_fetch_error(
+                                str(browser_exc)
+                            ):
                                 raise browser_exc
                         else:
                             return ProfileSourceFetchDiagnostics(
@@ -2350,8 +2379,15 @@ class ResumeProfileProcessor:
         normalized = _HTML_TAG_RE.sub(" ", normalized)
         normalized = unescape(normalized)
         normalized = re.sub(r"[ \t\r\f\v]+", " ", normalized)
-        normalized = re.sub(r"\n{2,}", "\n", normalized)
-        normalized = normalized.strip()
+        normalized_lines = [
+            line
+            for line in (
+                re.sub(r"\s+", " ", raw_line).strip()
+                for raw_line in normalized.splitlines()
+            )
+            if line and not self._is_low_value_html_text_line(line)
+        ]
+        normalized = "\n".join(normalized_lines).strip()
 
         text_parts: list[str] = []
         if title_match:
@@ -2400,6 +2436,9 @@ class ResumeProfileProcessor:
 
         sections = self._extract_linkedin_sections(filtered_lines)
         websites = self._format_linkedin_websites(sections.pop("Websites", []))
+        has_structured_content = bool(websites) or any(sections.values())
+        if not has_structured_content:
+            return None
 
         parts: list[str] = []
         if name:
@@ -2459,9 +2498,12 @@ class ResumeProfileProcessor:
         normalized = unescape(normalized)
         normalized = normalized.replace("\xa0", " ")
         return [
-            re.sub(r"\s+", " ", line).strip()
-            for line in normalized.splitlines()
-            if re.sub(r"\s+", " ", line).strip()
+            line
+            for line in (
+                re.sub(r"\s+", " ", raw_line).strip()
+                for raw_line in normalized.splitlines()
+            )
+            if line and not self._is_low_value_html_text_line(line)
         ]
 
     @staticmethod
@@ -2523,11 +2565,43 @@ class ResumeProfileProcessor:
         }
         return lowered in exact_noise_tokens
 
+    @staticmethod
+    def _is_low_value_html_text_line(line: str) -> bool:
+        candidate = line.strip()
+        if not candidate:
+            return False
+        if (
+            candidate.count("%") >= 3
+            and " " not in candidate
+            and re.search(r"%[0-9A-Fa-f]{2}", candidate)
+        ):
+            return True
+        if any(
+            marker in candidate
+            for marker in (
+                "__NEXT_DATA__",
+                "__NUXT__",
+                "window.__",
+                "webpackChunk",
+            )
+        ):
+            return True
+        if (
+            (
+                (candidate.startswith("{") and candidate.endswith("}"))
+                or (candidate.startswith("[") and candidate.endswith("]"))
+            )
+            and ('"' in candidate or ":" in candidate)
+            and candidate.count(" ") <= 2
+        ):
+            return True
+        return False
+
     def _extract_linkedin_sections(self, lines: list[str]) -> dict[str, list[str]]:
         indexed_headings = [
-            (index, line)
+            (index, heading)
             for index, line in enumerate(lines)
-            if line in _LINKEDIN_SECTION_HEADINGS
+            if (heading := _LINKEDIN_SECTION_HEADINGS_BY_CASEFOLD.get(line.casefold()))
         ]
         sections: dict[str, list[str]] = {}
         for position, (start_index, heading) in enumerate(indexed_headings):
@@ -2596,11 +2670,9 @@ class ResumeProfileProcessor:
         header_lines = lines[: min(first_section_index, 6)]
         for line in header_lines:
             candidate = line.strip()
-            if not candidate or any(char.isdigit() for char in candidate):
-                continue
-            if re.fullmatch(r"[A-Za-z .'-]+,\s*[A-Za-z .'-]+", candidate):
-                return candidate
-            if _LINKEDIN_BAY_AREA_RE.fullmatch(candidate):
+            if ResumeProfileProcessor._looks_like_linkedin_location_candidate(
+                candidate
+            ):
                 return candidate
         return None
 
@@ -2612,13 +2684,30 @@ class ResumeProfileProcessor:
             flags=re.IGNORECASE,
         ):
             candidate = re.sub(r"\s+", " ", unescape(match.group(1))).strip()
-            if not candidate:
-                continue
-            if re.fullmatch(r"[A-Za-z .'-]+,\s*[A-Za-z .'-]+", candidate):
-                return candidate
-            if _LINKEDIN_BAY_AREA_RE.fullmatch(candidate):
+            if ResumeProfileProcessor._looks_like_linkedin_location_candidate(
+                candidate
+            ):
                 return candidate
         return None
+
+    @staticmethod
+    def _looks_like_linkedin_location_candidate(candidate: str) -> bool:
+        line = candidate.strip()
+        if not line or any(char.isdigit() for char in line):
+            return False
+        if _LINKEDIN_BAY_AREA_RE.fullmatch(line):
+            return True
+        if "," not in line:
+            return False
+        lowered = line.casefold()
+        if any(term in lowered for term in _LINKEDIN_LOCATION_NEGATIVE_TERMS):
+            return False
+        parts = [part.strip() for part in line.split(",") if part.strip()]
+        if len(parts) < 2 or len(parts) > 3:
+            return False
+        if any(len(part.split()) > 4 for part in parts):
+            return False
+        return all(re.fullmatch(r"[A-Za-z .'-]+", part) for part in parts)
 
     def _validate_public_profile_url(self, candidate_url: str) -> str | None:
         resolution = self._resolve_public_profile_request_target(candidate_url)
