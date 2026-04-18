@@ -20,8 +20,16 @@ def _make_candidate(**overrides: object) -> SimpleNamespace:
         "latest_resume_id": None,
         "latest_resume_name": None,
         "matched_required_skills": [],
+        "matched_hard_required_skills": [],
+        "matched_soft_required_skills": [],
         "matched_discord_roles": [],
         "matched_preferred_skills": [],
+        "missing_hard_required_skills": [],
+        "evidence_signals": [],
+        "llm_fit_score": None,
+        "llm_summary": None,
+        "llm_risks": [],
+        "llm_missing_requirements": [],
         "match_score": 0.0,
         "seniority": None,
         "address_city": None,
@@ -29,6 +37,7 @@ def _make_candidate(**overrides: object) -> SimpleNamespace:
         "address_country": None,
         "timezone": None,
         "linkedin": None,
+        "github_username": None,
     }
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -154,3 +163,29 @@ def test_build_match_candidate_lines_keeps_name_discord_and_linkedin_on_first_li
     assert "score: 31.0" in second_line
     assert "seniority: **Mid-level**" in second_line
     assert "location: **Seattle, Washington, US** · tz: `UTC-08:00`" in third_line
+
+
+def test_build_match_candidate_lines_includes_evidence_and_llm_notes() -> None:
+    candidate = _make_candidate(
+        crm_name="Jamie",
+        matched_hard_required_skills=["webflow"],
+        matched_soft_required_skills=["figma"],
+        evidence_signals=["hard skill `webflow` (strength 5)", "resume `jamie.pdf`"],
+        llm_fit_score=92.0,
+        llm_summary="Strong Webflow fit but portfolio proof is still thin.",
+        llm_missing_requirements=["live webflow projects"],
+    )
+
+    lines, _ = JobsCog._build_match_candidate_lines(
+        candidates=[candidate],
+        crm_base="https://crm.example",
+    )
+
+    assert "LLM fit: 92/100" in lines[0]
+    assert "hard: `webflow`" in lines[0]
+    assert "soft: `figma`" in lines[0]
+    assert (
+        "evidence: hard skill `webflow` (strength 5) · resume `jamie.pdf`" in lines[0]
+    )
+    assert "summary: Strong Webflow fit but portfolio proof is still thin." in lines[0]
+    assert "missing: `live webflow projects`" in lines[0]

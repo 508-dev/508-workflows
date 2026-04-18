@@ -275,6 +275,40 @@ class TestSearchCandidatesE2E:
         assert results[0].crm_contact_id == "c1"
         assert "python" in results[0].matched_required_skills
 
+    def test_requires_anchor_skill_when_multiple_required_skills_present(
+        self, pg_db: SharedSettings
+    ) -> None:
+        _insert(crm_contact_id="webflow_dev", skills=["webflow", "figma"])
+        _insert(
+            crm_contact_id="figma_only",
+            skills=["figma", "hubspot"],
+            discord_roles=["Frontend"],
+        )
+
+        results = search_candidates(
+            pg_db,
+            _reqs(
+                required_skills=["webflow", "figma", "hubspot"],
+                discord_role_types=["Frontend"],
+            ),
+        )
+
+        assert [result.crm_contact_id for result in results] == ["webflow_dev"]
+
+    def test_requires_all_hard_skills(self, pg_db: SharedSettings) -> None:
+        _insert(crm_contact_id="full_match", skills=["webflow", "hubspot", "figma"])
+        _insert(crm_contact_id="missing_hard", skills=["webflow", "figma"])
+
+        results = search_candidates(
+            pg_db,
+            _reqs(
+                hard_required_skills=["webflow", "hubspot"],
+                soft_required_skills=["figma"],
+            ),
+        )
+
+        assert [result.crm_contact_id for result in results] == ["full_match"]
+
     def test_excludes_candidate_without_required_skill(
         self, pg_db: SharedSettings
     ) -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 from psycopg.rows import dict_row
 
@@ -85,6 +86,7 @@ class CandidateMatch:
     email_508: str | None
     email: str | None
     linkedin: str | None
+    github_username: str | None
     latest_resume_id: str | None
     latest_resume_name: str | None
     is_member: bool
@@ -96,8 +98,16 @@ class CandidateMatch:
     discord_user_id: str | None = None
     has_crm_link: bool = True
     matched_required_skills: list[str] = field(default_factory=list)
+    matched_hard_required_skills: list[str] = field(default_factory=list)
+    matched_soft_required_skills: list[str] = field(default_factory=list)
     matched_preferred_skills: list[str] = field(default_factory=list)
     matched_discord_roles: list[str] = field(default_factory=list)
+    missing_hard_required_skills: list[str] = field(default_factory=list)
+    evidence_signals: list[str] = field(default_factory=list)
+    llm_fit_score: float | None = None
+    llm_summary: str | None = None
+    llm_risks: list[str] = field(default_factory=list)
+    llm_missing_requirements: list[str] = field(default_factory=list)
     match_score: float = 0.0
     required_skill_score: int = 0  # sum of strength attrs for matched required skills
     seniority_score: float = 0.0  # 1.0 exact, 0.7 one level up, 0.0 mismatch or unknown
@@ -125,6 +135,69 @@ def _normalize_preferred_timezones(timezones: list[str] | None) -> list[str]:
     return [
         tz.strip() for tz in (timezones or []) if isinstance(tz, str) and tz.strip()
     ]
+
+
+def _skill_strength(skill_attrs: dict[str, Any], skill: str) -> int:
+    raw = skill_attrs.get(skill)
+    if isinstance(raw, bool) or raw is None:
+        return 0
+    if not isinstance(raw, (int, float, str)):
+        return 0
+    try:
+        strength = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(5, strength))
+
+
+def _build_candidate_evidence_signals(
+    *,
+    matched_hard: list[str],
+    matched_soft: list[str],
+    matched_preferred: list[str],
+    matched_discord_roles: list[str],
+    skill_attrs: dict[str, Any],
+    linkedin: str | None,
+    github_username: str | None,
+    latest_resume_name: str | None,
+) -> list[str]:
+    signals: list[str] = []
+
+    for skill in matched_hard[:3]:
+        strength = _skill_strength(skill_attrs, skill)
+        if strength > 0:
+            signals.append(f"hard skill `{skill}` (strength {strength})")
+        else:
+            signals.append(f"hard skill `{skill}`")
+
+    for skill in matched_soft[:2]:
+        strength = _skill_strength(skill_attrs, skill)
+        if strength > 0:
+            signals.append(f"soft requirement `{skill}` (strength {strength})")
+        else:
+            signals.append(f"soft requirement `{skill}`")
+
+    for skill in matched_preferred[:2]:
+        signals.append(f"preferred skill `{skill}`")
+
+    for role in matched_discord_roles[:2]:
+        signals.append(f"discord role `{role}`")
+
+    if linkedin:
+        signals.append("LinkedIn on file")
+    if github_username:
+        signals.append(f"GitHub `{github_username}`")
+    if latest_resume_name:
+        signals.append(f"resume `{latest_resume_name}`")
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for signal in signals:
+        if signal in seen:
+            continue
+        seen.add(signal)
+        deduped.append(signal)
+    return deduped[:6]
 
 
 def _build_location_hints(
@@ -182,21 +255,27 @@ def search_candidates(
     Ranking priority:
     1. Members before prospects.
     2. Location signal when posting has location constraints (explicit mismatch demoted).
-    3. Match score (weighted score from skills + CRM/location signals).
+    3. Match score (weighted score from hard/soft skill coverage + CRM/location signals).
     4. Timezone match (soft signal; 1 when candidate timezone is in preferred_timezones).
-    5. Required skill count matched.
-    6. Discord role type matched (1 if any discord role matches the required role types).
-    7. Required skill strength score (sum of skill_attrs values).
-    8. Preferred skill count matched.
+    5. Hard-required skill count matched.
+    6. Soft-required skill count matched.
+    7. Discord role type matched (1 if any discord role matches the required role types).
+    8. Required skill strength score (sum of skill_attrs values).
+    9. Preferred skill count matched.
     9. Seniority score (applied in Python after the query).
 
-    Candidates are included if they match ANY required skill OR any discord role type.
+    Candidates must match every hard-required skill when hard requirements exist.
+    When there are no hard requirements, candidates are included if they match any
+    soft-required skill or any discord role type. Discord role types remain a ranking
+    signal even when hard/soft skill requirements are present.
     A minimum final match score can be requested via min_match_score.
     When guild_id is provided, discord member snapshots are scoped to that guild.
     When requirements.location_type == "us_only", a hard US-only filter is applied
     in SQL so non-US candidates are excluded rather than merely down-ranked by the
     location signal.
     """
+    hard_required_skills = requirements.hard_required_skills
+    soft_required_skills = requirements.soft_required_skills
     required_skills = requirements.required_skills
     preferred_skills = requirements.preferred_skills
     role_types = requirements.discord_role_types
@@ -222,7 +301,8 @@ def search_candidates(
     # Python only adds seniority alignment and the final tie-break sort afterwards.
     query = """
         WITH
-          req AS (SELECT %s::text[] AS skills),
+          req_hard AS (SELECT %s::text[] AS skills),
+          req_soft AS (SELECT %s::text[] AS skills),
           pref AS (SELECT %s::text[] AS skills),
           rtypes AS (SELECT %s::text[] AS types),
           dm_agg AS (
@@ -255,6 +335,7 @@ def search_candidates(
                 p.email_508,
                 p.email,
                 p.linkedin,
+                p.github_username,
                 p.latest_resume_id,
                 p.latest_resume_name,
                 COALESCE(p.is_member, false) AS is_member,
@@ -269,12 +350,12 @@ def search_candidates(
                 COALESCE(dm.member_discord_username, p.discord_username) AS discord_username,
                 COALESCE(p.discord_user_id, dm.discord_user_id) AS discord_user_id,
                 (p.crm_contact_id IS NOT NULL) AS has_crm_link,
-                -- How many required skills this candidate has
+                -- How many hard-required skills this candidate has
                 (SELECT count(*)::int
                  FROM unnest(COALESCE(p.skills, '{}'::text[])) s
-                 WHERE s IN (SELECT unnest(skills) FROM req)
-                ) AS required_matched,
-                -- Weighted score: sum of strength attrs for matched required skills (default 1)
+                 WHERE s IN (SELECT unnest(skills) FROM req_hard)
+                ) AS hard_required_matched,
+                -- Weighted score: sum of strength attrs for matched hard-required skills
                 (SELECT COALESCE(
                     SUM(
                         LEAST(
@@ -285,8 +366,26 @@ def search_candidates(
                     0
                  )::int
                  FROM unnest(COALESCE(p.skills, '{}'::text[])) s
-                 WHERE s IN (SELECT unnest(skills) FROM req)
-                ) AS required_skill_score,
+                 WHERE s IN (SELECT unnest(skills) FROM req_hard)
+                ) AS hard_required_skill_score,
+                -- How many soft-required skills this candidate has
+                (SELECT count(*)::int
+                 FROM unnest(COALESCE(p.skills, '{}'::text[])) s
+                 WHERE s IN (SELECT unnest(skills) FROM req_soft)
+                ) AS soft_required_matched,
+                -- Weighted score: sum of strength attrs for matched soft-required skills
+                (SELECT COALESCE(
+                    SUM(
+                        LEAST(
+                            COALESCE((COALESCE(p.skill_attrs, '{}'::jsonb) ->> s)::int, 1),
+                            5
+                        )
+                    ),
+                    0
+                 )::int
+                 FROM unnest(COALESCE(p.skills, '{}'::text[])) s
+                 WHERE s IN (SELECT unnest(skills) FROM req_soft)
+                ) AS soft_required_skill_score,
                 -- How many preferred skills this candidate has
                 (SELECT count(*)::int
                  FROM unnest(COALESCE(p.skills, '{}'::text[])) s
@@ -336,15 +435,42 @@ def search_candidates(
             CROSS JOIN rtypes
             CROSS JOIN loc
             WHERE (p.sync_status = 'active' OR p.sync_status IS NULL)
-              -- Must match at least one required skill OR one discord role type
+              -- When hard requirements exist, candidates must match all of them.
+              -- If there are no hard requirements, allow candidates in through
+              -- soft-required skills or role-type matches.
               AND (
-                COALESCE(p.skills, '{}'::text[]) && (SELECT skills FROM req)
-                OR EXISTS (
-                  SELECT 1
-                  FROM jsonb_array_elements_text(
-                      COALESCE(dm.roles, p.discord_roles, '[]'::jsonb)
-                  ) r
-                  WHERE r = ANY(rtypes.types)
+                (
+                  cardinality((SELECT skills FROM req_hard)) > 0
+                  AND COALESCE(p.skills, '{}'::text[])
+                    @> (SELECT skills FROM req_hard)
+                )
+                OR (
+                  cardinality((SELECT skills FROM req_hard)) = 0
+                  AND (
+                    (
+                      cardinality((SELECT skills FROM req_soft)) > 0
+                      AND (
+                        COALESCE(p.skills, '{}'::text[]) && (SELECT skills FROM req_soft)
+                        OR EXISTS (
+                          SELECT 1
+                          FROM jsonb_array_elements_text(
+                              COALESCE(dm.roles, p.discord_roles, '[]'::jsonb)
+                          ) r
+                          WHERE r = ANY(rtypes.types)
+                        )
+                      )
+                    )
+                    OR (
+                      cardinality((SELECT skills FROM req_soft)) = 0
+                      AND EXISTS (
+                        SELECT 1
+                        FROM jsonb_array_elements_text(
+                            COALESCE(dm.roles, p.discord_roles, '[]'::jsonb)
+                        ) r
+                        WHERE r = ANY(rtypes.types)
+                      )
+                    )
+                  )
                 )
               )
               -- Hard location filter when us_only
@@ -361,6 +487,7 @@ def search_candidates(
             email_508,
             email,
             linkedin,
+            github_username,
             latest_resume_id,
             latest_resume_name,
             is_member,
@@ -374,15 +501,21 @@ def search_candidates(
             discord_roles,
             discord_user_id,
             has_crm_link,
-            required_matched,
-            required_skill_score,
+            hard_required_matched,
+            hard_required_skill_score,
+            soft_required_matched,
+            soft_required_skill_score,
+            (hard_required_matched + soft_required_matched) AS required_matched,
+            (hard_required_skill_score + soft_required_skill_score) AS required_skill_score,
             preferred_matched,
             timezone_matched,
             discord_role_matched,
             location_signal,
             (
-                required_matched * 10
-                + required_skill_score * 2
+                hard_required_matched * 16
+                + hard_required_skill_score * 3
+                + soft_required_matched * 8
+                + soft_required_skill_score * 2
                 + preferred_matched * 2
                 + timezone_matched * 2
                 + (discord_role_matched * 2)
@@ -396,10 +529,11 @@ def search_candidates(
             has_crm_link DESC,
             location_signal DESC,
             match_score DESC,
+            hard_required_matched DESC,
+            soft_required_matched DESC,
             timezone_matched DESC,
-            required_matched DESC,
-            discord_role_matched DESC,
             required_skill_score DESC,
+            discord_role_matched DESC,
             preferred_matched DESC
         LIMIT %s
     """
@@ -411,7 +545,8 @@ def search_candidates(
             cursor.execute(
                 query,
                 (
-                    required_skills,
+                    hard_required_skills,
+                    soft_required_skills,
                     preferred_skills,
                     role_types,
                     guild_id,
@@ -432,24 +567,42 @@ def search_candidates(
     for row in rows:
         candidate_skills: list[str] = row.get("skills") or []
         required_set = set(required_skills)
+        hard_required_set = set(hard_required_skills)
+        soft_required_set = set(soft_required_skills)
         preferred_set = set(preferred_skills)
         role_types_set = set(role_types)
 
+        matched_hard = [s for s in candidate_skills if s in hard_required_set]
+        matched_soft = [
+            s
+            for s in candidate_skills
+            if s in soft_required_set and s not in hard_required_set
+        ]
         matched_req = [s for s in candidate_skills if s in required_set]
         matched_pref = [s for s in candidate_skills if s in preferred_set]
+        missing_hard = [
+            s for s in hard_required_skills if s not in set(candidate_skills)
+        ]
 
         raw_discord_roles = row.get("discord_roles") or []
         matched_discord = [
             r for r in raw_discord_roles if isinstance(r, str) and r in role_types_set
         ]
+        skill_attrs = row.get("skill_attrs") or {}
 
         sen_score = _seniority_score(row.get("seniority"), requirements.seniority)
         raw_match_score = row.get("match_score")
         if raw_match_score is None:
             # Keep the final Python pass resilient if the selected SQL columns ever
             # drift; this mirrors the SQL scoring formula rather than failing closed.
-            required_matched = row.get("required_matched") or 0
-            required_skill_score = row.get("required_skill_score") or 0
+            hard_required_matched = row.get("hard_required_matched")
+            if hard_required_matched is None:
+                hard_required_matched = row.get("required_matched") or 0
+            hard_required_skill_score = row.get("hard_required_skill_score")
+            if hard_required_skill_score is None:
+                hard_required_skill_score = row.get("required_skill_score") or 0
+            soft_required_matched = row.get("soft_required_matched") or 0
+            soft_required_skill_score = row.get("soft_required_skill_score") or 0
             preferred_matched = row.get("preferred_matched") or 0
             timezone_matched = row.get("timezone_matched") or 0
             discord_role_matched = row.get("discord_role_matched") or 0
@@ -457,8 +610,10 @@ def search_candidates(
             is_member = bool(row.get("is_member"))
             has_crm_link = bool(row.get("has_crm_link", True))
             raw_match_score = (
-                required_matched * 10
-                + required_skill_score * 2
+                hard_required_matched * 16
+                + hard_required_skill_score * 3
+                + soft_required_matched * 8
+                + soft_required_skill_score * 2
                 + preferred_matched * 2
                 + timezone_matched * 2
                 + (discord_role_matched * 2)
@@ -478,6 +633,7 @@ def search_candidates(
                 email_508=row.get("email_508"),
                 email=row.get("email"),
                 linkedin=row.get("linkedin"),
+                github_username=row.get("github_username"),
                 latest_resume_id=row.get("latest_resume_id"),
                 latest_resume_name=row.get("latest_resume_name"),
                 is_member=bool(row.get("is_member")),
@@ -489,8 +645,21 @@ def search_candidates(
                 discord_user_id=row.get("discord_user_id"),
                 has_crm_link=bool(row.get("has_crm_link", True)),
                 matched_required_skills=matched_req,
+                matched_hard_required_skills=matched_hard,
+                matched_soft_required_skills=matched_soft,
                 matched_preferred_skills=matched_pref,
                 matched_discord_roles=matched_discord,
+                missing_hard_required_skills=missing_hard,
+                evidence_signals=_build_candidate_evidence_signals(
+                    matched_hard=matched_hard,
+                    matched_soft=matched_soft,
+                    matched_preferred=matched_pref,
+                    matched_discord_roles=matched_discord,
+                    skill_attrs=skill_attrs,
+                    linkedin=row.get("linkedin"),
+                    github_username=row.get("github_username"),
+                    latest_resume_name=row.get("latest_resume_name"),
+                ),
                 match_score=match_score,
                 required_skill_score=row.get("required_skill_score") or 0,
                 seniority_score=sen_score,
@@ -508,9 +677,11 @@ def search_candidates(
             not c.has_crm_link,
             -c.location_signal,
             -c.match_score,
+            -len(c.matched_hard_required_skills),
+            -len(c.matched_soft_required_skills),
             -len(c.matched_required_skills),
-            -len(c.matched_discord_roles),
             -c.required_skill_score,
+            -len(c.matched_discord_roles),
             -len(c.matched_preferred_skills),
             -c.seniority_score,
         )

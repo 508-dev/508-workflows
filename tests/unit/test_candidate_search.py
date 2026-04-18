@@ -181,8 +181,25 @@ def test_search_candidates_binds_trimmed_exact_timezones() -> None:
         search_candidates(settings, reqs)
 
     execute_params = conn.cursor.return_value.execute.call_args[0][1]
-    # Fixed SQL param order: exact_timezones is the 6th bind parameter.
-    assert execute_params[5] == ["America/New_York"]
+    # Fixed SQL param order: exact_timezones is the 7th bind parameter.
+    assert execute_params[6] == ["America/New_York"]
+
+
+def test_search_candidates_binds_anchor_required_skill() -> None:
+    row = _make_row(skills=["webflow"])
+    conn = _patch_db([row])
+    reqs = _make_requirements(
+        hard_required_skills=["webflow"],
+        soft_required_skills=["figma", "hubspot"],
+    )
+    settings = MagicMock()
+
+    with patch("five08.candidate_search.get_postgres_connection", return_value=conn):
+        search_candidates(settings, reqs)
+
+    execute_params = conn.cursor.return_value.execute.call_args[0][1]
+    assert execute_params[0] == ["webflow"]
+    assert execute_params[1] == ["figma", "hubspot"]
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +215,7 @@ def _make_row(**overrides: object) -> dict:
         "email_508": "alice@508.dev",
         "email": "alice@example.com",
         "linkedin": None,
+        "github_username": None,
         "latest_resume_id": None,
         "latest_resume_name": None,
         "is_member": True,
@@ -218,6 +236,32 @@ def _make_row(**overrides: object) -> dict:
     }
     base.update(overrides)
     return base
+
+
+def test_search_candidates_populates_hard_soft_matches_and_evidence() -> None:
+    row = _make_row(
+        skills=["webflow", "figma", "hubspot"],
+        skill_attrs={"webflow": "5", "figma": "3"},
+        linkedin="https://linkedin.example/jamie",
+        github_username="jamie-dev",
+        latest_resume_name="jamie.pdf",
+    )
+    conn = _patch_db([row])
+    reqs = _make_requirements(
+        hard_required_skills=["webflow"],
+        soft_required_skills=["figma"],
+        preferred_skills=["hubspot"],
+    )
+    settings = MagicMock()
+
+    with patch("five08.candidate_search.get_postgres_connection", return_value=conn):
+        results = search_candidates(settings, reqs)
+
+    assert results[0].matched_hard_required_skills == ["webflow"]
+    assert results[0].matched_soft_required_skills == ["figma"]
+    assert results[0].matched_preferred_skills == ["hubspot"]
+    assert "hard skill `webflow` (strength 5)" in results[0].evidence_signals
+    assert "GitHub `jamie-dev`" in results[0].evidence_signals
 
 
 def _make_requirements(**overrides: object) -> JobRequirements:

@@ -9,8 +9,8 @@ import logging
 import re
 import socket
 from collections import OrderedDict
-from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Literal
+from dataclasses import dataclass, is_dataclass, replace
+from typing import Any, Awaitable, Callable, Literal, cast
 from urllib.parse import urljoin, urlsplit
 
 import aiohttp
@@ -37,6 +37,7 @@ from five08.job_match import (
     DISCORD_ROLES_EXCLUDE_FROM_SYNC,
     JobRequirements,
     extract_job_requirements,
+    rerank_shortlisted_candidates,
 )
 
 logger = logging.getLogger(__name__)
@@ -468,10 +469,25 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 locality_mentions_line = "Locality: " + ", ".join(locality_mentions)
                 locality_mentions_role_ids = role_ids
 
-        if requirements.required_skills:
+        if requirements.hard_required_skills:
+            header_parts.append(
+                "Hard needs: "
+                + ", ".join(f"`{s}`" for s in requirements.hard_required_skills[:5])
+            )
+        elif requirements.required_skills:
             header_parts.append(
                 "Skills: "
                 + ", ".join(f"`{s}`" for s in requirements.required_skills[:8])
+            )
+        if requirements.soft_required_skills:
+            header_parts.append(
+                "Other needs: "
+                + ", ".join(f"`{s}`" for s in requirements.soft_required_skills[:5])
+            )
+        if requirements.required_evidence:
+            header_parts.append(
+                "Evidence: "
+                + ", ".join(f"`{item}`" for item in requirements.required_evidence[:3])
             )
         if requirements.seniority:
             header_parts.append(f"Seniority: `{requirements.seniority}`")
@@ -603,15 +619,53 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 for part in (raw_city, raw_state, raw_country)
                 if part
             )
+            matched_hard_required_skills = list(
+                getattr(candidate, "matched_hard_required_skills", []) or []
+            )
+            matched_soft_required_skills = list(
+                getattr(candidate, "matched_soft_required_skills", []) or []
+            )
+            matched_required_skills = list(
+                getattr(candidate, "matched_required_skills", []) or []
+            )
+            matched_preferred_skills = list(
+                getattr(candidate, "matched_preferred_skills", []) or []
+            )
+            missing_hard_required_skills = list(
+                getattr(candidate, "missing_hard_required_skills", []) or []
+            )
+            evidence_signals = list(getattr(candidate, "evidence_signals", []) or [])
+            llm_risks = list(getattr(candidate, "llm_risks", []) or [])
+            llm_missing_requirements = list(
+                getattr(candidate, "llm_missing_requirements", []) or []
+            )
             skill_info: list[str] = []
             location_info: list[str] = []
+            followup_info: list[str] = []
             match_score = getattr(candidate, "match_score", None)
             if isinstance(match_score, (int, float)):
                 skill_info.append(f"score: {match_score:.1f}")
-            if candidate.matched_required_skills:
+            llm_fit_score = getattr(candidate, "llm_fit_score", None)
+            if isinstance(llm_fit_score, (int, float)):
+                skill_info.append(f"LLM fit: {llm_fit_score:.0f}/100")
+            if matched_hard_required_skills:
                 skill_info.append(
-                    "✅ "
-                    + ", ".join(f"`{s}`" for s in candidate.matched_required_skills[:5])
+                    "hard: "
+                    + ", ".join(f"`{s}`" for s in matched_hard_required_skills[:4])
+                )
+            if matched_soft_required_skills:
+                skill_info.append(
+                    "soft: "
+                    + ", ".join(f"`{s}`" for s in matched_soft_required_skills[:4])
+                )
+            elif matched_required_skills and not matched_hard_required_skills:
+                skill_info.append(
+                    "✅ " + ", ".join(f"`{s}`" for s in matched_required_skills[:5])
+                )
+            if matched_preferred_skills:
+                skill_info.append(
+                    "preferred: "
+                    + ", ".join(f"`{s}`" for s in matched_preferred_skills[:3])
                 )
             if candidate.matched_discord_roles:
                 skill_info.append(
@@ -627,14 +681,169 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 location_info.append(f"location: **{location}**")
             if candidate.timezone:
                 location_info.append(f"tz: `{candidate.timezone}`")
+            if evidence_signals:
+                followup_info.append("evidence: " + " · ".join(evidence_signals[:4]))
+            llm_summary = getattr(candidate, "llm_summary", None)
+            if isinstance(llm_summary, str) and llm_summary.strip():
+                followup_info.append(
+                    "summary: "
+                    + discord.utils.escape_mentions(
+                        re.sub(r"\s+", " ", llm_summary).strip()
+                    )
+                )
+            missing_items = missing_hard_required_skills + [
+                item
+                for item in llm_missing_requirements
+                if item not in missing_hard_required_skills
+            ]
+            if missing_items:
+                followup_info.append(
+                    "missing: " + " · ".join(f"`{item}`" for item in missing_items[:4])
+                )
+            elif llm_risks:
+                followup_info.append(
+                    "risks: "
+                    + " · ".join(
+                        discord.utils.escape_mentions(item) for item in llm_risks[:3]
+                    )
+                )
             line = " ".join(header_parts)
             if skill_info:
                 line += "\n   " + " · ".join(skill_info)
             if location_info:
                 line += "\n   " + " · ".join(location_info)
+            for detail_line in followup_info:
+                line += "\n   " + detail_line
 
             lines.append(line)
         return lines, resume_options
+
+    @staticmethod
+    def _candidate_rerank_id(candidate: Any, index: int) -> str:
+        crm_contact_id = getattr(candidate, "crm_contact_id", None)
+        if isinstance(crm_contact_id, str) and crm_contact_id.strip():
+            return f"crm:{crm_contact_id.strip()}"
+
+        discord_user_id = getattr(candidate, "discord_user_id", None)
+        if isinstance(discord_user_id, str) and discord_user_id.strip():
+            return f"discord:{discord_user_id.strip()}"
+
+        return f"candidate:{index}"
+
+    @classmethod
+    def _build_rerank_candidate_payload(
+        cls,
+        *,
+        candidate: Any,
+        index: int,
+    ) -> dict[str, Any]:
+        location_parts = [
+            part.strip()
+            for part in (
+                getattr(candidate, "address_city", None),
+                getattr(candidate, "address_state", None),
+                getattr(candidate, "address_country", None),
+            )
+            if isinstance(part, str) and part.strip()
+        ]
+        return {
+            "candidate_id": cls._candidate_rerank_id(candidate, index),
+            "name": getattr(candidate, "crm_name", None)
+            or getattr(candidate, "name", None),
+            "is_member": bool(getattr(candidate, "is_member", False)),
+            "seniority": getattr(candidate, "seniority", None),
+            "location": ", ".join(location_parts) if location_parts else None,
+            "timezone": getattr(candidate, "timezone", None),
+            "hard_required_matches": list(
+                getattr(candidate, "matched_hard_required_skills", []) or []
+            ),
+            "soft_required_matches": list(
+                getattr(candidate, "matched_soft_required_skills", []) or []
+            ),
+            "preferred_matches": list(
+                getattr(candidate, "matched_preferred_skills", []) or []
+            ),
+            "missing_hard_requirements": list(
+                getattr(candidate, "missing_hard_required_skills", []) or []
+            ),
+            "matched_discord_roles": list(
+                getattr(candidate, "matched_discord_roles", []) or []
+            ),
+            "evidence": list(getattr(candidate, "evidence_signals", []) or []),
+            "linkedin": getattr(candidate, "linkedin", None),
+            "github_username": getattr(candidate, "github_username", None),
+            "resume_name": getattr(candidate, "latest_resume_name", None),
+            "deterministic_match_score": getattr(candidate, "match_score", None),
+        }
+
+    @staticmethod
+    def _apply_candidate_overrides(candidate: Any, **overrides: Any) -> Any:
+        if is_dataclass(candidate):
+            return replace(cast(Any, candidate), **overrides)
+        for key, value in overrides.items():
+            setattr(candidate, key, value)
+        return candidate
+
+    async def _rerank_candidates(
+        self,
+        *,
+        posting: str,
+        requirements: JobRequirements,
+        candidates: list[Any],
+    ) -> list[Any]:
+        if len(candidates) < 2 or not settings.openai_api_key:
+            return candidates
+
+        shortlist = candidates[:12]
+        payloads = [
+            self._build_rerank_candidate_payload(candidate=candidate, index=index)
+            for index, candidate in enumerate(shortlist, start=1)
+        ]
+
+        try:
+            rerank_results = await asyncio.to_thread(
+                rerank_shortlisted_candidates,
+                posting,
+                requirements=requirements,
+                candidates=payloads,
+                api_key=settings.openai_api_key,
+                base_url=settings.openai_base_url or None,
+                model=settings.openai_model,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Candidate rerank failed; keeping deterministic order: %s", exc
+            )
+            return candidates
+
+        if not rerank_results:
+            return candidates
+
+        result_map = {result.candidate_id: result for result in rerank_results}
+        reranked_shortlist: list[Any] = []
+        for index, candidate in enumerate(shortlist, start=1):
+            result = result_map.get(self._candidate_rerank_id(candidate, index))
+            if result is None:
+                reranked_shortlist.append(candidate)
+                continue
+            reranked_shortlist.append(
+                self._apply_candidate_overrides(
+                    candidate,
+                    llm_fit_score=result.fit_score,
+                    llm_summary=result.summary,
+                    llm_risks=result.risks,
+                    llm_missing_requirements=result.missing_requirements,
+                )
+            )
+
+        reranked_shortlist.sort(
+            key=lambda candidate: (
+                getattr(candidate, "llm_fit_score", None) is None,
+                -(float(getattr(candidate, "llm_fit_score", 0.0) or 0.0)),
+                -(float(getattr(candidate, "match_score", 0.0) or 0.0)),
+            )
+        )
+        return reranked_shortlist + candidates[len(shortlist) :]
 
     @staticmethod
     def _resume_file_extension(filename: str | None) -> str:
@@ -1123,10 +1332,10 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
-        if not requirements.required_skills:
+        if not requirements.required_skills and not requirements.discord_role_types:
             await self._unmark_thread_auto_matched(thread.id)
             await thread.send(
-                "⚠️ No required skills could be extracted automatically. "
+                "⚠️ No useful hard/soft skills or role types could be extracted automatically. "
                 "Run `/match-candidates` manually after updating the posting."
             )
             return
@@ -1153,6 +1362,12 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 "Run `/match-candidates` manually in this thread."
             )
             return
+
+        candidates = await self._rerank_candidates(
+            posting=posting,
+            requirements=requirements,
+            candidates=candidates,
+        )
 
         await self._publish_match_results(
             send=thread.send,
@@ -1605,16 +1820,16 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
-        if not requirements.required_skills:
+        if not requirements.required_skills and not requirements.discord_role_types:
             self._audit_command_safe(
                 interaction=interaction,
                 action="crm.match_candidates",
                 result="error",
-                metadata={"stage": "no_required_skills_extracted"},
+                metadata={"stage": "no_requirements_extracted"},
             )
             await interaction.followup.send(
-                "⚠️ No required skills could be extracted from this posting. "
-                "Please include explicit skill requirements and try again.",
+                "⚠️ No useful hard/soft skills or role types could be extracted from this posting. "
+                "Please include explicit requirements and try again.",
                 ephemeral=True,
             )
             return
@@ -1642,6 +1857,12 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
+        candidates = await self._rerank_candidates(
+            posting=posting,
+            requirements=requirements,
+            candidates=candidates,
+        )
+
         async def _send_match_result(message: str, **kwargs: Any) -> None:
             if is_private:
                 kwargs["ephemeral"] = True
@@ -1660,8 +1881,11 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             result="success",
             metadata={
                 "title": requirements.title,
+                "hard_required_skills_count": len(requirements.hard_required_skills),
+                "soft_required_skills_count": len(requirements.soft_required_skills),
                 "required_skills_count": len(requirements.required_skills),
                 "preferred_skills_count": len(requirements.preferred_skills),
+                "required_evidence_count": len(requirements.required_evidence),
                 "discord_role_types": requirements.discord_role_types,
                 "candidates_returned": len(candidates),
                 **posting_metadata,
