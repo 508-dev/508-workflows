@@ -132,6 +132,17 @@ _HTML_META_CONTENT_ATTR_RE = re.compile(
     r'content\s*=\s*["\']([^"\']*)["\']',
     flags=re.IGNORECASE,
 )
+_LINKEDIN_PROFILE_PAGEKEY_RE = re.compile(
+    r'(?is)<meta[^>]+name=["\']pagekey["\'][^>]+content=["\']public_profile_v3[^"\']*["\']'
+)
+_LINKEDIN_PROFILE_CANONICAL_URL_RE = re.compile(
+    r"(?is)(?:"
+    r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\']https?://(?:[\w.-]+\.)?linkedin\.com/in/[^"\']+["\']'
+    r'|<meta[^>]+property=["\']og:url["\'][^>]+content=["\']https?://(?:[\w.-]+\.)?linkedin\.com/in/[^"\']+["\']'
+    r'|<meta[^>]+property=["\']al:(?:android|ios):url["\'][^>]+content=["\']https?://(?:[\w.-]+\.)?linkedin\.com/in/[^"\']+["\']'
+    r")"
+)
+_LINKEDIN_BAY_AREA_RE = re.compile(r"(?i)^(?:greater\s+)?[A-Za-z .'-]+ area$")
 _GITHUB_USERNAME_RE = re.compile(
     r"^(?:https?://)?(?:www\.)?github\.com/([A-Za-z0-9-]{1,39})/?(?:[?#].*)?$",
     flags=re.IGNORECASE,
@@ -142,6 +153,15 @@ _LINKEDIN_PROFILE_RE = re.compile(
 )
 _DOMAIN_LINE_RE = re.compile(
     r"(?i)^(?:https?://)?(?:www\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?:[/?#].*)?$"
+)
+_LINKEDIN_SECTION_HEADINGS = (
+    "Websites",
+    "Experience",
+    "Education",
+    "Publications",
+    "Patents",
+    "Honors & Awards",
+    "Languages",
 )
 
 
@@ -2356,9 +2376,9 @@ class ResumeProfileProcessor:
                 name = name.strip() or None
                 headline = headline_part.strip() or None
 
-        location = self._extract_linkedin_location(filtered_lines)
+        location = self._extract_linkedin_location_from_html(value)
         if not location:
-            location = self._extract_linkedin_location_from_html(value)
+            location = self._extract_linkedin_location(filtered_lines)
 
         sections = self._extract_linkedin_sections(filtered_lines)
         websites = self._format_linkedin_websites(sections.pop("Websites", []))
@@ -2398,16 +2418,17 @@ class ResumeProfileProcessor:
     @staticmethod
     def _is_linkedin_public_profile_html(value: str) -> bool:
         lowered = value.casefold()
-        has_profile_marker = (
-            "linkedin.com/in/" in lowered or "public_profile_v3" in lowered
-        )
-        if not has_profile_marker:
+        if "| linkedin</title>" not in lowered:
             return False
-        return (
-            "linkedin:pagetag" in lowered
-            or "| linkedin</title>" in lowered
-            or "public_profile_v3" in lowered
-        )
+        has_profile_pagekey = _LINKEDIN_PROFILE_PAGEKEY_RE.search(value) is not None
+        has_profile_url = _LINKEDIN_PROFILE_CANONICAL_URL_RE.search(value) is not None
+        if not has_profile_pagekey or not has_profile_url:
+            return False
+        title_match = _HTML_TITLE_RE.search(value)
+        if not title_match:
+            return False
+        title = re.sub(r"\s+", " ", unescape(title_match.group(1))).strip()
+        return " - " in title
 
     def _extract_html_text_lines(self, value: str) -> list[str]:
         main_match = re.search(r"(?is)<main[^>]*>(.*?)</main>", value)
@@ -2485,17 +2506,10 @@ class ResumeProfileProcessor:
         return lowered in exact_noise_tokens
 
     def _extract_linkedin_sections(self, lines: list[str]) -> dict[str, list[str]]:
-        headings = (
-            "Websites",
-            "Experience",
-            "Education",
-            "Publications",
-            "Patents",
-            "Honors & Awards",
-            "Languages",
-        )
         indexed_headings = [
-            (index, line) for index, line in enumerate(lines) if line in headings
+            (index, line)
+            for index, line in enumerate(lines)
+            if line in _LINKEDIN_SECTION_HEADINGS
         ]
         sections: dict[str, list[str]] = {}
         for position, (start_index, heading) in enumerate(indexed_headings):
@@ -2540,7 +2554,9 @@ class ResumeProfileProcessor:
                 break
             if index + 1 < len(lines) and _DOMAIN_LINE_RE.fullmatch(lines[index + 1]):
                 if current.casefold() not in allowed_labels:
-                    break
+                    formatted.append(lines[index + 1])
+                    index += 2
+                    continue
                 formatted.append(f"{current}: {lines[index + 1]}")
                 index += 2
                 continue
@@ -2551,9 +2567,23 @@ class ResumeProfileProcessor:
 
     @staticmethod
     def _extract_linkedin_location(lines: list[str]) -> str | None:
-        for line in lines:
-            if re.fullmatch(r"[A-Za-z .'-]+,\s*[A-Za-z .'-]+", line):
-                return line
+        first_section_index = next(
+            (
+                index
+                for index, line in enumerate(lines)
+                if line in _LINKEDIN_SECTION_HEADINGS
+            ),
+            len(lines),
+        )
+        header_lines = lines[: min(first_section_index, 6)]
+        for line in header_lines:
+            candidate = line.strip()
+            if not candidate or any(char.isdigit() for char in candidate):
+                continue
+            if re.fullmatch(r"[A-Za-z .'-]+,\s*[A-Za-z .'-]+", candidate):
+                return candidate
+            if _LINKEDIN_BAY_AREA_RE.fullmatch(candidate):
+                return candidate
         return None
 
     @staticmethod
@@ -2564,7 +2594,11 @@ class ResumeProfileProcessor:
             flags=re.IGNORECASE,
         ):
             candidate = re.sub(r"\s+", " ", unescape(match.group(1))).strip()
-            if candidate:
+            if not candidate:
+                continue
+            if re.fullmatch(r"[A-Za-z .'-]+,\s*[A-Za-z .'-]+", candidate):
+                return candidate
+            if _LINKEDIN_BAY_AREA_RE.fullmatch(candidate):
                 return candidate
         return None
 

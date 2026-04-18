@@ -1223,7 +1223,6 @@ def test_is_linkedin_noise_line_uses_exact_ui_labels() -> None:
     assert processor._is_linkedin_noise_line("Copy") is True
     assert processor._is_linkedin_noise_line("Facebook") is True
     assert processor._is_linkedin_noise_line("Copywriter") is False
-    assert processor._is_linkedin_noise_line("Facebook") is True
     assert processor._is_linkedin_noise_line("Facebook / Meta") is False
     assert processor._is_linkedin_noise_line("People Operations Lead") is False
     assert processor._is_linkedin_noise_line("Jobs to Be Done Researcher") is False
@@ -1457,6 +1456,7 @@ def test_extract_text_from_html_compacts_linkedin_public_profile_sections() -> N
         <html>
           <head>
             <meta name="pageKey" content="public_profile_v3_desktop">
+            <link rel="canonical" href="https://www.linkedin.com/in/wumichaelm/">
             <title>Michael Wu - Software Engineer, Fractional CTO, Founder, Investor, World Traveler based in Taipei / Tokyo | LinkedIn</title>
           </head>
           <body>
@@ -1512,6 +1512,75 @@ def test_extract_text_from_html_compacts_linkedin_public_profile_sections() -> N
     assert "Stanford University" in rendered
     assert "Languages:" in rendered
     assert "Japanese" in rendered
+
+
+def test_is_linkedin_public_profile_html_requires_profile_canonical_url() -> None:
+    """LinkedIn profile compaction should ignore pages that merely link to a profile."""
+    processor = ResumeProfileProcessor()
+
+    assert (
+        processor._is_linkedin_public_profile_html(
+            """
+            <html>
+              <head>
+                <meta name="pageKey" content="public_profile_v3_desktop">
+                <title>Acme Corp - Hiring | LinkedIn</title>
+              </head>
+              <body>
+                <a href="https://www.linkedin.com/in/example-person/">Employee profile</a>
+              </body>
+            </html>
+            """
+        )
+        is False
+    )
+
+
+def test_format_linkedin_websites_keeps_parsing_after_unknown_label() -> None:
+    """Unexpected LinkedIn website labels should not suppress later website entries."""
+    processor = ResumeProfileProcessor()
+
+    assert processor._format_linkedin_websites(
+        [
+            "Newsletter",
+            "michaelinasia.com",
+            "Blog",
+            "demflyers.com",
+        ]
+    ) == [
+        "michaelinasia.com",
+        "Blog: demflyers.com",
+    ]
+
+
+def test_extract_linkedin_location_uses_header_lines_only() -> None:
+    """Location parsing should stay within the profile header and support Bay Area labels."""
+    processor = ResumeProfileProcessor()
+
+    assert (
+        processor._extract_linkedin_location(
+            [
+                "Michael Wu",
+                "Software Engineer",
+                "500+ connections",
+                "Experience",
+                "Master of Science, Computer Science",
+            ]
+        )
+        is None
+    )
+    assert (
+        processor._extract_linkedin_location(
+            [
+                "Michael Wu",
+                "Software Engineer",
+                "San Francisco Bay Area",
+                "500+ connections",
+                "Experience",
+            ]
+        )
+        == "San Francisco Bay Area"
+    )
 
 
 def test_fetch_external_profile_source_text_pins_resolved_public_ips() -> None:
