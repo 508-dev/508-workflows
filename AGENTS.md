@@ -72,7 +72,7 @@ uv run --package worker worker-consumer
 Full container parity remains available with:
 
 ```bash
-docker compose up --build
+./scripts/docker-compose.sh up --build
 ```
 
 ## Bot Feature Pattern

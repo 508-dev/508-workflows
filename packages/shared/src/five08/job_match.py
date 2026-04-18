@@ -1,4 +1,4 @@
-"""Job posting analysis and candidate requirement extraction."""
+"""Job posting analysis, candidate requirement extraction, and shortlist reranking."""
 
 from __future__ import annotations
 
@@ -392,7 +392,10 @@ class JobRequirements:
     """Normalized requirements extracted from a job posting."""
 
     required_skills: list[str] = field(default_factory=list)
+    hard_required_skills: list[str] = field(default_factory=list)
+    soft_required_skills: list[str] = field(default_factory=list)
     preferred_skills: list[str] = field(default_factory=list)
+    required_evidence: list[str] = field(default_factory=list)
     # Subset of DISCORD_SKILL_ROLE_NAMES that apply to this role.
     # Used to match candidates via their discord_roles column.
     discord_role_types: list[str] = field(default_factory=list)
@@ -403,11 +406,86 @@ class JobRequirements:
     title: str | None = None
 
     def __post_init__(self) -> None:
+        hard_required_skills = normalize_skill_list(list(self.hard_required_skills))
+        soft_required_skills = normalize_skill_list(list(self.soft_required_skills))
+        legacy_required_skills = normalize_skill_list(list(self.required_skills))
+
+        if (
+            not hard_required_skills
+            and not soft_required_skills
+            and legacy_required_skills
+        ):
+            hard_required_skills = legacy_required_skills[:1]
+            soft_required_skills = legacy_required_skills[1:]
+        elif (
+            hard_required_skills and not soft_required_skills and legacy_required_skills
+        ):
+            hard_required_skill_keys = {
+                item.casefold() for item in hard_required_skills
+            }
+            soft_required_skills = [
+                skill
+                for skill in legacy_required_skills
+                if skill.casefold() not in hard_required_skill_keys
+            ]
+
+        hard_required_skill_keys = {item.casefold() for item in hard_required_skills}
+        soft_required_skills = [
+            skill
+            for skill in soft_required_skills
+            if skill.casefold() not in hard_required_skill_keys
+        ]
+        required_skills = hard_required_skills + soft_required_skills
+        required_skill_keys = {item.casefold() for item in required_skills}
+        preferred_skills = [
+            skill
+            for skill in normalize_skill_list(list(self.preferred_skills))
+            if skill.casefold() not in required_skill_keys
+        ]
+
         object.__setattr__(
             self,
             "discord_role_types",
             _normalize_discord_role_types(self.discord_role_types),
         )
+        object.__setattr__(self, "hard_required_skills", hard_required_skills)
+        object.__setattr__(self, "soft_required_skills", soft_required_skills)
+        object.__setattr__(self, "required_skills", required_skills)
+        object.__setattr__(self, "preferred_skills", preferred_skills)
+        object.__setattr__(
+            self,
+            "required_evidence",
+            _normalize_evidence_list(self.required_evidence),
+        )
+
+
+@dataclass(frozen=True)
+class CandidateRerankResult:
+    """Structured LLM assessment for one shortlisted candidate."""
+
+    candidate_id: str
+    fit_score: float
+    summary: str | None = None
+    strengths: list[str] = field(default_factory=list)
+    risks: list[str] = field(default_factory=list)
+    missing_requirements: list[str] = field(default_factory=list)
+
+
+def _normalize_evidence_list(values: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        if not isinstance(raw, str):
+            continue
+        cleaned = re.sub(r"\s+", " ", raw.strip()).strip(" .,_-:/")
+        if not cleaned:
+            continue
+        key = cleaned.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(cleaned.lower())
+    return normalized
 
 
 def _regex_hints(text: str) -> dict[str, Any]:
@@ -444,13 +522,21 @@ def _build_prompt(posting_text: str, hints: dict[str, Any]) -> str:
         f"{hint_block}"
         "Analyze the following job posting and return a JSON object with these fields:\n"
         '- "title": string or null — the job title\n'
-        '- "required_skills": array of strings — up to 5 most critical TECHNICAL skills, '
-        'using concise canonical names (1-3 words, e.g. "effect ts", "typescript", '
-        '"react", "postgresql", "solidity"). Order by importance. '
+        '- "hard_required_skills": array of strings — hard must-have TECHNICAL skills. '
+        'Use concise canonical names (1-3 words, e.g. "webflow", "typescript", '
+        '"postgresql"). Only include skills that should block a candidate if missing. '
+        "If the posting clearly hinges on one platform or tool, put that anchor skill "
+        'first (e.g. "webflow" before adjacent skills like "figma").\n'
+        '- "soft_required_skills": array of strings — technical skills that matter a lot '
+        "but should not automatically disqualify a candidate if missing.\n"
+        '- "preferred_skills": array of strings — secondary technical skills, same format.\n'
+        '- "required_evidence": array of strings — non-skill proof items the hiring team '
+        'explicitly asks for, like "live webflow projects", "portfolio", or '
+        '"hubspot integration examples".\n'
+        '- "required_skills": array of strings — legacy compatibility field. Return the '
+        "combined hard + soft technical requirements in priority order.\n"
         "EXCLUDE soft skills, work styles, or behavioral traits such as "
         '"self-directed", "independent", "communication skills", "public github profile".\n'
-        '- "preferred_skills": array of strings — secondary technical skills, same format, '
-        "no soft skills\n"
         f'- "discord_role_types": array — classify using ONLY values from: [{role_names_str}]. '
         "Pick all that apply to this role.\n"
         '- "seniority": one of "junior", "midlevel", "senior", "staff", or null\n'
@@ -477,6 +563,143 @@ def _coerce_str_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [s for s in value if isinstance(s, str) and s.strip()]
+
+
+def _coerce_fit_score(value: Any) -> float:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(100.0, score))
+
+
+def _build_rerank_prompt(
+    posting_text: str,
+    requirements: JobRequirements,
+    candidates: list[dict[str, Any]],
+) -> str:
+    requirements_payload = {
+        "title": requirements.title,
+        "hard_required_skills": requirements.hard_required_skills,
+        "soft_required_skills": requirements.soft_required_skills,
+        "preferred_skills": requirements.preferred_skills,
+        "required_evidence": requirements.required_evidence,
+        "discord_role_types": requirements.discord_role_types,
+        "seniority": requirements.seniority,
+        "location_type": requirements.location_type,
+        "preferred_timezones": requirements.preferred_timezones,
+        "raw_location_text": requirements.raw_location_text,
+    }
+    return (
+        "You are reranking a shortlist of candidates after deterministic filtering.\n"
+        "Only use the provided candidate data. Do not invent portfolio links, project "
+        "history, or evidence that is not present.\n"
+        "Return a JSON object with a single key `ranked_candidates`, whose value is an "
+        "array of objects with:\n"
+        "- `candidate_id`: string copied exactly from the input\n"
+        "- `fit_score`: number from 0 to 100\n"
+        "- `summary`: one short sentence about the fit\n"
+        "- `strengths`: array of short strings\n"
+        "- `risks`: array of short strings\n"
+        "- `missing_requirements`: array of short strings, especially for missing evidence or unclear proof\n\n"
+        "Job requirements:\n"
+        f"{json.dumps(requirements_payload, ensure_ascii=True, indent=2)}\n\n"
+        "Job posting:\n"
+        f"{posting_text[:12000]}\n\n"
+        "Candidates:\n"
+        f"{json.dumps(candidates, ensure_ascii=True, indent=2)}"
+    )
+
+
+def rerank_shortlisted_candidates(
+    posting_text: str,
+    *,
+    requirements: JobRequirements,
+    candidates: list[dict[str, Any]],
+    api_key: str | None,
+    base_url: str | None = None,
+    model: str = "gpt-5-mini",
+) -> list[CandidateRerankResult]:
+    """Run an LLM rerank pass over an already filtered shortlist."""
+    if not api_key or len(candidates) < 2:
+        return []
+
+    try:
+        from openai import OpenAI as _OpenAI
+    except ImportError as exc:
+        raise RuntimeError("openai package is not installed") from exc
+
+    client = _OpenAI(api_key=api_key, base_url=base_url or None)
+    prompt = _build_rerank_prompt(posting_text, requirements, candidates)
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            temperature=0.1,
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a senior recruiting coordinator. Rerank a shortlist "
+                        "using only the provided evidence. Return only valid JSON."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=2500,
+        )
+    except Exception as exc:
+        logger.error("OpenAI candidate rerank call failed: %s", exc)
+        raise RuntimeError(f"OpenAI rerank failed: {exc}") from exc
+
+    if not response.choices or not response.choices[0].message.content:
+        raise RuntimeError("OpenAI rerank returned empty or missing response content.")
+
+    raw_content = response.choices[0].message.content.strip()
+    try:
+        data = _parse_llm_response(raw_content)
+    except (json.JSONDecodeError, ValueError) as exc:
+        logger.error(
+            "Failed to parse LLM rerank response length=%d error=%s",
+            len(raw_content),
+            exc,
+        )
+        raise RuntimeError(f"LLM rerank returned unparseable response: {exc}") from exc
+
+    ranked_payload = data.get("ranked_candidates")
+    if not isinstance(ranked_payload, list):
+        raise RuntimeError("LLM rerank response missing ranked_candidates array.")
+
+    results: list[CandidateRerankResult] = []
+    seen_ids: set[str] = set()
+    for item in ranked_payload:
+        if not isinstance(item, dict):
+            continue
+        candidate_id = item.get("candidate_id")
+        if not isinstance(candidate_id, str):
+            continue
+        candidate_id = candidate_id.strip()
+        if not candidate_id or candidate_id in seen_ids:
+            continue
+        seen_ids.add(candidate_id)
+        summary = item.get("summary")
+        results.append(
+            CandidateRerankResult(
+                candidate_id=candidate_id,
+                fit_score=_coerce_fit_score(item.get("fit_score")),
+                summary=summary.strip()
+                if isinstance(summary, str) and summary.strip()
+                else None,
+                strengths=_coerce_str_list(item.get("strengths"))[:4],
+                risks=_coerce_str_list(item.get("risks"))[:4],
+                missing_requirements=_coerce_str_list(item.get("missing_requirements"))[
+                    :5
+                ],
+            )
+        )
+
+    return results
 
 
 def extract_job_requirements(
@@ -547,11 +770,20 @@ def extract_job_requirements(
         logger.error("Failed to parse LLM job extraction response: %s", raw_content)
         raise RuntimeError(f"LLM returned unparseable response: {exc}") from exc
 
+    hard_required_skills = normalize_skill_list(
+        _coerce_str_list(data.get("hard_required_skills"))
+    )
+    soft_required_skills = normalize_skill_list(
+        _coerce_str_list(data.get("soft_required_skills"))
+    )
     required_skills = normalize_skill_list(
         _coerce_str_list(data.get("required_skills"))
     )
     preferred_skills = normalize_skill_list(
         _coerce_str_list(data.get("preferred_skills"))
+    )
+    required_evidence = _normalize_evidence_list(
+        _coerce_str_list(data.get("required_evidence"))
     )
 
     # Let JobRequirements.__post_init__ apply canonicalization + dedupe consistently.
@@ -587,7 +819,10 @@ def extract_job_requirements(
 
     return JobRequirements(
         required_skills=required_skills,
+        hard_required_skills=hard_required_skills,
+        soft_required_skills=soft_required_skills,
         preferred_skills=preferred_skills,
+        required_evidence=required_evidence,
         discord_role_types=discord_role_types,
         seniority=seniority,
         location_type=location_type,
