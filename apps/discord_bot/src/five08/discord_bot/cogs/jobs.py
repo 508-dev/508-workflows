@@ -204,6 +204,15 @@ class ThreadPost:
     tags: list[str]
 
 
+@dataclass(frozen=True)
+class CandidateSearchOutcome:
+    """Resolved candidate search result, including any relaxed search note."""
+
+    candidates: list[Any]
+    effective_requirements: JobRequirements
+    search_note: str | None = None
+
+
 class JobsCog(DiscordAuditCogMixin, commands.Cog):
     """Job posting and candidate matching workflows."""
 
@@ -313,6 +322,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         requirements: JobRequirements,
         candidates_count: int,
         guild: discord.Guild | None,
+        search_note: str | None = None,
     ) -> tuple[list[str], str | None, list[int], str | None, list[int]]:
         """Build header lines plus discord/locality role mention details."""
         header_parts: list[str] = []
@@ -479,7 +489,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 "Skills: "
                 + ", ".join(f"`{s}`" for s in requirements.required_skills[:8])
             )
-        if requirements.soft_required_skills:
+        if requirements.hard_required_skills and requirements.soft_required_skills:
             header_parts.append(
                 "Other needs: "
                 + ", ".join(f"`{s}`" for s in requirements.soft_required_skills[:5])
@@ -499,6 +509,8 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         header_lines: list[str] = ["## Job Match Results"]
         if header_parts:
             header_lines.append(" · ".join(header_parts))
+        if search_note:
+            header_lines.append(search_note)
         header_lines.append(f"Found **{candidates_count}** candidate(s).")
 
         return (
@@ -900,6 +912,82 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
     def _has_match_requirements(requirements: JobRequirements) -> bool:
         return bool(requirements.required_skills or requirements.discord_role_types)
 
+    @staticmethod
+    def _build_candidate_search_plan(
+        requirements: JobRequirements,
+        *,
+        min_match_score: float,
+    ) -> list[tuple[JobRequirements, float, str | None]]:
+        plan: list[tuple[JobRequirements, float, str | None]] = []
+        seen: set[
+            tuple[
+                tuple[str, ...],
+                tuple[str, ...],
+                tuple[str, ...],
+                tuple[str, ...],
+                float,
+            ]
+        ] = set()
+
+        def add_plan_step(
+            planned_requirements: JobRequirements,
+            planned_min_match_score: float,
+            search_note: str | None,
+        ) -> None:
+            key = (
+                tuple(planned_requirements.hard_required_skills),
+                tuple(planned_requirements.soft_required_skills),
+                tuple(planned_requirements.required_skills),
+                tuple(planned_requirements.discord_role_types),
+                planned_min_match_score,
+            )
+            if key in seen:
+                return
+            seen.add(key)
+            plan.append((planned_requirements, planned_min_match_score, search_note))
+
+        add_plan_step(requirements, min_match_score, None)
+
+        if len(requirements.hard_required_skills) > 1:
+            anchor_skill = requirements.hard_required_skills[0]
+            add_plan_step(
+                replace(
+                    requirements,
+                    hard_required_skills=requirements.hard_required_skills[:1],
+                    soft_required_skills=requirements.hard_required_skills[1:]
+                    + requirements.soft_required_skills,
+                ),
+                min_match_score,
+                "Search note: no strict full-match candidates, so only anchor hard "
+                f"need `{anchor_skill}` stayed mandatory.",
+            )
+
+        if requirements.required_skills:
+            add_plan_step(
+                replace(
+                    requirements,
+                    hard_required_skills=[],
+                    soft_required_skills=requirements.required_skills,
+                ),
+                0.0,
+                "Search note: still no strict matches, so matching was broadened to "
+                "any relevant skill or role signal.",
+            )
+        elif requirements.discord_role_types and min_match_score > 0:
+            add_plan_step(
+                replace(
+                    requirements,
+                    required_skills=[],
+                    hard_required_skills=[],
+                    soft_required_skills=[],
+                ),
+                0.0,
+                "Search note: still no strict matches, so matching was broadened to "
+                "role-based signals.",
+            )
+
+        return plan
+
     async def _search_and_rerank_candidates(
         self,
         *,
@@ -908,20 +996,47 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         guild_id: str | None,
         limit: int,
         min_match_score: float = 0.0,
-    ) -> list[Any]:
-        candidates = await asyncio.to_thread(
-            search_candidates,
-            settings,
+    ) -> CandidateSearchOutcome:
+        search_plan = self._build_candidate_search_plan(
             requirements,
-            guild_id=guild_id,
-            limit=limit,
             min_match_score=min_match_score,
         )
+        last_requirements = requirements
+        last_search_note: str | None = None
 
-        return await self._rerank_candidates(
-            posting=posting,
-            requirements=requirements,
-            candidates=candidates,
+        for (
+            planned_requirements,
+            planned_min_match_score,
+            search_note,
+        ) in search_plan:
+            candidates = await asyncio.to_thread(
+                search_candidates,
+                settings,
+                planned_requirements,
+                guild_id=guild_id,
+                limit=limit,
+                min_match_score=planned_min_match_score,
+            )
+            last_requirements = planned_requirements
+            last_search_note = search_note
+            if not candidates:
+                continue
+
+            reranked_candidates = await self._rerank_candidates(
+                posting=posting,
+                requirements=planned_requirements,
+                candidates=candidates,
+            )
+            return CandidateSearchOutcome(
+                candidates=reranked_candidates,
+                effective_requirements=planned_requirements,
+                search_note=search_note,
+            )
+
+        return CandidateSearchOutcome(
+            candidates=[],
+            effective_requirements=last_requirements,
+            search_note=last_search_note,
         )
 
     @staticmethod
@@ -1287,6 +1402,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         requirements: JobRequirements,
         candidates: list[Any],
         guild: discord.Guild | None,
+        search_note: str | None = None,
     ) -> None:
         """Send the formatted match output for both manual and automatic runs."""
         (
@@ -1299,6 +1415,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             requirements=requirements,
             candidates_count=len(candidates),
             guild=guild,
+            search_note=search_note,
         )
 
         safe_mentions = discord.AllowedMentions(
@@ -1420,7 +1537,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             return
 
         try:
-            candidates = await self._search_and_rerank_candidates(
+            search_outcome = await self._search_and_rerank_candidates(
                 posting=posting,
                 requirements=requirements,
                 guild_id=str(thread.guild.id) if thread.guild else None,
@@ -1443,9 +1560,10 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
 
         await self._publish_match_results(
             send=thread.send,
-            requirements=requirements,
-            candidates=candidates,
+            requirements=search_outcome.effective_requirements,
+            candidates=search_outcome.candidates,
             guild=guild,
+            search_note=search_outcome.search_note,
         )
 
     async def _bulk_sync_guild_roles(
@@ -1907,7 +2025,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             return
 
         try:
-            candidates = await self._search_and_rerank_candidates(
+            search_outcome = await self._search_and_rerank_candidates(
                 posting=posting,
                 requirements=requirements,
                 guild_id=str(interaction.guild.id) if interaction.guild else None,
@@ -1935,9 +2053,10 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
 
         await self._publish_match_results(
             send=_send_match_result,
-            requirements=requirements,
-            candidates=candidates,
+            requirements=search_outcome.effective_requirements,
+            candidates=search_outcome.candidates,
             guild=interaction.guild,
+            search_note=search_outcome.search_note,
         )
 
         self._audit_command_safe(
@@ -1952,7 +2071,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 "preferred_skills_count": len(requirements.preferred_skills),
                 "required_evidence_count": len(requirements.required_evidence),
                 "discord_role_types": requirements.discord_role_types,
-                "candidates_returned": len(candidates),
+                "candidates_returned": len(search_outcome.candidates),
                 **posting_metadata,
             },
         )
