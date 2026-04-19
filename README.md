@@ -137,6 +137,9 @@ For full containerized runs, including Coolify-style deployment parity:
 ./scripts/docker-compose.sh up --build
 ```
 
+Note: the service Dockerfiles use BuildKit cache mounts, so containerized builds
+require BuildKit-capable Docker / `docker compose build` support.
+
 Show the deterministic host ports for the current worktree:
 
 ```bash

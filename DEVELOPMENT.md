@@ -91,6 +91,9 @@ Start full stack (discord_bot + api + worker + redis + postgres + minio):
 ./scripts/docker-compose.sh up --build
 ```
 
+Note: the service Dockerfiles use BuildKit cache mounts, so containerized builds
+require BuildKit-capable Docker / `docker compose build` support.
+
 Stop stack:
 
 ```bash
