@@ -2,10 +2,11 @@
 
 import ipaddress
 import json
+import logging
 import sys
 from datetime import datetime
-from typing import Any
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from unittest.mock import ANY, MagicMock, Mock, call, patch
@@ -482,6 +483,45 @@ def test_extract_profile_proposal_fails_open_when_initial_enrichment_extract_err
     )
 
 
+def test_fetch_external_profile_sources_redacts_browser_logs_from_detail(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """User-facing enrichment details should omit embedded browser logs."""
+    processor = ResumeProfileProcessor()
+    processor._fetch_external_profile_source_text = Mock(
+        side_effect=ValueError(
+            "JavaScript profile fetch failed: BrowserType.launch: "
+            "Target page, context or browser has been closed "
+            "Browser logs:\n"
+            "  <launching> /app/.cloakbrowser/chromium/chrome --disable-extensions"
+        )
+    )
+
+    with caplog.at_level(logging.WARNING):
+        extra_sources, enrichments = processor._fetch_external_profile_sources(
+            [
+                _ExternalProfileSourceCandidate(
+                    label="Personal Website",
+                    url="https://example.com",
+                    origin="crm",
+                    source_key="website:example.com",
+                )
+            ],
+            seen_source_keys=set(),
+            source_label_counts={},
+        )
+
+    assert extra_sources == {}
+    assert [item.status for item in enrichments] == ["failed"]
+    assert enrichments[0].detail == (
+        "JavaScript profile fetch failed: BrowserType.launch: Target page, "
+        "context or browser has been closed"
+    )
+    assert "Browser logs:" not in (enrichments[0].detail or "")
+    assert "External profile source fetch failed" in caplog.text
+    assert "Browser logs:" in caplog.text
+
+
 def test_extract_profile_proposal_fetches_confirmed_website_and_github_together() -> (
     None
 ):
@@ -887,6 +927,47 @@ def test_inspect_profile_source_fetch_raises_non_retryable_direct_browser_error(
     processor._fetch_external_profile_source_response.assert_called_once_with(
         "https://candidate-one.example.com",
         session=ANY,
+    )
+
+
+def test_inspect_profile_source_fetch_retries_transient_direct_browser_error() -> None:
+    """Transient browser-launch closures should fall through to the next URL candidate."""
+    processor = ResumeProfileProcessor()
+    processor._fetch_external_profile_source_response = Mock(
+        side_effect=[
+            ValueError("Profile fetch hit a scraping block; reset session"),
+            ProfileSourceHttpResponse(
+                final_url="https://www.example.com/",
+                status_code=200,
+                headers={"content-type": "text/html"},
+                body=b"<html><body>stable fallback</body></html>",
+            ),
+        ]
+    )
+    processor._fetch_external_profile_source_text_with_browser_direct = Mock(
+        side_effect=ValueError(
+            "JavaScript profile fetch failed: BrowserType.launch: "
+            "Target page, context or browser has been closed"
+        )
+    )
+
+    diagnostics = processor.inspect_profile_source_fetch(
+        "https://example.com/",
+        allow_javascript_fallback=True,
+    )
+
+    assert diagnostics.final_url == "https://www.example.com/"
+    assert diagnostics.selected_text == "stable fallback"
+    assert diagnostics.browser_attempted is True
+    assert diagnostics.browser_used is False
+    processor._fetch_external_profile_source_response.assert_has_calls(
+        [
+            call("https://example.com/", session=ANY),
+            call("https://www.example.com/", session=ANY),
+        ]
+    )
+    processor._fetch_external_profile_source_text_with_browser_direct.assert_called_once_with(
+        "https://example.com/"
     )
 
 
