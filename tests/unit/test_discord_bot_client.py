@@ -9,6 +9,7 @@ from five08.clients.discord_bot import (
     DiscordBotClient,
     grant_member_role_for_signed_agreement,
 )
+from five08.tls import default_ca_bundle_path
 
 
 def test_grant_member_role_posts_expected_payload() -> None:
@@ -48,6 +49,7 @@ def test_grant_member_role_posts_expected_payload() -> None:
             "completed_at": "2026-03-25 12:00:00",
         },
         timeout=10.0,
+        verify=default_ca_bundle_path(),
     )
 
 
@@ -93,4 +95,5 @@ def test_request_omits_json_argument_when_payload_is_none() -> None:
             "X-API-Secret": "secret",
         },
         timeout=10.0,
+        verify=default_ca_bundle_path(),
     )

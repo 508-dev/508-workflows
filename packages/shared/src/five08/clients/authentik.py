@@ -8,6 +8,8 @@ from urllib.parse import urljoin
 
 import requests
 
+from five08.tls import default_ca_bundle_path
+
 
 class AuthentikAPIError(Exception):
     """Raised when an Authentik API call fails."""
@@ -118,6 +120,7 @@ class AuthentikClient:
                     params=params,
                     json=payload,
                     timeout=self.timeout_seconds,
+                    verify=default_ca_bundle_path(),
                     allow_redirects=False,
                 )
             except requests.RequestException as exc:
