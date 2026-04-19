@@ -60,6 +60,13 @@ PROFILE_SOURCE_FETCH_TIMEOUT_SECONDS = 10.0
 PROFILE_SOURCE_BROWSER_TIMEOUT_SECONDS = 20.0
 PROFILE_SOURCE_BROWSER_TIMEOUT_MS = int(PROFILE_SOURCE_BROWSER_TIMEOUT_SECONDS * 1000)
 PROFILE_SOURCE_BROWSER_POST_NAV_WAIT_MS = 5000
+PROFILE_SOURCE_DIRECT_BROWSER_ALLOWED_HOSTS = frozenset(
+    {
+        "beacons.ai",
+        "linktr.ee",
+        "carrd.co",
+    }
+)
 PROFILE_SOURCE_MAX_REDIRECTS = 3
 PROFILE_SOURCE_MAX_BYTES = 512 * 1024
 PROFILE_SOURCE_LINKEDIN_MAX_BYTES = 2 * 1024 * 1024
@@ -1372,6 +1379,7 @@ class ResumeProfileProcessor:
     ) -> list[_ExternalProfileSourceCandidate]:
         candidates: list[_ExternalProfileSourceCandidate] = []
         added_website_source_keys: set[str] = set()
+        added_linkedin_website_keys: set[str] = set()
         website_budget = PROFILE_SOURCE_MAX_WEBSITES
 
         explicit_website_links = self._coerce_fetchable_website_links(
@@ -1383,6 +1391,11 @@ class ResumeProfileProcessor:
             if website_budget <= 0:
                 break
             added_website_source_keys.add(source_key)
+            linkedin_website_key = self._canonical_linkedin_website_source_key(
+                website_url
+            )
+            if linkedin_website_key:
+                added_linkedin_website_keys.add(linkedin_website_key)
             website_budget -= 1
             candidates.append(
                 _ExternalProfileSourceCandidate(
@@ -1402,6 +1415,11 @@ class ResumeProfileProcessor:
             if website_budget <= 0:
                 break
             added_website_source_keys.add(source_key)
+            linkedin_website_key = self._canonical_linkedin_website_source_key(
+                website_url
+            )
+            if linkedin_website_key:
+                added_linkedin_website_keys.add(linkedin_website_key)
             website_budget -= 1
             candidates.append(
                 _ExternalProfileSourceCandidate(
@@ -1416,8 +1434,10 @@ class ResumeProfileProcessor:
             contact.get(LINKEDIN_FIELD)
         )
         if linkedin_profile_url:
-            linkedin_source_key = normalized_website_identity_key(linkedin_profile_url)
-            if linkedin_source_key in added_website_source_keys:
+            linkedin_source_key = self._canonical_linkedin_website_source_key(
+                linkedin_profile_url
+            )
+            if linkedin_source_key in added_linkedin_website_keys:
                 linkedin_profile_url = None
         if linkedin_profile_url:
             candidates.append(
@@ -2025,7 +2045,16 @@ class ResumeProfileProcessor:
         if validation_error:
             raise ValueError(validation_error)
 
-        session = self._create_profile_source_http_session()
+        relaxed_navigation_url = (
+            self._resolve_direct_browser_allowlisted_navigation_url(navigation_url)
+        )
+        allowed_browser_hosts = (
+            self._direct_browser_allowed_host_roots(relaxed_navigation_url)
+            if relaxed_navigation_url
+            else frozenset()
+        )
+        active_navigation_url = relaxed_navigation_url or navigation_url
+        session: curl_requests.Session | None = None
         response_cache: dict[str, ProfileSourceHttpResponse] = {}
         context = None
         try:
@@ -2037,16 +2066,26 @@ class ResumeProfileProcessor:
                 device_scale_factor=PROFILE_SOURCE_BROWSER_DEVICE_SCALE_FACTOR,
             )
             page = context.new_page()
-            page.route(
-                "**/*",
-                lambda route: self._handle_browser_profile_request_route(
-                    route,
-                    response_cache,
-                    session=session,
-                ),
-            )
+            if relaxed_navigation_url:
+                page.route(
+                    "**/*",
+                    lambda route: self._handle_relaxed_browser_profile_request_route(
+                        route,
+                        allowed_host_roots=allowed_browser_hosts,
+                    ),
+                )
+            else:
+                session = self._create_profile_source_http_session()
+                page.route(
+                    "**/*",
+                    lambda route: self._handle_browser_profile_request_route(
+                        route,
+                        response_cache,
+                        session=session,
+                    ),
+                )
             page.goto(
-                navigation_url,
+                active_navigation_url,
                 wait_until="domcontentloaded",
                 timeout=PROFILE_SOURCE_BROWSER_TIMEOUT_MS,
             )
@@ -2057,6 +2096,11 @@ class ResumeProfileProcessor:
             )
             if validation_error:
                 raise ValueError(validation_error)
+            if relaxed_navigation_url and not self._browser_host_matches_allowed_roots(
+                final_page_url,
+                allowed_host_roots=allowed_browser_hosts,
+            ):
+                raise ValueError("Direct browser fallback navigated outside allowlist")
             rendered_html = page.content()
             rendered_text = self._extract_browser_rendered_profile_source_text(
                 rendered_html,
@@ -2071,7 +2115,144 @@ class ResumeProfileProcessor:
                     context.close()
                 except Exception:
                     logger.debug("Failed to close CloakBrowser for %s", navigation_url)
-            session.close()
+            if session is not None:
+                session.close()
+
+    def _resolve_direct_browser_allowlisted_navigation_url(
+        self,
+        navigation_url: str,
+    ) -> str | None:
+        if self._is_direct_browser_allowed_host(navigation_url):
+            return navigation_url
+        try:
+            final_url = self._resolve_profile_redirect_target(navigation_url)
+        except ValueError:
+            return None
+        if self._is_direct_browser_allowed_host(final_url):
+            return final_url
+        return None
+
+    def _resolve_profile_redirect_target(
+        self,
+        url: str,
+        *,
+        session: curl_requests.Session | None = None,
+    ) -> str:
+        current_url = url
+        owns_session = session is None
+        active_session = session or self._create_profile_source_http_session()
+
+        try:
+            for _ in range(PROFILE_SOURCE_MAX_REDIRECTS + 1):
+                resolution = self._resolve_public_profile_request_target(current_url)
+                if isinstance(resolution, str):
+                    raise ValueError(resolution)
+                host, port, resolved_ips, host_is_ip_literal = resolution
+                try:
+                    resolve_entries = None
+                    if not host_is_ip_literal:
+                        resolve_entries = [
+                            f"{host}:{port}:{_format_curl_resolve_address(ip)}"
+                            for ip in resolved_ips
+                        ]
+                    self._configure_profile_source_http_session(
+                        active_session,
+                        resolve_entries=resolve_entries,
+                    )
+                    response = active_session.request(
+                        "GET",
+                        current_url,
+                        headers={"User-Agent": PROFILE_SOURCE_USER_AGENT},
+                        timeout=PROFILE_SOURCE_FETCH_TIMEOUT_SECONDS,
+                        allow_redirects=False,
+                        stream=True,
+                    )
+                    try:
+                        if response.status_code in {301, 302, 303, 307, 308}:
+                            redirect_to = response.headers.get("Location")
+                            if not redirect_to:
+                                raise ValueError(
+                                    "Profile URL redirect missing Location header"
+                                )
+                            current_url = urljoin(current_url, redirect_to)
+                            continue
+                        return current_url
+                    finally:
+                        response.close()
+                except RequestsError as exc:
+                    raise ValueError(f"Profile fetch failed: {exc}") from exc
+        finally:
+            if owns_session:
+                active_session.close()
+
+        raise ValueError("Profile URL exceeded redirect limit")
+
+    @staticmethod
+    def _is_direct_browser_allowed_host(candidate_url: str) -> bool:
+        host = (urlsplit(candidate_url).hostname or "").strip().casefold().rstrip(".")
+        if not host:
+            return False
+        return any(
+            host == allowed_host or host.endswith(f".{allowed_host}")
+            for allowed_host in PROFILE_SOURCE_DIRECT_BROWSER_ALLOWED_HOSTS
+        )
+
+    @staticmethod
+    def _direct_browser_allowed_host_roots(candidate_url: str) -> frozenset[str]:
+        host = (urlsplit(candidate_url).hostname or "").strip().casefold().rstrip(".")
+        matched_roots = {
+            allowed_host
+            for allowed_host in PROFILE_SOURCE_DIRECT_BROWSER_ALLOWED_HOSTS
+            if host == allowed_host or host.endswith(f".{allowed_host}")
+        }
+        return frozenset(matched_roots)
+
+    @staticmethod
+    def _browser_host_matches_allowed_roots(
+        candidate_url: str,
+        *,
+        allowed_host_roots: frozenset[str],
+    ) -> bool:
+        host = (urlsplit(candidate_url).hostname or "").strip().casefold().rstrip(".")
+        if not host:
+            return False
+        return any(
+            host == allowed_host or host.endswith(f".{allowed_host}")
+            for allowed_host in allowed_host_roots
+        )
+
+    def _handle_relaxed_browser_profile_request_route(
+        self,
+        route: Any,
+        *,
+        allowed_host_roots: frozenset[str],
+    ) -> None:
+        request = route.request
+        request_url = str(getattr(request, "url", "")).strip()
+        scheme = urlsplit(request_url).scheme.lower()
+        if scheme in {"data", "about", "blob"}:
+            route.continue_()
+            return
+        if not self._browser_host_matches_allowed_roots(
+            request_url,
+            allowed_host_roots=allowed_host_roots,
+        ):
+            logger.info(
+                "Blocked relaxed direct browser request outside allowlist url=%s",
+                request_url,
+            )
+            route.abort()
+            return
+        validation_error = self._validate_browser_profile_request_url(request_url)
+        if validation_error:
+            logger.info(
+                "Blocked relaxed direct browser request url=%s error=%s",
+                request_url,
+                validation_error,
+            )
+            route.abort()
+            return
+        route.continue_()
 
     def _fetch_external_profile_source_text_with_browser_once(
         self,
@@ -2878,6 +3059,12 @@ class ResumeProfileProcessor:
         if not match:
             return None
         return f"https://linkedin.com/in/{match.group(1)}"
+
+    def _canonical_linkedin_website_source_key(self, value: Any) -> str | None:
+        normalized_linkedin_url = self._normalize_linkedin_profile_url(value)
+        if not normalized_linkedin_url:
+            return None
+        return normalized_website_identity_key(normalized_linkedin_url)
 
     @staticmethod
     def _reset_unused_source_enrichments(
