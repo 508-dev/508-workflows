@@ -101,6 +101,9 @@ Show, export, or stop the local dev environment:
 ./scripts/dev.sh down
 ```
 
+`./scripts/dev.sh env` emits shell-safe exports for the current worktree and
+avoids printing the resolved Postgres password directly.
+
 ### 4. Run app services on the host
 
 ```bash
@@ -197,7 +200,7 @@ Use `.env.example` as the source of truth for defaults.
 - `Required` for protected endpoints: `API_SHARED_SECRET` (ingest requests are rejected when unset)
 - `Optional`: `WEBHOOK_INGEST_HOST` (default: `0.0.0.0`)
 - `Optional`: `WEBHOOK_INGEST_HOST_BIND` (default: `127.0.0.1`; Compose host bind for local exposure)
-- `Optional`: `WEBHOOK_INGEST_PORT` (default: `8090`; API listen port inside the container)
+- `Optional`: `WEBHOOK_INGEST_PORT` (default: `8090`; host-run API listen port. Compose pins the container listen port to `8090` and only varies the published host port.)
 - `Optional`: `WEBHOOK_INGEST_HOST_PORT` (default: `8090` when running `docker compose` directly; `./scripts/docker-compose.sh` computes a deterministic per-worktree value when unset, see `./scripts/docker-compose.sh print-ports`)
 
 ### Backend API OIDC Session Auth

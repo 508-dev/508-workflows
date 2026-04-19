@@ -5,17 +5,28 @@ script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
 . "$script_dir/worktree-env.sh"
 worktree_env_load "$script_dir"
 
+# dev.sh owns host-run service URLs so every launched process shares the same
+# worktree-local infra and app ports.
 export REDIS_URL="redis://127.0.0.1:${REDIS_HOST_PORT}/0"
-if [ -z "${POSTGRES_URL-}" ]; then
-  export POSTGRES_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:${POSTGRES_HOST_PORT}/${POSTGRES_DB}"
-fi
+export POSTGRES_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:${POSTGRES_HOST_PORT}/${POSTGRES_DB}"
 export MINIO_ENDPOINT="http://127.0.0.1:${MINIO_API_HOST_PORT}"
 export BACKEND_API_BASE_URL="http://127.0.0.1:${WEBHOOK_INGEST_PORT}"
 export WORKER_API_BASE_URL="http://127.0.0.1:${WEBHOOK_INGEST_PORT}"
 export DISCORD_BOT_INTERNAL_BASE_URL="http://127.0.0.1:${HEALTHCHECK_PORT}"
 
+shell_quote() {
+  python3 -c 'import shlex, sys; print(shlex.quote(sys.argv[1]))' "$1"
+}
+
+emit_export() {
+  key=$1
+  value=$2
+  printf 'export %s=%s\n' "$key" "$(shell_quote "$value")"
+}
+
 start_infra() {
-  "$script_dir/docker-compose.sh" up -d --wait redis postgres minio minio-init
+  "$script_dir/docker-compose.sh" up -d --wait redis postgres minio
+  "$script_dir/docker-compose.sh" up minio-init
 }
 
 command=${1:-infra}
@@ -59,23 +70,23 @@ HEALTHCHECK_PORT=$HEALTHCHECK_PORT
 EOF
     ;;
   env)
-    cat <<EOF
-export REDIS_HOST_PORT=$REDIS_HOST_PORT
-export POSTGRES_HOST_PORT=$POSTGRES_HOST_PORT
-export POSTGRES_USER=$POSTGRES_USER
-export POSTGRES_PASSWORD=$POSTGRES_PASSWORD
-export POSTGRES_DB=$POSTGRES_DB
-export MINIO_API_HOST_PORT=$MINIO_API_HOST_PORT
-export MINIO_CONSOLE_HOST_PORT=$MINIO_CONSOLE_HOST_PORT
-export WEBHOOK_INGEST_PORT=$WEBHOOK_INGEST_PORT
-export HEALTHCHECK_PORT=$HEALTHCHECK_PORT
-export REDIS_URL=$REDIS_URL
-export POSTGRES_URL=$POSTGRES_URL
-export MINIO_ENDPOINT=$MINIO_ENDPOINT
-export BACKEND_API_BASE_URL=$BACKEND_API_BASE_URL
-export WORKER_API_BASE_URL=$WORKER_API_BASE_URL
-export DISCORD_BOT_INTERNAL_BASE_URL=$DISCORD_BOT_INTERNAL_BASE_URL
-EOF
+    emit_export REDIS_HOST_PORT "$REDIS_HOST_PORT"
+    emit_export POSTGRES_HOST_PORT "$POSTGRES_HOST_PORT"
+    emit_export POSTGRES_USER "$POSTGRES_USER"
+    emit_export POSTGRES_DB "$POSTGRES_DB"
+    emit_export MINIO_API_HOST_PORT "$MINIO_API_HOST_PORT"
+    emit_export MINIO_CONSOLE_HOST_PORT "$MINIO_CONSOLE_HOST_PORT"
+    emit_export WEBHOOK_INGEST_PORT "$WEBHOOK_INGEST_PORT"
+    emit_export HEALTHCHECK_PORT "$HEALTHCHECK_PORT"
+    emit_export REDIS_URL "$REDIS_URL"
+    emit_export MINIO_ENDPOINT "$MINIO_ENDPOINT"
+    emit_export BACKEND_API_BASE_URL "$BACKEND_API_BASE_URL"
+    emit_export WORKER_API_BASE_URL "$WORKER_API_BASE_URL"
+    emit_export DISCORD_BOT_INTERNAL_BASE_URL "$DISCORD_BOT_INTERNAL_BASE_URL"
+    printf 'export POSTGRES_URL="$('%s' print-postgres-url)"\n' "$(shell_quote "$script_dir/dev.sh")"
+    ;;
+  print-postgres-url)
+    printf '%s\n' "$POSTGRES_URL"
     ;;
   api)
     exec uv run --package api backend-api

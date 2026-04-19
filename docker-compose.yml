@@ -90,7 +90,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-workflows}
-      POSTGRES_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-workflows}
+      POSTGRES_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-workflows}
       JOB_MAX_ATTEMPTS: ${JOB_MAX_ATTEMPTS:-8}
       JOB_RETRY_BASE_SECONDS: ${JOB_RETRY_BASE_SECONDS:-5}
       JOB_RETRY_MAX_SECONDS: ${JOB_RETRY_MAX_SECONDS:-300}
@@ -99,7 +99,7 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me}
       MINIO_INTERNAL_BUCKET: ${MINIO_INTERNAL_BUCKET:-internal-transfers}
       WEBHOOK_INGEST_HOST: 0.0.0.0
-      WEBHOOK_INGEST_PORT: ${WEBHOOK_INGEST_PORT:-8090}
+      WEBHOOK_INGEST_PORT: 8090
     restart: unless-stopped
     depends_on:
       redis:
@@ -109,7 +109,7 @@ services:
       minio-init:
         condition: service_completed_successfully
     ports:
-      - "${WEBHOOK_INGEST_HOST_BIND:-127.0.0.1}:${WEBHOOK_INGEST_HOST_PORT:-8090}:${WEBHOOK_INGEST_PORT:-8090}"
+      - "${WEBHOOK_INGEST_HOST_BIND:-127.0.0.1}:${WEBHOOK_INGEST_HOST_PORT:-8090}:8090"
 
   worker:
     build:
@@ -131,7 +131,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-workflows}
-      POSTGRES_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-workflows}
+      POSTGRES_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-workflows}
       JOB_MAX_ATTEMPTS: ${JOB_MAX_ATTEMPTS:-8}
       JOB_RETRY_BASE_SECONDS: ${JOB_RETRY_BASE_SECONDS:-5}
       JOB_RETRY_MAX_SECONDS: ${JOB_RETRY_MAX_SECONDS:-300}

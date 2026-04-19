@@ -126,10 +126,10 @@ worktree_env_load() {
   export MINIO_CONSOLE_HOST_PORT
 
   if [ "$mode" = "host" ]; then
-    # Host-run app ports are launcher-managed and intentionally ignore .env
-    # defaults so each worktree gets its own API and bot ports.
-    WEBHOOK_INGEST_PORT=$(worktree_env_resolve_shell_or_default WEBHOOK_INGEST_PORT "$((32080 + WORKTREE_ENV_SLOT))")
-    HEALTHCHECK_PORT=$(worktree_env_resolve_shell_or_default HEALTHCHECK_PORT "$((36000 + WORKTREE_ENV_SLOT))")
+    # Keep host-run app ports below the Linux default ephemeral range
+    # (32768-60999) to avoid rare EADDRINUSE races with outbound sockets.
+    WEBHOOK_INGEST_PORT=$(worktree_env_resolve_shell_or_default WEBHOOK_INGEST_PORT "$((18080 + WORKTREE_ENV_SLOT))")
+    HEALTHCHECK_PORT=$(worktree_env_resolve_shell_or_default HEALTHCHECK_PORT "$((30000 + WORKTREE_ENV_SLOT))")
     export WEBHOOK_INGEST_PORT
     export HEALTHCHECK_PORT
   else

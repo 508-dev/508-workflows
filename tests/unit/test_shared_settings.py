@@ -66,8 +66,14 @@ def test_shared_settings_docuseal_template_id_rejects_non_numeric_string() -> No
         SharedSettings(docuseal_member_agreement_template_id="abc")
 
 
-def test_local_service_defaults_target_host_runtime() -> None:
+def test_local_service_defaults_target_host_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Local defaults should work when app services run directly on the host."""
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.delenv("POSTGRES_URL", raising=False)
+    monkeypatch.delenv("MINIO_ENDPOINT", raising=False)
+
     settings = SharedSettings()
 
     assert settings.redis_url == "redis://127.0.0.1:6379/0"

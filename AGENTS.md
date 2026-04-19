@@ -60,7 +60,7 @@ uv run --package api backend-api
 uv run --package worker worker-consumer
 ```
 
-Run stack with Compose:
+Run the local dev stack:
 
 ```bash
 ./scripts/dev.sh infra

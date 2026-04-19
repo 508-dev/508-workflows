@@ -23,6 +23,7 @@ def _stream_output(name: str, process: subprocess.Popen[str]) -> None:
     assert process.stdout is not None
     for line in process.stdout:
         sys.stdout.write(f"[{name}] {line}")
+        sys.stdout.flush()
     process.stdout.close()
 
 
@@ -70,6 +71,7 @@ def main() -> int:
             return
         interrupted = True
         sys.stdout.write(f"\nReceived signal {signum}, stopping services...\n")
+        sys.stdout.flush()
         _stop_processes(processes)
 
     signal.signal(signal.SIGINT, handle_signal)
@@ -105,7 +107,9 @@ def main() -> int:
             for process in processes:
                 return_code = process.poll()
                 if return_code is not None:
-                    exit_code = return_code
+                    exit_code = (
+                        128 + abs(return_code) if return_code < 0 else return_code
+                    )
                     _stop_processes(processes)
                     interrupted = True
                     break

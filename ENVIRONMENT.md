@@ -59,7 +59,7 @@ Use `.env.example` as the source of defaults.
 
 - `Optional`: `WEBHOOK_INGEST_HOST` (default: `0.0.0.0`)
 - `Optional`: `WEBHOOK_INGEST_HOST_BIND` (default: `127.0.0.1`; Compose host bind for local exposure)
-- `Optional`: `WEBHOOK_INGEST_PORT` (default: `8090`; API listen port inside the container)
+- `Optional`: `WEBHOOK_INGEST_PORT` (default: `8090`; host-run API listen port. Compose pins the container listen port to `8090` and varies only the published host port)
 - `Optional`: `WEBHOOK_INGEST_HOST_PORT` (default: `8090` when running `docker compose` directly; `./scripts/docker-compose.sh` computes a deterministic per-worktree value when unset, see `./scripts/docker-compose.sh print-ports`)
 - `Required`: `API_SHARED_SECRET` (global shared secret for protected endpoints and webhooks)
 

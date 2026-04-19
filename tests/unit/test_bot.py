@@ -141,7 +141,12 @@ class TestBot508:
 
         assert config.discord_sendmsg_character_limit == 2000
 
-    def test_backend_api_base_url_defaults_to_host_runtime(self):
+    def test_backend_api_base_url_defaults_to_host_runtime(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.delenv("BACKEND_API_BASE_URL", raising=False)
+
         config = Settings(
             discord_bot_token="token",
             espo_api_key="espo-key",

@@ -59,6 +59,9 @@ Show, export, or stop the local dev environment:
 ./scripts/dev.sh down
 ```
 
+`./scripts/dev.sh env` emits shell-safe exports for the current worktree and
+avoids printing the resolved Postgres password directly.
+
 4. Run services on the host:
 
 ```bash
