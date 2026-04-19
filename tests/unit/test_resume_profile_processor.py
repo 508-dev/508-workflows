@@ -204,7 +204,7 @@ def test_extract_profile_proposal_merges_and_serializes_website_and_skill_attrs(
     assert result.success is True
     assert result.proposed_updates["cWebsiteLink"] == [
         "https://portfolio.example.com",
-        "https://blog.example.com",
+        "https://www.blog.example.com",
     ]
     assert result.proposed_updates["skills"] == ["typescript", "react native"]
     assert isinstance(result.proposed_updates["cSkillAttrs"], str)
@@ -212,6 +212,51 @@ def test_extract_profile_proposal_merges_and_serializes_website_and_skill_attrs(
         "react native": {"strength": 3},
         "typescript": {"strength": 4},
     }
+
+
+def test_extract_profile_proposal_skips_linkedin_www_only_change() -> None:
+    """LinkedIn compare should treat www-only normalization as unchanged."""
+    processor = ResumeProfileProcessor()
+    processor.crm = Mock()
+    processor.extractor = Mock()
+    processor.skills_extractor = Mock()
+    processor.document_processor = Mock()
+    processor._record_processing_run = Mock()
+    processor.skills_extractor.canonicalize_skill.side_effect = lambda v: (
+        str(v).strip().lower()
+    )
+
+    processor.crm.get_contact.return_value = {
+        "emailAddress": "member@example.com",
+        "cLinkedIn": "https://www.linkedin.com/in/wumichaelm/",
+    }
+    processor.crm.download_attachment.return_value = b"resume-bytes"
+    processor.document_processor.extract_text.return_value = "resume text"
+    processor.document_processor.get_content_hash.return_value = "hash-linkedin-www"
+    processor.extractor.extract.return_value = ResumeExtractedProfile(
+        email=None,
+        github_username=None,
+        linkedin_url="https://linkedin.com/in/wumichaelm",
+        phone=None,
+        confidence=0.9,
+        source="gpt-4o-mini",
+    )
+    processor.skills_extractor.extract_skills.return_value = ExtractedSkills(
+        skills=[],
+        skill_attrs={},
+        confidence=0.8,
+        source="gpt-4o-mini",
+    )
+
+    result = processor.extract_profile_proposal(
+        contact_id="contact-linkedin-www",
+        attachment_id="att-linkedin-www",
+        filename="resume.pdf",
+    )
+
+    assert result.success is True
+    assert "cLinkedIn" not in result.proposed_updates
+    assert not any(item.field == "cLinkedIn" for item in result.proposed_changes)
 
 
 def test_extract_profile_proposal_merges_and_serializes_social_links() -> None:
@@ -763,7 +808,7 @@ def test_build_initial_external_source_candidates_preserves_www_host_from_crm() 
     assert len(candidates) == 1
     assert candidates[0].label == "Personal Website"
     assert candidates[0].url == "https://www.example.com/about"
-    assert candidates[0].source_key == "website:example.com/about"
+    assert candidates[0].source_key == "website:www.example.com/about"
 
 
 def test_build_initial_external_source_candidates_skips_duplicate_linkedin_website() -> (
@@ -2229,6 +2274,54 @@ def test_extract_profile_proposal_deduplicates_existing_and_extracted_websites_b
 
     assert result.success is True
     assert "cWebsiteLink" not in result.proposed_updates
+
+
+def test_extract_profile_proposal_keeps_www_distinct_for_personal_websites() -> None:
+    """Personal websites should not collapse www and apex hosts together."""
+    processor = ResumeProfileProcessor()
+    processor.crm = Mock()
+    processor.extractor = Mock()
+    processor.skills_extractor = Mock()
+    processor.document_processor = Mock()
+    processor._record_processing_run = Mock()
+    processor.skills_extractor.canonicalize_skill.side_effect = lambda v: (
+        str(v).strip().lower()
+    )
+
+    processor.crm.get_contact.return_value = {
+        "emailAddress": "member@example.com",
+        "cWebsiteLink": ["https://example.com"],
+    }
+    processor.crm.download_attachment.return_value = b"resume-bytes"
+    processor.document_processor.extract_text.return_value = "resume text"
+    processor.document_processor.get_content_hash.return_value = "hash-www-distinct"
+    processor.extractor.extract.return_value = ResumeExtractedProfile(
+        email=None,
+        github_username=None,
+        linkedin_url=None,
+        phone=None,
+        website_links=["https://www.example.com"],
+        confidence=0.9,
+        source="gpt-4o-mini",
+    )
+    processor.skills_extractor.extract_skills.return_value = ExtractedSkills(
+        skills=[],
+        skill_attrs={},
+        confidence=0.8,
+        source="gpt-4o-mini",
+    )
+
+    result = processor.extract_profile_proposal(
+        contact_id="contact-www-distinct",
+        attachment_id="att-www-distinct",
+        filename="resume.pdf",
+    )
+
+    assert result.success is True
+    assert result.proposed_updates["cWebsiteLink"] == [
+        "https://example.com",
+        "https://www.example.com",
+    ]
 
 
 def test_extract_profile_proposal_deduplicates_skills_in_confirmation() -> None:

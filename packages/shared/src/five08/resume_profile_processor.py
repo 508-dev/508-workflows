@@ -1093,27 +1093,38 @@ class ResumeProfileProcessor:
         if not proposed:
             return
 
-        if callable(is_blocked) and is_blocked(proposed):
+        normalized_proposed = proposed
+        display_current: str | None = (
+            str(current).strip() if current is not None else None
+        )
+        normalized_current: str | None = display_current
+        if crm_field == LINKEDIN_FIELD:
+            normalized_proposed = self._normalize_linkedin_profile_url(proposed) or ""
+            if not normalized_proposed:
+                return
+            normalized_current = self._normalize_linkedin_profile_url(current)
+            display_current = normalized_current
+
+        if callable(is_blocked) and is_blocked(normalized_proposed):
             skipped.append(
                 ResumeSkipReason(
                     field=crm_field,
-                    value=proposed,
+                    value=normalized_proposed,
                     reason=blocked_reason or "Update blocked by policy",
                 )
             )
             return
 
-        current_value = str(current).strip() if current is not None else None
-        if current_value and current_value == proposed:
+        if normalized_current and normalized_current == normalized_proposed:
             return
 
-        proposed_updates[crm_field] = proposed
+        proposed_updates[crm_field] = normalized_proposed
         proposed_changes.append(
             ResumeFieldChange(
                 field=crm_field,
                 label=label,
-                current=current_value,
-                proposed=proposed,
+                current=display_current,
+                proposed=normalized_proposed,
                 reason="Extracted from uploaded resume",
             )
         )
