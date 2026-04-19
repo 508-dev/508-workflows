@@ -2,7 +2,9 @@
 
 import ipaddress
 import json
+import sys
 from datetime import datetime
+from typing import Any
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +14,7 @@ from curl_cffi import CurlOpt
 
 from five08.clients.espo import EspoAPIError
 from five08.resume_profile_processor import (
+    PROFILE_SOURCE_BROWSER_POST_NAV_WAIT_MS,
     PROFILE_SOURCE_BROWSER_RESOURCE_MAX_BYTES,
     PROFILE_SOURCE_MAX_BYTES,
     ProfileSourceHttpResponse,
@@ -261,8 +264,10 @@ def test_extract_profile_proposal_merges_and_serializes_social_links() -> None:
     ]
 
 
-def test_extract_profile_proposal_fetches_crm_website_and_github_sources() -> None:
-    """Existing CRM website and GitHub profile text should be passed into extraction."""
+def test_extract_profile_proposal_fetches_crm_website_linkedin_and_github_sources() -> (
+    None
+):
+    """Existing CRM website, LinkedIn, and GitHub profile text should be passed into extraction."""
     processor = ResumeProfileProcessor()
     processor.crm = Mock()
     processor.extractor = Mock()
@@ -272,6 +277,7 @@ def test_extract_profile_proposal_fetches_crm_website_and_github_sources() -> No
     processor._fetch_external_profile_source_text = Mock(
         side_effect=lambda url, **_: {
             "https://portfolio.example.com": "Portfolio content",
+            "https://linkedin.com/in/octocat": "LinkedIn profile content",
             "https://github.com/octocat": "GitHub profile content",
         }[url]
     )
@@ -282,6 +288,7 @@ def test_extract_profile_proposal_fetches_crm_website_and_github_sources() -> No
     processor.crm.get_contact.return_value = {
         "emailAddress": "member@example.com",
         "cWebsiteLink": ["https://portfolio.example.com"],
+        "cLinkedIn": "https://www.linkedin.com/in/octocat/",
         "cGitHubUsername": "octocat",
     }
     processor.crm.download_attachment.return_value = b"resume-bytes"
@@ -325,9 +332,23 @@ def test_extract_profile_proposal_fetches_crm_website_and_github_sources() -> No
             "Content:\n"
             "GitHub profile content"
         ),
+        "linkedin_profile": (
+            "Source: LinkedIn Profile\n"
+            "URL: https://linkedin.com/in/octocat\n"
+            "Content:\n"
+            "LinkedIn profile content"
+        ),
     }
-    assert [item.status for item in result.source_enrichments] == ["used", "used"]
-    assert [item.origin for item in result.source_enrichments] == ["crm", "crm"]
+    assert [item.status for item in result.source_enrichments] == [
+        "used",
+        "used",
+        "used",
+    ]
+    assert [item.origin for item in result.source_enrichments] == [
+        "crm",
+        "crm",
+        "crm",
+    ]
 
 
 def test_extract_profile_proposal_reruns_with_inferred_github_only() -> None:
@@ -705,6 +726,24 @@ def test_build_initial_external_source_candidates_preserves_www_host_from_crm() 
     assert candidates[0].source_key == "website:example.com/about"
 
 
+def test_build_initial_external_source_candidates_skips_duplicate_linkedin_website() -> (
+    None
+):
+    """LinkedIn URLs present in website links should not be added twice."""
+    processor = ResumeProfileProcessor()
+
+    candidates = processor._build_initial_external_source_candidates(
+        contact={
+            "cWebsiteLink": ["https://www.linkedin.com/in/octocat/"],
+            "cLinkedIn": "https://linkedin.com/in/octocat",
+        },
+    )
+
+    assert [(candidate.label, candidate.url) for candidate in candidates] == [
+        ("Personal Website", "https://www.linkedin.com/in/octocat"),
+    ]
+
+
 def test_fetch_external_profile_sources_retries_alternate_candidate_after_failure() -> (
     None
 ):
@@ -776,6 +815,191 @@ def test_fetch_external_profile_source_text_uses_browser_for_sparse_personal_sit
     processor._fetch_external_profile_source_text_with_browser.assert_called_once()
     browser_call = processor._fetch_external_profile_source_text_with_browser.call_args
     assert browser_call.args[0].final_url == "https://example.com/about"
+
+
+def test_inspect_profile_source_fetch_uses_direct_browser_on_initial_block() -> None:
+    """Blocked personal websites should still get a direct browser fallback attempt."""
+    processor = ResumeProfileProcessor()
+    processor._fetch_external_profile_source_response = Mock(
+        side_effect=ValueError("Profile fetch hit a scraping block; reset session")
+    )
+    processor._fetch_external_profile_source_text_with_browser_direct = Mock(
+        return_value=(
+            "https://beacons.ai/michaelmwu",
+            "Michael Wu\nMichael in Asia\nDEM Flyers",
+        )
+    )
+
+    diagnostics = processor.inspect_profile_source_fetch(
+        "https://michaelmwu.com/",
+        allow_javascript_fallback=True,
+    )
+
+    assert diagnostics.final_url == "https://beacons.ai/michaelmwu"
+    assert diagnostics.selected_text == "Michael Wu\nMichael in Asia\nDEM Flyers"
+    assert diagnostics.browser_attempted is True
+    assert diagnostics.browser_used is True
+    assert diagnostics.curl_text is None
+    processor._fetch_external_profile_source_text_with_browser_direct.assert_called_once_with(
+        "https://michaelmwu.com/"
+    )
+
+
+def test_inspect_profile_source_fetch_raises_non_retryable_direct_browser_error() -> (
+    None
+):
+    """Non-retryable direct browser failures should stop candidate iteration immediately."""
+    processor = ResumeProfileProcessor()
+    processor._fetch_external_profile_source_response = Mock(
+        side_effect=[
+            ValueError("Profile fetch hit a scraping block; reset session"),
+            ProfileSourceHttpResponse(
+                final_url="https://candidate-two.example.com",
+                status_code=200,
+                headers={"content-type": "text/html"},
+                body=b"<html><body>candidate two</body></html>",
+            ),
+        ]
+    )
+    processor._fetch_external_profile_source_text_with_browser_direct = Mock(
+        side_effect=ValueError(
+            "JavaScript profile fetch failed: Profile URL is invalid"
+        )
+    )
+    processor._iter_profile_source_fetch_urls = Mock(
+        return_value=iter(
+            [
+                "https://candidate-one.example.com",
+                "https://candidate-two.example.com",
+            ]
+        )
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="JavaScript profile fetch failed: Profile URL is invalid",
+    ):
+        processor.inspect_profile_source_fetch(
+            "https://example.com/",
+            allow_javascript_fallback=True,
+        )
+
+    processor._fetch_external_profile_source_response.assert_called_once_with(
+        "https://candidate-one.example.com",
+        session=ANY,
+    )
+
+
+def test_fetch_external_profile_source_text_with_browser_direct_validates_routed_requests() -> (
+    None
+):
+    """Direct browser fallback should proxy requests through the pinned fetch path."""
+    processor = ResumeProfileProcessor()
+    page = Mock()
+    page.url = "https://beacons.ai/michaelmwu"
+    page.content.return_value = "<html><body>Michael Wu</body></html>"
+    route_handler: Any = None
+    session = Mock()
+    session.close = Mock()
+
+    def capture_route(pattern: str, handler: object) -> None:
+        nonlocal route_handler
+        assert pattern == "**/*"
+        route_handler = handler
+
+    page.route.side_effect = capture_route
+    context = Mock()
+    context.new_page.return_value = page
+
+    def validate(url: str) -> str | None:
+        allowed_urls = {
+            "https://michaelmwu.com/",
+            "https://beacons.ai/michaelmwu",
+            "https://beacons.ai/assets/app.js",
+        }
+        return None if url in allowed_urls else "blocked"
+
+    with (
+        patch.dict(
+            sys.modules,
+            {
+                "cloakbrowser": SimpleNamespace(
+                    launch_context=Mock(return_value=context)
+                )
+            },
+        ),
+        patch.object(
+            processor,
+            "_validate_browser_profile_navigation_url",
+            return_value=None,
+        ),
+        patch.object(
+            processor,
+            "_create_profile_source_http_session",
+            return_value=session,
+        ),
+        patch.object(
+            processor,
+            "_validate_browser_profile_request_url",
+            side_effect=validate,
+        ) as validate_url,
+        patch.object(
+            processor,
+            "_fetch_browser_profile_request_response",
+            return_value=ProfileSourceHttpResponse(
+                final_url="https://beacons.ai/assets/app.js",
+                status_code=200,
+                headers={"content-type": "application/javascript"},
+                body=b"console.log('ok')",
+            ),
+        ) as fetch_route_response,
+        patch.object(
+            processor,
+            "_extract_browser_rendered_profile_source_text",
+            return_value="Michael Wu",
+        ),
+    ):
+        final_url, text = (
+            processor._fetch_external_profile_source_text_with_browser_direct(
+                "https://michaelmwu.com/"
+            )
+        )
+        page.wait_for_timeout.assert_called_once_with(
+            PROFILE_SOURCE_BROWSER_POST_NAV_WAIT_MS
+        )
+
+        assert route_handler is not None
+
+        blocked_route = Mock()
+        blocked_route.request = SimpleNamespace(url="http://127.0.0.1/internal")
+        route_handler(blocked_route)
+        blocked_route.abort.assert_called_once_with()
+        blocked_route.continue_.assert_not_called()
+
+        allowed_route = Mock()
+        allowed_route.request = SimpleNamespace(
+            url="https://beacons.ai/assets/app.js",
+            method="GET",
+        )
+        route_handler(allowed_route)
+        allowed_route.fulfill.assert_called_once_with(
+            status=200,
+            headers={"content-type": "application/javascript"},
+            body=b"console.log('ok')",
+        )
+        allowed_route.abort.assert_not_called()
+
+    assert final_url == "https://beacons.ai/michaelmwu"
+    assert text == "Michael Wu"
+    fetch_route_response.assert_called_once_with(
+        allowed_route.request,
+        session=session,
+    )
+    session.close.assert_called_once_with()
+    assert validate_url.call_args_list == [
+        call("http://127.0.0.1/internal"),
+        call("https://beacons.ai/assets/app.js"),
+    ]
 
 
 def test_fetch_external_profile_source_text_skips_browser_for_github_sources() -> None:
@@ -1109,6 +1333,41 @@ def test_request_profile_http_response_allows_blocked_browser_subrequests() -> N
     response.close.assert_called_once()
 
 
+def test_profile_source_html_looks_blocked_ignores_recaptcha_feature_flags() -> None:
+    """Normal pages should not be flagged by recaptcha-related config keys."""
+    processor = ResumeProfileProcessor()
+
+    assert (
+        processor._profile_source_html_looks_blocked(
+            '<meta data-recaptcha-v3-integration-lix-value="control">'
+        )
+        is False
+    )
+    assert (
+        processor._profile_source_html_looks_blocked(
+            '<script>window.features = ["octocaptcha_origin_optimization"]</script>'
+        )
+        is False
+    )
+
+
+def test_profile_source_html_looks_blocked_detects_cloudflare_challenge() -> None:
+    """Cloudflare challenge pages should still be recognized as blocked."""
+    processor = ResumeProfileProcessor()
+
+    assert (
+        processor._profile_source_html_looks_blocked(
+            """
+            <html><body>
+            <script>window._cf_chl_opt = {};</script>
+            <span>Enable JavaScript and cookies to continue</span>
+            </body></html>
+            """
+        )
+        is True
+    )
+
+
 def test_extract_rendered_profile_source_text_enforces_size_limit() -> None:
     """Rendered browser HTML should honor the same size cap as curl fetches."""
     processor = ResumeProfileProcessor()
@@ -1118,6 +1377,76 @@ def test_extract_rendered_profile_source_text_enforces_size_limit() -> None:
 
     with pytest.raises(ValueError, match="Rendered profile page exceeds size limit"):
         processor._extract_rendered_profile_source_text(oversized_html)
+
+
+def test_extract_rendered_profile_source_text_allows_larger_linkedin_pages() -> None:
+    """Rendered LinkedIn pages should use the larger LinkedIn size limit."""
+    processor = ResumeProfileProcessor()
+    oversized_html = (
+        "<html><body>" + ("a" * PROFILE_SOURCE_MAX_BYTES) + "</body></html>"
+    )
+
+    rendered = processor._extract_rendered_profile_source_text(
+        oversized_html,
+        navigation_url="https://www.linkedin.com/in/wumichaelm/",
+    )
+
+    assert rendered
+
+
+def test_fetch_external_profile_source_text_with_browser_once_uses_final_url_for_size_limit() -> (
+    None
+):
+    """Browser fallback should apply rendered size limits using the redirected destination URL."""
+    processor = ResumeProfileProcessor()
+    session = Mock()
+    context = Mock()
+    page = Mock()
+    page.url = "https://www.linkedin.com/in/wumichaelm/"
+    page.content.return_value = "<html><body>LinkedIn content</body></html>"
+    context.new_page.return_value = page
+    initial_response = ProfileSourceHttpResponse(
+        final_url="https://example.com/about",
+        status_code=200,
+        headers={"content-type": "text/html"},
+        body=b"<html><body>Initial</body></html>",
+    )
+
+    with (
+        patch.object(processor, "_seed_browser_profile_session"),
+        patch.object(
+            processor,
+            "_validate_browser_profile_navigation_url",
+            return_value=None,
+        ),
+        patch.object(
+            processor,
+            "_extract_browser_rendered_profile_source_text",
+            return_value="Rendered text",
+        ) as extract_rendered,
+    ):
+        rendered = processor._fetch_external_profile_source_text_with_browser_once(
+            initial_response,
+            session=session,
+            launch_context=Mock(return_value=context),
+        )
+
+    assert rendered == "Rendered text"
+    assert extract_rendered.call_args.kwargs["navigation_url"] == (
+        "https://www.linkedin.com/in/wumichaelm/"
+    )
+
+
+def test_is_linkedin_noise_line_uses_exact_ui_labels() -> None:
+    """Noise filtering should not drop legitimate profile content by substring."""
+    processor = ResumeProfileProcessor()
+
+    assert processor._is_linkedin_noise_line("Copy") is True
+    assert processor._is_linkedin_noise_line("Facebook") is True
+    assert processor._is_linkedin_noise_line("Copywriter") is False
+    assert processor._is_linkedin_noise_line("Facebook / Meta") is False
+    assert processor._is_linkedin_noise_line("People Operations Lead") is False
+    assert processor._is_linkedin_noise_line("Jobs to Be Done Researcher") is False
 
 
 def test_extract_profile_proposal_reruns_with_confirmed_personal_website() -> None:
@@ -1321,6 +1650,263 @@ def test_extract_text_from_html_reads_meta_description_regardless_of_order() -> 
     assert "Title: Portfolio" in rendered
     assert "Description: Builder of useful things" in rendered
     assert "Body copy" in rendered
+
+
+def test_extract_text_from_html_filters_template_and_jsonish_noise() -> None:
+    """Generic HTML extraction should drop template and hydration-style junk lines."""
+    processor = ResumeProfileProcessor()
+
+    rendered = processor._extract_text_from_html(
+        """
+        <html>
+          <head><title>Profile</title></head>
+          <body>
+            <main>
+              <div>Michael Wu</div>
+              <div>Software Engineer</div>
+              <div>%7B%22foo%22%3A%22bar%22%7D</div>
+              <div>{"props":{"page":"profile"}}</div>
+              <template>{"hydration":true}</template>
+            </main>
+          </body>
+        </html>
+        """
+    )
+
+    assert "Michael Wu" in rendered
+    assert "Software Engineer" in rendered
+    assert "%7B%22foo%22%3A%22bar%22%7D" not in rendered
+    assert '{"props":{"page":"profile"}}' not in rendered
+    assert '{"hydration":true}' not in rendered
+
+
+def test_profile_source_max_bytes_for_linkedin_pages_is_larger() -> None:
+    """LinkedIn public profiles should be allowed a larger response budget."""
+    processor = ResumeProfileProcessor()
+
+    assert (
+        processor._profile_source_max_bytes_for_url(
+            "https://www.linkedin.com/in/wumichaelm/"
+        )
+        > PROFILE_SOURCE_MAX_BYTES
+    )
+    assert (
+        processor._profile_source_max_bytes_for_url("https://example.com/about")
+        == PROFILE_SOURCE_MAX_BYTES
+    )
+
+
+def test_extract_text_from_html_compacts_linkedin_public_profile_sections() -> None:
+    """LinkedIn public profile HTML should be reduced to the useful header and sections."""
+    processor = ResumeProfileProcessor()
+
+    rendered = processor._extract_text_from_html(
+        """
+        <html>
+          <head>
+            <meta name="pageKey" content="public_profile_v3_desktop">
+            <link rel="canonical" href="https://www.linkedin.com/in/wumichaelm/">
+            <title>Michael Wu - Software Engineer, Fractional CTO, Founder, Investor, World Traveler based in Taipei / Tokyo | LinkedIn</title>
+          </head>
+          <body>
+            <main>
+              <div>Michael Wu</div>
+              <div>Software Engineer, Fractional CTO, Founder, Investor, World Traveler based in Taipei / Tokyo</div>
+              <div>Tokyo, Japan</div>
+              <section>
+                <h2>Websites</h2>
+                <div>Blog</div>
+                <div>michaelinasia.com</div>
+                <div>Blog</div>
+                <div>demflyers.com</div>
+              </section>
+              <section>
+                <h2>Experience</h2>
+                <div>Senior Software Engineer</div>
+                <div>Stripe</div>
+                <div>Feb 2020 - Dec 2022 2 years 11 months</div>
+                <div>Tokyo, Japan</div>
+                <div>Implemented cost pipelines for card transactions in Japan.</div>
+              </section>
+              <section>
+                <h2>Education</h2>
+                <div>Stanford University</div>
+                <div>Master of Science (MS) Electrical Engineering</div>
+              </section>
+              <section>
+                <h2>Languages</h2>
+                <div>Japanese</div>
+                <div>Limited working proficiency</div>
+              </section>
+            </main>
+          </body>
+        </html>
+        """
+    )
+
+    assert "Name: Michael Wu" in rendered
+    assert (
+        "Headline: Software Engineer, Fractional CTO, Founder, Investor, "
+        "World Traveler based in Taipei / Tokyo" in rendered
+    )
+    assert "Location: Tokyo, Japan" in rendered
+    assert "Websites:" in rendered
+    assert "- Blog: michaelinasia.com" in rendered
+    assert "- Blog: demflyers.com" in rendered
+    assert "Experience:" in rendered
+    assert "Senior Software Engineer" in rendered
+    assert "Stripe" in rendered
+    assert "Implemented cost pipelines for card transactions in Japan." in rendered
+    assert "Education:" in rendered
+    assert "Stanford University" in rendered
+    assert "Languages:" in rendered
+    assert "Japanese" in rendered
+
+
+def test_is_linkedin_public_profile_html_requires_profile_canonical_url() -> None:
+    """LinkedIn profile compaction should ignore pages that merely link to a profile."""
+    processor = ResumeProfileProcessor()
+
+    assert (
+        processor._is_linkedin_public_profile_html(
+            """
+            <html>
+              <head>
+                <meta name="pageKey" content="public_profile_v3_desktop">
+                <title>Acme Corp - Hiring | LinkedIn</title>
+              </head>
+              <body>
+                <a href="https://www.linkedin.com/in/example-person/">Employee profile</a>
+              </body>
+            </html>
+            """
+        )
+        is False
+    )
+
+
+def test_is_linkedin_public_profile_html_handles_swapped_attribute_order() -> None:
+    """LinkedIn profile detection should not depend on HTML attribute order."""
+    processor = ResumeProfileProcessor()
+
+    assert (
+        processor._is_linkedin_public_profile_html(
+            """
+            <html>
+              <head>
+                <meta content="public_profile_v3_desktop" name="pageKey">
+                <link href="https://www.linkedin.com/in/wumichaelm/" rel="canonical">
+                <title>Michael Wu - Software Engineer | LinkedIn</title>
+              </head>
+            </html>
+            """
+        )
+        is True
+    )
+
+
+def test_extract_text_from_html_falls_back_when_linkedin_sections_are_localized() -> (
+    None
+):
+    """Localized LinkedIn headings should keep generic body text instead of header-only compaction."""
+    processor = ResumeProfileProcessor()
+
+    rendered = processor._extract_text_from_html(
+        """
+        <html>
+          <head>
+            <meta name="pageKey" content="public_profile_v3_desktop">
+            <link rel="canonical" href="https://www.linkedin.com/in/wumichaelm/">
+            <title>Michael Wu - Software Engineer | LinkedIn</title>
+          </head>
+          <body>
+            <main>
+              <div>Michael Wu</div>
+              <div>Software Engineer</div>
+              <div>Tokyo, Japan</div>
+              <section>
+                <h2>経験</h2>
+                <div>Stripe</div>
+                <div>Implemented cost pipelines for card transactions in Japan.</div>
+              </section>
+            </main>
+          </body>
+        </html>
+        """
+    )
+
+    assert "Implemented cost pipelines for card transactions in Japan." in rendered
+    assert "Name: Michael Wu" not in rendered
+
+
+def test_format_linkedin_websites_keeps_parsing_after_unknown_label() -> None:
+    """Unexpected LinkedIn website labels should not suppress later website entries."""
+    processor = ResumeProfileProcessor()
+
+    assert processor._format_linkedin_websites(
+        [
+            "Newsletter",
+            "michaelinasia.com",
+            "Blog",
+            "demflyers.com",
+        ]
+    ) == [
+        "michaelinasia.com",
+        "Blog: demflyers.com",
+    ]
+
+
+def test_extract_linkedin_location_uses_header_lines_only() -> None:
+    """Location parsing should stay within the profile header and support Bay Area labels."""
+    processor = ResumeProfileProcessor()
+
+    assert (
+        processor._extract_linkedin_location(
+            [
+                "Michael Wu",
+                "Software Engineer",
+                "500+ connections",
+                "Experience",
+                "Master of Science, Computer Science",
+            ]
+        )
+        is None
+    )
+    assert (
+        processor._extract_linkedin_location(
+            [
+                "Michael Wu",
+                "Software Engineer",
+                "San Francisco Bay Area",
+                "500+ connections",
+                "Experience",
+            ]
+        )
+        == "San Francisco Bay Area"
+    )
+    assert (
+        processor._extract_linkedin_location(
+            [
+                "Michael Wu",
+                "Founder, Acme",
+                "Tokyo, Japan",
+                "500+ connections",
+                "Experience",
+            ]
+        )
+        == "Tokyo, Japan"
+    )
+    assert (
+        processor._extract_linkedin_location(
+            [
+                "Michael Wu",
+                "Founder, Acme",
+                "500+ connections",
+                "Experience",
+            ]
+        )
+        is None
+    )
 
 
 def test_fetch_external_profile_source_text_pins_resolved_public_ips() -> None:

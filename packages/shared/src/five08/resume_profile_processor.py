@@ -59,8 +59,10 @@ LINKEDIN_FIELD = "cLinkedIn"
 PROFILE_SOURCE_FETCH_TIMEOUT_SECONDS = 10.0
 PROFILE_SOURCE_BROWSER_TIMEOUT_SECONDS = 20.0
 PROFILE_SOURCE_BROWSER_TIMEOUT_MS = int(PROFILE_SOURCE_BROWSER_TIMEOUT_SECONDS * 1000)
+PROFILE_SOURCE_BROWSER_POST_NAV_WAIT_MS = 5000
 PROFILE_SOURCE_MAX_REDIRECTS = 3
 PROFILE_SOURCE_MAX_BYTES = 512 * 1024
+PROFILE_SOURCE_LINKEDIN_MAX_BYTES = 2 * 1024 * 1024
 PROFILE_SOURCE_BROWSER_RESOURCE_MAX_BYTES = 10 * 1024 * 1024
 PROFILE_SOURCE_MAX_TEXT_CHARS = 12000
 PROFILE_SOURCE_MAX_WEBSITES = 2
@@ -79,16 +81,16 @@ PROFILE_SOURCE_ALLOWED_CONTENT_TYPES = (
     "text/markdown",
 )
 PROFILE_SOURCE_BLOCKED_STATUS_CODES = frozenset({401, 403, 429, 503})
-PROFILE_SOURCE_BLOCKED_MARKERS = (
-    "access denied",
-    "attention required",
-    "captcha",
-    "cf-chl",
-    "challenge-platform",
-    "checking your browser",
-    "enable javascript and cookies",
-    "unusual traffic",
-    "verify you are human",
+PROFILE_SOURCE_BLOCKED_PATTERNS = (
+    re.compile(r"access denied", re.IGNORECASE),
+    re.compile(r"attention required", re.IGNORECASE),
+    re.compile(r"\bcaptcha\b", re.IGNORECASE),
+    re.compile(r"_cf_chl_opt", re.IGNORECASE),
+    re.compile(r"/cdn-cgi/challenge-platform", re.IGNORECASE),
+    re.compile(r"checking your browser", re.IGNORECASE),
+    re.compile(r"enable javascript and cookies(?: to continue)?", re.IGNORECASE),
+    re.compile(r"unusual traffic", re.IGNORECASE),
+    re.compile(r"verify you are human", re.IGNORECASE),
 )
 PROFILE_SOURCE_JS_SPARSE_TEXT_MAX_CHARS = 250
 PROFILE_SOURCE_JS_SPARSE_TEXT_MAX_WORDS = 40
@@ -114,7 +116,7 @@ PROFILE_SOURCE_JS_RENDER_MARKERS = (
     "please turn on javascript",
 )
 _HTML_BLOCK_RE = re.compile(
-    r"(?is)<(script|style|noscript|svg|nav|header|footer)[^>]*>.*?</\1>"
+    r"(?is)<(script|style|noscript|svg|nav|header|footer|template)[^>]*>.*?</\1>"
 )
 _HTML_TAG_RE = re.compile(r"(?s)<[^>]+>")
 _HTML_BREAK_RE = re.compile(r"(?i)<br\s*/?>")
@@ -131,9 +133,63 @@ _HTML_META_CONTENT_ATTR_RE = re.compile(
     r'content\s*=\s*["\']([^"\']*)["\']',
     flags=re.IGNORECASE,
 )
+_LINKEDIN_PROFILE_PAGEKEY_RE = re.compile(
+    r'(?is)<meta\b(?=[^>]*\bname=["\']pagekey["\'])(?=[^>]*\bcontent=["\']public_profile_v3[^"\']*["\'])[^>]*>'
+)
+_LINKEDIN_PROFILE_CANONICAL_URL_RE = re.compile(
+    r"(?is)(?:"
+    r'<link\b(?=[^>]*\brel=["\']canonical["\'])(?=[^>]*\bhref=["\']https?://(?:[\w.-]+\.)?linkedin\.com/in/[^"\']+["\'])[^>]*>'
+    r'|<meta\b(?=[^>]*\bproperty=["\']og:url["\'])(?=[^>]*\bcontent=["\']https?://(?:[\w.-]+\.)?linkedin\.com/in/[^"\']+["\'])[^>]*>'
+    r'|<meta\b(?=[^>]*\bproperty=["\']al:(?:android|ios):url["\'])(?=[^>]*\bcontent=["\']https?://(?:[\w.-]+\.)?linkedin\.com/in/[^"\']+["\'])[^>]*>'
+    r")"
+)
+_LINKEDIN_BAY_AREA_RE = re.compile(r"(?i)^(?:greater\s+)?[A-Za-z .'-]+ area$")
 _GITHUB_USERNAME_RE = re.compile(
     r"^(?:https?://)?(?:www\.)?github\.com/([A-Za-z0-9-]{1,39})/?(?:[?#].*)?$",
     flags=re.IGNORECASE,
+)
+_LINKEDIN_PROFILE_RE = re.compile(
+    r"^(?:https?://)?(?:[\w.-]+\.)?linkedin\.com/in/([A-Za-z0-9_%-]+)/?(?:[?#].*)?$",
+    flags=re.IGNORECASE,
+)
+_DOMAIN_LINE_RE = re.compile(
+    r"(?i)^(?:https?://)?(?:www\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?:[/?#].*)?$"
+)
+_LINKEDIN_SECTION_HEADINGS = (
+    "Websites",
+    "Experience",
+    "Education",
+    "Publications",
+    "Patents",
+    "Honors & Awards",
+    "Languages",
+)
+_LINKEDIN_SECTION_HEADINGS_BY_CASEFOLD = {
+    heading.casefold(): heading for heading in _LINKEDIN_SECTION_HEADINGS
+}
+_LINKEDIN_LOCATION_NEGATIVE_TERMS = (
+    "founder",
+    "co-founder",
+    "engineer",
+    "developer",
+    "designer",
+    "manager",
+    "director",
+    "consultant",
+    "software",
+    "product",
+    "marketing",
+    "science",
+    "scientist",
+    "master",
+    "bachelor",
+    "degree",
+    "university",
+    "college",
+    "investor",
+    "blogger",
+    "writer",
+    "researcher",
 )
 
 
@@ -1341,6 +1397,23 @@ class ResumeProfileProcessor:
                 )
             )
 
+        linkedin_profile_url = self._normalize_linkedin_profile_url(
+            contact.get(LINKEDIN_FIELD)
+        )
+        if linkedin_profile_url:
+            linkedin_source_key = normalized_website_identity_key(linkedin_profile_url)
+            if linkedin_source_key in added_website_source_keys:
+                linkedin_profile_url = None
+        if linkedin_profile_url:
+            candidates.append(
+                _ExternalProfileSourceCandidate(
+                    label="LinkedIn Profile",
+                    url=linkedin_profile_url,
+                    origin="crm",
+                    source_key=f"linkedin:{linkedin_profile_url.casefold()}",
+                )
+            )
+
         explicit_github_keys: set[str] = set()
         for username in explicit_github_usernames or []:
             normalized_username = self._normalize_github_username(username)
@@ -1381,6 +1454,8 @@ class ResumeProfileProcessor:
         explicit_github_usernames: list[str] | None = None,
     ) -> bool:
         if self._coerce_website_links(explicit_personal_websites):
+            return True
+        if self._normalize_linkedin_profile_url(contact.get(LINKEDIN_FIELD)):
             return True
         if any(
             self._normalize_github_username(username)
@@ -1428,6 +1503,8 @@ class ResumeProfileProcessor:
             label_base = (
                 "github_profile"
                 if candidate.label.casefold() == "github profile"
+                else "linkedin_profile"
+                if candidate.label.casefold() == "linkedin profile"
                 else "personal_website"
             )
             next_index = source_label_counts.get(label_base, 0) + 1
@@ -1477,6 +1554,7 @@ class ResumeProfileProcessor:
         try:
             response: ProfileSourceHttpResponse | None = None
             last_fetch_error: ValueError | None = None
+            browser_attempted = False
             for candidate_url in self._iter_profile_source_fetch_urls(
                 url,
                 allow_javascript_fallback=allow_javascript_fallback,
@@ -1489,6 +1567,36 @@ class ResumeProfileProcessor:
                     break
                 except ValueError as exc:
                     last_fetch_error = exc
+                    if (
+                        allow_javascript_fallback
+                        and self._should_reset_profile_source_session(str(exc))
+                    ):
+                        browser_attempted = True
+                        try:
+                            (
+                                browser_final_url,
+                                direct_browser_text,
+                            ) = self._fetch_external_profile_source_text_with_browser_direct(
+                                candidate_url
+                            )
+                        except ValueError as browser_exc:
+                            last_fetch_error = browser_exc
+                            if not self._is_retryable_profile_fetch_error(
+                                str(browser_exc)
+                            ):
+                                raise browser_exc
+                        else:
+                            return ProfileSourceFetchDiagnostics(
+                                url=url,
+                                final_url=browser_final_url,
+                                content_type="text/html",
+                                selected_text=direct_browser_text,
+                                curl_text=None,
+                                browser_attempted=True,
+                                browser_used=True,
+                                browser_text=direct_browser_text,
+                                error=None,
+                            )
                     if not self._is_retryable_profile_fetch_error(str(exc)):
                         raise
 
@@ -1504,7 +1612,6 @@ class ResumeProfileProcessor:
             except ValueError as exc:
                 extraction_error = exc
 
-            browser_attempted = False
             browser_used = False
             browser_text: str | None = None
             if (
@@ -1650,7 +1757,7 @@ class ResumeProfileProcessor:
                 "Accept": ", ".join(PROFILE_SOURCE_ALLOWED_CONTENT_TYPES),
             },
             body=None,
-            max_bytes=PROFILE_SOURCE_MAX_BYTES,
+            max_bytes=self._profile_source_max_bytes_for_url(url),
             require_success=True,
             size_limit_error="Profile page exceeds size limit",
             detect_blocked=True,
@@ -1810,6 +1917,12 @@ class ResumeProfileProcessor:
                 raise ValueError(size_limit_error)
         return bytes(payload)
 
+    def _profile_source_max_bytes_for_url(self, url: str) -> int:
+        host = (urlsplit(url).hostname or "").strip().casefold()
+        if host == "linkedin.com" or host.endswith(".linkedin.com"):
+            return PROFILE_SOURCE_LINKEDIN_MAX_BYTES
+        return PROFILE_SOURCE_MAX_BYTES
+
     def _fetch_external_profile_source_text_with_browser(
         self,
         initial_response: ProfileSourceHttpResponse,
@@ -1853,6 +1966,67 @@ class ResumeProfileProcessor:
             )
         finally:
             fresh_session.close()
+
+    def _fetch_external_profile_source_text_with_browser_direct(
+        self,
+        navigation_url: str,
+    ) -> tuple[str, str]:
+        try:
+            from cloakbrowser import launch_context  # type: ignore[import-untyped]
+        except ImportError as exc:
+            raise ValueError("JavaScript browser fallback is unavailable") from exc
+
+        validation_error = self._validate_browser_profile_navigation_url(navigation_url)
+        if validation_error:
+            raise ValueError(validation_error)
+
+        session = self._create_profile_source_http_session()
+        response_cache: dict[str, ProfileSourceHttpResponse] = {}
+        context = None
+        try:
+            context = launch_context(
+                user_agent=PROFILE_SOURCE_USER_AGENT,
+                viewport=PROFILE_SOURCE_BROWSER_VIEWPORT,
+                is_mobile=True,
+                has_touch=True,
+                device_scale_factor=PROFILE_SOURCE_BROWSER_DEVICE_SCALE_FACTOR,
+            )
+            page = context.new_page()
+            page.route(
+                "**/*",
+                lambda route: self._handle_browser_profile_request_route(
+                    route,
+                    response_cache,
+                    session=session,
+                ),
+            )
+            page.goto(
+                navigation_url,
+                wait_until="domcontentloaded",
+                timeout=PROFILE_SOURCE_BROWSER_TIMEOUT_MS,
+            )
+            page.wait_for_timeout(PROFILE_SOURCE_BROWSER_POST_NAV_WAIT_MS)
+            final_page_url = str(getattr(page, "url", "")).strip()
+            validation_error = self._validate_browser_profile_navigation_url(
+                final_page_url
+            )
+            if validation_error:
+                raise ValueError(validation_error)
+            rendered_html = page.content()
+            rendered_text = self._extract_browser_rendered_profile_source_text(
+                rendered_html,
+                navigation_url=final_page_url,
+            )
+            return final_page_url, rendered_text
+        except Exception as exc:
+            raise ValueError(f"JavaScript profile fetch failed: {exc}") from exc
+        finally:
+            if context is not None:
+                try:
+                    context.close()
+                except Exception:
+                    logger.debug("Failed to close CloakBrowser for %s", navigation_url)
+            session.close()
 
     def _fetch_external_profile_source_text_with_browser_once(
         self,
@@ -1900,8 +2074,6 @@ class ResumeProfileProcessor:
             if validation_error:
                 raise ValueError(validation_error)
             rendered_html = page.content()
-            if self._profile_source_html_looks_blocked(rendered_html):
-                raise ValueError("JavaScript profile fetch hit a scraping block")
         except Exception as exc:
             raise ValueError(f"JavaScript profile fetch failed: {exc}") from exc
         finally:
@@ -1911,7 +2083,10 @@ class ResumeProfileProcessor:
                 except Exception:
                     logger.debug("Failed to close CloakBrowser for %s", navigation_url)
 
-        return self._extract_rendered_profile_source_text(rendered_html)
+        return self._extract_browser_rendered_profile_source_text(
+            rendered_html,
+            navigation_url=final_page_url,
+        )
 
     def _extract_profile_source_text(self, *, body: bytes, content_type: str) -> str:
         normalized_type = content_type.split(";", 1)[0].strip().lower()
@@ -2043,14 +2218,43 @@ class ResumeProfileProcessor:
             return "Profile URL must use http or https"
         return self._validate_public_profile_url(candidate_url)
 
-    def _extract_rendered_profile_source_text(self, rendered_html: str) -> str:
+    def _extract_rendered_profile_source_text(
+        self,
+        rendered_html: str,
+        *,
+        navigation_url: str | None = None,
+    ) -> str:
         rendered_body = rendered_html.encode("utf-8")
-        if len(rendered_body) > PROFILE_SOURCE_MAX_BYTES:
+        if len(rendered_body) > self._profile_source_max_bytes_for_url(
+            navigation_url or ""
+        ):
             raise ValueError("Rendered profile page exceeds size limit")
         return self._extract_profile_source_text(
             body=rendered_body,
             content_type="text/html",
         )
+
+    def _extract_browser_rendered_profile_source_text(
+        self,
+        rendered_html: str,
+        *,
+        navigation_url: str | None = None,
+    ) -> str:
+        rendered_text = self._extract_rendered_profile_source_text(
+            rendered_html,
+            navigation_url=navigation_url,
+        )
+        if not self._profile_source_html_looks_blocked(rendered_html):
+            return rendered_text
+
+        stripped_text = rendered_text.strip()
+        word_count = len(re.findall(r"\w+", stripped_text))
+        if self._profile_source_html_looks_blocked(stripped_text) or (
+            len(stripped_text) <= PROFILE_SOURCE_JS_SPARSE_TEXT_MAX_CHARS
+            and word_count <= PROFILE_SOURCE_JS_SPARSE_TEXT_MAX_WORDS
+        ):
+            raise ValueError("JavaScript profile fetch hit a scraping block")
+        return rendered_text
 
     @staticmethod
     def _browser_route_response_headers(
@@ -2127,8 +2331,9 @@ class ResumeProfileProcessor:
 
     @staticmethod
     def _profile_source_html_looks_blocked(rendered_html: str) -> bool:
-        normalized = rendered_html.casefold()
-        return any(marker in normalized for marker in PROFILE_SOURCE_BLOCKED_MARKERS)
+        return any(
+            pattern.search(rendered_html) for pattern in PROFILE_SOURCE_BLOCKED_PATTERNS
+        )
 
     @staticmethod
     def _profile_source_response_looks_blocked(
@@ -2157,6 +2362,10 @@ class ResumeProfileProcessor:
         )
 
     def _extract_text_from_html(self, value: str) -> str:
+        linkedin_text = self._extract_text_from_linkedin_html(value)
+        if linkedin_text:
+            return linkedin_text
+
         main_match = re.search(r"(?is)<main[^>]*>(.*?)</main>", value)
         html_value = main_match.group(1) if main_match else value
         title_match = _HTML_TITLE_RE.search(value)
@@ -2168,8 +2377,15 @@ class ResumeProfileProcessor:
         normalized = _HTML_TAG_RE.sub(" ", normalized)
         normalized = unescape(normalized)
         normalized = re.sub(r"[ \t\r\f\v]+", " ", normalized)
-        normalized = re.sub(r"\n{2,}", "\n", normalized)
-        normalized = normalized.strip()
+        normalized_lines = [
+            line
+            for line in (
+                re.sub(r"\s+", " ", raw_line).strip()
+                for raw_line in normalized.splitlines()
+            )
+            if line and not self._is_low_value_html_text_line(line)
+        ]
+        normalized = "\n".join(normalized_lines).strip()
 
         text_parts: list[str] = []
         if title_match:
@@ -2187,6 +2403,309 @@ class ResumeProfileProcessor:
         if normalized:
             text_parts.append(normalized)
         return "\n".join(text_parts).strip()
+
+    def _extract_text_from_linkedin_html(self, value: str) -> str | None:
+        if not self._is_linkedin_public_profile_html(value):
+            return None
+
+        lines = self._extract_html_text_lines(value)
+        if not lines:
+            return None
+        filtered_lines = self._dedupe_lines(
+            line for line in lines if not self._is_linkedin_noise_line(line)
+        )
+        if not filtered_lines:
+            return None
+
+        title_match = _HTML_TITLE_RE.search(value)
+        name: str | None = None
+        headline: str | None = None
+        if title_match:
+            title = re.sub(r"\s+", " ", unescape(title_match.group(1))).strip()
+            if title:
+                title_root = title.removesuffix(" | LinkedIn").strip()
+                name, _, headline_part = title_root.partition(" - ")
+                name = name.strip() or None
+                headline = headline_part.strip() or None
+
+        location = self._extract_linkedin_location_from_html(value)
+        if not location:
+            location = self._extract_linkedin_location(filtered_lines)
+
+        sections = self._extract_linkedin_sections(filtered_lines)
+        websites = self._format_linkedin_websites(sections.pop("Websites", []))
+        has_structured_content = bool(websites) or any(sections.values())
+        if not has_structured_content:
+            return None
+
+        parts: list[str] = []
+        if name:
+            parts.append(f"Name: {name}")
+        if headline:
+            parts.append(f"Headline: {headline}")
+        if location:
+            parts.append(f"Location: {location}")
+
+        if websites:
+            if parts:
+                parts.append("")
+            parts.append("Websites:")
+            parts.extend(f"- {item}" for item in websites)
+
+        for heading in (
+            "Experience",
+            "Education",
+            "Publications",
+            "Patents",
+            "Honors & Awards",
+            "Languages",
+        ):
+            section_lines = sections.get(heading, [])
+            if not section_lines:
+                continue
+            if parts:
+                parts.append("")
+            parts.append(f"{heading}:")
+            parts.extend(section_lines)
+
+        return "\n".join(parts).strip() or None
+
+    @staticmethod
+    def _is_linkedin_public_profile_html(value: str) -> bool:
+        lowered = value.casefold()
+        if "| linkedin</title>" not in lowered:
+            return False
+        has_profile_pagekey = _LINKEDIN_PROFILE_PAGEKEY_RE.search(value) is not None
+        has_profile_url = _LINKEDIN_PROFILE_CANONICAL_URL_RE.search(value) is not None
+        if not has_profile_pagekey or not has_profile_url:
+            return False
+        title_match = _HTML_TITLE_RE.search(value)
+        if not title_match:
+            return False
+        title = re.sub(r"\s+", " ", unescape(title_match.group(1))).strip()
+        return " - " in title
+
+    def _extract_html_text_lines(self, value: str) -> list[str]:
+        main_match = re.search(r"(?is)<main[^>]*>(.*?)</main>", value)
+        html_value = main_match.group(1) if main_match else value
+        normalized = re.sub(r"(?is)<!--.*?-->", " ", html_value)
+        normalized = _HTML_BLOCK_RE.sub(" ", normalized)
+        normalized = _HTML_BREAK_RE.sub("\n", normalized)
+        normalized = _HTML_BLOCK_CLOSE_RE.sub("\n", normalized)
+        normalized = _HTML_TAG_RE.sub("\n", normalized)
+        normalized = unescape(normalized)
+        normalized = normalized.replace("\xa0", " ")
+        return [
+            line
+            for line in (
+                re.sub(r"\s+", " ", raw_line).strip()
+                for raw_line in normalized.splitlines()
+            )
+            if line and not self._is_low_value_html_text_line(line)
+        ]
+
+    @staticmethod
+    def _dedupe_lines(lines: Any) -> list[str]:
+        deduped: list[str] = []
+        previous: str | None = None
+        for raw_line in lines:
+            line = str(raw_line).strip()
+            if not line or line == previous:
+                continue
+            deduped.append(line)
+            previous = line
+        return deduped
+
+    @staticmethod
+    def _is_linkedin_noise_line(line: str) -> bool:
+        lowered = line.casefold()
+        if re.search(r"\*]:|\[&|group-hover:|text-color-|font-|leading-\[", line):
+            return True
+        if line.endswith(" Graphic"):
+            return True
+        if re.fullmatch(r"sign in to view .+ full profile", lowered):
+            return True
+        exact_noise_tokens = {
+            "skip to main content",
+            "join now",
+            "sign in",
+            "join with email",
+            "already on linkedin? sign in",
+            "user agreement",
+            "privacy policy",
+            "cookie policy",
+            "view mutual connections",
+            "see your mutual connections",
+            "report this post",
+            "report this profile",
+            "report this",
+            "close menu",
+            "copy",
+            "copy link",
+            "facebook",
+            "x",
+            "top content",
+            "people",
+            "learning",
+            "jobs",
+            "games",
+            "contact info",
+            "email or phone",
+            "password",
+            "forgot password?",
+            "forgot password",
+            "show all activity",
+            "other similar profiles",
+            "message",
+            "send message",
+            "view profile",
+            "public_profile__posts",
+        }
+        return lowered in exact_noise_tokens
+
+    @staticmethod
+    def _is_low_value_html_text_line(line: str) -> bool:
+        candidate = line.strip()
+        if not candidate:
+            return False
+        if (
+            candidate.count("%") >= 3
+            and " " not in candidate
+            and re.search(r"%[0-9A-Fa-f]{2}", candidate)
+        ):
+            return True
+        if any(
+            marker in candidate
+            for marker in (
+                "__NEXT_DATA__",
+                "__NUXT__",
+                "window.__",
+                "webpackChunk",
+            )
+        ):
+            return True
+        if (
+            (
+                (candidate.startswith("{") and candidate.endswith("}"))
+                or (candidate.startswith("[") and candidate.endswith("]"))
+            )
+            and ('"' in candidate or ":" in candidate)
+            and candidate.count(" ") <= 2
+        ):
+            return True
+        return False
+
+    def _extract_linkedin_sections(self, lines: list[str]) -> dict[str, list[str]]:
+        indexed_headings = [
+            (index, heading)
+            for index, line in enumerate(lines)
+            if (heading := _LINKEDIN_SECTION_HEADINGS_BY_CASEFOLD.get(line.casefold()))
+        ]
+        sections: dict[str, list[str]] = {}
+        for position, (start_index, heading) in enumerate(indexed_headings):
+            end_index = (
+                indexed_headings[position + 1][0]
+                if position + 1 < len(indexed_headings)
+                else len(lines)
+            )
+            section_lines = self._dedupe_lines(
+                line
+                for line in lines[start_index + 1 : end_index]
+                if not self._is_linkedin_noise_line(line)
+            )
+            if not section_lines:
+                continue
+            if heading == "Websites":
+                trimmed_lines: list[str] = []
+                for line in section_lines:
+                    if "similar profiles" in line.casefold():
+                        break
+                    trimmed_lines.append(line)
+                section_lines = trimmed_lines
+            sections[heading] = section_lines
+        return sections
+
+    @staticmethod
+    def _format_linkedin_websites(lines: list[str]) -> list[str]:
+        allowed_labels = {
+            "blog",
+            "company website",
+            "other",
+            "personal website",
+            "portfolio",
+            "rss feed",
+            "website",
+        }
+        formatted: list[str] = []
+        index = 0
+        while index < len(lines):
+            current = lines[index]
+            if current.casefold().startswith("other similar profiles"):
+                break
+            if index + 1 < len(lines) and _DOMAIN_LINE_RE.fullmatch(lines[index + 1]):
+                if current.casefold() not in allowed_labels:
+                    formatted.append(lines[index + 1])
+                    index += 2
+                    continue
+                formatted.append(f"{current}: {lines[index + 1]}")
+                index += 2
+                continue
+            if _DOMAIN_LINE_RE.fullmatch(current):
+                formatted.append(current)
+            index += 1
+        return formatted
+
+    @staticmethod
+    def _extract_linkedin_location(lines: list[str]) -> str | None:
+        first_section_index = next(
+            (
+                index
+                for index, line in enumerate(lines)
+                if line in _LINKEDIN_SECTION_HEADINGS
+            ),
+            len(lines),
+        )
+        header_lines = lines[: min(first_section_index, 6)]
+        for line in header_lines:
+            candidate = line.strip()
+            if ResumeProfileProcessor._looks_like_linkedin_location_candidate(
+                candidate
+            ):
+                return candidate
+        return None
+
+    @staticmethod
+    def _extract_linkedin_location_from_html(html: str) -> str | None:
+        for match in re.finditer(
+            r'"addressLocality"\s*:\s*"([^"]+)"',
+            html,
+            flags=re.IGNORECASE,
+        ):
+            candidate = re.sub(r"\s+", " ", unescape(match.group(1))).strip()
+            if ResumeProfileProcessor._looks_like_linkedin_location_candidate(
+                candidate
+            ):
+                return candidate
+        return None
+
+    @staticmethod
+    def _looks_like_linkedin_location_candidate(candidate: str) -> bool:
+        line = candidate.strip()
+        if not line or any(char.isdigit() for char in line):
+            return False
+        if _LINKEDIN_BAY_AREA_RE.fullmatch(line):
+            return True
+        if "," not in line:
+            return False
+        lowered = line.casefold()
+        if any(term in lowered for term in _LINKEDIN_LOCATION_NEGATIVE_TERMS):
+            return False
+        parts = [part.strip() for part in line.split(",") if part.strip()]
+        if len(parts) < 2 or len(parts) > 3:
+            return False
+        if any(len(part.split()) > 4 for part in parts):
+            return False
+        return all(re.fullmatch(r"[A-Za-z .'-]+", part) for part in parts)
 
     def _validate_public_profile_url(self, candidate_url: str) -> str | None:
         resolution = self._resolve_public_profile_request_target(candidate_url)
@@ -2287,6 +2806,32 @@ class ResumeProfileProcessor:
         if not re.fullmatch(r"[A-Za-z0-9-]{1,39}", candidate):
             return None
         return candidate
+
+    @staticmethod
+    def _normalize_linkedin_profile_url(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        candidate = value.strip()
+        if not candidate:
+            return None
+        if candidate.casefold().startswith("www."):
+            candidate = f"https://{candidate}"
+        elif not candidate.casefold().startswith(("http://", "https://")):
+            candidate = f"https://{candidate}"
+        try:
+            parsed = urlsplit(candidate)
+        except Exception:
+            return None
+        if "@" in parsed.netloc:
+            return None
+        host = (parsed.hostname or "").strip().casefold()
+        if host != "linkedin.com" and not host.endswith(".linkedin.com"):
+            return None
+        normalized_path = re.sub(r"/{2,}", "/", parsed.path or "").rstrip("/")
+        match = _LINKEDIN_PROFILE_RE.fullmatch(f"https://linkedin.com{normalized_path}")
+        if not match:
+            return None
+        return f"https://linkedin.com/in/{match.group(1)}"
 
     @staticmethod
     def _reset_unused_source_enrichments(

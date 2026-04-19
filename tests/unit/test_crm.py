@@ -1664,7 +1664,7 @@ class TestCRMCog:
         assert "developer profile" in evidence_field.value
 
     def test_resume_preview_embed_includes_external_sources(self, crm_cog):
-        """Preview embeds should show external website/GitHub enrichment attempts."""
+        """Preview embeds should show external profile-source enrichment attempts."""
         embed, _ = crm_cog._build_resume_preview_embed(
             contact_id="contact-1",
             contact_name="Test User",
@@ -6086,10 +6086,7 @@ class TestCRMCog:
         followup_kwargs = mock_interaction.followup.send.call_args.kwargs
         assert "view" in followup_kwargs
         assert isinstance(followup_kwargs["view"], ResumeReprocessConfirmationView)
-        assert (
-            "include any fetchable website or GitHub profile sources"
-            in confirmation_message
-        )
+        assert "include any fetchable profile sources" in confirmation_message
         view = followup_kwargs["view"]
         assert view.contact_id == "contact123"
         assert view.contact_name == "Candidate User"
@@ -6101,7 +6098,7 @@ class TestCRMCog:
     async def test_reprocess_profile_without_resume_uses_crm_sources(
         self, crm_cog, mock_interaction
     ):
-        """Contacts without a resume can still reprocess from CRM website/GitHub sources."""
+        """Contacts without a resume can still reprocess from CRM profile sources."""
         mock_interaction.user.id = 101
 
         with (
@@ -6136,10 +6133,10 @@ class TestCRMCog:
 
         confirmation_message = mock_interaction.followup.send.call_args.args[0]
         followup_kwargs = mock_interaction.followup.send.call_args.kwargs
-        assert "CRM website or GitHub sources" in confirmation_message
+        assert "CRM profile sources" in confirmation_message
         view = followup_kwargs["view"]
         assert view.attachment_id == ""
-        assert view.filename == "CRM website/GitHub sources"
+        assert view.filename == "CRM profile sources"
         assert view.has_resume is False
 
     @pytest.mark.asyncio
@@ -6520,7 +6517,7 @@ class TestCRMCog:
         }
         assert (
             kwargs["status_message"]
-            == "🔄 Re-running profile extraction with confirmed website and GitHub content..."
+            == "🔄 Re-running profile extraction with confirmed profile-source content..."
         )
         assert all(
             child.disabled
