@@ -2243,6 +2243,15 @@ class ResumeProfileProcessor:
             )
             route.abort()
             return
+        validation_error = self._validate_browser_profile_request_url(request_url)
+        if validation_error:
+            logger.info(
+                "Blocked relaxed direct browser request url=%s error=%s",
+                request_url,
+                validation_error,
+            )
+            route.abort()
+            return
         route.continue_()
 
     def _fetch_external_profile_source_text_with_browser_once(

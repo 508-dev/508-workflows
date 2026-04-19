@@ -1191,6 +1191,15 @@ def test_fetch_external_profile_source_text_with_browser_direct_allows_trusted_h
         ),
         patch.object(
             processor,
+            "_validate_browser_profile_request_url",
+            side_effect=lambda url: (
+                None
+                if url == "https://static.beacons.ai/app.js"
+                else "Profile URL host resolves to a non-public address"
+            ),
+        ) as validate_url,
+        patch.object(
+            processor,
             "_extract_browser_rendered_profile_source_text",
             return_value="Michael Wu",
         ),
@@ -1211,6 +1220,14 @@ def test_fetch_external_profile_source_text_with_browser_direct_allows_trusted_h
         blocked_route.abort.assert_called_once_with()
         blocked_route.continue_.assert_not_called()
 
+        invalid_allowed_route = Mock()
+        invalid_allowed_route.request = SimpleNamespace(
+            url="https://private.beacons.ai/app.js"
+        )
+        route_handler(invalid_allowed_route)
+        invalid_allowed_route.abort.assert_called_once_with()
+        invalid_allowed_route.continue_.assert_not_called()
+
         allowed_route = Mock()
         allowed_route.request = SimpleNamespace(url="https://static.beacons.ai/app.js")
         route_handler(allowed_route)
@@ -1224,6 +1241,10 @@ def test_fetch_external_profile_source_text_with_browser_direct_allows_trusted_h
     )
     assert final_url == "https://beacons.ai/michaelmwu"
     assert text == "Michael Wu"
+    assert validate_url.call_args_list == [
+        call("https://private.beacons.ai/app.js"),
+        call("https://static.beacons.ai/app.js"),
+    ]
 
 
 def test_fetch_external_profile_source_text_skips_browser_for_github_sources() -> None:
