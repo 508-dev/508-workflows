@@ -6140,6 +6140,224 @@ class TestCRMCog:
         assert view.has_resume is False
 
     @pytest.mark.asyncio
+    async def test_reprocess_profile_without_resume_uses_linkedin_source(
+        self, crm_cog, mock_interaction
+    ):
+        """LinkedIn-only contacts should still reprocess from CRM profile sources."""
+        mock_interaction.user.id = 101
+
+        with (
+            patch(
+                "five08.discord_bot.cogs.crm.settings.api_shared_secret",
+                "test-shared-secret",
+            ),
+            patch(
+                "five08.discord_bot.cogs.crm.check_user_roles_with_hierarchy",
+                return_value=True,
+            ),
+            patch.object(
+                crm_cog,
+                "_search_contacts_for_reprocess_resume",
+                new=AsyncMock(
+                    return_value=[
+                        {
+                            "id": "contact123",
+                            "name": "Candidate User",
+                            "resumeIds": [],
+                            "resumeNames": {},
+                            "cWebsiteLink": [],
+                            "cGitHubUsername": "",
+                            "cLinkedIn": "https://www.linkedin.com/in/candidate-user/",
+                        },
+                    ]
+                ),
+            ),
+        ):
+            await crm_cog.reprocess_profile.callback(
+                crm_cog, mock_interaction, "candidate"
+            )
+
+        confirmation_message = mock_interaction.followup.send.call_args.args[0]
+        followup_kwargs = mock_interaction.followup.send.call_args.kwargs
+        assert "CRM profile sources" in confirmation_message
+        view = followup_kwargs["view"]
+        assert view.attachment_id == ""
+        assert view.filename == "CRM profile sources"
+        assert view.has_resume is False
+
+    def test_contact_has_external_profile_sources_accepts_linkedin(self, crm_cog):
+        """LinkedIn profiles count as external profile sources."""
+        assert crm_cog._contact_has_external_profile_sources(
+            {"cLinkedIn": "https://linkedin.com/in/candidate-user/"}
+        )
+
+    @pytest.mark.asyncio
+    async def test_bulk_profile_reprocess_search_includes_linkedin_only_contact(
+        self, crm_cog, mock_espo_api
+    ):
+        """Profile-aware bulk search should include LinkedIn-only contacts."""
+        linkedin_only_contact = {
+            "id": "contact123",
+            "name": "Candidate User",
+            "addressCountry": "",
+            "cTimezone": "",
+            "skills": [],
+            "cRoles": [],
+            "cSeniority": "unknown",
+            "resumeIds": [],
+            "resumeNames": {},
+            "cWebsiteLink": [],
+            "cGitHubUsername": "",
+            "cLinkedIn": "https://linkedin.com/in/candidate-user/",
+        }
+        mock_espo_api.request.return_value = {
+            "list": [linkedin_only_contact],
+            "total": 1,
+        }
+
+        (
+            resume_only_contacts,
+            _,
+        ) = await crm_cog._search_contacts_for_bulk_resume_reprocess(
+            limit=25,
+            offset=0,
+        )
+        (
+            profile_contacts,
+            total,
+        ) = await crm_cog._search_contacts_for_bulk_profile_reprocess(
+            limit=25,
+            offset=0,
+            include_external_profile_sources=True,
+        )
+
+        assert resume_only_contacts == []
+        assert profile_contacts == [linkedin_only_contact]
+        assert total == 1
+
+    @pytest.mark.asyncio
+    async def test_bulk_reprocess_profiles_uses_profile_sources_without_resume(
+        self, crm_cog, mock_interaction
+    ):
+        """The bulk profile command should route profile-only contacts into reprocess."""
+        crm_cog._prompt_reprocess_resume_confirmation = AsyncMock()
+
+        with (
+            patch(
+                "five08.discord_bot.cogs.crm.check_user_roles_with_hierarchy",
+                return_value=True,
+            ),
+            patch.object(
+                crm_cog,
+                "_search_contacts_for_bulk_profile_reprocess",
+                new=AsyncMock(
+                    return_value=(
+                        [
+                            {
+                                "id": "contact123",
+                                "name": "Candidate User",
+                                "resumeIds": [],
+                                "resumeNames": {},
+                                "cWebsiteLink": [],
+                                "cGitHubUsername": "",
+                                "cLinkedIn": "https://linkedin.com/in/candidate-user/",
+                                "addressCountry": "",
+                                "cTimezone": "",
+                                "skills": [],
+                                "cRoles": [],
+                                "cSeniority": "unknown",
+                            }
+                        ],
+                        1,
+                    )
+                ),
+            ),
+        ):
+            await crm_cog.bulk_reprocess_profiles.callback(
+                crm_cog, mock_interaction, 25, 0
+            )
+
+        crm_cog._prompt_reprocess_resume_confirmation.assert_awaited_once()
+        kwargs = crm_cog._prompt_reprocess_resume_confirmation.await_args.kwargs
+        assert kwargs["interaction"] is mock_interaction
+        assert kwargs["contact"]["id"] == "contact123"
+        assert kwargs["search_term"] == "bulk_missing_fields"
+
+    @pytest.mark.asyncio
+    async def test_bulk_reprocess_profiles_selection_opens_confirmation(
+        self, crm_cog, mock_interaction
+    ):
+        """Bulk selection should open confirmation instead of starting enrichment."""
+        crm_cog._prompt_reprocess_resume_confirmation = AsyncMock()
+        crm_cog._start_resume_reprocess_from_contact = AsyncMock()
+
+        with (
+            patch(
+                "five08.discord_bot.cogs.crm.check_user_roles_with_hierarchy",
+                return_value=True,
+            ),
+            patch.object(
+                crm_cog,
+                "_search_contacts_for_bulk_profile_reprocess",
+                new=AsyncMock(
+                    return_value=(
+                        [
+                            {
+                                "id": "contact123",
+                                "name": "Candidate User",
+                                "resumeIds": [],
+                                "resumeNames": {},
+                                "cWebsiteLink": [],
+                                "cGitHubUsername": "",
+                                "cLinkedIn": "https://linkedin.com/in/candidate-user/",
+                                "addressCountry": "",
+                                "cTimezone": "",
+                                "skills": [],
+                                "cRoles": [],
+                                "cSeniority": "unknown",
+                            },
+                            {
+                                "id": "contact456",
+                                "name": "Other User",
+                                "resumeIds": [],
+                                "resumeNames": {},
+                                "cWebsiteLink": ["https://other.example.com"],
+                                "cGitHubUsername": "",
+                                "cLinkedIn": "",
+                                "addressCountry": "",
+                                "cTimezone": "",
+                                "skills": [],
+                                "cRoles": [],
+                                "cSeniority": "unknown",
+                            },
+                        ],
+                        2,
+                    )
+                ),
+            ),
+        ):
+            await crm_cog.bulk_reprocess_profiles.callback(
+                crm_cog, mock_interaction, 25, 0
+            )
+
+        view = mock_interaction.followup.send.call_args.kwargs["view"]
+        select = next(
+            child for child in view.children if isinstance(child, discord.ui.Select)
+        )
+
+        select_interaction = AsyncMock()
+        select_interaction.user = Mock()
+        select_interaction.user.id = 101
+        select_interaction.response = AsyncMock()
+        select_interaction.response.defer = AsyncMock()
+        select._values = ["contact123"]
+
+        await select.callback(select_interaction)
+
+        crm_cog._prompt_reprocess_resume_confirmation.assert_awaited_once()
+        crm_cog._start_resume_reprocess_from_contact.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_reprocess_profile_shows_no_contact_message(
         self, crm_cog, mock_interaction
     ):
