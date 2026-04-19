@@ -10,12 +10,18 @@ import sys
 import threading
 import time
 from collections.abc import Iterable
+from urllib.parse import urlparse
 
 
 SERVICES: list[tuple[str, list[str]]] = [
     ("api", ["uv", "run", "--package", "api", "backend-api"]),
     ("worker", ["uv", "run", "--package", "worker", "worker-consumer"]),
     ("discord-bot", ["uv", "run", "--package", "discord_bot", "discord-bot"]),
+]
+
+PORT_SERVICES: list[tuple[str, str]] = [
+    ("api", "BACKEND_API_BASE_URL"),
+    ("discord-bot", "DISCORD_BOT_INTERNAL_BASE_URL"),
 ]
 
 
@@ -51,6 +57,100 @@ def _stop_processes(processes: Iterable[subprocess.Popen[str]]) -> None:
         _terminate_process_group(process, signal.SIGKILL)
 
 
+def _service_port(env: dict[str, str], env_key: str) -> int | None:
+    value = env.get(env_key)
+    if not value:
+        return None
+    parsed = urlparse(value)
+    return parsed.port
+
+
+def _port_is_free(port: int) -> bool:
+    return not _listening_pids(port)
+
+
+def _listening_pids(port: int) -> list[int]:
+    result = subprocess.run(
+        ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return [int(line) for line in result.stdout.splitlines() if line.strip().isdigit()]
+
+
+def _pid_command(pid: int) -> str:
+    result = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "command="],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def _stop_pid(pid: int) -> None:
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.1)
+
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+
+
+def _ensure_ports_available(env: dict[str, str]) -> tuple[bool, str | None]:
+    worktree_root = env.get("WORKTREE_ENV_REPO_ROOT", "")
+
+    for service_name, env_key in PORT_SERVICES:
+        port = _service_port(env, env_key)
+        if port is None or _port_is_free(port):
+            continue
+
+        pids = _listening_pids(port)
+        commands = {pid: _pid_command(pid) for pid in pids}
+        stale_pids = [
+            pid
+            for pid, command in commands.items()
+            if worktree_root and worktree_root in command
+        ]
+        if stale_pids and len(stale_pids) == len(pids):
+            print(
+                f"{service_name} port {port} is already in use by stale "
+                "same-worktree process(es); reclaiming it."
+            )
+            for pid in stale_pids:
+                _stop_pid(pid)
+            if _port_is_free(port):
+                continue
+            pids = _listening_pids(port)
+            commands = {pid: _pid_command(pid) for pid in pids}
+
+        owners = (
+            ", ".join(
+                f"pid={pid} command={command or '<unknown>'}"
+                for pid, command in commands.items()
+            )
+            or "<unknown>"
+        )
+        return False, (
+            f"{service_name} port {port} is already in use; "
+            f"stop the existing listener and retry. Owners: {owners}"
+        )
+
+    return True, None
+
+
 def main() -> int:
     env = os.environ.copy()
     env.setdefault("PYTHONUNBUFFERED", "1")
@@ -60,6 +160,11 @@ def main() -> int:
     print(f"  Worker:   {env.get('WORKER_API_BASE_URL', '')}")
     print(f"  Bot:      {env.get('DISCORD_BOT_INTERNAL_BASE_URL', '')}")
     print()
+
+    ports_ok, port_error = _ensure_ports_available(env)
+    if not ports_ok:
+        print(port_error, file=sys.stderr)
+        return 1
 
     processes: list[subprocess.Popen[str]] = []
     threads: list[threading.Thread] = []
