@@ -6358,6 +6358,52 @@ class TestCRMCog:
         crm_cog._start_resume_reprocess_from_contact.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_bulk_reprocess_profiles_splits_long_followup_messages(
+        self, crm_cog, mock_interaction
+    ):
+        """Bulk profile results should split across messages before hitting Discord's limit."""
+        contacts = [
+            {
+                "id": f"contact{i}",
+                "name": "Candidate User " + ("X" * 70) + str(i),
+                "resumeIds": [],
+                "resumeNames": {},
+                "cWebsiteLink": [f"https://portfolio{i}.example.com/" + ("p" * 40)],
+                "cGitHubUsername": "",
+                "cLinkedIn": "",
+                "addressCountry": "",
+                "cTimezone": "",
+                "skills": [],
+                "cRoles": [],
+                "cSeniority": "unknown",
+            }
+            for i in range(25)
+        ]
+
+        with (
+            patch(
+                "five08.discord_bot.cogs.crm.check_user_roles_with_hierarchy",
+                return_value=True,
+            ),
+            patch.object(
+                crm_cog,
+                "_search_contacts_for_bulk_profile_reprocess",
+                new=AsyncMock(return_value=(contacts, len(contacts))),
+            ),
+        ):
+            await crm_cog.bulk_reprocess_profiles.callback(
+                crm_cog, mock_interaction, 25, 0
+            )
+
+        assert mock_interaction.followup.send.await_count > 1
+        first_call = mock_interaction.followup.send.await_args_list[0]
+        second_call = mock_interaction.followup.send.await_args_list[1]
+        assert first_call.kwargs["view"] is not None
+        assert "view" not in second_call.kwargs
+        assert len(first_call.args[0]) <= 2000
+        assert len(second_call.args[0]) <= 2000
+
+    @pytest.mark.asyncio
     async def test_reprocess_profile_shows_no_contact_message(
         self, crm_cog, mock_interaction
     ):

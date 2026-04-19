@@ -8525,12 +8525,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 )
             lines.append(f"- {name} ({contact_id}) - {reason}; input: {input_label}")
 
-        def _truncate(value: str, limit: int) -> str:
-            if len(value) <= limit:
-                return value
-            return value[: limit - 3].rstrip() + "..."
-
-        class BulkResumeReprocessSelect(discord.ui.Select):
+        class BulkProfileReviewSelect(discord.ui.Select):
             def __init__(
                 self,
                 crm_cog: Any,
@@ -8545,10 +8540,10 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     if not item_id:
                         continue
                     label = str(item.get("name") or item_id)
-                    label = _truncate(label, 100)
-                    description = _truncate(
+                    label = _truncate_component_label(label, limit=100)
+                    description = _truncate_component_label(
                         self.crm_cog._bulk_resume_missing_summary(item),
-                        100,
+                        limit=100,
                     )
                     select_options.append(
                         discord.SelectOption(
@@ -8558,7 +8553,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                         )
                     )
                 super().__init__(
-                    placeholder="Select a contact to review for enrichment",
+                    placeholder=_truncate_component_placeholder(
+                        "Select a contact to review for enrichment"
+                    ),
                     min_values=1,
                     max_values=1,
                     options=select_options,
@@ -8580,7 +8577,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     search_term="bulk_missing_fields",
                 )
 
-        class BulkResumeReprocessSelectView(discord.ui.View):
+        class BulkProfileReviewSelectView(discord.ui.View):
             def __init__(
                 self,
                 crm_cog: Any,
@@ -8588,7 +8585,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             ) -> None:
                 super().__init__(timeout=600)
                 self.add_item(
-                    BulkResumeReprocessSelect(
+                    BulkProfileReviewSelect(
                         crm_cog=crm_cog,
                         options=options,
                         contact_lookup=contact_lookup,
@@ -8610,6 +8607,23 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 f"{filter_label}, showing {len(contact_lookup)}:"
             )
 
+        message_parts = [summary, *lines]
+        messages: list[str] = []
+        current_message = ""
+        for part in message_parts:
+            candidate = part if not current_message else f"{current_message}\n{part}"
+            if len(candidate) <= 2000:
+                current_message = candidate
+                continue
+            if current_message:
+                messages.append(current_message)
+                current_message = part
+                continue
+            messages.append(_truncate_component_placeholder(part, limit=2000))
+            current_message = ""
+        if current_message:
+            messages.append(current_message)
+
         self._audit_command(
             interaction=interaction,
             action=action_name,
@@ -8621,11 +8635,18 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 "include_external_profile_sources": include_external_profile_sources,
             },
         )
-        await interaction.followup.send(
-            summary + "\n" + "\n".join(lines),
-            view=BulkResumeReprocessSelectView(self, contacts),
-            ephemeral=True,
-        )
+        for index, message in enumerate(messages):
+            if index == 0:
+                await interaction.followup.send(
+                    message,
+                    view=BulkProfileReviewSelectView(self, contacts),
+                    ephemeral=True,
+                )
+                continue
+            await interaction.followup.send(
+                message,
+                ephemeral=True,
+            )
 
     async def _get_latest_resume_attachment_for_contact(
         self, contact_id: str
@@ -10424,8 +10445,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
     @app_commands.command(
         name="bulk-reprocess-profiles",
         description=(
-            "Find contacts missing country/timezone, skills/roles, or seniority "
-            "and reprocess profiles from resumes or CRM profile sources"
+            "Review contacts missing key fields for resume or profile-source reprocessing"
         ),
     )
     @app_commands.describe(
