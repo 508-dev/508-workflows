@@ -107,15 +107,30 @@ _CANADA_PROVINCE_NAMES: dict[str, str] = {
 }
 _WWW_CANONICAL_HOST_SUFFIXES = frozenset(
     {
+        "bsky.app",
         "facebook.com",
+        "fb.com",
+        "fb.me",
+        "gitlab.com",
         "github.com",
+        "huggingface.co",
         "instagram.com",
+        "kaggle.com",
         "linkedin.com",
+        "mastodon.social",
+        "medium.com",
+        "pinterest.com",
+        "stackoverflow.com",
+        "substack.com",
+        "t.me",
+        "telegram.me",
         "threads.net",
         "tiktok.com",
+        "twitch.tv",
         "twitter.com",
         "x.com",
         "youtube.com",
+        "youtube-nocookie.com",
     }
 )
 _LOCATION_STOPWORDS = frozenset(

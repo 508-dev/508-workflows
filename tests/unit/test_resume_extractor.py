@@ -44,7 +44,7 @@ def test_extract_website_links_includes_scheme_less_domains() -> None:
     )
 
     assert "https://michaelwu.dev" in links
-    assert "https://example.org/about" in links
+    assert "https://www.example.org/about" in links
     assert "https://example.com" not in links
 
 
