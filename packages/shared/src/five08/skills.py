@@ -35,6 +35,7 @@ SKILL_ALIASES: dict[str, str] = {
     "crm": "customer relationship management",
     "ga4": "google analytics",
     "google analytics 4": "google analytics",
+    "webflow cms": "webflow",
 }
 
 DISALLOWED_RESUME_SKILLS: frozenset[str] = frozenset(

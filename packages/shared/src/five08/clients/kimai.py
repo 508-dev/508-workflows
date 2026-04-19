@@ -8,6 +8,8 @@ import requests
 from typing import Any
 from datetime import datetime
 
+from five08.tls import default_ca_bundle_path
+
 
 class KimaiAPIError(Exception):
     """An exception class for Kimai API errors"""
@@ -86,11 +88,19 @@ class KimaiAPI:
         try:
             if method in ["POST", "PATCH", "PUT"]:
                 response = self._session.request(
-                    method, url, json=params, timeout=self.timeout
+                    method,
+                    url,
+                    json=params,
+                    timeout=self.timeout,
+                    verify=default_ca_bundle_path(),
                 )
             else:
                 response = self._session.request(
-                    method, url, params=params, timeout=self.timeout
+                    method,
+                    url,
+                    params=params,
+                    timeout=self.timeout,
+                    verify=default_ca_bundle_path(),
                 )
 
             self.status_code = response.status_code

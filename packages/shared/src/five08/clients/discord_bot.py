@@ -4,6 +4,8 @@ from typing import Any
 
 import requests
 
+from five08.tls import default_ca_bundle_path
+
 
 class DiscordBotAPIError(Exception):
     """Raised when a Discord bot internal API call fails."""
@@ -41,6 +43,7 @@ class DiscordBotClient:
             "url": url,
             "headers": headers,
             "timeout": self.timeout_seconds,
+            "verify": default_ca_bundle_path(),
         }
         if payload is not None:
             request_kwargs["json"] = payload

@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from five08.job_match import (
+    CandidateRerankResult,
     DISCORD_LOCALITY_ROLE_NAMES,
     DISCORD_ROLES_EXCLUDE_FROM_SYNC,
     DISCORD_ROLES_NEVER_SUGGEST,
@@ -17,6 +18,8 @@ from five08.job_match import (
     _parse_llm_response,
     _regex_hints,
     extract_job_requirements,
+    rerank_shortlisted_candidates,
+    JobRequirements,
     suggest_locality_discord_roles,
     suggest_technical_discord_roles,
 )
@@ -142,8 +145,11 @@ def test_extract_raises_and_logs_webhook_when_api_key_missing() -> None:
 
 def test_extract_normalizes_required_skills() -> None:
     payload = {
-        "required_skills": ["Python", "REACT", "  django  "],
-        "preferred_skills": [],
+        "hard_required_skills": ["Python"],
+        "soft_required_skills": ["REACT", "  django  "],
+        "preferred_skills": ["GraphQL"],
+        "required_evidence": ["Portfolio"],
+        "required_skills": ["Python", "REACT", "django"],
         "seniority": "senior",
         "location_type": "remote_any",
         "preferred_timezones": [],
@@ -162,10 +168,94 @@ def test_extract_normalizes_required_skills() -> None:
             api_key="test-key",
         )
 
-    # Skills should be normalized/lowercased
-    assert "python" in result.required_skills
+    assert result.hard_required_skills == ["python"]
+    assert result.soft_required_skills == ["react", "django"]
+    assert result.preferred_skills == ["graphql"]
+    assert result.required_evidence == ["portfolio"]
+    assert result.required_skills == ["python", "react", "django"]
     assert result.seniority == "senior"
     assert result.title == "Backend Engineer"
+
+
+def test_extract_backfills_hard_and_soft_from_legacy_required_skills() -> None:
+    payload = {
+        "required_skills": ["Webflow", "Figma", "HubSpot"],
+        "preferred_skills": [],
+        "required_evidence": [],
+        "seniority": None,
+        "location_type": "remote_any",
+        "preferred_timezones": [],
+        "raw_location_text": None,
+        "title": None,
+    }
+    with patch("openai.OpenAI") as mock_openai_cls:
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value = _make_openai_response(
+            payload
+        )
+
+        result = extract_job_requirements("Webflow role", api_key="test-key")
+
+    assert result.hard_required_skills == ["webflow"]
+    assert result.soft_required_skills == ["figma", "hubspot"]
+
+
+def test_extract_backfills_soft_from_legacy_required_skills_when_hard_present() -> None:
+    payload = {
+        "hard_required_skills": ["Webflow"],
+        "required_skills": ["Webflow", "Figma", "HubSpot"],
+        "preferred_skills": [],
+        "required_evidence": [],
+        "seniority": None,
+        "location_type": "remote_any",
+        "preferred_timezones": [],
+        "raw_location_text": None,
+        "title": None,
+    }
+    with patch("openai.OpenAI") as mock_openai_cls:
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value = _make_openai_response(
+            payload
+        )
+
+        result = extract_job_requirements("Webflow role", api_key="test-key")
+
+    assert result.hard_required_skills == ["webflow"]
+    assert result.soft_required_skills == ["figma", "hubspot"]
+    assert result.required_skills == ["webflow", "figma", "hubspot"]
+
+
+def test_job_requirements_dedupes_soft_and_preferred_against_hard() -> None:
+    requirements = JobRequirements(
+        hard_required_skills=["Webflow"],
+        soft_required_skills=["webflow", "Figma"],
+        preferred_skills=["FIGMA", "HubSpot", "webflow"],
+    )
+
+    assert requirements.hard_required_skills == ["webflow"]
+    assert requirements.soft_required_skills == ["figma"]
+    assert requirements.required_skills == ["webflow", "figma"]
+    assert requirements.preferred_skills == ["hubspot"]
+
+
+def test_job_requirements_caps_hard_skills_and_normalizes_searchable_aliases() -> None:
+    requirements = JobRequirements(
+        hard_required_skills=[
+            "Webflow",
+            "Figma",
+            "HubSpot integration",
+            "Webflow automations",
+        ],
+        soft_required_skills=["Agent UX"],
+        preferred_skills=["AI native design"],
+    )
+
+    assert requirements.hard_required_skills == ["webflow", "figma"]
+    assert requirements.soft_required_skills == ["hubspot", "ux design"]
+    assert requirements.required_skills == ["webflow", "figma", "hubspot", "ux design"]
+    assert requirements.preferred_skills == ["product design"]
 
 
 def test_extract_us_only_regex_overrides_remote_any() -> None:
@@ -254,6 +344,92 @@ def test_build_prompt_includes_us_only_hint() -> None:
 def test_build_prompt_includes_seniority_hint() -> None:
     prompt = _build_prompt("text", {"seniority_hint": "senior"})
     assert "senior" in prompt
+
+
+def test_build_prompt_includes_anchor_skill_instruction() -> None:
+    prompt = _build_prompt("text", {})
+    assert "anchor skill first" in prompt
+    assert '"webflow" before adjacent skills like "figma"' in prompt
+
+
+def test_build_prompt_requests_searchable_skill_names() -> None:
+    prompt = _build_prompt("text", {})
+    assert "searchable skill likely to appear verbatim" in prompt
+    assert '"agent ux" -> "ux design"' in prompt
+
+
+def test_rerank_shortlisted_candidates_parses_structured_response() -> None:
+    payload = {
+        "ranked_candidates": [
+            {
+                "candidate_id": "candidate:1",
+                "fit_score": 91,
+                "summary": "Strong Webflow fit.",
+                "strengths": ["webflow", "resume"],
+                "risks": ["portfolio evidence thin"],
+                "missing_requirements": ["live webflow projects"],
+            }
+        ]
+    }
+    with patch("openai.OpenAI") as mock_openai_cls:
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value = _make_openai_response(
+            payload
+        )
+
+        results = rerank_shortlisted_candidates(
+            "Webflow job",
+            requirements=JobRequirements(required_skills=["webflow"]),
+            candidates=[
+                {"candidate_id": "candidate:1"},
+                {"candidate_id": "candidate:2"},
+            ],
+            api_key="test-key",
+        )
+
+    assert results == [
+        CandidateRerankResult(
+            candidate_id="candidate:1",
+            fit_score=91.0,
+            summary="Strong Webflow fit.",
+            strengths=["webflow", "resume"],
+            risks=["portfolio evidence thin"],
+            missing_requirements=["live webflow projects"],
+        )
+    ]
+
+
+def test_rerank_shortlisted_candidates_parse_error_does_not_log_raw_content() -> None:
+    choice = MagicMock()
+    choice.message.content = "not json"
+    choice.finish_reason = "stop"
+    response = MagicMock()
+    response.choices = [choice]
+
+    with patch("openai.OpenAI") as mock_openai_cls:
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value = response
+
+        with patch("five08.job_match.logger.error") as mock_logger_error:
+            with pytest.raises(RuntimeError, match="unparseable"):
+                rerank_shortlisted_candidates(
+                    "python role",
+                    requirements=JobRequirements(required_skills=["python"]),
+                    candidates=[
+                        {"candidate_id": "candidate:1"},
+                        {"candidate_id": "candidate:2"},
+                    ],
+                    api_key="test-key",
+                )
+
+    assert mock_logger_error.call_args is not None
+    assert (
+        mock_logger_error.call_args[0][0]
+        == "Failed to parse LLM rerank response length=%d error=%s"
+    )
+    assert "not json" not in repr(mock_logger_error.call_args)
 
 
 def test_build_prompt_no_hints_has_no_note_lines() -> None:

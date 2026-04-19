@@ -2,10 +2,11 @@
 
 import ipaddress
 import json
+import logging
 import sys
 from datetime import datetime
-from typing import Any
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from unittest.mock import ANY, MagicMock, Mock, call, patch
@@ -203,7 +204,7 @@ def test_extract_profile_proposal_merges_and_serializes_website_and_skill_attrs(
     assert result.success is True
     assert result.proposed_updates["cWebsiteLink"] == [
         "https://portfolio.example.com",
-        "https://blog.example.com",
+        "https://www.blog.example.com",
     ]
     assert result.proposed_updates["skills"] == ["typescript", "react native"]
     assert isinstance(result.proposed_updates["cSkillAttrs"], str)
@@ -211,6 +212,51 @@ def test_extract_profile_proposal_merges_and_serializes_website_and_skill_attrs(
         "react native": {"strength": 3},
         "typescript": {"strength": 4},
     }
+
+
+def test_extract_profile_proposal_skips_linkedin_www_only_change() -> None:
+    """LinkedIn compare should treat www-only normalization as unchanged."""
+    processor = ResumeProfileProcessor()
+    processor.crm = Mock()
+    processor.extractor = Mock()
+    processor.skills_extractor = Mock()
+    processor.document_processor = Mock()
+    processor._record_processing_run = Mock()
+    processor.skills_extractor.canonicalize_skill.side_effect = lambda v: (
+        str(v).strip().lower()
+    )
+
+    processor.crm.get_contact.return_value = {
+        "emailAddress": "member@example.com",
+        "cLinkedIn": "https://www.linkedin.com/in/wumichaelm/",
+    }
+    processor.crm.download_attachment.return_value = b"resume-bytes"
+    processor.document_processor.extract_text.return_value = "resume text"
+    processor.document_processor.get_content_hash.return_value = "hash-linkedin-www"
+    processor.extractor.extract.return_value = ResumeExtractedProfile(
+        email=None,
+        github_username=None,
+        linkedin_url="https://linkedin.com/in/wumichaelm",
+        phone=None,
+        confidence=0.9,
+        source="gpt-4o-mini",
+    )
+    processor.skills_extractor.extract_skills.return_value = ExtractedSkills(
+        skills=[],
+        skill_attrs={},
+        confidence=0.8,
+        source="gpt-4o-mini",
+    )
+
+    result = processor.extract_profile_proposal(
+        contact_id="contact-linkedin-www",
+        attachment_id="att-linkedin-www",
+        filename="resume.pdf",
+    )
+
+    assert result.success is True
+    assert "cLinkedIn" not in result.proposed_updates
+    assert not any(item.field == "cLinkedIn" for item in result.proposed_changes)
 
 
 def test_extract_profile_proposal_merges_and_serializes_social_links() -> None:
@@ -482,6 +528,45 @@ def test_extract_profile_proposal_fails_open_when_initial_enrichment_extract_err
     )
 
 
+def test_fetch_external_profile_sources_redacts_browser_logs_from_detail(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """User-facing enrichment details should omit embedded browser logs."""
+    processor = ResumeProfileProcessor()
+    processor._fetch_external_profile_source_text = Mock(
+        side_effect=ValueError(
+            "JavaScript profile fetch failed: BrowserType.launch: "
+            "Target page, context or browser has been closed "
+            "Browser logs:\n"
+            "  <launching> /app/.cloakbrowser/chromium/chrome --disable-extensions"
+        )
+    )
+
+    with caplog.at_level(logging.WARNING):
+        extra_sources, enrichments = processor._fetch_external_profile_sources(
+            [
+                _ExternalProfileSourceCandidate(
+                    label="Personal Website",
+                    url="https://example.com",
+                    origin="crm",
+                    source_key="website:example.com",
+                )
+            ],
+            seen_source_keys=set(),
+            source_label_counts={},
+        )
+
+    assert extra_sources == {}
+    assert [item.status for item in enrichments] == ["failed"]
+    assert enrichments[0].detail == (
+        "JavaScript profile fetch failed: BrowserType.launch: Target page, "
+        "context or browser has been closed"
+    )
+    assert "Browser logs:" not in (enrichments[0].detail or "")
+    assert "External profile source fetch failed" in caplog.text
+    assert "Browser logs:" in caplog.text
+
+
 def test_extract_profile_proposal_fetches_confirmed_website_and_github_together() -> (
     None
 ):
@@ -723,7 +808,7 @@ def test_build_initial_external_source_candidates_preserves_www_host_from_crm() 
     assert len(candidates) == 1
     assert candidates[0].label == "Personal Website"
     assert candidates[0].url == "https://www.example.com/about"
-    assert candidates[0].source_key == "website:example.com/about"
+    assert candidates[0].source_key == "website:www.example.com/about"
 
 
 def test_build_initial_external_source_candidates_skips_duplicate_linkedin_website() -> (
@@ -905,6 +990,47 @@ def test_inspect_profile_source_fetch_raises_non_retryable_direct_browser_error(
     processor._fetch_external_profile_source_response.assert_called_once_with(
         "https://candidate-one.example.com",
         session=ANY,
+    )
+
+
+def test_inspect_profile_source_fetch_retries_transient_direct_browser_error() -> None:
+    """Transient browser-launch closures should fall through to the next URL candidate."""
+    processor = ResumeProfileProcessor()
+    processor._fetch_external_profile_source_response = Mock(
+        side_effect=[
+            ValueError("Profile fetch hit a scraping block; reset session"),
+            ProfileSourceHttpResponse(
+                final_url="https://www.example.com/",
+                status_code=200,
+                headers={"content-type": "text/html"},
+                body=b"<html><body>stable fallback</body></html>",
+            ),
+        ]
+    )
+    processor._fetch_external_profile_source_text_with_browser_direct = Mock(
+        side_effect=ValueError(
+            "JavaScript profile fetch failed: BrowserType.launch: "
+            "Target page, context or browser has been closed"
+        )
+    )
+
+    diagnostics = processor.inspect_profile_source_fetch(
+        "https://example.com/",
+        allow_javascript_fallback=True,
+    )
+
+    assert diagnostics.final_url == "https://www.example.com/"
+    assert diagnostics.selected_text == "stable fallback"
+    assert diagnostics.browser_attempted is True
+    assert diagnostics.browser_used is False
+    processor._fetch_external_profile_source_response.assert_has_calls(
+        [
+            call("https://example.com/", session=ANY),
+            call("https://www.example.com/", session=ANY),
+        ]
+    )
+    processor._fetch_external_profile_source_text_with_browser_direct.assert_called_once_with(
+        "https://example.com/"
     )
 
 
@@ -2246,6 +2372,54 @@ def test_extract_profile_proposal_deduplicates_existing_and_extracted_websites_b
 
     assert result.success is True
     assert "cWebsiteLink" not in result.proposed_updates
+
+
+def test_extract_profile_proposal_keeps_www_distinct_for_personal_websites() -> None:
+    """Personal websites should not collapse www and apex hosts together."""
+    processor = ResumeProfileProcessor()
+    processor.crm = Mock()
+    processor.extractor = Mock()
+    processor.skills_extractor = Mock()
+    processor.document_processor = Mock()
+    processor._record_processing_run = Mock()
+    processor.skills_extractor.canonicalize_skill.side_effect = lambda v: (
+        str(v).strip().lower()
+    )
+
+    processor.crm.get_contact.return_value = {
+        "emailAddress": "member@example.com",
+        "cWebsiteLink": ["https://example.com"],
+    }
+    processor.crm.download_attachment.return_value = b"resume-bytes"
+    processor.document_processor.extract_text.return_value = "resume text"
+    processor.document_processor.get_content_hash.return_value = "hash-www-distinct"
+    processor.extractor.extract.return_value = ResumeExtractedProfile(
+        email=None,
+        github_username=None,
+        linkedin_url=None,
+        phone=None,
+        website_links=["https://www.example.com"],
+        confidence=0.9,
+        source="gpt-4o-mini",
+    )
+    processor.skills_extractor.extract_skills.return_value = ExtractedSkills(
+        skills=[],
+        skill_attrs={},
+        confidence=0.8,
+        source="gpt-4o-mini",
+    )
+
+    result = processor.extract_profile_proposal(
+        contact_id="contact-www-distinct",
+        attachment_id="att-www-distinct",
+        filename="resume.pdf",
+    )
+
+    assert result.success is True
+    assert result.proposed_updates["cWebsiteLink"] == [
+        "https://example.com",
+        "https://www.example.com",
+    ]
 
 
 def test_extract_profile_proposal_deduplicates_skills_in_confirmation() -> None:

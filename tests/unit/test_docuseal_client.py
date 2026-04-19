@@ -5,6 +5,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from five08.clients.docuseal import DocusealAPIError, create_member_agreement_submission
+from five08.tls import default_ca_bundle_path
 
 
 def test_create_member_agreement_submission_posts_expected_payload() -> None:
@@ -46,6 +47,7 @@ def test_create_member_agreement_submission_posts_expected_payload() -> None:
             ],
         },
         timeout=20.0,
+        verify=default_ca_bundle_path(),
     )
 
 

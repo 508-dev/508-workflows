@@ -2,6 +2,8 @@ import requests
 import urllib
 from typing import Any, Dict, List
 
+from five08.tls import default_ca_bundle_path
+
 
 class EspoAPIError(Exception):
     """An exception class for the client"""
@@ -64,6 +66,7 @@ class EspoAPI:
                     headers=headers,
                     json=params,
                     timeout=self.timeout_seconds,
+                    verify=default_ca_bundle_path(),
                 )
             else:
                 if params:
@@ -73,6 +76,7 @@ class EspoAPI:
                     url,
                     headers=headers,
                     timeout=self.timeout_seconds,
+                    verify=default_ca_bundle_path(),
                 )
         except requests.RequestException as exc:
             raise EspoAPIError(f"HTTP request failed: {exc}") from exc
@@ -106,7 +110,12 @@ class EspoAPI:
             url = url + "?" + http_build_query(params)
 
         try:
-            response = requests.get(url, headers=headers, timeout=self.timeout_seconds)
+            response = requests.get(
+                url,
+                headers=headers,
+                timeout=self.timeout_seconds,
+                verify=default_ca_bundle_path(),
+            )
         except requests.RequestException as exc:
             raise EspoAPIError(f"HTTP request failed: {exc}") from exc
 

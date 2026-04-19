@@ -99,6 +99,10 @@ PROFILE_SOURCE_BLOCKED_PATTERNS = (
     re.compile(r"unusual traffic", re.IGNORECASE),
     re.compile(r"verify you are human", re.IGNORECASE),
 )
+PROFILE_SOURCE_TRANSIENT_BROWSER_ERROR_MARKERS = (
+    "target page, context or browser has been closed",
+    "browser has been closed",
+)
 PROFILE_SOURCE_JS_SPARSE_TEXT_MAX_CHARS = 250
 PROFILE_SOURCE_JS_SPARSE_TEXT_MAX_WORDS = 40
 PROFILE_SOURCE_JS_HTML_MIN_CHARS = 2000
@@ -1096,27 +1100,38 @@ class ResumeProfileProcessor:
         if not proposed:
             return
 
-        if callable(is_blocked) and is_blocked(proposed):
+        normalized_proposed = proposed
+        display_current: str | None = (
+            str(current).strip() if current is not None else None
+        )
+        normalized_current: str | None = display_current
+        if crm_field == LINKEDIN_FIELD:
+            normalized_proposed = self._normalize_linkedin_profile_url(proposed) or ""
+            if not normalized_proposed:
+                return
+            normalized_current = self._normalize_linkedin_profile_url(current)
+            display_current = normalized_current
+
+        if callable(is_blocked) and is_blocked(normalized_proposed):
             skipped.append(
                 ResumeSkipReason(
                     field=crm_field,
-                    value=proposed,
+                    value=normalized_proposed,
                     reason=blocked_reason or "Update blocked by policy",
                 )
             )
             return
 
-        current_value = str(current).strip() if current is not None else None
-        if current_value and current_value == proposed:
+        if normalized_current and normalized_current == normalized_proposed:
             return
 
-        proposed_updates[crm_field] = proposed
+        proposed_updates[crm_field] = normalized_proposed
         proposed_changes.append(
             ResumeFieldChange(
                 field=crm_field,
                 label=label,
-                current=current_value,
-                proposed=proposed,
+                current=display_current,
+                proposed=normalized_proposed,
                 reason="Extracted from uploaded resume",
             )
         )
@@ -1508,13 +1523,20 @@ class ResumeProfileProcessor:
                     allow_javascript_fallback=candidate.label == "Personal Website",
                 )
             except Exception as exc:
+                logger.warning(
+                    "External profile source fetch failed label=%s origin=%s url=%s error=%s",
+                    candidate.label,
+                    candidate.origin,
+                    candidate.url,
+                    exc,
+                )
                 enrichments.append(
                     ResumeSourceEnrichment(
                         label=candidate.label,
                         url=candidate.url,
                         origin=candidate.origin,
                         status="failed",
-                        detail=str(exc),
+                        detail=self._summarize_external_profile_source_error(exc),
                     )
                 )
                 continue
@@ -1547,6 +1569,20 @@ class ResumeProfileProcessor:
             )
 
         return extra_sources, enrichments
+
+    @staticmethod
+    def _summarize_external_profile_source_error(error: Exception) -> str:
+        detail = str(error).strip()
+        if not detail:
+            return "External source fetch failed"
+        if "Browser logs:" in detail:
+            detail = detail.split("Browser logs:", 1)[0].strip()
+        lines = [line.strip() for line in detail.splitlines() if line.strip()]
+        if lines:
+            detail = lines[0]
+        if len(detail) > 240:
+            detail = f"{detail[:237].rstrip()}..."
+        return detail
 
     def _fetch_external_profile_source_text(
         self,
@@ -1587,6 +1623,7 @@ class ResumeProfileProcessor:
                     break
                 except ValueError as exc:
                     last_fetch_error = exc
+                    retryable_browser_error = False
                     if (
                         allow_javascript_fallback
                         and self._should_reset_profile_source_session(str(exc))
@@ -1601,9 +1638,10 @@ class ResumeProfileProcessor:
                             )
                         except ValueError as browser_exc:
                             last_fetch_error = browser_exc
-                            if not self._is_retryable_profile_fetch_error(
-                                str(browser_exc)
-                            ):
+                            retryable_browser_error = (
+                                self._is_retryable_profile_fetch_error(str(browser_exc))
+                            )
+                            if not retryable_browser_error:
                                 raise browser_exc
                         else:
                             return ProfileSourceFetchDiagnostics(
@@ -1617,6 +1655,8 @@ class ResumeProfileProcessor:
                                 browser_text=direct_browser_text,
                                 error=None,
                             )
+                    if retryable_browser_error:
+                        continue
                     if not self._is_retryable_profile_fetch_error(str(exc)):
                         raise
 
@@ -1724,7 +1764,7 @@ class ResumeProfileProcessor:
     @staticmethod
     def _is_retryable_profile_fetch_error(error: str) -> bool:
         normalized = error.casefold()
-        return "profile fetch failed:" in normalized and any(
+        if "profile fetch failed:" in normalized and any(
             marker in normalized
             for marker in (
                 "tls connect error",
@@ -1732,6 +1772,11 @@ class ResumeProfileProcessor:
                 "tlsv1 alert internal error",
                 "ssl:",
             )
+        ):
+            return True
+        return "javascript profile fetch failed:" in normalized and any(
+            marker in normalized
+            for marker in PROFILE_SOURCE_TRANSIENT_BROWSER_ERROR_MARKERS
         )
 
     @staticmethod
@@ -2498,6 +2543,7 @@ class ResumeProfileProcessor:
                 "scraping block",
                 "timed out",
                 "timeout",
+                *PROFILE_SOURCE_TRANSIENT_BROWSER_ERROR_MARKERS,
             )
         )
 

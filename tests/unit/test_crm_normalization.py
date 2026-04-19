@@ -32,12 +32,24 @@ def test_normalize_role_and_roles_dedupe() -> None:
 
 
 def test_normalize_website_url_scheme_less_and_cleanup() -> None:
-    assert normalize_website_url("www.Example.com/path/") == "https://Example.com/path"
+    assert (
+        normalize_website_url("www.Example.com/path/") == "https://www.Example.com/path"
+    )
     assert (
         normalize_website_url("portfolio.example.com")
         == "https://portfolio.example.com"
     )
     assert normalize_website_url("mailto:test@example.com") is None
+
+
+def test_normalize_website_url_strips_www_for_known_social_hosts() -> None:
+    assert (
+        normalize_website_url("https://www.linkedin.com/in/wumichaelm/")
+        == "https://linkedin.com/in/wumichaelm"
+    )
+    assert (
+        normalize_website_url("www.github.com/octocat/") == "https://github.com/octocat"
+    )
 
 
 def test_normalize_website_url_respects_disallowed_host_predicate() -> None:
@@ -54,6 +66,18 @@ def test_website_identity_key_ignores_scheme_and_path_casing() -> None:
     assert website_identity_key("http://Example.com/About") == website_identity_key(
         "https://example.com/about/"
     )
+
+
+def test_website_identity_key_preserves_www_for_personal_sites() -> None:
+    assert website_identity_key(
+        "https://www.example.com/about"
+    ) != website_identity_key("https://example.com/about")
+
+
+def test_website_identity_key_ignores_www_for_known_social_hosts() -> None:
+    assert website_identity_key(
+        "https://www.linkedin.com/in/wumichaelm"
+    ) == website_identity_key("https://linkedin.com/in/wumichaelm/")
 
 
 def test_normalize_country_and_city() -> None:

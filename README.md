@@ -18,7 +18,7 @@ This repository follows a service-oriented monorepo layout:
 ├── packages/
 │   └── shared/
 │       └── src/five08/      # Shared settings, queue helpers, shared clients
-├── docker-compose.yml      # discord_bot + api + worker + redis + postgres + minio
+├── docker-compose.yml      # full container stack for Coolify/local parity
 ├── tests/                  # Unit and integration tests
 └── pyproject.toml          # uv workspace root
 ```
@@ -72,9 +72,39 @@ cp .env.example .env
 # then edit .env
 ```
 
-### 3. Run services
+### 3. Start local infrastructure
 
-Run directly with uv:
+For development, run Redis, Postgres, and MinIO in Docker and run the app
+processes on the host:
+
+```bash
+./scripts/dev.sh infra
+./scripts/dev.sh api
+./scripts/dev.sh worker
+./scripts/dev.sh discord-bot
+```
+
+`infra` brings up only the Docker infra. Use the host-service subcommands to run
+the app processes with per-worktree ports and derived localhost URLs.
+
+To launch infra plus all host-run services together with prefixed logs:
+
+```bash
+./scripts/dev.sh all
+```
+
+Show, export, or stop the local dev environment:
+
+```bash
+./scripts/dev.sh ports
+./scripts/dev.sh env
+./scripts/dev.sh down
+```
+
+`./scripts/dev.sh env` emits shell-safe exports for the current worktree and
+avoids printing the resolved Postgres password directly.
+
+### 4. Run app services on the host
 
 ```bash
 # Discord bot
@@ -97,11 +127,24 @@ uv run --package five08 crmctl search --where timezone__is_null=true --where loc
 uv run --package five08 crmctl batch-update --where timezone__is_null=true --where location__is_not_null=true --update timezone=@location
 ```
 
-Or run the full stack with Docker Compose:
+`./scripts/dev.sh` exports deterministic per-worktree localhost ports and
+service URLs so the apps can run on the host without manual overrides. Use
+the lower-level Compose wrapper when you want full containerized parity.
+
+For full containerized runs, including Coolify-style deployment parity:
 
 ```bash
-docker compose up --build
+./scripts/docker-compose.sh up --build
 ```
+
+Show the deterministic host ports for the current worktree:
+
+```bash
+./scripts/docker-compose.sh print-ports
+```
+
+Set `*_HOST_PORT` or `COMPOSE_PROJECT_NAME` in `.env` or the invoking shell if you
+want to pin them; otherwise the wrapper computes deterministic per-worktree values.
 
 ## License
 
@@ -120,9 +163,11 @@ Use `.env.example` as the source of truth for defaults.
 
 ### Queue + Job Runtime
 
-- `Optional`: `REDIS_URL` (default: `redis://redis:6379/0`)
+- `Optional`: `REDIS_URL` (default: `redis://127.0.0.1:6379/0`; `./scripts/dev.sh` overrides it to a deterministic per-worktree localhost port, Compose injects `redis://redis:6379/0`)
 - `Optional`: `REDIS_QUEUE_NAME` (default: `jobs.default`)
 - `Optional`: `REDIS_KEY_PREFIX` (default: `jobs`)
+- `Optional`: `REDIS_HOST_BIND` (default: `127.0.0.1`)
+- `Optional`: `REDIS_HOST_PORT` (default when unset: deterministic per-worktree value `12000 + WORKTREE_ENV_SLOT`; set `REDIS_HOST_PORT=6379` in your shell or `.env` to pin it to `6379`)
 - `Optional`: `JOB_TIMEOUT_SECONDS` (default: `600`)
 - `Optional`: `JOB_RESULT_TTL_SECONDS` (default: `3600`)
 - `Optional`: `JOB_MAX_ATTEMPTS` (default: `8`)
@@ -131,22 +176,22 @@ Use `.env.example` as the source of truth for defaults.
 
 ### Postgres + Compose Exposure
 
-- `Optional`: `POSTGRES_URL` (default: `postgresql://postgres@postgres:5432/workflows`)
+- `Optional`: `POSTGRES_URL` (default: `postgresql://postgres:postgres@127.0.0.1:5432/workflows`; `./scripts/dev.sh` overrides it to a deterministic per-worktree localhost port, Compose injects a Docker-network URL)
 - `Optional` (Compose DB container): `POSTGRES_DB` (default: `workflows`)
 - `Optional` (Compose DB container): `POSTGRES_USER` (default: `postgres`)
 - `Optional` (Compose DB container): `POSTGRES_PASSWORD` (default: `postgres`)
 - `Optional` (Compose host bind): `POSTGRES_HOST_BIND` (default: `127.0.0.1`)
-- `Optional` (Compose host port): `POSTGRES_PORT` (default: `5432`)
+- `Optional` (Compose host port): `POSTGRES_HOST_PORT` (default when unset: deterministic per-worktree value `15432 + WORKTREE_ENV_SLOT`; use `5432` only if you explicitly pin it, e.g. `POSTGRES_HOST_PORT=5432`; see `./scripts/docker-compose.sh print-ports`)
 
 ### MinIO + Internal Transfers
 
 - `Required` in non-local environments: `MINIO_ROOT_PASSWORD`
-- `Optional`: `MINIO_ENDPOINT` (default: `http://minio:9000`)
+- `Optional`: `MINIO_ENDPOINT` (default: `http://127.0.0.1:9000`; `./scripts/dev.sh` overrides it to a deterministic per-worktree localhost port, Compose injects `http://minio:9000`)
 - `Optional`: `MINIO_INTERNAL_BUCKET` (default: `internal-transfers`)
 - `Optional`: `MINIO_ROOT_USER` (default: `internal`)
 - `Optional`: `MINIO_HOST_BIND` (default: `127.0.0.1`; set `0.0.0.0` to expose externally)
-- `Optional`: `MINIO_API_PORT` (default: `9000`)
-- `Optional`: `MINIO_CONSOLE_PORT` (default: `9001`)
+- `Optional`: `MINIO_API_HOST_PORT` (default when unset: deterministic per-worktree value `24000 + WORKTREE_ENV_SLOT`; set `MINIO_API_HOST_PORT=9000` to pin it to `9000`; see `./scripts/docker-compose.sh print-ports`)
+- `Optional`: `MINIO_CONSOLE_HOST_PORT` (default when unset: deterministic per-worktree value `28000 + WORKTREE_ENV_SLOT`; set `MINIO_CONSOLE_HOST_PORT=9001` to pin it to `9001`; see `./scripts/docker-compose.sh print-ports`)
 - Note: `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` are `SharedSettings` alias properties (`minio_access_key`, `minio_secret_key`) and are not env-loaded fields.
 - Note: use `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` as the actual env vars.
 
@@ -154,7 +199,9 @@ Use `.env.example` as the source of truth for defaults.
 
 - `Required` for protected endpoints: `API_SHARED_SECRET` (ingest requests are rejected when unset)
 - `Optional`: `WEBHOOK_INGEST_HOST` (default: `0.0.0.0`)
-- `Optional`: `WEBHOOK_INGEST_PORT` (default: `8090`)
+- `Optional`: `WEBHOOK_INGEST_HOST_BIND` (default: `127.0.0.1`; Compose host bind for local exposure)
+- `Optional`: `WEBHOOK_INGEST_PORT` (default: `8090`; host-run API listen port. Compose pins the container listen port to `8090` and only varies the published host port.)
+- `Optional`: `WEBHOOK_INGEST_HOST_PORT` (default: `8090` when running `docker compose` directly; `./scripts/docker-compose.sh` computes a deterministic per-worktree value when unset, see `./scripts/docker-compose.sh print-ports`)
 
 ### Backend API OIDC Session Auth
 
@@ -180,7 +227,7 @@ Use `.env.example` as the source of truth for defaults.
 ### Worker Consumer
 
 - `Optional`: `WORKER_NAME` (default: `worker`)
-- `Optional`: `DISCORD_BOT_INTERNAL_BASE_URL` (default: `http://discord_bot:3000`; used for best-effort Member role grants after Docuseal signatures)
+- `Optional`: `DISCORD_BOT_INTERNAL_BASE_URL` (default: `http://127.0.0.1:3000`; `./scripts/dev.sh worker` overrides it to the worktree bot port, Compose injects `http://discord_bot:3000`)
 - `Optional`: `WORKER_QUEUE_NAMES` (default: `jobs.default`, comma-separated)
 - `Optional`: `WORKER_BURST` (default: `false`)
 
@@ -211,7 +258,7 @@ Use `.env.example` as the source of truth for defaults.
 ### Discord Bot Core
 
 - `Required`: `DISCORD_BOT_TOKEN`
-- `Optional`: `BACKEND_API_BASE_URL` (default: `http://api:8090`)
+- `Optional`: `BACKEND_API_BASE_URL` (default: `http://127.0.0.1:8090`; `./scripts/dev.sh` overrides it to the worktree API port, Compose injects `http://api:8090`)
 - `Optional`: `HEALTHCHECK_PORT` (default: `3000`)
 - Note: bot message chunking uses Discord's 2000 character limit in code.
 
