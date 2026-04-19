@@ -744,6 +744,24 @@ def test_build_initial_external_source_candidates_skips_duplicate_linkedin_websi
     ]
 
 
+def test_build_initial_external_source_candidates_skips_duplicate_linkedin_website_with_tracking_query() -> (
+    None
+):
+    """LinkedIn website URLs with tracking params should still dedupe against cLinkedIn."""
+    processor = ResumeProfileProcessor()
+
+    candidates = processor._build_initial_external_source_candidates(
+        contact={
+            "cWebsiteLink": ["https://www.linkedin.com/in/octocat?trk=public_profile"],
+            "cLinkedIn": "https://linkedin.com/in/octocat",
+        },
+    )
+
+    assert [(candidate.label, candidate.url) for candidate in candidates] == [
+        ("Personal Website", "https://www.linkedin.com/in/octocat?trk=public_profile"),
+    ]
+
+
 def test_fetch_external_profile_sources_retries_alternate_candidate_after_failure() -> (
     None
 ):

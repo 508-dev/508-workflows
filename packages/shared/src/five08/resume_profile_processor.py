@@ -1364,6 +1364,7 @@ class ResumeProfileProcessor:
     ) -> list[_ExternalProfileSourceCandidate]:
         candidates: list[_ExternalProfileSourceCandidate] = []
         added_website_source_keys: set[str] = set()
+        added_linkedin_website_keys: set[str] = set()
         website_budget = PROFILE_SOURCE_MAX_WEBSITES
 
         explicit_website_links = self._coerce_fetchable_website_links(
@@ -1375,6 +1376,11 @@ class ResumeProfileProcessor:
             if website_budget <= 0:
                 break
             added_website_source_keys.add(source_key)
+            linkedin_website_key = self._canonical_linkedin_website_source_key(
+                website_url
+            )
+            if linkedin_website_key:
+                added_linkedin_website_keys.add(linkedin_website_key)
             website_budget -= 1
             candidates.append(
                 _ExternalProfileSourceCandidate(
@@ -1394,6 +1400,11 @@ class ResumeProfileProcessor:
             if website_budget <= 0:
                 break
             added_website_source_keys.add(source_key)
+            linkedin_website_key = self._canonical_linkedin_website_source_key(
+                website_url
+            )
+            if linkedin_website_key:
+                added_linkedin_website_keys.add(linkedin_website_key)
             website_budget -= 1
             candidates.append(
                 _ExternalProfileSourceCandidate(
@@ -1408,8 +1419,10 @@ class ResumeProfileProcessor:
             contact.get(LINKEDIN_FIELD)
         )
         if linkedin_profile_url:
-            linkedin_source_key = normalized_website_identity_key(linkedin_profile_url)
-            if linkedin_source_key in added_website_source_keys:
+            linkedin_source_key = self._canonical_linkedin_website_source_key(
+                linkedin_profile_url
+            )
+            if linkedin_source_key in added_linkedin_website_keys:
                 linkedin_profile_url = None
         if linkedin_profile_url:
             candidates.append(
@@ -2991,6 +3004,12 @@ class ResumeProfileProcessor:
         if not match:
             return None
         return f"https://linkedin.com/in/{match.group(1)}"
+
+    def _canonical_linkedin_website_source_key(self, value: Any) -> str | None:
+        normalized_linkedin_url = self._normalize_linkedin_profile_url(value)
+        if not normalized_linkedin_url:
+            return None
+        return normalized_website_identity_key(normalized_linkedin_url)
 
     @staticmethod
     def _reset_unused_source_enrichments(
