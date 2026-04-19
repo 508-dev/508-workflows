@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # Pinned from ghcr.io/astral-sh/uv:python3.12-bookworm-slim (verified 2026-02-21).
 FROM ghcr.io/astral-sh/uv@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58
 
@@ -10,9 +11,12 @@ COPY apps/worker/pyproject.toml apps/worker/pyproject.toml
 COPY apps/api/pyproject.toml apps/api/pyproject.toml
 COPY packages/shared/pyproject.toml packages/shared/pyproject.toml
 COPY apps/discord_bot/src apps/discord_bot/src
+COPY apps/api/src apps/api/src
+COPY apps/worker/src apps/worker/src
 COPY packages/shared/src packages/shared/src
 
-RUN uv sync --frozen --no-dev --package discord_bot
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv,sharing=locked \
+    uv sync --frozen --no-dev --all-packages
 RUN groupadd -r appgroup && useradd -r -g appgroup -d /app -s /usr/sbin/nologin appuser
 RUN chown -R appuser:appgroup /app
 
