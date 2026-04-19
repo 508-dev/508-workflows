@@ -5,6 +5,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from five08.clients.authentik import AuthentikAPIError, AuthentikClient
+from five08.tls import default_ca_bundle_path
 
 
 def test_create_user_posts_expected_payload() -> None:
@@ -45,6 +46,7 @@ def test_create_user_posts_expected_payload() -> None:
             "email": "jane@508.dev",
         },
         timeout=20.0,
+        verify=default_ca_bundle_path(),
         allow_redirects=False,
     )
 
@@ -122,6 +124,7 @@ def test_send_recovery_email_posts_required_stage() -> None:
         params=None,
         json={"email_stage": "3fa85f64-5717-4562-b3fc-2c963f66afa6"},
         timeout=20.0,
+        verify=default_ca_bundle_path(),
         allow_redirects=False,
     )
 

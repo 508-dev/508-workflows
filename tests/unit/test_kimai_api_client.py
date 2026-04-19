@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 from datetime import datetime
 
 from five08.clients.kimai import KimaiAPI, KimaiAPIError
+from five08.tls import default_ca_bundle_path
 
 
 class TestKimaiAPI:
@@ -59,6 +60,7 @@ class TestKimaiAPI:
             assert result == [{"id": 1, "name": "Test Project"}]
             assert kimai_api.status_code == 200
             mock_request.assert_called_once()
+            assert mock_request.call_args.kwargs["verify"] == default_ca_bundle_path()
 
     def test_request_post_success(self, kimai_api):
         """Test successful POST request."""
@@ -75,6 +77,7 @@ class TestKimaiAPI:
             assert result == {"id": 1, "name": "New Project"}
             assert kimai_api.status_code == 201
             mock_request.assert_called_once()
+            assert mock_request.call_args.kwargs["verify"] == default_ca_bundle_path()
 
     def test_request_empty_response(self, kimai_api):
         """Test request with empty response content."""

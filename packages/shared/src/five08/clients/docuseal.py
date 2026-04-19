@@ -4,6 +4,8 @@ from typing import Any
 
 import requests
 
+from five08.tls import default_ca_bundle_path
+
 
 class DocusealAPIError(Exception):
     """Raised when a DocuSeal API call fails."""
@@ -43,6 +45,7 @@ class DocusealClient:
                 headers=headers,
                 json=payload,
                 timeout=self.timeout_seconds,
+                verify=default_ca_bundle_path(),
             )
         except requests.RequestException as exc:
             raise DocusealAPIError(f"HTTP request failed: {exc}") from exc
