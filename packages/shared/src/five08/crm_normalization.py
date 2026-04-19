@@ -105,6 +105,19 @@ _CANADA_PROVINCE_ABBREVIATIONS: dict[str, str] = {
 _CANADA_PROVINCE_NAMES: dict[str, str] = {
     value.casefold(): value for value in _CANADA_PROVINCE_ABBREVIATIONS.values()
 }
+_WWW_CANONICAL_HOST_SUFFIXES = frozenset(
+    {
+        "facebook.com",
+        "github.com",
+        "instagram.com",
+        "linkedin.com",
+        "threads.net",
+        "tiktok.com",
+        "twitter.com",
+        "x.com",
+        "youtube.com",
+    }
+)
 _LOCATION_STOPWORDS = frozenset(
     {
         "account",
@@ -896,26 +909,29 @@ def normalize_website_url(
         return None
 
     host = parsed.hostname or ""
-    if host.lower().startswith("www."):
-        host = host[4:]
     if not host:
         return None
 
-    if disallowed_host_predicate and disallowed_host_predicate(host):
+    policy_host = host[4:] if host.lower().startswith("www.") else host
+    if disallowed_host_predicate and disallowed_host_predicate(policy_host):
         return None
 
     normalized_netloc = parsed.netloc
     lower_netloc = parsed.netloc.lower()
-    if lower_netloc.startswith("www."):
+    if lower_netloc.startswith("www.") and _should_strip_www_subdomain(host):
         normalized_netloc = parsed.netloc[4:]
-    elif host and lower_netloc.startswith(f"www.{host}"):
+    elif (
+        host
+        and lower_netloc.startswith(f"www.{host}")
+        and _should_strip_www_subdomain(host)
+    ):
         normalized_netloc = parsed.netloc.replace(parsed.netloc[:4], "", 1)
 
     parsed = parsed._replace(netloc=normalized_netloc)
     normalized = parsed.geturl().rstrip("/")
-    if normalized.startswith("https://www."):
+    if normalized.startswith("https://www.") and _should_strip_www_subdomain(host):
         normalized = normalized.replace("https://www.", "https://", 1)
-    elif normalized.startswith("http://www."):
+    elif normalized.startswith("http://www.") and _should_strip_www_subdomain(host):
         normalized = normalized.replace("http://www.", "http://", 1)
     return normalized
 
@@ -927,7 +943,7 @@ def normalized_website_identity_key(normalized_url: str) -> str | None:
         return normalized_url.casefold()
 
     netloc = parsed.netloc.casefold()
-    if netloc.startswith("www."):
+    if netloc.startswith("www.") and _should_strip_www_subdomain(parsed.hostname or ""):
         netloc = netloc[4:]
     path = re.sub(r"/+", "/", parsed.path or "").rstrip("/").casefold()
     query = parsed.query.casefold()
@@ -951,3 +967,13 @@ def website_identity_key(
     if normalized is None:
         return None
     return normalized_website_identity_key(normalized)
+
+
+def _should_strip_www_subdomain(host: str) -> bool:
+    normalized_host = host.casefold()
+    if normalized_host.startswith("www."):
+        normalized_host = normalized_host[4:]
+    return any(
+        normalized_host == suffix or normalized_host.endswith(f".{suffix}")
+        for suffix in _WWW_CANONICAL_HOST_SUFFIXES
+    )
