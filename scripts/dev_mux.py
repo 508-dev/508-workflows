@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -62,20 +63,41 @@ def _service_port(env: dict[str, str], env_key: str) -> int | None:
     if not value:
         return None
     parsed = urlparse(value)
-    return parsed.port
+    try:
+        return parsed.port
+    except ValueError as exc:
+        raise ValueError(
+            f"{env_key} must include a valid numeric port: {value!r}"
+        ) from exc
+
+
+def _can_bind_port(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
 
 
 def _port_is_free(port: int) -> bool:
-    return not _listening_pids(port)
+    pids = _listening_pids(port)
+    if pids is None:
+        return _can_bind_port(port)
+    return not pids
 
 
-def _listening_pids(port: int) -> list[int]:
-    result = subprocess.run(
-        ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+def _listening_pids(port: int) -> list[int] | None:
+    try:
+        result = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return None
     return [int(line) for line in result.stdout.splitlines() if line.strip().isdigit()]
 
 
@@ -113,11 +135,26 @@ def _ensure_ports_available(env: dict[str, str]) -> tuple[bool, str | None]:
     worktree_root = env.get("WORKTREE_ENV_REPO_ROOT", "")
 
     for service_name, env_key in PORT_SERVICES:
-        port = _service_port(env, env_key)
-        if port is None or _port_is_free(port):
+        try:
+            port = _service_port(env, env_key)
+        except ValueError as exc:
+            return False, str(exc)
+
+        if port is None:
             continue
 
         pids = _listening_pids(port)
+        if pids is None:
+            if _can_bind_port(port):
+                continue
+            return False, (
+                f"{service_name} port {port} is already in use; "
+                "install lsof for owner details or stop the existing listener and retry."
+            )
+
+        if not pids:
+            continue
+
         commands = {pid: _pid_command(pid) for pid in pids}
         stale_pids = [
             pid
