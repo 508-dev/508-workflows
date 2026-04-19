@@ -14,6 +14,7 @@ from curl_cffi import CurlOpt
 
 from five08.clients.espo import EspoAPIError
 from five08.resume_profile_processor import (
+    PROFILE_SOURCE_BROWSER_POST_NAV_WAIT_MS,
     PROFILE_SOURCE_BROWSER_RESOURCE_MAX_BYTES,
     PROFILE_SOURCE_MAX_BYTES,
     ProfileSourceHttpResponse,
@@ -725,6 +726,24 @@ def test_build_initial_external_source_candidates_preserves_www_host_from_crm() 
     assert candidates[0].source_key == "website:example.com/about"
 
 
+def test_build_initial_external_source_candidates_skips_duplicate_linkedin_website() -> (
+    None
+):
+    """LinkedIn URLs present in website links should not be added twice."""
+    processor = ResumeProfileProcessor()
+
+    candidates = processor._build_initial_external_source_candidates(
+        contact={
+            "cWebsiteLink": ["https://www.linkedin.com/in/octocat/"],
+            "cLinkedIn": "https://linkedin.com/in/octocat",
+        },
+    )
+
+    assert [(candidate.label, candidate.url) for candidate in candidates] == [
+        ("Personal Website", "https://www.linkedin.com/in/octocat"),
+    ]
+
+
 def test_fetch_external_profile_sources_retries_alternate_candidate_after_failure() -> (
     None
 ):
@@ -874,12 +893,14 @@ def test_inspect_profile_source_fetch_raises_non_retryable_direct_browser_error(
 def test_fetch_external_profile_source_text_with_browser_direct_validates_routed_requests() -> (
     None
 ):
-    """Direct browser fallback should still abort non-public requests via route validation."""
+    """Direct browser fallback should proxy requests through the pinned fetch path."""
     processor = ResumeProfileProcessor()
     page = Mock()
     page.url = "https://beacons.ai/michaelmwu"
     page.content.return_value = "<html><body>Michael Wu</body></html>"
     route_handler: Any = None
+    session = Mock()
+    session.close = Mock()
 
     def capture_route(pattern: str, handler: object) -> None:
         nonlocal route_handler
@@ -914,9 +935,24 @@ def test_fetch_external_profile_source_text_with_browser_direct_validates_routed
         ),
         patch.object(
             processor,
+            "_create_profile_source_http_session",
+            return_value=session,
+        ),
+        patch.object(
+            processor,
             "_validate_browser_profile_request_url",
             side_effect=validate,
         ) as validate_url,
+        patch.object(
+            processor,
+            "_fetch_browser_profile_request_response",
+            return_value=ProfileSourceHttpResponse(
+                final_url="https://beacons.ai/assets/app.js",
+                status_code=200,
+                headers={"content-type": "application/javascript"},
+                body=b"console.log('ok')",
+            ),
+        ) as fetch_route_response,
         patch.object(
             processor,
             "_extract_browser_rendered_profile_source_text",
@@ -928,6 +964,9 @@ def test_fetch_external_profile_source_text_with_browser_direct_validates_routed
                 "https://michaelmwu.com/"
             )
         )
+        page.wait_for_timeout.assert_called_once_with(
+            PROFILE_SOURCE_BROWSER_POST_NAV_WAIT_MS
+        )
 
         assert route_handler is not None
 
@@ -938,13 +977,25 @@ def test_fetch_external_profile_source_text_with_browser_direct_validates_routed
         blocked_route.continue_.assert_not_called()
 
         allowed_route = Mock()
-        allowed_route.request = SimpleNamespace(url="https://beacons.ai/assets/app.js")
+        allowed_route.request = SimpleNamespace(
+            url="https://beacons.ai/assets/app.js",
+            method="GET",
+        )
         route_handler(allowed_route)
-        allowed_route.continue_.assert_called_once_with()
+        allowed_route.fulfill.assert_called_once_with(
+            status=200,
+            headers={"content-type": "application/javascript"},
+            body=b"console.log('ok')",
+        )
         allowed_route.abort.assert_not_called()
 
     assert final_url == "https://beacons.ai/michaelmwu"
     assert text == "Michael Wu"
+    fetch_route_response.assert_called_once_with(
+        allowed_route.request,
+        session=session,
+    )
+    session.close.assert_called_once_with()
     assert validate_url.call_args_list == [
         call("http://127.0.0.1/internal"),
         call("https://beacons.ai/assets/app.js"),
@@ -1341,6 +1392,49 @@ def test_extract_rendered_profile_source_text_allows_larger_linkedin_pages() -> 
     )
 
     assert rendered
+
+
+def test_fetch_external_profile_source_text_with_browser_once_uses_final_url_for_size_limit() -> (
+    None
+):
+    """Browser fallback should apply rendered size limits using the redirected destination URL."""
+    processor = ResumeProfileProcessor()
+    session = Mock()
+    context = Mock()
+    page = Mock()
+    page.url = "https://www.linkedin.com/in/wumichaelm/"
+    page.content.return_value = "<html><body>LinkedIn content</body></html>"
+    context.new_page.return_value = page
+    initial_response = ProfileSourceHttpResponse(
+        final_url="https://example.com/about",
+        status_code=200,
+        headers={"content-type": "text/html"},
+        body=b"<html><body>Initial</body></html>",
+    )
+
+    with (
+        patch.object(processor, "_seed_browser_profile_session"),
+        patch.object(
+            processor,
+            "_validate_browser_profile_navigation_url",
+            return_value=None,
+        ),
+        patch.object(
+            processor,
+            "_extract_browser_rendered_profile_source_text",
+            return_value="Rendered text",
+        ) as extract_rendered,
+    ):
+        rendered = processor._fetch_external_profile_source_text_with_browser_once(
+            initial_response,
+            session=session,
+            launch_context=Mock(return_value=context),
+        )
+
+    assert rendered == "Rendered text"
+    assert extract_rendered.call_args.kwargs["navigation_url"] == (
+        "https://www.linkedin.com/in/wumichaelm/"
+    )
 
 
 def test_is_linkedin_noise_line_uses_exact_ui_labels() -> None:

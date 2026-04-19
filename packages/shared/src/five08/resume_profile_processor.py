@@ -59,6 +59,7 @@ LINKEDIN_FIELD = "cLinkedIn"
 PROFILE_SOURCE_FETCH_TIMEOUT_SECONDS = 10.0
 PROFILE_SOURCE_BROWSER_TIMEOUT_SECONDS = 20.0
 PROFILE_SOURCE_BROWSER_TIMEOUT_MS = int(PROFILE_SOURCE_BROWSER_TIMEOUT_SECONDS * 1000)
+PROFILE_SOURCE_BROWSER_POST_NAV_WAIT_MS = 5000
 PROFILE_SOURCE_MAX_REDIRECTS = 3
 PROFILE_SOURCE_MAX_BYTES = 512 * 1024
 PROFILE_SOURCE_LINKEDIN_MAX_BYTES = 2 * 1024 * 1024
@@ -1400,6 +1401,10 @@ class ResumeProfileProcessor:
             contact.get(LINKEDIN_FIELD)
         )
         if linkedin_profile_url:
+            linkedin_source_key = normalized_website_identity_key(linkedin_profile_url)
+            if linkedin_source_key in added_website_source_keys:
+                linkedin_profile_url = None
+        if linkedin_profile_url:
             candidates.append(
                 _ExternalProfileSourceCandidate(
                     label="LinkedIn Profile",
@@ -1975,6 +1980,8 @@ class ResumeProfileProcessor:
         if validation_error:
             raise ValueError(validation_error)
 
+        session = self._create_profile_source_http_session()
+        response_cache: dict[str, ProfileSourceHttpResponse] = {}
         context = None
         try:
             context = launch_context(
@@ -1987,14 +1994,18 @@ class ResumeProfileProcessor:
             page = context.new_page()
             page.route(
                 "**/*",
-                lambda route: self._handle_browser_profile_request_route_direct(route),
+                lambda route: self._handle_browser_profile_request_route(
+                    route,
+                    response_cache,
+                    session=session,
+                ),
             )
             page.goto(
                 navigation_url,
                 wait_until="domcontentloaded",
                 timeout=PROFILE_SOURCE_BROWSER_TIMEOUT_MS,
             )
-            page.wait_for_timeout(5000)
+            page.wait_for_timeout(PROFILE_SOURCE_BROWSER_POST_NAV_WAIT_MS)
             final_page_url = str(getattr(page, "url", "")).strip()
             validation_error = self._validate_browser_profile_navigation_url(
                 final_page_url
@@ -2015,20 +2026,7 @@ class ResumeProfileProcessor:
                     context.close()
                 except Exception:
                     logger.debug("Failed to close CloakBrowser for %s", navigation_url)
-
-    def _handle_browser_profile_request_route_direct(self, route: Any) -> None:
-        request = route.request
-        request_url = str(getattr(request, "url", "")).strip()
-        validation_error = self._validate_browser_profile_request_url(request_url)
-        if validation_error:
-            logger.info(
-                "Blocked non-public direct browser profile request url=%s error=%s",
-                request_url,
-                validation_error,
-            )
-            route.abort()
-            return
-        route.continue_()
+            session.close()
 
     def _fetch_external_profile_source_text_with_browser_once(
         self,
@@ -2087,7 +2085,7 @@ class ResumeProfileProcessor:
 
         return self._extract_browser_rendered_profile_source_text(
             rendered_html,
-            navigation_url=navigation_url,
+            navigation_url=final_page_url,
         )
 
     def _extract_profile_source_text(self, *, body: bytes, content_type: str) -> str:
