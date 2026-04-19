@@ -931,22 +931,19 @@ def normalize_website_url(
     if disallowed_host_predicate and disallowed_host_predicate(policy_host):
         return None
 
+    strip_www = _should_strip_www_subdomain(host)
     normalized_netloc = parsed.netloc
     lower_netloc = parsed.netloc.lower()
-    if lower_netloc.startswith("www.") and _should_strip_www_subdomain(host):
+    if lower_netloc.startswith("www.") and strip_www:
         normalized_netloc = parsed.netloc[4:]
-    elif (
-        host
-        and lower_netloc.startswith(f"www.{host}")
-        and _should_strip_www_subdomain(host)
-    ):
+    elif host and lower_netloc.startswith(f"www.{host}") and strip_www:
         normalized_netloc = parsed.netloc.replace(parsed.netloc[:4], "", 1)
 
     parsed = parsed._replace(netloc=normalized_netloc)
     normalized = parsed.geturl().rstrip("/")
-    if normalized.startswith("https://www.") and _should_strip_www_subdomain(host):
+    if normalized.startswith("https://www.") and strip_www:
         normalized = normalized.replace("https://www.", "https://", 1)
-    elif normalized.startswith("http://www.") and _should_strip_www_subdomain(host):
+    elif normalized.startswith("http://www.") and strip_www:
         normalized = normalized.replace("http://www.", "http://", 1)
     return normalized
 

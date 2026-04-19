@@ -1090,14 +1090,16 @@ class ResumeProfileProcessor:
             return
 
         normalized_proposed = proposed
-        normalized_current: str | None = (
+        display_current: str | None = (
             str(current).strip() if current is not None else None
         )
+        normalized_current: str | None = display_current
         if crm_field == LINKEDIN_FIELD:
             normalized_proposed = self._normalize_linkedin_profile_url(proposed) or ""
             if not normalized_proposed:
                 return
             normalized_current = self._normalize_linkedin_profile_url(current)
+            display_current = normalized_current
 
         if callable(is_blocked) and is_blocked(normalized_proposed):
             skipped.append(
@@ -1117,7 +1119,7 @@ class ResumeProfileProcessor:
             ResumeFieldChange(
                 field=crm_field,
                 label=label,
-                current=str(current).strip() if current is not None else None,
+                current=display_current,
                 proposed=normalized_proposed,
                 reason="Extracted from uploaded resume",
             )
