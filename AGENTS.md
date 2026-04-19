@@ -25,7 +25,7 @@ This repo contains multiple services:
 - `apps/discord_bot`: Discord gateway and bot commands/cogs
 - `apps/api`: webhook ingest API and dashboard auth routes
 - `apps/worker`: queue consumer and processing jobs
-- `docker-compose.yml`: stack orchestration with Redis, Postgres, and MinIO
+- `docker-compose.yml`: full container stack for Coolify/local parity; day-to-day dev should prefer host-run app services with Docker-managed infra
 
 4. Human audit logging
 - Human-triggered CRM actions from Discord should write to the worker audit ingest endpoint.
@@ -60,7 +60,18 @@ uv run --package api backend-api
 uv run --package worker worker-consumer
 ```
 
-Run stack with Compose:
+Run the local dev stack:
+
+```bash
+./scripts/dev.sh infra
+./scripts/dev.sh discord-bot
+./scripts/dev.sh api
+./scripts/dev.sh worker
+./scripts/dev.sh all
+```
+
+`./scripts/dev.sh` is the primary local-dev entrypoint. Full container parity
+remains available with:
 
 ```bash
 ./scripts/docker-compose.sh up --build

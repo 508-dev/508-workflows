@@ -33,7 +33,36 @@ cp .env.example .env
 
 The backend API process runs Alembic migrations on startup (`apps/worker/src/five08/worker/db_migrations.py`) so the `jobs` table is created or upgraded before requests are accepted.
 
-3. Run services:
+3. Start local infrastructure:
+
+```bash
+./scripts/dev.sh infra
+./scripts/dev.sh api
+./scripts/dev.sh worker
+./scripts/dev.sh discord-bot
+```
+
+`infra` brings up only the Docker infra. Use the host-service subcommands to run
+the app processes with per-worktree ports and derived localhost URLs.
+
+To launch infra plus all host-run services together with prefixed logs:
+
+```bash
+./scripts/dev.sh all
+```
+
+Show, export, or stop the local dev environment:
+
+```bash
+./scripts/dev.sh ports
+./scripts/dev.sh env
+./scripts/dev.sh down
+```
+
+`./scripts/dev.sh env` emits shell-safe exports for the current worktree and
+avoids printing the resolved Postgres password directly.
+
+4. Run services on the host:
 
 ```bash
 # bot
@@ -50,6 +79,11 @@ uv run --package five08 crmctl repl
 ```
 
 ## Docker Compose Workflow
+
+For day-to-day development, prefer `./scripts/dev.sh` plus host-run app
+services. That entrypoint exports deterministic per-worktree localhost ports
+and service URLs so the apps work without manual overrides. Use the Compose
+wrapper when you need full container parity, including Coolify-style runs.
 
 Start full stack (discord_bot + api + worker + redis + postgres + minio):
 
@@ -155,7 +189,7 @@ contact.save()
 
 Use `.env.example` as source of truth. Key categories:
 
-- Shared queue/runtime: `REDIS_URL`, `REDIS_QUEUE_NAME`, `POSTGRES_URL`, `JOB_MAX_ATTEMPTS`, `JOB_RETRY_BASE_SECONDS`, `JOB_RETRY_MAX_SECONDS`, `LOG_LEVEL`, webhook settings
+- Shared queue/runtime: `REDIS_URL`, `REDIS_QUEUE_NAME`, `POSTGRES_URL`, `JOB_MAX_ATTEMPTS`, `JOB_RETRY_BASE_SECONDS`, `JOB_RETRY_MAX_SECONDS`, `LOG_LEVEL`, webhook settings. Local defaults target host-run services; `docker-compose.yml` injects Docker-network URLs for containerized runs.
 - Bot credentials/integrations: Discord, email, Espo, Kimai
 - Discord CRM audit writer: `AUDIT_API_BASE_URL`, `AUDIT_API_TIMEOUT_SECONDS` (plus shared `API_SHARED_SECRET`)
 - Worker controls: `WORKER_NAME`, `WORKER_QUEUE_NAMES`, `WORKER_BURST`

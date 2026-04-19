@@ -15,7 +15,7 @@ class WorkerSettings(SharedSettings):
     worker_name: str = "worker"
     worker_queue_names: str = "jobs.default"
     worker_burst: bool = False
-    discord_bot_internal_base_url: str = "http://discord_bot:3000"
+    discord_bot_internal_base_url: str = "http://127.0.0.1:3000"
 
     espo_base_url: str
     espo_api_key: str

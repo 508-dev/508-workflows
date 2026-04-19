@@ -21,9 +21,11 @@ Use `.env.example` as the source of defaults.
 ## Queue + Job Runtime
 
 - `Optional`: `LOG_LEVEL` (default: `INFO`)
-- `Optional`: `REDIS_URL` (default: `redis://redis:6379/0`)
+- `Optional`: `REDIS_URL` (default: `redis://127.0.0.1:6379/0`; `./scripts/dev.sh` overrides it to a deterministic per-worktree localhost port, Compose injects `redis://redis:6379/0`)
 - `Optional`: `REDIS_QUEUE_NAME` (default: `jobs.default`)
 - `Optional`: `REDIS_KEY_PREFIX` (default: `jobs`)
+- `Optional`: `REDIS_HOST_BIND` (default: `127.0.0.1`)
+- `Optional`: `REDIS_HOST_PORT` (default: computed per worktree as `12000 + WORKTREE_ENV_SLOT` when unset; use `6379` only if explicitly pinned via env/.env; see `./scripts/docker-compose.sh print-ports`)
 - `Optional`: `JOB_TIMEOUT_SECONDS` (default: `600`)
 - `Optional`: `JOB_RESULT_TTL_SECONDS` (default: `3600`)
 - `Optional`: `JOB_MAX_ATTEMPTS` (default: `8`)
@@ -32,21 +34,21 @@ Use `.env.example` as the source of defaults.
 
 ## Postgres + Compose Exposure
 
-- `Optional`: `POSTGRES_URL` (default: `postgresql://postgres@postgres:5432/workflows`)
+- `Optional`: `POSTGRES_URL` (default: `postgresql://postgres:postgres@127.0.0.1:5432/workflows`; `./scripts/dev.sh` overrides it to a deterministic per-worktree localhost port, Compose injects a Docker-network URL)
 - `Optional` (Compose DB container): `POSTGRES_DB` (default: `workflows`)
 - `Optional` (Compose DB container): `POSTGRES_USER` (default: `postgres`)
 - `Optional` (Compose DB container): `POSTGRES_PASSWORD` (default: `postgres`)
 - `Optional` (Compose host bind): `POSTGRES_HOST_BIND` (default: `127.0.0.1`)
-- `Optional` (Compose host port): `POSTGRES_HOST_PORT` (default: `5432` when running `docker compose` directly; `./scripts/docker-compose.sh` computes a deterministic per-worktree value when unset, see `./scripts/docker-compose.sh print-ports`)
+- `Optional` (Compose host port): `POSTGRES_HOST_PORT` (default when unset: deterministic per-worktree value `15432 + WORKTREE_ENV_SLOT`; set `POSTGRES_HOST_PORT=5432` to pin it to `5432`; see `./scripts/docker-compose.sh print-ports`)
 
 ## MinIO + Internal Transfers
 
-- `Optional`: `MINIO_ENDPOINT` (default: `http://minio:9000`)
+- `Optional`: `MINIO_ENDPOINT` (default: `http://127.0.0.1:9000`; `./scripts/dev.sh` overrides it to a deterministic per-worktree localhost port, Compose injects `http://minio:9000`)
 - `Optional`: `MINIO_INTERNAL_BUCKET` (default: `internal-transfers`)
 - `Optional`: `MINIO_ROOT_USER` (default: `internal`)
 - `Optional`: `MINIO_HOST_BIND` (default: `127.0.0.1`; set `0.0.0.0` to expose externally)
-- `Optional`: `MINIO_API_HOST_PORT` (default: `9000` when running `docker compose` directly; `./scripts/docker-compose.sh` computes a deterministic per-worktree value when unset, see `./scripts/docker-compose.sh print-ports`)
-- `Optional`: `MINIO_CONSOLE_HOST_PORT` (default: `9001` when running `docker compose` directly; `./scripts/docker-compose.sh` computes a deterministic per-worktree value when unset, see `./scripts/docker-compose.sh print-ports`)
+- `Optional`: `MINIO_API_HOST_PORT` (default when unset: deterministic per-worktree value `24000 + WORKTREE_ENV_SLOT`; set `MINIO_API_HOST_PORT=9000` to pin it to `9000`; see `./scripts/docker-compose.sh print-ports`)
+- `Optional`: `MINIO_CONSOLE_HOST_PORT` (default when unset: deterministic per-worktree value `28000 + WORKTREE_ENV_SLOT`; set `MINIO_CONSOLE_HOST_PORT=9001` to pin it to `9001`; see `./scripts/docker-compose.sh print-ports`)
 
 ### Notes
 
@@ -57,7 +59,7 @@ Use `.env.example` as the source of defaults.
 
 - `Optional`: `WEBHOOK_INGEST_HOST` (default: `0.0.0.0`)
 - `Optional`: `WEBHOOK_INGEST_HOST_BIND` (default: `127.0.0.1`; Compose host bind for local exposure)
-- `Optional`: `WEBHOOK_INGEST_PORT` (default: `8090`; API listen port inside the container)
+- `Optional`: `WEBHOOK_INGEST_PORT` (default: `8090`; host-run API listen port. Compose pins the container listen port to `8090` and varies only the published host port)
 - `Optional`: `WEBHOOK_INGEST_HOST_PORT` (default: `8090` when running `docker compose` directly; `./scripts/docker-compose.sh` computes a deterministic per-worktree value when unset, see `./scripts/docker-compose.sh print-ports`)
 - `Required`: `API_SHARED_SECRET` (global shared secret for protected endpoints and webhooks)
 
@@ -119,7 +121,7 @@ Use `.env.example` as the source of defaults.
 
 ## Discord Bot Core
 
-- `Optional`: `BACKEND_API_BASE_URL` (default: `http://api:8090`)
+- `Optional`: `BACKEND_API_BASE_URL` (default: `http://127.0.0.1:8090`; `./scripts/dev.sh` overrides it to the worktree API port, Compose injects `http://api:8090`)
 - `Optional`: `HEALTHCHECK_PORT` (default: `3000`)
 - Note: bot message chunking follows Discord's 2000 character limit in code.
 

@@ -30,6 +30,10 @@ def test_docuseal_processor_marks_member_agreement_signed_timestamp() -> None:
             "top-secret",
         ),
         patch(
+            "five08.worker.crm.docuseal_processor.settings.discord_bot_internal_base_url",
+            "http://127.0.0.1:3000",
+        ),
+        patch(
             "five08.worker.crm.docuseal_processor.grant_member_role_for_signed_agreement",
             return_value={"status": "applied", "role": "Member"},
         ) as mock_grant_role,
@@ -54,7 +58,7 @@ def test_docuseal_processor_marks_member_agreement_signed_timestamp() -> None:
     assert result["discord_user_id"] == "1234"
     assert result["member_role"]["status"] == "applied"
     mock_grant_role.assert_called_once_with(
-        base_url="http://discord_bot:3000",
+        base_url="http://127.0.0.1:3000",
         api_secret="top-secret",
         discord_user_id="1234",
         contact_id="contact-1",
