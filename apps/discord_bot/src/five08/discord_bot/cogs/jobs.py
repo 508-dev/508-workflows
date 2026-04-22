@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import html
 import ipaddress
+import json
 import logging
 import re
 import socket
@@ -13,10 +14,13 @@ from dataclasses import dataclass, is_dataclass, replace
 from typing import Any, Awaitable, Callable, Literal, cast
 from urllib.parse import urljoin, urlsplit
 
-import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
+from curl_cffi import CurlOpt
+from curl_cffi import requests as curl_requests
+from curl_cffi.requests import BrowserTypeLiteral
+from curl_cffi.requests import RequestsError
 
 from five08.audit import update_person_discord_roles, upsert_discord_member
 from five08.candidate_search import search_candidates
@@ -50,6 +54,48 @@ MATCH_CANDIDATES_MAX_LINK_TEXT_CHARS = 12000
 MATCH_CANDIDATES_MAX_LINK_BYTES = 2 * 1024 * 1024
 MATCH_CANDIDATES_MAX_LINK_REDIRECTS = 2
 MATCH_CANDIDATES_MAX_POSTING_CHARS = 36000
+MATCH_CANDIDATES_FETCH_TIMEOUT_SECONDS = 12.0
+MATCH_CANDIDATES_BROWSER_TIMEOUT_MS = 20_000
+MATCH_CANDIDATES_BROWSER_POST_NAV_WAIT_MS = 5_000
+MATCH_CANDIDATES_FETCH_USER_AGENT = (
+    "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+)
+MATCH_CANDIDATES_FETCH_IMPERSONATE: BrowserTypeLiteral = "chrome131_android"
+MATCH_CANDIDATES_BLOCKED_STATUS_CODES = frozenset({401, 403, 429, 503})
+MATCH_CANDIDATES_BLOCKED_PATTERNS = (
+    re.compile(r"access denied", re.IGNORECASE),
+    re.compile(r"attention required", re.IGNORECASE),
+    re.compile(r"\bcaptcha\b", re.IGNORECASE),
+    re.compile(r"_cf_chl_opt", re.IGNORECASE),
+    re.compile(r"/cdn-cgi/challenge-platform", re.IGNORECASE),
+    re.compile(r"checking your browser", re.IGNORECASE),
+    re.compile(r"enable javascript and cookies(?: to continue)?", re.IGNORECASE),
+    re.compile(r"unusual traffic", re.IGNORECASE),
+    re.compile(r"verify you are human", re.IGNORECASE),
+)
+MATCH_CANDIDATES_JS_SPARSE_TEXT_MAX_CHARS = 250
+MATCH_CANDIDATES_JS_SPARSE_TEXT_MAX_WORDS = 40
+MATCH_CANDIDATES_JS_RENDER_MARKERS = (
+    'id="__next"',
+    "id='__next'",
+    'id="__nuxt"',
+    "id='__nuxt'",
+    'id="root"',
+    "id='root'",
+    'id="app"',
+    "id='app'",
+    "data-reactroot",
+    "__next_data__",
+    "__next_f",
+    "__nuxt__",
+    "window.__next_data__",
+    "window.__nuxt__",
+    "enable javascript",
+    "requires javascript",
+    "javascript to run this app",
+    "please turn on javascript",
+)
 MATCH_CANDIDATES_SUPPORTED_ATTACHMENT_EXTENSIONS = frozenset(
     {".txt", ".md", ".pdf", ".docx", ".html", ".htm", ".rtf"}
 )
@@ -79,6 +125,12 @@ MATCH_CANDIDATES_PRIVATE_TRUTHY = frozenset({"true", "1", "yes", "y", "on"})
 AUTO_MATCH_EXCLUDED_RESUME_NAMES = frozenset({"Vladyslav_Stryzhak.pdf"})
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 JobWatchChannel = discord.ForumChannel
+
+
+def _format_curl_resolve_address(value: IPAddress) -> str:
+    if value.version == 6:
+        return f"[{value.compressed}]"
+    return value.compressed
 
 
 def _parse_match_candidates_private(private_flag: str | None) -> bool | None:
@@ -211,6 +263,20 @@ class CandidateSearchOutcome:
     candidates: list[Any]
     effective_requirements: JobRequirements
     search_note: str | None = None
+
+
+@dataclass(frozen=True)
+class MatchCandidatesHttpResponse:
+    """Minimal HTTP response payload for external JD fetches."""
+
+    final_url: str
+    status_code: int
+    headers: dict[str, str]
+    body: bytes
+
+    @property
+    def content_type(self) -> str:
+        return self.headers.get("content-type", "").split(";", 1)[0].strip().lower()
 
 
 class JobsCog(DiscordAuditCogMixin, commands.Cog):
@@ -1097,6 +1163,125 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         return re.sub(r"\s+", " ", unescaped).strip()
 
     @staticmethod
+    def _json_ld_nodes(value: Any) -> list[dict[str, Any]]:
+        nodes: list[dict[str, Any]] = []
+        if isinstance(value, dict):
+            nodes.append(value)
+            for nested in value.values():
+                nodes.extend(JobsCog._json_ld_nodes(nested))
+        elif isinstance(value, list):
+            for item in value:
+                nodes.extend(JobsCog._json_ld_nodes(item))
+        return nodes
+
+    @staticmethod
+    def _json_ld_type_names(value: Any) -> set[str]:
+        if isinstance(value, str):
+            return {value.casefold()}
+        if isinstance(value, list):
+            return {
+                item.casefold()
+                for item in value
+                if isinstance(item, str) and item.strip()
+            }
+        return set()
+
+    @staticmethod
+    def _extract_job_posting_location(value: Any) -> str | None:
+        locations: list[str] = []
+        seen: set[str] = set()
+
+        def add_location(raw: str | None) -> None:
+            if not isinstance(raw, str):
+                return
+            cleaned = re.sub(r"\s+", " ", raw).strip(" ,;/")
+            key = cleaned.casefold()
+            if not cleaned or key in seen:
+                return
+            seen.add(key)
+            locations.append(cleaned)
+
+        def walk(node: Any) -> None:
+            if isinstance(node, list):
+                for item in node:
+                    walk(item)
+                return
+            if not isinstance(node, dict):
+                return
+
+            address = node.get("address")
+            if isinstance(address, dict):
+                parts = [
+                    address.get("addressLocality"),
+                    address.get("addressRegion"),
+                    address.get("addressCountry"),
+                ]
+                location_text = ", ".join(
+                    part.strip()
+                    for part in parts
+                    if isinstance(part, str) and part.strip()
+                )
+                add_location(location_text)
+            name = node.get("name")
+            if isinstance(name, str):
+                add_location(name)
+            if "jobLocation" in node:
+                walk(node.get("jobLocation"))
+
+        walk(value)
+        if not locations:
+            return None
+        return " | ".join(locations)
+
+    @classmethod
+    def _extract_structured_job_posting_text(cls, raw_html: str) -> str | None:
+        for match in re.finditer(
+            r'(?is)<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+            raw_html,
+        ):
+            raw_json = match.group(1).strip()
+            if not raw_json:
+                continue
+            try:
+                payload = json.loads(html.unescape(raw_json))
+            except json.JSONDecodeError:
+                continue
+
+            for node in cls._json_ld_nodes(payload):
+                if "jobposting" not in cls._json_ld_type_names(node.get("@type")):
+                    continue
+
+                sections: list[str] = []
+                title = node.get("title")
+                if isinstance(title, str) and title.strip():
+                    sections.append(title.strip())
+
+                header_parts: list[str] = []
+                location_text = cls._extract_job_posting_location(
+                    node.get("jobLocation")
+                )
+                if location_text:
+                    header_parts.append(location_text)
+                employment_type = node.get("employmentType")
+                if isinstance(employment_type, str) and employment_type.strip():
+                    header_parts.append(employment_type.strip())
+                if header_parts:
+                    sections.append(" | ".join(header_parts))
+
+                description = node.get("description")
+                if isinstance(description, str):
+                    description_text = cls._strip_html_to_text(description)
+                    if description_text:
+                        sections.append(description_text)
+
+                structured_text = "\n\n".join(
+                    section for section in sections if section
+                )
+                if structured_text.strip():
+                    return structured_text.strip()
+        return None
+
+    @staticmethod
     def _parse_ip_literal(value: str) -> IPAddress | None:
         try:
             return ipaddress.ip_address(value)
@@ -1144,29 +1329,20 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             return False
         return all(cls._is_public_ip(parsed_ip) for parsed_ip in resolved_ips)
 
-    async def _validate_match_candidates_url(self, candidate_url: str) -> str | None:
-        try:
-            parsed = urlsplit(candidate_url)
-        except Exception:
-            return "Job description URL is invalid."
-
-        if parsed.scheme.lower() != "https":
-            return "Job description URL must use https."
-
-        if parsed.username or parsed.password:
-            return "Job description URL must not include credentials."
-
-        host = (parsed.hostname or "").strip().lower().rstrip(".")
-        if not host:
-            return "Job description URL must include a hostname."
-
-        resolves_publicly = await asyncio.to_thread(
-            self._hostname_resolves_publicly, host
+    @classmethod
+    def _validate_match_candidates_url_sync(cls, candidate_url: str) -> str | None:
+        resolution = cls._resolve_match_candidates_request_target(
+            candidate_url,
+            require_https=True,
         )
-        if not resolves_publicly:
-            return "Job description URL host resolves to a non-public address."
-
+        if isinstance(resolution, str):
+            return resolution
         return None
+
+    async def _validate_match_candidates_url(self, candidate_url: str) -> str | None:
+        return await asyncio.to_thread(
+            self._validate_match_candidates_url_sync, candidate_url
+        )
 
     async def _read_match_candidates_attachment_text(
         self, attachment: discord.Attachment
@@ -1208,110 +1384,442 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             )
         return extracted
 
-    async def _fetch_match_candidates_link_text(self, url: str) -> str | None:
-        timeout = aiohttp.ClientTimeout(total=12)
-        headers = {"User-Agent": "508-job-match/1.0"}
-        current_url = url
+    @staticmethod
+    def _match_candidates_html_looks_blocked(raw_html: str) -> bool:
+        return any(
+            pattern.search(raw_html) for pattern in MATCH_CANDIDATES_BLOCKED_PATTERNS
+        )
+
+    @staticmethod
+    def _match_candidates_body_looks_like_html(raw_text: str) -> bool:
+        normalized = raw_text.casefold()
+        if any(
+            marker in normalized
+            for marker in ("<!doctype html", "<html", "<body", "<head")
+        ):
+            return True
+        return any(
+            marker in normalized for marker in MATCH_CANDIDATES_JS_RENDER_MARKERS
+        )
+
+    @classmethod
+    def _match_candidates_response_looks_blocked(
+        cls, response: MatchCandidatesHttpResponse
+    ) -> bool:
+        if response.status_code in MATCH_CANDIDATES_BLOCKED_STATUS_CODES:
+            return True
+        return cls._match_candidates_html_looks_blocked(
+            response.body.decode("utf-8", errors="ignore")
+        )
+
+    @staticmethod
+    def _match_candidates_html_needs_browser(
+        raw_html: str, extracted_text: str
+    ) -> bool:
+        if not raw_html:
+            return False
+        normalized_html = raw_html.casefold()
+        if any(
+            marker in normalized_html for marker in MATCH_CANDIDATES_JS_RENDER_MARKERS
+        ):
+            stripped_text = extracted_text.strip()
+            word_count = len(re.findall(r"\w+", stripped_text))
+            if len(stripped_text) <= MATCH_CANDIDATES_JS_SPARSE_TEXT_MAX_CHARS and (
+                word_count <= MATCH_CANDIDATES_JS_SPARSE_TEXT_MAX_WORDS
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _clean_match_candidates_text(text: str) -> str:
+        cleaned = re.sub(r"\s+", " ", text).strip()
+        if len(cleaned) > MATCH_CANDIDATES_MAX_LINK_TEXT_CHARS:
+            return cleaned[:MATCH_CANDIDATES_MAX_LINK_TEXT_CHARS].rstrip()
+        return cleaned
+
+    @classmethod
+    def _create_match_candidates_http_session(cls) -> curl_requests.Session:
+        return curl_requests.Session(
+            headers={"User-Agent": MATCH_CANDIDATES_FETCH_USER_AGENT},
+            impersonate=MATCH_CANDIDATES_FETCH_IMPERSONATE,
+        )
+
+    @staticmethod
+    def _configure_match_candidates_http_session(
+        session: curl_requests.Session,
+        *,
+        resolve_entries: list[str] | None,
+    ) -> None:
+        if resolve_entries:
+            session.curl_options = {CurlOpt.RESOLVE: resolve_entries}
+            return
+        session.curl_options = {}
+
+    @staticmethod
+    def _read_match_candidates_http_response_body(response: Any) -> bytes:
+        content_length = response.headers.get("Content-Length")
+        if content_length:
+            try:
+                content_len_bytes = int(content_length)
+            except (TypeError, ValueError):
+                content_len_bytes = None
+            if (
+                content_len_bytes is not None
+                and content_len_bytes > MATCH_CANDIDATES_MAX_LINK_BYTES
+            ):
+                raise ValueError(f"Oversized JD link body ({content_len_bytes} bytes)")
+
+        payload = bytearray()
+        for chunk in response.iter_content(chunk_size=8192):
+            if not chunk:
+                continue
+            payload.extend(chunk)
+            if len(payload) > MATCH_CANDIDATES_MAX_LINK_BYTES:
+                raise ValueError("Oversized JD link body")
+        return bytes(payload)
+
+    @classmethod
+    def _resolve_match_candidates_request_target(
+        cls,
+        candidate_url: str,
+        *,
+        require_https: bool,
+    ) -> tuple[str, int, list[IPAddress], bool] | str:
         try:
-            async with aiohttp.ClientSession(
-                timeout=timeout, headers=headers
-            ) as session:
-                for _ in range(MATCH_CANDIDATES_MAX_LINK_REDIRECTS + 1):
-                    validation_error = await self._validate_match_candidates_url(
-                        current_url
+            parsed = urlsplit(candidate_url)
+        except Exception:
+            return "Job description URL is invalid."
+
+        scheme = parsed.scheme.lower()
+        if require_https:
+            if scheme != "https":
+                return "Job description URL must use https."
+        elif scheme not in {"http", "https"}:
+            return f"Job description request URL scheme '{scheme}' is not allowed."
+
+        if parsed.username or parsed.password:
+            return "Job description URL must not include credentials."
+
+        host = (parsed.hostname or "").strip().lower().rstrip(".")
+        if not host:
+            return "Job description URL must include a hostname."
+
+        try:
+            port = parsed.port
+        except ValueError:
+            return "Job description URL port is invalid."
+        if port is None:
+            port = 443 if scheme == "https" else 80
+        if port not in {80, 443}:
+            return "Job description URL port must be 80 or 443."
+
+        if host in {"localhost", "localhost.localdomain"}:
+            return "Job description URL host resolves to a non-public address."
+
+        ip_literal = cls._parse_ip_literal(host)
+        if ip_literal is not None:
+            if not cls._is_public_ip(ip_literal):
+                return "Job description URL host resolves to a non-public address."
+            return host, port, [ip_literal], True
+
+        try:
+            addr_infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+        except socket.gaierror:
+            return "Job description URL host resolves to a non-public address."
+        except Exception:
+            return "Job description URL host resolves to a non-public address."
+
+        resolved_ips: set[IPAddress] = set()
+        for _, _, _, _, sockaddr in addr_infos:
+            if not sockaddr:
+                continue
+            parsed_ip = cls._parse_ip_literal(str(sockaddr[0]).strip())
+            if parsed_ip is None:
+                continue
+            if not cls._is_public_ip(parsed_ip):
+                return "Job description URL host resolves to a non-public address."
+            resolved_ips.add(parsed_ip)
+
+        if not resolved_ips:
+            return "Job description URL host resolves to a non-public address."
+
+        ordered_ips = sorted(resolved_ips, key=lambda parsed_ip: parsed_ip.compressed)
+        return host, port, ordered_ips, False
+
+    def _fetch_match_candidates_link_response_sync(
+        self, url: str
+    ) -> MatchCandidatesHttpResponse:
+        current_url = url
+        session = self._create_match_candidates_http_session()
+        try:
+            for _ in range(MATCH_CANDIDATES_MAX_LINK_REDIRECTS + 1):
+                resolution = self._resolve_match_candidates_request_target(
+                    current_url,
+                    require_https=True,
+                )
+                if isinstance(resolution, str):
+                    raise ValueError(resolution)
+                host, port, resolved_ips, host_is_ip_literal = resolution
+
+                try:
+                    resolve_entries = None
+                    if not host_is_ip_literal:
+                        resolve_entries = [
+                            f"{host}:{port}:{_format_curl_resolve_address(ip)}"
+                            for ip in resolved_ips
+                        ]
+                    self._configure_match_candidates_http_session(
+                        session,
+                        resolve_entries=resolve_entries,
                     )
-                    if validation_error:
-                        logger.info(
-                            "Skipping JD link fetch url=%s reason=%s",
-                            current_url,
-                            validation_error,
-                        )
-                        return None
+                    response = session.request(
+                        "GET",
+                        current_url,
+                        timeout=MATCH_CANDIDATES_FETCH_TIMEOUT_SECONDS,
+                        allow_redirects=False,
+                        stream=True,
+                    )
+                except RequestsError as exc:
+                    raise ValueError(f"JD fetch failed: {exc}") from exc
 
-                    async with session.get(
-                        current_url, allow_redirects=False
-                    ) as response:
-                        if response.status in {301, 302, 303, 307, 308}:
-                            redirect_to = response.headers.get("Location")
-                            if not redirect_to:
-                                return None
-                            current_url = urljoin(current_url, redirect_to)
-                            continue
-                        if response.status >= 400:
-                            return None
+                try:
+                    if response.status_code in {301, 302, 303, 307, 308}:
+                        redirect_to = response.headers.get("Location")
+                        if not redirect_to:
+                            raise ValueError("JD redirect missing Location header")
+                        current_url = urljoin(current_url, redirect_to)
+                        continue
 
-                        content_type = (
-                            response.headers.get("Content-Type", "")
-                            .split(";")[0]
-                            .strip()
-                            .lower()
-                        )
-                        is_supported_content_type = content_type in {
-                            "application/pdf",
-                            "application/xhtml+xml",
-                        } or content_type.startswith("text/")
-                        if content_type and not is_supported_content_type:
-                            logger.info(
-                                "Skipping unsupported JD content type url=%s content_type=%s",
-                                current_url,
-                                content_type,
-                            )
-                            return None
+                    headers = {
+                        str(key).lower(): str(value)
+                        for key, value in response.headers.items()
+                    }
+                    body = self._read_match_candidates_http_response_body(response)
+                    return MatchCandidatesHttpResponse(
+                        final_url=current_url,
+                        status_code=int(response.status_code),
+                        headers=headers,
+                        body=body,
+                    )
+                finally:
+                    response.close()
+        finally:
+            session.close()
 
-                        content_length = response.headers.get("Content-Length")
-                        if content_length:
-                            try:
-                                content_len_bytes = int(content_length)
-                            except (TypeError, ValueError):
-                                pass
-                            else:
-                                if content_len_bytes > MATCH_CANDIDATES_MAX_LINK_BYTES:
-                                    logger.info(
-                                        "Skipping oversized JD link url=%s bytes=%s",
-                                        current_url,
-                                        content_len_bytes,
-                                    )
-                                    return None
+        raise ValueError("JD URL exceeded redirect limit")
 
-                        final_url = str(response.url)
-                        raw_chunks = bytearray()
-                        async for chunk in response.content.iter_chunked(8192):
-                            if not chunk:
-                                continue
-                            raw_chunks.extend(chunk)
-                            if len(raw_chunks) > MATCH_CANDIDATES_MAX_LINK_BYTES:
-                                logger.info(
-                                    "Skipping oversized JD body url=%s bytes>%s",
-                                    final_url,
-                                    MATCH_CANDIDATES_MAX_LINK_BYTES,
-                                )
-                                return None
-                        raw = bytes(raw_chunks)
-                        break
-                else:
-                    logger.info("Skipping JD link after too many redirects url=%s", url)
-                    return None
+    def _extract_match_candidates_response_text(
+        self, response: MatchCandidatesHttpResponse
+    ) -> str | None:
+        if not response.body:
+            return None
+
+        content_type = response.content_type
+        decoded_body = response.body.decode("utf-8", errors="ignore")
+        body_looks_like_html = self._match_candidates_body_looks_like_html(decoded_body)
+        is_supported_content_type = content_type in {
+            "application/pdf",
+            "application/xhtml+xml",
+        } or content_type.startswith("text/")
+        if content_type and not is_supported_content_type and not body_looks_like_html:
+            logger.info(
+                "Skipping unsupported JD content type url=%s content_type=%s",
+                response.final_url,
+                content_type,
+            )
+            return None
+
+        lower_final = response.final_url.casefold()
+        if content_type == "application/pdf" or lower_final.endswith(".pdf"):
+            text = self._extract_resume_text(response.body, filename="linked_jd.pdf")
+        elif content_type in {"text/plain", "text/markdown"}:
+            text = decoded_body
+        else:
+            text = self._extract_structured_job_posting_text(
+                decoded_body
+            ) or self._strip_html_to_text(decoded_body)
+
+        cleaned = self._clean_match_candidates_text(text)
+        return cleaned or None
+
+    def _fetch_match_candidates_link_text_with_browser_sync(
+        self, url: str
+    ) -> str | None:
+        try:
+            from cloakbrowser import launch_context  # type: ignore[import-untyped]
+        except ImportError as exc:
+            raise ValueError("JavaScript browser fallback is unavailable") from exc
+
+        validation_error = self._validate_match_candidates_url_sync(url)
+        if validation_error:
+            raise ValueError(validation_error)
+
+        context = None
+        request_validation_cache: dict[tuple[str, int], str | None] = {}
+        try:
+            context = launch_context(
+                user_agent=MATCH_CANDIDATES_FETCH_USER_AGENT,
+                viewport={"width": 412, "height": 915},
+                is_mobile=True,
+                has_touch=True,
+                device_scale_factor=2.625,
+            )
+            page = context.new_page()
+            page.route(
+                "**/*",
+                lambda route: self._handle_match_candidates_browser_route(
+                    route,
+                    request_validation_cache=request_validation_cache,
+                ),
+            )
+            page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=MATCH_CANDIDATES_BROWSER_TIMEOUT_MS,
+            )
+            page.wait_for_timeout(MATCH_CANDIDATES_BROWSER_POST_NAV_WAIT_MS)
+            final_page_url = str(getattr(page, "url", "")).strip()
+            validation_error = self._validate_match_candidates_url_sync(final_page_url)
+            if validation_error:
+                raise ValueError(validation_error)
+
+            rendered_html = page.content()
+            text = self._extract_structured_job_posting_text(
+                rendered_html
+            ) or self._strip_html_to_text(rendered_html)
+            cleaned = self._clean_match_candidates_text(text)
+            if not cleaned:
+                return None
+
+            word_count = len(re.findall(r"\w+", cleaned))
+            if self._match_candidates_html_looks_blocked(rendered_html) and (
+                len(cleaned) <= MATCH_CANDIDATES_JS_SPARSE_TEXT_MAX_CHARS
+                and word_count <= MATCH_CANDIDATES_JS_SPARSE_TEXT_MAX_WORDS
+            ):
+                raise ValueError("JavaScript job-page fetch hit a scraping block")
+            return cleaned
+        except Exception as exc:
+            raise ValueError(f"JavaScript JD fetch failed: {exc}") from exc
+        finally:
+            if context is not None:
+                try:
+                    context.close()
+                except Exception:
+                    logger.debug("Failed to close CloakBrowser for %s", url)
+
+    def _validate_match_candidates_browser_request_url_sync(
+        self,
+        candidate_url: str,
+        *,
+        request_validation_cache: dict[tuple[str, int], str | None],
+    ) -> str | None:
+        parsed = urlsplit(candidate_url)
+        scheme = parsed.scheme.lower()
+        if not scheme:
+            return "Job description request URL must specify a scheme."
+        if scheme in {"data", "about", "blob"}:
+            return None
+        if scheme not in {"http", "https"}:
+            return f"Job description request URL scheme '{scheme}' is not allowed."
+
+        host = (parsed.hostname or "").strip().lower().rstrip(".")
+        if not host:
+            return "Job description URL must include a hostname."
+
+        try:
+            port = parsed.port
+        except ValueError:
+            return "Job description URL port is invalid."
+        if port is None:
+            port = 443 if scheme == "https" else 80
+
+        cache_key = (host, port)
+        if cache_key in request_validation_cache:
+            return request_validation_cache[cache_key]
+
+        resolution = self._resolve_match_candidates_request_target(
+            candidate_url,
+            require_https=False,
+        )
+        error = resolution if isinstance(resolution, str) else None
+        request_validation_cache[cache_key] = error
+        return error
+
+    def _handle_match_candidates_browser_route(
+        self,
+        route: Any,
+        *,
+        request_validation_cache: dict[tuple[str, int], str | None],
+    ) -> None:
+        request = route.request
+        request_url = str(getattr(request, "url", "")).strip()
+        scheme = urlsplit(request_url).scheme.lower()
+        if scheme in {"data", "about", "blob"}:
+            route.continue_()
+            return
+
+        validation_error = self._validate_match_candidates_browser_request_url_sync(
+            request_url,
+            request_validation_cache=request_validation_cache,
+        )
+        if validation_error:
+            logger.info(
+                "Blocked match-candidates browser request url=%s error=%s",
+                request_url,
+                validation_error,
+            )
+            route.abort()
+            return
+        route.continue_()
+
+    async def _fetch_match_candidates_link_text(self, url: str) -> str | None:
+        try:
+            response = await asyncio.to_thread(
+                self._fetch_match_candidates_link_response_sync, url
+            )
         except Exception as exc:
             logger.info("Failed fetching JD link url=%s error=%s", url, exc)
             return None
 
-        if not raw:
+        if (
+            response.status_code >= 400
+            and not self._match_candidates_response_looks_blocked(response)
+        ):
             return None
 
-        lower_final = final_url.casefold()
-        if content_type == "application/pdf" or lower_final.endswith(".pdf"):
-            text = self._extract_resume_text(raw, filename="linked_jd.pdf")
-        elif content_type in {"text/plain", "text/markdown"}:
-            text = raw.decode("utf-8", errors="ignore")
-        else:
-            text = self._strip_html_to_text(raw.decode("utf-8", errors="ignore"))
+        text = self._extract_match_candidates_response_text(response)
+        decoded_body = response.body.decode("utf-8", errors="ignore")
+        raw_html = (
+            decoded_body
+            if response.content_type in {"text/html", "application/xhtml+xml"}
+            or response.content_type.startswith("text/")
+            or self._match_candidates_body_looks_like_html(decoded_body)
+            else ""
+        )
+        needs_browser_fallback = self._match_candidates_response_looks_blocked(
+            response
+        ) or (
+            bool(raw_html)
+            and self._match_candidates_html_needs_browser(raw_html, text or "")
+        )
 
-        cleaned = re.sub(r"\s+", " ", text).strip()
-        if not cleaned:
-            return None
-        if len(cleaned) > MATCH_CANDIDATES_MAX_LINK_TEXT_CHARS:
-            return cleaned[:MATCH_CANDIDATES_MAX_LINK_TEXT_CHARS].rstrip()
-        return cleaned
+        if needs_browser_fallback:
+            try:
+                browser_text = await asyncio.to_thread(
+                    self._fetch_match_candidates_link_text_with_browser_sync,
+                    response.final_url,
+                )
+            except Exception as exc:
+                logger.info(
+                    "JD browser fallback failed url=%s error=%s",
+                    response.final_url,
+                    exc,
+                )
+            else:
+                if browser_text:
+                    return browser_text
+
+        return text
 
     async def _build_match_candidates_posting(
         self, starter: discord.Message
