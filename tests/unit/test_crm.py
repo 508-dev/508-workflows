@@ -3500,6 +3500,39 @@ class TestCRMCog:
         assert embed.title == "🛠️ CRM Skills"
 
     @pytest.mark.asyncio
+    async def test_search_contacts_self_skill_filter_matches_raw_skills_when_attrs_partial(
+        self, crm_cog, mock_interaction, mock_member_role
+    ):
+        """Self/direct skill filtering should match against both CRM skill sources."""
+        mock_interaction.user.roles = [mock_member_role]
+        mock_interaction.user.id = 123456789
+
+        with patch.object(
+            crm_cog,
+            "_find_contact_by_discord_user",
+            new=AsyncMock(
+                return_value={
+                    "id": "contact123",
+                    "name": "John Doe",
+                    "emailAddress": "john@example.com",
+                    "type": "Member",
+                    "cSkillAttrs": '{"python":{"strength":5}}',
+                    "skills": ["python", "sql"],
+                }
+            ),
+        ):
+            await crm_cog.search_members.callback(
+                crm_cog,
+                mock_interaction,
+                "me skills:sql",
+            )
+
+        crm_cog.espo_api.request.assert_not_called()
+        embed = mock_interaction.followup.send.call_args.kwargs["embed"]
+        assert embed.title == "🔍 CRM Contact Search Results"
+        assert "John Doe" in embed.fields[0].name
+
+    @pytest.mark.asyncio
     async def test_search_contacts_shows_skill_strengths(
         self, crm_cog, mock_interaction, mock_member_role
     ):

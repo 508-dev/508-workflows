@@ -4842,6 +4842,20 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             skill.casefold()
             for skill, _ in self._extract_contact_skills_for_view(contact)[0]
         }
+        raw_skills = contact.get("skills")
+        if isinstance(raw_skills, list):
+            normalized_skills = normalize_skill_list(
+                [str(item) for item in raw_skills if str(item).strip()]
+            )
+        else:
+            normalized_skills = normalize_skill_list(
+                [
+                    item.strip()
+                    for item in str(raw_skills or "").split(",")
+                    if item.strip()
+                ]
+            )
+        available_skills.update(skill.casefold() for skill in normalized_skills)
         return all(skill.casefold() in available_skills for skill in requested_skills)
 
     @app_commands.command(
