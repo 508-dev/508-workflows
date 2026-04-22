@@ -80,8 +80,9 @@ This document captures Discord bot behavior, permissions, and slash command usag
 - `/search-members`
   - Description: Search for candidates/members in the CRM.
   - Args:
-    - `query` (optional)
-    - `skills` (optional, comma-separated)
+    - `query` (required; also accepts `skills:python,sql` for skills-only search)
+    - `skills` (optional, comma-separated AND filter; filtered results show member skills)
+    - `show_skills` (optional; explicit detailed skills output)
 
 - `/crm-status`
   - Description: Check CRM API accessibility.
@@ -99,11 +100,6 @@ This document captures Discord bot behavior, permissions, and slash command usag
 
 - `/unlinked-discord-users`
   - Description: List Discord members with `Member` role not linked in CRM.
-
-- `/view-skills`
-  - Description: View structured skills for yourself or a specific member.
-  - Args:
-    - `search_term` (optional)
 
 - `/set-github-username`
   - Description: Set GitHub username on a CRM contact.

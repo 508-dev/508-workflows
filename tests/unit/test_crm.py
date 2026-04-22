@@ -2675,7 +2675,7 @@ class TestCRMCog:
         """Test contact search requires a query or skills."""
         mock_interaction.user.roles = [mock_member_role]
 
-        await crm_cog.search_members.callback(crm_cog, mock_interaction, None, None)
+        await crm_cog.search_members.callback(crm_cog, mock_interaction, "", None)
 
         mock_interaction.followup.send.assert_called_once_with(
             "❌ Please provide a search term or skills to search by."
@@ -2686,12 +2686,12 @@ class TestCRMCog:
     async def test_search_contacts_skills_only(
         self, crm_cog, mock_interaction, mock_member_role
     ):
-        """Test contact search by skills only."""
+        """Test contact search by inline `skills:` query syntax."""
         mock_interaction.user.roles = [mock_member_role]
         crm_cog.espo_api.request.return_value = {"list": []}
 
         await crm_cog.search_members.callback(
-            crm_cog, mock_interaction, None, "python,  sql "
+            crm_cog, mock_interaction, "skills: python,  sql "
         )
 
         crm_cog.espo_api.request.assert_called_once()
@@ -2738,7 +2738,7 @@ class TestCRMCog:
         crm_cog.espo_api.request.return_value = {"list": []}
 
         await crm_cog.search_members.callback(
-            crm_cog, mock_interaction, None, "Python, FastAPI "
+            crm_cog, mock_interaction, "skills: Python, FastAPI "
         )
 
         crm_cog.espo_api.request.assert_called_once()
@@ -3269,16 +3269,19 @@ class TestCRMCog:
         )
 
     @pytest.mark.asyncio
-    async def test_view_skills_self_uses_structured_attrs(
+    async def test_search_contacts_show_skills_self_uses_structured_attrs(
         self, crm_cog, mock_interaction, mock_member_role
     ):
-        """No search term should resolve self and display structured skill strengths."""
+        """`/search-members me show_skills:true` should display structured skill strengths."""
         mock_interaction.user.roles = [mock_member_role]
         mock_interaction.user.id = 123456789
 
-        crm_cog.espo_api.request.side_effect = [
-            {"list": [{"id": "contact123", "name": "John Doe"}]},
-            {
+        with patch.object(
+            crm_cog,
+            "_find_contact_by_discord_user",
+            new=AsyncMock(return_value={"id": "contact123", "name": "John Doe"}),
+        ):
+            crm_cog.espo_api.request.return_value = {
                 "id": "contact123",
                 "name": "John Doe",
                 "emailAddress": "john@example.com",
@@ -3286,36 +3289,37 @@ class TestCRMCog:
                 "c508Email": "john@508.dev",
                 "cSkillAttrs": '{"python":{"strength":4},"go":{"strength":5}}',
                 "skills": ["python", "go"],
-            },
-        ]
+            }
 
-        await crm_cog.view_skills.callback(crm_cog, mock_interaction, None)
+            await crm_cog.search_members.callback(
+                crm_cog,
+                mock_interaction,
+                "me",
+                None,
+                True,
+            )
 
-        assert crm_cog.espo_api.request.call_count == 2
+        crm_cog.espo_api.request.assert_called_once_with("GET", "Contact/contact123")
         mock_interaction.followup.send.assert_called_once()
         call_args = mock_interaction.followup.send.call_args
         embed = call_args[1]["embed"]
         assert embed.title == "🛠️ CRM Skills"
         assert "Skills for **John Doe**" in embed.description
-        # issue #61: profile field should show full contact info
         profile_field = embed.fields[0]
         assert profile_field.name == "👤 Profile"
         assert "john@example.com" in profile_field.value
         assert "Member" in profile_field.value
         assert "john@508.dev" in profile_field.value
-        # skills should still be present
         skills_field = embed.fields[1]
         assert "go (5)" in skills_field.value
         assert "python (4)" in skills_field.value
 
     @pytest.mark.asyncio
-    async def test_view_skills_falls_back_to_skills_when_attrs_unrecoverable(
+    async def test_search_contacts_show_skills_falls_back_to_multi_enum(
         self, crm_cog, mock_interaction, mock_member_role
     ):
-        """If attrs cannot be recovered, command should display skills multi-enum."""
+        """`show_skills` should fall back to multi-enum skills when attrs are broken."""
         mock_interaction.user.roles = [mock_member_role]
-        mock_interaction.user.id = 123456789
-
         crm_cog.espo_api.request.side_effect = [
             {"list": [{"id": "contact123", "name": "John Doe"}]},
             {
@@ -3326,7 +3330,13 @@ class TestCRMCog:
             },
         ]
 
-        await crm_cog.view_skills.callback(crm_cog, mock_interaction, None)
+        await crm_cog.search_members.callback(
+            crm_cog,
+            mock_interaction,
+            "john",
+            None,
+            True,
+        )
 
         mock_interaction.followup.send.assert_called_once()
         call_args = mock_interaction.followup.send.call_args
@@ -3336,53 +3346,67 @@ class TestCRMCog:
         assert "/5" not in embed.fields[1].value
 
     @pytest.mark.asyncio
-    async def test_search_contacts_for_view_skills_delegates_to_linking(self, crm_cog):
-        """`_search_contacts_for_view_skills` should delegate to `_search_contacts_for_lookup`."""
-        expected = [{"id": "contact123"}]
-        with patch.object(
-            crm_cog,
-            "_search_contacts_for_lookup",
-            new=AsyncMock(return_value=expected),
-        ) as mock_search:
-            result = await crm_cog._search_contacts_for_view_skills("john")
-
-        assert result == expected
-        mock_search.assert_awaited_once_with("john")
-
-    @pytest.mark.asyncio
-    async def test_view_skills_multiple_contacts_requires_refine(
+    async def test_search_contacts_show_skills_multiple_contacts_adds_preview(
         self, crm_cog, mock_interaction, mock_member_role
     ):
-        """Search term with multiple matches should ask caller to refine."""
+        """Multiple matches should keep search results and add compact skill previews."""
         mock_interaction.user.roles = [mock_member_role]
-
-        with patch.object(crm_cog, "_search_contacts_for_view_skills") as mock_search:
-            mock_search.return_value = [
-                {"id": "contact1", "name": "John Doe"},
-                {"id": "contact2", "name": "John Smith"},
+        crm_cog.espo_api.request.return_value = {
+            "list": [
+                {
+                    "id": "contact1",
+                    "name": "John Doe",
+                    "emailAddress": "john@example.com",
+                    "type": "Member",
+                    "cSkillAttrs": '{"python":{"strength":5},"go":{"strength":4}}',
+                },
+                {
+                    "id": "contact2",
+                    "name": "John Smith",
+                    "emailAddress": "jsmith@example.com",
+                    "type": "Member",
+                    "skills": ["react", "typescript"],
+                },
             ]
+        }
 
-            await crm_cog.view_skills.callback(crm_cog, mock_interaction, "john")
+        await crm_cog.search_members.callback(
+            crm_cog,
+            mock_interaction,
+            "john",
+            None,
+            True,
+        )
 
-        crm_cog.espo_api.request.assert_not_called()
         mock_interaction.followup.send.assert_called_once()
-        message = mock_interaction.followup.send.call_args[0][0]
-        assert "Multiple contacts found" in message
-        assert "John Doe" in message
-        assert "John Smith" in message
+        embed = mock_interaction.followup.send.call_args.kwargs["embed"]
+        assert "John Doe" in embed.fields[0].name
+        assert "🧠 Skills: python (5), go (4)" in embed.fields[0].value
+        assert "John Smith" in embed.fields[1].name
+        assert "🧠 Skills: react, typescript" in embed.fields[1].value
 
     @pytest.mark.asyncio
-    async def test_view_skills_self_not_linked(
+    async def test_search_contacts_show_skills_self_not_linked(
         self, crm_cog, mock_interaction, mock_member_role
     ):
-        """No search term should error when requester is not linked to CRM."""
+        """`me` should produce a direct linked-account error when no CRM contact exists."""
         mock_interaction.user.roles = [mock_member_role]
         mock_interaction.user.id = 123456789
-        crm_cog.espo_api.request.return_value = {"list": []}
 
-        await crm_cog.view_skills.callback(crm_cog, mock_interaction, None)
+        with patch.object(
+            crm_cog,
+            "_find_contact_by_discord_user",
+            new=AsyncMock(return_value=None),
+        ):
+            await crm_cog.search_members.callback(
+                crm_cog,
+                mock_interaction,
+                "me",
+                None,
+                True,
+            )
 
-        crm_cog.espo_api.request.assert_called_once()
+        crm_cog.espo_api.request.assert_not_called()
         mock_interaction.followup.send.assert_called_once()
         message = mock_interaction.followup.send.call_args[0][0]
         assert "Discord account is not linked to a CRM contact" in message
@@ -3391,7 +3415,7 @@ class TestCRMCog:
     async def test_search_contacts_shows_skill_strengths(
         self, crm_cog, mock_interaction, mock_member_role
     ):
-        """Test contact search displays requested skills with strengths."""
+        """Skill-filtered search should show the found member's skills by default."""
         mock_interaction.user.roles = [mock_member_role]
         crm_cog.espo_api.request.return_value = {
             "list": [
@@ -3405,27 +3429,26 @@ class TestCRMCog:
                     "cSkillAttrs": {
                         "python": {"strength": 5},
                         "sql": {"strength": "4"},
-                        "aws": {"strength": "6"},
-                        "gcp": "1",
+                        "react": {"strength": 3},
                     },
                 }
             ]
         }
 
         await crm_cog.search_members.callback(
-            crm_cog, mock_interaction, None, "python,sql,aws"
+            crm_cog, mock_interaction, "skills: python,sql"
         )
 
         mock_interaction.followup.send.assert_called_once()
         embed = mock_interaction.followup.send.call_args.kwargs["embed"]
         field_value = embed.fields[0].value
-        assert "🧠 Skills: python (5), sql (4), amazon web services" in field_value
+        assert "🧠 Skills: python (5), sql (4), react (3)" in field_value
 
     @pytest.mark.asyncio
     async def test_search_contacts_ignores_broken_skill_attrs(
         self, crm_cog, mock_interaction, mock_member_role
     ):
-        """Test contact search ignores malformed cSkillAttrs payloads."""
+        """Broken skill attrs should fall back to requested skills when needed."""
         mock_interaction.user.roles = [mock_member_role]
         crm_cog.espo_api.request.return_value = {
             "list": [
@@ -3440,7 +3463,7 @@ class TestCRMCog:
         }
 
         await crm_cog.search_members.callback(
-            crm_cog, mock_interaction, None, "python,sql"
+            crm_cog, mock_interaction, "skills: python,sql"
         )
 
         mock_interaction.followup.send.assert_called_once()
