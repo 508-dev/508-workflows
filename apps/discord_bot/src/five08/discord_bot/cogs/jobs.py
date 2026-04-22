@@ -17,6 +17,7 @@ from urllib.parse import urljoin, urlsplit
 import discord
 from discord import app_commands
 from discord.ext import commands
+from curl_cffi import CurlOpt
 from curl_cffi import requests as curl_requests
 from curl_cffi.requests import BrowserTypeLiteral
 from curl_cffi.requests import RequestsError
@@ -124,6 +125,12 @@ MATCH_CANDIDATES_PRIVATE_TRUTHY = frozenset({"true", "1", "yes", "y", "on"})
 AUTO_MATCH_EXCLUDED_RESUME_NAMES = frozenset({"Vladyslav_Stryzhak.pdf"})
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 JobWatchChannel = discord.ForumChannel
+
+
+def _format_curl_resolve_address(value: IPAddress) -> str:
+    if value.version == 6:
+        return f"[{value.compressed}]"
+    return value.compressed
 
 
 def _parse_match_candidates_private(private_flag: str | None) -> bool | None:
@@ -1324,24 +1331,12 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
 
     @classmethod
     def _validate_match_candidates_url_sync(cls, candidate_url: str) -> str | None:
-        try:
-            parsed = urlsplit(candidate_url)
-        except Exception:
-            return "Job description URL is invalid."
-
-        if parsed.scheme.lower() != "https":
-            return "Job description URL must use https."
-
-        if parsed.username or parsed.password:
-            return "Job description URL must not include credentials."
-
-        host = (parsed.hostname or "").strip().lower().rstrip(".")
-        if not host:
-            return "Job description URL must include a hostname."
-
-        if not cls._hostname_resolves_publicly(host):
-            return "Job description URL host resolves to a non-public address."
-
+        resolution = cls._resolve_match_candidates_request_target(
+            candidate_url,
+            require_https=True,
+        )
+        if isinstance(resolution, str):
+            return resolution
         return None
 
     async def _validate_match_candidates_url(self, candidate_url: str) -> str | None:
@@ -1395,6 +1390,18 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             pattern.search(raw_html) for pattern in MATCH_CANDIDATES_BLOCKED_PATTERNS
         )
 
+    @staticmethod
+    def _match_candidates_body_looks_like_html(raw_text: str) -> bool:
+        normalized = raw_text.casefold()
+        if any(
+            marker in normalized
+            for marker in ("<!doctype html", "<html", "<body", "<head")
+        ):
+            return True
+        return any(
+            marker in normalized for marker in MATCH_CANDIDATES_JS_RENDER_MARKERS
+        )
+
     @classmethod
     def _match_candidates_response_looks_blocked(
         cls, response: MatchCandidatesHttpResponse
@@ -1438,6 +1445,17 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         )
 
     @staticmethod
+    def _configure_match_candidates_http_session(
+        session: curl_requests.Session,
+        *,
+        resolve_entries: list[str] | None,
+    ) -> None:
+        if resolve_entries:
+            session.curl_options = {CurlOpt.RESOLVE: resolve_entries}
+            return
+        session.curl_options = {}
+
+    @staticmethod
     def _read_match_candidates_http_response_body(response: Any) -> bytes:
         content_length = response.headers.get("Content-Length")
         if content_length:
@@ -1460,6 +1478,74 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 raise ValueError("Oversized JD link body")
         return bytes(payload)
 
+    @classmethod
+    def _resolve_match_candidates_request_target(
+        cls,
+        candidate_url: str,
+        *,
+        require_https: bool,
+    ) -> tuple[str, int, list[IPAddress], bool] | str:
+        try:
+            parsed = urlsplit(candidate_url)
+        except Exception:
+            return "Job description URL is invalid."
+
+        scheme = parsed.scheme.lower()
+        if require_https:
+            if scheme != "https":
+                return "Job description URL must use https."
+        elif scheme not in {"http", "https"}:
+            return f"Job description request URL scheme '{scheme}' is not allowed."
+
+        if parsed.username or parsed.password:
+            return "Job description URL must not include credentials."
+
+        host = (parsed.hostname or "").strip().lower().rstrip(".")
+        if not host:
+            return "Job description URL must include a hostname."
+
+        try:
+            port = parsed.port
+        except ValueError:
+            return "Job description URL port is invalid."
+        if port is None:
+            port = 443 if scheme == "https" else 80
+        if port not in {80, 443}:
+            return "Job description URL port must be 80 or 443."
+
+        if host in {"localhost", "localhost.localdomain"}:
+            return "Job description URL host resolves to a non-public address."
+
+        ip_literal = cls._parse_ip_literal(host)
+        if ip_literal is not None:
+            if not cls._is_public_ip(ip_literal):
+                return "Job description URL host resolves to a non-public address."
+            return host, port, [ip_literal], True
+
+        try:
+            addr_infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+        except socket.gaierror:
+            return "Job description URL host resolves to a non-public address."
+        except Exception:
+            return "Job description URL host resolves to a non-public address."
+
+        resolved_ips: set[IPAddress] = set()
+        for _, _, _, _, sockaddr in addr_infos:
+            if not sockaddr:
+                continue
+            parsed_ip = cls._parse_ip_literal(str(sockaddr[0]).strip())
+            if parsed_ip is None:
+                continue
+            if not cls._is_public_ip(parsed_ip):
+                return "Job description URL host resolves to a non-public address."
+            resolved_ips.add(parsed_ip)
+
+        if not resolved_ips:
+            return "Job description URL host resolves to a non-public address."
+
+        ordered_ips = sorted(resolved_ips, key=lambda parsed_ip: parsed_ip.compressed)
+        return host, port, ordered_ips, False
+
     def _fetch_match_candidates_link_response_sync(
         self, url: str
     ) -> MatchCandidatesHttpResponse:
@@ -1467,11 +1553,25 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         session = self._create_match_candidates_http_session()
         try:
             for _ in range(MATCH_CANDIDATES_MAX_LINK_REDIRECTS + 1):
-                validation_error = self._validate_match_candidates_url_sync(current_url)
-                if validation_error:
-                    raise ValueError(validation_error)
+                resolution = self._resolve_match_candidates_request_target(
+                    current_url,
+                    require_https=True,
+                )
+                if isinstance(resolution, str):
+                    raise ValueError(resolution)
+                host, port, resolved_ips, host_is_ip_literal = resolution
 
                 try:
+                    resolve_entries = None
+                    if not host_is_ip_literal:
+                        resolve_entries = [
+                            f"{host}:{port}:{_format_curl_resolve_address(ip)}"
+                            for ip in resolved_ips
+                        ]
+                    self._configure_match_candidates_http_session(
+                        session,
+                        resolve_entries=resolve_entries,
+                    )
                     response = session.request(
                         "GET",
                         current_url,
@@ -1515,11 +1615,13 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             return None
 
         content_type = response.content_type
+        decoded_body = response.body.decode("utf-8", errors="ignore")
+        body_looks_like_html = self._match_candidates_body_looks_like_html(decoded_body)
         is_supported_content_type = content_type in {
             "application/pdf",
             "application/xhtml+xml",
         } or content_type.startswith("text/")
-        if content_type and not is_supported_content_type:
+        if content_type and not is_supported_content_type and not body_looks_like_html:
             logger.info(
                 "Skipping unsupported JD content type url=%s content_type=%s",
                 response.final_url,
@@ -1531,12 +1633,11 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         if content_type == "application/pdf" or lower_final.endswith(".pdf"):
             text = self._extract_resume_text(response.body, filename="linked_jd.pdf")
         elif content_type in {"text/plain", "text/markdown"}:
-            text = response.body.decode("utf-8", errors="ignore")
+            text = decoded_body
         else:
-            raw_html = response.body.decode("utf-8", errors="ignore")
             text = self._extract_structured_job_posting_text(
-                raw_html
-            ) or self._strip_html_to_text(raw_html)
+                decoded_body
+            ) or self._strip_html_to_text(decoded_body)
 
         cleaned = self._clean_match_candidates_text(text)
         return cleaned or None
@@ -1554,6 +1655,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             raise ValueError(validation_error)
 
         context = None
+        request_validation_cache: dict[tuple[str, int], str | None] = {}
         try:
             context = launch_context(
                 user_agent=MATCH_CANDIDATES_FETCH_USER_AGENT,
@@ -1565,7 +1667,10 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             page = context.new_page()
             page.route(
                 "**/*",
-                lambda route: self._handle_match_candidates_browser_route(route),
+                lambda route: self._handle_match_candidates_browser_route(
+                    route,
+                    request_validation_cache=request_validation_cache,
+                ),
             )
             page.goto(
                 url,
@@ -1602,7 +1707,50 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 except Exception:
                     logger.debug("Failed to close CloakBrowser for %s", url)
 
-    def _handle_match_candidates_browser_route(self, route: Any) -> None:
+    def _validate_match_candidates_browser_request_url_sync(
+        self,
+        candidate_url: str,
+        *,
+        request_validation_cache: dict[tuple[str, int], str | None],
+    ) -> str | None:
+        parsed = urlsplit(candidate_url)
+        scheme = parsed.scheme.lower()
+        if not scheme:
+            return "Job description request URL must specify a scheme."
+        if scheme in {"data", "about", "blob"}:
+            return None
+        if scheme not in {"http", "https"}:
+            return f"Job description request URL scheme '{scheme}' is not allowed."
+
+        host = (parsed.hostname or "").strip().lower().rstrip(".")
+        if not host:
+            return "Job description URL must include a hostname."
+
+        try:
+            port = parsed.port
+        except ValueError:
+            return "Job description URL port is invalid."
+        if port is None:
+            port = 443 if scheme == "https" else 80
+
+        cache_key = (host, port)
+        if cache_key in request_validation_cache:
+            return request_validation_cache[cache_key]
+
+        resolution = self._resolve_match_candidates_request_target(
+            candidate_url,
+            require_https=False,
+        )
+        error = resolution if isinstance(resolution, str) else None
+        request_validation_cache[cache_key] = error
+        return error
+
+    def _handle_match_candidates_browser_route(
+        self,
+        route: Any,
+        *,
+        request_validation_cache: dict[tuple[str, int], str | None],
+    ) -> None:
         request = route.request
         request_url = str(getattr(request, "url", "")).strip()
         scheme = urlsplit(request_url).scheme.lower()
@@ -1610,7 +1758,10 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             route.continue_()
             return
 
-        validation_error = self._validate_match_candidates_url_sync(request_url)
+        validation_error = self._validate_match_candidates_browser_request_url_sync(
+            request_url,
+            request_validation_cache=request_validation_cache,
+        )
         if validation_error:
             logger.info(
                 "Blocked match-candidates browser request url=%s error=%s",
@@ -1637,16 +1788,18 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             return None
 
         text = self._extract_match_candidates_response_text(response)
+        decoded_body = response.body.decode("utf-8", errors="ignore")
         raw_html = (
-            response.body.decode("utf-8", errors="ignore")
+            decoded_body
             if response.content_type in {"text/html", "application/xhtml+xml"}
             or response.content_type.startswith("text/")
+            or self._match_candidates_body_looks_like_html(decoded_body)
             else ""
         )
         needs_browser_fallback = self._match_candidates_response_looks_blocked(
             response
         ) or (
-            response.content_type in {"text/html", "application/xhtml+xml"}
+            bool(raw_html)
             and self._match_candidates_html_needs_browser(raw_html, text or "")
         )
 

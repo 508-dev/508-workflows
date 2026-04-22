@@ -2,11 +2,13 @@
 Unit tests for CRM cog functionality.
 """
 
+import ipaddress
 import json
 from unittest.mock import AsyncMock, Mock, patch
 
 import discord
 import pytest
+from curl_cffi import CurlOpt
 
 from five08.discord_bot.cogs.crm import (
     CRMCog,
@@ -2709,6 +2711,119 @@ class TestCRMCog:
 
         browser_mock.assert_called_once_with(response.final_url)
         assert text == "Rendered JS job details"
+
+    @pytest.mark.asyncio
+    async def test_fetch_match_candidates_link_text_uses_browser_for_js_shell_without_content_type(
+        self, jobs_cog
+    ):
+        """Missing content types should still trigger JS-shell browser fallback."""
+        response = jobs_module.MatchCandidatesHttpResponse(
+            final_url="https://jobs.example.com/role",
+            status_code=200,
+            headers={},
+            body=(
+                b"<!DOCTYPE html><html><body><div id='root'></div>"
+                b"<script>window.__NEXT_DATA__={}</script></body></html>"
+            ),
+        )
+
+        with (
+            patch.object(
+                jobs_cog,
+                "_fetch_match_candidates_link_response_sync",
+                return_value=response,
+            ),
+            patch.object(
+                jobs_cog,
+                "_fetch_match_candidates_link_text_with_browser_sync",
+                return_value="Rendered no-header job details",
+            ) as browser_mock,
+        ):
+            text = await jobs_cog._fetch_match_candidates_link_text(response.final_url)
+
+        browser_mock.assert_called_once_with(response.final_url)
+        assert text == "Rendered no-header job details"
+
+    def test_fetch_match_candidates_link_response_sync_pins_resolved_ips(
+        self, jobs_cog
+    ):
+        """curl_cffi requests should be pinned to the validated DNS answers."""
+
+        class DummyResponse:
+            status_code = 200
+            headers = {"Content-Type": "text/html"}
+
+            def iter_content(self, chunk_size=8192):
+                yield b"<html><body>JD</body></html>"
+
+            def close(self):
+                return None
+
+        class DummySession:
+            def __init__(self) -> None:
+                self.curl_options = {}
+
+            def request(self, *args, **kwargs):
+                return DummyResponse()
+
+            def close(self):
+                return None
+
+        session = DummySession()
+
+        with (
+            patch.object(
+                jobs_cog,
+                "_create_match_candidates_http_session",
+                return_value=session,
+            ),
+            patch.object(
+                jobs_cog,
+                "_resolve_match_candidates_request_target",
+                return_value=(
+                    "jobs.example.com",
+                    443,
+                    [ipaddress.ip_address("1.2.3.4")],
+                    False,
+                ),
+            ),
+        ):
+            jobs_cog._fetch_match_candidates_link_response_sync(
+                "https://jobs.example.com/role"
+            )
+
+        assert session.curl_options == {
+            CurlOpt.RESOLVE: ["jobs.example.com:443:1.2.3.4"]
+        }
+
+    def test_validate_match_candidates_browser_request_url_allows_http_and_caches(
+        self, jobs_cog
+    ):
+        """Browser request validation should allow http assets and cache host checks."""
+        cache: dict[tuple[str, int], str | None] = {}
+
+        with patch.object(
+            jobs_cog,
+            "_resolve_match_candidates_request_target",
+            return_value=(
+                "jobs.example.com",
+                80,
+                [ipaddress.ip_address("1.2.3.4")],
+                False,
+            ),
+        ) as resolve_mock:
+            first = jobs_cog._validate_match_candidates_browser_request_url_sync(
+                "http://jobs.example.com/script.js",
+                request_validation_cache=cache,
+            )
+            second = jobs_cog._validate_match_candidates_browser_request_url_sync(
+                "http://jobs.example.com/style.css",
+                request_validation_cache=cache,
+            )
+
+        assert first is None
+        assert second is None
+        assert resolve_mock.call_count == 1
 
     def test_extract_structured_job_posting_text_prefers_json_ld(self, jobs_cog):
         """Structured JobPosting data should beat noisy generic HTML stripping."""
