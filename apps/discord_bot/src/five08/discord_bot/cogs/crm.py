@@ -4840,7 +4840,10 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         name="search-members", description="Search for candidates / members in the CRM"
     )
     @app_commands.describe(
-        query="Name/email/Discord/ID, or `skills:python,sql`",
+        query=(
+            "Name/email/Discord/ID, `me`/`self` for yourself "
+            "(use with `show_skills`), or `skills:python,sql`"
+        ),
         skills="Extra comma-separated skills (AND match)",
         show_skills="Show skills for matches; replaces `/view-skills`",
     )
@@ -4889,8 +4892,35 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 "select": select_fields,
             }
             contacts: list[dict[str, Any]]
+            direct_contact: dict[str, Any] | None = None
 
-            if query_value.casefold() in {"me", "self"}:
+            if query_value and self._is_hex_string(query_value):
+                try:
+                    candidate = self.espo_api.request("GET", f"Contact/{query_value}")
+                except EspoAPIError:
+                    candidate = None
+                if isinstance(candidate, dict) and candidate.get("id"):
+                    direct_contact = candidate
+
+            if direct_contact is not None:
+                if skills_list:
+                    available_skills = {
+                        skill.casefold()
+                        for skill, _ in self._extract_contact_skills_for_view(
+                            direct_contact
+                        )[0]
+                    }
+                    contacts = (
+                        [direct_contact]
+                        if all(
+                            skill.casefold() in available_skills
+                            for skill in skills_list
+                        )
+                        else []
+                    )
+                else:
+                    contacts = [direct_contact]
+            elif query_value.casefold() in {"me", "self"}:
                 target_contact = await self._find_contact_by_discord_user(
                     interaction.user,
                     select=select_fields,
@@ -5011,7 +5041,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 target_contact = contacts[0]
                 contact_id = str(target_contact.get("id") or "").strip()
                 if not contact_id:
-                    self._audit_command(
+                    self._audit_command_safe(
                         interaction=interaction,
                         action="crm.search_members",
                         result="error",
@@ -5041,7 +5071,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 else:
                     await interaction.followup.send(embed=skill_embed)
 
-                self._audit_command(
+                self._audit_command_safe(
                     interaction=interaction,
                     action="crm.search_members",
                     result="success",
@@ -8355,7 +8385,13 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         if len(skills) > 25:
             skill_lines.append(f"...and {len(skills) - 25} more.")
         if skill_lines:
-            embed.add_field(name="Skills", value=", ".join(skill_lines), inline=False)
+            embed.add_field(
+                name="Skills",
+                value=ResumeUpdateConfirmationView._truncate_embed_field(
+                    ", ".join(skill_lines)
+                ),
+                inline=False,
+            )
 
         return embed, len(skills), source, contact_name
 

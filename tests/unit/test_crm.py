@@ -2747,6 +2747,28 @@ class TestCRMCog:
         assert search_params["where"][0]["type"] == "arrayAllOf"
         assert search_params["where"][0]["value"] == ["python", "fastapi"]
 
+    @pytest.mark.asyncio
+    async def test_search_contacts_direct_contact_id_lookup(
+        self, crm_cog, mock_interaction, mock_member_role
+    ):
+        """Hex-like CRM contact IDs should use direct lookup before fallback search."""
+        mock_interaction.user.roles = [mock_member_role]
+        contact_id = "0123456789abcdef"
+        crm_cog.espo_api.request.return_value = {
+            "id": contact_id,
+            "name": "John Doe",
+            "emailAddress": "john@example.com",
+            "type": "Member",
+        }
+
+        await crm_cog.search_members.callback(crm_cog, mock_interaction, contact_id)
+
+        crm_cog.espo_api.request.assert_called_once_with("GET", f"Contact/{contact_id}")
+        mock_interaction.followup.send.assert_called_once()
+        embed = mock_interaction.followup.send.call_args.kwargs["embed"]
+        assert embed.title == "🔍 CRM Contact Search Results"
+        assert "John Doe" in embed.fields[0].name
+
     def test_parse_contact_skill_attrs_recovers_python_literal(self, crm_cog):
         """Malformed JSON-like skill attrs should recover via literal parsing."""
         parsed = crm_cog._parse_contact_skill_attrs(
@@ -3313,6 +3335,30 @@ class TestCRMCog:
         skills_field = embed.fields[1]
         assert "go (5)" in skills_field.value
         assert "python (4)" in skills_field.value
+
+    def test_build_contact_skills_embed_truncates_long_skill_field(self, crm_cog):
+        """Detailed skills embed should stay within Discord field limits."""
+        long_skill = "x" * 120
+        full_contact = {
+            "id": "contact123",
+            "name": "John Doe",
+            "emailAddress": "john@example.com",
+            "type": "Member",
+            "skills": [f"{long_skill}{index}" for index in range(25)],
+        }
+        interaction = Mock()
+        interaction.guild = None
+
+        embed, skills_count, source, contact_name = crm_cog._build_contact_skills_embed(
+            full_contact,
+            target_contact={"id": "contact123", "name": "John Doe"},
+            interaction=interaction,
+        )
+
+        assert skills_count == 25
+        assert source == "skills"
+        assert contact_name == "John Doe"
+        assert len(embed.fields[1].value) <= 1024
 
     @pytest.mark.asyncio
     async def test_search_contacts_show_skills_falls_back_to_multi_enum(
