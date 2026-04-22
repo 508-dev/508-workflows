@@ -80,8 +80,7 @@ This document captures Discord bot behavior, permissions, and slash command usag
 - `/search-members`
   - Description: Search for candidates/members in the CRM.
   - Args:
-    - `query` (required; also accepts `skills:python,sql` for skills-only search, and `me`/`self` to look up your own CRM profile)
-    - `skills` (optional, comma-separated AND filter; filtered results show member skills)
+    - `query` (required; accepts `skills:python,sql` for skills-only search, `john skills:python,sql` for combined search, and `me`/`self` to look up your own CRM profile)
     - `show_skills` (optional; explicit detailed skills output)
   - Notes:
     - Use `query: me` or `query: self` to replace the old self-lookup flow from `/view-skills`.
@@ -89,6 +88,7 @@ This document captures Discord bot behavior, permissions, and slash command usag
   - Examples:
     - `/search-members query:me`
     - `/search-members query:me show_skills:true`
+    - `/search-members query:john skills:python,sql`
 
 - `/crm-status`
   - Description: Check CRM API accessibility.

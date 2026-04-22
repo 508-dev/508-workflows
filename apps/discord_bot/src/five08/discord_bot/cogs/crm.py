@@ -4813,25 +4813,18 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
 
         return ", ".join(rendered)
 
-    def _parse_search_members_inputs(
-        self,
-        query: str | None,
-        skills: str | None,
-    ) -> tuple[str, list[str]]:
+    def _parse_search_members_inputs(self, query: str | None) -> tuple[str, list[str]]:
         """Normalize `/search-members` query text and skill filters."""
         query_value = (query or "").strip()
         raw_skills: list[str] = []
 
-        prefix, separator, remainder = query_value.partition(":")
-        if separator and prefix.strip().casefold() in {"skill", "skills"}:
-            query_value = ""
+        skills_match = re.search(r"(?i)(?:^|\s)skills?\s*:\s*(.+)$", query_value)
+        if skills_match:
+            query_value = query_value[: skills_match.start()].strip()
             raw_skills.extend(
-                item.strip() for item in remainder.split(",") if item.strip()
-            )
-
-        if skills:
-            raw_skills.extend(
-                item.strip() for item in skills.split(",") if item.strip()
+                item.strip()
+                for item in skills_match.group(1).split(",")
+                if item.strip()
             )
 
         return query_value, normalize_skill_list(raw_skills)
@@ -4840,11 +4833,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         name="search-members", description="Search for candidates / members in the CRM"
     )
     @app_commands.describe(
-        query=(
-            "Name/email/Discord/ID, `me`/`self` for yourself "
-            "(use with `show_skills`), or `skills:python,sql`"
-        ),
-        skills="Extra comma-separated skills (AND match)",
+        query=("Name/email/Discord/ID, `me`/`self`, or append `skills:python,sql`"),
         show_skills="Show skills for matches; replaces `/view-skills`",
     )
     @require_role("Member")
@@ -4852,14 +4841,13 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         self,
         interaction: discord.Interaction,
         query: str,
-        skills: str | None = None,
         show_skills: bool = False,
     ) -> None:
         """Search for contacts in the CRM."""
         try:
             await interaction.response.defer(ephemeral=True)
 
-            query_value, skills_list = self._parse_search_members_inputs(query, skills)
+            query_value, skills_list = self._parse_search_members_inputs(query)
             show_member_skills = show_skills or bool(skills_list)
 
             if not query_value and not skills_list:
@@ -4870,7 +4858,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     metadata={"reason": "missing_query_and_skills"},
                 )
                 await interaction.followup.send(
-                    "❌ Please provide a search term or skills to search by."
+                    "❌ Please provide a search term or `skills:...` to search by."
                 )
                 return
 

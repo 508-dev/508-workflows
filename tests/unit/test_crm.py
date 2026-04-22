@@ -2675,10 +2675,10 @@ class TestCRMCog:
         """Test contact search requires a query or skills."""
         mock_interaction.user.roles = [mock_member_role]
 
-        await crm_cog.search_members.callback(crm_cog, mock_interaction, "", None)
+        await crm_cog.search_members.callback(crm_cog, mock_interaction, "")
 
         mock_interaction.followup.send.assert_called_once_with(
-            "❌ Please provide a search term or skills to search by."
+            "❌ Please provide a search term or `skills:...` to search by."
         )
         crm_cog.espo_api.request.assert_not_called()
 
@@ -2711,12 +2711,12 @@ class TestCRMCog:
     async def test_search_contacts_query_and_skills(
         self, crm_cog, mock_interaction, mock_member_role
     ):
-        """Test contact search by query and skills."""
+        """Test contact search by combined inline query and skills."""
         mock_interaction.user.roles = [mock_member_role]
         crm_cog.espo_api.request.return_value = {"list": []}
 
         await crm_cog.search_members.callback(
-            crm_cog, mock_interaction, "john", "python,sql"
+            crm_cog, mock_interaction, "john skills:python,sql"
         )
 
         crm_cog.espo_api.request.assert_called_once()
@@ -3317,7 +3317,6 @@ class TestCRMCog:
                 crm_cog,
                 mock_interaction,
                 "me",
-                None,
                 True,
             )
 
@@ -3380,7 +3379,6 @@ class TestCRMCog:
             crm_cog,
             mock_interaction,
             "john",
-            None,
             True,
         )
 
@@ -3420,7 +3418,6 @@ class TestCRMCog:
             crm_cog,
             mock_interaction,
             "john",
-            None,
             True,
         )
 
@@ -3448,7 +3445,6 @@ class TestCRMCog:
                 crm_cog,
                 mock_interaction,
                 "me",
-                None,
                 True,
             )
 
