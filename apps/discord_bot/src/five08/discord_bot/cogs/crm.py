@@ -4813,31 +4813,73 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
 
         return ", ".join(rendered)
 
+    def _parse_search_members_inputs(self, query: str | None) -> tuple[str, list[str]]:
+        """Normalize `/search-members` query text and skill filters."""
+        query_value = (query or "").strip()
+        raw_skills: list[str] = []
+
+        skills_match = re.search(r"(?i)(?:^|\s)skills?\s*:\s*(.*)$", query_value)
+        if skills_match:
+            query_value = query_value[: skills_match.start()].strip()
+            raw_skills.extend(
+                item.strip()
+                for item in skills_match.group(1).split(",")
+                if item.strip()
+            )
+
+        return query_value, normalize_skill_list(raw_skills)
+
+    def _contact_matches_requested_skills(
+        self,
+        contact: dict[str, Any],
+        requested_skills: list[str],
+    ) -> bool:
+        """Return whether a contact satisfies all requested skills."""
+        if not requested_skills:
+            return True
+
+        available_skills = {
+            skill.casefold()
+            for skill, _ in self._extract_contact_skills_for_view(contact)[0]
+        }
+        raw_skills = contact.get("skills")
+        if isinstance(raw_skills, list):
+            normalized_skills = normalize_skill_list(
+                [str(item) for item in raw_skills if str(item).strip()]
+            )
+        else:
+            normalized_skills = normalize_skill_list(
+                [
+                    item.strip()
+                    for item in str(raw_skills or "").split(",")
+                    if item.strip()
+                ]
+            )
+        available_skills.update(skill.casefold() for skill in normalized_skills)
+        return all(skill.casefold() in available_skills for skill in requested_skills)
+
     @app_commands.command(
         name="search-members", description="Search for candidates / members in the CRM"
     )
     @app_commands.describe(
-        query="Search term (name, Discord username, email, or 508 email)",
-        skills="Comma-separated skills (AND match)",
+        query=(
+            "Name/email/Discord/ID, `me`/`self`/`myself`, or append `skills:python,sql`"
+        ),
+        show_skills="Show skills for matches; replaces `/view-skills`",
     )
     @require_role("Member")
     async def search_members(
         self,
         interaction: discord.Interaction,
-        query: str | None = None,
-        skills: str | None = None,
+        query: str,
+        show_skills: bool = False,
     ) -> None:
         """Search for contacts in the CRM."""
         try:
             await interaction.response.defer(ephemeral=True)
 
-            query_value = (query or "").strip()
-            raw_skills_list = (
-                [skill.strip() for skill in skills.split(",") if skill.strip()]
-                if skills
-                else []
-            )
-            skills_list = normalize_skill_list(raw_skills_list)
+            query_value, skills_list = self._parse_search_members_inputs(query)
+            show_member_skills = show_skills or bool(skills_list)
 
             if not query_value and not skills_list:
                 self._audit_command(
@@ -4847,7 +4889,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     metadata={"reason": "missing_query_and_skills"},
                 )
                 await interaction.followup.send(
-                    "❌ Please provide a search term or skills to search by."
+                    "❌ Please provide a search term or `skills:...` to search by."
                 )
                 return
 
@@ -4858,73 +4900,125 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 search_parts.append(f"skills: `{', '.join(skills_list)}`")
             search_summary = ", ".join(search_parts)
 
-            # Search contacts using EspoCRM API
-            where_filters = []
-            if query_value:
-                discord_user_id = self._extract_discord_id_from_mention(
-                    query_value
-                ) or (
-                    query_value
-                    if self._looks_like_discord_user_id(query_value)
-                    else None
-                )
-                query_filters = [
-                    {
-                        "type": "contains",
-                        "attribute": "name",
-                        "value": query_value,
-                    },
-                    {
-                        "type": "contains",
-                        "attribute": "emailAddress",
-                        "value": query_value,
-                    },
-                    {
-                        "type": "contains",
-                        "attribute": "c508Email",
-                        "value": query_value,
-                    },
-                ]
-                if discord_user_id:
-                    query_filters.append(
-                        {
-                            "type": "equals",
-                            "attribute": "cDiscordUserID",
-                            "value": discord_user_id,
-                        }
-                    )
-                else:
-                    query_filters.append(
-                        {
-                            "type": "contains",
-                            "attribute": "cDiscordUsername",
-                            "value": query_value,
-                        }
-                    )
-                where_filters.append(
-                    {
-                        "type": "or",
-                        "value": query_filters,
-                    }
-                )
-
-            if skills_list:
-                where_filters.append(
-                    {
-                        "type": "arrayAllOf",
-                        "attribute": "skills",
-                        "value": skills_list,
-                    }
-                )
-
-            search_params = {
+            select_fields = (
+                "id,name,emailAddress,c508Email,cDiscordUsername,cDiscordUserID,"
+                "phoneNumber,type,resumeIds,resumeNames,resumeTypes,skills,cSkillAttrs"
+            )
+            where_filters: list[dict[str, Any]] = []
+            search_params: dict[str, Any] = {
                 "where": where_filters,
                 "maxSize": 10,
-                "select": "id,name,emailAddress,c508Email,cDiscordUsername,cDiscordUserID,phoneNumber,type,resumeIds,resumeNames,resumeTypes,skills,cSkillAttrs",
+                "select": select_fields,
             }
+            contacts: list[dict[str, Any]]
+            direct_contact: dict[str, Any] | None = None
 
-            response = self.espo_api.request("GET", "Contact", search_params)
-            contacts = response.get("list", [])
+            if query_value and self._is_hex_string(query_value):
+                try:
+                    candidate = self.espo_api.request("GET", f"Contact/{query_value}")
+                except EspoAPIError:
+                    candidate = None
+                if isinstance(candidate, dict) and candidate.get("id"):
+                    direct_contact = candidate
+
+            if direct_contact is not None:
+                contacts = (
+                    [direct_contact]
+                    if self._contact_matches_requested_skills(
+                        direct_contact, skills_list
+                    )
+                    else []
+                )
+            elif query_value.casefold() in {"me", "self", "myself"}:
+                target_contact = await self._find_contact_by_discord_user(
+                    interaction.user,
+                    select=select_fields,
+                )
+                if not target_contact:
+                    self._audit_command(
+                        interaction=interaction,
+                        action="crm.search_members",
+                        result="denied",
+                        metadata={
+                            "query": query_value,
+                            "skills": skills_list,
+                            "show_skills": show_skills,
+                            "reason": "discord_not_linked",
+                        },
+                    )
+                    await interaction.followup.send(
+                        "❌ Your Discord account is not linked to a CRM contact. "
+                        "Please ask a Steering Committee member to link your account first."
+                    )
+                    return
+
+                contacts = (
+                    [target_contact]
+                    if self._contact_matches_requested_skills(
+                        target_contact, skills_list
+                    )
+                    else []
+                )
+            else:
+                if query_value:
+                    discord_user_id = self._extract_discord_id_from_mention(
+                        query_value
+                    ) or (
+                        query_value
+                        if self._looks_like_discord_user_id(query_value)
+                        else None
+                    )
+                    query_filters = [
+                        {
+                            "type": "contains",
+                            "attribute": "name",
+                            "value": query_value,
+                        },
+                        {
+                            "type": "contains",
+                            "attribute": "emailAddress",
+                            "value": query_value,
+                        },
+                        {
+                            "type": "contains",
+                            "attribute": "c508Email",
+                            "value": query_value,
+                        },
+                    ]
+                    if discord_user_id:
+                        query_filters.append(
+                            {
+                                "type": "equals",
+                                "attribute": "cDiscordUserID",
+                                "value": discord_user_id,
+                            }
+                        )
+                    else:
+                        query_filters.append(
+                            {
+                                "type": "contains",
+                                "attribute": "cDiscordUsername",
+                                "value": query_value,
+                            }
+                        )
+                    search_params["where"].append(
+                        {
+                            "type": "or",
+                            "value": query_filters,
+                        }
+                    )
+
+                if skills_list:
+                    search_params["where"].append(
+                        {
+                            "type": "arrayAllOf",
+                            "attribute": "skills",
+                            "value": skills_list,
+                        }
+                    )
+
+                response = self.espo_api.request("GET", "Contact", search_params)
+                contacts = response.get("list", [])
 
             if not contacts:
                 self._audit_command(
@@ -4942,6 +5036,57 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 )
                 return
 
+            if show_skills and len(contacts) == 1:
+                target_contact = contacts[0]
+                contact_id = str(target_contact.get("id") or "").strip()
+                if not contact_id:
+                    self._audit_command_safe(
+                        interaction=interaction,
+                        action="crm.search_members",
+                        result="error",
+                        metadata={
+                            "query": query_value or None,
+                            "skills": skills_list,
+                            "show_skills": True,
+                            "error": "missing_contact_id",
+                        },
+                    )
+                    await interaction.followup.send("❌ Contact ID not found.")
+                    return
+
+                full_contact = self.espo_api.request("GET", f"Contact/{contact_id}")
+                skill_embed, skills_count, source, contact_name = (
+                    self._build_contact_skills_embed(
+                        full_contact,
+                        target_contact=target_contact,
+                        interaction=interaction,
+                    )
+                )
+
+                if skills_count == 0:
+                    await interaction.followup.send(
+                        f"ℹ️ No skills found for **{contact_name}**."
+                    )
+                else:
+                    await interaction.followup.send(embed=skill_embed)
+
+                self._audit_command_safe(
+                    interaction=interaction,
+                    action="crm.search_members",
+                    result="success",
+                    metadata={
+                        "query": query_value or None,
+                        "skills": skills_list,
+                        "show_skills": True,
+                        "contacts_found": 1,
+                        "skills_count": skills_count,
+                        "source": source,
+                    },
+                    resource_type="crm_contact",
+                    resource_id=contact_id,
+                )
+                return
+
             logger.info(f"Found {len(contacts)} contacts for: {search_summary}")
 
             # Create embed with results
@@ -4954,14 +5099,20 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             # Create view with resume download buttons
             view = ResumeButtonView()
 
-            for i, contact in enumerate(contacts):
+            for contact in contacts:
                 name = contact.get("name", "Unknown")
                 additional_fields: list[tuple[str, str]] = []
 
-                if skills_list:
-                    contact_skills = self._format_requested_skills(skills_list, contact)
+                if show_member_skills:
+                    contact_skills = self._format_contact_skill_preview(contact)
                     if contact_skills:
                         additional_fields.append(("🧠 Skills", contact_skills))
+                    elif skills_list:
+                        requested_skills = self._format_requested_skills(
+                            skills_list, contact
+                        )
+                        if requested_skills:
+                            additional_fields.append(("🧠 Skills", requested_skills))
 
                 contact_info = self._format_contact_card(
                     contact,
@@ -4999,6 +5150,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 metadata={
                     "query": query_value or None,
                     "skills": skills_list,
+                    "show_skills": show_skills,
+                    "skills_shown": show_member_skills,
                     "contacts_found": len(contacts),
                     "resume_button_count": len(view.children),
                 },
@@ -8180,12 +8333,66 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
         return [(skill, None) for skill in skills], "skills"
 
-    async def _search_contacts_for_view_skills(
-        self, search_term: str
-    ) -> list[dict[str, Any]]:
-        """Resolve search term for view-skills lookup."""
-        contacts = await self._search_contacts_for_lookup(search_term)
-        return contacts
+    def _format_contact_skill_preview(
+        self,
+        contact: dict[str, Any],
+        *,
+        limit: int = 8,
+    ) -> str:
+        """Build a compact skills preview for search results."""
+        skills, _ = self._extract_contact_skills_for_view(contact)
+        if not skills:
+            return ""
+
+        rendered: list[str] = []
+        for skill, strength in skills[:limit]:
+            if strength is None:
+                rendered.append(skill)
+            else:
+                rendered.append(f"{skill} ({strength})")
+        if len(skills) > limit:
+            rendered.append(f"...and {len(skills) - limit} more.")
+        return ", ".join(rendered)
+
+    def _build_contact_skills_embed(
+        self,
+        full_contact: dict[str, Any],
+        *,
+        target_contact: dict[str, Any],
+        interaction: discord.Interaction,
+    ) -> tuple[discord.Embed, int, str, str]:
+        """Build the detailed skills embed used by `/search-members show_skills`."""
+        contact_name = str(
+            full_contact.get("name") or target_contact.get("name") or "Unknown"
+        )
+        skills, source = self._extract_contact_skills_for_view(full_contact)
+
+        contact_card = self._format_contact_card(full_contact, interaction)
+        embed = discord.Embed(
+            title="🛠️ CRM Skills",
+            description=f"Skills for **{contact_name}**",
+            color=0x0099FF,
+        )
+        embed.add_field(name="👤 Profile", value=contact_card, inline=False)
+
+        skill_lines: list[str] = []
+        for skill, strength in skills[:25]:
+            if strength is None:
+                skill_lines.append(skill)
+            else:
+                skill_lines.append(f"{skill} ({strength})")
+        if len(skills) > 25:
+            skill_lines.append(f"...and {len(skills) - 25} more.")
+        if skill_lines:
+            embed.add_field(
+                name="Skills",
+                value=ResumeUpdateConfirmationView._truncate_embed_field(
+                    ", ".join(skill_lines)
+                ),
+                inline=False,
+            )
+
+        return embed, len(skills), source, contact_name
 
     async def _search_contacts_for_reprocess_resume(
         self, search_term: str
@@ -8837,185 +9044,6 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             "one for this contact.",
             ephemeral=True,
         )
-
-    @app_commands.command(
-        name="view-skills",
-        description="View CRM skills for yourself or a specific member",
-    )
-    @app_commands.describe(
-        search_term="Optional: @mention, email, 508 username, name, or contact ID",
-    )
-    @require_role("Member")
-    async def view_skills(
-        self, interaction: discord.Interaction, search_term: str | None = None
-    ) -> None:
-        """View structured skills (with strengths) or fallback multi-enum skills."""
-        try:
-            await interaction.response.defer(ephemeral=True)
-
-            query = (search_term or "").strip()
-            target_scope = "other" if query else "self"
-
-            target_contact: dict[str, Any] | None = None
-            if not query:
-                target_contact = await self._find_contact_by_discord_user(
-                    interaction.user
-                )
-                if not target_contact:
-                    self._audit_command(
-                        interaction=interaction,
-                        action="crm.view_skills",
-                        result="denied",
-                        metadata={
-                            "target_scope": "self",
-                            "reason": "discord_not_linked",
-                        },
-                    )
-                    await interaction.followup.send(
-                        "❌ Your Discord account is not linked to a CRM contact. "
-                        "Please ask a Steering Committee member to link your account first."
-                    )
-                    return
-            else:
-                contacts = await self._search_contacts_for_view_skills(query)
-                if not contacts:
-                    self._audit_command(
-                        interaction=interaction,
-                        action="crm.view_skills",
-                        result="success",
-                        metadata={
-                            "search_term": query,
-                            "target_scope": target_scope,
-                            "contacts_found": 0,
-                        },
-                    )
-                    await interaction.followup.send(
-                        f"❌ No contact found for: `{query}`"
-                    )
-                    return
-
-                if len(contacts) > 1:
-                    lines: list[str] = []
-                    for contact in contacts[:5]:
-                        name = str(contact.get("name", "Unknown"))
-                        contact_id = str(contact.get("id", ""))
-                        lines.append(f"- **{name}** (`{contact_id}`)")
-                    suffix = (
-                        f"\n...and {len(contacts) - 5} more."
-                        if len(contacts) > 5
-                        else ""
-                    )
-                    self._audit_command(
-                        interaction=interaction,
-                        action="crm.view_skills",
-                        result="success",
-                        metadata={
-                            "search_term": query,
-                            "target_scope": target_scope,
-                            "contacts_found": len(contacts),
-                            "requires_selection": True,
-                        },
-                    )
-                    await interaction.followup.send(
-                        "⚠️ Multiple contacts found. Please refine your search:\n"
-                        + "\n".join(lines)
-                        + suffix
-                    )
-                    return
-
-                target_contact = contacts[0]
-
-            assert target_contact is not None
-            contact_id = str(target_contact.get("id") or "").strip()
-            if not contact_id:
-                self._audit_command(
-                    interaction=interaction,
-                    action="crm.view_skills",
-                    result="error",
-                    metadata={
-                        "search_term": query or None,
-                        "error": "missing_contact_id",
-                    },
-                )
-                await interaction.followup.send("❌ Contact ID not found.")
-                return
-
-            full_contact = self.espo_api.request("GET", f"Contact/{contact_id}")
-            contact_name = str(
-                full_contact.get("name") or target_contact.get("name") or "Unknown"
-            )
-            skills, source = self._extract_contact_skills_for_view(full_contact)
-
-            if not skills:
-                self._audit_command(
-                    interaction=interaction,
-                    action="crm.view_skills",
-                    result="success",
-                    metadata={
-                        "search_term": query or None,
-                        "target_scope": target_scope,
-                        "skills_count": 0,
-                        "source": source,
-                    },
-                    resource_type="crm_contact",
-                    resource_id=contact_id,
-                )
-                await interaction.followup.send(
-                    f"ℹ️ No skills found for **{contact_name}**."
-                )
-                return
-
-            contact_card = self._format_contact_card(full_contact, interaction)
-            embed = discord.Embed(
-                title="🛠️ CRM Skills",
-                description=f"Skills for **{contact_name}**",
-                color=0x0099FF,
-            )
-            embed.add_field(name="👤 Profile", value=contact_card, inline=False)
-            skill_lines: list[str] = []
-            for skill, strength in skills[:25]:
-                if strength is None:
-                    skill_lines.append(skill)
-                else:
-                    skill_lines.append(f"{skill} ({strength})")
-            if len(skills) > 25:
-                skill_lines.append(f"...and {len(skills) - 25} more.")
-            embed.add_field(name="Skills", value=", ".join(skill_lines), inline=False)
-
-            await interaction.followup.send(embed=embed)
-            self._audit_command(
-                interaction=interaction,
-                action="crm.view_skills",
-                result="success",
-                metadata={
-                    "search_term": query or None,
-                    "target_scope": target_scope,
-                    "skills_count": len(skills),
-                    "source": source,
-                },
-                resource_type="crm_contact",
-                resource_id=contact_id,
-            )
-        except EspoAPIError as e:
-            logger.error(f"EspoCRM API error in view_skills: {e}")
-            self._audit_command(
-                interaction=interaction,
-                action="crm.view_skills",
-                result="error",
-                metadata={"search_term": search_term, "error": str(e)},
-            )
-            await interaction.followup.send(f"❌ CRM API error: {str(e)}")
-        except Exception as e:
-            logger.error(f"Unexpected error in view_skills: {e}")
-            self._audit_command(
-                interaction=interaction,
-                action="crm.view_skills",
-                result="error",
-                metadata={"search_term": search_term, "error": str(e)},
-            )
-            await interaction.followup.send(
-                "❌ An unexpected error occurred while fetching skills."
-            )
 
     @app_commands.command(
         name="update-contact",
