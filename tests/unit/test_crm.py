@@ -3454,6 +3454,38 @@ class TestCRMCog:
         assert "Discord account is not linked to a CRM contact" in message
 
     @pytest.mark.asyncio
+    async def test_search_contacts_show_skills_myself_alias_uses_self_lookup(
+        self, crm_cog, mock_interaction, mock_member_role
+    ):
+        """`myself` should behave the same as the existing self-lookup aliases."""
+        mock_interaction.user.roles = [mock_member_role]
+        mock_interaction.user.id = 123456789
+
+        with patch.object(
+            crm_cog,
+            "_find_contact_by_discord_user",
+            new=AsyncMock(return_value={"id": "contact123", "name": "John Doe"}),
+        ):
+            crm_cog.espo_api.request.return_value = {
+                "id": "contact123",
+                "name": "John Doe",
+                "emailAddress": "john@example.com",
+                "type": "Member",
+                "skills": ["python"],
+            }
+
+            await crm_cog.search_members.callback(
+                crm_cog,
+                mock_interaction,
+                "myself",
+                True,
+            )
+
+        crm_cog.espo_api.request.assert_called_once_with("GET", "Contact/contact123")
+        embed = mock_interaction.followup.send.call_args.kwargs["embed"]
+        assert embed.title == "🛠️ CRM Skills"
+
+    @pytest.mark.asyncio
     async def test_search_contacts_shows_skill_strengths(
         self, crm_cog, mock_interaction, mock_member_role
     ):

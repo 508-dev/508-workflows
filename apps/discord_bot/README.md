@@ -80,13 +80,14 @@ This document captures Discord bot behavior, permissions, and slash command usag
 - `/search-members`
   - Description: Search for candidates/members in the CRM.
   - Args:
-    - `query` (required; accepts `skills:python,sql` for skills-only search, `john skills:python,sql` for combined search, and `me`/`self` to look up your own CRM profile)
+    - `query` (required; accepts `skills:python,sql` for skills-only search, `john skills:python,sql` for combined search, and `me`/`self`/`myself` to look up your own CRM profile)
     - `show_skills` (optional; explicit detailed skills output)
   - Notes:
-    - Use `query: me` or `query: self` to replace the old self-lookup flow from `/view-skills`.
+    - Use `query: me`, `query: self`, or `query: myself` to replace the old self-lookup flow from `/view-skills`.
     - Add `show_skills:true` to return the detailed skills embed for a single match.
   - Examples:
     - `/search-members query:me`
+    - `/search-members query:myself`
     - `/search-members query:me show_skills:true`
     - `/search-members query:john skills:python,sql`
 

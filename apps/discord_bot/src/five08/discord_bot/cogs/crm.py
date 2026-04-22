@@ -4833,7 +4833,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         name="search-members", description="Search for candidates / members in the CRM"
     )
     @app_commands.describe(
-        query=("Name/email/Discord/ID, `me`/`self`, or append `skills:python,sql`"),
+        query=(
+            "Name/email/Discord/ID, `me`/`self`/`myself`, or append `skills:python,sql`"
+        ),
         show_skills="Show skills for matches; replaces `/view-skills`",
     )
     @require_role("Member")
@@ -4908,7 +4910,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     )
                 else:
                     contacts = [direct_contact]
-            elif query_value.casefold() in {"me", "self"}:
+            elif query_value.casefold() in {"me", "self", "myself"}:
                 target_contact = await self._find_contact_by_discord_user(
                     interaction.user,
                     select=select_fields,
