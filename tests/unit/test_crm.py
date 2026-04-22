@@ -2650,6 +2650,109 @@ class TestCRMCog:
         assert message == "Job description URL host resolves to a non-public address."
 
     @pytest.mark.asyncio
+    async def test_fetch_match_candidates_link_text_uses_browser_fallback_for_block(
+        self, jobs_cog
+    ):
+        """Blocked responses should retry through the JS browser fallback."""
+        response = jobs_module.MatchCandidatesHttpResponse(
+            final_url="https://jobs.example.com/role",
+            status_code=403,
+            headers={"content-type": "text/html"},
+            body=b"<html><body>Verify you are human</body></html>",
+        )
+
+        with (
+            patch.object(
+                jobs_cog,
+                "_fetch_match_candidates_link_response_sync",
+                return_value=response,
+            ),
+            patch.object(
+                jobs_cog,
+                "_fetch_match_candidates_link_text_with_browser_sync",
+                return_value="Rendered role details",
+            ) as browser_mock,
+        ):
+            text = await jobs_cog._fetch_match_candidates_link_text(response.final_url)
+
+        browser_mock.assert_called_once_with(response.final_url)
+        assert text == "Rendered role details"
+
+    @pytest.mark.asyncio
+    async def test_fetch_match_candidates_link_text_uses_browser_for_js_shell(
+        self, jobs_cog
+    ):
+        """Sparse app-shell HTML should fall back to the browser renderer."""
+        response = jobs_module.MatchCandidatesHttpResponse(
+            final_url="https://jobs.example.com/role",
+            status_code=200,
+            headers={"content-type": "text/html"},
+            body=(
+                b"<html><body><div id='root'></div>"
+                b"<script>window.__NEXT_DATA__={}</script></body></html>"
+            ),
+        )
+
+        with (
+            patch.object(
+                jobs_cog,
+                "_fetch_match_candidates_link_response_sync",
+                return_value=response,
+            ),
+            patch.object(
+                jobs_cog,
+                "_fetch_match_candidates_link_text_with_browser_sync",
+                return_value="Rendered JS job details",
+            ) as browser_mock,
+        ):
+            text = await jobs_cog._fetch_match_candidates_link_text(response.final_url)
+
+        browser_mock.assert_called_once_with(response.final_url)
+        assert text == "Rendered JS job details"
+
+    def test_extract_structured_job_posting_text_prefers_json_ld(self, jobs_cog):
+        """Structured JobPosting data should beat noisy generic HTML stripping."""
+        raw_html = """
+        <html>
+          <head>
+            <title>15Five - Senior Software Engineer</title>
+            <meta
+              name="description"
+              content="Teaser copy that mirrors the page shell."
+            />
+            <script type="application/ld+json">
+              {
+                "@context": "https://schema.org",
+                "@type": "JobPosting",
+                "title": "Senior Software Engineer",
+                "jobLocation": {
+                  "@type": "Place",
+                  "address": {
+                    "@type": "PostalAddress",
+                    "addressLocality": "US, Remote"
+                  }
+                },
+                "employmentType": "Full Time",
+                "description": "<p>Build data and AI platform capabilities.</p><p>Use Python and SQL every day.</p>"
+              }
+            </script>
+          </head>
+          <body>
+            <nav>apply for this job</nav>
+            <div>Chrome that should not dominate extraction.</div>
+          </body>
+        </html>
+        """
+
+        extracted = jobs_cog._extract_structured_job_posting_text(raw_html)
+
+        assert extracted == (
+            "Senior Software Engineer\n\n"
+            "US, Remote | Full Time\n\n"
+            "Build data and AI platform capabilities. Use Python and SQL every day."
+        )
+
+    @pytest.mark.asyncio
     async def test_on_member_update_skips_bot_members(self, jobs_cog):
         before = Mock()
         before.roles = []
