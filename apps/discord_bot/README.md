@@ -89,7 +89,7 @@ This document captures Discord bot behavior, permissions, and slash command usag
     - `/search-members query:me`
     - `/search-members query:myself`
     - `/search-members query:me show_skills:true`
-    - `/search-members query:john skills:python,sql`
+    - `/search-members query:"john skills:python,sql"`
 
 - `/crm-status`
   - Description: Check CRM API accessibility.

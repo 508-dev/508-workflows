@@ -2683,6 +2683,20 @@ class TestCRMCog:
         crm_cog.espo_api.request.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_search_contacts_rejects_empty_inline_skills_filter(
+        self, crm_cog, mock_interaction, mock_member_role
+    ):
+        """A bare `skills:` query should trigger the standard missing-input validation."""
+        mock_interaction.user.roles = [mock_member_role]
+
+        await crm_cog.search_members.callback(crm_cog, mock_interaction, "skills:")
+
+        mock_interaction.followup.send.assert_called_once_with(
+            "❌ Please provide a search term or `skills:...` to search by."
+        )
+        crm_cog.espo_api.request.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_search_contacts_skills_only(
         self, crm_cog, mock_interaction, mock_member_role
     ):

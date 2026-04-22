@@ -4818,7 +4818,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         query_value = (query or "").strip()
         raw_skills: list[str] = []
 
-        skills_match = re.search(r"(?i)(?:^|\s)skills?\s*:\s*(.+)$", query_value)
+        skills_match = re.search(r"(?i)(?:^|\s)skills?\s*:\s*(.*)$", query_value)
         if skills_match:
             query_value = query_value[: skills_match.start()].strip()
             raw_skills.extend(
@@ -4828,6 +4828,21 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
 
         return query_value, normalize_skill_list(raw_skills)
+
+    def _contact_matches_requested_skills(
+        self,
+        contact: dict[str, Any],
+        requested_skills: list[str],
+    ) -> bool:
+        """Return whether a contact satisfies all requested skills."""
+        if not requested_skills:
+            return True
+
+        available_skills = {
+            skill.casefold()
+            for skill, _ in self._extract_contact_skills_for_view(contact)[0]
+        }
+        return all(skill.casefold() in available_skills for skill in requested_skills)
 
     @app_commands.command(
         name="search-members", description="Search for candidates / members in the CRM"
@@ -4893,23 +4908,13 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     direct_contact = candidate
 
             if direct_contact is not None:
-                if skills_list:
-                    available_skills = {
-                        skill.casefold()
-                        for skill, _ in self._extract_contact_skills_for_view(
-                            direct_contact
-                        )[0]
-                    }
-                    contacts = (
-                        [direct_contact]
-                        if all(
-                            skill.casefold() in available_skills
-                            for skill in skills_list
-                        )
-                        else []
+                contacts = (
+                    [direct_contact]
+                    if self._contact_matches_requested_skills(
+                        direct_contact, skills_list
                     )
-                else:
-                    contacts = [direct_contact]
+                    else []
+                )
             elif query_value.casefold() in {"me", "self", "myself"}:
                 target_contact = await self._find_contact_by_discord_user(
                     interaction.user,
@@ -4933,23 +4938,13 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     )
                     return
 
-                if skills_list:
-                    available_skills = {
-                        skill.casefold()
-                        for skill, _ in self._extract_contact_skills_for_view(
-                            target_contact
-                        )[0]
-                    }
-                    contacts = (
-                        [target_contact]
-                        if all(
-                            skill.casefold() in available_skills
-                            for skill in skills_list
-                        )
-                        else []
+                contacts = (
+                    [target_contact]
+                    if self._contact_matches_requested_skills(
+                        target_contact, skills_list
                     )
-                else:
-                    contacts = [target_contact]
+                    else []
+                )
             else:
                 if query_value:
                     discord_user_id = self._extract_discord_id_from_mention(
