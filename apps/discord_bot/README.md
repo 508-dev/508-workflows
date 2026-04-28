@@ -70,7 +70,7 @@ This document captures Discord bot behavior, permissions, and slash command usag
 - `/send-member-agreement`
   - Description: Send the member agreement for signature through DocuSeal.
   - Required role: Steering Committee
-  - Prerequisites: `DOCUSEAL_BASE_URL`, `DOCUSEAL_API_KEY`, and `DOCUSEAL_MEMBER_AGREEMENT_TEMPLATE_ID` must be configured.
+  - Prerequisites: `DOCUSEAL_BASE_URL`, `DOCUSEAL_API_KEY`, and `DOCUSEAL_MEMBER_AGREEMENT_TEMPLATE_ID` must be configured. For DocuSeal Cloud, set `DOCUSEAL_BASE_URL=https://api.docuseal.com`. For self-hosted DocuSeal, this is usually `https://your-host/api`.
   - Args:
     - `search_term` (required): Email, 508 email, Discord username, name, or contact ID.
   - Guardrails:

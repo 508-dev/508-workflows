@@ -101,15 +101,15 @@ jobs:
     - name: Install dependencies
       run: |
         uv sync --all-extras
-        uv add --dev bandit safety
 
     - name: Run bandit security linter
       run: |
-        uv run bandit -r apps/discord_bot/src/five08/ -r apps/worker/src/five08/ -r packages/shared/src/five08/ -f json -o bandit-report.json || true
+        uv run --with bandit bandit -r apps/discord_bot/src/five08/ apps/worker/src/five08/ packages/shared/src/five08/ -f json -o bandit-report.json || true
 
     - name: Run safety check
       run: |
-        uv run safety check --json --output safety-report.json || true
+        uv export --format requirements-txt --no-hashes > requirements-ci.txt
+        uv run --with safety safety check -r requirements-ci.txt --output json --save-json safety-report.json || true
 
     - name: Upload security reports
       uses: actions/upload-artifact@v7
