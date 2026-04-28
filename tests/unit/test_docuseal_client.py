@@ -139,6 +139,22 @@ def test_normalize_docuseal_base_url_adds_api_to_self_hosted_root_url() -> None:
     )
 
 
+def test_normalize_docuseal_base_url_leaves_docuseal_cloud_api_url_unchanged() -> None:
+    """DocuSeal Cloud API URLs should not have `/api` appended again."""
+    assert (
+        normalize_docuseal_base_url("https://api.docuseal.com")
+        == "https://api.docuseal.com"
+    )
+
+
+def test_normalize_docuseal_base_url_strips_query_and_fragment() -> None:
+    """Normalized base URLs should drop query strings and fragments."""
+    assert (
+        normalize_docuseal_base_url("https://docuseal.example.com/api?x=1#frag")
+        == "https://docuseal.example.com/api"
+    )
+
+
 def test_create_member_agreement_submission_raises_on_invalid_json_body() -> None:
     """2xx responses with invalid JSON should still raise DocusealAPIError."""
     mock_response = Mock()

@@ -116,17 +116,13 @@ def normalize_docuseal_base_url(base_url: str) -> str:
     """Normalize DocuSeal Cloud URLs and self-hosted root URLs to the API base."""
     normalized = base_url.strip().rstrip("/")
     parts = urlsplit(normalized)
+    cleaned = urlunsplit((parts.scheme, parts.netloc, parts.path, "", "")).rstrip("/")
     hostname = (parts.hostname or "").lower()
     if hostname in {"docuseal.com", "www.docuseal.com"}:
-        return urlunsplit(
-            (
-                "https",
-                "api.docuseal.com",
-                "",
-                parts.query,
-                parts.fragment,
-            )
-        ).rstrip("/")
+        return "https://api.docuseal.com"
+
+    if hostname == "api.docuseal.com":
+        return "https://api.docuseal.com"
 
     if parts.path in {"", "/"}:
         return urlunsplit(
@@ -134,12 +130,12 @@ def normalize_docuseal_base_url(base_url: str) -> str:
                 parts.scheme or "https",
                 parts.netloc,
                 "/api",
-                parts.query,
-                parts.fragment,
+                "",
+                "",
             )
         ).rstrip("/")
 
-    return normalized
+    return cleaned
 
 
 def create_member_agreement_submission(
