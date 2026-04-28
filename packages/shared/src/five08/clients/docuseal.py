@@ -116,6 +116,10 @@ def normalize_docuseal_base_url(base_url: str) -> str:
     """Normalize DocuSeal Cloud URLs and self-hosted root URLs to the API base."""
     normalized = base_url.strip().rstrip("/")
     parts = urlsplit(normalized)
+    if not parts.scheme or not parts.netloc or not parts.hostname:
+        raise ValueError(
+            "DOCUSEAL_BASE_URL must be an absolute URL including scheme and host."
+        )
     cleaned = urlunsplit((parts.scheme, parts.netloc, parts.path, "", "")).rstrip("/")
     hostname = (parts.hostname or "").lower()
     if hostname in {"docuseal.com", "www.docuseal.com"}:

@@ -155,6 +155,24 @@ def test_normalize_docuseal_base_url_strips_query_and_fragment() -> None:
     )
 
 
+def test_normalize_docuseal_base_url_rejects_empty_string() -> None:
+    """Empty DocuSeal base URLs should fail with a clear validation error."""
+    with pytest.raises(
+        ValueError,
+        match="DOCUSEAL_BASE_URL must be an absolute URL including scheme and host",
+    ):
+        normalize_docuseal_base_url("")
+
+
+def test_normalize_docuseal_base_url_rejects_scheme_less_url() -> None:
+    """Scheme-less DocuSeal base URLs should fail validation."""
+    with pytest.raises(
+        ValueError,
+        match="DOCUSEAL_BASE_URL must be an absolute URL including scheme and host",
+    ):
+        normalize_docuseal_base_url("docuseal.508.dev")
+
+
 def test_create_member_agreement_submission_raises_on_invalid_json_body() -> None:
     """2xx responses with invalid JSON should still raise DocusealAPIError."""
     mock_response = Mock()
