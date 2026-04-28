@@ -4,7 +4,11 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from five08.clients.docuseal import DocusealAPIError, create_member_agreement_submission
+from five08.clients.docuseal import (
+    DocusealAPIError,
+    create_member_agreement_submission,
+    normalize_docuseal_base_url,
+)
 from five08.tls import default_ca_bundle_path
 
 
@@ -30,7 +34,7 @@ def test_create_member_agreement_submission_posts_expected_payload() -> None:
     assert result == {"id": 4200}
     mock_request.assert_called_once_with(
         "POST",
-        "https://docuseal.example.com/submissions",
+        "https://docuseal.example.com/api/submissions",
         headers={
             "Content-Type": "application/json",
             "X-Auth-Token": "secret",
@@ -49,6 +53,53 @@ def test_create_member_agreement_submission_posts_expected_payload() -> None:
         timeout=20.0,
         verify=default_ca_bundle_path(),
     )
+
+
+def test_create_member_agreement_submission_normalizes_docuseal_cloud_ui_url() -> None:
+    """Cloud UI URLs should be rewritten to the DocuSeal API host."""
+    mock_response = Mock()
+    mock_response.status_code = 201
+    mock_response.content = b'{"id": 4200}'
+    mock_response.json.return_value = {"id": 4200}
+
+    with patch(
+        "five08.clients.docuseal.requests.request",
+        return_value=mock_response,
+    ) as mock_request:
+        create_member_agreement_submission(
+            base_url="https://docuseal.com/",
+            api_key="secret",
+            template_id=1000001,
+            submitter_name="Jane Doe",
+            submitter_email="jane@example.com",
+        )
+
+    mock_request.assert_called_once()
+    assert mock_request.call_args.args[1] == "https://api.docuseal.com/submissions"
+
+
+def test_create_member_agreement_submission_normalizes_self_hosted_root_url() -> None:
+    """Self-hosted root URLs should be rewritten to the `/api` base once."""
+    mock_response = Mock()
+    mock_response.status_code = 201
+    mock_response.content = b'{"id": 4200}'
+    mock_response.json.return_value = {"id": 4200}
+
+    with patch(
+        "five08.clients.docuseal.requests.request",
+        return_value=mock_response,
+    ) as mock_request:
+        result = create_member_agreement_submission(
+            base_url="https://docuseal.508.dev",
+            api_key="secret",
+            template_id=1000001,
+            submitter_name="Jane Doe",
+            submitter_email="jane@example.com",
+        )
+
+    assert result == {"id": 4200}
+    mock_request.assert_called_once()
+    assert mock_request.call_args.args[1] == "https://docuseal.508.dev/api/submissions"
 
 
 def test_create_member_agreement_submission_raises_on_api_error() -> None:
@@ -70,6 +121,22 @@ def test_create_member_agreement_submission_raises_on_api_error() -> None:
                 submitter_name="Jane Doe",
                 submitter_email="jane@example.com",
             )
+
+
+def test_normalize_docuseal_base_url_leaves_self_hosted_url_unchanged() -> None:
+    """Self-hosted DocuSeal API URLs should keep their configured base URL."""
+    assert (
+        normalize_docuseal_base_url("https://docuseal.example.com/api")
+        == "https://docuseal.example.com/api"
+    )
+
+
+def test_normalize_docuseal_base_url_adds_api_to_self_hosted_root_url() -> None:
+    """Self-hosted root URLs should normalize to the API base URL."""
+    assert (
+        normalize_docuseal_base_url("https://docuseal.example.com/")
+        == "https://docuseal.example.com/api"
+    )
 
 
 def test_create_member_agreement_submission_raises_on_invalid_json_body() -> None:

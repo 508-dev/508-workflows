@@ -1,6 +1,7 @@
 """Shared DocuSeal client helpers."""
 
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
@@ -20,7 +21,7 @@ class DocusealClient:
         api_key: str,
         timeout_seconds: float = 20.0,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
+        self.base_url = normalize_docuseal_base_url(base_url)
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
         self.status_code: int | None = None
@@ -38,23 +39,13 @@ class DocusealClient:
             "X-Auth-Token": self.api_key,
         }
 
-        try:
-            response = requests.request(
-                method.upper(),
-                url,
-                headers=headers,
-                json=payload,
-                timeout=self.timeout_seconds,
-                verify=default_ca_bundle_path(),
-            )
-        except requests.RequestException as exc:
-            raise DocusealAPIError(f"HTTP request failed: {exc}") from exc
-
+        response = self._send_request(method, url, headers, payload)
         self.status_code = response.status_code
         if not 200 <= response.status_code < 300:
             message = response.text.strip() or "Unknown Error"
             raise DocusealAPIError(
-                f"Wrong request, status code is {response.status_code}, reason is {message}"
+                f"DocuSeal request to {url} failed: "
+                f"status code is {response.status_code}, reason is {message}"
             )
 
         if not response.content:
@@ -99,6 +90,56 @@ class DocusealClient:
             "submitters": [submitter],
         }
         return self.request("POST", "submissions", payload)
+
+    def _send_request(
+        self,
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any] | None,
+    ) -> requests.Response:
+        """Send one HTTP request to DocuSeal."""
+        try:
+            return requests.request(
+                method.upper(),
+                url,
+                headers=headers,
+                json=payload,
+                timeout=self.timeout_seconds,
+                verify=default_ca_bundle_path(),
+            )
+        except requests.RequestException as exc:
+            raise DocusealAPIError(f"HTTP request failed: {exc}") from exc
+
+
+def normalize_docuseal_base_url(base_url: str) -> str:
+    """Normalize DocuSeal Cloud URLs and self-hosted root URLs to the API base."""
+    normalized = base_url.strip().rstrip("/")
+    parts = urlsplit(normalized)
+    hostname = (parts.hostname or "").lower()
+    if hostname in {"docuseal.com", "www.docuseal.com"}:
+        return urlunsplit(
+            (
+                "https",
+                "api.docuseal.com",
+                "",
+                parts.query,
+                parts.fragment,
+            )
+        ).rstrip("/")
+
+    if parts.path in {"", "/"}:
+        return urlunsplit(
+            (
+                parts.scheme or "https",
+                parts.netloc,
+                "/api",
+                parts.query,
+                parts.fragment,
+            )
+        ).rstrip("/")
+
+    return normalized
 
 
 def create_member_agreement_submission(
