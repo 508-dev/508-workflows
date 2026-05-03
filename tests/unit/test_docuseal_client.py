@@ -16,8 +16,8 @@ def test_create_member_agreement_submission_posts_expected_payload() -> None:
     """Shared helper should create a standard member agreement submission."""
     mock_response = Mock()
     mock_response.status_code = 201
-    mock_response.content = b'{"id": 4200}'
-    mock_response.json.return_value = {"id": 4200}
+    mock_response.content = b'[{"id": 1, "submission_id": 4200}]'
+    mock_response.json.return_value = [{"id": 1, "submission_id": 4200}]
 
     with patch(
         "five08.clients.docuseal.requests.request",
@@ -59,8 +59,8 @@ def test_create_member_agreement_submission_normalizes_docuseal_cloud_ui_url() -
     """Cloud UI URLs should be rewritten to the DocuSeal API host."""
     mock_response = Mock()
     mock_response.status_code = 201
-    mock_response.content = b'{"id": 4200}'
-    mock_response.json.return_value = {"id": 4200}
+    mock_response.content = b'[{"id": 1, "submission_id": 4200}]'
+    mock_response.json.return_value = [{"id": 1, "submission_id": 4200}]
 
     with patch(
         "five08.clients.docuseal.requests.request",
@@ -82,8 +82,8 @@ def test_create_member_agreement_submission_normalizes_self_hosted_root_url() ->
     """Self-hosted root URLs should be rewritten to the `/api` base once."""
     mock_response = Mock()
     mock_response.status_code = 201
-    mock_response.content = b'{"id": 4200}'
-    mock_response.json.return_value = {"id": 4200}
+    mock_response.content = b'[{"id": 1, "submission_id": 4200}]'
+    mock_response.json.return_value = [{"id": 1, "submission_id": 4200}]
 
     with patch(
         "five08.clients.docuseal.requests.request",
@@ -100,6 +100,56 @@ def test_create_member_agreement_submission_normalizes_self_hosted_root_url() ->
     assert result == {"id": 4200}
     mock_request.assert_called_once()
     assert mock_request.call_args.args[1] == "https://docuseal.508.dev/api/submissions"
+
+
+def test_create_member_agreement_submission_normalizes_submitter_list_response() -> (
+    None
+):
+    """Create submission should accept DocuSeal's submitter array response."""
+    mock_response = Mock()
+    mock_response.status_code = 201
+    mock_response.content = (
+        b'[{"id": 11, "submission_id": 4200, "role": "First Party"}]'
+    )
+    mock_response.json.return_value = [
+        {"id": 11, "submission_id": 4200, "role": "First Party"}
+    ]
+
+    with patch(
+        "five08.clients.docuseal.requests.request",
+        return_value=mock_response,
+    ):
+        result = create_member_agreement_submission(
+            base_url="https://docuseal.example.com",
+            api_key="secret",
+            template_id=1000001,
+            submitter_name="Jane Doe",
+            submitter_email="jane@example.com",
+        )
+
+    assert result == {"id": 4200}
+
+
+def test_create_member_agreement_submission_keeps_object_response() -> None:
+    """Create submission should still accept object responses if returned."""
+    mock_response = Mock()
+    mock_response.status_code = 201
+    mock_response.content = b'{"id": 4200}'
+    mock_response.json.return_value = {"id": 4200}
+
+    with patch(
+        "five08.clients.docuseal.requests.request",
+        return_value=mock_response,
+    ):
+        result = create_member_agreement_submission(
+            base_url="https://docuseal.example.com",
+            api_key="secret",
+            template_id=1000001,
+            submitter_name="Jane Doe",
+            submitter_email="jane@example.com",
+        )
+
+    assert result == {"id": 4200}
 
 
 def test_create_member_agreement_submission_raises_on_api_error() -> None:

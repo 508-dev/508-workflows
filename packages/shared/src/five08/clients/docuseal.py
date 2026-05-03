@@ -31,7 +31,7 @@ class DocusealClient:
         method: str,
         path: str,
         payload: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> Any:
         """Send one JSON request to DocuSeal."""
         url = f"{self.base_url}/{path.lstrip('/')}"
         headers = {
@@ -63,8 +63,6 @@ class DocusealClient:
                 f"Failed to decode JSON response (status {response.status_code}). "
                 f"Body preview: {body_preview}"
             ) from exc
-        if not isinstance(json_data, dict):
-            raise DocusealAPIError("API response is not a JSON object")
         return json_data
 
     def create_submission(
@@ -89,7 +87,30 @@ class DocusealClient:
             "send_email": send_email,
             "submitters": [submitter],
         }
-        return self.request("POST", "submissions", payload)
+        response_payload = self.request("POST", "submissions", payload)
+        if isinstance(response_payload, dict):
+            return response_payload
+        if isinstance(response_payload, list):
+            return self._normalize_submission_submitters_response(response_payload)
+        raise DocusealAPIError("API response is not valid JSON for a submission")
+
+    @staticmethod
+    def _normalize_submission_submitters_response(
+        response_payload: list[Any],
+    ) -> dict[str, Any]:
+        """Convert DocuSeal's submitter list response into a stable submission object."""
+        if not response_payload:
+            raise DocusealAPIError("API response did not include any submitters")
+
+        first_submitter = response_payload[0]
+        if not isinstance(first_submitter, dict):
+            raise DocusealAPIError("API response submitter is not a JSON object")
+
+        submission_id = first_submitter.get("submission_id")
+        if submission_id is None:
+            raise DocusealAPIError("API response did not include a submission_id")
+
+        return {"id": submission_id}
 
     def _send_request(
         self,
