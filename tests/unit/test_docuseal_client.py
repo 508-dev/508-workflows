@@ -130,6 +130,78 @@ def test_create_member_agreement_submission_normalizes_submitter_list_response()
     assert result == {"id": 4200}
 
 
+def test_create_member_agreement_submission_raises_on_empty_submitter_list() -> None:
+    """Create submission should reject empty submitter-array responses."""
+    mock_response = Mock()
+    mock_response.status_code = 201
+    mock_response.content = b"[]"
+    mock_response.json.return_value = []
+
+    with patch(
+        "five08.clients.docuseal.requests.request",
+        return_value=mock_response,
+    ):
+        with pytest.raises(
+            DocusealAPIError,
+            match="API response did not include any submitters",
+        ):
+            create_member_agreement_submission(
+                base_url="https://docuseal.example.com",
+                api_key="secret",
+                template_id=1000001,
+                submitter_name="Jane Doe",
+                submitter_email="jane@example.com",
+            )
+
+
+def test_create_member_agreement_submission_raises_on_non_object_submitter() -> None:
+    """Create submission should reject submitter arrays with non-object entries."""
+    mock_response = Mock()
+    mock_response.status_code = 201
+    mock_response.content = b'["not-an-object"]'
+    mock_response.json.return_value = ["not-an-object"]
+
+    with patch(
+        "five08.clients.docuseal.requests.request",
+        return_value=mock_response,
+    ):
+        with pytest.raises(
+            DocusealAPIError,
+            match="API response submitter is not a JSON object",
+        ):
+            create_member_agreement_submission(
+                base_url="https://docuseal.example.com",
+                api_key="secret",
+                template_id=1000001,
+                submitter_name="Jane Doe",
+                submitter_email="jane@example.com",
+            )
+
+
+def test_create_member_agreement_submission_raises_on_missing_submission_id() -> None:
+    """Create submission should reject submitter arrays without a submission id."""
+    mock_response = Mock()
+    mock_response.status_code = 201
+    mock_response.content = b'[{"id": 11, "role": "First Party"}]'
+    mock_response.json.return_value = [{"id": 11, "role": "First Party"}]
+
+    with patch(
+        "five08.clients.docuseal.requests.request",
+        return_value=mock_response,
+    ):
+        with pytest.raises(
+            DocusealAPIError,
+            match="API response did not include a submission_id",
+        ):
+            create_member_agreement_submission(
+                base_url="https://docuseal.example.com",
+                api_key="secret",
+                template_id=1000001,
+                submitter_name="Jane Doe",
+                submitter_email="jane@example.com",
+            )
+
+
 def test_create_member_agreement_submission_keeps_object_response() -> None:
     """Create submission should still accept object responses if returned."""
     mock_response = Mock()
