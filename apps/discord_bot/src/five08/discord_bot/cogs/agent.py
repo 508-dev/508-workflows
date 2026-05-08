@@ -188,6 +188,14 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         if isinstance(interaction.user, discord.Member):
             role_names = [role.name for role in interaction.user.roles]
 
+        interaction_message = getattr(interaction, "message", None)
+        message_id = (
+            str(interaction_message.id)
+            if interaction_message is not None
+            and getattr(interaction_message, "id", None) is not None
+            else None
+        )
+
         return {
             "discord_user_id": str(interaction.user.id),
             "internal_user_id": None,
@@ -203,7 +211,8 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             "roles": role_names,
             "scopes": [],
             "impersonation": False,
-            "message_id": str(interaction.id),
+            "interaction_id": str(interaction.id),
+            "message_id": message_id,
         }
 
     async def _post_agent_request(

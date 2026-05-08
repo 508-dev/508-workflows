@@ -1198,7 +1198,7 @@ async def _write_agent_audit_event(
                 actor_subject=context.discord_user_id,
                 resource_type="agent_plan" if plan is not None else "agent_request",
                 resource_id=plan.plan_id if plan is not None else None,
-                correlation_id=context.message_id,
+                correlation_id=context.message_id or context.interaction_id,
                 metadata=metadata or {},
             ),
         )

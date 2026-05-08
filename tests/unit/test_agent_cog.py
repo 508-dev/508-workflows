@@ -47,6 +47,22 @@ def test_audit_result_treats_forbidden_error_payload_as_denied() -> None:
     )
 
 
+def test_build_agent_context_separates_interaction_and_message_ids() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    interaction = SimpleNamespace(
+        id=999,
+        user=SimpleNamespace(id=123),
+        guild_id=456,
+        channel_id=789,
+        message=SimpleNamespace(id=321),
+    )
+
+    context = cog._build_agent_context(interaction)
+
+    assert context["interaction_id"] == "999"
+    assert context["message_id"] == "321"
+
+
 def test_post_backend_json_returns_structured_failed_response(
     monkeypatch,
 ) -> None:

@@ -638,7 +638,7 @@ def test_agent_request_for_write_returns_confirmation_plan(
     )
     monkeypatch.setattr(api, "_PENDING_AGENT_PLANS", {})
 
-    with patch("five08.backend.api.insert_audit_event"):
+    with patch("five08.backend.api.insert_audit_event") as mock_insert:
         response = client.post(
             "/agent/requests",
             json={
@@ -647,6 +647,8 @@ def test_agent_request_for_write_returns_confirmation_plan(
                     "discord_user_id": "123",
                     "organization_id": "org-1",
                     "guild_id": "org-1",
+                    "interaction_id": "interaction-1",
+                    "message_id": "message-1",
                     "roles": ["Member"],
                 },
             },
@@ -658,6 +660,8 @@ def test_agent_request_for_write_returns_confirmation_plan(
     assert payload["status"] == "requires_confirmation"
     assert payload["plan"]["actions"][0]["tool_name"] == "task_write.create_task"
     assert payload["plan"]["plan_id"] in api._PENDING_AGENT_PLANS
+    audit_payload = mock_insert.call_args.args[1]
+    assert audit_payload.correlation_id == "message-1"
 
 
 def test_agent_confirmation_executes_frozen_plan_inline(

@@ -334,7 +334,7 @@ class AgentOrchestrator:
         if match is None:
             return None
         project = re.split(
-            r"\s+\b(?:by|before|due|and|assign)\b",
+            r"\s+\b(?:by|before|due|and|assign|to)\b",
             match.group(1),
             maxsplit=1,
             flags=re.IGNORECASE,

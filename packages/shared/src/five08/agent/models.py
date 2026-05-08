@@ -24,6 +24,7 @@ class AgentIdentityContext(BaseModel):
     roles: list[str] = Field(default_factory=list)
     scopes: list[str] = Field(default_factory=list)
     impersonation: bool = False
+    interaction_id: str | None = None
     message_id: str | None = None
 
 

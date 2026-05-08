@@ -130,6 +130,19 @@ def test_create_task_parses_capitalized_for_assignee() -> None:
     assert response.plan.actions[0].arguments["assignee"] == "Sarah"
 
 
+def test_create_task_project_clause_stops_before_title() -> None:
+    orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
+
+    response = orchestrator.plan(
+        "Create a task for project Atlas to update docs",
+        _context(),
+    )
+
+    assert response.plan is not None
+    assert response.plan.actions[0].arguments["project"] == "Atlas"
+    assert response.plan.actions[0].arguments["title"] == "update docs"
+
+
 def test_invalid_month_date_does_not_crash_planning() -> None:
     orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
 
