@@ -221,7 +221,8 @@ class ResumeDownloadButton(discord.ui.Button[discord.ui.View]):
                     resource_id=self.resume_id,
                 )
             await interaction.followup.send(
-                "❌ An unexpected error occurred while downloading the resume."
+                "❌ An unexpected error occurred while downloading the resume.",
+                ephemeral=True,
             )
 
 
@@ -4624,13 +4625,15 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             discord_file = discord.File(file_buffer, filename=filename)
 
             await interaction.followup.send(
-                f"📄 Resume for **{contact_name}**:", file=discord_file
+                f"📄 Resume for **{contact_name}**:", file=discord_file, ephemeral=True
             )
             return True
 
         except EspoAPIError as e:
             logger.error(f"Failed to download resume {resume_id}: {e}")
-            await interaction.followup.send(f"❌ Failed to download resume: {str(e)}")
+            await interaction.followup.send(
+                f"❌ Failed to download resume: {str(e)}", ephemeral=True
+            )
             return False
 
     def _check_member_role(self, interaction: discord.Interaction) -> bool:
