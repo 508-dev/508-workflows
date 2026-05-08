@@ -11,7 +11,10 @@ from five08.agent import (
     AgentIdentityContext,
     AgentModelConfig,
     AgentOrchestrator,
+    AgentToolAction,
     InMemoryTaskStore,
+    PolicyEngine,
+    ToolManifest,
 )
 from five08.agent.tools import ToolRegistry
 
@@ -163,11 +166,35 @@ def test_create_task_project_clause_stops_before_title() -> None:
     assert "assignee" not in response.plan.actions[0].arguments
 
 
+def test_update_assignment_parses_task_id_before_to() -> None:
+    orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
+
+    response = orchestrator.plan("Assign TASK-001 to Sarah", _context())
+
+    assert response.plan is not None
+    assert response.plan.actions[0].tool_name == "task_write.update_task"
+    assert response.plan.actions[0].arguments["task_id"] == "TASK-001"
+    assert response.plan.actions[0].arguments["assignee"] == "Sarah"
+
+
 def test_invalid_month_date_does_not_crash_planning() -> None:
     orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
 
     response = orchestrator.plan(
         "Create a task to follow up by February 31 2026",
+        _context(),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    assert "due_date" not in response.plan.actions[0].arguments
+
+
+def test_invalid_iso_date_does_not_freeze_malformed_due_date() -> None:
+    orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
+
+    response = orchestrator.plan(
+        "Create a task to follow up due 2026-02-31",
         _context(),
     )
 
@@ -208,6 +235,14 @@ def test_tool_registry_rejects_malformed_write_arguments() -> None:
             actor_id="123",
         )
 
+    with pytest.raises(ValueError, match="valid ISO date"):
+        registry.execute(
+            "task_write.create_task",
+            {"title": "Follow up", "due_date": "2026-02-31"},
+            organization_id="org-1",
+            actor_id="123",
+        )
+
     with pytest.raises(ValueError, match="Task id"):
         registry.execute(
             "task_write.update_task",
@@ -231,6 +266,31 @@ def test_tool_registry_rejects_malformed_write_arguments() -> None:
             organization_id="org-1",
             actor_id="123",
         )
+
+
+def test_policy_ignores_client_supplied_scopes() -> None:
+    policy = PolicyEngine()
+    manifest = ToolManifest(
+        name="deploy.request",
+        risk="high",
+        required_scopes=("deploy:request",),
+        tenant_scoped=False,
+    )
+    action = AgentToolAction(
+        tool_name="deploy.request",
+        required_scopes=["deploy:request"],
+        summary="Request deploy",
+    )
+    context = AgentIdentityContext(
+        discord_user_id="123",
+        roles=["Member"],
+        scopes=["deploy:request"],
+    )
+
+    decision = policy.authorize(context=context, manifest=manifest, action=action)
+
+    assert not decision.allowed
+    assert "deploy:request" in decision.reason
 
 
 def test_agent_model_config_uses_tier_specific_provider() -> None:

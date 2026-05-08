@@ -67,6 +67,15 @@ def test_audit_result_treats_http_forbidden_payload_as_denied() -> None:
     )
 
 
+def test_audit_result_treats_clarification_as_success() -> None:
+    assert (
+        AgentCog._audit_result_for_agent_response(
+            {"status": "needs_clarification", "http_status": 422}
+        )
+        == "success"
+    )
+
+
 @pytest.mark.asyncio
 async def test_confirmation_view_disable_stops_listener() -> None:
     view = AgentConfirmationView(

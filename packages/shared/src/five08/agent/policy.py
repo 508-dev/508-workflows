@@ -61,7 +61,7 @@ class PolicyEngine:
     """Authorize each proposed tool call without model involvement."""
 
     def scopes_for_context(self, context: AgentIdentityContext) -> set[str]:
-        scopes = {scope.strip() for scope in context.scopes if scope.strip()}
+        scopes: set[str] = set()
         normalized_roles = {role.strip().casefold() for role in context.roles}
         if normalized_roles & _ADMIN_ROLE_NAMES:
             scopes.update(_ROLE_SCOPES["admin"])

@@ -295,6 +295,8 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
     @staticmethod
     def _audit_result_for_agent_response(response: dict[str, Any]) -> str:
         status = str(response.get("status") or "").strip().lower()
+        if status == "needs_clarification":
+            return "success"
         if status == "denied":
             return "denied"
         if status == "failed" or response.get("error"):

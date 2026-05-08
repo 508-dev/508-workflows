@@ -252,5 +252,10 @@ def _optional_date(value: Any) -> str | None:
         return value.isoformat()
     if isinstance(value, str):
         stripped = value.strip()
-        return stripped or None
+        if not stripped:
+            return None
+        try:
+            return date.fromisoformat(stripped).isoformat()
+        except ValueError as exc:
+            raise ValueError("Expected date value as valid ISO date") from exc
     return None

@@ -336,7 +336,7 @@ class AgentOrchestrator:
 
         if match is None or match.group(1).casefold().startswith("project "):
             match = re.search(
-                r"\bassign(?:ed)?\s+(?:it\s+|task\s+)?to\s+([A-Za-z][A-Za-z .'-]{0,80})",
+                r"\bassign(?:ed)?\s+(?:(?:it|task|TASK-\d+)\s+)?to\s+([A-Za-z][A-Za-z .'-]{0,80})",
                 text,
                 re.IGNORECASE,
             )
@@ -369,7 +369,10 @@ class AgentOrchestrator:
     def _extract_due_date(self, text: str) -> str | None:
         iso_match = _DATE_ISO_RE.search(text)
         if iso_match:
-            return iso_match.group(1)
+            try:
+                return date.fromisoformat(iso_match.group(1)).isoformat()
+            except ValueError:
+                return None
         month_match = _MONTH_DATE_RE.search(text)
         if month_match:
             month = _MONTHS[month_match.group(1).casefold()]
