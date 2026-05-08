@@ -30,6 +30,7 @@ class Settings(SharedSettings):
     backend_api_base_url: str = "http://127.0.0.1:8090"
     audit_api_base_url: str | None = None
     audit_api_timeout_seconds: float = 2.0
+    agent_api_timeout_seconds: float = 8.0
     migadu_api_user: str | None = None
     migadu_api_key: str | None = None
     migadu_mailbox_domain: str = "508.dev"

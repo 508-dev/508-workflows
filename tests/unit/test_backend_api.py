@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import AsyncMock, Mock, patch
 
+from five08.agent import AgentOrchestrator, InMemoryTaskStore, ToolRegistry
 from five08.backend import api
 from five08.worker.masking import mask_email
 
@@ -621,6 +622,92 @@ def test_audit_event_handler_persists_human_event(
     assert response.status_code == 201
     assert payload["event_id"] == "evt-1"
     assert payload["person_id"] == "person-1"
+
+
+def test_agent_request_for_write_returns_confirmation_plan(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Agent writes should freeze a plan instead of mutating immediately."""
+    task_store = InMemoryTaskStore()
+    monkeypatch.setattr(
+        api,
+        "_AGENT_ORCHESTRATOR",
+        AgentOrchestrator(registry=ToolRegistry(task_store)),
+    )
+    monkeypatch.setattr(api, "_PENDING_AGENT_PLANS", {})
+
+    with patch("five08.backend.api.insert_audit_event"):
+        response = client.post(
+            "/agent/requests",
+            json={
+                "message": "Create a task for Sarah to update onboarding docs by Friday",
+                "context": {
+                    "discord_user_id": "123",
+                    "organization_id": "org-1",
+                    "guild_id": "org-1",
+                    "roles": ["Member"],
+                },
+            },
+            headers=auth_headers,
+        )
+
+    payload = response.json()
+    assert response.status_code == 202
+    assert payload["status"] == "requires_confirmation"
+    assert payload["plan"]["actions"][0]["tool_name"] == "task_write.create_task"
+    assert payload["plan"]["plan_id"] in api._PENDING_AGENT_PLANS
+
+
+def test_agent_confirmation_executes_frozen_plan_inline(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Confirmed agent writes should execute inline and return the result."""
+    task_store = InMemoryTaskStore()
+    monkeypatch.setattr(
+        api,
+        "_AGENT_ORCHESTRATOR",
+        AgentOrchestrator(registry=ToolRegistry(task_store)),
+    )
+    monkeypatch.setattr(api, "_PENDING_AGENT_PLANS", {})
+
+    with patch("five08.backend.api.insert_audit_event"):
+        plan_response = client.post(
+            "/agent/requests",
+            json={
+                "message": "Create a task for Sarah to update onboarding docs by Friday",
+                "context": {
+                    "discord_user_id": "123",
+                    "organization_id": "org-1",
+                    "guild_id": "org-1",
+                    "roles": ["Member"],
+                },
+            },
+            headers=auth_headers,
+        )
+        plan_id = plan_response.json()["plan"]["plan_id"]
+        confirm_response = client.post(
+            f"/agent/confirmations/{plan_id}",
+            json={
+                "confirm": True,
+                "context": {
+                    "discord_user_id": "123",
+                    "organization_id": "org-1",
+                    "guild_id": "org-1",
+                    "roles": ["Member"],
+                },
+            },
+            headers=auth_headers,
+        )
+
+    payload = confirm_response.json()
+    assert confirm_response.status_code == 200
+    assert payload["status"] == "executed"
+    assert payload["results"][0]["result"]["task_id"] == "TASK-001"
+    assert plan_id not in api._PENDING_AGENT_PLANS
 
 
 def test_auth_login_returns_503_when_store_not_ready(client: TestClient) -> None:

@@ -265,6 +265,10 @@ Use `.env.example` as the source of truth for defaults.
 - `Optional`: `HEALTHCHECK_PORT` (host-run `./scripts/dev.sh` ignores `.env` for this key and defaults to a deterministic per-worktree value near `30000 + WORKTREE_ENV_SLOT`; export it in your shell only when you intentionally want a fixed port, and avoid browser-unsafe ports such as `5060`)
 - Note: bot message chunking uses Discord's 2000 character limit in code.
 
+### Discord Agent Gateway
+
+- `Optional`: `AGENT_API_TIMEOUT_SECONDS` (default: `8.0`; timeout for synchronous Discord agent gateway calls)
+
 ### Discord CRM Audit Logging (Best Effort)
 
 - `Optional`: `AUDIT_API_BASE_URL` (when set with `API_SHARED_SECRET`, CRM commands emit best-effort audit events)

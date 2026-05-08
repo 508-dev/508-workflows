@@ -30,6 +30,15 @@ from five08.audit import (
     AuditSource,
     insert_audit_event,
 )
+from five08.agent import (
+    AgentIdentityContext,
+    AgentOrchestrator,
+    AgentPlan,
+    AgentRequest,
+    AgentResponse,
+    InMemoryTaskStore,
+    ToolRegistry,
+)
 from five08.logging import configure_observability
 from five08.queue import (
     EnqueuedJob,
@@ -99,6 +108,13 @@ class DiscordLinkCreateRequest(BaseModel):
     next_path: str | None = None
 
 
+class AgentConfirmationRequest(BaseModel):
+    """Payload for confirming or canceling a frozen agent plan."""
+
+    context: AgentIdentityContext
+    confirm: bool = True
+
+
 _JOB_FUNCTIONS = JOB_FUNCTIONS
 
 # Backward-compatible direct handler exports expected by existing call sites/tests.
@@ -111,6 +127,11 @@ process_mailbox_message_job = JOB_FUNCTIONS["process_mailbox_message_job"]
 sync_people_from_crm_job = JOB_FUNCTIONS["sync_people_from_crm_job"]
 sync_person_from_crm_job = JOB_FUNCTIONS["sync_person_from_crm_job"]
 process_docuseal_agreement_job = JOB_FUNCTIONS["process_docuseal_agreement_job"]
+_AGENT_TASK_STORE = InMemoryTaskStore()
+_AGENT_ORCHESTRATOR = AgentOrchestrator(
+    registry=ToolRegistry(_AGENT_TASK_STORE),
+)
+_PENDING_AGENT_PLANS: dict[str, tuple[AgentPlan, AgentIdentityContext]] = {}
 
 
 def _is_authorized(request: Request) -> bool:
@@ -1153,6 +1174,204 @@ async def audit_event_handler(request: Request) -> JSONResponse:
     )
 
 
+async def _write_agent_audit_event(
+    *,
+    context: AgentIdentityContext,
+    action: str,
+    result: AuditResult,
+    plan: AgentPlan | None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Best-effort agent audit write that never breaks command execution."""
+    try:
+        await asyncio.to_thread(
+            insert_audit_event,
+            settings,
+            AuditEventInput(
+                source=AuditSource.DISCORD,
+                action=action,
+                result=result,
+                actor_provider=ActorProvider.DISCORD,
+                actor_subject=context.discord_user_id,
+                resource_type="agent_plan" if plan is not None else "agent_request",
+                resource_id=plan.plan_id if plan is not None else None,
+                correlation_id=context.message_id,
+                metadata=metadata or {},
+            ),
+        )
+    except Exception:
+        logger.warning(
+            "Best-effort agent audit write failed action=%s user=%s",
+            action,
+            context.discord_user_id,
+            exc_info=True,
+        )
+
+
+def _store_pending_agent_plan(plan: AgentPlan, context: AgentIdentityContext) -> None:
+    _PENDING_AGENT_PLANS[plan.plan_id] = (plan, context)
+
+
+def _pop_pending_agent_plan(
+    plan_id: str,
+) -> tuple[AgentPlan, AgentIdentityContext] | None:
+    return _PENDING_AGENT_PLANS.pop(plan_id, None)
+
+
+async def agent_request_handler(request: Request) -> JSONResponse:
+    """Plan and execute supported English agent commands."""
+    if not _is_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    try:
+        payload_data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+
+    if not isinstance(payload_data, dict):
+        return JSONResponse({"error": "payload_must_be_object"}, status_code=400)
+
+    try:
+        payload = AgentRequest.model_validate(payload_data)
+    except ValidationError as exc:
+        return JSONResponse(
+            {"error": "invalid_payload", "detail": str(exc)}, status_code=400
+        )
+
+    response = _AGENT_ORCHESTRATOR.plan(payload.message, payload.context)
+    if response.plan is not None and response.status == "requires_confirmation":
+        _store_pending_agent_plan(response.plan, payload.context)
+
+    audit_result = AuditResult.SUCCESS
+    if response.status == "denied":
+        audit_result = AuditResult.DENIED
+    elif response.status == "failed":
+        audit_result = AuditResult.ERROR
+    await _write_agent_audit_event(
+        context=payload.context,
+        action="agent.request",
+        result=audit_result,
+        plan=response.plan,
+        metadata={
+            "status": response.status,
+            "intent": response.plan.intent if response.plan else None,
+            "model_tier": response.plan.model_tier if response.plan else None,
+            "requires_confirmation": (
+                response.plan.requires_confirmation if response.plan else False
+            ),
+        },
+    )
+
+    status_code = {
+        "executed": 200,
+        "requires_confirmation": 202,
+        "needs_clarification": 422,
+        "denied": 403,
+        "failed": 500,
+    }[response.status]
+    return JSONResponse(response.model_dump(mode="json"), status_code=status_code)
+
+
+async def agent_confirmation_handler(
+    request: Request,
+    plan_id: str,
+) -> JSONResponse:
+    """Execute or cancel a frozen agent plan after user confirmation."""
+    if not _is_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    try:
+        payload_data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+
+    if not isinstance(payload_data, dict):
+        return JSONResponse({"error": "payload_must_be_object"}, status_code=400)
+
+    try:
+        payload = AgentConfirmationRequest.model_validate(payload_data)
+    except ValidationError as exc:
+        return JSONResponse(
+            {"error": "invalid_payload", "detail": str(exc)}, status_code=400
+        )
+
+    pending = _PENDING_AGENT_PLANS.get(plan_id)
+    if pending is None:
+        return JSONResponse({"error": "plan_not_found"}, status_code=404)
+
+    plan, original_context = pending
+    if original_context.discord_user_id != payload.context.discord_user_id:
+        await _write_agent_audit_event(
+            context=payload.context,
+            action="agent.confirmation",
+            result=AuditResult.DENIED,
+            plan=plan,
+            metadata={"reason": "actor_mismatch"},
+        )
+        return JSONResponse({"error": "actor_mismatch"}, status_code=403)
+
+    if plan.expires_at is not None:
+        expires_at = plan.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) > expires_at.astimezone(timezone.utc):
+            _pop_pending_agent_plan(plan_id)
+            return JSONResponse({"error": "plan_expired"}, status_code=410)
+
+    if not payload.confirm:
+        _pop_pending_agent_plan(plan_id)
+        await _write_agent_audit_event(
+            context=payload.context,
+            action="agent.confirmation",
+            result=AuditResult.DENIED,
+            plan=plan,
+            metadata={"status": "canceled"},
+        )
+        response = AgentResponse(
+            status="denied",
+            plan=plan,
+            message="Agent plan was canceled before execution.",
+        )
+        return JSONResponse(response.model_dump(mode="json"), status_code=200)
+
+    _pop_pending_agent_plan(plan_id)
+    results = _AGENT_ORCHESTRATOR.execute_plan(plan, payload.context)
+    status = (
+        "executed"
+        if all(result.status == "succeeded" for result in results)
+        else "failed"
+    )
+    if status == "executed":
+        response = AgentResponse(
+            status="executed",
+            plan=plan,
+            results=results,
+            message="Executed the confirmed agent plan.",
+        )
+    else:
+        response = AgentResponse(
+            status="failed",
+            plan=plan,
+            results=results,
+            message="One or more confirmed agent actions failed.",
+        )
+    audit_result = AuditResult.SUCCESS if status == "executed" else AuditResult.ERROR
+    await _write_agent_audit_event(
+        context=payload.context,
+        action="agent.confirmation",
+        result=audit_result,
+        plan=plan,
+        metadata={
+            "status": response.status,
+            "results": [result.model_dump(mode="json") for result in results],
+        },
+    )
+    return JSONResponse(
+        response.model_dump(mode="json"),
+        status_code=200 if status == "executed" else 500,
+    )
+
+
 async def auth_login_handler(
     request: Request,
     next_path: str | None = Query(default=None, alias="next"),
@@ -1742,6 +1961,12 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
     )
     app.add_api_route("/sync/people", sync_people_handler, methods=["POST"])
     app.add_api_route("/audit/events", audit_event_handler, methods=["POST"])
+    app.add_api_route("/agent/requests", agent_request_handler, methods=["POST"])
+    app.add_api_route(
+        "/agent/confirmations/{plan_id}",
+        agent_confirmation_handler,
+        methods=["POST"],
+    )
 
     app.add_api_route(
         "/auth/login", auth_login_handler, methods=["GET"], response_model=None
