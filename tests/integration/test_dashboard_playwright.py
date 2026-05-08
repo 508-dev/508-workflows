@@ -201,9 +201,11 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             assert page.locator("#metricFailed").inner_text() == "1"
 
             with page.expect_response(
-                lambda response: "/dashboard/api/jobs?" in response.url
-                and "status=failed" in response.url
-                and response.status == 200
+                lambda response: (
+                    "/dashboard/api/jobs?" in response.url
+                    and "status=failed" in response.url
+                    and response.status == 200
+                )
             ):
                 page.locator("#status").select_option("failed")
 
