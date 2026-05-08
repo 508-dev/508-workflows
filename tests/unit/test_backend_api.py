@@ -755,6 +755,71 @@ def test_dashboard_jobs_requires_admin_session(client: TestClient) -> None:
     assert response.status_code == 401
 
 
+def test_dashboard_jobs_forbids_non_admin_session(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="member-1",
+        email="member@508.dev",
+        display_name="Member User",
+        groups=["Member"],
+        is_admin=False,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/api/jobs")
+
+    assert response.status_code == 403
+    assert response.json()["error"] == "forbidden"
+
+
+def test_dashboard_sync_people_audits_discord_session(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="admin@508.dev",
+        display_name="Discord Admin",
+        groups=["discord_admin"],
+        is_admin=True,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+        crm_contact_id="contact-123",
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._enqueue_full_crm_sync_job",
+            new_callable=AsyncMock,
+            return_value=Mock(id="job-sync-1", created=True),
+        ),
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
+    ):
+        response = client.post("/dashboard/api/sync/people")
+
+    assert response.status_code == 202
+    assert response.json()["job_id"] == "job-sync-1"
+    audit_payload = mock_insert.call_args.args[1]
+    assert audit_payload.source == api.AuditSource.ADMIN_DASHBOARD
+    assert audit_payload.action == "crm.people_sync"
+    assert audit_payload.result == api.AuditResult.SUCCESS
+    assert audit_payload.actor_provider == api.ActorProvider.DISCORD
+    assert audit_payload.actor_subject == "123456789"
+    assert audit_payload.actor_display_name == "Discord Admin"
+    assert audit_payload.resource_type == "crm_people_sync"
+    assert audit_payload.resource_id == "job-sync-1"
+    assert audit_payload.metadata is not None
+    assert audit_payload.metadata["source"] == "dashboard"
+
+
 def test_auth_discord_link_create_forbidden_for_non_admin(
     client: TestClient,
     auth_headers: dict[str, str],

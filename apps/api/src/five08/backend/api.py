@@ -382,13 +382,6 @@ async def _current_session(request: Request) -> tuple[str | None, AuthSession | 
     return session_id, session
 
 
-async def _current_admin_session(request: Request) -> AuthSession | None:
-    _, session = await _current_session(request)
-    if session is None or not session.is_admin:
-        return None
-    return session
-
-
 async def _dashboard_admin_session_or_error(
     request: Request,
 ) -> tuple[AuthSession | None, JSONResponse | None]:
@@ -399,7 +392,7 @@ async def _dashboard_admin_session_or_error(
             _clear_session_cookie(response)
         return None, response
     if not session.is_admin:
-        return None, JSONResponse({"error": "unauthorized"}, status_code=401)
+        return None, JSONResponse({"error": "forbidden"}, status_code=403)
     return session, None
 
 
@@ -983,11 +976,30 @@ async def dashboard_rerun_job_handler(
 
 async def dashboard_sync_people_handler(request: Request) -> JSONResponse:
     """Queue a people-cache sync from the authenticated admin dashboard."""
-    _, error_response = await _dashboard_admin_session_or_error(request)
+    session, error_response = await _dashboard_admin_session_or_error(request)
     if error_response is not None:
         return error_response
+    assert session is not None
 
     job = await _enqueue_full_crm_sync_job(request.app.state.queue, reason="dashboard")
+    actor_provider = _session_actor_provider(session)
+    actor_subject = session.email or session.subject
+    if actor_provider == ActorProvider.DISCORD:
+        actor_subject = session.subject
+    await _write_auth_audit_event(
+        action="crm.people_sync",
+        result=AuditResult.SUCCESS,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="crm_people_sync",
+        resource_id=job.id,
+        metadata={
+            "source": "dashboard",
+            "queue": settings.redis_queue_name,
+            "actor_is_admin": session.is_admin,
+        },
+    )
     return JSONResponse(
         {
             "status": "queued",
