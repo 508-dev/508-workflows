@@ -234,7 +234,7 @@ def dashboard_html() -> str:
     <div class="topbar">
       <div>
         <h1>508 Admin Dashboard</h1>
-        <p class="status-line">Operations view for authenticated Discord admins.</p>
+        <p class="status-line">Operations view for authenticated admins.</p>
       </div>
       <div class="identity" aria-live="polite">
         <strong id="userName">Loading user</strong>

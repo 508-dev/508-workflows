@@ -641,6 +641,22 @@ def test_dashboard_redirects_unauthenticated_client(client: TestClient) -> None:
     assert response.headers["location"] == "/auth/login?next=%2Fdashboard"
 
 
+def test_dashboard_clears_stale_session_cookie(client: TestClient) -> None:
+    client.cookies.set(api.settings.auth_session_cookie_name, "stale-session")
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("stale-session", None),
+    ):
+        response = client.get("/dashboard", follow_redirects=False)
+
+    assert response.status_code == 302
+    set_cookie = response.headers["set-cookie"]
+    assert f"{api.settings.auth_session_cookie_name}=" in set_cookie
+    assert "Max-Age=0" in set_cookie
+
+
 def test_dashboard_forbids_non_admin_session(client: TestClient) -> None:
     session = api.AuthSession(
         subject="member-1",
@@ -710,6 +726,22 @@ def test_dashboard_me_returns_crm_linked_admin_session(client: TestClient) -> No
     assert response.status_code == 200
     assert response.json()["crm_contact_id"] == "contact-123"
     assert response.json()["actor_provider"] == api.ActorProvider.DISCORD.value
+
+
+def test_dashboard_me_clears_stale_session_cookie(client: TestClient) -> None:
+    client.cookies.set(api.settings.auth_session_cookie_name, "stale-session")
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("stale-session", None),
+    ):
+        response = client.get("/dashboard/api/me")
+
+    assert response.status_code == 401
+    set_cookie = response.headers["set-cookie"]
+    assert f"{api.settings.auth_session_cookie_name}=" in set_cookie
+    assert "Max-Age=0" in set_cookie
 
 
 def test_dashboard_jobs_requires_admin_session(client: TestClient) -> None:

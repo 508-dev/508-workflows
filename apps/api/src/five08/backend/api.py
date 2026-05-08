@@ -389,6 +389,20 @@ async def _current_admin_session(request: Request) -> AuthSession | None:
     return session
 
 
+async def _dashboard_admin_session_or_error(
+    request: Request,
+) -> tuple[AuthSession | None, JSONResponse | None]:
+    session_id, session = await _current_session(request)
+    if session is None:
+        response = JSONResponse({"error": "unauthorized"}, status_code=401)
+        if session_id is not None:
+            _clear_session_cookie(response)
+        return None, response
+    if not session.is_admin:
+        return None, JSONResponse({"error": "unauthorized"}, status_code=401)
+    return session, None
+
+
 def _session_payload(session: AuthSession) -> dict[str, Any]:
     return {
         "subject": session.subject,
@@ -884,10 +898,13 @@ async def sync_people_handler(request: Request) -> JSONResponse:
 
 async def dashboard_handler(request: Request) -> HTMLResponse | RedirectResponse:
     """Serve the admin dashboard for authenticated admin sessions."""
-    _, session = await _current_session(request)
+    session_id, session = await _current_session(request)
     if session is None:
         login_query = urlencode({"next": normalize_next_path(request.url.path)})
-        return RedirectResponse(url=f"/auth/login?{login_query}", status_code=302)
+        response = RedirectResponse(url=f"/auth/login?{login_query}", status_code=302)
+        if session_id is not None:
+            _clear_session_cookie(response)
+        return response
     if not session.is_admin:
         return HTMLResponse("Forbidden", status_code=403)
     return HTMLResponse(dashboard_html(), status_code=200)
@@ -895,9 +912,10 @@ async def dashboard_handler(request: Request) -> HTMLResponse | RedirectResponse
 
 async def dashboard_me_handler(request: Request) -> JSONResponse:
     """Return the dashboard session identity."""
-    session = await _current_admin_session(request)
-    if session is None:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    session, error_response = await _dashboard_admin_session_or_error(request)
+    if error_response is not None:
+        return error_response
+    assert session is not None
     return JSONResponse(_session_payload(session))
 
 
@@ -909,8 +927,9 @@ async def dashboard_jobs_handler(
     job_type: str | None = Query(default=None, alias="type"),
 ) -> JSONResponse:
     """Return recent jobs for an authenticated admin dashboard session."""
-    if await _current_admin_session(request) is None:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    _, error_response = await _dashboard_admin_session_or_error(request)
+    if error_response is not None:
+        return error_response
 
     cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=minutes)
     job_status: JobStatus | None = None
@@ -954,8 +973,9 @@ async def dashboard_rerun_job_handler(
     job_id: str,
 ) -> JSONResponse:
     """Rerun one job from the authenticated admin dashboard."""
-    if await _current_admin_session(request) is None:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    _, error_response = await _dashboard_admin_session_or_error(request)
+    if error_response is not None:
+        return error_response
 
     payload, status_code = await _rerun_job(job_id, request.app.state.queue)
     return JSONResponse(payload, status_code=status_code)
@@ -963,9 +983,9 @@ async def dashboard_rerun_job_handler(
 
 async def dashboard_sync_people_handler(request: Request) -> JSONResponse:
     """Queue a people-cache sync from the authenticated admin dashboard."""
-    session = await _current_admin_session(request)
-    if session is None:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    _, error_response = await _dashboard_admin_session_or_error(request)
+    if error_response is not None:
+        return error_response
 
     job = await _enqueue_full_crm_sync_job(request.app.state.queue, reason="dashboard")
     return JSONResponse(

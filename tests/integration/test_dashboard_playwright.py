@@ -8,6 +8,7 @@ import threading
 import time
 from collections.abc import Iterator
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 from unittest.mock import Mock
 
 import pytest
@@ -114,6 +115,7 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
     playwright_api = pytest.importorskip("playwright.sync_api")
     sync_playwright = playwright_api.sync_playwright
     playwright_error = playwright_api.Error
+    expect = playwright_api.expect
 
     with sync_playwright() as playwright:
         try:
@@ -140,10 +142,15 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
         def jobs_route(route: Any) -> None:
             request = route.request
             job_requests.append(request.url)
+            query = parse_qs(urlparse(request.url).query)
+            requested_status = query.get("status", [""])[0]
+            jobs = _jobs_payload()
+            if requested_status:
+                jobs = [job for job in jobs if job["status"] == requested_status]
             route.fulfill(
                 status=200,
                 content_type="application/json",
-                body=json.dumps(_jobs_payload()),
+                body=json.dumps(jobs),
             )
 
         def rerun_route(route: Any) -> None:
@@ -193,11 +200,22 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             assert page.locator("#metricQueued").inner_text() == "1"
             assert page.locator("#metricFailed").inner_text() == "1"
 
-            page.locator("#status").select_option("failed")
-            page.wait_for_timeout(250)
-            assert any("status=failed" in url for url in job_requests)
+            with page.expect_response(
+                lambda response: "/dashboard/api/jobs?" in response.url
+                and "status=failed" in response.url
+                and response.status == 200
+            ):
+                page.locator("#status").select_option("failed")
 
-            page.get_by_role("button", name="Rerun").nth(1).click()
+            assert any("status=failed" in url for url in job_requests)
+            expect(page.locator("tbody tr")).to_have_count(1)
+            expect(page.locator("#metricTotal")).to_have_text("1")
+            expect(page.locator("#metricQueued")).to_have_text("0")
+            expect(page.locator("#metricFailed")).to_have_text("1")
+            expect(page.get_by_text("job-queued")).not_to_be_visible()
+            expect(page.get_by_text("job-failed")).to_be_visible()
+
+            page.get_by_role("button", name="Rerun").click()
             assert rerun_requested.wait(timeout=5)
 
             page.get_by_role("button", name="Sync people").click()
