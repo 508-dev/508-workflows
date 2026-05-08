@@ -41,11 +41,11 @@ jobs:
 
     - name: Run tests with pytest
       run: |
-        uv run pytest tests/ -v --tb=short
+        uv run pytest tests/ -m "not playwright" -v --tb=short
 
     - name: Run tests with coverage
       run: |
-        uv run coverage run -m pytest tests/
+        uv run coverage run -m pytest tests/ -m "not playwright"
         uv run coverage report
         uv run coverage xml
 
@@ -54,6 +54,46 @@ jobs:
       with:
         files: ./coverage.xml
         fail_ci_if_error: false
+
+  playwright-dashboard:
+    runs-on: ubuntu-latest
+    environment: test
+
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v7
+      with:
+        version: "0.6.6"
+
+    - name: Set up Python 3.12
+      run: uv python install 3.12
+
+    - name: Install dependencies
+      run: |
+        uv sync --all-extras
+
+    - name: Install Playwright Chromium
+      run: |
+        uv run python -m playwright install --with-deps chromium
+
+    - name: Set environment variables for dashboard tests
+      run: |
+        echo "DISCORD_BOT_TOKEN=test_token_for_ci" >> $GITHUB_ENV
+        echo "EMAIL_USERNAME=test@example.com" >> $GITHUB_ENV
+        echo "EMAIL_PASSWORD=test_password" >> $GITHUB_ENV
+        echo "CHANNEL_ID=123456789" >> $GITHUB_ENV
+        echo "IMAP_SERVER=imap.test.com" >> $GITHUB_ENV
+        echo "SMTP_SERVER=smtp.test.com" >> $GITHUB_ENV
+        echo "ESPO_API_KEY=${{ secrets.ESPO_API_KEY }}" >> $GITHUB_ENV
+        echo "ESPO_BASE_URL=${{ secrets.ESPO_BASE_URL }}" >> $GITHUB_ENV
+        echo "KIMAI_BASE_URL=${{ secrets.KIMAI_BASE_URL }}" >> $GITHUB_ENV
+        echo "KIMAI_API_TOKEN=${{ secrets.KIMAI_API_TOKEN }}" >> $GITHUB_ENV
+
+    - name: Run dashboard Playwright tests
+      run: |
+        uv run pytest tests/integration/test_dashboard_playwright.py -m playwright -v --tb=short
 
   lint:
     runs-on: ubuntu-latest
@@ -123,13 +163,17 @@ jobs:
   # Status check for PRs - ensures all tests pass before merge
   all-tests-passed:
     if: always()
-    needs: [test, lint, security]
+    needs: [test, playwright-dashboard, lint, security]
     runs-on: ubuntu-latest
     steps:
     - name: Check all jobs
       run: |
         if [[ "${{ needs.test.result }}" != "success" ]]; then
           echo "Tests failed"
+          exit 1
+        fi
+        if [[ "${{ needs['playwright-dashboard'].result }}" != "success" ]]; then
+          echo "Dashboard Playwright tests failed"
           exit 1
         fi
         if [[ "${{ needs.lint.result }}" != "success" ]]; then
