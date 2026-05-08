@@ -121,6 +121,23 @@ worktree_env_next_browser_safe_port() {
   printf '%s' "$port_value"
 }
 
+worktree_env_finalize_browser_safe_port() {
+  resolved_value=$1
+  source_label=$2
+  port_label=$3
+
+  worktree_env_validate_port_number "$resolved_value" "$port_label" || return 1
+
+  if [ "$source_label" = "default" ]; then
+    resolved_value=$(worktree_env_next_browser_safe_port "$resolved_value")
+  elif worktree_env_is_browser_unsafe_port "$resolved_value"; then
+    echo "$port_label cannot use browser-unsafe port '$resolved_value'; pick a different port." >&2
+    return 1
+  fi
+
+  printf '%s' "$resolved_value"
+}
+
 worktree_env_resolve_browser_safe_port() {
   key=$1
   default_value=$2
@@ -139,16 +156,30 @@ worktree_env_resolve_browser_safe_port() {
     resolved_value=$default_value
   fi
 
-  worktree_env_validate_port_number "$resolved_value" "$port_label" || return 1
+  worktree_env_finalize_browser_safe_port \
+    "$resolved_value" \
+    "$source_label" \
+    "$port_label"
+}
 
-  if [ "$source_label" = "default" ]; then
-    resolved_value=$(worktree_env_next_browser_safe_port "$resolved_value")
-  elif worktree_env_is_browser_unsafe_port "$resolved_value"; then
-    echo "$port_label cannot use browser-unsafe port '$resolved_value'; pick a different port." >&2
-    return 1
+worktree_env_resolve_browser_safe_shell_or_default() {
+  key=$1
+  default_value=$2
+  port_label=$3
+  source_label=default
+  eval "shell_value=\${$key-}"
+
+  if [ -n "$shell_value" ]; then
+    resolved_value=$shell_value
+    source_label=environment
+  else
+    resolved_value=$default_value
   fi
 
-  printf '%s' "$resolved_value"
+  worktree_env_finalize_browser_safe_port \
+    "$resolved_value" \
+    "$source_label" \
+    "$port_label"
 }
 
 worktree_env_load() {
@@ -192,8 +223,8 @@ worktree_env_load() {
   if [ "$mode" = "host" ]; then
     # Keep host-run app ports below the Linux default ephemeral range
     # (32768-60999) to avoid rare EADDRINUSE races with outbound sockets.
-    WEBHOOK_INGEST_PORT=$(worktree_env_resolve_browser_safe_port WEBHOOK_INGEST_PORT "$((18080 + WORKTREE_ENV_SLOT))" "$WORKTREE_ENV_FILE" "WEBHOOK_INGEST_PORT")
-    HEALTHCHECK_PORT=$(worktree_env_resolve_browser_safe_port HEALTHCHECK_PORT "$((30000 + WORKTREE_ENV_SLOT))" "$WORKTREE_ENV_FILE" "HEALTHCHECK_PORT")
+    WEBHOOK_INGEST_PORT=$(worktree_env_resolve_browser_safe_shell_or_default WEBHOOK_INGEST_PORT "$((18080 + WORKTREE_ENV_SLOT))" "WEBHOOK_INGEST_PORT")
+    HEALTHCHECK_PORT=$(worktree_env_resolve_browser_safe_shell_or_default HEALTHCHECK_PORT "$((30000 + WORKTREE_ENV_SLOT))" "HEALTHCHECK_PORT")
     export WEBHOOK_INGEST_PORT
     export HEALTHCHECK_PORT
   else

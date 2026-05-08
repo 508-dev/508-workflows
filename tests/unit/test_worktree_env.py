@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -73,3 +74,46 @@ def test_worktree_env_load_rejects_unsafe_compose_http_port_override() -> None:
         "WEBHOOK_INGEST_HOST_PORT cannot use browser-unsafe port '5060'; "
         "pick a different port." in result.stderr
     )
+
+
+def test_worktree_env_load_host_mode_ignores_dotenv_host_port_pins() -> None:
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        repo_root = Path(tmp_dir)
+        scripts_dir = repo_root / "scripts"
+        scripts_dir.mkdir()
+        env = os.environ.copy()
+        env.pop("WEBHOOK_INGEST_PORT", None)
+        env.pop("HEALTHCHECK_PORT", None)
+        (repo_root / ".env").write_text(
+            "WEBHOOK_INGEST_PORT=8090\nHEALTHCHECK_PORT=3000\n",
+            encoding="utf-8",
+        )
+
+        result = _run_shell(
+            f"""
+            set -eu
+            . {SCRIPT_PATH}
+            worktree_env_load {scripts_dir} host
+            printf '%s\\n%s\\n' "$WEBHOOK_INGEST_PORT" "$HEALTHCHECK_PORT"
+            """,
+            env=env,
+        )
+
+        assert result.returncode == 0
+
+        hash_value = subprocess.run(
+            [
+                "/bin/sh",
+                "-c",
+                f"printf '%s' '{repo_root}' | cksum | awk '{{print $1}}'",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        slot = int(hash_value) % 2000
+
+        assert result.stdout.splitlines() == [
+            str(18080 + slot),
+            str(30000 + slot),
+        ]

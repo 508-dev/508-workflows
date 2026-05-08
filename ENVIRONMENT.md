@@ -59,7 +59,7 @@ Use `.env.example` as the source of defaults.
 
 - `Optional`: `WEBHOOK_INGEST_HOST` (default: `0.0.0.0`)
 - `Optional`: `WEBHOOK_INGEST_HOST_BIND` (default: `127.0.0.1`; Compose host bind for local exposure)
-- `Optional`: `WEBHOOK_INGEST_PORT` (default when unset: deterministic per-worktree value near `18080 + WORKTREE_ENV_SLOT`; pinned values must avoid browser-unsafe ports such as `5060` because Chrome blocks them)
+- `Optional`: `WEBHOOK_INGEST_PORT` (host-run `./scripts/dev.sh` ignores `.env` for this key and defaults to a deterministic per-worktree value near `18080 + WORKTREE_ENV_SLOT`; export it in your shell only when you intentionally want a fixed port, and avoid browser-unsafe ports such as `5060`)
 - `Optional`: `WEBHOOK_INGEST_HOST_PORT` (default: `8090` when running `docker compose` directly; `./scripts/docker-compose.sh` computes a deterministic per-worktree value when unset, and pinned values must avoid browser-unsafe ports such as `5060`; see `./scripts/docker-compose.sh print-ports`)
 - `Required`: `API_SHARED_SECRET` (global shared secret for protected endpoints and webhooks)
 
@@ -122,7 +122,7 @@ Use `.env.example` as the source of defaults.
 ## Discord Bot Core
 
 - `Optional`: `BACKEND_API_BASE_URL` (default: `http://127.0.0.1:8090`; `./scripts/dev.sh` overrides it to the worktree API port, Compose injects `http://api:8090`)
-- `Optional`: `HEALTHCHECK_PORT` (default when unset: deterministic per-worktree value near `30000 + WORKTREE_ENV_SLOT`; pinned values must avoid browser-unsafe ports such as `5060`)
+- `Optional`: `HEALTHCHECK_PORT` (host-run `./scripts/dev.sh` ignores `.env` for this key and defaults to a deterministic per-worktree value near `30000 + WORKTREE_ENV_SLOT`; export it in your shell only when you intentionally want a fixed port, and avoid browser-unsafe ports such as `5060`)
 - Note: bot message chunking follows Discord's 2000 character limit in code.
 
 ## Migadu Mailbox Automation
