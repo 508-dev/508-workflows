@@ -36,7 +36,7 @@ dev = [
     "ruff~=0.15.10",
     "mypy~=1.14",
     "watchfiles>=1.1.1",
-    "types-requests>=2.32.4.20250913",
+    "types-requests>=2.33.0.20260408",
     "pre-commit>=3.7",
     "pre-commit-uv",
     "freezegun>=1.5.5",
