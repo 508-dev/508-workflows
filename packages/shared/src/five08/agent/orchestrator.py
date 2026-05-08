@@ -143,8 +143,20 @@ class AgentOrchestrator:
         self,
         plan: AgentPlan,
         context: AgentIdentityContext,
+        *,
+        confirmed: bool = False,
     ) -> list[AgentExecutionResult]:
         results: list[AgentExecutionResult] = []
+        if plan.requires_confirmation and not confirmed:
+            return [
+                AgentExecutionResult(
+                    tool_name=action.tool_name,
+                    status="denied",
+                    error="Plan requires confirmation before execution",
+                )
+                for action in plan.actions
+            ]
+
         organization_id = (
             context.organization_id or context.guild_id or context.workspace_id
         )
@@ -171,6 +183,14 @@ class AgentOrchestrator:
                     action.arguments,
                     organization_id=organization_id,
                     actor_id=actor_id,
+                )
+            except PermissionError as exc:
+                results.append(
+                    AgentExecutionResult(
+                        tool_name=action.tool_name,
+                        status="denied",
+                        error=str(exc),
+                    )
                 )
             except Exception as exc:
                 results.append(
@@ -309,7 +329,12 @@ class AgentOrchestrator:
             text,
             re.IGNORECASE,
         )
-        if match is None:
+        if match is not None:
+            assignee = _clean_text(match.group(1))
+            if assignee and not assignee.casefold().startswith("project "):
+                return assignee
+
+        if match is None or match.group(1).casefold().startswith("project "):
             match = re.search(
                 r"\bassign(?:ed)?\s+(?:it\s+|task\s+)?to\s+([A-Za-z][A-Za-z .'-]{0,80})",
                 text,

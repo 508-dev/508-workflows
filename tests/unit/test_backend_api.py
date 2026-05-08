@@ -1,10 +1,11 @@
 """Unit tests for backend dashboard/ingest API."""
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, Mock, patch
+
 import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import AsyncMock, Mock, patch
 
 from five08.agent import AgentOrchestrator, InMemoryTaskStore, ToolRegistry
 from five08.backend import api
@@ -768,8 +769,8 @@ def test_agent_confirmation_uses_original_context_for_execution(
         )
 
     payload = confirm_response.json()
-    assert confirm_response.status_code == 500
-    assert payload["status"] == "failed"
+    assert confirm_response.status_code == 403
+    assert payload["status"] == "denied"
     assert "creator" in payload["results"][0]["error"]
 
 
@@ -832,6 +833,94 @@ def test_agent_confirmation_claims_plan_once(
     assert first_response.status_code == 200
     assert second_response.status_code == 404
     assert second_response.json()["error"] == "plan_not_found"
+
+
+def test_agent_confirmation_not_found_is_audited(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api, "_PENDING_AGENT_PLANS", {})
+
+    with patch("five08.backend.api.insert_audit_event") as mock_insert:
+        response = client.post(
+            "/agent/confirmations/missing-plan",
+            json={
+                "confirm": True,
+                "context": {
+                    "discord_user_id": "123",
+                    "organization_id": "org-1",
+                    "guild_id": "org-1",
+                    "interaction_id": "interaction-1",
+                },
+            },
+            headers=auth_headers,
+        )
+
+    assert response.status_code == 404
+    audit_payload = mock_insert.call_args.args[1]
+    assert audit_payload.action == "agent.confirmation"
+    assert audit_payload.result == api.AuditResult.DENIED
+    assert audit_payload.correlation_id == "interaction-1"
+    assert audit_payload.metadata["reason"] == "plan_not_found"
+    assert audit_payload.metadata["plan_id"] == "missing-plan"
+
+
+def test_agent_confirmation_expired_plan_is_audited(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_store = InMemoryTaskStore()
+    monkeypatch.setattr(
+        api,
+        "_AGENT_ORCHESTRATOR",
+        AgentOrchestrator(registry=ToolRegistry(task_store)),
+    )
+    monkeypatch.setattr(api, "_PENDING_AGENT_PLANS", {})
+
+    with patch("five08.backend.api.insert_audit_event") as mock_insert:
+        plan_response = client.post(
+            "/agent/requests",
+            json={
+                "message": "Create a task for Sarah to update onboarding docs by Friday",
+                "context": {
+                    "discord_user_id": "123",
+                    "organization_id": "org-1",
+                    "guild_id": "org-1",
+                    "interaction_id": "interaction-1",
+                },
+            },
+            headers=auth_headers,
+        )
+        plan_id = plan_response.json()["plan"]["plan_id"]
+        plan, context = api._PENDING_AGENT_PLANS[plan_id]
+        api._PENDING_AGENT_PLANS[plan_id] = (
+            plan.model_copy(
+                update={"expires_at": datetime.now(timezone.utc) - timedelta(seconds=1)}
+            ),
+            context,
+        )
+        response = client.post(
+            f"/agent/confirmations/{plan_id}",
+            json={
+                "confirm": True,
+                "context": {
+                    "discord_user_id": "123",
+                    "organization_id": "org-1",
+                    "guild_id": "org-1",
+                },
+            },
+            headers=auth_headers,
+        )
+
+    assert response.status_code == 410
+    audit_payload = mock_insert.call_args.args[1]
+    assert audit_payload.action == "agent.confirmation"
+    assert audit_payload.result == api.AuditResult.DENIED
+    assert audit_payload.resource_id == plan_id
+    assert audit_payload.correlation_id == "interaction-1"
+    assert audit_payload.metadata["reason"] == "plan_expired"
 
 
 def test_auth_login_returns_503_when_store_not_ready(client: TestClient) -> None:

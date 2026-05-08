@@ -47,6 +47,7 @@ class AgentConfirmationView(discord.ui.View):
         for item in self.children:
             if isinstance(item, discord.ui.Button):
                 item.disabled = True
+        self.stop()
 
     @discord.ui.button(label="Confirm", style=discord.ButtonStyle.primary)
     async def confirm(
@@ -64,6 +65,16 @@ class AgentConfirmationView(discord.ui.View):
         except Exception as exc:
             logger.warning("Agent confirmation request failed: %s", exc)
             response = {"status": "failed", "message": str(exc)}
+        self.cog._audit_command_safe(
+            interaction=interaction,
+            action="agent.confirm",
+            result=AgentCog._audit_result_for_agent_response(response),
+            metadata={
+                "plan_id": self.plan_id,
+                "status": response.get("status"),
+                "error": response.get("error"),
+            },
+        )
         self._disable()
         await interaction.followup.send(
             self.cog._format_agent_response(response),
@@ -93,6 +104,16 @@ class AgentConfirmationView(discord.ui.View):
         except Exception as exc:
             logger.warning("Agent cancellation request failed: %s", exc)
             response = {"status": "failed", "message": str(exc)}
+        self.cog._audit_command_safe(
+            interaction=interaction,
+            action="agent.cancel",
+            result=AgentCog._audit_result_for_agent_response(response),
+            metadata={
+                "plan_id": self.plan_id,
+                "status": response.get("status"),
+                "error": response.get("error"),
+            },
+        )
         self._disable()
         await interaction.followup.send(
             self.cog._format_agent_response(response),
@@ -281,11 +302,23 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             if http_status in {401, 403}:
                 return "denied"
             return "error"
+        http_status = response.get("http_status")
+        if http_status in {401, 403}:
+            return "denied"
+        if isinstance(http_status, int) and http_status >= 400:
+            return "error"
         return "success"
 
     def _format_agent_response(self, response: dict[str, Any]) -> str:
+        http_status = response.get("http_status")
         status = str(
-            response.get("status") or ("error" if response.get("error") else "unknown")
+            response.get("status")
+            or (
+                "error"
+                if response.get("error")
+                or (isinstance(http_status, int) and http_status >= 400)
+                else "unknown"
+            )
         )
         plan = response.get("plan") if isinstance(response.get("plan"), dict) else {}
         lines: list[str] = [f"Agent status: {status}"]

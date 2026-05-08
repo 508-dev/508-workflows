@@ -5,7 +5,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from five08.discord_bot.cogs.agent import AgentCog
+import pytest
+
+from five08.discord_bot.cogs.agent import AgentCog, AgentConfirmationView
 
 
 class _FakeResponse:
@@ -45,6 +47,38 @@ def test_audit_result_treats_forbidden_error_payload_as_denied() -> None:
         )
         == "denied"
     )
+
+
+def test_audit_result_treats_http_error_payload_as_error() -> None:
+    assert (
+        AgentCog._audit_result_for_agent_response(
+            {"detail": "Not Found", "http_status": 404}
+        )
+        == "error"
+    )
+
+
+def test_audit_result_treats_http_forbidden_payload_as_denied() -> None:
+    assert (
+        AgentCog._audit_result_for_agent_response(
+            {"detail": "Forbidden", "http_status": 403}
+        )
+        == "denied"
+    )
+
+
+@pytest.mark.asyncio
+async def test_confirmation_view_disable_stops_listener() -> None:
+    view = AgentConfirmationView(
+        cog=AgentCog.__new__(AgentCog),
+        requester_id=123,
+        plan_id="plan-1",
+        context={"discord_user_id": "123"},
+    )
+
+    view._disable()
+
+    assert view.is_finished()
 
 
 def test_build_agent_context_separates_interaction_and_message_ids() -> None:

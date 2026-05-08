@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import date
 from types import SimpleNamespace
 
+import pytest
+
 from five08.agent import (
     AgentIdentityContext,
     AgentModelConfig,
@@ -61,11 +63,28 @@ def test_confirmed_plan_executes_inline_against_registry() -> None:
     )
 
     assert response.plan is not None
-    results = orchestrator.execute_plan(response.plan, context)
+    results = orchestrator.execute_plan(response.plan, context, confirmed=True)
 
     assert results[0].status == "succeeded"
     assert results[0].result["task_id"] == "TASK-001"
     assert results[0].result["title"] == "update onboarding docs"
+
+
+def test_execute_plan_denies_unconfirmed_write_plan() -> None:
+    task_store = InMemoryTaskStore()
+    orchestrator = AgentOrchestrator(registry=ToolRegistry(task_store))
+    context = _context()
+    response = orchestrator.plan(
+        "Create a task for Sarah to update onboarding docs by Friday",
+        context,
+    )
+
+    assert response.plan is not None
+    results = orchestrator.execute_plan(response.plan, context)
+
+    assert results[0].status == "denied"
+    assert "requires confirmation" in (results[0].error or "")
+    assert task_store.search_tasks(query="", organization_id="org-1")["tasks"] == []
 
 
 def test_policy_denies_tenant_scoped_tools_without_tenant_context() -> None:
@@ -141,6 +160,7 @@ def test_create_task_project_clause_stops_before_title() -> None:
     assert response.plan is not None
     assert response.plan.actions[0].arguments["project"] == "Atlas"
     assert response.plan.actions[0].arguments["title"] == "update docs"
+    assert "assignee" not in response.plan.actions[0].arguments
 
 
 def test_invalid_month_date_does_not_crash_planning() -> None:
@@ -170,10 +190,47 @@ def test_update_task_enforces_creator_ownership() -> None:
     response = orchestrator.plan("Update TASK-001 due tomorrow", _context())
 
     assert response.plan is not None
-    results = orchestrator.execute_plan(response.plan, _context())
+    results = orchestrator.execute_plan(response.plan, _context(), confirmed=True)
 
-    assert results[0].status == "failed"
+    assert results[0].status == "denied"
     assert "creator" in (results[0].error or "")
+
+
+def test_tool_registry_rejects_malformed_write_arguments() -> None:
+    task_store = InMemoryTaskStore()
+    registry = ToolRegistry(task_store)
+
+    with pytest.raises(ValueError, match="title"):
+        registry.execute(
+            "task_write.create_task",
+            {"title": " "},
+            organization_id="org-1",
+            actor_id="123",
+        )
+
+    with pytest.raises(ValueError, match="Task id"):
+        registry.execute(
+            "task_write.update_task",
+            {"task_id": " "},
+            organization_id="org-1",
+            actor_id="123",
+        )
+
+    task_store.create_task(
+        title="Existing task",
+        project="Atlas",
+        assignee=None,
+        due_date=None,
+        organization_id="org-1",
+        created_by="123",
+    )
+    with pytest.raises(ValueError, match="At least one"):
+        registry.execute(
+            "task_write.update_task",
+            {"task_id": "TASK-001"},
+            organization_id="org-1",
+            actor_id="123",
+        )
 
 
 def test_agent_model_config_uses_tier_specific_provider() -> None:

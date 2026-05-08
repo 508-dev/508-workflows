@@ -1355,6 +1355,13 @@ async def agent_confirmation_handler(
         discord_user_id=payload.context.discord_user_id,
     )
     if pending is None:
+        await _write_agent_audit_event(
+            context=payload.context,
+            action="agent.confirmation",
+            result=AuditResult.DENIED,
+            plan=None,
+            metadata={"reason": "plan_not_found", "plan_id": plan_id},
+        )
         return JSONResponse({"error": "plan_not_found"}, status_code=404)
 
     plan, original_context = pending
@@ -1368,6 +1375,13 @@ async def agent_confirmation_handler(
         )
         return JSONResponse({"error": "actor_mismatch"}, status_code=403)
     if claim_status == "expired":
+        await _write_agent_audit_event(
+            context=original_context,
+            action="agent.confirmation",
+            result=AuditResult.DENIED,
+            plan=plan,
+            metadata={"reason": "plan_expired"},
+        )
         return JSONResponse({"error": "plan_expired"}, status_code=410)
 
     if not payload.confirm:
@@ -1385,18 +1399,30 @@ async def agent_confirmation_handler(
         )
         return JSONResponse(response.model_dump(mode="json"), status_code=200)
 
-    results = _AGENT_ORCHESTRATOR.execute_plan(plan, original_context)
-    status = (
-        "executed"
-        if all(result.status == "succeeded" for result in results)
-        else "failed"
+    results = _AGENT_ORCHESTRATOR.execute_plan(
+        plan,
+        original_context,
+        confirmed=True,
     )
+    if any(result.status == "denied" for result in results):
+        status = "denied"
+    elif all(result.status == "succeeded" for result in results):
+        status = "executed"
+    else:
+        status = "failed"
     if status == "executed":
         response = AgentResponse(
             status="executed",
             plan=plan,
             results=results,
             message="Executed the confirmed agent plan.",
+        )
+    elif status == "denied":
+        response = AgentResponse(
+            status="denied",
+            plan=plan,
+            results=results,
+            message="The confirmed agent plan was denied by policy.",
         )
     else:
         response = AgentResponse(
@@ -1405,7 +1431,11 @@ async def agent_confirmation_handler(
             results=results,
             message="One or more confirmed agent actions failed.",
         )
-    audit_result = AuditResult.SUCCESS if status == "executed" else AuditResult.ERROR
+    audit_result = {
+        "executed": AuditResult.SUCCESS,
+        "denied": AuditResult.DENIED,
+        "failed": AuditResult.ERROR,
+    }[status]
     await _write_agent_audit_event(
         context=original_context,
         action="agent.confirmation",
@@ -1418,7 +1448,7 @@ async def agent_confirmation_handler(
     )
     return JSONResponse(
         response.model_dump(mode="json"),
-        status_code=200 if status == "executed" else 500,
+        status_code={"executed": 200, "denied": 403, "failed": 500}[status],
     )
 
 

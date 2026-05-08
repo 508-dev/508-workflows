@@ -201,8 +201,11 @@ class ToolRegistry:
                 project=_optional_str(arguments.get("project")),
             )
         if tool_name == "task_write.create_task":
+            title = str(arguments.get("title") or "").strip()
+            if not title:
+                raise ValueError("Task title is required")
             return self.task_store.create_task(
-                title=str(arguments.get("title") or "").strip(),
+                title=title,
                 project=_optional_str(arguments.get("project")),
                 assignee=_optional_str(arguments.get("assignee")),
                 due_date=_optional_date(arguments.get("due_date")),
@@ -210,15 +213,27 @@ class ToolRegistry:
                 created_by=actor_id,
             )
         if tool_name == "task_write.update_task":
+            task_id = str(arguments.get("task_id") or "").strip().upper()
+            if not task_id:
+                raise ValueError("Task id is required")
+            updates = {
+                "title": _optional_str(arguments.get("title")),
+                "project": _optional_str(arguments.get("project")),
+                "assignee": _optional_str(arguments.get("assignee")),
+                "due_date": _optional_date(arguments.get("due_date")),
+                "status": _optional_str(arguments.get("status")),
+            }
+            if not any(value is not None for value in updates.values()):
+                raise ValueError("At least one task field must be provided")
             return self.task_store.update_task(
-                task_id=str(arguments.get("task_id") or "").strip().upper(),
+                task_id=task_id,
                 organization_id=organization_id,
                 actor_id=actor_id,
-                title=_optional_str(arguments.get("title")),
-                project=_optional_str(arguments.get("project")),
-                assignee=_optional_str(arguments.get("assignee")),
-                due_date=_optional_date(arguments.get("due_date")),
-                status=_optional_str(arguments.get("status")),
+                title=updates["title"],
+                project=updates["project"],
+                assignee=updates["assignee"],
+                due_date=updates["due_date"],
+                status=updates["status"],
             )
         raise KeyError(f"Unknown tool {tool_name}")
 
