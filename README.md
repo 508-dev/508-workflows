@@ -51,6 +51,11 @@ Migrations:
 See the API service docs: [`apps/api/README.md#backend-api-endpoints`](./apps/api/README.md#backend-api-endpoints).
 CLI request examples are documented at [`apps/worker/README.md#cli-usage`](./apps/worker/README.md#cli-usage).
 
+The admin dashboard is served at `/dashboard`. It is available only to active
+admin sessions created through the existing OIDC or Discord dashboard login link
+flows, and Discord-backed sessions carry the linked CRM contact id from the
+local `people` cache.
+
 ### Current API/queue caveats
 
 - Protected API endpoints use a shared `API_SHARED_SECRET` in `X-API-Secret` today. This includes webhook and admin routes until per-webhook/per-route auth is introduced.

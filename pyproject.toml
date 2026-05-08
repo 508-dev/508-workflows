@@ -40,6 +40,7 @@ dev = [
     "pre-commit>=3.7",
     "pre-commit-uv",
     "freezegun>=1.5.5",
+    "playwright>=1.58.0",
 ]
 
 [tool.pytest.ini_options]
@@ -51,6 +52,7 @@ asyncio_mode = "auto"
 addopts = "--tb=short --strict-markers"
 markers = [
     "e2e: end-to-end tests requiring a live PostgreSQL connection",
+    "playwright: browser-driven dashboard integration tests",
 ]
 
 [tool.coverage.run]

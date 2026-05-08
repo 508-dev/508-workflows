@@ -19,7 +19,7 @@ from uuid import uuid4
 import httpx
 import uvicorn
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, ValidationError
 from psycopg import Connection
 
@@ -56,6 +56,7 @@ from five08.backend.auth import (
     make_pkce_pair,
     normalize_next_path,
 )
+from five08.backend.dashboard import dashboard_html
 from five08.worker.config import settings
 from five08.worker.db_migrations import run_job_migrations
 from five08.worker.dispatcher import build_queue_client
@@ -379,6 +380,26 @@ async def _current_session(request: Request) -> tuple[str | None, AuthSession | 
         return session_id, None
 
     return session_id, session
+
+
+async def _current_admin_session(request: Request) -> AuthSession | None:
+    _, session = await _current_session(request)
+    if session is None or not session.is_admin:
+        return None
+    return session
+
+
+def _session_payload(session: AuthSession) -> dict[str, Any]:
+    return {
+        "subject": session.subject,
+        "email": session.email,
+        "display_name": session.display_name,
+        "groups": session.groups,
+        "is_admin": session.is_admin,
+        "expires_at": session.expires_at,
+        "actor_provider": session.actor_provider,
+        "crm_contact_id": session.crm_contact_id,
+    }
 
 
 def _session_actor_provider(session: AuthSession) -> ActorProvider:
@@ -775,41 +796,34 @@ async def jobs_handler(
     return JSONResponse(payload)
 
 
-async def rerun_job_handler(request: Request, job_id: str) -> JSONResponse:
-    """Create and enqueue a new job using a prior job's original call payload."""
-    if not _is_authorized(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-
+async def _rerun_job(job_id: str, queue: QueueClient) -> tuple[dict[str, Any], int]:
+    """Create a duplicate queued job from an existing persisted job."""
     normalized_job_id = job_id.strip()
     if not normalized_job_id:
-        return JSONResponse({"error": "job_id_required"}, status_code=400)
+        return {"error": "job_id_required"}, 400
 
     source_job = await asyncio.to_thread(get_job, settings, normalized_job_id)
     if source_job is None:
-        return JSONResponse({"error": "job_not_found"}, status_code=404)
+        return {"error": "job_not_found"}, 404
 
     fn = JOB_FUNCTIONS.get(source_job.type)
     if fn is None:
-        return JSONResponse(
-            {
-                "error": "unsupported_job_type",
-                "job_type": source_job.type,
-            },
-            status_code=400,
-        )
+        return {
+            "error": "unsupported_job_type",
+            "job_type": source_job.type,
+        }, 400
 
     raw_payload = source_job.payload
     if not isinstance(raw_payload, dict):
-        return JSONResponse({"error": "invalid_job_payload"}, status_code=400)
+        return {"error": "invalid_job_payload"}, 400
     if "args" not in raw_payload or "kwargs" not in raw_payload:
-        return JSONResponse({"error": "invalid_job_payload"}, status_code=400)
+        return {"error": "invalid_job_payload"}, 400
 
     raw_args = raw_payload["args"]
     raw_kwargs = raw_payload["kwargs"]
     if not isinstance(raw_args, list) or not isinstance(raw_kwargs, dict):
-        return JSONResponse({"error": "invalid_job_payload"}, status_code=400)
+        return {"error": "invalid_job_payload"}, 400
 
-    queue = request.app.state.queue
     rerun_idempotency_key = f"manual-rerun:{source_job.id}:{_generate_ulid()}"
 
     try:
@@ -829,18 +843,25 @@ async def rerun_job_handler(request: Request, job_id: str) -> JSONResponse:
             source_job.id,
             source_job.type,
         )
-        return JSONResponse({"error": "enqueue_failed"}, status_code=503)
+        return {"error": "enqueue_failed"}, 503
 
-    return JSONResponse(
-        {
-            "status": "queued",
-            "source_job_id": source_job.id,
-            "job_id": rerun_job.id,
-            "type": source_job.type,
-            "created": rerun_job.created,
-        },
-        status_code=202,
-    )
+    return {
+        "status": "queued",
+        "source_job_id": source_job.id,
+        "job_id": rerun_job.id,
+        "type": source_job.type,
+        "created": rerun_job.created,
+    }, 202
+
+
+async def rerun_job_handler(request: Request, job_id: str) -> JSONResponse:
+    """Create and enqueue a new job using a prior job's original call payload."""
+    if not _is_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    queue = request.app.state.queue
+    payload, status_code = await _rerun_job(job_id, queue)
+    return JSONResponse(payload, status_code=status_code)
 
 
 async def sync_people_handler(request: Request) -> JSONResponse:
@@ -854,6 +875,103 @@ async def sync_people_handler(request: Request) -> JSONResponse:
         {
             "status": "queued",
             "source": "manual",
+            "job_id": job.id,
+            "created": job.created,
+        },
+        status_code=202,
+    )
+
+
+async def dashboard_handler(request: Request) -> HTMLResponse | RedirectResponse:
+    """Serve the admin dashboard for authenticated admin sessions."""
+    _, session = await _current_session(request)
+    if session is None:
+        login_query = urlencode({"next": normalize_next_path(request.url.path)})
+        return RedirectResponse(url=f"/auth/login?{login_query}", status_code=302)
+    if not session.is_admin:
+        return HTMLResponse("Forbidden", status_code=403)
+    return HTMLResponse(dashboard_html(), status_code=200)
+
+
+async def dashboard_me_handler(request: Request) -> JSONResponse:
+    """Return the dashboard session identity."""
+    session = await _current_admin_session(request)
+    if session is None:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return JSONResponse(_session_payload(session))
+
+
+async def dashboard_jobs_handler(
+    request: Request,
+    minutes: int = Query(default=60, ge=1),
+    limit: int = Query(default=100, ge=1, le=1000),
+    status: str | None = Query(default=None),
+    job_type: str | None = Query(default=None, alias="type"),
+) -> JSONResponse:
+    """Return recent jobs for an authenticated admin dashboard session."""
+    if await _current_admin_session(request) is None:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=minutes)
+    job_status: JobStatus | None = None
+    if status is not None:
+        try:
+            job_status = JobStatus(status)
+        except ValueError:
+            return JSONResponse(
+                {"error": "invalid_status", "status": status},
+                status_code=400,
+            )
+
+    recent_jobs = await asyncio.to_thread(
+        list_jobs,
+        settings,
+        created_after=cutoff,
+        limit=limit,
+        status=job_status,
+        job_type=job_type,
+    )
+
+    return JSONResponse(
+        [
+            {
+                "job_id": job.id,
+                "type": job.type,
+                "status": job.status.value,
+                "attempts": job.attempts,
+                "max_attempts": job.max_attempts,
+                "last_error": job.last_error,
+                "created_at": job.created_at.isoformat(),
+                "updated_at": job.updated_at.isoformat(),
+            }
+            for job in recent_jobs
+        ]
+    )
+
+
+async def dashboard_rerun_job_handler(
+    request: Request,
+    job_id: str,
+) -> JSONResponse:
+    """Rerun one job from the authenticated admin dashboard."""
+    if await _current_admin_session(request) is None:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    payload, status_code = await _rerun_job(job_id, request.app.state.queue)
+    return JSONResponse(payload, status_code=status_code)
+
+
+async def dashboard_sync_people_handler(request: Request) -> JSONResponse:
+    """Queue a people-cache sync from the authenticated admin dashboard."""
+    session = await _current_admin_session(request)
+    if session is None:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    job = await _enqueue_full_crm_sync_job(request.app.state.queue, reason="dashboard")
+    return JSONResponse(
+        {
+            "status": "queued",
+            "source": "dashboard",
             "job_id": job.id,
             "created": job.created,
         },
@@ -1282,6 +1400,7 @@ async def auth_callback_handler(
     enforce_discord_link_identity_checks = (
         settings.discord_link_require_oidc_identity_checks
     )
+    crm_contact_id: str | None = None
 
     if pending.discord_link_token:
         grant = await store.get_discord_link(pending.discord_link_token)
@@ -1350,6 +1469,12 @@ async def auth_callback_handler(
                     },
                     status_code=403,
                 )
+            identity = await verifier.resolve_admin_identity(
+                discord_user_id=grant.discord_user_id,
+                http_client=http_client,
+            )
+            if identity is not None:
+                crm_contact_id = identity.crm_contact_id
         else:
             # Discord deep links are already restricted to Discord admin users.
             # In bootstrap mode, skip OIDC group/email-link checks for this path.
@@ -1377,6 +1502,7 @@ async def auth_callback_handler(
             id_token=id_token,
             expires_at=expires_at,
             actor_provider=ActorProvider.ADMIN_SSO.value,
+            crm_contact_id=crm_contact_id,
         ),
         ttl_seconds=settings.auth_session_ttl_seconds,
     )
@@ -1417,17 +1543,7 @@ async def auth_me_handler(request: Request) -> JSONResponse:
         _clear_session_cookie(response)
         return response
 
-    return JSONResponse(
-        {
-            "subject": session.subject,
-            "email": session.email,
-            "display_name": session.display_name,
-            "groups": session.groups,
-            "is_admin": session.is_admin,
-            "expires_at": session.expires_at,
-            "actor_provider": session.actor_provider,
-        }
-    )
+    return JSONResponse(_session_payload(session))
 
 
 async def auth_logout_handler(request: Request) -> JSONResponse:
@@ -1588,6 +1704,7 @@ async def auth_discord_link_redirect_handler(
                 id_token="",
                 expires_at=expires_at,
                 actor_provider=ActorProvider.DISCORD.value,
+                crm_contact_id=identity.crm_contact_id,
             ),
             ttl_seconds=settings.auth_session_ttl_seconds,
         )
@@ -1710,6 +1827,25 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
 
     app.add_api_route("/", health_handler, methods=["GET"])
     app.add_api_route("/health", health_handler, methods=["GET"])
+
+    app.add_api_route(
+        "/dashboard",
+        dashboard_handler,
+        methods=["GET"],
+        response_model=None,
+    )
+    app.add_api_route("/dashboard/api/me", dashboard_me_handler, methods=["GET"])
+    app.add_api_route("/dashboard/api/jobs", dashboard_jobs_handler, methods=["GET"])
+    app.add_api_route(
+        "/dashboard/api/jobs/{job_id}/rerun",
+        dashboard_rerun_job_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/dashboard/api/sync/people",
+        dashboard_sync_people_handler,
+        methods=["POST"],
+    )
 
     app.add_api_route("/jobs", jobs_handler, methods=["GET"])
     app.add_api_route("/jobs/{job_id}", job_status_handler, methods=["GET"])

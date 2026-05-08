@@ -635,6 +635,94 @@ def test_auth_me_requires_session(client: TestClient) -> None:
     assert response.json()["error"] == "unauthorized"
 
 
+def test_dashboard_redirects_unauthenticated_client(client: TestClient) -> None:
+    response = client.get("/dashboard", follow_redirects=False)
+    assert response.status_code == 302
+    assert response.headers["location"] == "/auth/login?next=%2Fdashboard"
+
+
+def test_dashboard_forbids_non_admin_session(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="member-1",
+        email="member@508.dev",
+        display_name="Member User",
+        groups=["Member"],
+        is_admin=False,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard")
+
+    assert response.status_code == 403
+
+
+def test_dashboard_renders_for_admin_session(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="admin@508.dev",
+        display_name="Discord Admin",
+        groups=["discord_admin"],
+        is_admin=True,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+        crm_contact_id="contact-123",
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard")
+
+    assert response.status_code == 200
+    assert "508 Admin Dashboard" in response.text
+    assert "/dashboard/api/me" in response.text
+
+
+def test_dashboard_me_returns_crm_linked_admin_session(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="admin@508.dev",
+        display_name="Discord Admin",
+        groups=["discord_admin"],
+        is_admin=True,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+        crm_contact_id="contact-123",
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/api/me")
+
+    assert response.status_code == 200
+    assert response.json()["crm_contact_id"] == "contact-123"
+    assert response.json()["actor_provider"] == api.ActorProvider.DISCORD.value
+
+
+def test_dashboard_jobs_requires_admin_session(client: TestClient) -> None:
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=(None, None),
+    ):
+        response = client.get("/dashboard/api/jobs")
+
+    assert response.status_code == 401
+
+
 def test_auth_discord_link_create_forbidden_for_non_admin(
     client: TestClient,
     auth_headers: dict[str, str],
@@ -867,6 +955,7 @@ def test_auth_discord_link_redirect_creates_discord_session_when_disabled(
     verifier.resolve_admin_identity = AsyncMock(
         return_value=Mock(
             discord_user_id="123456789",
+            crm_contact_id="contact-123",
             email="admin@508.dev",
             display_name="Discord Admin",
         )
@@ -889,6 +978,7 @@ def test_auth_discord_link_redirect_creates_discord_session_when_disabled(
     saved_session = store.save_session.call_args.kwargs["payload"]
     assert saved_session.subject == "123456789"
     assert saved_session.actor_provider == api.ActorProvider.DISCORD.value
+    assert saved_session.crm_contact_id == "contact-123"
     assert saved_session.email == "admin@508.dev"
     audit_payload = mock_insert.call_args.args[1]
     assert audit_payload.actor_provider == api.ActorProvider.DISCORD

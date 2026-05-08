@@ -60,6 +60,7 @@ class AuthSession:
     id_token: str
     expires_at: int
     actor_provider: str = "admin_sso"
+    crm_contact_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -75,6 +76,7 @@ class DiscordAdminIdentity:
     """Resolved CRM-backed Discord admin identity details."""
 
     discord_user_id: str
+    crm_contact_id: str
     email: str | None
     display_name: str | None
 
@@ -137,6 +139,7 @@ class RedisAuthStore:
                 id_token=str(value["id_token"]),
                 expires_at=int(value["expires_at"]),
                 actor_provider=str(value.get("actor_provider") or "admin_sso"),
+                crm_contact_id=_to_optional_str(value.get("crm_contact_id")),
             )
         except Exception:
             logger.warning("Invalid auth session payload in Redis")
@@ -521,8 +524,12 @@ class DiscordAdminVerifier:
         email = _to_optional_str(person.get("email_508")) or _to_optional_str(
             person.get("email")
         )
+        crm_contact_id = _to_optional_str(person.get("crm_contact_id"))
+        if crm_contact_id is None:
+            return None
         return DiscordAdminIdentity(
             discord_user_id=discord_user_id,
+            crm_contact_id=crm_contact_id,
             email=email,
             display_name=_to_optional_str(person.get("name")),
         )
@@ -563,7 +570,7 @@ class DiscordAdminVerifier:
         normalized_email: str | None = None,
     ) -> dict[str, Any] | None:
         query = """
-            SELECT name, email, email_508, discord_roles
+            SELECT crm_contact_id, name, email, email_508, discord_roles
             FROM people
             WHERE sync_status = 'active' AND discord_user_id = %s
         """
