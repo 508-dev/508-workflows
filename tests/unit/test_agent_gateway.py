@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 from datetime import date
+from types import SimpleNamespace
 
-from five08.agent import AgentIdentityContext, AgentOrchestrator, InMemoryTaskStore
+from five08.agent import (
+    AgentIdentityContext,
+    AgentModelConfig,
+    AgentOrchestrator,
+    InMemoryTaskStore,
+)
 from five08.agent.tools import ToolRegistry
 
 
@@ -29,6 +35,8 @@ def test_create_task_requires_confirmation_and_uses_stronger_model() -> None:
     assert response.status == "requires_confirmation"
     assert response.plan is not None
     assert response.plan.model_tier == "strong"
+    assert response.plan.model.model == "gpt-5-mini"
+    assert response.plan.model.source_tier == "built_in_default"
     action = response.plan.actions[0]
     assert action.tool_name == "task_write.create_task"
     assert action.arguments == {
@@ -90,3 +98,67 @@ def test_search_task_executes_without_confirmation() -> None:
     assert response.status == "executed"
     assert response.results[0].status == "succeeded"
     assert response.results[0].result["tasks"][0]["task_id"] == "TASK-001"
+
+
+def test_agent_model_config_uses_tier_specific_provider() -> None:
+    settings = SimpleNamespace(
+        openai_api_key="openai-key",
+        openai_base_url=None,
+        openai_model="gpt-5-mini",
+        agent_fast_model=None,
+        agent_fast_base_url=None,
+        agent_fast_api_key=None,
+        agent_strong_model="accounts/fireworks/models/kimi-k2-instruct",
+        agent_strong_base_url="https://api.fireworks.ai/inference/v1",
+        agent_strong_api_key="fireworks-key",
+        agent_reasoning_model=None,
+        agent_reasoning_base_url=None,
+        agent_reasoning_api_key=None,
+    )
+
+    selection = AgentModelConfig.from_settings(settings).resolve("strong")
+
+    assert selection.model == "accounts/fireworks/models/kimi-k2-instruct"
+    assert selection.base_url == "https://api.fireworks.ai/inference/v1"
+    assert selection.source_tier == "strong"
+    assert selection.fallback_used is False
+    assert selection.api_key_configured is True
+
+
+def test_agent_model_config_falls_back_between_tiers() -> None:
+    settings = SimpleNamespace(
+        openai_api_key=None,
+        openai_base_url="https://api.openai.com/v1",
+        openai_model="gpt-5-mini",
+        agent_fast_model="gpt-5-nano",
+        agent_fast_base_url=None,
+        agent_fast_api_key=None,
+        agent_strong_model=None,
+        agent_strong_base_url=None,
+        agent_strong_api_key=None,
+        agent_reasoning_model=None,
+        agent_reasoning_base_url=None,
+        agent_reasoning_api_key=None,
+    )
+
+    selection = AgentModelConfig.from_settings(settings).resolve("reasoning")
+
+    assert selection.model == "gpt-5-nano"
+    assert selection.base_url == "https://api.openai.com/v1"
+    assert selection.source_tier == "fast"
+    assert selection.fallback_used is True
+
+
+def test_agent_model_config_falls_back_to_openai_model() -> None:
+    settings = SimpleNamespace(
+        openai_api_key="openai-key",
+        openai_base_url="https://api.openai.com/v1",
+        openai_model="gpt-5-mini",
+    )
+
+    selection = AgentModelConfig.from_settings(settings).resolve("strong")
+
+    assert selection.model == "gpt-5-mini"
+    assert selection.base_url == "https://api.openai.com/v1"
+    assert selection.source_tier == "openai_default"
+    assert selection.fallback_used is True

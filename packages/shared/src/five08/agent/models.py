@@ -8,7 +8,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 RiskLevel = Literal["low", "medium", "high", "critical"]
-ModelTier = Literal["fast", "strong"]
+ModelTier = Literal["fast", "strong", "reasoning"]
 
 
 class AgentIdentityContext(BaseModel):
@@ -45,12 +45,24 @@ class AgentToolAction(BaseModel):
     summary: str
 
 
+class AgentModelSelection(BaseModel):
+    """Resolved model/provider metadata for a plan, excluding credentials."""
+
+    tier: ModelTier
+    model: str
+    base_url: str | None = None
+    source_tier: ModelTier | Literal["openai_default", "built_in_default"]
+    fallback_used: bool = False
+    api_key_configured: bool = False
+
+
 class AgentPlan(BaseModel):
     """A model-proposed, policy-checked plan that may be executed later."""
 
     plan_id: str
     intent: str
     model_tier: ModelTier
+    model: AgentModelSelection
     actions: list[AgentToolAction] = Field(default_factory=list)
     human_summary: str
     requires_confirmation: bool = False

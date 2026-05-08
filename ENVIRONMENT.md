@@ -128,6 +128,10 @@ Use `.env.example` as the source of defaults.
 ## Discord Agent Gateway
 
 - `Optional`: `AGENT_API_TIMEOUT_SECONDS` (default: `8.0`; timeout for synchronous Discord agent gateway calls)
+- `Optional`: `AGENT_FAST_MODEL`, `AGENT_FAST_BASE_URL`, `AGENT_FAST_API_KEY`
+- `Optional`: `AGENT_STRONG_MODEL`, `AGENT_STRONG_BASE_URL`, `AGENT_STRONG_API_KEY`
+- `Optional`: `AGENT_REASONING_MODEL`, `AGENT_REASONING_BASE_URL`, `AGENT_REASONING_API_KEY`
+- Note: tier-specific agent models can point at OpenAI-compatible providers such as Fireworks. If a tier is not configured, fallback order is `reasoning -> strong -> fast -> OPENAI_MODEL -> gpt-5-mini`; `strong` falls back through `fast`, and `fast` falls back through `OPENAI_MODEL`.
 
 ## Migadu Mailbox Automation
 

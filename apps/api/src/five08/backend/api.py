@@ -32,6 +32,7 @@ from five08.audit import (
 )
 from five08.agent import (
     AgentIdentityContext,
+    AgentModelConfig,
     AgentOrchestrator,
     AgentPlan,
     AgentRequest,
@@ -130,6 +131,7 @@ process_docuseal_agreement_job = JOB_FUNCTIONS["process_docuseal_agreement_job"]
 _AGENT_TASK_STORE = InMemoryTaskStore()
 _AGENT_ORCHESTRATOR = AgentOrchestrator(
     registry=ToolRegistry(_AGENT_TASK_STORE),
+    model_config=AgentModelConfig.from_settings(settings),
 )
 _PENDING_AGENT_PLANS: dict[str, tuple[AgentPlan, AgentIdentityContext]] = {}
 
@@ -1256,6 +1258,13 @@ async def agent_request_handler(request: Request) -> JSONResponse:
             "status": response.status,
             "intent": response.plan.intent if response.plan else None,
             "model_tier": response.plan.model_tier if response.plan else None,
+            "model": response.plan.model.model if response.plan else None,
+            "model_source_tier": (
+                response.plan.model.source_tier if response.plan else None
+            ),
+            "model_fallback_used": (
+                response.plan.model.fallback_used if response.plan else None
+            ),
             "requires_confirmation": (
                 response.plan.requires_confirmation if response.plan else False
             ),

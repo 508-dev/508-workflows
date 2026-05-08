@@ -9,11 +9,13 @@ from uuid import uuid4
 from five08.agent.models import (
     AgentExecutionResult,
     AgentIdentityContext,
+    AgentModelSelection,
     AgentPlan,
     AgentResponse,
     AgentToolAction,
     ModelTier,
 )
+from five08.agent.model_routing import AgentModelConfig
 from five08.agent.policy import PolicyEngine
 from five08.agent.tools import ToolRegistry
 
@@ -57,10 +59,12 @@ class AgentOrchestrator:
         *,
         registry: ToolRegistry | None = None,
         policy: PolicyEngine | None = None,
+        model_config: AgentModelConfig | None = None,
         today: date | None = None,
     ) -> None:
         self.registry = registry or ToolRegistry()
         self.policy = policy or PolicyEngine()
+        self.model_config = model_config or AgentModelConfig()
         self.today = today
 
     def plan(self, message: str, context: AgentIdentityContext) -> AgentResponse:
@@ -198,11 +202,15 @@ class AgentOrchestrator:
             plan_id=str(uuid4()),
             intent=intent,
             model_tier=model_tier,
+            model=self._resolve_model(model_tier),
             actions=actions,
             human_summary=self._human_summary(actions),
             requires_confirmation=requires_confirmation,
             expires_at=datetime.now().astimezone() + timedelta(minutes=10),
         )
+
+    def _resolve_model(self, model_tier: ModelTier) -> AgentModelSelection:
+        return self.model_config.resolve(model_tier)
 
     def _parse_action(self, text: str) -> AgentToolAction | None:
         lowered = text.casefold()

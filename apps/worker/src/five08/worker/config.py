@@ -24,6 +24,15 @@ class WorkerSettings(SharedSettings):
     openai_api_key: str | None = None
     openai_base_url: str | None = None
     openai_model: str = "gpt-5-mini"
+    agent_fast_api_key: str | None = None
+    agent_fast_base_url: str | None = None
+    agent_fast_model: str | None = None
+    agent_strong_api_key: str | None = None
+    agent_strong_base_url: str | None = None
+    agent_strong_model: str | None = None
+    agent_reasoning_api_key: str | None = None
+    agent_reasoning_base_url: str | None = None
+    agent_reasoning_model: str | None = None
     resume_ai_model: str = "gpt-5-mini"
     resume_extractor_max_tokens: int = 2000
     resume_extractor_version: str = "v1"

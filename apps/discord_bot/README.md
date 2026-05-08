@@ -67,6 +67,9 @@ Relevant configuration:
 - `BACKEND_API_BASE_URL`: backend API used by the bot.
 - `API_SHARED_SECRET`: shared service secret for protected backend calls.
 - `AGENT_API_TIMEOUT_SECONDS`: timeout for synchronous agent gateway requests.
+- `AGENT_FAST_*`, `AGENT_STRONG_*`, `AGENT_REASONING_*`: backend model
+  tier configuration for OpenAI-compatible providers. Credentials stay in the
+  backend process; the bot only receives non-secret plan metadata.
 
 ## Permissions
 
