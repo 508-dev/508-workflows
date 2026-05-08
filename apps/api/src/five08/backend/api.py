@@ -134,6 +134,7 @@ _AGENT_ORCHESTRATOR = AgentOrchestrator(
     model_config=AgentModelConfig.from_settings(settings),
 )
 _PENDING_AGENT_PLANS: dict[str, tuple[AgentPlan, AgentIdentityContext]] = {}
+_PENDING_AGENT_PLANS_LOCK = asyncio.Lock()
 
 
 def _is_authorized(request: Request) -> bool:
@@ -1210,14 +1211,59 @@ async def _write_agent_audit_event(
         )
 
 
-def _store_pending_agent_plan(plan: AgentPlan, context: AgentIdentityContext) -> None:
-    _PENDING_AGENT_PLANS[plan.plan_id] = (plan, context)
+def _is_agent_plan_expired(plan: AgentPlan, *, now: datetime | None = None) -> bool:
+    if plan.expires_at is None:
+        return False
+    expires_at = plan.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    comparison_time = now or datetime.now(timezone.utc)
+    return comparison_time > expires_at.astimezone(timezone.utc)
 
 
-def _pop_pending_agent_plan(
+def _cleanup_expired_pending_agent_plans(*, now: datetime | None = None) -> None:
+    comparison_time = now or datetime.now(timezone.utc)
+    expired_plan_ids = [
+        plan_id
+        for plan_id, (plan, _context) in _PENDING_AGENT_PLANS.items()
+        if _is_agent_plan_expired(plan, now=comparison_time)
+    ]
+    for plan_id in expired_plan_ids:
+        _PENDING_AGENT_PLANS.pop(plan_id, None)
+
+
+async def _store_pending_agent_plan(
+    plan: AgentPlan,
+    context: AgentIdentityContext,
+) -> None:
+    async with _PENDING_AGENT_PLANS_LOCK:
+        _cleanup_expired_pending_agent_plans()
+        _PENDING_AGENT_PLANS[plan.plan_id] = (plan, context)
+
+
+async def _claim_pending_agent_plan(
     plan_id: str,
-) -> tuple[AgentPlan, AgentIdentityContext] | None:
-    return _PENDING_AGENT_PLANS.pop(plan_id, None)
+    *,
+    discord_user_id: str,
+) -> tuple[str, tuple[AgentPlan, AgentIdentityContext] | None]:
+    async with _PENDING_AGENT_PLANS_LOCK:
+        pending = _PENDING_AGENT_PLANS.get(plan_id)
+        if pending is None:
+            _cleanup_expired_pending_agent_plans()
+            return "not_found", None
+
+        plan, original_context = pending
+        if original_context.discord_user_id != discord_user_id:
+            _cleanup_expired_pending_agent_plans()
+            return "actor_mismatch", pending
+
+        if _is_agent_plan_expired(plan):
+            _PENDING_AGENT_PLANS.pop(plan_id, None)
+            _cleanup_expired_pending_agent_plans()
+            return "expired", pending
+
+        _cleanup_expired_pending_agent_plans()
+        return "claimed", _PENDING_AGENT_PLANS.pop(plan_id)
 
 
 async def agent_request_handler(request: Request) -> JSONResponse:
@@ -1242,7 +1288,7 @@ async def agent_request_handler(request: Request) -> JSONResponse:
 
     response = _AGENT_ORCHESTRATOR.plan(payload.message, payload.context)
     if response.plan is not None and response.status == "requires_confirmation":
-        _store_pending_agent_plan(response.plan, payload.context)
+        await _store_pending_agent_plan(response.plan, payload.context)
 
     audit_result = AuditResult.SUCCESS
     if response.status == "denied":
@@ -1304,12 +1350,15 @@ async def agent_confirmation_handler(
             {"error": "invalid_payload", "detail": str(exc)}, status_code=400
         )
 
-    pending = _PENDING_AGENT_PLANS.get(plan_id)
+    claim_status, pending = await _claim_pending_agent_plan(
+        plan_id,
+        discord_user_id=payload.context.discord_user_id,
+    )
     if pending is None:
         return JSONResponse({"error": "plan_not_found"}, status_code=404)
 
     plan, original_context = pending
-    if original_context.discord_user_id != payload.context.discord_user_id:
+    if claim_status == "actor_mismatch":
         await _write_agent_audit_event(
             context=payload.context,
             action="agent.confirmation",
@@ -1318,19 +1367,12 @@ async def agent_confirmation_handler(
             metadata={"reason": "actor_mismatch"},
         )
         return JSONResponse({"error": "actor_mismatch"}, status_code=403)
-
-    if plan.expires_at is not None:
-        expires_at = plan.expires_at
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if datetime.now(timezone.utc) > expires_at.astimezone(timezone.utc):
-            _pop_pending_agent_plan(plan_id)
-            return JSONResponse({"error": "plan_expired"}, status_code=410)
+    if claim_status == "expired":
+        return JSONResponse({"error": "plan_expired"}, status_code=410)
 
     if not payload.confirm:
-        _pop_pending_agent_plan(plan_id)
         await _write_agent_audit_event(
-            context=payload.context,
+            context=original_context,
             action="agent.confirmation",
             result=AuditResult.DENIED,
             plan=plan,
@@ -1343,8 +1385,7 @@ async def agent_confirmation_handler(
         )
         return JSONResponse(response.model_dump(mode="json"), status_code=200)
 
-    _pop_pending_agent_plan(plan_id)
-    results = _AGENT_ORCHESTRATOR.execute_plan(plan, payload.context)
+    results = _AGENT_ORCHESTRATOR.execute_plan(plan, original_context)
     status = (
         "executed"
         if all(result.status == "succeeded" for result in results)
@@ -1366,7 +1407,7 @@ async def agent_confirmation_handler(
         )
     audit_result = AuditResult.SUCCESS if status == "executed" else AuditResult.ERROR
     await _write_agent_audit_event(
-        context=payload.context,
+        context=original_context,
         action="agent.confirmation",
         result=audit_result,
         plan=plan,

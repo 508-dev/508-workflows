@@ -20,7 +20,14 @@ class PolicyDecision:
 _ROLE_SCOPES: dict[str, frozenset[str]] = {
     "member": frozenset({"project:read", "task:create", "task:update_own"}),
     "project_manager": frozenset(
-        {"project:read", "project:write", "task:create", "task:update", "task:assign"}
+        {
+            "project:read",
+            "project:write",
+            "task:create",
+            "task:update",
+            "task:update_own",
+            "task:assign",
+        }
     ),
     "engineer": frozenset(
         {
@@ -36,6 +43,7 @@ _ROLE_SCOPES: dict[str, frozenset[str]] = {
             "project:write",
             "task:create",
             "task:update",
+            "task:update_own",
             "task:assign",
             "task:delete",
             "github:issue:create",

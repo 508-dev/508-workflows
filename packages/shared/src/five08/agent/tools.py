@@ -88,6 +88,7 @@ class InMemoryTaskStore:
         *,
         task_id: str,
         organization_id: str | None,
+        actor_id: str | None,
         title: str | None = None,
         project: str | None = None,
         assignee: str | None = None,
@@ -99,6 +100,8 @@ class InMemoryTaskStore:
             raise KeyError(f"Task {task_id} was not found")
         if task.organization_id and organization_id != task.organization_id:
             raise PermissionError("Task belongs to a different organization")
+        if task.created_by and actor_id != task.created_by:
+            raise PermissionError("Task can only be updated by its creator")
         if title is not None:
             task.title = title
         if project is not None:
@@ -172,7 +175,7 @@ class ToolRegistry:
             "task_write.update_task": ToolManifest(
                 name="task_write.update_task",
                 risk="medium",
-                required_scopes=("task:update",),
+                required_scopes=("task:update_own",),
                 requires_confirmation=True,
                 tenant_scoped=True,
                 idempotent=False,
@@ -210,6 +213,7 @@ class ToolRegistry:
             return self.task_store.update_task(
                 task_id=str(arguments.get("task_id") or "").strip().upper(),
                 organization_id=organization_id,
+                actor_id=actor_id,
                 title=_optional_str(arguments.get("title")),
                 project=_optional_str(arguments.get("project")),
                 assignee=_optional_str(arguments.get("assignee")),

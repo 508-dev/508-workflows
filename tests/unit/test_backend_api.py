@@ -710,6 +710,126 @@ def test_agent_confirmation_executes_frozen_plan_inline(
     assert plan_id not in api._PENDING_AGENT_PLANS
 
 
+def test_agent_confirmation_uses_original_context_for_execution(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Confirmation should ignore spoofed roles/scopes/context from the client."""
+    task_store = InMemoryTaskStore()
+    task_store.create_task(
+        title="Existing task",
+        project="Atlas",
+        assignee="Sarah",
+        due_date=None,
+        organization_id="org-1",
+        created_by="456",
+    )
+    monkeypatch.setattr(
+        api,
+        "_AGENT_ORCHESTRATOR",
+        AgentOrchestrator(registry=ToolRegistry(task_store)),
+    )
+    monkeypatch.setattr(api, "_PENDING_AGENT_PLANS", {})
+
+    with patch("five08.backend.api.insert_audit_event"):
+        plan_response = client.post(
+            "/agent/requests",
+            json={
+                "message": "Update TASK-001 due tomorrow",
+                "context": {
+                    "discord_user_id": "123",
+                    "organization_id": "org-1",
+                    "guild_id": "org-1",
+                    "roles": ["Member"],
+                },
+            },
+            headers=auth_headers,
+        )
+        plan_id = plan_response.json()["plan"]["plan_id"]
+        confirm_response = client.post(
+            f"/agent/confirmations/{plan_id}",
+            json={
+                "confirm": True,
+                "context": {
+                    "discord_user_id": "123",
+                    "internal_user_id": "456",
+                    "organization_id": "org-1",
+                    "guild_id": "org-1",
+                    "roles": ["Admin"],
+                    "scopes": ["task:update_own"],
+                },
+            },
+            headers=auth_headers,
+        )
+
+    payload = confirm_response.json()
+    assert confirm_response.status_code == 500
+    assert payload["status"] == "failed"
+    assert "creator" in payload["results"][0]["error"]
+
+
+def test_agent_confirmation_claims_plan_once(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A confirmed plan should be consumed so repeated confirms cannot double-run."""
+    task_store = InMemoryTaskStore()
+    monkeypatch.setattr(
+        api,
+        "_AGENT_ORCHESTRATOR",
+        AgentOrchestrator(registry=ToolRegistry(task_store)),
+    )
+    monkeypatch.setattr(api, "_PENDING_AGENT_PLANS", {})
+
+    with patch("five08.backend.api.insert_audit_event"):
+        plan_response = client.post(
+            "/agent/requests",
+            json={
+                "message": "Create a task for Sarah to update onboarding docs by Friday",
+                "context": {
+                    "discord_user_id": "123",
+                    "organization_id": "org-1",
+                    "guild_id": "org-1",
+                    "roles": ["Member"],
+                },
+            },
+            headers=auth_headers,
+        )
+        plan_id = plan_response.json()["plan"]["plan_id"]
+        first_response = client.post(
+            f"/agent/confirmations/{plan_id}",
+            json={
+                "confirm": True,
+                "context": {
+                    "discord_user_id": "123",
+                    "organization_id": "org-1",
+                    "guild_id": "org-1",
+                    "roles": ["Member"],
+                },
+            },
+            headers=auth_headers,
+        )
+        second_response = client.post(
+            f"/agent/confirmations/{plan_id}",
+            json={
+                "confirm": True,
+                "context": {
+                    "discord_user_id": "123",
+                    "organization_id": "org-1",
+                    "guild_id": "org-1",
+                    "roles": ["Member"],
+                },
+            },
+            headers=auth_headers,
+        )
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 404
+    assert second_response.json()["error"] == "plan_not_found"
+
+
 def test_auth_login_returns_503_when_store_not_ready(client: TestClient) -> None:
     response = client.get("/auth/login")
     assert response.status_code == 503

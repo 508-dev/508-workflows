@@ -62,6 +62,12 @@ requires confirmation for writes, and audits request/confirmation attempts.
 Long-running service changes should be implemented as PR-based workflows rather
 than direct production mutations.
 
+Pending confirmation plans are currently process-local in the backend API and
+expire after 10 minutes with opportunistic cleanup during agent requests and
+confirmations. A production multi-process deployment should move these pending
+plans to Redis or another shared TTL store before relying on cross-process
+confirmation delivery.
+
 Relevant configuration:
 
 - `BACKEND_API_BASE_URL`: backend API used by the bot.

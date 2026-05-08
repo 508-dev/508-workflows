@@ -100,6 +100,69 @@ def test_search_task_executes_without_confirmation() -> None:
     assert response.results[0].result["tasks"][0]["task_id"] == "TASK-001"
 
 
+def test_project_only_search_uses_project_as_filter_not_query() -> None:
+    task_store = InMemoryTaskStore()
+    task_store.create_task(
+        title="Update onboarding docs",
+        project="Atlas",
+        assignee="Sarah",
+        due_date="2026-05-15",
+        organization_id="org-1",
+        created_by="123",
+    )
+    orchestrator = AgentOrchestrator(registry=ToolRegistry(task_store))
+
+    response = orchestrator.plan("Show tasks for project Atlas", _context())
+
+    assert response.status == "executed"
+    assert response.results[0].result["tasks"][0]["project"] == "Atlas"
+
+
+def test_create_task_parses_capitalized_for_assignee() -> None:
+    orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
+
+    response = orchestrator.plan(
+        "Create a task For Sarah to update onboarding docs by Friday.",
+        _context(),
+    )
+
+    assert response.plan is not None
+    assert response.plan.actions[0].arguments["assignee"] == "Sarah"
+
+
+def test_invalid_month_date_does_not_crash_planning() -> None:
+    orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
+
+    response = orchestrator.plan(
+        "Create a task to follow up by February 31 2026",
+        _context(),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    assert "due_date" not in response.plan.actions[0].arguments
+
+
+def test_update_task_enforces_creator_ownership() -> None:
+    task_store = InMemoryTaskStore()
+    task_store.create_task(
+        title="Update onboarding docs",
+        project="Atlas",
+        assignee="Sarah",
+        due_date=None,
+        organization_id="org-1",
+        created_by="456",
+    )
+    orchestrator = AgentOrchestrator(registry=ToolRegistry(task_store))
+    response = orchestrator.plan("Update TASK-001 due tomorrow", _context())
+
+    assert response.plan is not None
+    results = orchestrator.execute_plan(response.plan, _context())
+
+    assert results[0].status == "failed"
+    assert "creator" in (results[0].error or "")
+
+
 def test_agent_model_config_uses_tier_specific_provider() -> None:
     settings = SimpleNamespace(
         openai_api_key="openai-key",

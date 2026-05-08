@@ -304,7 +304,11 @@ class AgentOrchestrator:
         return _clean_text(title)
 
     def _extract_assignee(self, text: str) -> str | None:
-        match = re.search(r"\bfor\s+([A-Za-z][A-Za-z .'-]{0,80}?)\s+to\b", text)
+        match = re.search(
+            r"\bfor\s+([A-Za-z][A-Za-z .'-]{0,80}?)\s+to\b",
+            text,
+            re.IGNORECASE,
+        )
         if match is None:
             match = re.search(
                 r"\bassign(?:ed)?\s+(?:it\s+|task\s+)?to\s+([A-Za-z][A-Za-z .'-]{0,80})",
@@ -346,7 +350,10 @@ class AgentOrchestrator:
             month = _MONTHS[month_match.group(1).casefold()]
             day = int(month_match.group(2))
             year = int(month_match.group(3))
-            return date(year, month, day).isoformat()
+            try:
+                return date(year, month, day).isoformat()
+            except ValueError:
+                return None
         lowered = text.casefold()
         today = self.today or date.today()
         if "tomorrow" in lowered:
@@ -368,9 +375,12 @@ class AgentOrchestrator:
         )
         if match is None:
             return text.strip()
+        raw_query = match.group(1).strip()
+        if re.match(r"^(?:in\s+project|for\s+project|project)\b", raw_query, re.I):
+            return ""
         query = re.split(
             r"\s+\b(?:in project|for project|project)\b",
-            match.group(1),
+            raw_query,
             maxsplit=1,
             flags=re.IGNORECASE,
         )[0]
