@@ -13,7 +13,7 @@ def _run_shell(
     script: str, *, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["zsh", "-c", script],
+        ["/bin/sh", "-c", script],
         cwd=REPO_ROOT,
         env=env,
         check=False,
