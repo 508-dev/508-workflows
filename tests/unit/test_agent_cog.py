@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -29,6 +29,26 @@ def test_format_agent_response_renders_error_payload() -> None:
     assert "Agent status: error" in message
     assert "Error: plan_expired" in message
     assert "Detail: confirm again" in message
+
+
+def test_format_agent_response_renders_tool_error() -> None:
+    cog = AgentCog.__new__(AgentCog)
+
+    message = cog._format_agent_response(
+        {
+            "status": "failed",
+            "message": "One or more actions failed.",
+            "results": [
+                {
+                    "tool_name": "task_write.update_task",
+                    "status": "failed",
+                    "error": "Task TASK-999 was not found",
+                }
+            ],
+        }
+    )
+
+    assert "- task_write.update_task: failed (Task TASK-999 was not found)" in message
 
 
 def test_audit_result_treats_error_payload_as_error() -> None:
@@ -88,6 +108,33 @@ async def test_confirmation_view_disable_stops_listener() -> None:
     view._disable()
 
     assert view.is_finished()
+
+
+@pytest.mark.asyncio
+async def test_confirmation_transport_failure_keeps_view_retryable() -> None:
+    cog = SimpleNamespace(
+        _post_agent_confirmation=AsyncMock(side_effect=RuntimeError("timeout")),
+        _audit_command_safe=Mock(),
+        _format_agent_response=Mock(return_value="Agent status: failed"),
+    )
+    view = AgentConfirmationView(
+        cog=cog,
+        requester_id=123,
+        plan_id="plan-1",
+        context={"discord_user_id": "123"},
+    )
+    interaction = SimpleNamespace(
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+        message=SimpleNamespace(edit=AsyncMock()),
+        user=SimpleNamespace(id=123),
+    )
+
+    await AgentConfirmationView.confirm(view, interaction, None)
+
+    assert not view.is_finished()
+    assert all(not item.disabled for item in view.children)
+    interaction.message.edit.assert_not_awaited()
 
 
 def test_build_agent_context_separates_interaction_and_message_ids() -> None:

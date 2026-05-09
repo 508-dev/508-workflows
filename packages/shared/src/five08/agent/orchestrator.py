@@ -360,7 +360,7 @@ class AgentOrchestrator:
         if match is None:
             return None
         project = re.split(
-            r"\s+\b(?:by|before|due|and|assign|to)\b",
+            r"\s+\b(?:by|before|due|and|assign|to|matching|about)\b",
             match.group(1),
             maxsplit=1,
             flags=re.IGNORECASE,
@@ -405,6 +405,20 @@ class AgentOrchestrator:
         if match is None:
             return text.strip()
         raw_query = match.group(1).strip()
+        leading_project = re.match(
+            r"^(?:in\s+project|for\s+project|project)\s+(.+)",
+            raw_query,
+            re.IGNORECASE,
+        )
+        if leading_project is not None:
+            trailing_query = re.search(
+                r"\b(?:matching|about)\s+(.+)",
+                leading_project.group(1),
+                re.IGNORECASE,
+            )
+            return (
+                (_clean_text(trailing_query.group(1)) or "") if trailing_query else ""
+            )
         if re.match(r"^(?:in\s+project|for\s+project|project)\b", raw_query, re.I):
             return ""
         query = re.split(
@@ -422,6 +436,8 @@ class AgentOrchestrator:
             word in lowered
             for word in ["close task", "mark done", "complete task", "completed"]
         ):
+            return "done"
+        if re.search(r"\b(?:status\s+to\s+)?done\b", lowered):
             return "done"
         if "blocked" in lowered:
             return "blocked"

@@ -3,6 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
+from five08.langfuse import get_langfuse_client
 from five08.settings import SharedSettings
 
 
@@ -55,6 +56,11 @@ def test_langfuse_base_url_is_shared_configuration() -> None:
     settings = SharedSettings(langfuse_base_url="https://cloud.langfuse.com")
 
     assert settings.langfuse_base_url == "https://cloud.langfuse.com"
+
+
+def test_langfuse_client_is_disabled_without_base_url() -> None:
+    """Langfuse should be lazily initialized only when configured."""
+    assert get_langfuse_client(SharedSettings()) is None
 
 
 def test_shared_settings_docuseal_template_id_accepts_numeric_string() -> None:
