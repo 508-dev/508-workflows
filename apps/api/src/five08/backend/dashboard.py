@@ -410,6 +410,7 @@ def dashboard_html() -> str:
         const rerun = document.createElement("button");
         rerun.type = "button";
         rerun.textContent = "Rerun";
+        rerun.setAttribute("aria-label", `Rerun ${job.type} job ${job.job_id}`);
         rerun.dataset.jobId = job.job_id;
         rerun.addEventListener("click", () => rerunJob(job.job_id, rerun));
         actionCell.appendChild(rerun);

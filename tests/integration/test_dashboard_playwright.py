@@ -217,7 +217,10 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             expect(page.get_by_text("job-queued")).not_to_be_visible()
             expect(page.get_by_text("job-failed")).to_be_visible()
 
-            page.get_by_role("button", name="Rerun").click()
+            page.get_by_role(
+                "button",
+                name="Rerun process_docuseal_agreement_job job job-failed",
+            ).click()
             assert rerun_requested.wait(timeout=5)
 
             page.get_by_role("button", name="Sync people").click()

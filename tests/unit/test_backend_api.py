@@ -777,6 +777,91 @@ def test_dashboard_jobs_forbids_non_admin_session(client: TestClient) -> None:
     assert response.json()["error"] == "forbidden"
 
 
+def test_dashboard_jobs_returns_filtered_job_payload(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admins"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+    created_at = datetime(2026, 2, 25, 12, 0, 0, tzinfo=timezone.utc)
+    updated_at = datetime(2026, 2, 25, 12, 5, 0, tzinfo=timezone.utc)
+    job = Mock(
+        id="job-failed-1",
+        type="sync_people_from_crm_job",
+        status=api.JobStatus.FAILED,
+        attempts=2,
+        max_attempts=5,
+        last_error="crm timeout",
+        created_at=created_at,
+        updated_at=updated_at,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.list_jobs", return_value=[job]) as mock_list_jobs,
+    ):
+        response = client.get(
+            "/dashboard/api/jobs"
+            "?minutes=15&limit=2&status=failed&type=sync_people_from_crm_job"
+        )
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "job_id": "job-failed-1",
+            "type": "sync_people_from_crm_job",
+            "status": "failed",
+            "attempts": 2,
+            "max_attempts": 5,
+            "last_error": "crm timeout",
+            "created_at": created_at.isoformat(),
+            "updated_at": updated_at.isoformat(),
+        }
+    ]
+    called_kwargs = mock_list_jobs.call_args.kwargs
+    assert called_kwargs["limit"] == 2
+    assert called_kwargs["status"] == api.JobStatus.FAILED
+    assert called_kwargs["job_type"] == "sync_people_from_crm_job"
+    assert called_kwargs["created_after"].tzinfo == timezone.utc
+
+
+def test_dashboard_jobs_rejects_invalid_status(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admins"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.list_jobs") as mock_list_jobs,
+    ):
+        response = client.get("/dashboard/api/jobs?status=not-a-status")
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": "invalid_status",
+        "status": "not-a-status",
+    }
+    mock_list_jobs.assert_not_called()
+
+
 def test_dashboard_rerun_crm_job_audits_discord_session(
     client: TestClient,
 ) -> None:
