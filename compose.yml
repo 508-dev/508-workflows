@@ -36,7 +36,8 @@ services:
       context: .
       dockerfile: apps/discord_bot/Dockerfile
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
       REDIS_QUEUE_NAME: ${REDIS_QUEUE_NAME:-jobs.default}
@@ -49,7 +50,8 @@ services:
       dockerfile: apps/api/Dockerfile
     command: ["uv", "run", "--package", "api", "backend-api"]
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
       REDIS_QUEUE_NAME: ${REDIS_QUEUE_NAME:-jobs.default}
@@ -81,7 +83,8 @@ services:
       --threads ${WORKER_THREADS:-8}
       -Q ${WORKER_QUEUE_NAMES:-jobs.default}
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
       REDIS_QUEUE_NAME: ${REDIS_QUEUE_NAME:-jobs.default}
