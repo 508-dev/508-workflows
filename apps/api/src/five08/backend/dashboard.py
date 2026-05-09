@@ -331,10 +331,12 @@ def dashboard_html() -> str:
     }
 
     async function requestJson(url, options = {}) {
+      const headers = new Headers(options.headers || {});
+      headers.set("Accept", "application/json");
       const response = await fetch(url, {
         credentials: "same-origin",
-        headers: { "Accept": "application/json", ...(options.headers || {}) },
         ...options,
+        headers,
       });
       if (response.status === 401) {
         window.location.assign(`/auth/login?next=${encodeURIComponent("/dashboard")}`);
