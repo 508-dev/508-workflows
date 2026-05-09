@@ -308,7 +308,11 @@ class AgentOrchestrator:
         )
 
     def _extract_title(self, text: str) -> str | None:
-        match = re.search(r"\btask\s+(?:for\s+.+?\s+)?to\s+(.+)", text, re.IGNORECASE)
+        match = re.search(
+            r"\btask\s+(?:(?:for|in)\s+.+?\s+)?to\s+(.+)",
+            text,
+            re.IGNORECASE,
+        )
         if match is None:
             match = re.search(
                 r"\bcreate\s+(?:a\s+)?task[:\s]+(.+)", text, re.IGNORECASE
