@@ -14,6 +14,7 @@ dependencies = [
     "redis>=6.4.0",
     "requests~=2.31",
     "sentry-sdk>=2.30.0",
+    "langfuse==4.6.1",
 ]
 
 [project.scripts]

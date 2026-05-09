@@ -245,6 +245,7 @@ Use `.env.example` as the source of truth for defaults.
 - `Optional`: `ALLOWED_FILE_TYPES` (default: `pdf,doc,docx,txt`)
 - `Optional`: `OPENAI_API_KEY` (if unset, heuristic extraction is used)
 - `Optional`: `OPENAI_BASE_URL` (set `https://openrouter.ai/api/v1` for OpenRouter)
+- `Optional`: `LANGFUSE_BASE_URL` (Langfuse endpoint for LLM tracing/observability)
 - `Optional`: `RESUME_AI_MODEL` (default: `gpt-4o-mini`; use plain names like `gpt-4o-mini`, OpenRouter gets auto-prefixed to `openai/<model>`)
 - `Optional`: `OPENAI_MODEL` (default: `gpt-4o-mini`; fallback/legacy model setting)
 - `Optional`: `RESUME_EXTRACTOR_VERSION` (default: `v1`; used in resume processing idempotency/ledger keys)

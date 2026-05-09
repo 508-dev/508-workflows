@@ -23,6 +23,7 @@ class SharedSettings(BaseSettings):
     sentry_dsn: str | None = None
     sentry_send_default_pii: bool = False
     sentry_debug: bool = False
+    langfuse_base_url: str | None = None
 
     # Local development defaults to host-run app services. Containerized runtimes
     # should inject Docker-network service URLs explicitly.

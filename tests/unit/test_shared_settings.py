@@ -50,6 +50,13 @@ def test_sentry_environment_and_sampling_are_not_env_configurable(
     assert settings.sentry_profiles_sample_rate == 0.0
 
 
+def test_langfuse_base_url_is_shared_configuration() -> None:
+    """Shared settings should expose Langfuse endpoint configuration."""
+    settings = SharedSettings(langfuse_base_url="https://cloud.langfuse.com")
+
+    assert settings.langfuse_base_url == "https://cloud.langfuse.com"
+
+
 def test_shared_settings_docuseal_template_id_accepts_numeric_string() -> None:
     """Shared settings should coerce DocuSeal template ids from env-like strings."""
     settings = SharedSettings(docuseal_member_agreement_template_id="1000001")
