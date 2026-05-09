@@ -24,7 +24,7 @@ def _context(*, roles: list[str] | None = None) -> AgentIdentityContext:
         discord_user_id="123",
         organization_id="org-1",
         guild_id="org-1",
-        roles=roles or ["Member"],
+        roles=roles if roles is not None else ["Member"],
     )
 
 
