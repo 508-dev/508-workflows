@@ -70,13 +70,17 @@ class AgentModelConfig:
         for fallback_tier in _TIER_FALLBACKS[tier]:
             tier_config = self._tier_config(fallback_tier)
             if tier_config.model:
+                resolved_base_url = tier_config.base_url or self.openai_base_url
                 return AgentModelSelection(
                     tier=tier,
                     model=tier_config.model,
-                    base_url=tier_config.base_url or self.openai_base_url,
+                    base_url=resolved_base_url,
                     source_tier=fallback_tier,
                     fallback_used=fallback_tier != tier,
-                    api_key_configured=bool(tier_config.api_key or self.openai_api_key),
+                    api_key_configured=self._api_key_configured_for_tier(
+                        tier_config=tier_config,
+                        resolved_base_url=resolved_base_url,
+                    ),
                 )
 
         if self.openai_model:
@@ -104,6 +108,18 @@ class AgentModelConfig:
             "strong": self.strong,
             "reasoning": self.reasoning,
         }[tier]
+
+    def _api_key_configured_for_tier(
+        self,
+        *,
+        tier_config: AgentTierModelConfig,
+        resolved_base_url: str | None,
+    ) -> bool:
+        if tier_config.api_key:
+            return True
+        if tier_config.base_url and tier_config.base_url != self.openai_base_url:
+            return False
+        return bool(self.openai_api_key and resolved_base_url == self.openai_base_url)
 
 
 def _optional_str(value: Any) -> str | None:

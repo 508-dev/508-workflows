@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -39,6 +39,8 @@ def test_create_task_requires_confirmation_and_uses_stronger_model() -> None:
 
     assert response.status == "requires_confirmation"
     assert response.plan is not None
+    assert response.plan.expires_at is not None
+    assert response.plan.expires_at.tzinfo == timezone.utc
     assert response.plan.model_tier == "strong"
     assert response.plan.model.model == "gpt-5-mini"
     assert response.plan.model.source_tier == "built_in_default"
@@ -101,6 +103,9 @@ def test_policy_denies_tenant_scoped_tools_without_tenant_context() -> None:
 
     assert response.status == "denied"
     assert "tenant context" in response.message
+    assert response.plan is not None
+    assert response.plan.requires_confirmation is False
+    assert response.plan.actions[0].requires_confirmation is False
 
 
 def test_search_task_executes_without_confirmation() -> None:
@@ -340,6 +345,28 @@ def test_agent_model_config_falls_back_between_tiers() -> None:
     assert selection.base_url == "https://api.openai.com/v1"
     assert selection.source_tier == "fast"
     assert selection.fallback_used is True
+
+
+def test_agent_model_config_requires_tier_key_for_external_provider() -> None:
+    settings = SimpleNamespace(
+        openai_api_key="openai-key",
+        openai_base_url="https://api.openai.com/v1",
+        openai_model="gpt-5-mini",
+        agent_fast_model=None,
+        agent_fast_base_url=None,
+        agent_fast_api_key=None,
+        agent_strong_model="accounts/fireworks/models/kimi-k2-instruct",
+        agent_strong_base_url="https://api.fireworks.ai/inference/v1",
+        agent_strong_api_key=None,
+        agent_reasoning_model=None,
+        agent_reasoning_base_url=None,
+        agent_reasoning_api_key=None,
+    )
+
+    selection = AgentModelConfig.from_settings(settings).resolve("strong")
+
+    assert selection.base_url == "https://api.fireworks.ai/inference/v1"
+    assert selection.api_key_configured is False
 
 
 def test_agent_model_config_falls_back_to_openai_model() -> None:

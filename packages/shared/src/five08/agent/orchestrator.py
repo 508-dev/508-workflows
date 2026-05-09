@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
 
 from five08.agent.models import (
@@ -98,6 +98,7 @@ class AgentOrchestrator:
             action=action,
         )
         if not decision.allowed:
+            action.requires_confirmation = False
             plan = self._build_plan(
                 intent=self._intent_for_tool(action.tool_name),
                 actions=[action],
@@ -226,7 +227,7 @@ class AgentOrchestrator:
             actions=actions,
             human_summary=self._human_summary(actions),
             requires_confirmation=requires_confirmation,
-            expires_at=datetime.now().astimezone() + timedelta(minutes=10),
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
         )
 
     def _resolve_model(self, model_tier: ModelTier) -> AgentModelSelection:
