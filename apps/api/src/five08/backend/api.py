@@ -113,6 +113,16 @@ sync_people_from_crm_job = JOB_FUNCTIONS["sync_people_from_crm_job"]
 sync_person_from_crm_job = JOB_FUNCTIONS["sync_person_from_crm_job"]
 process_docuseal_agreement_job = JOB_FUNCTIONS["process_docuseal_agreement_job"]
 
+_CRM_DASHBOARD_RERUN_AUDIT_JOB_TYPES = {
+    "process_contact_skills_job",
+    "extract_resume_profile_job",
+    "apply_resume_profile_job",
+    "process_intake_form_job",
+    "sync_people_from_crm_job",
+    "sync_person_from_crm_job",
+    "process_docuseal_agreement_job",
+}
+
 
 def _is_authorized(request: Request) -> bool:
     """Validate shared API secret."""
@@ -479,6 +489,51 @@ async def _write_auth_audit_event(
             subject,
             exc_info=True,
         )
+
+
+def _session_audit_actor(session: AuthSession) -> tuple[ActorProvider, str]:
+    actor_provider = _session_actor_provider(session)
+    actor_subject = session.email or session.subject
+    if actor_provider == ActorProvider.DISCORD:
+        actor_subject = session.subject
+    return actor_provider, actor_subject
+
+
+async def _audit_dashboard_crm_job_rerun(
+    session: AuthSession,
+    payload: dict[str, Any],
+) -> None:
+    if payload.get("status") != "queued":
+        return
+
+    job_type = payload.get("type")
+    if not isinstance(job_type, str):
+        return
+    if job_type not in _CRM_DASHBOARD_RERUN_AUDIT_JOB_TYPES:
+        return
+
+    job_id = payload.get("job_id")
+    source_job_id = payload.get("source_job_id")
+    if not isinstance(job_id, str) or not isinstance(source_job_id, str):
+        return
+
+    actor_provider, actor_subject = _session_audit_actor(session)
+    await _write_auth_audit_event(
+        action="crm.job_rerun",
+        result=AuditResult.SUCCESS,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="worker_job",
+        resource_id=job_id,
+        metadata={
+            "source": "dashboard",
+            "source_job_id": source_job_id,
+            "job_type": job_type,
+            "queue": settings.redis_queue_name,
+            "actor_is_admin": session.is_admin,
+        },
+    )
 
 
 async def health_handler(request: Request) -> JSONResponse:
@@ -966,11 +1021,14 @@ async def dashboard_rerun_job_handler(
     job_id: str,
 ) -> JSONResponse:
     """Rerun one job from the authenticated admin dashboard."""
-    _, error_response = await _dashboard_admin_session_or_error(request)
+    session, error_response = await _dashboard_admin_session_or_error(request)
     if error_response is not None:
         return error_response
+    assert session is not None
 
     payload, status_code = await _rerun_job(job_id, request.app.state.queue)
+    if status_code == 202:
+        await _audit_dashboard_crm_job_rerun(session, payload)
     return JSONResponse(payload, status_code=status_code)
 
 
@@ -982,10 +1040,7 @@ async def dashboard_sync_people_handler(request: Request) -> JSONResponse:
     assert session is not None
 
     job = await _enqueue_full_crm_sync_job(request.app.state.queue, reason="dashboard")
-    actor_provider = _session_actor_provider(session)
-    actor_subject = session.email or session.subject
-    if actor_provider == ActorProvider.DISCORD:
-        actor_subject = session.subject
+    actor_provider, actor_subject = _session_audit_actor(session)
     await _write_auth_audit_event(
         action="crm.people_sync",
         result=AuditResult.SUCCESS,
