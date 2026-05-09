@@ -12,6 +12,8 @@ export POSTGRES_HOST_PORT
 export WEBHOOK_INGEST_HOST_PORT
 export MINIO_API_HOST_PORT
 export MINIO_CONSOLE_HOST_PORT
+export REDIS_URL="redis://redis:6379/0"
+export POSTGRES_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
 
 # Host-run-only app ports must not leak into Compose interpolation, or the API
 # container can start on a high worktree port while peers still target :8090.
@@ -32,4 +34,4 @@ EOF
 fi
 
 cd "$repo_root"
-exec docker compose "$@"
+exec docker compose -f compose.yml -f compose.local.yml "$@"

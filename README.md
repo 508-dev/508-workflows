@@ -18,7 +18,8 @@ This repository follows a service-oriented monorepo layout:
 ├── packages/
 │   └── shared/
 │       └── src/five08/      # Shared settings, queue helpers, shared clients
-├── docker-compose.yml      # full container stack for Coolify/local parity
+├── compose.yml             # Coolify/app stack using external Redis/Postgres URLs
+├── compose.local.yml       # local Redis/Postgres overlay for Docker Compose
 ├── tests/                  # Unit and integration tests
 └── pyproject.toml          # uv workspace root
 ```
@@ -129,13 +130,18 @@ uv run --package five08 crmctl batch-update --where timezone__is_null=true --whe
 
 `./scripts/dev.sh` exports deterministic per-worktree localhost ports and
 service URLs so the apps can run on the host without manual overrides. Use
-the lower-level Compose wrapper when you want full containerized parity.
+the lower-level Compose wrapper when you want a full local container stack.
 
-For full containerized runs, including Coolify-style deployment parity:
+For full local containerized runs:
 
 ```bash
 ./scripts/docker-compose.sh up --build
 ```
+
+`./scripts/docker-compose.sh` loads `compose.yml` plus `compose.local.yml`, so
+local runs include Redis and Postgres containers. Coolify should deploy
+`compose.yml` by itself and provide managed `REDIS_URL` and `POSTGRES_URL`
+runtime variables.
 
 Note: the service Dockerfiles use BuildKit cache mounts, so containerized builds
 require BuildKit-capable Docker / `docker compose build` support.
@@ -166,7 +172,7 @@ Use `.env.example` as the source of truth for defaults.
 
 ### Queue + Job Runtime
 
-- `Optional`: `REDIS_URL` (default: `redis://127.0.0.1:6379/0`; `./scripts/dev.sh` overrides it to a deterministic per-worktree localhost port, Compose injects `redis://redis:6379/0`)
+- `Optional`: `REDIS_URL` (default: `redis://127.0.0.1:6379/0`; `./scripts/dev.sh` overrides it to a deterministic per-worktree localhost port, `compose.local.yml` injects `redis://redis:6379/0`, and Coolify should provide the managed Redis URL)
 - `Optional`: `REDIS_QUEUE_NAME` (default: `jobs.default`)
 - `Optional`: `REDIS_KEY_PREFIX` (default: `jobs`)
 - `Optional`: `REDIS_HOST_BIND` (default: `127.0.0.1`)
@@ -179,7 +185,7 @@ Use `.env.example` as the source of truth for defaults.
 
 ### Postgres + Compose Exposure
 
-- `Optional`: `POSTGRES_URL` (default: `postgresql://postgres:postgres@127.0.0.1:5432/workflows`; `./scripts/dev.sh` overrides it to a deterministic per-worktree localhost port, Compose injects a Docker-network URL)
+- `Optional`: `POSTGRES_URL` (default: `postgresql://postgres:postgres@127.0.0.1:5432/workflows`; `./scripts/dev.sh` overrides it to a deterministic per-worktree localhost port, `compose.local.yml` injects a Docker-network URL, and Coolify should provide the managed Postgres URL)
 - `Optional` (Compose DB container): `POSTGRES_DB` (default: `workflows`)
 - `Optional` (Compose DB container): `POSTGRES_USER` (default: `postgres`)
 - `Optional` (Compose DB container): `POSTGRES_PASSWORD` (default: `postgres`)

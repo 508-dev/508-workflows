@@ -25,7 +25,7 @@ This repo contains multiple services:
 - `apps/discord_bot`: Discord gateway and bot commands/cogs
 - `apps/api`: webhook ingest API and dashboard auth routes
 - `apps/worker`: queue consumer and processing jobs
-- `docker-compose.yml`: full container stack for Coolify/local parity; day-to-day dev should prefer host-run app services with Docker-managed infra
+- `compose.yml`: Coolify/app stack using external Redis/Postgres URLs; `compose.local.yml`: local Redis/Postgres overlay
 
 4. Human audit logging
 - Human-triggered CRM actions from Discord should write to the worker audit ingest endpoint.
