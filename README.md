@@ -58,7 +58,8 @@ local `people` cache.
 
 ### Current API/queue caveats
 
-- Protected API endpoints use a shared `API_SHARED_SECRET` in `X-API-Secret` today. This includes webhook and admin routes until per-webhook/per-route auth is introduced.
+- Non-dashboard protected API endpoints use a shared `API_SHARED_SECRET` in `X-API-Secret` today. This includes webhook and secret-backed admin routes until per-webhook/per-route auth is introduced.
+- `/dashboard` and `/dashboard/api/*` are browser-facing admin routes that use the HttpOnly session cookie from OIDC or Discord dashboard login flows. They do not accept `X-API-Secret`.
 - Worker startup uses a single effective queue name for actor registration; keep this explicit if you later add true multi-queue routing.
 - Backend rerun/enqueue behavior relies on one shared job-handler set. Add any new worker callable consistently to both backend handler resolution and worker dispatch.
 
@@ -205,7 +206,7 @@ Use `.env.example` as the source of truth for defaults.
 
 ### Backend API Ingest
 
-- `Required` for protected endpoints: `API_SHARED_SECRET` (ingest requests are rejected when unset)
+- `Required` for non-dashboard protected endpoints: `API_SHARED_SECRET` (ingest requests are rejected when unset)
 - `Optional`: `WEBHOOK_INGEST_HOST` (default: `0.0.0.0`)
 - `Optional`: `WEBHOOK_INGEST_HOST_BIND` (default: `127.0.0.1`; Compose host bind for local exposure)
 - `Optional`: `WEBHOOK_INGEST_PORT` (host-run `./scripts/dev.sh` ignores `.env` for this key and defaults to a deterministic per-worktree value near `18080 + WORKTREE_ENV_SLOT`; export it in your shell only when you intentionally want a fixed port, and avoid browser-unsafe ports such as `5060`)

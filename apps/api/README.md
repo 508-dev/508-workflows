@@ -2,15 +2,17 @@
 
 ## Auth
 
-- Protected ingest/job endpoints require `API_SHARED_SECRET` to be configured on the API.
+- Non-dashboard protected ingest/job endpoints require `API_SHARED_SECRET` to be configured on the API.
 - Send the secret in header `X-API-Secret`.
 - Header name is exactly `X-API-Secret` (not `X-API-Secret-Key`).
+- `GET /dashboard` and `/dashboard/api/*` use the HttpOnly session cookie created by OIDC or Discord dashboard login flows. They do not accept `X-API-Secret`.
 - `GET /health` and most OIDC session routes (`/auth/login`, `/auth/callback`, `/auth/me`, `/auth/logout`) do not use `X-API-Secret`.
 - `POST /auth/discord/links` does use `X-API-Secret` because it is called by trusted backend/bot components.
 
 ### API auth strategy
 
-- Protected routes (including webhooks) use `X-API-Secret` with `API_SHARED_SECRET`.
+- Non-dashboard protected routes (including webhooks) use `X-API-Secret` with `API_SHARED_SECRET`.
+- Dashboard browser routes (`/dashboard` and `/dashboard/api/*`) are session-authenticated admin routes and are intentionally exempt from `X-API-Secret`.
 
 Example:
 
