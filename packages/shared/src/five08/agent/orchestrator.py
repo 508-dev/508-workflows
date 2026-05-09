@@ -389,10 +389,11 @@ class AgentOrchestrator:
                 return None
         lowered = text.casefold()
         today = self.today or date.today()
-        if "tomorrow" in lowered:
+        due_cue = r"\b(?:by|before|due)\s+(?:on\s+)?"
+        if re.search(rf"{due_cue}tomorrow\b", lowered):
             return (today + timedelta(days=1)).isoformat()
         for weekday_name, weekday_index in _WEEKDAYS.items():
-            if re.search(rf"\b{weekday_name}\b", lowered):
+            if re.search(rf"{due_cue}(?:next\s+)?{weekday_name}\b", lowered):
                 days_ahead = (weekday_index - today.weekday()) % 7
                 if days_ahead == 0:
                     days_ahead = 7

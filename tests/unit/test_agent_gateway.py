@@ -227,6 +227,19 @@ def test_create_task_assignment_clause_stops_before_title() -> None:
     assert response.plan.actions[0].arguments["assignee"] == "Sarah"
 
 
+def test_create_task_title_weekday_does_not_become_due_date_without_cue() -> None:
+    orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
+
+    response = orchestrator.plan(
+        "Create a task to draft the Monday newsletter",
+        _context(),
+    )
+
+    assert response.plan is not None
+    assert response.plan.actions[0].arguments["title"] == "draft the Monday newsletter"
+    assert "due_date" not in response.plan.actions[0].arguments
+
+
 def test_update_assignment_parses_task_id_before_to() -> None:
     orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
 
