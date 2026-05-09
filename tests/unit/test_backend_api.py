@@ -7,7 +7,13 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from five08.agent import AgentOrchestrator, InMemoryTaskStore, ToolRegistry
+from five08.agent import (
+    AgentExecutionResult,
+    AgentIdentityContext,
+    AgentOrchestrator,
+    InMemoryTaskStore,
+    ToolRegistry,
+)
 from five08.backend import api
 from five08.worker.masking import mask_email
 
@@ -665,6 +671,49 @@ def test_agent_request_for_write_returns_confirmation_plan(
     assert audit_payload.correlation_id == "message-1"
 
 
+def test_agent_request_rejects_when_pending_plan_capacity_is_full(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pending confirmation plans should be bounded under request bursts."""
+    task_store = InMemoryTaskStore()
+    monkeypatch.setattr(
+        api,
+        "_AGENT_ORCHESTRATOR",
+        AgentOrchestrator(registry=ToolRegistry(task_store)),
+    )
+    monkeypatch.setattr(api, "_PENDING_AGENT_PLANS", {})
+    monkeypatch.setattr(api, "_MAX_PENDING_AGENT_PLANS", 1)
+
+    request_body = {
+        "message": "Create a task for Sarah to update onboarding docs by Friday",
+        "context": {
+            "discord_user_id": "123",
+            "organization_id": "org-1",
+            "guild_id": "org-1",
+            "roles": ["Member"],
+        },
+    }
+
+    with patch("five08.backend.api.insert_audit_event"):
+        first_response = client.post(
+            "/agent/requests",
+            json=request_body,
+            headers=auth_headers,
+        )
+        second_response = client.post(
+            "/agent/requests",
+            json=request_body,
+            headers=auth_headers,
+        )
+
+    assert first_response.status_code == 202
+    assert second_response.status_code == 503
+    assert second_response.json()["status"] == "failed"
+    assert "capacity is full" in second_response.json()["message"]
+
+
 def test_agent_confirmation_executes_frozen_plan_inline(
     client: TestClient,
     auth_headers: dict[str, str],
@@ -772,6 +821,80 @@ def test_agent_confirmation_uses_original_context_for_execution(
     assert confirm_response.status_code == 403
     assert payload["status"] == "denied"
     assert "creator" in payload["results"][0]["error"]
+
+
+def test_agent_confirmation_uses_fresh_non_escalating_roles(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Confirmation should reflect role revocation without accepting escalation."""
+    captured: dict[str, AgentIdentityContext] = {}
+    task_store = InMemoryTaskStore()
+    monkeypatch.setattr(
+        api,
+        "_AGENT_ORCHESTRATOR",
+        AgentOrchestrator(registry=ToolRegistry(task_store)),
+    )
+    monkeypatch.setattr(api, "_PENDING_AGENT_PLANS", {})
+
+    class CapturingOrchestrator:
+        def execute_plan(
+            self,
+            plan: object,
+            context: AgentIdentityContext,
+            *,
+            confirmed: bool = False,
+        ) -> list[AgentExecutionResult]:
+            captured["context"] = context
+            return [
+                AgentExecutionResult(
+                    tool_name="task_write.create_task",
+                    status="succeeded",
+                    result={"task_id": "TASK-001"},
+                )
+            ]
+
+    with patch("five08.backend.api.insert_audit_event"):
+        plan_response = client.post(
+            "/agent/requests",
+            json={
+                "message": "Create a task for Sarah to update onboarding docs by Friday",
+                "context": {
+                    "discord_user_id": "123",
+                    "internal_user_id": "internal-123",
+                    "organization_id": "org-1",
+                    "guild_id": "org-1",
+                    "roles": ["Admin"],
+                    "scopes": ["deploy:request"],
+                },
+            },
+            headers=auth_headers,
+        )
+        monkeypatch.setattr(api, "_AGENT_ORCHESTRATOR", CapturingOrchestrator())
+        plan_id = plan_response.json()["plan"]["plan_id"]
+        confirm_response = client.post(
+            f"/agent/confirmations/{plan_id}",
+            json={
+                "confirm": True,
+                "context": {
+                    "discord_user_id": "123",
+                    "internal_user_id": "attacker-internal-id",
+                    "organization_id": "other-org",
+                    "guild_id": "other-guild",
+                    "roles": ["Member"],
+                    "scopes": ["deploy:request"],
+                },
+            },
+            headers=auth_headers,
+        )
+
+    assert confirm_response.status_code == 200
+    assert captured["context"].internal_user_id == "internal-123"
+    assert captured["context"].organization_id == "org-1"
+    assert captured["context"].guild_id == "org-1"
+    assert captured["context"].roles == []
+    assert captured["context"].scopes == []
 
 
 def test_agent_confirmation_claims_plan_once(

@@ -321,7 +321,7 @@ class AgentOrchestrator:
             return None
         title = match.group(1)
         title = re.split(
-            r"\s+\b(?:by|before|due|and link(?: it)? to|in project|for project)\b",
+            r"\s+\b(?:by|before|due|and assign(?: it)? to|assign(?: it)? to|and link(?: it)? to|in project|for project)\b",
             title,
             maxsplit=1,
             flags=re.IGNORECASE,

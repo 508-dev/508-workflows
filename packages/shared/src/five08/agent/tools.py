@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import threading
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any
@@ -54,11 +55,12 @@ class TaskRecord:
 
 
 class InMemoryTaskStore:
-    """Small inline task store for synchronous agent command execution."""
+    """Process-local MVP task store for synchronous agent command execution."""
 
     def __init__(self) -> None:
         self._counter = itertools.count(1)
         self._tasks: dict[str, TaskRecord] = {}
+        self._lock = threading.RLock()
 
     def create_task(
         self,
@@ -70,18 +72,19 @@ class InMemoryTaskStore:
         organization_id: str | None,
         created_by: str | None,
     ) -> dict[str, Any]:
-        task_id = f"TASK-{next(self._counter):03d}"
-        task = TaskRecord(
-            task_id=task_id,
-            title=title,
-            project=project,
-            assignee=assignee,
-            due_date=due_date,
-            organization_id=organization_id,
-            created_by=created_by,
-        )
-        self._tasks[task_id] = task
-        return task.to_payload()
+        with self._lock:
+            task_id = f"TASK-{next(self._counter):03d}"
+            task = TaskRecord(
+                task_id=task_id,
+                title=title,
+                project=project,
+                assignee=assignee,
+                due_date=due_date,
+                organization_id=organization_id,
+                created_by=created_by,
+            )
+            self._tasks[task_id] = task
+            return task.to_payload()
 
     def update_task(
         self,
@@ -95,25 +98,26 @@ class InMemoryTaskStore:
         due_date: str | None = None,
         status: str | None = None,
     ) -> dict[str, Any]:
-        task = self._tasks.get(task_id)
-        if task is None:
-            raise KeyError(f"Task {task_id} was not found")
-        if task.organization_id and organization_id != task.organization_id:
-            raise PermissionError("Task belongs to a different organization")
-        if task.created_by and actor_id != task.created_by:
-            raise PermissionError("Task can only be updated by its creator")
-        if title is not None:
-            task.title = title
-        if project is not None:
-            task.project = project
-        if assignee is not None:
-            task.assignee = assignee
-        if due_date is not None:
-            task.due_date = due_date
-        if status is not None:
-            task.status = status
-        task.updated_at = datetime.now(timezone.utc).isoformat()
-        return task.to_payload()
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                raise KeyError(f"Task {task_id} was not found")
+            if task.organization_id and organization_id != task.organization_id:
+                raise PermissionError("Task belongs to a different organization")
+            if task.created_by and actor_id != task.created_by:
+                raise PermissionError("Task can only be updated by its creator")
+            if title is not None:
+                task.title = title
+            if project is not None:
+                task.project = project
+            if assignee is not None:
+                task.assignee = assignee
+            if due_date is not None:
+                task.due_date = due_date
+            if status is not None:
+                task.status = status
+            task.updated_at = datetime.now(timezone.utc).isoformat()
+            return task.to_payload()
 
     def search_tasks(
         self,
@@ -125,7 +129,9 @@ class InMemoryTaskStore:
         normalized_query = query.strip().casefold()
         normalized_project = project.strip().casefold() if project else None
         matches: list[dict[str, Any]] = []
-        for task in self._tasks.values():
+        with self._lock:
+            tasks = list(self._tasks.values())
+        for task in tasks:
             if task.organization_id and organization_id != task.organization_id:
                 continue
             if (

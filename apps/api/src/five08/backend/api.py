@@ -128,6 +128,9 @@ process_mailbox_message_job = JOB_FUNCTIONS["process_mailbox_message_job"]
 sync_people_from_crm_job = JOB_FUNCTIONS["sync_people_from_crm_job"]
 sync_person_from_crm_job = JOB_FUNCTIONS["sync_person_from_crm_job"]
 process_docuseal_agreement_job = JOB_FUNCTIONS["process_docuseal_agreement_job"]
+# Process-local MVP agent tools stay synchronous for Discord button UX; the
+# shared in-memory store serializes access, and pending confirmations are bounded
+# below so a burst cannot grow memory without limit.
 _AGENT_TASK_STORE = InMemoryTaskStore()
 _AGENT_ORCHESTRATOR = AgentOrchestrator(
     registry=ToolRegistry(_AGENT_TASK_STORE),
@@ -135,6 +138,8 @@ _AGENT_ORCHESTRATOR = AgentOrchestrator(
 )
 _PENDING_AGENT_PLANS: dict[str, tuple[AgentPlan, AgentIdentityContext]] = {}
 _PENDING_AGENT_PLANS_LOCK = asyncio.Lock()
+_MAX_PENDING_AGENT_PLANS = 1000
+_MAX_PENDING_AGENT_PLANS_PER_ACTOR = 25
 
 
 def _is_authorized(request: Request) -> bool:
@@ -1232,13 +1237,58 @@ def _cleanup_expired_pending_agent_plans(*, now: datetime | None = None) -> None
         _PENDING_AGENT_PLANS.pop(plan_id, None)
 
 
+def _pending_agent_plan_count_for_actor(discord_user_id: str) -> int:
+    return sum(
+        1
+        for _plan, context in _PENDING_AGENT_PLANS.values()
+        if context.discord_user_id == discord_user_id
+    )
+
+
+def _confirmation_execution_context(
+    *,
+    original_context: AgentIdentityContext,
+    confirmation_context: AgentIdentityContext,
+) -> AgentIdentityContext:
+    original_roles = {role.strip().casefold() for role in original_context.roles}
+    confirmation_roles = {
+        role.strip().casefold() for role in confirmation_context.roles
+    }
+    roles = sorted(role for role in original_roles & confirmation_roles if role)
+    return AgentIdentityContext(
+        discord_user_id=original_context.discord_user_id,
+        internal_user_id=original_context.internal_user_id,
+        organization_id=original_context.organization_id,
+        workspace_id=original_context.workspace_id,
+        project_id=original_context.project_id,
+        guild_id=original_context.guild_id,
+        channel_id=original_context.channel_id,
+        roles=roles,
+        scopes=[],
+        impersonation=(
+            original_context.impersonation or confirmation_context.impersonation
+        ),
+        interaction_id=(
+            confirmation_context.interaction_id or original_context.interaction_id
+        ),
+        message_id=confirmation_context.message_id or original_context.message_id,
+    )
+
+
 async def _store_pending_agent_plan(
     plan: AgentPlan,
     context: AgentIdentityContext,
-) -> None:
+) -> bool:
     async with _PENDING_AGENT_PLANS_LOCK:
         _cleanup_expired_pending_agent_plans()
+        if (
+            len(_PENDING_AGENT_PLANS) >= _MAX_PENDING_AGENT_PLANS
+            or _pending_agent_plan_count_for_actor(context.discord_user_id)
+            >= _MAX_PENDING_AGENT_PLANS_PER_ACTOR
+        ):
+            return False
         _PENDING_AGENT_PLANS[plan.plan_id] = (plan, context)
+        return True
 
 
 async def _claim_pending_agent_plan(
@@ -1288,7 +1338,27 @@ async def agent_request_handler(request: Request) -> JSONResponse:
 
     response = _AGENT_ORCHESTRATOR.plan(payload.message, payload.context)
     if response.plan is not None and response.status == "requires_confirmation":
-        await _store_pending_agent_plan(response.plan, payload.context)
+        stored = await _store_pending_agent_plan(response.plan, payload.context)
+        if not stored:
+            await _write_agent_audit_event(
+                context=payload.context,
+                action="agent.request",
+                result=AuditResult.ERROR,
+                plan=response.plan,
+                metadata={
+                    "status": "failed",
+                    "reason": "pending_plan_capacity_exceeded",
+                },
+            )
+            response = AgentResponse(
+                status="failed",
+                plan=response.plan,
+                message=("Agent confirmation capacity is full. Try again shortly."),
+            )
+            return JSONResponse(
+                response.model_dump(mode="json"),
+                status_code=503,
+            )
 
     audit_result = AuditResult.SUCCESS
     if response.status == "denied":
@@ -1399,9 +1469,13 @@ async def agent_confirmation_handler(
         )
         return JSONResponse(response.model_dump(mode="json"), status_code=200)
 
+    execution_context = _confirmation_execution_context(
+        original_context=original_context,
+        confirmation_context=payload.context,
+    )
     results = _AGENT_ORCHESTRATOR.execute_plan(
         plan,
-        original_context,
+        execution_context,
         confirmed=True,
     )
     if any(result.status == "denied" for result in results):
@@ -1437,7 +1511,7 @@ async def agent_confirmation_handler(
         "failed": AuditResult.ERROR,
     }[status]
     await _write_agent_audit_event(
-        context=original_context,
+        context=execution_context,
         action="agent.confirmation",
         result=audit_result,
         plan=plan,

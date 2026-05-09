@@ -104,9 +104,11 @@ class AgentConfirmationView(discord.ui.View):
                 context=self.context,
                 confirm=False,
             )
+            transport_failed = False
         except Exception as exc:
             logger.warning("Agent cancellation request failed: %s", exc)
             response = {"status": "failed", "message": str(exc)}
+            transport_failed = True
         self.cog._audit_command_safe(
             interaction=interaction,
             action="agent.cancel",
@@ -117,12 +119,13 @@ class AgentConfirmationView(discord.ui.View):
                 "error": response.get("error"),
             },
         )
-        self._disable()
+        if not transport_failed:
+            self._disable()
         await interaction.followup.send(
             self.cog._format_agent_response(response),
             ephemeral=True,
         )
-        if interaction.message is not None:
+        if not transport_failed and interaction.message is not None:
             try:
                 await interaction.message.edit(view=self)
             except discord.HTTPException:

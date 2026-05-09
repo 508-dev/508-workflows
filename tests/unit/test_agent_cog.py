@@ -137,6 +137,33 @@ async def test_confirmation_transport_failure_keeps_view_retryable() -> None:
     interaction.message.edit.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_cancellation_transport_failure_keeps_view_retryable() -> None:
+    cog = SimpleNamespace(
+        _post_agent_confirmation=AsyncMock(side_effect=RuntimeError("timeout")),
+        _audit_command_safe=Mock(),
+        _format_agent_response=Mock(return_value="Agent status: failed"),
+    )
+    view = AgentConfirmationView(
+        cog=cog,
+        requester_id=123,
+        plan_id="plan-1",
+        context={"discord_user_id": "123"},
+    )
+    interaction = SimpleNamespace(
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+        message=SimpleNamespace(edit=AsyncMock()),
+        user=SimpleNamespace(id=123),
+    )
+
+    await AgentConfirmationView.cancel(view, interaction, None)
+
+    assert not view.is_finished()
+    assert all(not item.disabled for item in view.children)
+    interaction.message.edit.assert_not_awaited()
+
+
 def test_build_agent_context_separates_interaction_and_message_ids() -> None:
     cog = AgentCog.__new__(AgentCog)
     interaction = SimpleNamespace(

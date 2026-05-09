@@ -214,6 +214,19 @@ def test_create_task_in_project_clause_stops_before_title() -> None:
     assert response.plan.actions[0].arguments["title"] == "update docs"
 
 
+def test_create_task_assignment_clause_stops_before_title() -> None:
+    orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
+
+    response = orchestrator.plan(
+        "Create a task to update docs and assign it to Sarah by Friday",
+        _context(),
+    )
+
+    assert response.plan is not None
+    assert response.plan.actions[0].arguments["title"] == "update docs"
+    assert response.plan.actions[0].arguments["assignee"] == "Sarah"
+
+
 def test_update_assignment_parses_task_id_before_to() -> None:
     orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
 
