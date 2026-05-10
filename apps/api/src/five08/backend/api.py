@@ -1315,23 +1315,25 @@ async def _claim_pending_agent_plan(
     discord_user_id: str,
 ) -> tuple[str, tuple[AgentPlan, AgentIdentityContext] | None]:
     async with _pending_agent_plans_lock():
+        now = datetime.now(timezone.utc)
         pending = _PENDING_AGENT_PLANS.get(plan_id)
         if pending is None:
-            _cleanup_expired_pending_agent_plans()
+            _cleanup_expired_pending_agent_plans(now=now)
             return "not_found", None
 
         plan, original_context = pending
         if original_context.discord_user_id != discord_user_id:
-            _cleanup_expired_pending_agent_plans()
+            _cleanup_expired_pending_agent_plans(now=now)
             return "actor_mismatch", pending
 
-        if _is_agent_plan_expired(plan):
+        if _is_agent_plan_expired(plan, now=now):
             _PENDING_AGENT_PLANS.pop(plan_id, None)
-            _cleanup_expired_pending_agent_plans()
+            _cleanup_expired_pending_agent_plans(now=now)
             return "expired", pending
 
-        _cleanup_expired_pending_agent_plans()
-        return "claimed", _PENDING_AGENT_PLANS.pop(plan_id)
+        claimed = _PENDING_AGENT_PLANS.pop(plan_id, pending)
+        _cleanup_expired_pending_agent_plans(now=now)
+        return "claimed", claimed
 
 
 async def agent_request_handler(request: Request) -> JSONResponse:

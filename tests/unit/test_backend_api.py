@@ -732,6 +732,50 @@ def test_pending_agent_plan_lock_is_created_per_running_loop(
     assert first_lock is not second_lock
 
 
+@pytest.mark.asyncio
+async def test_agent_confirmation_claim_pops_before_expired_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claiming a plan should not race itself if cleanup sees it as expired."""
+    plan_response = AgentOrchestrator(today=datetime.now(timezone.utc).date()).plan(
+        "Create a task for Sarah to update onboarding docs by Friday",
+        AgentIdentityContext(
+            discord_user_id="123",
+            organization_id="org-1",
+            guild_id="org-1",
+            roles=["Member"],
+        ),
+    )
+    assert plan_response.plan is not None
+    original_context = AgentIdentityContext(
+        discord_user_id="123",
+        organization_id="org-1",
+        guild_id="org-1",
+        roles=["Member"],
+    )
+    monkeypatch.setattr(
+        api,
+        "_PENDING_AGENT_PLANS",
+        {plan_response.plan.plan_id: (plan_response.plan, original_context)},
+    )
+
+    def cleanup_removes_plan(*, now: datetime | None = None) -> None:
+        api._PENDING_AGENT_PLANS.pop(plan_response.plan.plan_id, None)
+
+    monkeypatch.setattr(
+        api, "_cleanup_expired_pending_agent_plans", cleanup_removes_plan
+    )
+
+    claim_status, pending = await api._claim_pending_agent_plan(
+        plan_response.plan.plan_id,
+        discord_user_id="123",
+    )
+
+    assert claim_status == "claimed"
+    assert pending is not None
+    assert pending[0].plan_id == plan_response.plan.plan_id
+
+
 def test_agent_confirmation_executes_frozen_plan_inline(
     client: TestClient,
     auth_headers: dict[str, str],

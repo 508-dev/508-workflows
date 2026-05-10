@@ -162,7 +162,7 @@ class AgentOrchestrator:
         organization_id = (
             context.organization_id or context.guild_id or context.workspace_id
         )
-        actor_id = context.internal_user_id or context.discord_user_id
+        actor_id = context.discord_user_id
         actor_scopes = effective_scopes or self.policy.scopes_for_context(context)
         for action in plan.actions:
             manifest = self.registry.get(action.tool_name)
@@ -255,7 +255,7 @@ class AgentOrchestrator:
         if task_id and any(
             keyword in lowered
             for keyword in ["assign", "due", "status", "close", "complete", "completed"]
-            + ["mark", "marked"]
+            + ["mark", "marked", "rename", "title"]
         ):
             return self._parse_update_task(text)
         return None
@@ -328,8 +328,9 @@ class AgentOrchestrator:
         if match is None:
             return None
         title = match.group(1)
+        title = self._trim_parseable_due_clause(title)
         title = re.split(
-            r"\s+\b(?:by|before|due|and assign(?: it)? to|assign(?: it)? to|and link(?: it)? to|in project|for project)\b",
+            r"\s+\b(?:and assign(?: it)? to|assign(?: it)? to|and link(?: it)? to|in project|for project)\b",
             title,
             maxsplit=1,
             flags=re.IGNORECASE,
@@ -338,19 +339,27 @@ class AgentOrchestrator:
 
     def _extract_update_title(self, text: str) -> str | None:
         match = re.search(
-            r"\b(?:title|rename(?:\s+task)?)\s+to\s+(.+)",
+            r"\b(?:title|rename(?:\s+(?:task|TASK-\d+))?)\s+to\s+(.+)",
             text,
             re.IGNORECASE,
         )
         if match is None:
             return None
+        title = self._trim_parseable_due_clause(match.group(1))
         title = re.split(
-            r"\s+\b(?:by|before|due|and assign(?: it)? to|assign(?: it)? to|and link(?: it)? to|in project|for project|status to)\b",
-            match.group(1),
+            r"\s+\b(?:and assign(?: it)? to|assign(?: it)? to|and link(?: it)? to|in project|for project|status to)\b",
+            title,
             maxsplit=1,
             flags=re.IGNORECASE,
         )[0]
         return _clean_text(title)
+
+    def _trim_parseable_due_clause(self, title: str) -> str:
+        for match in re.finditer(r"\b(?:by|before|due)\b", title, re.IGNORECASE):
+            candidate = title[match.start() :]
+            if self._extract_due_date(candidate) is not None:
+                return title[: match.start()].rstrip()
+        return title
 
     def _extract_assignee(self, text: str) -> str | None:
         match = re.search(
@@ -436,11 +445,15 @@ class AgentOrchestrator:
         raw_query = (match.group(1) or "").strip()
         if not raw_query:
             return ""
-        leading_project = re.match(
-            r"^(?:in\s+project|for\s+project|project)\s+(.+)",
-            raw_query,
-            re.IGNORECASE,
+        has_explicit_project_clause = (
+            re.search(r"\b(?:for|in)\s+project\s+", text, re.IGNORECASE) is not None
         )
+        leading_project_pattern = (
+            r"^(?:in\s+project|for\s+project|project)\s+(.+)"
+            if has_explicit_project_clause
+            else r"^(?:in\s+project|for\s+project)\s+(.+)"
+        )
+        leading_project = re.match(leading_project_pattern, raw_query, re.IGNORECASE)
         if leading_project is not None:
             trailing_query = re.search(
                 r"\b(?:matching|about)\s+(.+)",
@@ -450,10 +463,15 @@ class AgentOrchestrator:
             return (
                 (_clean_text(trailing_query.group(1)) or "") if trailing_query else ""
             )
-        if re.match(r"^(?:in\s+project|for\s+project|project)\b", raw_query, re.I):
+        project_only_pattern = (
+            r"^(?:in\s+project|for\s+project|project)\b"
+            if has_explicit_project_clause
+            else r"^(?:in\s+project|for\s+project)\b"
+        )
+        if re.match(project_only_pattern, raw_query, re.I):
             return ""
         query = re.split(
-            r"\s+\b(?:in project|for project|project)\b",
+            r"\s+\b(?:in project|for project)\b",
             raw_query,
             maxsplit=1,
             flags=re.IGNORECASE,

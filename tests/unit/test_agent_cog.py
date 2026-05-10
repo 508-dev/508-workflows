@@ -301,6 +301,21 @@ def test_build_agent_context_from_message_uses_thread_message_context() -> None:
     assert context["roles"] == ["@everyone", "Member"]
 
 
+def test_mention_rate_limit_prunes_expired_user_entries() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog._mention_request_timestamps = {
+        111: [1.0],
+        222: [2.0],
+    }
+
+    with patch("five08.discord_bot.cogs.agent.time.monotonic", return_value=1000.0):
+        assert cog._mention_rate_limited(333) is False
+
+    assert 111 not in cog._mention_request_timestamps
+    assert 222 not in cog._mention_request_timestamps
+    assert cog._mention_request_timestamps[333] == [1000.0]
+
+
 @pytest.mark.asyncio
 async def test_agent_mention_posts_agent_response() -> None:
     cog = AgentCog.__new__(AgentCog)

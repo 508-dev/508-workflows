@@ -19,9 +19,14 @@ from five08.agent import (
 from five08.agent.tools import ToolRegistry
 
 
-def _context(*, roles: list[str] | None = None) -> AgentIdentityContext:
+def _context(
+    *,
+    roles: list[str] | None = None,
+    internal_user_id: str | None = None,
+) -> AgentIdentityContext:
     return AgentIdentityContext(
         discord_user_id="123",
+        internal_user_id=internal_user_id,
         organization_id="org-1",
         guild_id="org-1",
         roles=roles if roles is not None else ["Member"],
@@ -216,6 +221,33 @@ def test_project_search_keeps_trailing_matching_query() -> None:
     assert len(response.results[0].result["tasks"]) == 1
 
 
+def test_search_about_project_plan_keeps_project_as_query_text() -> None:
+    task_store = InMemoryTaskStore()
+    task_store.create_task(
+        title="Update project plan",
+        project="Atlas",
+        assignee="Sarah",
+        due_date=None,
+        organization_id="org-1",
+        created_by="123",
+    )
+    task_store.create_task(
+        title="Review onboarding docs",
+        project="Atlas",
+        assignee="Sarah",
+        due_date=None,
+        organization_id="org-1",
+        created_by="123",
+    )
+    orchestrator = AgentOrchestrator(registry=ToolRegistry(task_store))
+
+    response = orchestrator.plan("Show tasks about project plan", _context())
+
+    assert response.status == "executed"
+    assert len(response.results[0].result["tasks"]) == 1
+    assert response.results[0].result["tasks"][0]["title"] == "Update project plan"
+
+
 def test_create_task_parses_capitalized_for_assignee() -> None:
     orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
 
@@ -266,6 +298,21 @@ def test_create_task_assignment_clause_stops_before_title() -> None:
     assert response.plan is not None
     assert response.plan.actions[0].arguments["title"] == "update docs"
     assert response.plan.actions[0].arguments["assignee"] == "Sarah"
+
+
+def test_create_task_title_due_word_without_date_stays_in_title() -> None:
+    orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
+
+    response = orchestrator.plan(
+        "Create a task to prepare due diligence report",
+        _context(),
+    )
+
+    assert response.plan is not None
+    assert response.plan.actions[0].arguments["title"] == (
+        "prepare due diligence report"
+    )
+    assert "due_date" not in response.plan.actions[0].arguments
 
 
 def test_create_task_title_weekday_does_not_become_due_date_without_cue() -> None:
@@ -364,6 +411,20 @@ def test_mark_task_id_as_done_routes_to_status_update() -> None:
     assert response.plan.actions[0].arguments["status"] == "done"
 
 
+def test_rename_task_id_routes_to_title_update() -> None:
+    orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
+
+    response = orchestrator.plan(
+        "Rename TASK-001 to refresh onboarding docs",
+        _context(),
+    )
+
+    assert response.plan is not None
+    assert response.plan.actions[0].tool_name == "task_write.update_task"
+    assert response.plan.actions[0].arguments["task_id"] == "TASK-001"
+    assert response.plan.actions[0].arguments["title"] == "refresh onboarding docs"
+
+
 def test_update_title_parses_title_update() -> None:
     orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
 
@@ -459,6 +520,28 @@ def test_admin_can_update_task_created_by_someone_else() -> None:
         _context(roles=["Admin"]),
         confirmed=True,
     )
+
+    assert results[0].status == "succeeded"
+    assert results[0].result["due_date"] is not None
+
+
+def test_linked_user_can_update_task_created_before_linking() -> None:
+    task_store = InMemoryTaskStore()
+    task_store.create_task(
+        title="Update onboarding docs",
+        project="Atlas",
+        assignee="Sarah",
+        due_date=None,
+        organization_id="org-1",
+        created_by="123",
+    )
+    orchestrator = AgentOrchestrator(registry=ToolRegistry(task_store))
+    context = _context(internal_user_id="internal-123")
+
+    response = orchestrator.plan("Update TASK-001 due tomorrow", context)
+
+    assert response.plan is not None
+    results = orchestrator.execute_plan(response.plan, context, confirmed=True)
 
     assert results[0].status == "succeeded"
     assert results[0].result["due_date"] is not None

@@ -318,23 +318,25 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
     def _mention_rate_limited(self, user_id: int) -> bool:
         now = time.monotonic()
         window_start = now - _MENTION_RATE_LIMIT_WINDOW_SECONDS
-        timestamps = [
-            timestamp
-            for timestamp in getattr(
-                self,
-                "_mention_request_timestamps",
-                {},
-            ).get(user_id, [])
-            if timestamp >= window_start
-        ]
+        if not hasattr(self, "_mention_request_timestamps"):
+            self._mention_request_timestamps = {}
+        for stored_user_id, stored_timestamps in list(
+            self._mention_request_timestamps.items()
+        ):
+            active_timestamps = [
+                timestamp
+                for timestamp in stored_timestamps
+                if timestamp >= window_start
+            ]
+            if active_timestamps:
+                self._mention_request_timestamps[stored_user_id] = active_timestamps
+            else:
+                del self._mention_request_timestamps[stored_user_id]
+        timestamps = self._mention_request_timestamps.get(user_id, [])
         if len(timestamps) >= _MENTION_RATE_LIMIT_MAX_REQUESTS:
-            if not hasattr(self, "_mention_request_timestamps"):
-                self._mention_request_timestamps = {}
             self._mention_request_timestamps[user_id] = timestamps
             return True
         timestamps.append(now)
-        if not hasattr(self, "_mention_request_timestamps"):
-            self._mention_request_timestamps = {}
         self._mention_request_timestamps[user_id] = timestamps
         return False
 
