@@ -13,6 +13,7 @@ from five08.discord_bot.cogs.crm import (
 )
 from five08.clients.authentik import AuthentikAPIError
 from five08.clients.espo import EspoAPIError
+from five08.clients.outline import OutlineAPIError
 
 
 @pytest.fixture
@@ -576,6 +577,21 @@ async def test_create_user_accounts_uses_configured_mailbox_domain_for_sso(
     assert "Email: `jane@example.org`" in message
 
 
+def test_contact_lookup_bare_username_uses_configured_mailbox_domain(
+    cog: CRMCog,
+) -> None:
+    with patch(
+        "five08.discord_bot.cogs.crm.settings.migadu_mailbox_domain", "example.org"
+    ):
+        filters = cog._build_contact_search_filters("jane")
+
+    assert {
+        "type": "equals",
+        "attribute": "c508Email",
+        "value": "jane@example.org",
+    } in filters
+
+
 @pytest.mark.asyncio
 async def test_create_user_accounts_reuses_existing_mailbox(
     cog: CRMCog, mock_interaction: AsyncMock, mock_espo_api: Mock
@@ -731,6 +747,45 @@ async def test_create_user_accounts_primary_508_email_does_not_skip_mailbox_crea
 
 
 @pytest.mark.asyncio
+async def test_create_user_accounts_validates_outline_before_mailbox_creation(
+    cog: CRMCog, mock_interaction: AsyncMock
+) -> None:
+    contact = {
+        "id": "crm-123",
+        "name": "Jane Doe",
+        "emailAddress": "jane.personal@example.com",
+        "c508Email": "",
+        "cSsoID": None,
+    }
+
+    with (
+        patch.object(
+            cog,
+            "_search_contacts_for_lookup",
+            new=AsyncMock(return_value=[contact]),
+        ),
+        patch.object(cog, "_authentik_client", return_value=Mock()),
+        patch.object(
+            cog,
+            "_outline_client",
+            side_effect=ValueError("OUTLINE_API_KEY is not configured."),
+        ),
+        patch.object(cog, "_migadu_client") as migadu_client,
+        patch.object(cog, "_audit_command_safe"),
+    ):
+        await cog.create_user_accounts.callback(
+            cog,
+            mock_interaction,
+            search_term="jane",
+            mailbox_username="jane",
+        )
+
+    migadu_client.assert_not_called()
+    message = mock_interaction.followup.send.call_args.args[0]
+    assert "OUTLINE_API_KEY is not configured" in message
+
+
+@pytest.mark.asyncio
 async def test_create_user_accounts_reports_partial_success_when_mailbox_crm_sync_fails(
     cog: CRMCog, mock_interaction: AsyncMock, mock_espo_api: Mock
 ) -> None:
@@ -752,8 +807,8 @@ async def test_create_user_accounts_reports_partial_success_when_mailbox_crm_syn
             new=AsyncMock(return_value=[contact]),
         ),
         patch.object(cog, "_migadu_client", return_value=migadu_client),
-        patch.object(cog, "_authentik_client") as authentik_client,
-        patch.object(cog, "_outline_client") as outline_client,
+        patch.object(cog, "_authentik_client") as authentik_factory,
+        patch.object(cog, "_outline_client") as outline_factory,
         patch.object(cog, "_audit_command_safe") as mock_audit,
     ):
         await cog.create_user_accounts.callback(
@@ -763,8 +818,9 @@ async def test_create_user_accounts_reports_partial_success_when_mailbox_crm_syn
             mailbox_username="jane",
         )
 
-    authentik_client.assert_not_called()
-    outline_client.assert_not_called()
+    authentik_factory.return_value.find_users_by_username_or_email.assert_not_called()
+    authentik_factory.return_value.create_user.assert_not_called()
+    outline_factory.return_value.invite_user.assert_not_called()
     message = mock_interaction.followup.send.call_args.args[0]
     assert "Created the mailbox, but failed to update CRM" in message
     assert "Email: `jane@508.dev`" in message
@@ -794,8 +850,8 @@ async def test_create_user_accounts_rejects_migadu_address_mismatch(
             new=AsyncMock(return_value=[contact]),
         ),
         patch.object(cog, "_migadu_client", return_value=migadu_client),
-        patch.object(cog, "_authentik_client") as authentik_client,
-        patch.object(cog, "_outline_client") as outline_client,
+        patch.object(cog, "_authentik_client") as authentik_factory,
+        patch.object(cog, "_outline_client") as outline_factory,
         patch.object(cog, "_audit_command_safe") as mock_audit,
     ):
         await cog.create_user_accounts.callback(
@@ -806,13 +862,68 @@ async def test_create_user_accounts_rejects_migadu_address_mismatch(
         )
 
     mock_espo_api.request.assert_not_called()
-    authentik_client.assert_not_called()
-    outline_client.assert_not_called()
+    authentik_factory.return_value.find_users_by_username_or_email.assert_not_called()
+    authentik_factory.return_value.create_user.assert_not_called()
+    outline_factory.return_value.invite_user.assert_not_called()
     message = mock_interaction.followup.send.call_args.args[0]
     assert "returned a different address" in message
     assert "Created mailbox: `other@508.dev`" in message
     audit_metadata = mock_audit.call_args.kwargs["metadata"]
     assert audit_metadata["partial_success"] == "mailbox_created_address_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_create_user_accounts_reports_outline_invite_failure(
+    cog: CRMCog, mock_interaction: AsyncMock, mock_espo_api: Mock
+) -> None:
+    contact = {
+        "id": "crm-123",
+        "name": "Jane Doe",
+        "emailAddress": "jane.personal@example.com",
+        "c508Email": "",
+        "cSsoID": None,
+    }
+    migadu_client = Mock()
+    migadu_client.create_mailbox.return_value = {"address": "jane@508.dev"}
+    authentik_client = Mock()
+    authentik_client.find_users_by_username_or_email.return_value = []
+    authentik_client.create_user.return_value = {
+        "pk": 42,
+        "username": "jane",
+        "email": "jane@508.dev",
+        "name": "Jane Doe",
+        "is_superuser": False,
+    }
+    authentik_client.resolve_email_stage_id.return_value = "stage-id"
+    authentik_client.send_recovery_email.return_value = None
+    outline_client = Mock()
+    outline_client.invite_user.side_effect = OutlineAPIError("outline unavailable")
+
+    with (
+        patch.object(
+            cog,
+            "_search_contacts_for_lookup",
+            new=AsyncMock(return_value=[contact]),
+        ),
+        patch.object(cog, "_migadu_client", return_value=migadu_client),
+        patch.object(cog, "_authentik_client", return_value=authentik_client),
+        patch.object(cog, "_outline_client", return_value=outline_client),
+        patch.object(cog, "_audit_command_safe") as mock_audit,
+    ):
+        mock_espo_api.request.return_value = {"id": "crm-123"}
+        await cog.create_user_accounts.callback(
+            cog,
+            mock_interaction,
+            search_term="jane",
+            mailbox_username="jane",
+        )
+
+    message = mock_interaction.followup.send.call_args.args[0]
+    assert "Mailbox and SSO are ready, but the Outline invite failed" in message
+    assert "outline unavailable" in message
+    audit_metadata = mock_audit.call_args.kwargs["metadata"]
+    assert audit_metadata["stage"] == "outline"
+    assert "outline unavailable" in audit_metadata["error"]
 
 
 @pytest.mark.asyncio
@@ -934,6 +1045,42 @@ async def test_invite_outline_user_invites_contact_508_email(
     assert "Email: `jane@508.dev`" in message
     assert mock_interaction.followup.send.call_args.kwargs["ephemeral"] is True
     assert mock_audit.call_args.kwargs["metadata"]["contact_id"] == "crm-123"
+
+
+@pytest.mark.asyncio
+async def test_invite_outline_user_reports_outline_api_error(
+    cog: CRMCog, mock_interaction: AsyncMock
+) -> None:
+    contact = {
+        "id": "crm-123",
+        "name": "Jane Doe",
+        "emailAddress": "jane.personal@example.com",
+        "c508Email": "jane@508.dev",
+    }
+    outline_client = Mock()
+    outline_client.invite_user.side_effect = OutlineAPIError("outline unavailable")
+
+    with (
+        patch.object(
+            cog,
+            "_search_contacts_for_lookup",
+            new=AsyncMock(return_value=[contact]),
+        ),
+        patch.object(cog, "_outline_client", return_value=outline_client),
+        patch.object(cog, "_audit_command_safe") as mock_audit,
+    ):
+        await cog.invite_outline_user.callback(
+            cog,
+            mock_interaction,
+            search_term="jane",
+        )
+
+    message = mock_interaction.followup.send.call_args.args[0]
+    assert "Outline invite failed" in message
+    assert "outline unavailable" in message
+    audit_metadata = mock_audit.call_args.kwargs["metadata"]
+    assert audit_metadata["search_term"] == "jane"
+    assert audit_metadata["error"] == "outline unavailable"
 
 
 @pytest.mark.asyncio

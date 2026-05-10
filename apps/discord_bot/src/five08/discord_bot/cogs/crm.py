@@ -6056,8 +6056,12 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
 
         if has_at:
             local_part, _, domain = normalized.partition("@")
-            if local_part and (not domain or domain.lower() in {"", "508", "508.dev"}):
-                normalized = f"{local_part}@508.dev"
+            configured_domain = self._migadu_mailbox_domain()
+            domain_aliases = {"", configured_domain}
+            if "." in configured_domain:
+                domain_aliases.add(configured_domain.split(".", 1)[0])
+            if local_part and domain.lower() in domain_aliases:
+                normalized = f"{local_part}@{configured_domain}"
 
             search_filters.extend(
                 [
@@ -6080,7 +6084,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 {
                     "type": "equals",
                     "attribute": "c508Email",
-                    "value": f"{normalized}@508.dev",
+                    "value": f"{normalized}@{self._migadu_mailbox_domain()}",
                 }
             )
         return search_filters
@@ -8221,6 +8225,10 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         if not contact_id:
             raise ValueError("Selected contact is missing a CRM ID.")
 
+        self._validate_user_accounts_provisioning_config(
+            contact=contact,
+            mailbox_username=mailbox_username,
+        )
         contact_name = self._contact_text_value(contact.get("name")) or "Unknown"
         mailbox = await self._create_migadu_mailbox_for_contact(
             contact=contact,
@@ -8240,6 +8248,25 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             sso=sso,
             outline_invited=outline_invited,
         )
+
+    def _validate_user_accounts_provisioning_config(
+        self,
+        *,
+        contact: dict[str, Any],
+        mailbox_username: str,
+    ) -> None:
+        """Validate required account clients before creating any resources."""
+        self._authentik_client()
+        self._outline_client()
+
+        target_email, _local_part = self._normalize_mailbox_request(mailbox_username)
+        existing_email = self._normalize_508_email(contact.get("c508Email"))
+        if existing_email is None:
+            self._migadu_client()
+        elif existing_email != target_email:
+            raise ValueError(
+                f"CRM contact already has a different 508 email: `{existing_email}`."
+            )
 
     @staticmethod
     def _created_or_reused_label(created: bool) -> str:
