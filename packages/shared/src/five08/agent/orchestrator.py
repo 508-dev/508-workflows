@@ -380,7 +380,7 @@ class AgentOrchestrator:
 
     def _extract_project(self, text: str) -> str | None:
         match = re.search(
-            r"\b(?:project|link(?: it)? to project|in project|for project)\s+([A-Za-z0-9][A-Za-z0-9 ._-]{0,80})",
+            r"\b(?:link(?: it)? to project|in project|for project)\s+([A-Za-z0-9][A-Za-z0-9 ._-]{0,80})",
             text,
             re.IGNORECASE,
         )

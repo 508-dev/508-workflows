@@ -296,6 +296,19 @@ def test_create_task_title_iso_date_does_not_become_due_date_without_cue() -> No
     assert "due_date" not in response.plan.actions[0].arguments
 
 
+def test_create_task_title_project_word_does_not_become_project() -> None:
+    orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
+
+    response = orchestrator.plan(
+        "Create a task to update project plan",
+        _context(),
+    )
+
+    assert response.plan is not None
+    assert response.plan.actions[0].arguments["title"] == "update project plan"
+    assert "project" not in response.plan.actions[0].arguments
+
+
 def test_update_assignment_parses_task_id_before_to() -> None:
     orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
 
