@@ -6,6 +6,8 @@ from typing import Any
 
 import requests
 
+from five08.tls import default_ca_bundle_path
+
 
 class GitHubAPIError(RuntimeError):
     """Raised when a GitHub API request fails."""
@@ -85,6 +87,7 @@ class GitHubClient:
                 json=json,
                 params=params,
                 timeout=self.timeout_seconds,
+                verify=default_ca_bundle_path(),
             )
         except requests.RequestException as exc:
             raise GitHubAPIError(f"GitHub request failed: {exc}") from exc

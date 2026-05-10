@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from five08.discord_bot.cogs.agent import AgentCog, AgentConfirmationView
+from five08.tls import default_ca_bundle_path
 
 
 class _FakeResponse:
@@ -451,6 +452,7 @@ def test_post_backend_json_returns_structured_failed_response(
 
     assert payload["status"] == "failed"
     assert payload["http_status"] == 500
+    assert mock_post.call_args.kwargs["verify"] == default_ca_bundle_path()
 
 
 def test_post_backend_json_returns_detail_error_response(

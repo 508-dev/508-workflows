@@ -15,6 +15,7 @@ from discord.ext import commands
 
 from five08.discord_bot.config import settings
 from five08.discord_bot.utils.audit import DiscordAuditCogMixin
+from five08.tls import default_ca_bundle_path
 
 logger = logging.getLogger(__name__)
 _MENTION_RATE_LIMIT_WINDOW_SECONDS = 60.0
@@ -484,6 +485,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             headers={"X-API-Secret": secret},
             json=payload,
             timeout=settings.agent_api_timeout_seconds,
+            verify=default_ca_bundle_path(),
         )
         try:
             data = response.json()
