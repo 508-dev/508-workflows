@@ -2,7 +2,6 @@
 
 import asyncio
 import re
-import threading
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -648,9 +647,9 @@ def test_agent_request_for_write_returns_confirmation_plan(
     )
     monkeypatch.setattr(api, "_PENDING_AGENT_PLANS", {})
 
-    with patch("five08.backend.api.insert_audit_event") as mock_insert:
-        audit_written = threading.Event()
-        mock_insert.side_effect = lambda *_args, **_kwargs: audit_written.set()
+    with patch(
+        "five08.backend.api._write_agent_audit_event", new_callable=AsyncMock
+    ) as mock_audit:
         response = client.post(
             "/agent/requests",
             json={
@@ -666,16 +665,15 @@ def test_agent_request_for_write_returns_confirmation_plan(
             },
             headers=auth_headers,
         )
-        assert audit_written.wait(timeout=2)
-        audit_payload = mock_insert.call_args.args[1]
+        audit_kwargs = mock_audit.call_args.kwargs
 
     payload = response.json()
     assert response.status_code == 202
     assert payload["status"] == "requires_confirmation"
     assert payload["plan"]["actions"][0]["tool_name"] == "task_write.create_task"
     assert payload["plan"]["plan_id"] in api._PENDING_AGENT_PLANS
-    assert audit_payload.correlation_id == "interaction-1"
-    assert audit_payload.metadata["message"] == (
+    assert audit_kwargs["context"].interaction_id == "interaction-1"
+    assert audit_kwargs["metadata"]["message"] == (
         "Create a task for Sarah to update onboarding docs by Friday"
     )
 
