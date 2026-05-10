@@ -2,7 +2,7 @@
 
 import asyncio
 import re
-import time
+import threading
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -648,6 +648,8 @@ def test_agent_request_for_write_returns_confirmation_plan(
     monkeypatch.setattr(api, "_PENDING_AGENT_PLANS", {})
 
     with patch("five08.backend.api.insert_audit_event") as mock_insert:
+        audit_written = threading.Event()
+        mock_insert.side_effect = lambda *_args, **_kwargs: audit_written.set()
         response = client.post(
             "/agent/requests",
             json={
@@ -663,10 +665,7 @@ def test_agent_request_for_write_returns_confirmation_plan(
             },
             headers=auth_headers,
         )
-        for _ in range(20):
-            if mock_insert.call_args is not None:
-                break
-            time.sleep(0.01)
+        assert audit_written.wait(timeout=2)
         audit_payload = mock_insert.call_args.args[1]
 
     payload = response.json()
@@ -674,7 +673,7 @@ def test_agent_request_for_write_returns_confirmation_plan(
     assert payload["status"] == "requires_confirmation"
     assert payload["plan"]["actions"][0]["tool_name"] == "task_write.create_task"
     assert payload["plan"]["plan_id"] in api._PENDING_AGENT_PLANS
-    assert audit_payload.correlation_id == "message-1"
+    assert audit_payload.correlation_id == "interaction-1"
 
 
 def test_agent_request_rejects_when_pending_plan_capacity_is_full(

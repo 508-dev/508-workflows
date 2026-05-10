@@ -721,6 +721,12 @@ class AgentOrchestrator:
         if match is None:
             return ""
         query = match.group(1) or ""
+        query = re.split(
+            r"\s+\b(?:in|for)\s+(?:repo|repository)\s+[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\b",
+            query,
+            maxsplit=1,
+            flags=re.I,
+        )[0]
         return _clean_text(query) or ""
 
     @staticmethod

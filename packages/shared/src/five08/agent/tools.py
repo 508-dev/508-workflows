@@ -404,9 +404,11 @@ class ToolRegistry:
             repository = _optional_str(self.runtime_config.github_default_repo)
         if repository is None:
             raise ValueError("GitHub repository is required")
-        if "/" not in repository.strip("/"):
+        normalized_repository = repository.strip().strip("/")
+        repository_parts = normalized_repository.split("/")
+        if len(repository_parts) != 2 or not all(repository_parts):
             raise ValueError("GitHub repository must be in owner/name form")
-        return repository.strip().strip("/")
+        return normalized_repository
 
     def _crm_repository(self) -> EspoContactRepository:
         base_url = _required_config(self.runtime_config.espo_base_url, "ESPO_BASE_URL")

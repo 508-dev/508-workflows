@@ -614,6 +614,24 @@ def test_github_issue_create_strips_trailing_repository_clause() -> None:
     }
 
 
+def test_github_issue_search_strips_trailing_repository_clause() -> None:
+    orchestrator = AgentOrchestrator()
+
+    response = orchestrator.plan(
+        "Search GitHub issues matching onboarding in repo 508-dev/508-workflows",
+        _context(roles=["Engineer"]),
+    )
+
+    assert response.plan is not None
+    action = response.plan.actions[0]
+    assert action.tool_name == "github_issue.search_issues"
+    assert action.arguments == {
+        "query": "onboarding",
+        "repository": "508-dev/508-workflows",
+        "state": "open",
+    }
+
+
 def test_member_cannot_create_github_issue() -> None:
     orchestrator = AgentOrchestrator()
 
@@ -749,6 +767,21 @@ def test_github_issue_create_uses_runtime_configured_default_repo(
 
     assert result["number"] == 42
     assert calls["repository"] == "508-dev/508-workflows"
+
+
+def test_github_issue_repository_must_be_owner_name() -> None:
+    registry = ToolRegistry(
+        runtime_config=ToolRuntimeConfig(github_api_token="token"),
+    )
+
+    with pytest.raises(ValueError, match="owner/name"):
+        registry.execute(
+            "github_issue.search_issues",
+            {"query": "onboarding", "repository": "508-dev/508-workflows/extra"},
+            organization_id="org-1",
+            actor_id="123",
+            actor_scopes={"github:issue:read"},
+        )
 
 
 def test_member_cannot_assign_task_without_assign_scope() -> None:
