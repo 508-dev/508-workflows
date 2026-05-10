@@ -38,6 +38,7 @@ from five08.agent import (
     AgentRequest,
     AgentResponse,
     InMemoryTaskStore,
+    PolicyEngine,
     ToolRegistry,
 )
 from five08.logging import configure_observability
@@ -128,9 +129,9 @@ process_mailbox_message_job = JOB_FUNCTIONS["process_mailbox_message_job"]
 sync_people_from_crm_job = JOB_FUNCTIONS["sync_people_from_crm_job"]
 sync_person_from_crm_job = JOB_FUNCTIONS["sync_person_from_crm_job"]
 process_docuseal_agreement_job = JOB_FUNCTIONS["process_docuseal_agreement_job"]
-# Process-local MVP agent tools stay synchronous for Discord button UX; the
-# shared in-memory store serializes access, and pending confirmations are bounded
-# below so a burst cannot grow memory without limit.
+# Process-local MVP agent tools stay synchronous for Discord button UX. Both the
+# task store and pending plans are non-durable; production task workflows should
+# swap this registry for a persistent task service before multi-worker use.
 _AGENT_TASK_STORE = InMemoryTaskStore()
 _AGENT_ORCHESTRATOR = AgentOrchestrator(
     registry=ToolRegistry(_AGENT_TASK_STORE),
@@ -1250,11 +1251,7 @@ def _confirmation_execution_context(
     original_context: AgentIdentityContext,
     confirmation_context: AgentIdentityContext,
 ) -> AgentIdentityContext:
-    original_roles = {role.strip().casefold() for role in original_context.roles}
-    confirmation_roles = {
-        role.strip().casefold() for role in confirmation_context.roles
-    }
-    roles = sorted(role for role in original_roles & confirmation_roles if role)
+    roles = [role for role in confirmation_context.roles if role.strip()]
     return AgentIdentityContext(
         discord_user_id=original_context.discord_user_id,
         internal_user_id=original_context.internal_user_id,
@@ -1273,6 +1270,17 @@ def _confirmation_execution_context(
         ),
         message_id=confirmation_context.message_id or original_context.message_id,
     )
+
+
+def _confirmation_execution_scopes(
+    *,
+    original_context: AgentIdentityContext,
+    confirmation_context: AgentIdentityContext,
+) -> set[str]:
+    policy = PolicyEngine()
+    original_scopes = policy.scopes_for_context(original_context)
+    confirmation_scopes = policy.scopes_for_context(confirmation_context)
+    return original_scopes & confirmation_scopes
 
 
 async def _store_pending_agent_plan(
@@ -1340,19 +1348,20 @@ async def agent_request_handler(request: Request) -> JSONResponse:
     if response.plan is not None and response.status == "requires_confirmation":
         stored = await _store_pending_agent_plan(response.plan, payload.context)
         if not stored:
-            await _write_agent_audit_event(
-                context=payload.context,
-                action="agent.request",
-                result=AuditResult.ERROR,
-                plan=response.plan,
-                metadata={
-                    "status": "failed",
-                    "reason": "pending_plan_capacity_exceeded",
-                },
+            asyncio.create_task(
+                _write_agent_audit_event(
+                    context=payload.context,
+                    action="agent.request",
+                    result=AuditResult.ERROR,
+                    plan=response.plan,
+                    metadata={
+                        "status": "failed",
+                        "reason": "pending_plan_capacity_exceeded",
+                    },
+                )
             )
             response = AgentResponse(
                 status="failed",
-                plan=response.plan,
                 message=("Agent confirmation capacity is full. Try again shortly."),
             )
             return JSONResponse(
@@ -1365,26 +1374,21 @@ async def agent_request_handler(request: Request) -> JSONResponse:
         audit_result = AuditResult.DENIED
     elif response.status == "failed":
         audit_result = AuditResult.ERROR
-    await _write_agent_audit_event(
-        context=payload.context,
-        action="agent.request",
-        result=audit_result,
-        plan=response.plan,
-        metadata={
-            "status": response.status,
-            "intent": response.plan.intent if response.plan else None,
-            "model_tier": response.plan.model_tier if response.plan else None,
-            "model": response.plan.model.model if response.plan else None,
-            "model_source_tier": (
-                response.plan.model.source_tier if response.plan else None
-            ),
-            "model_fallback_used": (
-                response.plan.model.fallback_used if response.plan else None
-            ),
-            "requires_confirmation": (
-                response.plan.requires_confirmation if response.plan else False
-            ),
-        },
+    asyncio.create_task(
+        _write_agent_audit_event(
+            context=payload.context,
+            action="agent.request",
+            result=audit_result,
+            plan=response.plan,
+            metadata={
+                "status": response.status,
+                "intent": response.plan.intent if response.plan else None,
+                "planner": response.plan.planner if response.plan else None,
+                "requires_confirmation": (
+                    response.plan.requires_confirmation if response.plan else False
+                ),
+            },
+        )
     )
 
     status_code = {
@@ -1426,42 +1430,50 @@ async def agent_confirmation_handler(
         discord_user_id=payload.context.discord_user_id,
     )
     if pending is None:
-        await _write_agent_audit_event(
-            context=payload.context,
-            action="agent.confirmation",
-            result=AuditResult.DENIED,
-            plan=None,
-            metadata={"reason": "plan_not_found", "plan_id": plan_id},
+        asyncio.create_task(
+            _write_agent_audit_event(
+                context=payload.context,
+                action="agent.confirmation",
+                result=AuditResult.DENIED,
+                plan=None,
+                metadata={"reason": "plan_not_found", "plan_id": plan_id},
+            )
         )
         return JSONResponse({"error": "plan_not_found"}, status_code=404)
 
     plan, original_context = pending
     if claim_status == "actor_mismatch":
-        await _write_agent_audit_event(
-            context=payload.context,
-            action="agent.confirmation",
-            result=AuditResult.DENIED,
-            plan=plan,
-            metadata={"reason": "actor_mismatch"},
+        asyncio.create_task(
+            _write_agent_audit_event(
+                context=payload.context,
+                action="agent.confirmation",
+                result=AuditResult.DENIED,
+                plan=plan,
+                metadata={"reason": "actor_mismatch"},
+            )
         )
         return JSONResponse({"error": "actor_mismatch"}, status_code=403)
     if claim_status == "expired":
-        await _write_agent_audit_event(
-            context=original_context,
-            action="agent.confirmation",
-            result=AuditResult.DENIED,
-            plan=plan,
-            metadata={"reason": "plan_expired"},
+        asyncio.create_task(
+            _write_agent_audit_event(
+                context=original_context,
+                action="agent.confirmation",
+                result=AuditResult.DENIED,
+                plan=plan,
+                metadata={"reason": "plan_expired"},
+            )
         )
         return JSONResponse({"error": "plan_expired"}, status_code=410)
 
     if not payload.confirm:
-        await _write_agent_audit_event(
-            context=original_context,
-            action="agent.confirmation",
-            result=AuditResult.SUCCESS,
-            plan=plan,
-            metadata={"status": "canceled"},
+        asyncio.create_task(
+            _write_agent_audit_event(
+                context=original_context,
+                action="agent.confirmation",
+                result=AuditResult.SUCCESS,
+                plan=plan,
+                metadata={"status": "canceled"},
+            )
         )
         response = AgentResponse(
             status="canceled",
@@ -1478,6 +1490,10 @@ async def agent_confirmation_handler(
         plan,
         execution_context,
         confirmed=True,
+        effective_scopes=_confirmation_execution_scopes(
+            original_context=original_context,
+            confirmation_context=payload.context,
+        ),
     )
     if any(result.status == "denied" for result in results):
         status = "denied"
@@ -1511,15 +1527,17 @@ async def agent_confirmation_handler(
         "denied": AuditResult.DENIED,
         "failed": AuditResult.ERROR,
     }[status]
-    await _write_agent_audit_event(
-        context=execution_context,
-        action="agent.confirmation",
-        result=audit_result,
-        plan=plan,
-        metadata={
-            "status": response.status,
-            "results": [result.model_dump(mode="json") for result in results],
-        },
+    asyncio.create_task(
+        _write_agent_audit_event(
+            context=execution_context,
+            action="agent.confirmation",
+            result=audit_result,
+            plan=plan,
+            metadata={
+                "status": response.status,
+                "results": [result.model_dump(mode="json") for result in results],
+            },
+        )
     )
     return JSONResponse(
         response.model_dump(mode="json"),

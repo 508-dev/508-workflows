@@ -92,6 +92,7 @@ class InMemoryTaskStore:
         task_id: str,
         organization_id: str | None,
         actor_id: str | None,
+        can_update_any: bool = False,
         title: str | None = None,
         project: str | None = None,
         assignee: str | None = None,
@@ -104,7 +105,7 @@ class InMemoryTaskStore:
                 raise KeyError(f"Task {task_id} was not found")
             if task.organization_id and organization_id != task.organization_id:
                 raise PermissionError("Task belongs to a different organization")
-            if task.created_by and actor_id != task.created_by:
+            if task.created_by and actor_id != task.created_by and not can_update_any:
                 raise PermissionError("Task can only be updated by its creator")
             if title is not None:
                 task.title = title
@@ -198,6 +199,7 @@ class ToolRegistry:
         *,
         organization_id: str | None,
         actor_id: str | None,
+        actor_scopes: set[str] | None = None,
     ) -> dict[str, Any]:
         if tool_name == "task_read.search_tasks":
             return self.task_store.search_tasks(
@@ -234,6 +236,7 @@ class ToolRegistry:
                 task_id=task_id,
                 organization_id=organization_id,
                 actor_id=actor_id,
+                can_update_any="task:update" in (actor_scopes or set()),
                 title=updates["title"],
                 project=updates["project"],
                 assignee=updates["assignee"],

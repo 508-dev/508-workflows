@@ -711,6 +711,7 @@ def test_agent_request_rejects_when_pending_plan_capacity_is_full(
     assert first_response.status_code == 202
     assert second_response.status_code == 503
     assert second_response.json()["status"] == "failed"
+    assert second_response.json()["plan"] is None
     assert "capacity is full" in second_response.json()["message"]
 
 
@@ -881,7 +882,7 @@ def test_agent_confirmation_uses_fresh_non_escalating_roles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Confirmation should reflect role revocation without accepting escalation."""
-    captured: dict[str, AgentIdentityContext] = {}
+    captured: dict[str, object] = {}
     task_store = InMemoryTaskStore()
     monkeypatch.setattr(
         api,
@@ -897,8 +898,10 @@ def test_agent_confirmation_uses_fresh_non_escalating_roles(
             context: AgentIdentityContext,
             *,
             confirmed: bool = False,
+            effective_scopes: set[str] | None = None,
         ) -> list[AgentExecutionResult]:
             captured["context"] = context
+            captured["effective_scopes"] = effective_scopes
             return [
                 AgentExecutionResult(
                     tool_name="task_write.create_task",
@@ -942,11 +945,18 @@ def test_agent_confirmation_uses_fresh_non_escalating_roles(
         )
 
     assert confirm_response.status_code == 200
-    assert captured["context"].internal_user_id == "internal-123"
-    assert captured["context"].organization_id == "org-1"
-    assert captured["context"].guild_id == "org-1"
-    assert captured["context"].roles == []
-    assert captured["context"].scopes == []
+    context = captured["context"]
+    assert isinstance(context, AgentIdentityContext)
+    assert context.internal_user_id == "internal-123"
+    assert context.organization_id == "org-1"
+    assert context.guild_id == "org-1"
+    assert context.roles == ["Member"]
+    assert context.scopes == []
+    assert captured["effective_scopes"] == {
+        "project:read",
+        "task:create",
+        "task:update_own",
+    }
 
 
 def test_agent_confirmation_claims_plan_once(

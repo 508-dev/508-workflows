@@ -92,6 +92,21 @@ class PolicyEngine:
         manifest: ToolManifest | None,
         action: AgentToolAction,
     ) -> PolicyDecision:
+        return self.authorize_with_scopes(
+            context=context,
+            manifest=manifest,
+            action=action,
+            effective_scopes=self.scopes_for_context(context),
+        )
+
+    def authorize_with_scopes(
+        self,
+        *,
+        context: AgentIdentityContext,
+        manifest: ToolManifest | None,
+        action: AgentToolAction,
+        effective_scopes: set[str],
+    ) -> PolicyDecision:
         if manifest is None:
             return PolicyDecision(False, f"Unknown tool {action.tool_name}")
         if context.impersonation:
@@ -103,7 +118,6 @@ class PolicyEngine:
         ):
             return PolicyDecision(False, "Tool requires resolved tenant context")
 
-        effective_scopes = self.scopes_for_context(context)
         missing_scopes = [
             scope for scope in manifest.required_scopes if scope not in effective_scopes
         ]

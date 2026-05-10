@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from typing import Any
 
 import discord
@@ -16,6 +17,8 @@ from five08.discord_bot.config import settings
 from five08.discord_bot.utils.audit import DiscordAuditCogMixin
 
 logger = logging.getLogger(__name__)
+_MENTION_RATE_LIMIT_WINDOW_SECONDS = 60.0
+_MENTION_RATE_LIMIT_MAX_REQUESTS = 5
 
 
 class AgentConfirmationView(discord.ui.View):
@@ -153,6 +156,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self._init_audit_logger()
+        self._mention_request_timestamps: dict[int, list[float]] = {}
 
     @app_commands.command(
         name="agent",
@@ -235,6 +239,18 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         request = self._extract_mention_request(message.content, bot_user.id)
         if not request:
             return
+        if self._mention_rate_limited(message.author.id):
+            self._audit_message_safe(
+                message=message,
+                action="agent.mention",
+                result="denied",
+                metadata={"reason": "rate_limited"},
+            )
+            await message.reply(
+                "Too many agent mentions. Try again in a minute.",
+                mention_author=False,
+            )
+            return
 
         context = self._build_agent_context_from_message(message)
         try:
@@ -299,9 +315,35 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         request = re.sub(mention_pattern, "", content).strip()
         return re.sub(r"\s+", " ", request)
 
+    def _mention_rate_limited(self, user_id: int) -> bool:
+        now = time.monotonic()
+        window_start = now - _MENTION_RATE_LIMIT_WINDOW_SECONDS
+        timestamps = [
+            timestamp
+            for timestamp in getattr(
+                self,
+                "_mention_request_timestamps",
+                {},
+            ).get(user_id, [])
+            if timestamp >= window_start
+        ]
+        if len(timestamps) >= _MENTION_RATE_LIMIT_MAX_REQUESTS:
+            if not hasattr(self, "_mention_request_timestamps"):
+                self._mention_request_timestamps = {}
+            self._mention_request_timestamps[user_id] = timestamps
+            return True
+        timestamps.append(now)
+        if not hasattr(self, "_mention_request_timestamps"):
+            self._mention_request_timestamps = {}
+        self._mention_request_timestamps[user_id] = timestamps
+        return False
+
     def _build_agent_context(self, interaction: discord.Interaction) -> dict[str, Any]:
         role_names = self._role_names_from_user(interaction.user)
 
+        # Slash commands do not have a Discord message id; button interactions do.
+        # Keep message_id as the visible Discord message when present and use
+        # interaction_id as the stable fallback correlation id.
         interaction_message = getattr(interaction, "message", None)
         message_id = (
             str(interaction_message.id)
@@ -486,9 +528,9 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         plan = response.get("plan") if isinstance(response.get("plan"), dict) else {}
         lines: list[str] = [f"Agent status: {status}"]
         if plan:
-            model_tier = plan.get("model_tier")
-            if model_tier:
-                lines.append(f"Model tier: {model_tier}")
+            planner = plan.get("planner")
+            if planner:
+                lines.append(f"Planner: {planner}")
             summary = str(plan.get("human_summary") or "").strip()
             if summary:
                 lines.append("")

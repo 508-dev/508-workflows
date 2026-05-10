@@ -413,6 +413,33 @@ def test_update_task_enforces_creator_ownership() -> None:
     assert "creator" in (results[0].error or "")
 
 
+def test_admin_can_update_task_created_by_someone_else() -> None:
+    task_store = InMemoryTaskStore()
+    task_store.create_task(
+        title="Update onboarding docs",
+        project="Atlas",
+        assignee="Sarah",
+        due_date=None,
+        organization_id="org-1",
+        created_by="456",
+    )
+    orchestrator = AgentOrchestrator(registry=ToolRegistry(task_store))
+    response = orchestrator.plan(
+        "Update TASK-001 due tomorrow",
+        _context(roles=["Admin"]),
+    )
+
+    assert response.plan is not None
+    results = orchestrator.execute_plan(
+        response.plan,
+        _context(roles=["Admin"]),
+        confirmed=True,
+    )
+
+    assert results[0].status == "succeeded"
+    assert results[0].result["due_date"] is not None
+
+
 def test_tool_registry_rejects_malformed_write_arguments() -> None:
     task_store = InMemoryTaskStore()
     registry = ToolRegistry(task_store)

@@ -58,10 +58,11 @@ class AgentModelSelection(BaseModel):
 
 
 class AgentPlan(BaseModel):
-    """A model-proposed, policy-checked plan that may be executed later."""
+    """A deterministic, policy-checked plan that may be executed later."""
 
     plan_id: str
     intent: str
+    planner: Literal["deterministic_regex"] = "deterministic_regex"
     model_tier: ModelTier
     model: AgentModelSelection
     actions: list[AgentToolAction] = Field(default_factory=list)

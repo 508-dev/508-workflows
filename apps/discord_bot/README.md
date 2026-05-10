@@ -67,11 +67,12 @@ mentioned, including messages inside Discord threads. A follow-up in the same
 thread should mention the bot again so the bot has an explicit user trigger and
 fresh Discord role context for that request.
 
-Pending confirmation plans are currently process-local in the backend API and
-expire after 10 minutes with opportunistic cleanup during agent requests and
-confirmations. A production multi-process deployment should move these pending
-plans to Redis or another shared TTL store before relying on cross-process
-confirmation delivery.
+Pending confirmation plans and the MVP task store are currently process-local in
+the backend API. Confirmation plans expire after 10 minutes with opportunistic
+cleanup during agent requests and confirmations. A production multi-process
+deployment should move pending plans to Redis or another shared TTL store and
+swap the task registry for a durable task service before relying on cross-process
+agent behavior.
 
 Relevant configuration:
 

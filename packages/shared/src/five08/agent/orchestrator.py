@@ -146,6 +146,7 @@ class AgentOrchestrator:
         context: AgentIdentityContext,
         *,
         confirmed: bool = False,
+        effective_scopes: set[str] | None = None,
     ) -> list[AgentExecutionResult]:
         results: list[AgentExecutionResult] = []
         if plan.requires_confirmation and not confirmed:
@@ -162,12 +163,14 @@ class AgentOrchestrator:
             context.organization_id or context.guild_id or context.workspace_id
         )
         actor_id = context.internal_user_id or context.discord_user_id
+        actor_scopes = effective_scopes or self.policy.scopes_for_context(context)
         for action in plan.actions:
             manifest = self.registry.get(action.tool_name)
-            decision = self.policy.authorize(
+            decision = self.policy.authorize_with_scopes(
                 context=context,
                 manifest=manifest,
                 action=action,
+                effective_scopes=actor_scopes,
             )
             if not decision.allowed:
                 results.append(
@@ -184,6 +187,7 @@ class AgentOrchestrator:
                     action.arguments,
                     organization_id=organization_id,
                     actor_id=actor_id,
+                    actor_scopes=actor_scopes,
                 )
             except PermissionError as exc:
                 results.append(
