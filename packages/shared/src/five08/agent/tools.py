@@ -130,28 +130,27 @@ class InMemoryTaskStore:
         normalized_project = project.strip().casefold() if project else None
         matches: list[dict[str, Any]] = []
         with self._lock:
-            tasks = list(self._tasks.values())
-        for task in tasks:
-            if task.organization_id and organization_id != task.organization_id:
-                continue
-            if (
-                normalized_project
-                and (task.project or "").casefold() != normalized_project
-            ):
-                continue
-            searchable = " ".join(
-                value
-                for value in [
-                    task.task_id,
-                    task.title,
-                    task.project or "",
-                    task.assignee or "",
-                    task.status,
-                ]
-                if value
-            ).casefold()
-            if not normalized_query or normalized_query in searchable:
-                matches.append(task.to_payload())
+            for task in self._tasks.values():
+                if task.organization_id and organization_id != task.organization_id:
+                    continue
+                if (
+                    normalized_project
+                    and (task.project or "").casefold() != normalized_project
+                ):
+                    continue
+                searchable = " ".join(
+                    value
+                    for value in [
+                        task.task_id,
+                        task.title,
+                        task.project or "",
+                        task.assignee or "",
+                        task.status,
+                    ]
+                    if value
+                ).casefold()
+                if not normalized_query or normalized_query in searchable:
+                    matches.append(task.to_payload())
         return {"tasks": matches}
 
 

@@ -455,16 +455,16 @@ class AgentOrchestrator:
     @staticmethod
     def _extract_status(text: str) -> str | None:
         lowered = text.casefold()
-        if any(
-            word in lowered
-            for word in ["close task", "mark done", "complete task", "completed"]
+        if re.search(
+            r"\b(?:close|complete|mark)\s+(?:task\s+)?(?:as\s+)?(?:done|completed)\b",
+            lowered,
         ):
             return "done"
-        if re.search(r"\b(?:status\s+to\s+)?done\b", lowered):
+        if re.search(r"\bstatus\s+to\s+(?:done|completed)\b", lowered):
             return "done"
-        if "blocked" in lowered:
+        if re.search(r"\bstatus\s+to\s+blocked\b", lowered):
             return "blocked"
-        if "in progress" in lowered:
+        if re.search(r"\bstatus\s+to\s+in progress\b", lowered):
             return "in_progress"
         return None
 

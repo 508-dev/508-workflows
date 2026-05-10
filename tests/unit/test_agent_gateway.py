@@ -306,6 +306,19 @@ def test_update_title_parses_title_update() -> None:
     assert response.plan.actions[0].arguments["title"] == "refresh onboarding docs"
 
 
+def test_update_title_with_status_word_does_not_change_status() -> None:
+    orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
+
+    response = orchestrator.plan(
+        "Update TASK-001 title to completed checklist",
+        _context(),
+    )
+
+    assert response.plan is not None
+    assert response.plan.actions[0].arguments["title"] == "completed checklist"
+    assert "status" not in response.plan.actions[0].arguments
+
+
 def test_invalid_month_date_does_not_crash_planning() -> None:
     orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
 
