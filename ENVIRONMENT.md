@@ -130,6 +130,12 @@ Use `.env.example` as the source of defaults.
 - `Required for /create-mailbox`: `MIGADU_API_USER`, `MIGADU_API_KEY`
 - `Optional`: `MIGADU_MAILBOX_DOMAIN` (default: `508.dev`)
 
+## Outline Invitations
+
+- `Required for /create-user-accounts`: `OUTLINE_API_KEY`
+- `Optional`: `OUTLINE_API_BASE_URL` (default: `https://app.getoutline.com/api`)
+- `Optional`: `OUTLINE_API_TIMEOUT_SECONDS` (default: `20.0`)
+
 ## Discord CRM Audit Logging (Best Effort)
 
 - `Optional`: `AUDIT_API_BASE_URL` (when set with `API_SHARED_SECRET`, CRM commands emit best-effort audit events)

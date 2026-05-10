@@ -4,7 +4,12 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from five08.discord_bot.cogs.crm import CRMCog, CreateSSOUserSelectionView
+from five08.discord_bot.cogs.crm import (
+    CRMCog,
+    CreateSSOUserSelectionView,
+    CreateUserAccountsSelectionView,
+    OutlineInviteSelectionView,
+)
 from five08.clients.authentik import AuthentikAPIError
 from five08.clients.espo import EspoAPIError
 
@@ -423,3 +428,284 @@ async def test_create_sso_user_shows_selection_view_for_multiple_contacts(
     assert isinstance(view, CreateSSOUserSelectionView)
     labels = [item.label for item in view.children if hasattr(item, "label")]
     assert labels == ["Jane Doe", "John Doe"]
+
+
+@pytest.mark.asyncio
+async def test_create_user_accounts_creates_mailbox_sso_and_outline_invite(
+    cog: CRMCog, mock_interaction: AsyncMock, mock_espo_api: Mock
+) -> None:
+    contact = {
+        "id": "crm-123",
+        "name": "Jane Doe",
+        "emailAddress": "jane.personal@example.com",
+        "c508Email": "",
+        "cSsoID": None,
+    }
+    migadu_client = Mock()
+    migadu_client.create_mailbox.return_value = {"address": "jane@508.dev"}
+    authentik_client = Mock()
+    authentik_client.find_users_by_username_or_email.return_value = []
+    authentik_client.create_user.return_value = {
+        "pk": 42,
+        "username": "jane",
+        "email": "jane@508.dev",
+        "name": "Jane Doe",
+        "is_superuser": False,
+    }
+    authentik_client.resolve_email_stage_id.return_value = "stage-id"
+    authentik_client.send_recovery_email.return_value = None
+    outline_client = Mock()
+    outline_client.invite_user.return_value = {
+        "ok": True,
+        "data": {"sent": [{"email": "jane@508.dev"}], "users": []},
+    }
+
+    with (
+        patch.object(
+            cog,
+            "_search_contacts_for_lookup",
+            new=AsyncMock(return_value=[contact]),
+        ),
+        patch.object(cog, "_migadu_client", return_value=migadu_client),
+        patch.object(cog, "_authentik_client", return_value=authentik_client),
+        patch.object(cog, "_outline_client", return_value=outline_client),
+        patch.object(cog, "_audit_command_safe") as mock_audit,
+    ):
+        mock_espo_api.request.return_value = {"id": "crm-123"}
+        await cog.create_user_accounts.callback(
+            cog,
+            mock_interaction,
+            search_term="jane",
+            mailbox_username="jane",
+        )
+
+    migadu_client.create_mailbox.assert_called_once()
+    mailbox_request = migadu_client.create_mailbox.call_args.args[0]
+    assert mailbox_request.local_part == "jane"
+    assert mailbox_request.backup_email == "jane.personal@example.com"
+    assert mailbox_request.name == "Jane Doe"
+    authentik_client.create_user.assert_called_once_with(
+        username="jane",
+        name="Jane Doe",
+        email="jane@508.dev",
+    )
+    outline_client.invite_user.assert_called_once_with(
+        email="jane@508.dev",
+        name="Jane Doe",
+    )
+    assert mock_espo_api.request.call_args_list[0].args == (
+        "PUT",
+        "Contact/crm-123",
+        {"c508Email": "jane@508.dev"},
+    )
+    assert mock_espo_api.request.call_args_list[1].args == (
+        "PUT",
+        "Contact/crm-123",
+        {"cSsoID": "42"},
+    )
+    message = mock_interaction.followup.send.call_args.args[0]
+    assert "User accounts are ready" in message
+    assert "Email: `jane@508.dev`" in message
+    assert "Outline invite: sent." in message
+    assert mock_interaction.followup.send.call_args.kwargs["ephemeral"] is True
+    assert mock_audit.call_args.kwargs["metadata"]["outline_invited"] is True
+
+
+@pytest.mark.asyncio
+async def test_create_user_accounts_reuses_existing_mailbox(
+    cog: CRMCog, mock_interaction: AsyncMock, mock_espo_api: Mock
+) -> None:
+    contact = {
+        "id": "crm-123",
+        "name": "Jane Doe",
+        "emailAddress": "jane.personal@example.com",
+        "c508Email": "jane@508.dev",
+        "cSsoID": "42",
+    }
+    authentik_client = Mock()
+    authentik_client.get_user.return_value = {
+        "pk": 42,
+        "username": "jane",
+        "email": "jane@508.dev",
+        "name": "Jane Doe",
+        "is_superuser": False,
+    }
+    outline_client = Mock()
+    outline_client.invite_user.return_value = {"ok": True}
+
+    with (
+        patch.object(
+            cog,
+            "_search_contacts_for_lookup",
+            new=AsyncMock(return_value=[contact]),
+        ),
+        patch.object(cog, "_migadu_client") as migadu_client,
+        patch.object(cog, "_authentik_client", return_value=authentik_client),
+        patch.object(cog, "_outline_client", return_value=outline_client),
+        patch.object(cog, "_audit_command_safe"),
+    ):
+        await cog.create_user_accounts.callback(
+            cog,
+            mock_interaction,
+            search_term="jane",
+            mailbox_username="jane@508.dev",
+        )
+
+    migadu_client.assert_not_called()
+    mock_espo_api.request.assert_not_called()
+    outline_client.invite_user.assert_called_once_with(
+        email="jane@508.dev",
+        name="Jane Doe",
+    )
+    message = mock_interaction.followup.send.call_args.args[0]
+    assert "Mailbox: already existed/reused." in message
+    assert "SSO: already existed/reused" in message
+
+
+@pytest.mark.asyncio
+async def test_create_user_accounts_shows_selection_view_for_multiple_contacts(
+    cog: CRMCog, mock_interaction: AsyncMock
+) -> None:
+    contacts = [
+        {
+            "id": "crm-123",
+            "name": "Jane Doe",
+            "emailAddress": "jane@example.com",
+        },
+        {
+            "id": "crm-456",
+            "name": "Jane Smith",
+            "emailAddress": "smith@example.com",
+        },
+    ]
+
+    with patch.object(
+        cog,
+        "_search_contacts_for_lookup",
+        new=AsyncMock(return_value=contacts),
+    ):
+        sent_message = Mock()
+        mock_interaction.followup.send = AsyncMock(return_value=sent_message)
+        await cog.create_user_accounts.callback(
+            cog,
+            mock_interaction,
+            search_term="jane",
+            mailbox_username="jane",
+        )
+
+    kwargs = mock_interaction.followup.send.call_args.kwargs
+    assert kwargs["ephemeral"] is True
+    view = kwargs["view"]
+    assert isinstance(view, CreateUserAccountsSelectionView)
+    labels = [item.label for item in view.children if hasattr(item, "label")]
+    assert labels == ["Jane Doe", "Jane Smith"]
+
+
+@pytest.mark.asyncio
+async def test_invite_outline_user_invites_contact_508_email(
+    cog: CRMCog, mock_interaction: AsyncMock
+) -> None:
+    contact = {
+        "id": "crm-123",
+        "name": "Jane Doe",
+        "emailAddress": "jane.personal@example.com",
+        "c508Email": "jane@508.dev",
+    }
+    outline_client = Mock()
+    outline_client.invite_user.return_value = {"ok": True}
+
+    with (
+        patch.object(
+            cog,
+            "_search_contacts_for_lookup",
+            new=AsyncMock(return_value=[contact]),
+        ),
+        patch.object(cog, "_outline_client", return_value=outline_client),
+        patch.object(cog, "_audit_command_safe") as mock_audit,
+    ):
+        await cog.invite_outline_user.callback(
+            cog,
+            mock_interaction,
+            search_term="jane",
+        )
+
+    outline_client.invite_user.assert_called_once_with(
+        email="jane@508.dev",
+        name="Jane Doe",
+    )
+    message = mock_interaction.followup.send.call_args.args[0]
+    assert "Outline invite sent" in message
+    assert "Email: `jane@508.dev`" in message
+    assert mock_interaction.followup.send.call_args.kwargs["ephemeral"] is True
+    assert mock_audit.call_args.kwargs["metadata"]["contact_id"] == "crm-123"
+
+
+@pytest.mark.asyncio
+async def test_invite_outline_user_invites_direct_email_when_no_contact_matches(
+    cog: CRMCog, mock_interaction: AsyncMock
+) -> None:
+    outline_client = Mock()
+    outline_client.invite_user.return_value = {"ok": True}
+
+    with (
+        patch.object(
+            cog,
+            "_search_contacts_for_lookup",
+            new=AsyncMock(return_value=[]),
+        ),
+        patch.object(cog, "_outline_client", return_value=outline_client),
+        patch.object(cog, "_audit_command_safe") as mock_audit,
+    ):
+        await cog.invite_outline_user.callback(
+            cog,
+            mock_interaction,
+            search_term="person@example.com",
+        )
+
+    outline_client.invite_user.assert_called_once_with(
+        email="person@example.com",
+        name=None,
+    )
+    message = mock_interaction.followup.send.call_args.args[0]
+    assert "Email: `person@example.com`" in message
+    assert mock_audit.call_args.kwargs["metadata"]["direct_email"] is True
+
+
+@pytest.mark.asyncio
+async def test_invite_outline_user_shows_selection_view_for_multiple_contacts(
+    cog: CRMCog, mock_interaction: AsyncMock
+) -> None:
+    contacts = [
+        {
+            "id": "crm-123",
+            "name": "Jane Doe",
+            "emailAddress": "jane@example.com",
+            "c508Email": "jane@508.dev",
+        },
+        {
+            "id": "crm-456",
+            "name": "Jane Smith",
+            "emailAddress": "smith@example.com",
+            "c508Email": "smith@508.dev",
+        },
+    ]
+
+    with patch.object(
+        cog,
+        "_search_contacts_for_lookup",
+        new=AsyncMock(return_value=contacts),
+    ):
+        sent_message = Mock()
+        mock_interaction.followup.send = AsyncMock(return_value=sent_message)
+        await cog.invite_outline_user.callback(
+            cog,
+            mock_interaction,
+            search_term="jane",
+        )
+
+    kwargs = mock_interaction.followup.send.call_args.kwargs
+    assert kwargs["ephemeral"] is True
+    view = kwargs["view"]
+    assert isinstance(view, OutlineInviteSelectionView)
+    labels = [item.label for item in view.children if hasattr(item, "label")]
+    assert labels == ["Jane Doe", "Jane Smith"]
