@@ -142,6 +142,32 @@ def test_search_task_executes_without_confirmation() -> None:
     assert response.results[0].result["tasks"][0]["task_id"] == "TASK-001"
 
 
+def test_bare_task_list_uses_empty_query() -> None:
+    task_store = InMemoryTaskStore()
+    task_store.create_task(
+        title="Update onboarding docs",
+        project="Atlas",
+        assignee="Sarah",
+        due_date="2026-05-15",
+        organization_id="org-1",
+        created_by="123",
+    )
+    task_store.create_task(
+        title="Review launch notes",
+        project="Atlas",
+        assignee=None,
+        due_date=None,
+        organization_id="org-1",
+        created_by="123",
+    )
+    orchestrator = AgentOrchestrator(registry=ToolRegistry(task_store))
+
+    response = orchestrator.plan("Show tasks", _context())
+
+    assert response.status == "executed"
+    assert len(response.results[0].result["tasks"]) == 2
+
+
 def test_project_only_search_uses_project_as_filter_not_query() -> None:
     task_store = InMemoryTaskStore()
     task_store.create_task(
@@ -285,6 +311,17 @@ def test_update_status_to_done_parses_done_status() -> None:
     orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
 
     response = orchestrator.plan("Update TASK-001 status to done", _context())
+
+    assert response.plan is not None
+    assert response.plan.actions[0].tool_name == "task_write.update_task"
+    assert response.plan.actions[0].arguments["task_id"] == "TASK-001"
+    assert response.plan.actions[0].arguments["status"] == "done"
+
+
+def test_close_task_id_parses_done_status() -> None:
+    orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
+
+    response = orchestrator.plan("Close TASK-001", _context())
 
     assert response.plan is not None
     assert response.plan.actions[0].tool_name == "task_write.update_task"

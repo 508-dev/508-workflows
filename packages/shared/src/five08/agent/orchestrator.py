@@ -421,13 +421,15 @@ class AgentOrchestrator:
     @staticmethod
     def _extract_search_query(text: str) -> str:
         match = re.search(
-            r"\b(?:find|search|list|show)\s+tasks?\s+(?:for|matching|about)?\s*(.+)",
+            r"\b(?:find|search|list|show)\s+tasks?\b(?:\s+(?:for|matching|about)?\s*(.*))?",
             text,
             re.IGNORECASE,
         )
         if match is None:
             return text.strip()
-        raw_query = match.group(1).strip()
+        raw_query = (match.group(1) or "").strip()
+        if not raw_query:
+            return ""
         leading_project = re.match(
             r"^(?:in\s+project|for\s+project|project)\s+(.+)",
             raw_query,
@@ -455,6 +457,8 @@ class AgentOrchestrator:
     @staticmethod
     def _extract_status(text: str) -> str | None:
         lowered = text.casefold()
+        if re.search(r"\b(?:close|complete)\s+(?:task\s+)?task-\d+\b", lowered):
+            return "done"
         if re.search(
             r"\b(?:close|complete|mark)\s+(?:task\s+)?(?:as\s+)?(?:done|completed)\b",
             lowered,
