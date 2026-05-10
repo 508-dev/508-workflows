@@ -581,6 +581,39 @@ def test_engineer_can_draft_github_issue_write_with_confirmation() -> None:
     }
 
 
+def test_github_issue_create_title_can_include_search_word() -> None:
+    orchestrator = AgentOrchestrator()
+
+    response = orchestrator.plan(
+        "Create a GitHub issue to improve search UI",
+        _context(roles=["Engineer"]),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    action = response.plan.actions[0]
+    assert action.tool_name == "github_issue.create_issue"
+    assert action.arguments["title"] == "improve search UI"
+
+
+def test_github_issue_create_strips_trailing_repository_clause() -> None:
+    orchestrator = AgentOrchestrator()
+
+    response = orchestrator.plan(
+        "Create a GitHub issue to improve UI in repo 508-dev/508-workflows",
+        _context(roles=["Engineer"]),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    action = response.plan.actions[0]
+    assert action.tool_name == "github_issue.create_issue"
+    assert action.arguments == {
+        "title": "improve UI",
+        "repository": "508-dev/508-workflows",
+    }
+
+
 def test_member_cannot_create_github_issue() -> None:
     orchestrator = AgentOrchestrator()
 
@@ -591,6 +624,37 @@ def test_member_cannot_create_github_issue() -> None:
 
     assert response.status == "denied"
     assert "github:issue:create" in response.message
+
+
+def test_kimai_month_query_sets_begin_and_end_bounds() -> None:
+    orchestrator = AgentOrchestrator()
+
+    response = orchestrator.plan(
+        "Kimai hours for project Atlas in 2026-05",
+        _context(roles=["Admin"]),
+    )
+
+    assert response.status == "failed"
+    action = response.plan.actions[0]
+    assert action.tool_name == "kimai_read.project_hours"
+    assert action.arguments["project"] == "Atlas"
+    assert action.arguments["begin"] == "2026-05-01"
+    assert action.arguments["end"] == "2026-05-31T23:59:59"
+    assert response.results[0].status == "failed"
+    assert "KIMAI_BASE_URL" in response.results[0].error
+
+
+def test_kimai_december_month_query_rolls_end_to_year_boundary() -> None:
+    orchestrator = AgentOrchestrator()
+
+    response = orchestrator.plan(
+        "Kimai hours for project Atlas in 2026-12",
+        _context(roles=["Admin"]),
+    )
+
+    action = response.plan.actions[0]
+    assert action.arguments["begin"] == "2026-12-01"
+    assert action.arguments["end"] == "2026-12-31T23:59:59"
 
 
 def test_admin_can_draft_docuseal_member_agreement_with_confirmation() -> None:

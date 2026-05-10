@@ -293,19 +293,11 @@ class AgentOrchestrator:
 
     def _parse_github_issue(self, text: str) -> AgentToolAction | None:
         lowered = text.casefold()
-        if any(keyword in lowered for keyword in ["search", "find", "list", "show"]):
-            query = self._extract_github_issue_query(text)
-            repository = self._extract_repository(text)
-            args = {"query": query, "repository": repository, "state": "open"}
-            return AgentToolAction(
-                tool_name="github_issue.search_issues",
-                arguments={
-                    key: value for key, value in args.items() if value is not None
-                },
-                summary=f"Search GitHub issues matching: {query}",
-            )
-
-        if any(keyword in lowered for keyword in ["create", "open"]):
+        if re.search(
+            r"\b(?:create|open)\s+(?:a\s+)?(?:github|gh)\s+issue\b",
+            text,
+            re.IGNORECASE,
+        ):
             title = self._extract_github_issue_title(text)
             if not title:
                 return None
@@ -318,6 +310,18 @@ class AgentOrchestrator:
                     key: value for key, value in args.items() if value is not None
                 },
                 summary=f'Create GitHub issue: "{title}"',
+            )
+
+        if any(keyword in lowered for keyword in ["search", "find", "list", "show"]):
+            query = self._extract_github_issue_query(text)
+            repository = self._extract_repository(text)
+            args = {"query": query, "repository": repository, "state": "open"}
+            return AgentToolAction(
+                tool_name="github_issue.search_issues",
+                arguments={
+                    key: value for key, value in args.items() if value is not None
+                },
+                summary=f"Search GitHub issues matching: {query}",
             )
         return None
 
@@ -385,7 +389,17 @@ class AgentOrchestrator:
         args: dict[str, str] = {"project": project_name}
         month_match = re.search(r"\b(20\d{2}-\d{2})\b", text)
         if month_match:
-            args["begin"] = f"{month_match.group(1)}-01"
+            year, month = (int(part) for part in month_match.group(1).split("-"))
+            begin = date(year, month, 1)
+            if month == 12:
+                next_month = date(year + 1, 1, 1)
+            else:
+                next_month = date(year, month + 1, 1)
+            end = datetime.combine(next_month, datetime.min.time()) - timedelta(
+                seconds=1
+            )
+            args["begin"] = begin.isoformat()
+            args["end"] = end.isoformat()
         return AgentToolAction(
             tool_name="kimai_read.project_hours",
             arguments=args,
@@ -681,9 +695,18 @@ class AgentOrchestrator:
         )
         if match is None:
             return None
-        title = re.split(r"\s+\bwith\s+body\b", match.group(1), maxsplit=1, flags=re.I)[
-            0
-        ]
+        title = re.split(
+            r"\s+\bwith\s+body\b",
+            match.group(1),
+            maxsplit=1,
+            flags=re.I,
+        )[0]
+        title = re.split(
+            r"\s+\b(?:in|for)\s+(?:repo|repository)\s+[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\b",
+            title,
+            maxsplit=1,
+            flags=re.I,
+        )[0]
         return _clean_text(title)
 
     @staticmethod
