@@ -449,11 +449,6 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             ) from exc
         if isinstance(data, dict):
             data.setdefault("http_status", response.status_code)
-        if response.status_code >= 400 and isinstance(data, dict):
-            if "status" in data or "error" in data:
-                return data
-            if response.status_code not in {403, 404, 410, 422}:
-                raise RuntimeError(str(data.get("error") or data))
         if not isinstance(data, dict):
             raise RuntimeError("Backend returned unexpected JSON payload")
         return data

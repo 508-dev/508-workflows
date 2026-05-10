@@ -355,3 +355,28 @@ def test_post_backend_json_returns_structured_failed_response(
 
     assert payload["status"] == "failed"
     assert payload["http_status"] == 500
+
+
+def test_post_backend_json_returns_detail_error_response(
+    monkeypatch,
+) -> None:
+    cog = AgentCog.__new__(AgentCog)
+    monkeypatch.setattr(
+        "five08.discord_bot.cogs.agent.settings",
+        SimpleNamespace(
+            backend_api_base_url="http://api.test",
+            api_shared_secret="secret",
+            agent_api_timeout_seconds=8.0,
+        ),
+    )
+
+    with patch("five08.discord_bot.cogs.agent.requests.post") as mock_post:
+        mock_post.return_value = _FakeResponse(
+            500,
+            {"detail": "backend unavailable"},
+        )
+
+        payload = cog._post_backend_json("/agent/confirmations/plan-1", {})
+
+    assert payload["detail"] == "backend unavailable"
+    assert payload["http_status"] == 500

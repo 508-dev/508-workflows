@@ -249,7 +249,8 @@ class AgentOrchestrator:
             return self._parse_update_task(text)
         task_id = _TASK_ID_RE.search(text)
         if task_id and any(
-            keyword in lowered for keyword in ["assign", "due", "status", "close"]
+            keyword in lowered
+            for keyword in ["assign", "due", "status", "close", "complete", "completed"]
         ):
             return self._parse_update_task(text)
         return None
