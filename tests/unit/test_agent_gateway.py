@@ -614,6 +614,21 @@ def test_github_issue_create_title_can_include_search_word() -> None:
     assert action.arguments["title"] == "improve search UI"
 
 
+def test_github_issue_create_title_can_include_task_word() -> None:
+    orchestrator = AgentOrchestrator()
+
+    response = orchestrator.plan(
+        "Create a GitHub issue to show task counts on the dashboard",
+        _context(roles=["Engineer"]),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    action = response.plan.actions[0]
+    assert action.tool_name == "github_issue.create_issue"
+    assert action.arguments["title"] == "show task counts on the dashboard"
+
+
 def test_github_issue_create_strips_trailing_repository_clause() -> None:
     orchestrator = AgentOrchestrator()
 
@@ -746,6 +761,25 @@ def test_admin_can_search_crm_contacts() -> None:
     assert response.results[0].result["contacts"][0]["name"] == "Sarah Example"
 
 
+def test_mailbox_create_uses_explicit_backup_email_not_mailbox_address() -> None:
+    orchestrator = AgentOrchestrator()
+
+    response = orchestrator.plan(
+        "Create mailbox john@508.dev named John with backup john@gmail.com",
+        _context(roles=["Admin"]),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    action = response.plan.actions[0]
+    assert action.tool_name == "mail_write.create_mailbox"
+    assert action.arguments == {
+        "local_part": "john",
+        "backup_email": "john@gmail.com",
+        "name": "John",
+    }
+
+
 def test_github_issue_create_uses_runtime_configured_default_repo(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -818,6 +852,11 @@ def test_member_cannot_assign_task_without_assign_scope() -> None:
 
     assert response.status == "denied"
     assert "task:assign" in response.message
+    assert response.plan is not None
+    assert response.plan.actions[0].required_scopes == [
+        "task:update_own",
+        "task:assign",
+    ]
 
 
 def test_project_manager_can_assign_task() -> None:

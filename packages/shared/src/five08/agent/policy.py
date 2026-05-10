@@ -123,11 +123,10 @@ class PolicyEngine:
         if manifest.tenant_scoped and not context.organization_id:
             return PolicyDecision(False, "Tool requires resolved tenant context")
 
-        required_scopes = list(manifest.required_scopes)
-        if action.tool_name == "task_write.update_task" and action.arguments.get(
-            "assignee"
-        ):
-            required_scopes.append("task:assign")
+        required_scopes = self.required_scopes_for_action(
+            manifest=manifest,
+            action=action,
+        )
         missing_scopes = [
             scope for scope in required_scopes if scope not in effective_scopes
         ]
@@ -142,3 +141,16 @@ class PolicyEngine:
             "allowed",
             requires_confirmation=manifest.requires_confirmation,
         )
+
+    def required_scopes_for_action(
+        self,
+        *,
+        manifest: ToolManifest,
+        action: AgentToolAction,
+    ) -> list[str]:
+        required_scopes = list(manifest.required_scopes)
+        if action.tool_name == "task_write.update_task" and action.arguments.get(
+            "assignee"
+        ):
+            required_scopes.append("task:assign")
+        return required_scopes

@@ -98,7 +98,10 @@ class AgentOrchestrator:
         if manifest is not None:
             action.risk = manifest.risk
             action.requires_confirmation = manifest.requires_confirmation
-            action.required_scopes = list(manifest.required_scopes)
+            action.required_scopes = self.policy.required_scopes_for_action(
+                manifest=manifest,
+                action=action,
+            )
 
         decision = self.policy.authorize(
             context=context,
@@ -245,15 +248,15 @@ class AgentOrchestrator:
 
     def _parse_action(self, text: str) -> AgentToolAction | None:
         lowered = text.casefold()
-        if "create" in lowered and "task" in lowered:
+        if "github issue" in lowered or "gh issue" in lowered:
+            return self._parse_github_issue(text)
+        if re.search(r"\bcreate\s+(?:a\s+)?task\b", text, re.IGNORECASE):
             return self._parse_create_task(text)
         if any(
             keyword in lowered
             for keyword in ["find task", "search task", "list task", "show task"]
         ):
             return self._parse_search_task(text)
-        if "github issue" in lowered or "gh issue" in lowered:
-            return self._parse_github_issue(text)
         if any(
             keyword in lowered
             for keyword in [
@@ -413,11 +416,6 @@ class AgentOrchestrator:
         )
 
     def _parse_mailbox_create(self, text: str) -> AgentToolAction | None:
-        email_match = re.search(
-            r"\b([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})\b",
-            text,
-            re.IGNORECASE,
-        )
         local_match = re.search(
             r"\bmailbox\s+(?:for\s+)?([A-Za-z0-9._%+-]+)(?:@|\s)",
             text,
@@ -428,21 +426,52 @@ class AgentOrchestrator:
             text,
             re.IGNORECASE,
         )
-        if email_match is None or local_match is None or name_match is None:
+        if local_match is None or name_match is None:
             return None
         local_part = local_match.group(1).strip().lower()
-        name = _clean_text(name_match.group(1))
-        if not local_part or not name:
+        name = _clean_text(
+            re.split(
+                r"\s+\b(?:with\s+)?(?:backup|recovery|forward(?:ing)?|forward)\b",
+                name_match.group(1),
+                maxsplit=1,
+                flags=re.IGNORECASE,
+            )[0]
+        )
+        backup_email = self._extract_mailbox_backup_email(text)
+        if not local_part or not name or not backup_email:
             return None
         return AgentToolAction(
             tool_name="mail_write.create_mailbox",
             arguments={
                 "local_part": local_part,
-                "backup_email": email_match.group(1),
+                "backup_email": backup_email,
                 "name": name,
             },
             summary=f"Create mailbox {local_part} for {name}",
         )
+
+    @staticmethod
+    def _extract_mailbox_backup_email(text: str) -> str | None:
+        email_pattern = r"([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})"
+        for pattern in [
+            rf"\b(?:with\s+)?(?:backup|recovery)(?:\s+(?:email|address))?\s+{email_pattern}\b",
+            rf"\bforward(?:ing)?(?:\s+to)?\s+{email_pattern}\b",
+        ]:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match is not None:
+                return match.group(1)
+
+        mailbox_match = re.search(
+            rf"\bmailbox\s+(?:for\s+)?{email_pattern}\b",
+            text,
+            re.IGNORECASE,
+        )
+        mailbox_email = mailbox_match.group(1).casefold() if mailbox_match else None
+        for email_match in re.finditer(rf"\b{email_pattern}\b", text, re.IGNORECASE):
+            email = email_match.group(1)
+            if mailbox_email is None or email.casefold() != mailbox_email:
+                return email
+        return None
 
     def _parse_create_task(self, text: str) -> AgentToolAction | None:
         title = self._extract_title(text)
