@@ -2,6 +2,7 @@
 
 import asyncio
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -662,13 +663,17 @@ def test_agent_request_for_write_returns_confirmation_plan(
             },
             headers=auth_headers,
         )
+        for _ in range(20):
+            if mock_insert.call_args is not None:
+                break
+            time.sleep(0.01)
+        audit_payload = mock_insert.call_args.args[1]
 
     payload = response.json()
     assert response.status_code == 202
     assert payload["status"] == "requires_confirmation"
     assert payload["plan"]["actions"][0]["tool_name"] == "task_write.create_task"
     assert payload["plan"]["plan_id"] in api._PENDING_AGENT_PLANS
-    audit_payload = mock_insert.call_args.args[1]
     assert audit_payload.correlation_id == "message-1"
 
 
