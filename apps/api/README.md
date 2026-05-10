@@ -6,6 +6,7 @@
 - Send the secret in header `X-API-Secret`.
 - Header name is exactly `X-API-Secret` (not `X-API-Secret-Key`).
 - `GET /dashboard` and `/dashboard/api/*` use the HttpOnly session cookie created by OIDC or Discord dashboard login flows. They do not accept `X-API-Secret`.
+- Dashboard session cookies are expected to stay `SameSite=Lax` or stricter; dashboard mutating POSTs rely on that cookie policy for CSRF protection.
 - `GET /health` and most OIDC session routes (`/auth/login`, `/auth/callback`, `/auth/me`, `/auth/logout`) do not use `X-API-Secret`.
 - `POST /auth/discord/links` does use `X-API-Secret` because it is called by trusted backend/bot components.
 

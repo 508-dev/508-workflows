@@ -113,16 +113,6 @@ sync_people_from_crm_job = JOB_FUNCTIONS["sync_people_from_crm_job"]
 sync_person_from_crm_job = JOB_FUNCTIONS["sync_person_from_crm_job"]
 process_docuseal_agreement_job = JOB_FUNCTIONS["process_docuseal_agreement_job"]
 
-_CRM_DASHBOARD_RERUN_AUDIT_JOB_TYPES = {
-    "process_contact_skills_job",
-    "extract_resume_profile_job",
-    "apply_resume_profile_job",
-    "process_intake_form_job",
-    "sync_people_from_crm_job",
-    "sync_person_from_crm_job",
-    "process_docuseal_agreement_job",
-}
-
 
 def _is_authorized(request: Request) -> bool:
     """Validate shared API secret."""
@@ -499,7 +489,7 @@ def _session_audit_actor(session: AuthSession) -> tuple[ActorProvider, str]:
     return actor_provider, actor_subject
 
 
-async def _audit_dashboard_crm_job_rerun(
+async def _audit_dashboard_job_rerun(
     session: AuthSession,
     payload: dict[str, Any],
 ) -> None:
@@ -509,8 +499,6 @@ async def _audit_dashboard_crm_job_rerun(
     job_type = payload.get("type")
     if not isinstance(job_type, str):
         return
-    if job_type not in _CRM_DASHBOARD_RERUN_AUDIT_JOB_TYPES:
-        return
 
     job_id = payload.get("job_id")
     source_job_id = payload.get("source_job_id")
@@ -519,7 +507,7 @@ async def _audit_dashboard_crm_job_rerun(
 
     actor_provider, actor_subject = _session_audit_actor(session)
     await _write_auth_audit_event(
-        action="crm.job_rerun",
+        action="worker.job_rerun",
         result=AuditResult.SUCCESS,
         actor_subject=actor_subject,
         actor_display_name=session.display_name,
@@ -531,7 +519,6 @@ async def _audit_dashboard_crm_job_rerun(
             "source_job_id": source_job_id,
             "job_type": job_type,
             "queue": settings.redis_queue_name,
-            "actor_is_admin": session.is_admin,
         },
     )
 
@@ -833,13 +820,17 @@ async def jobs_handler(
                 status_code=400,
             )
 
+    normalized_job_type = job_type.strip() if job_type is not None else None
+    if normalized_job_type == "":
+        normalized_job_type = None
+
     recent_jobs = await asyncio.to_thread(
         list_jobs,
         settings,
         created_after=cutoff,
         limit=limit,
         status=job_status,
-        job_type=job_type,
+        job_type=normalized_job_type,
     )
 
     payload = [
@@ -990,13 +981,17 @@ async def dashboard_jobs_handler(
                 status_code=400,
             )
 
+    normalized_job_type = job_type.strip() if job_type is not None else None
+    if normalized_job_type == "":
+        normalized_job_type = None
+
     recent_jobs = await asyncio.to_thread(
         list_jobs,
         settings,
         created_after=cutoff,
         limit=limit,
         status=job_status,
-        job_type=job_type,
+        job_type=normalized_job_type,
     )
 
     return JSONResponse(
@@ -1028,7 +1023,7 @@ async def dashboard_rerun_job_handler(
 
     payload, status_code = await _rerun_job(job_id, request.app.state.queue)
     if status_code == 202:
-        await _audit_dashboard_crm_job_rerun(session, payload)
+        await _audit_dashboard_job_rerun(session, payload)
     return JSONResponse(payload, status_code=status_code)
 
 
@@ -1052,7 +1047,6 @@ async def dashboard_sync_people_handler(request: Request) -> JSONResponse:
         metadata={
             "source": "dashboard",
             "queue": settings.redis_queue_name,
-            "actor_is_admin": session.is_admin,
         },
     )
     return JSONResponse(
@@ -1483,10 +1477,18 @@ async def auth_callback_handler(
     if display_name == "":
         display_name = None
 
-    audit_actor_subject = (email or str(claims.get("sub", "")).strip()).strip()
+    oidc_subject = str(claims.get("sub", ""))
+    audit_actor_subject = (email or oidc_subject.strip()).strip()
+    audit_actor_display_name = display_name
+    audit_actor_provider = ActorProvider.ADMIN_SSO
     enforce_discord_link_identity_checks = (
         settings.discord_link_require_oidc_identity_checks
     )
+    session_subject = oidc_subject
+    session_email = email
+    session_display_name = display_name
+    session_groups = groups
+    session_actor_provider = ActorProvider.ADMIN_SSO
     crm_contact_id: str | None = None
 
     if pending.discord_link_token:
@@ -1560,8 +1562,31 @@ async def auth_callback_handler(
                 discord_user_id=grant.discord_user_id,
                 http_client=http_client,
             )
-            if identity is not None:
-                crm_contact_id = identity.crm_contact_id
+            if identity is None:
+                await _write_auth_audit_event(
+                    action="auth.login",
+                    result=AuditResult.DENIED,
+                    actor_subject=audit_actor_subject,
+                    actor_display_name=display_name,
+                    metadata={
+                        "reason": "discord_user_not_admin",
+                        "discord_user_id": grant.discord_user_id,
+                    },
+                    correlation_id=state,
+                )
+                return JSONResponse(
+                    {"error": "forbidden", "detail": "discord_user_not_admin"},
+                    status_code=403,
+                )
+            crm_contact_id = identity.crm_contact_id
+            session_subject = grant.discord_user_id
+            session_email = identity.email or email
+            session_display_name = identity.display_name or display_name
+            session_groups = ["discord_admin"]
+            session_actor_provider = ActorProvider.DISCORD
+            audit_actor_subject = grant.discord_user_id
+            audit_actor_display_name = session_display_name
+            audit_actor_provider = ActorProvider.DISCORD
         else:
             # Discord deep links are already restricted to Discord admin users.
             # In bootstrap mode, skip OIDC group/email-link checks for this path.
@@ -1581,14 +1606,14 @@ async def auth_callback_handler(
     await store.save_session(
         session_id=session_id,
         payload=AuthSession(
-            subject=str(claims.get("sub", "")),
-            email=email,
-            display_name=display_name,
-            groups=groups,
+            subject=session_subject,
+            email=session_email,
+            display_name=session_display_name,
+            groups=session_groups,
             is_admin=is_admin,
             id_token=id_token,
             expires_at=expires_at,
-            actor_provider=ActorProvider.ADMIN_SSO.value,
+            actor_provider=session_actor_provider.value,
             crm_contact_id=crm_contact_id,
         ),
         ttl_seconds=settings.auth_session_ttl_seconds,
@@ -1602,7 +1627,7 @@ async def auth_callback_handler(
     _set_session_cookie(response, session_id)
     login_audit_metadata: dict[str, Any] = {
         "is_admin": is_admin,
-        "groups": groups,
+        "groups": session_groups,
         "via_discord_link": bool(pending.discord_link_token),
     }
     if pending.discord_link_token:
@@ -1614,7 +1639,8 @@ async def auth_callback_handler(
         action="auth.login",
         result=AuditResult.SUCCESS,
         actor_subject=audit_actor_subject,
-        actor_display_name=display_name,
+        actor_display_name=audit_actor_display_name,
+        actor_provider=audit_actor_provider,
         metadata=login_audit_metadata,
         resource_id=session_id,
         correlation_id=state,
