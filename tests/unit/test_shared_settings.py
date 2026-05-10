@@ -67,6 +67,7 @@ def test_langfuse_client_is_disabled_without_base_url() -> None:
 def test_shared_settings_expose_agent_external_tool_credentials() -> None:
     """Backend agent tools should receive Kimai and Migadu credentials from env."""
     settings = SharedSettings(
+        github_allowed_repos="508-dev/508-workflows,508-dev/infra",
         kimai_base_url="https://kimai.example.com",
         kimai_api_token="kimai-token",
         migadu_api_user="migadu-user",
@@ -76,6 +77,7 @@ def test_shared_settings_expose_agent_external_tool_credentials() -> None:
 
     runtime_config = ToolRuntimeConfig.from_settings(settings)
 
+    assert runtime_config.github_allowed_repos == "508-dev/508-workflows,508-dev/infra"
     assert runtime_config.kimai_base_url == "https://kimai.example.com"
     assert runtime_config.kimai_api_token == "kimai-token"
     assert runtime_config.migadu_api_user == "migadu-user"

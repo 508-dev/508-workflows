@@ -40,6 +40,7 @@ class ToolRuntimeConfig:
 
     github_api_token: str | None = None
     github_default_repo: str | None = None
+    github_allowed_repos: str = ""
     espo_base_url: str | None = None
     espo_api_key: str | None = None
     docuseal_base_url: str | None = None
@@ -57,6 +58,7 @@ class ToolRuntimeConfig:
         return cls(
             github_api_token=getattr(settings, "github_api_token", None),
             github_default_repo=getattr(settings, "github_default_repo", None),
+            github_allowed_repos=getattr(settings, "github_allowed_repos", ""),
             espo_base_url=getattr(settings, "espo_base_url", None),
             espo_api_key=getattr(settings, "espo_api_key", None),
             docuseal_base_url=getattr(settings, "docuseal_base_url", None),
@@ -410,6 +412,24 @@ class ToolRegistry:
         repository_parts = normalized_repository.split("/")
         if len(repository_parts) != 2 or not all(repository_parts):
             raise ValueError("GitHub repository must be in owner/name form")
+        allowed_repositories = {
+            repo.lower()
+            for repo in _optional_str_list(self.runtime_config.github_allowed_repos)
+            or []
+        }
+        default_repository = _optional_str(self.runtime_config.github_default_repo)
+        if default_repository is not None:
+            allowed_repositories.add(default_repository.strip().strip("/").lower())
+        if not allowed_repositories:
+            raise ValueError(
+                "GitHub repository is not allowed; configure GITHUB_DEFAULT_REPO "
+                "or GITHUB_ALLOWED_REPOS"
+            )
+        if normalized_repository.lower() not in allowed_repositories:
+            raise ValueError(
+                "GitHub repository is not allowed by GITHUB_DEFAULT_REPO "
+                "or GITHUB_ALLOWED_REPOS"
+            )
         return normalized_repository
 
     def _crm_repository(self) -> EspoContactRepository:

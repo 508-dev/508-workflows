@@ -134,7 +134,7 @@ Use `.env.example` as the source of defaults.
 - `Optional`: `AGENT_REASONING_MODEL`, `AGENT_REASONING_BASE_URL`, `AGENT_REASONING_API_KEY`
 - Note: tier-specific agent models can point at OpenAI-compatible providers such as Fireworks. Agent model base URLs must be HTTPS endpoints on `api.openai.com`, `api.fireworks.ai`, or `openrouter.ai`. If a tier is not configured, fallback order is `reasoning -> strong -> fast -> OPENAI_MODEL -> gpt-5-mini`; `strong` falls back through `fast`, and `fast` falls back through `OPENAI_MODEL`.
 - Agent tools follow the deterministic path: planner drafts the action, policy authorizes scopes, write tools require confirmation, and the backend executes known-good tool code.
-- `Optional`: `GITHUB_API_TOKEN`, `GITHUB_DEFAULT_REPO` (GitHub Issues are the canonical code-task backend for agent-created code work).
+- `Optional`: `GITHUB_API_TOKEN`, `GITHUB_DEFAULT_REPO`, `GITHUB_ALLOWED_REPOS` (comma-separated; GitHub Issues are the canonical code-task backend for agent-created code work, and agent tools only access the default/allowed repositories).
 - Existing integration tools also expose CRM contact search/update, DocuSeal member-agreement submission, Kimai project-hours reads, and Migadu mailbox creation when their normal service env vars are configured.
 - Note: the current generic task tool registry is process-local and non-durable for non-code/org tasks until the task-management platform is selected.
 

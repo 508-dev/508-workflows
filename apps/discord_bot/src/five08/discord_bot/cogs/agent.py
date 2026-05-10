@@ -154,7 +154,7 @@ class AgentConfirmationView(discord.ui.View):
                 guild_id=str(original_guild_id),
                 user_id=interaction.user.id,
             )
-            context["roles"] = fresh_roles or list(self.context.get("roles") or [])
+            context["roles"] = fresh_roles
         original_message_id = self.context.get("message_id")
         if original_message_id:
             context["message_id"] = original_message_id

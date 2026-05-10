@@ -849,6 +849,66 @@ def test_github_issue_repository_must_be_owner_name() -> None:
         )
 
 
+def test_github_issue_repository_must_be_default_or_allowed() -> None:
+    registry = ToolRegistry(
+        runtime_config=ToolRuntimeConfig(
+            github_api_token="token",
+            github_default_repo="508-dev/508-workflows",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="not allowed"):
+        registry.execute(
+            "github_issue.search_issues",
+            {"query": "onboarding", "repository": "other-owner/other-repo"},
+            organization_id="org-1",
+            actor_id="123",
+            actor_scopes={"github:issue:read"},
+        )
+
+
+def test_github_issue_repository_allows_configured_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
+
+    def fake_search_issues(
+        self: object,
+        *,
+        repository: str,
+        query: str,
+        state: str = "open",
+        limit: int = 10,
+    ) -> dict[str, object]:
+        calls.update(
+            {"repository": repository, "query": query, "state": state, "limit": limit}
+        )
+        return {"issues": []}
+
+    monkeypatch.setattr(
+        "five08.clients.github.GitHubClient.search_issues",
+        fake_search_issues,
+    )
+    registry = ToolRegistry(
+        runtime_config=ToolRuntimeConfig(
+            github_api_token="token",
+            github_default_repo="508-dev/508-workflows",
+            github_allowed_repos="other-owner/other-repo",
+        ),
+    )
+
+    result = registry.execute(
+        "github_issue.search_issues",
+        {"query": "onboarding", "repository": "other-owner/other-repo"},
+        organization_id="org-1",
+        actor_id="123",
+        actor_scopes={"github:issue:read"},
+    )
+
+    assert result == {"issues": []}
+    assert calls["repository"] == "other-owner/other-repo"
+
+
 def test_member_cannot_assign_task_without_assign_scope() -> None:
     task_store = InMemoryTaskStore()
     task_store.create_task(

@@ -53,6 +53,7 @@ class SharedSettings(BaseSettings):
     docuseal_member_agreement_template_id: int | None = None
     github_api_token: str | None = None
     github_default_repo: str | None = None
+    github_allowed_repos: str = ""
     kimai_base_url: str | None = None
     kimai_api_token: str | None = None
     migadu_api_user: str | None = None
