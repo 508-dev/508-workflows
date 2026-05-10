@@ -7825,11 +7825,16 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     {SSO_ID_FIELD: str(user_id)},
                 )
             except EspoAPIError as exc:
-                if freshly_created:
+                if freshly_created or recovered_existing_after_create_error:
+                    partial_success = (
+                        "sso_created_crm_update_failed"
+                        if freshly_created
+                        else "sso_reconciled_crm_update_failed"
+                    )
                     raise SSOProvisioningPartialError(
                         str(exc),
                         partial_user_id=user_id,
-                        partial_success="sso_created_crm_update_failed",
+                        partial_success=partial_success,
                     ) from exc
                 raise
             crm_updated = True
@@ -7929,6 +7934,14 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 await interaction.followup.send(
                     "⚠️ Created the SSO user, but failed to update CRM "
                     f"`{SSO_ID_FIELD}`.\nSSO user ID: `{exc.partial_user_id}`\n"
+                    f"Error: `{message}`",
+                    ephemeral=True,
+                )
+            elif exc.partial_success == "sso_reconciled_crm_update_failed":
+                await interaction.followup.send(
+                    "⚠️ Recovered the SSO user after the create request failed, "
+                    f"but failed to update CRM `{SSO_ID_FIELD}`.\n"
+                    f"SSO user ID: `{exc.partial_user_id}`\n"
                     f"Error: `{message}`",
                     ephemeral=True,
                 )

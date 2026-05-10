@@ -398,6 +398,56 @@ async def test_create_sso_user_reconciles_user_after_create_error(
 
 
 @pytest.mark.asyncio
+async def test_create_sso_user_reports_partial_success_when_reconciled_crm_update_fails(
+    cog: CRMCog, mock_interaction: AsyncMock, mock_espo_api: Mock
+) -> None:
+    contact = {
+        "id": "crm-123",
+        "name": "Jane Doe",
+        "c508Email": "jane@508.dev",
+        "cSsoID": None,
+    }
+    reconciled_user = {
+        "pk": 42,
+        "username": "jane",
+        "email": "jane@508.dev",
+        "name": "Jane Doe",
+        "is_superuser": False,
+    }
+    authentik_client = Mock()
+    authentik_client.find_users_by_username_or_email.side_effect = [
+        [],
+        [reconciled_user],
+    ]
+    authentik_client.create_user.side_effect = AuthentikAPIError(
+        "Authentik request failed with status 405: Method Not Allowed"
+    )
+    authentik_client.resolve_email_stage_id.return_value = "stage-id"
+    authentik_client.status_code = 405
+    mock_espo_api.request.side_effect = EspoAPIError("crm update failed")
+
+    with (
+        patch.object(
+            cog,
+            "_search_contacts_for_lookup",
+            new=AsyncMock(return_value=[contact]),
+        ),
+        patch.object(cog, "_authentik_client", return_value=authentik_client),
+        patch.object(cog, "_audit_command_safe") as mock_audit,
+    ):
+        await cog.create_sso_user.callback(cog, mock_interaction, search_term="jane")
+
+    authentik_client.send_recovery_email.assert_not_called()
+    message = mock_interaction.followup.send.call_args.args[0]
+    assert "Recovered the SSO user after the create request failed" in message
+    assert "SSO user ID: `42`" in message
+    assert mock_interaction.followup.send.call_args.kwargs["ephemeral"] is True
+    audit_metadata = mock_audit.call_args.kwargs["metadata"]
+    assert audit_metadata["partial_user_id"] == 42
+    assert audit_metadata["partial_success"] == "sso_reconciled_crm_update_failed"
+
+
+@pytest.mark.asyncio
 async def test_create_sso_user_shows_selection_view_for_multiple_contacts(
     cog: CRMCog, mock_interaction: AsyncMock
 ) -> None:
@@ -924,6 +974,70 @@ async def test_create_user_accounts_reports_outline_invite_failure(
     audit_metadata = mock_audit.call_args.kwargs["metadata"]
     assert audit_metadata["stage"] == "outline"
     assert "outline unavailable" in audit_metadata["error"]
+
+
+@pytest.mark.asyncio
+async def test_create_user_accounts_reports_reconciled_sso_crm_partial_success(
+    cog: CRMCog, mock_interaction: AsyncMock, mock_espo_api: Mock
+) -> None:
+    contact = {
+        "id": "crm-123",
+        "name": "Jane Doe",
+        "emailAddress": "jane.personal@example.com",
+        "c508Email": "",
+        "cSsoID": None,
+    }
+    migadu_client = Mock()
+    migadu_client.create_mailbox.return_value = {"address": "jane@508.dev"}
+    reconciled_user = {
+        "pk": 42,
+        "username": "jane",
+        "email": "jane@508.dev",
+        "name": "Jane Doe",
+        "is_superuser": False,
+    }
+    authentik_client = Mock()
+    authentik_client.find_users_by_username_or_email.side_effect = [
+        [],
+        [reconciled_user],
+    ]
+    authentik_client.create_user.side_effect = AuthentikAPIError(
+        "Authentik request failed with status 405: Method Not Allowed"
+    )
+    authentik_client.resolve_email_stage_id.return_value = "stage-id"
+    authentik_client.status_code = 405
+    outline_client = Mock()
+    mock_espo_api.request.side_effect = [
+        {"id": "crm-123"},
+        EspoAPIError("crm sso update failed"),
+    ]
+
+    with (
+        patch.object(
+            cog,
+            "_search_contacts_for_lookup",
+            new=AsyncMock(return_value=[contact]),
+        ),
+        patch.object(cog, "_migadu_client", return_value=migadu_client),
+        patch.object(cog, "_authentik_client", return_value=authentik_client),
+        patch.object(cog, "_outline_client", return_value=outline_client),
+        patch.object(cog, "_audit_command_safe") as mock_audit,
+    ):
+        await cog.create_user_accounts.callback(
+            cog,
+            mock_interaction,
+            search_term="jane",
+            mailbox_username="jane",
+        )
+
+    outline_client.invite_user.assert_not_called()
+    message = mock_interaction.followup.send.call_args.args[0]
+    assert "Created the mailbox and started SSO provisioning" in message
+    assert "SSO user ID: `42`" in message
+    assert "Outline invite was not sent" in message
+    audit_metadata = mock_audit.call_args.kwargs["metadata"]
+    assert audit_metadata["partial_user_id"] == 42
+    assert audit_metadata["partial_success"] == "sso_reconciled_crm_update_failed"
 
 
 @pytest.mark.asyncio
