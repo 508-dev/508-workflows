@@ -8000,11 +8000,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             raise ValueError("Selected contact is missing a CRM ID.")
 
         target_email, local_part = self._normalize_mailbox_request(mailbox_username)
-        existing_email = self._contact_508_email(contact)
-        backup_email = self._normalize_full_email(
-            contact.get("emailAddress"),
-            field_label="CRM primary email",
-        )
+        existing_email = self._normalize_508_email(contact.get("c508Email"))
 
         if existing_email is not None:
             if existing_email != target_email:
@@ -8016,9 +8012,13 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 email=existing_email,
                 created=False,
                 crm_updated=False,
-                backup_email=backup_email,
+                backup_email="",
             )
 
+        backup_email = self._normalize_full_email(
+            contact.get("emailAddress"),
+            field_label="CRM primary email",
+        )
         contact_name = self._contact_text_value(contact.get("name")) or local_part
         request = MigaduMailboxCreateRequest(
             local_part=local_part,
@@ -8292,6 +8292,11 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 )
         except SSOProvisioningPartialError as exc:
             message = self._sanitize_error_message_for_discord(exc)
+            partial_id_line = (
+                f"\nSSO user ID: `{exc.partial_user_id}`"
+                if exc.partial_user_id is not None
+                else ""
+            )
             self._audit_command_safe(
                 interaction=interaction,
                 action="crm.create_user_accounts",
@@ -8306,7 +8311,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
             await interaction.followup.send(
                 "⚠️ Created the mailbox and started SSO provisioning, but the SSO "
-                f"flow partially failed.\nSSO user ID: `{exc.partial_user_id}`\n"
+                f"flow partially failed.{partial_id_line}\n"
                 f"Error: `{message}`\nOutline invite was not sent.",
                 ephemeral=True,
             )
@@ -8732,7 +8737,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
     )
     @app_commands.describe(
         search_term="Discord mention, email, 508 username, or contact ID.",
-        mailbox_username="508 mailbox username to create, like jane or jane@508.dev.",
+        mailbox_username="Mailbox username to create, like jane or jane@domain.",
     )
     @require_role("Admin")
     async def create_user_accounts(
