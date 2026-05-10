@@ -138,7 +138,8 @@ _AGENT_ORCHESTRATOR = AgentOrchestrator(
     model_config=AgentModelConfig.from_settings(settings),
 )
 _PENDING_AGENT_PLANS: dict[str, tuple[AgentPlan, AgentIdentityContext]] = {}
-_PENDING_AGENT_PLANS_LOCK = asyncio.Lock()
+_PENDING_AGENT_PLANS_LOCK: asyncio.Lock | None = None
+_PENDING_AGENT_PLANS_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
 _MAX_PENDING_AGENT_PLANS = 1000
 _MAX_PENDING_AGENT_PLANS_PER_ACTOR = 25
 
@@ -1283,11 +1284,20 @@ def _confirmation_execution_scopes(
     return original_scopes & confirmation_scopes
 
 
+def _pending_agent_plans_lock() -> asyncio.Lock:
+    global _PENDING_AGENT_PLANS_LOCK, _PENDING_AGENT_PLANS_LOCK_LOOP
+    loop = asyncio.get_running_loop()
+    if _PENDING_AGENT_PLANS_LOCK is None or _PENDING_AGENT_PLANS_LOCK_LOOP is not loop:
+        _PENDING_AGENT_PLANS_LOCK = asyncio.Lock()
+        _PENDING_AGENT_PLANS_LOCK_LOOP = loop
+    return _PENDING_AGENT_PLANS_LOCK
+
+
 async def _store_pending_agent_plan(
     plan: AgentPlan,
     context: AgentIdentityContext,
 ) -> bool:
-    async with _PENDING_AGENT_PLANS_LOCK:
+    async with _pending_agent_plans_lock():
         _cleanup_expired_pending_agent_plans()
         if (
             len(_PENDING_AGENT_PLANS) >= _MAX_PENDING_AGENT_PLANS
@@ -1304,7 +1314,7 @@ async def _claim_pending_agent_plan(
     *,
     discord_user_id: str,
 ) -> tuple[str, tuple[AgentPlan, AgentIdentityContext] | None]:
-    async with _PENDING_AGENT_PLANS_LOCK:
+    async with _pending_agent_plans_lock():
         pending = _PENDING_AGENT_PLANS.get(plan_id)
         if pending is None:
             _cleanup_expired_pending_agent_plans()

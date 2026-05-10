@@ -1,5 +1,6 @@
 """Unit tests for backend dashboard/ingest API."""
 
+import asyncio
 import re
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, Mock, patch
@@ -713,6 +714,22 @@ def test_agent_request_rejects_when_pending_plan_capacity_is_full(
     assert second_response.json()["status"] == "failed"
     assert second_response.json()["plan"] is None
     assert "capacity is full" in second_response.json()["message"]
+
+
+def test_pending_agent_plan_lock_is_created_per_running_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pending-plan locks should be bound to the active request loop, not import time."""
+    monkeypatch.setattr(api, "_PENDING_AGENT_PLANS_LOCK", None)
+    monkeypatch.setattr(api, "_PENDING_AGENT_PLANS_LOCK_LOOP", None)
+
+    async def get_lock() -> asyncio.Lock:
+        return api._pending_agent_plans_lock()
+
+    first_lock = asyncio.run(get_lock())
+    second_lock = asyncio.run(get_lock())
+
+    assert first_lock is not second_lock
 
 
 def test_agent_confirmation_executes_frozen_plan_inline(

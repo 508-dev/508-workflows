@@ -353,6 +353,17 @@ def test_complete_task_id_routes_to_done_status_update() -> None:
     assert response.plan.actions[0].arguments["status"] == "done"
 
 
+def test_mark_task_id_as_done_routes_to_status_update() -> None:
+    orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
+
+    response = orchestrator.plan("Mark TASK-001 as done", _context())
+
+    assert response.plan is not None
+    assert response.plan.actions[0].tool_name == "task_write.update_task"
+    assert response.plan.actions[0].arguments["task_id"] == "TASK-001"
+    assert response.plan.actions[0].arguments["status"] == "done"
+
+
 def test_update_title_parses_title_update() -> None:
     orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
 

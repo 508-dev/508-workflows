@@ -255,6 +255,7 @@ class AgentOrchestrator:
         if task_id and any(
             keyword in lowered
             for keyword in ["assign", "due", "status", "close", "complete", "completed"]
+            + ["mark", "marked"]
         ):
             return self._parse_update_task(text)
         return None
@@ -463,6 +464,11 @@ class AgentOrchestrator:
     def _extract_status(text: str) -> str | None:
         lowered = text.casefold()
         if re.search(r"\b(?:close|complete)\s+(?:task\s+)?task-\d+\b", lowered):
+            return "done"
+        if re.search(
+            r"\bmark(?:ed)?\s+(?:task\s+)?task-\d+\s+(?:as\s+)?(?:done|completed)\b",
+            lowered,
+        ):
             return "done"
         if re.search(
             r"\b(?:close|complete|mark)\s+(?:task\s+)?(?:as\s+)?(?:done|completed)\b",
