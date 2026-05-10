@@ -287,12 +287,14 @@ class AgentOrchestrator:
         if task_match is None:
             return None
         task_id = task_match.group(0).upper()
+        title = self._extract_update_title(text)
         assignee = self._extract_assignee(text)
         project = self._extract_project(text)
         due_date = self._extract_due_date(text)
         status = self._extract_status(text)
         args = {
             "task_id": task_id,
+            "title": title,
             "assignee": assignee,
             "project": project,
             "due_date": due_date,
@@ -323,6 +325,22 @@ class AgentOrchestrator:
         title = re.split(
             r"\s+\b(?:by|before|due|and assign(?: it)? to|assign(?: it)? to|and link(?: it)? to|in project|for project)\b",
             title,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0]
+        return _clean_text(title)
+
+    def _extract_update_title(self, text: str) -> str | None:
+        match = re.search(
+            r"\b(?:title|rename(?:\s+task)?)\s+to\s+(.+)",
+            text,
+            re.IGNORECASE,
+        )
+        if match is None:
+            return None
+        title = re.split(
+            r"\s+\b(?:by|before|due|and assign(?: it)? to|assign(?: it)? to|and link(?: it)? to|in project|for project|status to)\b",
+            match.group(1),
             maxsplit=1,
             flags=re.IGNORECASE,
         )[0]

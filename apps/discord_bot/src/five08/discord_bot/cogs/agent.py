@@ -58,9 +58,10 @@ class AgentConfirmationView(discord.ui.View):
     ) -> None:
         await interaction.response.defer(ephemeral=True)
         try:
+            confirmation_context = self._confirmation_context(interaction)
             response = await self.cog._post_agent_confirmation(
                 plan_id=self.plan_id,
-                context=self.context,
+                context=confirmation_context,
                 confirm=True,
             )
             transport_failed = False
@@ -100,9 +101,10 @@ class AgentConfirmationView(discord.ui.View):
     ) -> None:
         await interaction.response.defer(ephemeral=True)
         try:
+            confirmation_context = self._confirmation_context(interaction)
             response = await self.cog._post_agent_confirmation(
                 plan_id=self.plan_id,
-                context=self.context,
+                context=confirmation_context,
                 confirm=False,
             )
             transport_failed = False
@@ -133,6 +135,16 @@ class AgentConfirmationView(discord.ui.View):
                 logger.warning(
                     "Failed disabling agent confirmation view", exc_info=True
                 )
+
+    def _confirmation_context(
+        self,
+        interaction: discord.Interaction,
+    ) -> dict[str, Any]:
+        context = self.cog._build_agent_context(interaction)
+        original_message_id = self.context.get("message_id")
+        if original_message_id:
+            context["message_id"] = original_message_id
+        return context
 
 
 class AgentCog(DiscordAuditCogMixin, commands.Cog):

@@ -178,6 +178,82 @@ async def test_cancellation_transport_failure_keeps_view_retryable() -> None:
     interaction.message.edit.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_confirmation_uses_fresh_button_context() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog._post_agent_confirmation = AsyncMock(
+        return_value={"status": "executed", "message": "Done"}
+    )
+    cog._audit_command_safe = Mock()
+    cog._format_agent_response = Mock(return_value="Agent status: executed")
+    view = AgentConfirmationView(
+        cog=cog,
+        requester_id=123,
+        plan_id="plan-1",
+        context={
+            "discord_user_id": "123",
+            "message_id": "original-message",
+            "roles": ["Member"],
+        },
+    )
+    interaction = SimpleNamespace(
+        id=999,
+        guild_id=456,
+        channel_id=789,
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+        message=SimpleNamespace(id=321, edit=AsyncMock()),
+        user=SimpleNamespace(
+            id=123,
+            roles=[SimpleNamespace(name="@everyone"), SimpleNamespace(name="Admin")],
+        ),
+    )
+
+    await AgentConfirmationView.confirm(view, interaction, None)
+
+    context = cog._post_agent_confirmation.await_args.kwargs["context"]
+    assert context["roles"] == ["@everyone", "Admin"]
+    assert context["interaction_id"] == "999"
+    assert context["channel_id"] == "789"
+    assert context["message_id"] == "original-message"
+
+
+@pytest.mark.asyncio
+async def test_cancellation_uses_fresh_button_context() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog._post_agent_confirmation = AsyncMock(
+        return_value={"status": "canceled", "message": "Canceled"}
+    )
+    cog._audit_command_safe = Mock()
+    cog._format_agent_response = Mock(return_value="Agent status: canceled")
+    view = AgentConfirmationView(
+        cog=cog,
+        requester_id=123,
+        plan_id="plan-1",
+        context={
+            "discord_user_id": "123",
+            "message_id": "original-message",
+            "roles": ["Member"],
+        },
+    )
+    interaction = SimpleNamespace(
+        id=999,
+        guild_id=456,
+        channel_id=789,
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+        message=SimpleNamespace(id=321, edit=AsyncMock()),
+        user=SimpleNamespace(id=123, roles=[]),
+    )
+
+    await AgentConfirmationView.cancel(view, interaction, None)
+
+    context = cog._post_agent_confirmation.await_args.kwargs["context"]
+    assert context["roles"] == []
+    assert context["interaction_id"] == "999"
+    assert context["message_id"] == "original-message"
+
+
 def test_build_agent_context_separates_interaction_and_message_ids() -> None:
     cog = AgentCog.__new__(AgentCog)
     interaction = SimpleNamespace(

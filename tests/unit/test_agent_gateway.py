@@ -108,6 +108,21 @@ def test_policy_denies_tenant_scoped_tools_without_tenant_context() -> None:
     assert response.plan.actions[0].requires_confirmation is False
 
 
+def test_policy_denies_task_tools_without_member_role() -> None:
+    orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
+    context = AgentIdentityContext(
+        discord_user_id="123",
+        organization_id="org-1",
+        guild_id="org-1",
+        roles=["@everyone"],
+    )
+
+    response = orchestrator.plan("Show tasks for project Atlas", context)
+
+    assert response.status == "denied"
+    assert "Missing required scopes" in response.message
+
+
 def test_search_task_executes_without_confirmation() -> None:
     task_store = InMemoryTaskStore()
     task_store.create_task(
@@ -275,6 +290,20 @@ def test_update_status_to_done_parses_done_status() -> None:
     assert response.plan.actions[0].tool_name == "task_write.update_task"
     assert response.plan.actions[0].arguments["task_id"] == "TASK-001"
     assert response.plan.actions[0].arguments["status"] == "done"
+
+
+def test_update_title_parses_title_update() -> None:
+    orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
+
+    response = orchestrator.plan(
+        "Update TASK-001 title to refresh onboarding docs",
+        _context(),
+    )
+
+    assert response.plan is not None
+    assert response.plan.actions[0].tool_name == "task_write.update_task"
+    assert response.plan.actions[0].arguments["task_id"] == "TASK-001"
+    assert response.plan.actions[0].arguments["title"] == "refresh onboarding docs"
 
 
 def test_invalid_month_date_does_not_crash_planning() -> None:

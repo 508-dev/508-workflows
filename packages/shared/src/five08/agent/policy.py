@@ -55,6 +55,15 @@ _ROLE_SCOPES: dict[str, frozenset[str]] = {
     ),
 }
 _ADMIN_ROLE_NAMES = frozenset({"admin", "owner", "steering committee"})
+_MEMBER_ROLE_NAMES = frozenset(
+    {
+        "member",
+        "project manager",
+        "project_manager",
+        "engineer",
+        *_ADMIN_ROLE_NAMES,
+    }
+)
 
 
 class PolicyEngine:
@@ -72,7 +81,8 @@ class PolicyEngine:
             scopes.update(_ROLE_SCOPES["project_manager"])
         if "engineer" in normalized_roles:
             scopes.update(_ROLE_SCOPES["engineer"])
-        scopes.update(_ROLE_SCOPES["member"])
+        if normalized_roles & _MEMBER_ROLE_NAMES:
+            scopes.update(_ROLE_SCOPES["member"])
         return scopes
 
     def authorize(
