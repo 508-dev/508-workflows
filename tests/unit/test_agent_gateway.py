@@ -240,6 +240,21 @@ def test_create_task_title_weekday_does_not_become_due_date_without_cue() -> Non
     assert "due_date" not in response.plan.actions[0].arguments
 
 
+def test_create_task_title_iso_date_does_not_become_due_date_without_cue() -> None:
+    orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
+
+    response = orchestrator.plan(
+        "Create a task to draft 2026-05-09 launch notes",
+        _context(),
+    )
+
+    assert response.plan is not None
+    assert response.plan.actions[0].arguments["title"] == (
+        "draft 2026-05-09 launch notes"
+    )
+    assert "due_date" not in response.plan.actions[0].arguments
+
+
 def test_update_assignment_parses_task_id_before_to() -> None:
     orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
 

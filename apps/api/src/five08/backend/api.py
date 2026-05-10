@@ -1391,6 +1391,7 @@ async def agent_request_handler(request: Request) -> JSONResponse:
         "executed": 200,
         "requires_confirmation": 202,
         "needs_clarification": 422,
+        "canceled": 200,
         "denied": 403,
         "failed": 500,
     }[response.status]
@@ -1458,12 +1459,12 @@ async def agent_confirmation_handler(
         await _write_agent_audit_event(
             context=original_context,
             action="agent.confirmation",
-            result=AuditResult.DENIED,
+            result=AuditResult.SUCCESS,
             plan=plan,
             metadata={"status": "canceled"},
         )
         response = AgentResponse(
-            status="denied",
+            status="canceled",
             plan=plan,
             message="Agent plan was canceled before execution.",
         )

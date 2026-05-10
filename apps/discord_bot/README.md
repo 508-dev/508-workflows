@@ -38,14 +38,14 @@ still belongs in role checks, backend policy checks, and resource-level checks.
 
 ## Agent Gateway
 
-The `/agent` command sends natural-language requests to the backend agent
-gateway. The bot does not execute agent tool calls directly and does not hold
-extra service credentials for agent actions.
+The `/agent` command and explicit bot mentions send natural-language requests to
+the backend agent gateway. The bot does not execute agent tool calls directly and
+does not hold extra service credentials for agent actions.
 
 Agent command flow:
 
 ```text
-/agent request
+/agent request or @bot mention
   -> bot resolves Discord user/guild/channel/role context
   -> POST /agent/requests on the backend API
   -> backend parses the request into a typed plan
@@ -61,6 +61,11 @@ read and write tools separate, applies capability checks before every tool call,
 requires confirmation for writes, and audits request/confirmation attempts.
 Long-running service changes should be implemented as PR-based workflows rather
 than direct production mutations.
+
+Mention flow is opt-in per message: the bot runs the agent only when directly
+mentioned, including messages inside Discord threads. A follow-up in the same
+thread should mention the bot again so the bot has an explicit user trigger and
+fresh Discord role context for that request.
 
 Pending confirmation plans are currently process-local in the backend API and
 expire after 10 minutes with opportunistic cleanup during agent requests and
@@ -97,6 +102,14 @@ Relevant configuration:
     - The bot does not authorize agent tool calls itself.
     - Backend policy checks scopes and tenant context before every tool execution.
     - Agent write actions are audited and require confirmation.
+
+- `@bot ...`
+  - Description: Run the same agent gateway from a normal channel or thread message.
+  - Behavior:
+    - Strips the bot mention and sends the remaining text as the agent request.
+    - Replies in the same channel or thread.
+    - Supports the same confirmation buttons for writes.
+  - Example: `@508.dev Bot show tasks for project Atlas`
 
 - `/login`
   - Description: Generate a one-time admin dashboard login link.

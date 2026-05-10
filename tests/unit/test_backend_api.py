@@ -764,6 +764,58 @@ def test_agent_confirmation_executes_frozen_plan_inline(
     assert plan_id not in api._PENDING_AGENT_PLANS
 
 
+def test_agent_confirmation_cancel_returns_canceled_status(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """User cancellation should not be reported as policy denial."""
+    task_store = InMemoryTaskStore()
+    monkeypatch.setattr(
+        api,
+        "_AGENT_ORCHESTRATOR",
+        AgentOrchestrator(registry=ToolRegistry(task_store)),
+    )
+    monkeypatch.setattr(api, "_PENDING_AGENT_PLANS", {})
+
+    with patch("five08.backend.api.insert_audit_event") as mock_insert:
+        plan_response = client.post(
+            "/agent/requests",
+            json={
+                "message": "Create a task for Sarah to update onboarding docs by Friday",
+                "context": {
+                    "discord_user_id": "123",
+                    "organization_id": "org-1",
+                    "guild_id": "org-1",
+                    "roles": ["Member"],
+                },
+            },
+            headers=auth_headers,
+        )
+        plan_id = plan_response.json()["plan"]["plan_id"]
+        cancel_response = client.post(
+            f"/agent/confirmations/{plan_id}",
+            json={
+                "confirm": False,
+                "context": {
+                    "discord_user_id": "123",
+                    "organization_id": "org-1",
+                    "guild_id": "org-1",
+                    "roles": ["Member"],
+                },
+            },
+            headers=auth_headers,
+        )
+
+    payload = cancel_response.json()
+    assert cancel_response.status_code == 200
+    assert payload["status"] == "canceled"
+    audit_payload = mock_insert.call_args.args[1]
+    assert audit_payload.result == api.AuditResult.SUCCESS
+    assert audit_payload.metadata["status"] == "canceled"
+    assert plan_id not in api._PENDING_AGENT_PLANS
+
+
 def test_agent_confirmation_uses_original_context_for_execution(
     client: TestClient,
     auth_headers: dict[str, str],

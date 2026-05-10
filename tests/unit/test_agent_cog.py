@@ -19,6 +19,14 @@ class _FakeResponse:
         return self._payload
 
 
+class _AsyncTyping:
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+
 def test_format_agent_response_renders_error_payload() -> None:
     cog = AgentCog.__new__(AgentCog)
 
@@ -93,6 +101,12 @@ def test_audit_result_treats_clarification_as_success() -> None:
             {"status": "needs_clarification", "http_status": 422}
         )
         == "success"
+    )
+
+
+def test_audit_result_treats_canceled_as_success() -> None:
+    assert (
+        AgentCog._audit_result_for_agent_response({"status": "canceled"}) == "success"
     )
 
 
@@ -178,6 +192,68 @@ def test_build_agent_context_separates_interaction_and_message_ids() -> None:
 
     assert context["interaction_id"] == "999"
     assert context["message_id"] == "321"
+
+
+def test_extract_mention_request_strips_bot_mentions() -> None:
+    assert (
+        AgentCog._extract_mention_request(
+            "<@123> create a task to update docs <@!123>",
+            123,
+        )
+        == "create a task to update docs"
+    )
+
+
+def test_build_agent_context_from_message_uses_thread_message_context() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    message = SimpleNamespace(
+        id=555,
+        author=SimpleNamespace(
+            id=123,
+            roles=[SimpleNamespace(name="@everyone"), SimpleNamespace(name="Member")],
+        ),
+        guild=SimpleNamespace(id=456),
+        channel=SimpleNamespace(id=789),
+    )
+
+    context = cog._build_agent_context_from_message(message)
+
+    assert context["discord_user_id"] == "123"
+    assert context["guild_id"] == "456"
+    assert context["channel_id"] == "789"
+    assert context["message_id"] == "555"
+    assert context["roles"] == ["@everyone", "Member"]
+
+
+@pytest.mark.asyncio
+async def test_agent_mention_posts_agent_response() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))
+    cog._post_agent_request = AsyncMock(
+        return_value={"status": "executed", "message": "Done"}
+    )
+    cog._audit_message_safe = Mock()
+    cog._format_agent_response = Mock(return_value="Agent status: executed")
+    message = SimpleNamespace(
+        id=555,
+        content="<@999> show tasks for project Atlas",
+        author=SimpleNamespace(id=123, bot=False, roles=[]),
+        mentions=[SimpleNamespace(id=999)],
+        guild=SimpleNamespace(id=456),
+        channel=SimpleNamespace(id=789, typing=Mock(return_value=_AsyncTyping())),
+        reply=AsyncMock(),
+    )
+
+    await cog.agent_mention(message)
+
+    cog._post_agent_request.assert_awaited_once()
+    assert cog._post_agent_request.await_args.kwargs["message"] == (
+        "show tasks for project Atlas"
+    )
+    message.reply.assert_awaited_once_with(
+        "Agent status: executed",
+        mention_author=False,
+    )
 
 
 def test_post_backend_json_returns_structured_failed_response(

@@ -372,24 +372,24 @@ class AgentOrchestrator:
         return _clean_text(project)
 
     def _extract_due_date(self, text: str) -> str | None:
-        iso_match = _DATE_ISO_RE.search(text)
+        due_cue = r"\b(?:by|before|due)\s+(?:on\s+)?"
+        iso_match = re.search(rf"{due_cue}({_DATE_ISO_RE.pattern})", text, re.I)
         if iso_match:
             try:
-                return date.fromisoformat(iso_match.group(1)).isoformat()
+                return date.fromisoformat(iso_match.group(2)).isoformat()
             except ValueError:
                 return None
-        month_match = _MONTH_DATE_RE.search(text)
+        month_match = re.search(rf"{due_cue}({_MONTH_DATE_RE.pattern})", text, re.I)
         if month_match:
-            month = _MONTHS[month_match.group(1).casefold()]
-            day = int(month_match.group(2))
-            year = int(month_match.group(3))
+            month = _MONTHS[month_match.group(2).casefold()]
+            day = int(month_match.group(3))
+            year = int(month_match.group(4))
             try:
                 return date(year, month, day).isoformat()
             except ValueError:
                 return None
         lowered = text.casefold()
         today = self.today or date.today()
-        due_cue = r"\b(?:by|before|due)\s+(?:on\s+)?"
         if re.search(rf"{due_cue}tomorrow\b", lowered):
             return (today + timedelta(days=1)).isoformat()
         for weekday_name, weekday_index in _WEEKDAYS.items():

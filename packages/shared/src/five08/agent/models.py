@@ -87,6 +87,7 @@ class AgentResponse(BaseModel):
         "executed",
         "requires_confirmation",
         "needs_clarification",
+        "canceled",
         "denied",
         "failed",
     ]

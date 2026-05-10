@@ -273,6 +273,7 @@ Use `.env.example` as the source of truth for defaults.
 - `Optional`: `AGENT_STRONG_MODEL`, `AGENT_STRONG_BASE_URL`, `AGENT_STRONG_API_KEY`
 - `Optional`: `AGENT_REASONING_MODEL`, `AGENT_REASONING_BASE_URL`, `AGENT_REASONING_API_KEY`
 - Note: tier-specific agent models can point at OpenAI-compatible providers such as Fireworks. If a tier is not configured, fallback order is `reasoning -> strong -> fast -> OPENAI_MODEL -> gpt-5-mini`; `strong` falls back through `fast`, and `fast` falls back through `OPENAI_MODEL`.
+- Note: the Discord bot accepts agent requests through `/agent` and explicit bot mentions. Mentioned requests work in channels and threads, and thread follow-ups should mention the bot again to trigger a fresh request.
 
 ### Discord CRM Audit Logging (Best Effort)
 

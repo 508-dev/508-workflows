@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
 
 import discord
@@ -210,10 +211,84 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             ephemeral=True,
         )
 
+    @commands.Cog.listener("on_message")
+    async def agent_mention(self, message: discord.Message) -> None:
+        """Handle natural-language agent requests when the bot is mentioned."""
+        bot_user = self.bot.user
+        if bot_user is None or message.author.bot:
+            return
+        if not any(user.id == bot_user.id for user in message.mentions):
+            return
+
+        request = self._extract_mention_request(message.content, bot_user.id)
+        if not request:
+            return
+
+        context = self._build_agent_context_from_message(message)
+        try:
+            async with message.channel.typing():
+                response = await self._post_agent_request(
+                    message=request,
+                    context=context,
+                )
+        except Exception as exc:
+            logger.warning("Agent mention request failed: %s", exc)
+            self._audit_message_safe(
+                message=message,
+                action="agent.mention",
+                result="error",
+                metadata={"error": str(exc)},
+            )
+            await message.reply(
+                "Agent gateway request failed. Check backend API configuration.",
+                mention_author=False,
+            )
+            return
+
+        self._audit_message_safe(
+            message=message,
+            action="agent.mention",
+            result=self._audit_result_for_agent_response(response),
+            metadata={
+                "status": response.get("status"),
+                "error": response.get("error"),
+                "plan_id": (response.get("plan") or {}).get("plan_id"),
+            },
+        )
+
+        view: AgentConfirmationView | None = None
+        plan = response.get("plan") if isinstance(response.get("plan"), dict) else None
+        if response.get("status") == "requires_confirmation" and plan is not None:
+            plan_id = str(plan.get("plan_id") or "")
+            if plan_id:
+                view = AgentConfirmationView(
+                    cog=self,
+                    requester_id=message.author.id,
+                    plan_id=plan_id,
+                    context=context,
+                )
+
+        if view is None:
+            await message.reply(
+                self._format_agent_response(response),
+                mention_author=False,
+            )
+            return
+
+        await message.reply(
+            self._format_agent_response(response),
+            view=view,
+            mention_author=False,
+        )
+
+    @staticmethod
+    def _extract_mention_request(content: str, bot_user_id: int) -> str:
+        mention_pattern = rf"<@!?{bot_user_id}>"
+        request = re.sub(mention_pattern, "", content).strip()
+        return re.sub(r"\s+", " ", request)
+
     def _build_agent_context(self, interaction: discord.Interaction) -> dict[str, Any]:
-        role_names: list[str] = []
-        if isinstance(interaction.user, discord.Member):
-            role_names = [role.name for role in interaction.user.roles]
+        role_names = self._role_names_from_user(interaction.user)
 
         interaction_message = getattr(interaction, "message", None)
         message_id = (
@@ -241,6 +316,79 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             "interaction_id": str(interaction.id),
             "message_id": message_id,
         }
+
+    def _build_agent_context_from_message(
+        self,
+        message: discord.Message,
+    ) -> dict[str, Any]:
+        guild_id = message.guild.id if message.guild is not None else None
+        channel_id = getattr(message.channel, "id", None)
+        return {
+            "discord_user_id": str(message.author.id),
+            "internal_user_id": None,
+            "organization_id": str(guild_id) if guild_id else None,
+            "guild_id": str(guild_id) if guild_id else None,
+            "channel_id": str(channel_id) if channel_id is not None else None,
+            "roles": self._role_names_from_user(message.author),
+            "scopes": [],
+            "impersonation": False,
+            "interaction_id": None,
+            "message_id": str(message.id),
+        }
+
+    @staticmethod
+    def _role_names_from_user(user: discord.abc.User) -> list[str]:
+        roles = getattr(user, "roles", [])
+        return [
+            str(getattr(role, "name", "")).strip()
+            for role in roles
+            if str(getattr(role, "name", "")).strip()
+        ]
+
+    def _audit_message_safe(
+        self,
+        *,
+        message: discord.Message,
+        action: str,
+        result: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        try:
+            if not (self.audit_logger.enabled or self.audit_logger.webhook_enabled):
+                return
+            if not self.audit_logger._should_log_command_event(
+                action=action,
+                result=result,
+            ):
+                return
+            guild_id = message.guild.id if message.guild is not None else None
+            channel_id = getattr(message.channel, "id", None)
+            actor_display_name = getattr(message.author, "display_name", None)
+            if not actor_display_name:
+                actor_display_name = getattr(message.author, "name", None)
+            base_metadata: dict[str, Any] = {
+                "guild_id": str(guild_id) if guild_id else None,
+                "channel_id": str(channel_id) if channel_id is not None else None,
+                "message_id": str(message.id),
+            }
+            if metadata:
+                base_metadata.update(metadata)
+            self.audit_logger._queue_event(
+                {
+                    "source": "discord",
+                    "action": action,
+                    "result": result,
+                    "actor_provider": "discord",
+                    "actor_subject": str(message.author.id),
+                    "actor_display_name": actor_display_name,
+                    "resource_type": "discord_message",
+                    "resource_id": str(message.id),
+                    "correlation_id": str(message.id),
+                    "metadata": base_metadata,
+                }
+            )
+        except Exception:
+            logger.warning("Audit logging failed for action=%s", action, exc_info=True)
 
     async def _post_agent_request(
         self,
@@ -301,7 +449,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
     @staticmethod
     def _audit_result_for_agent_response(response: dict[str, Any]) -> str:
         status = str(response.get("status") or "").strip().lower()
-        if status == "needs_clarification":
+        if status in {"needs_clarification", "canceled"}:
             return "success"
         if status == "denied":
             return "denied"
