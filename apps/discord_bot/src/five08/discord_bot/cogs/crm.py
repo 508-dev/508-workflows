@@ -8066,11 +8066,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
     ) -> bool:
         """Invite the contact to Outline using the provided 508 email."""
         contact_name = self._contact_text_value(contact.get("name"))
-        await asyncio.to_thread(
-            self._outline_client().invite_user,
-            email=email,
-            name=contact_name,
-        )
+        await self._invite_outline_user(email=email, name=contact_name)
         return True
 
     def _outline_invite_email_for_contact(self, contact: dict[str, Any]) -> str:
@@ -8087,10 +8083,12 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         name: str | None = None,
     ) -> None:
         """Invite one email address to Outline."""
+        invite_name = name or email.partition("@")[0]
         await asyncio.to_thread(
             self._outline_client().invite_user,
             email=email,
-            name=name,
+            name=invite_name,
+            role="member",
         )
 
     async def _invite_outline_user_for_contact_flow(

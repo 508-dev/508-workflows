@@ -493,6 +493,7 @@ async def test_create_user_accounts_creates_mailbox_sso_and_outline_invite(
     outline_client.invite_user.assert_called_once_with(
         email="jane@508.dev",
         name="Jane Doe",
+        role="member",
     )
     assert mock_espo_api.request.call_args_list[0].args == (
         "PUT",
@@ -569,6 +570,7 @@ async def test_create_user_accounts_uses_configured_mailbox_domain_for_sso(
     outline_client.invite_user.assert_called_once_with(
         email="jane@example.org",
         name="Jane Doe",
+        role="member",
     )
     message = mock_interaction.followup.send.call_args.args[0]
     assert "Email: `jane@example.org`" in message
@@ -619,6 +621,7 @@ async def test_create_user_accounts_reuses_existing_mailbox(
     outline_client.invite_user.assert_called_once_with(
         email="jane@508.dev",
         name="Jane Doe",
+        role="member",
     )
     message = mock_interaction.followup.send.call_args.args[0]
     assert "Mailbox: already existed/reused." in message
@@ -924,6 +927,7 @@ async def test_invite_outline_user_invites_contact_508_email(
     outline_client.invite_user.assert_called_once_with(
         email="jane@508.dev",
         name="Jane Doe",
+        role="member",
     )
     message = mock_interaction.followup.send.call_args.args[0]
     assert "Outline invite sent" in message
@@ -956,7 +960,8 @@ async def test_invite_outline_user_invites_direct_email_when_no_contact_matches(
 
     outline_client.invite_user.assert_called_once_with(
         email="person@example.com",
-        name=None,
+        name="person",
+        role="member",
     )
     message = mock_interaction.followup.send.call_args.args[0]
     assert "Email: `person@example.com`" in message
