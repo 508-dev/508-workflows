@@ -8,8 +8,9 @@ import hashlib
 import logging
 import os
 import secrets
-import time
 import json
+import threading
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, cast
@@ -146,6 +147,10 @@ _PENDING_AGENT_PLANS_LOCK: asyncio.Lock | None = None
 _PENDING_AGENT_PLANS_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
 _MAX_PENDING_AGENT_PLANS = 1000
 _MAX_PENDING_AGENT_PLANS_PER_ACTOR = 25
+_AGENT_REQUEST_RATE_LIMIT_WINDOW_SECONDS = 60.0
+_AGENT_REQUEST_RATE_LIMIT_MAX_REQUESTS = 10
+_AGENT_REQUEST_TIMESTAMPS: dict[str, list[float]] = {}
+_AGENT_REQUEST_RATE_LIMIT_LOCK = threading.RLock()
 
 
 def _is_authorized(request: Request) -> bool:
@@ -159,6 +164,32 @@ def _is_authorized(request: Request) -> bool:
         return True
     logger.warning("Rejecting request: invalid X-API-Secret")
     return False
+
+
+def _agent_request_rate_limited(discord_user_id: str) -> bool:
+    now = time.monotonic()
+    window_start = now - _AGENT_REQUEST_RATE_LIMIT_WINDOW_SECONDS
+    with _AGENT_REQUEST_RATE_LIMIT_LOCK:
+        for stored_user_id, stored_timestamps in list(
+            _AGENT_REQUEST_TIMESTAMPS.items()
+        ):
+            active_timestamps = [
+                timestamp
+                for timestamp in stored_timestamps
+                if timestamp >= window_start
+            ]
+            if active_timestamps:
+                _AGENT_REQUEST_TIMESTAMPS[stored_user_id] = active_timestamps
+            else:
+                del _AGENT_REQUEST_TIMESTAMPS[stored_user_id]
+
+        timestamps = _AGENT_REQUEST_TIMESTAMPS.get(discord_user_id, [])
+        if len(timestamps) >= _AGENT_REQUEST_RATE_LIMIT_MAX_REQUESTS:
+            _AGENT_REQUEST_TIMESTAMPS[discord_user_id] = timestamps
+            return True
+        timestamps.append(now)
+        _AGENT_REQUEST_TIMESTAMPS[discord_user_id] = timestamps
+        return False
 
 
 def _encode_ulid_base32(value: int, length: int) -> str:
@@ -1359,6 +1390,27 @@ async def agent_request_handler(request: Request) -> JSONResponse:
         return JSONResponse(
             {"error": "invalid_payload", "detail": str(exc)}, status_code=400
         )
+    if _agent_request_rate_limited(payload.context.discord_user_id):
+        asyncio.create_task(
+            _write_agent_audit_event(
+                context=payload.context,
+                action="agent.request",
+                result=AuditResult.DENIED,
+                plan=None,
+                metadata={
+                    "status": "denied",
+                    "reason": "rate_limited",
+                    "message": payload.message[:256],
+                },
+            )
+        )
+        return JSONResponse(
+            {
+                "status": "denied",
+                "message": "Too many agent requests. Try again in a minute.",
+            },
+            status_code=429,
+        )
 
     response = await asyncio.to_thread(
         _AGENT_ORCHESTRATOR.plan,
@@ -1377,6 +1429,7 @@ async def agent_request_handler(request: Request) -> JSONResponse:
                     metadata={
                         "status": "failed",
                         "reason": "pending_plan_capacity_exceeded",
+                        "message": payload.message[:256],
                     },
                 )
             )
@@ -1402,6 +1455,7 @@ async def agent_request_handler(request: Request) -> JSONResponse:
             plan=response.plan,
             metadata={
                 "status": response.status,
+                "message": payload.message[:256],
                 "intent": response.plan.intent if response.plan else None,
                 "planner": response.plan.planner if response.plan else None,
                 "requires_confirmation": (

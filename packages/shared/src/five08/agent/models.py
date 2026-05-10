@@ -31,7 +31,7 @@ class AgentIdentityContext(BaseModel):
 class AgentRequest(BaseModel):
     """Natural-language agent request from Discord or another client."""
 
-    message: str
+    message: str = Field(max_length=4096)
     context: AgentIdentityContext
 
 

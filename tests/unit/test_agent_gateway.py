@@ -114,6 +114,20 @@ def test_policy_denies_tenant_scoped_tools_without_tenant_context() -> None:
     assert response.plan.actions[0].requires_confirmation is False
 
 
+def test_policy_requires_canonical_organization_for_tenant_tools() -> None:
+    orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
+    context = AgentIdentityContext(
+        discord_user_id="123",
+        guild_id="org-1",
+        roles=["Member"],
+    )
+
+    response = orchestrator.plan("Show tasks for project Atlas", context)
+
+    assert response.status == "denied"
+    assert "tenant context" in response.message
+
+
 def test_policy_denies_task_tools_without_member_role() -> None:
     orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
     context = AgentIdentityContext(
@@ -141,7 +155,9 @@ def test_search_task_executes_without_confirmation() -> None:
     )
     orchestrator = AgentOrchestrator(registry=ToolRegistry(task_store))
 
-    response = orchestrator.plan("Search tasks for onboarding", _context())
+    response = orchestrator.plan(
+        "Search tasks for project Atlas matching onboarding", _context()
+    )
 
     assert response.status == "executed"
     assert response.results[0].status == "succeeded"
@@ -163,7 +179,7 @@ def test_create_task_title_with_search_phrase_routes_to_create() -> None:
     assert action.arguments["title"] == "show task counts on the dashboard"
 
 
-def test_bare_task_list_uses_empty_query() -> None:
+def test_bare_task_list_requires_project_filter() -> None:
     task_store = InMemoryTaskStore()
     task_store.create_task(
         title="Update onboarding docs",
@@ -185,8 +201,8 @@ def test_bare_task_list_uses_empty_query() -> None:
 
     response = orchestrator.plan("Show tasks", _context())
 
-    assert response.status == "executed"
-    assert len(response.results[0].result["tasks"]) == 2
+    assert response.status == "needs_clarification"
+    assert response.clarification_question == "Which project should I search?"
 
 
 def test_project_only_search_uses_project_as_filter_not_query() -> None:
@@ -237,7 +253,7 @@ def test_project_search_keeps_trailing_matching_query() -> None:
     assert len(response.results[0].result["tasks"]) == 1
 
 
-def test_search_about_project_plan_keeps_project_as_query_text() -> None:
+def test_project_search_about_project_plan_keeps_project_as_query_text() -> None:
     task_store = InMemoryTaskStore()
     task_store.create_task(
         title="Update project plan",
@@ -257,7 +273,9 @@ def test_search_about_project_plan_keeps_project_as_query_text() -> None:
     )
     orchestrator = AgentOrchestrator(registry=ToolRegistry(task_store))
 
-    response = orchestrator.plan("Show tasks about project plan", _context())
+    response = orchestrator.plan(
+        "Show tasks for project Atlas about project plan", _context()
+    )
 
     assert response.status == "executed"
     assert len(response.results[0].result["tasks"]) == 1
@@ -978,3 +996,14 @@ def test_agent_model_config_falls_back_to_openai_model() -> None:
     assert selection.base_url == "https://api.openai.com/v1"
     assert selection.source_tier == "openai_default"
     assert selection.fallback_used is True
+
+
+def test_agent_model_config_rejects_disallowed_base_url() -> None:
+    settings = SimpleNamespace(
+        openai_api_key="openai-key",
+        openai_base_url="https://metadata.google.internal",
+        openai_model="gpt-5-mini",
+    )
+
+    with pytest.raises(ValueError, match="Disallowed agent model base_url"):
+        AgentModelConfig.from_settings(settings)

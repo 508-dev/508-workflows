@@ -4,10 +4,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 from five08.agent.models import AgentModelSelection, ModelTier
 
 DEFAULT_AGENT_MODEL = "gpt-5-mini"
+_ALLOWED_BASE_URL_HOSTS = frozenset(
+    {
+        "api.openai.com",
+        "api.fireworks.ai",
+        "openrouter.ai",
+    }
+)
 _TIER_FALLBACKS: dict[ModelTier, tuple[ModelTier, ...]] = {
     "fast": ("fast",),
     "strong": ("strong", "fast"),
@@ -41,19 +49,21 @@ class AgentModelConfig:
         return cls(
             fast=AgentTierModelConfig(
                 model=_optional_str(getattr(settings, "agent_fast_model", None)),
-                base_url=_optional_str(getattr(settings, "agent_fast_base_url", None)),
+                base_url=_validated_base_url(
+                    getattr(settings, "agent_fast_base_url", None)
+                ),
                 api_key=_optional_str(getattr(settings, "agent_fast_api_key", None)),
             ),
             strong=AgentTierModelConfig(
                 model=_optional_str(getattr(settings, "agent_strong_model", None)),
-                base_url=_optional_str(
+                base_url=_validated_base_url(
                     getattr(settings, "agent_strong_base_url", None)
                 ),
                 api_key=_optional_str(getattr(settings, "agent_strong_api_key", None)),
             ),
             reasoning=AgentTierModelConfig(
                 model=_optional_str(getattr(settings, "agent_reasoning_model", None)),
-                base_url=_optional_str(
+                base_url=_validated_base_url(
                     getattr(settings, "agent_reasoning_base_url", None)
                 ),
                 api_key=_optional_str(
@@ -61,7 +71,9 @@ class AgentModelConfig:
                 ),
             ),
             openai_model=_optional_str(getattr(settings, "openai_model", None)),
-            openai_base_url=_optional_str(getattr(settings, "openai_base_url", None)),
+            openai_base_url=_validated_base_url(
+                getattr(settings, "openai_base_url", None)
+            ),
             openai_api_key=_optional_str(getattr(settings, "openai_api_key", None)),
         )
 
@@ -127,3 +139,13 @@ def _optional_str(value: Any) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def _validated_base_url(value: Any) -> str | None:
+    base_url = _optional_str(value)
+    if base_url is None:
+        return None
+    parsed = urlparse(base_url)
+    if parsed.scheme != "https" or parsed.hostname not in _ALLOWED_BASE_URL_HOSTS:
+        raise ValueError(f"Disallowed agent model base_url: {base_url}")
+    return base_url

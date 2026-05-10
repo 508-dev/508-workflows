@@ -181,6 +181,8 @@ class InMemoryTaskStore:
         organization_id: str | None,
         project: str | None = None,
     ) -> dict[str, Any]:
+        if not project:
+            return {"tasks": []}
         normalized_query = query.strip().casefold()
         normalized_project = project.strip().casefold() if project else None
         matches: list[dict[str, Any]] = []

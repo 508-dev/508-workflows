@@ -145,6 +145,16 @@ class AgentConfirmationView(discord.ui.View):
         interaction: discord.Interaction,
     ) -> dict[str, Any]:
         context = self.cog._build_agent_context(interaction)
+        original_guild_id = self.context.get("guild_id")
+        if context.get("organization_id") is None and original_guild_id:
+            context["organization_id"] = self.context.get("organization_id")
+            context["guild_id"] = original_guild_id
+            context["channel_id"] = self.context.get("channel_id")
+            fresh_roles = self.cog._cached_guild_role_names(
+                guild_id=str(original_guild_id),
+                user_id=interaction.user.id,
+            )
+            context["roles"] = fresh_roles or list(self.context.get("roles") or [])
         original_message_id = self.context.get("message_id")
         if original_message_id:
             context["message_id"] = original_message_id
@@ -234,6 +244,12 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         bot_user = self.bot.user
         if bot_user is None or message.author.bot:
             return
+        if message.guild is None:
+            await message.reply(
+                "Agent mentions only work in servers.",
+                mention_author=False,
+            )
+            return
         if not any(user.id == bot_user.id for user in message.mentions):
             return
 
@@ -297,18 +313,17 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                     context=context,
                 )
 
-        if view is None:
+        sent_dm = await self._send_mention_response_dm(message, response, view)
+        if sent_dm:
             await message.reply(
-                self._format_agent_response(response),
+                "I sent the agent response by DM.",
                 mention_author=False,
             )
-            return
-
-        await message.reply(
-            self._format_agent_response(response),
-            view=view,
-            mention_author=False,
-        )
+        else:
+            await message.reply(
+                "I couldn't send you a DM. Use `/agent` for a private response.",
+                mention_author=False,
+            )
 
     @staticmethod
     def _extract_mention_request(content: str, bot_user_id: int) -> str:
@@ -340,6 +355,33 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         timestamps.append(now)
         self._mention_request_timestamps[user_id] = timestamps
         return False
+
+    async def _send_mention_response_dm(
+        self,
+        message: discord.Message,
+        response: dict[str, Any],
+        view: AgentConfirmationView | None,
+    ) -> bool:
+        try:
+            formatted_response = self._format_agent_response(response)
+            if view is None:
+                await message.author.send(formatted_response)
+            else:
+                await message.author.send(formatted_response, view=view)
+            return True
+        except discord.HTTPException:
+            logger.warning(
+                "Failed sending agent mention response by DM user=%s",
+                getattr(message.author, "id", None),
+                exc_info=True,
+            )
+            self._audit_message_safe(
+                message=message,
+                action="agent.mention.dm",
+                result="error",
+                metadata={"reason": "dm_failed"},
+            )
+            return False
 
     def _build_agent_context(self, interaction: discord.Interaction) -> dict[str, Any]:
         role_names = self._role_names_from_user(interaction.user)
@@ -401,6 +443,18 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             for role in roles
             if str(getattr(role, "name", "")).strip()
         ]
+
+    def _cached_guild_role_names(self, *, guild_id: str, user_id: int) -> list[str]:
+        try:
+            guild = self.bot.get_guild(int(guild_id))
+        except (TypeError, ValueError):
+            return []
+        if guild is None:
+            return []
+        member = guild.get_member(user_id)
+        if member is None:
+            return []
+        return self._role_names_from_user(member)
 
     def _audit_message_safe(
         self,

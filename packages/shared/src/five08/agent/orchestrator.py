@@ -85,6 +85,14 @@ class AgentOrchestrator:
                     "Try asking me to create, update, or search for a task."
                 ),
             )
+        if action.tool_name == "task_read.search_tasks" and not action.arguments.get(
+            "project"
+        ):
+            return AgentResponse(
+                status="needs_clarification",
+                message="Task search requires a project filter.",
+                clarification_question="Which project should I search?",
+            )
 
         manifest = self.registry.get(action.tool_name)
         if manifest is not None:
@@ -159,9 +167,7 @@ class AgentOrchestrator:
                 for action in plan.actions
             ]
 
-        organization_id = (
-            context.organization_id or context.guild_id or context.workspace_id
-        )
+        organization_id = context.organization_id
         actor_id = context.discord_user_id
         actor_scopes = effective_scopes or self.policy.scopes_for_context(context)
         for action in plan.actions:

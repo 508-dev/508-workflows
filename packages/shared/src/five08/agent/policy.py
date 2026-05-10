@@ -120,9 +120,7 @@ class PolicyEngine:
             return PolicyDecision(
                 False, "Impersonated Discord requests cannot use agent tools"
             )
-        if manifest.tenant_scoped and not (
-            context.organization_id or context.guild_id or context.workspace_id
-        ):
+        if manifest.tenant_scoped and not context.organization_id:
             return PolicyDecision(False, "Tool requires resolved tenant context")
 
         required_scopes = list(manifest.required_scopes)

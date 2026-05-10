@@ -383,6 +383,43 @@ def test_build_agent_context_from_message_uses_thread_message_context() -> None:
     assert context["roles"] == ["@everyone", "Member"]
 
 
+@pytest.mark.asyncio
+async def test_confirmation_context_in_dm_uses_cached_original_guild_roles() -> None:
+    member = SimpleNamespace(roles=[SimpleNamespace(name="Member")])
+    guild = SimpleNamespace(get_member=Mock(return_value=member))
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(get_guild=Mock(return_value=guild))
+    view = AgentConfirmationView(
+        cog=cog,
+        requester_id=123,
+        plan_id="plan-1",
+        context={
+            "discord_user_id": "123",
+            "organization_id": "456",
+            "guild_id": "456",
+            "channel_id": "789",
+            "message_id": "555",
+            "roles": ["Admin"],
+        },
+    )
+    interaction = SimpleNamespace(
+        id=999,
+        guild_id=None,
+        channel_id=111,
+        message=SimpleNamespace(id=222),
+        user=SimpleNamespace(id=123),
+    )
+
+    context = view._confirmation_context(interaction)
+
+    assert context["organization_id"] == "456"
+    assert context["guild_id"] == "456"
+    assert context["channel_id"] == "789"
+    assert context["roles"] == ["Member"]
+    assert context["interaction_id"] == "999"
+    assert context["message_id"] == "555"
+
+
 def test_mention_rate_limit_prunes_expired_user_entries() -> None:
     cog = AgentCog.__new__(AgentCog)
     cog._mention_request_timestamps = {
@@ -399,7 +436,7 @@ def test_mention_rate_limit_prunes_expired_user_entries() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_mention_posts_agent_response() -> None:
+async def test_agent_mention_sends_agent_response_by_dm() -> None:
     cog = AgentCog.__new__(AgentCog)
     cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))
     cog._post_agent_request = AsyncMock(
@@ -407,10 +444,11 @@ async def test_agent_mention_posts_agent_response() -> None:
     )
     cog._audit_message_safe = Mock()
     cog._format_agent_response = Mock(return_value="Agent status: executed")
+    author = SimpleNamespace(id=123, bot=False, roles=[], send=AsyncMock())
     message = SimpleNamespace(
         id=555,
         content="<@999> show tasks for project Atlas",
-        author=SimpleNamespace(id=123, bot=False, roles=[]),
+        author=author,
         mentions=[SimpleNamespace(id=999)],
         guild=SimpleNamespace(id=456),
         channel=SimpleNamespace(id=789, typing=Mock(return_value=_AsyncTyping())),
@@ -423,8 +461,31 @@ async def test_agent_mention_posts_agent_response() -> None:
     assert cog._post_agent_request.await_args.kwargs["message"] == (
         "show tasks for project Atlas"
     )
+    author.send.assert_awaited_once_with("Agent status: executed")
     message.reply.assert_awaited_once_with(
-        "Agent status: executed",
+        "I sent the agent response by DM.",
+        mention_author=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_mention_ignores_dms() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))
+    cog._post_agent_request = AsyncMock()
+    message = SimpleNamespace(
+        content="<@999> show tasks for project Atlas",
+        author=SimpleNamespace(id=123, bot=False, roles=[]),
+        mentions=[SimpleNamespace(id=999)],
+        guild=None,
+        reply=AsyncMock(),
+    )
+
+    await cog.agent_mention(message)
+
+    cog._post_agent_request.assert_not_awaited()
+    message.reply.assert_awaited_once_with(
+        "Agent mentions only work in servers.",
         mention_author=False,
     )
 

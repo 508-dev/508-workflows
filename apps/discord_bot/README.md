@@ -60,12 +60,19 @@ Current MVP scope is task-style commands only. The backend agent package keeps
 read and write tools separate, applies capability checks before every tool call,
 requires confirmation for writes, and audits request/confirmation attempts.
 Long-running service changes should be implemented as PR-based workflows rather
-than direct production mutations.
+than direct production mutations. Task reads require an explicit project filter
+to avoid guild-wide task enumeration.
 
 Mention flow is opt-in per message: the bot runs the agent only when directly
-mentioned, including messages inside Discord threads. A follow-up in the same
-thread should mention the bot again so the bot has an explicit user trigger and
-fresh Discord role context for that request.
+mentioned in a server channel or thread. Mention-triggered agent results and
+confirmation buttons are sent by DM to avoid leaking task or plan details into
+public channels. A follow-up in the same thread should mention the bot again so
+the bot has an explicit user trigger and fresh Discord role context for that
+request.
+
+Audit writes are best-effort and do not block command execution. If the audit
+store is unavailable, treat the agent surface as temporarily untraced until the
+audit pipeline is healthy again.
 
 Pending confirmation plans and the MVP task store are currently process-local in
 the backend API. Confirmation plans expire after 10 minutes with opportunistic

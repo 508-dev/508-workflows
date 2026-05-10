@@ -68,6 +68,7 @@ class _FakeAuthStore:
 def auth_headers(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     """Configure API secret and return matching auth headers."""
     monkeypatch.setattr(api.settings, "api_shared_secret", "test-secret")
+    monkeypatch.setattr(api, "_AGENT_REQUEST_TIMESTAMPS", {})
     return {"X-API-Secret": "test-secret"}
 
 
@@ -674,6 +675,65 @@ def test_agent_request_for_write_returns_confirmation_plan(
     assert payload["plan"]["actions"][0]["tool_name"] == "task_write.create_task"
     assert payload["plan"]["plan_id"] in api._PENDING_AGENT_PLANS
     assert audit_payload.correlation_id == "interaction-1"
+    assert audit_payload.metadata["message"] == (
+        "Create a task for Sarah to update onboarding docs by Friday"
+    )
+
+
+def test_agent_request_rejects_oversized_message(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    response = client.post(
+        "/agent/requests",
+        json={
+            "message": "x" * 4097,
+            "context": {
+                "discord_user_id": "123",
+                "organization_id": "org-1",
+                "guild_id": "org-1",
+                "roles": ["Member"],
+            },
+        },
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_payload"
+
+
+def test_agent_request_rate_limits_per_user(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api, "_AGENT_REQUEST_RATE_LIMIT_MAX_REQUESTS", 1)
+
+    request_body = {
+        "message": "nonsense",
+        "context": {
+            "discord_user_id": "123",
+            "organization_id": "org-1",
+            "guild_id": "org-1",
+            "roles": ["Member"],
+        },
+    }
+
+    with patch("five08.backend.api.insert_audit_event"):
+        first_response = client.post(
+            "/agent/requests",
+            json=request_body,
+            headers=auth_headers,
+        )
+        second_response = client.post(
+            "/agent/requests",
+            json=request_body,
+            headers=auth_headers,
+        )
+
+    assert first_response.status_code == 422
+    assert second_response.status_code == 429
+    assert second_response.json()["status"] == "denied"
 
 
 def test_agent_request_rejects_when_pending_plan_capacity_is_full(
@@ -1022,6 +1082,54 @@ def test_agent_confirmation_uses_fresh_non_escalating_roles(
         "task:create",
         "task:update_own",
     }
+
+
+def test_agent_confirmation_executes_with_confirm_time_member_role(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retained member role should keep member-scoped writes executable."""
+    task_store = InMemoryTaskStore()
+    monkeypatch.setattr(
+        api,
+        "_AGENT_ORCHESTRATOR",
+        AgentOrchestrator(registry=ToolRegistry(task_store)),
+    )
+    monkeypatch.setattr(api, "_PENDING_AGENT_PLANS", {})
+
+    with patch("five08.backend.api.insert_audit_event"):
+        plan_response = client.post(
+            "/agent/requests",
+            json={
+                "message": "Create a task for Sarah to update onboarding docs by Friday",
+                "context": {
+                    "discord_user_id": "123",
+                    "organization_id": "org-1",
+                    "guild_id": "org-1",
+                    "roles": ["Admin", "Member"],
+                },
+            },
+            headers=auth_headers,
+        )
+        plan_id = plan_response.json()["plan"]["plan_id"]
+        confirm_response = client.post(
+            f"/agent/confirmations/{plan_id}",
+            json={
+                "confirm": True,
+                "context": {
+                    "discord_user_id": "123",
+                    "organization_id": "org-1",
+                    "guild_id": "org-1",
+                    "roles": ["Member"],
+                },
+            },
+            headers=auth_headers,
+        )
+
+    assert confirm_response.status_code == 200
+    assert confirm_response.json()["status"] == "executed"
+    assert confirm_response.json()["results"][0]["result"]["task_id"] == "TASK-001"
 
 
 def test_agent_confirmation_claims_plan_once(

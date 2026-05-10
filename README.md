@@ -272,12 +272,13 @@ Use `.env.example` as the source of truth for defaults.
 - `Optional`: `AGENT_FAST_MODEL`, `AGENT_FAST_BASE_URL`, `AGENT_FAST_API_KEY`
 - `Optional`: `AGENT_STRONG_MODEL`, `AGENT_STRONG_BASE_URL`, `AGENT_STRONG_API_KEY`
 - `Optional`: `AGENT_REASONING_MODEL`, `AGENT_REASONING_BASE_URL`, `AGENT_REASONING_API_KEY`
-- Note: tier-specific agent models can point at OpenAI-compatible providers such as Fireworks. If a tier is not configured, fallback order is `reasoning -> strong -> fast -> OPENAI_MODEL -> gpt-5-mini`; `strong` falls back through `fast`, and `fast` falls back through `OPENAI_MODEL`.
-- Note: the Discord bot accepts agent requests through `/agent` and explicit bot mentions. Mentioned requests work in channels and threads, and thread follow-ups should mention the bot again to trigger a fresh request.
+- Note: tier-specific agent models can point at OpenAI-compatible providers such as Fireworks. Agent model base URLs must be HTTPS endpoints on `api.openai.com`, `api.fireworks.ai`, or `openrouter.ai`. If a tier is not configured, fallback order is `reasoning -> strong -> fast -> OPENAI_MODEL -> gpt-5-mini`; `strong` falls back through `fast`, and `fast` falls back through `OPENAI_MODEL`.
+- Note: the Discord bot accepts agent requests through `/agent` and explicit bot mentions. Mentioned requests work in server channels and threads, but results and confirmation buttons are sent by DM to avoid leaking task or plan details into public channels. Thread follow-ups should mention the bot again to trigger a fresh request.
 - Agent tools follow the deterministic path: planner drafts the action, policy authorizes scopes, write tools require confirmation, and the backend executes known-good tool code.
 - `Optional`: `GITHUB_API_TOKEN`, `GITHUB_DEFAULT_REPO` (GitHub Issues are the canonical code-task backend for agent-created code work).
 - Existing integration tools also expose CRM contact search/update, DocuSeal member-agreement submission, Kimai project-hours reads, and Migadu mailbox creation when their normal service env vars are configured.
-- Note: the current generic task tool registry is an MVP, process-local in-memory store for non-code/org tasks until the task-management platform is selected. It is not durable across backend restarts or shared across multiple API workers.
+- Note: the current generic task tool registry is an MVP, process-local in-memory store for non-code/org tasks until the task-management platform is selected. It is not durable across backend restarts or shared across multiple API workers. Task reads require an explicit project filter to avoid guild-wide task enumeration.
+- Note: agent audit writes are best-effort. If the audit store is down, agent actions can still execute and should be considered temporarily untraced until audit ingestion recovers.
 
 ### Discord CRM Audit Logging (Best Effort)
 
