@@ -132,7 +132,7 @@ Use `.env.example` as the source of defaults.
 
 ## Outline Invitations
 
-- `Required for /create-user-accounts`: `OUTLINE_API_KEY`
+- `Required for /create-user-accounts and /invite-outline-user`: `OUTLINE_API_KEY`
 - `Optional`: `OUTLINE_BASE_URL` (default: `https://app.getoutline.com`; root and `/api` URLs are both accepted)
 - `Optional`: `OUTLINE_API_TIMEOUT_SECONDS` (default: `20.0`)
 

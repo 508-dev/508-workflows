@@ -123,6 +123,21 @@ class SSOProvisioningPartialError(RuntimeError):
         self.partial_success = partial_success
 
 
+class MailboxProvisioningPartialError(RuntimeError):
+    """Raised when Migadu created a mailbox but a later local/CRM step failed."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        mailbox_email: str,
+        partial_success: str,
+    ) -> None:
+        super().__init__(message)
+        self.mailbox_email = mailbox_email
+        self.partial_success = partial_success
+
+
 @dataclass(frozen=True, slots=True)
 class MailboxProvisioningResult:
     """Result from creating or reusing one 508 mailbox."""
@@ -3674,10 +3689,10 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             raise ValueError(f"{field_label} must be a full email address.")
         return normalized
 
-    @staticmethod
-    def _normalize_508_email(value: Any) -> str | None:
+    def _normalize_508_email(self, value: Any) -> str | None:
         text = str(value or "").strip().lower()
-        if not text or not text.endswith("@508.dev"):
+        configured_domain = self._migadu_mailbox_domain()
+        if not text or not text.endswith(f"@{configured_domain}"):
             return None
         return text
 
@@ -3694,7 +3709,10 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         """Derive the Authentik username and email from CRM's 508 email."""
         email = self._contact_508_email(contact)
         if not email:
-            raise ValueError("Selected contact does not have a @508.dev email in CRM.")
+            configured_domain = self._migadu_mailbox_domain()
+            raise ValueError(
+                f"Selected contact does not have a @{configured_domain} email in CRM."
+            )
 
         username = self._normalize_508_username(email)
         if not username:
@@ -3737,8 +3755,10 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
 
         actual_email = self._normalize_508_email(user.get("email"))
         if actual_email != expected_email:
+            configured_domain = self._migadu_mailbox_domain()
             raise ValueError(
-                "Matched Authentik email does not match the CRM-derived @508.dev email."
+                "Matched Authentik email does not match the CRM-derived "
+                f"@{configured_domain} email."
             )
 
         return self._authentik_user_pk(user)
@@ -8008,18 +8028,27 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         mailbox = await asyncio.to_thread(self._migadu_client().create_mailbox, request)
         created_address = str(mailbox.get("address") or target_email).strip().lower()
         if created_address != target_email:
-            logger.warning(
-                "Migadu returned address=%s for requested target_email=%s",
-                created_address,
-                target_email,
+            raise MailboxProvisioningPartialError(
+                "Migadu created a mailbox but returned a different address "
+                f"`{created_address}` than requested `{target_email}`. "
+                "CRM, SSO, and Outline were not updated.",
+                mailbox_email=created_address,
+                partial_success="mailbox_created_address_mismatch",
             )
 
-        await asyncio.to_thread(
-            self.espo_api.request,
-            "PUT",
-            f"Contact/{contact_id}",
-            {"c508Email": target_email},
-        )
+        try:
+            await asyncio.to_thread(
+                self.espo_api.request,
+                "PUT",
+                f"Contact/{contact_id}",
+                {"c508Email": target_email},
+            )
+        except EspoAPIError as exc:
+            raise MailboxProvisioningPartialError(
+                str(exc),
+                mailbox_email=target_email,
+                partial_success="mailbox_created_crm_update_failed",
+            ) from exc
         contact["c508Email"] = target_email
 
         return MailboxProvisioningResult(
@@ -8232,6 +8261,35 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 contact=contact,
                 mailbox_username=mailbox_username,
             )
+        except MailboxProvisioningPartialError as exc:
+            message = self._sanitize_error_message_for_discord(exc)
+            self._audit_command_safe(
+                interaction=interaction,
+                action="crm.create_user_accounts",
+                result="error",
+                metadata={
+                    "search_term": search_term,
+                    "mailbox_username": mailbox_username,
+                    "mailbox_email": exc.mailbox_email,
+                    "partial_success": exc.partial_success,
+                    "error": message,
+                },
+            )
+            if exc.partial_success == "mailbox_created_crm_update_failed":
+                await interaction.followup.send(
+                    "⚠️ Created the mailbox, but failed to update CRM `c508Email`.\n"
+                    f"Email: `{exc.mailbox_email}`\n"
+                    f"Error: `{message}`\n"
+                    "SSO provisioning and Outline invite were not started.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    f"⚠️ {message}\n"
+                    f"Created mailbox: `{exc.mailbox_email}`\n"
+                    "SSO provisioning and Outline invite were not started.",
+                    ephemeral=True,
+                )
         except SSOProvisioningPartialError as exc:
             message = self._sanitize_error_message_for_discord(exc)
             self._audit_command_safe(

@@ -512,6 +512,68 @@ async def test_create_user_accounts_creates_mailbox_sso_and_outline_invite(
 
 
 @pytest.mark.asyncio
+async def test_create_user_accounts_uses_configured_mailbox_domain_for_sso(
+    cog: CRMCog, mock_interaction: AsyncMock, mock_espo_api: Mock
+) -> None:
+    contact = {
+        "id": "crm-123",
+        "name": "Jane Doe",
+        "emailAddress": "jane.personal@example.com",
+        "c508Email": "",
+        "cSsoID": None,
+    }
+    migadu_client = Mock()
+    migadu_client.create_mailbox.return_value = {"address": "jane@example.org"}
+    authentik_client = Mock()
+    authentik_client.find_users_by_username_or_email.return_value = []
+    authentik_client.create_user.return_value = {
+        "pk": 42,
+        "username": "jane",
+        "email": "jane@example.org",
+        "name": "Jane Doe",
+        "is_superuser": False,
+    }
+    authentik_client.resolve_email_stage_id.return_value = "stage-id"
+    authentik_client.send_recovery_email.return_value = None
+    outline_client = Mock()
+    outline_client.invite_user.return_value = {"ok": True}
+
+    with (
+        patch(
+            "five08.discord_bot.cogs.crm.settings.migadu_mailbox_domain", "example.org"
+        ),
+        patch.object(
+            cog,
+            "_search_contacts_for_lookup",
+            new=AsyncMock(return_value=[contact]),
+        ),
+        patch.object(cog, "_migadu_client", return_value=migadu_client),
+        patch.object(cog, "_authentik_client", return_value=authentik_client),
+        patch.object(cog, "_outline_client", return_value=outline_client),
+        patch.object(cog, "_audit_command_safe"),
+    ):
+        mock_espo_api.request.return_value = {"id": "crm-123"}
+        await cog.create_user_accounts.callback(
+            cog,
+            mock_interaction,
+            search_term="jane",
+            mailbox_username="jane",
+        )
+
+    authentik_client.create_user.assert_called_once_with(
+        username="jane",
+        name="Jane Doe",
+        email="jane@example.org",
+    )
+    outline_client.invite_user.assert_called_once_with(
+        email="jane@example.org",
+        name="Jane Doe",
+    )
+    message = mock_interaction.followup.send.call_args.args[0]
+    assert "Email: `jane@example.org`" in message
+
+
+@pytest.mark.asyncio
 async def test_create_user_accounts_reuses_existing_mailbox(
     cog: CRMCog, mock_interaction: AsyncMock, mock_espo_api: Mock
 ) -> None:
@@ -560,6 +622,91 @@ async def test_create_user_accounts_reuses_existing_mailbox(
     message = mock_interaction.followup.send.call_args.args[0]
     assert "Mailbox: already existed/reused." in message
     assert "SSO: already existed/reused" in message
+
+
+@pytest.mark.asyncio
+async def test_create_user_accounts_reports_partial_success_when_mailbox_crm_sync_fails(
+    cog: CRMCog, mock_interaction: AsyncMock, mock_espo_api: Mock
+) -> None:
+    contact = {
+        "id": "crm-123",
+        "name": "Jane Doe",
+        "emailAddress": "jane.personal@example.com",
+        "c508Email": "",
+        "cSsoID": None,
+    }
+    migadu_client = Mock()
+    migadu_client.create_mailbox.return_value = {"address": "jane@508.dev"}
+    mock_espo_api.request.side_effect = EspoAPIError("crm update failed")
+
+    with (
+        patch.object(
+            cog,
+            "_search_contacts_for_lookup",
+            new=AsyncMock(return_value=[contact]),
+        ),
+        patch.object(cog, "_migadu_client", return_value=migadu_client),
+        patch.object(cog, "_authentik_client") as authentik_client,
+        patch.object(cog, "_outline_client") as outline_client,
+        patch.object(cog, "_audit_command_safe") as mock_audit,
+    ):
+        await cog.create_user_accounts.callback(
+            cog,
+            mock_interaction,
+            search_term="jane",
+            mailbox_username="jane",
+        )
+
+    authentik_client.assert_not_called()
+    outline_client.assert_not_called()
+    message = mock_interaction.followup.send.call_args.args[0]
+    assert "Created the mailbox, but failed to update CRM" in message
+    assert "Email: `jane@508.dev`" in message
+    assert "SSO provisioning and Outline invite were not started" in message
+    audit_metadata = mock_audit.call_args.kwargs["metadata"]
+    assert audit_metadata["partial_success"] == "mailbox_created_crm_update_failed"
+
+
+@pytest.mark.asyncio
+async def test_create_user_accounts_rejects_migadu_address_mismatch(
+    cog: CRMCog, mock_interaction: AsyncMock, mock_espo_api: Mock
+) -> None:
+    contact = {
+        "id": "crm-123",
+        "name": "Jane Doe",
+        "emailAddress": "jane.personal@example.com",
+        "c508Email": "",
+        "cSsoID": None,
+    }
+    migadu_client = Mock()
+    migadu_client.create_mailbox.return_value = {"address": "other@508.dev"}
+
+    with (
+        patch.object(
+            cog,
+            "_search_contacts_for_lookup",
+            new=AsyncMock(return_value=[contact]),
+        ),
+        patch.object(cog, "_migadu_client", return_value=migadu_client),
+        patch.object(cog, "_authentik_client") as authentik_client,
+        patch.object(cog, "_outline_client") as outline_client,
+        patch.object(cog, "_audit_command_safe") as mock_audit,
+    ):
+        await cog.create_user_accounts.callback(
+            cog,
+            mock_interaction,
+            search_term="jane",
+            mailbox_username="jane",
+        )
+
+    mock_espo_api.request.assert_not_called()
+    authentik_client.assert_not_called()
+    outline_client.assert_not_called()
+    message = mock_interaction.followup.send.call_args.args[0]
+    assert "returned a different address" in message
+    assert "Created mailbox: `other@508.dev`" in message
+    audit_metadata = mock_audit.call_args.kwargs["metadata"]
+    assert audit_metadata["partial_success"] == "mailbox_created_address_mismatch"
 
 
 @pytest.mark.asyncio
