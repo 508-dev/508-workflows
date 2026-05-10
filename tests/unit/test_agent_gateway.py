@@ -148,6 +148,21 @@ def test_search_task_executes_without_confirmation() -> None:
     assert response.results[0].result["tasks"][0]["task_id"] == "TASK-001"
 
 
+def test_create_task_title_with_search_phrase_routes_to_create() -> None:
+    orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
+
+    response = orchestrator.plan(
+        "Create a task to show task counts on the dashboard",
+        _context(),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    action = response.plan.actions[0]
+    assert action.tool_name == "task_write.create_task"
+    assert action.arguments["title"] == "show task counts on the dashboard"
+
+
 def test_bare_task_list_uses_empty_query() -> None:
     task_store = InMemoryTaskStore()
     task_store.create_task(

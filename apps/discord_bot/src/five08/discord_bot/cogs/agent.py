@@ -568,6 +568,20 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                     lines.append(
                         f"- {tool_name}: {len(result_payload.get('tasks') or [])} matches"
                     )
+                elif isinstance(result_payload, dict) and "issues" in result_payload:
+                    lines.extend(
+                        self._format_issue_result_lines(tool_name, result_payload)
+                    )
+                elif isinstance(result_payload, dict) and "contacts" in result_payload:
+                    lines.extend(
+                        self._format_contact_result_lines(tool_name, result_payload)
+                    )
+                elif (
+                    isinstance(result_payload, dict) and "user_hours" in result_payload
+                ):
+                    lines.extend(
+                        self._format_kimai_result_lines(tool_name, result_payload)
+                    )
                 else:
                     result_error = str(result.get("error") or "").strip()
                     if result_error:
@@ -576,6 +590,67 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                         lines.append(f"- {tool_name}: {result_status}")
 
         return "\n".join(lines)[:1900]
+
+    @staticmethod
+    def _format_issue_result_lines(
+        tool_name: object,
+        payload: dict[str, Any],
+    ) -> list[str]:
+        issues = payload.get("issues")
+        issue_items = issues if isinstance(issues, list) else []
+        lines = [f"- {tool_name}: {len(issue_items)} issues"]
+        for issue in issue_items[:3]:
+            if not isinstance(issue, dict):
+                continue
+            number = issue.get("number")
+            title = str(issue.get("title") or "").strip()
+            url = str(issue.get("html_url") or "").strip()
+            label = f"  - #{number} {title}".strip()
+            lines.append(f"{label} {url}".strip())
+        return lines
+
+    @staticmethod
+    def _format_contact_result_lines(
+        tool_name: object,
+        payload: dict[str, Any],
+    ) -> list[str]:
+        contacts = payload.get("contacts")
+        contact_items = contacts if isinstance(contacts, list) else []
+        lines = [f"- {tool_name}: {len(contact_items)} contacts"]
+        for contact in contact_items[:3]:
+            if not isinstance(contact, dict):
+                continue
+            name = str(contact.get("name") or contact.get("id") or "Unknown").strip()
+            email = str(contact.get("emailAddress") or "").strip()
+            contact_id = str(contact.get("id") or "").strip()
+            suffix = " ".join(part for part in [email, contact_id] if part)
+            lines.append(f"  - {name} {suffix}".strip())
+        return lines
+
+    @staticmethod
+    def _format_kimai_result_lines(
+        tool_name: object,
+        payload: dict[str, Any],
+    ) -> list[str]:
+        project = payload.get("project")
+        project_name = (
+            str(project.get("name") or "").strip()
+            if isinstance(project, dict)
+            else "project"
+        )
+        total_hours = payload.get("total_hours")
+        total_billed = payload.get("total_billed")
+        lines = [f"- {tool_name}: {project_name} {total_hours or 0:g}h"]
+        if isinstance(total_billed, int | float):
+            lines[0] += f", ${total_billed:,.2f}"
+        user_hours = payload.get("user_hours")
+        if isinstance(user_hours, dict):
+            for user_name, data in list(user_hours.items())[:3]:
+                if not isinstance(data, dict):
+                    continue
+                hours = data.get("hours") or 0
+                lines.append(f"  - {user_name}: {hours:g}h")
+        return lines
 
 
 async def setup(bot: commands.Bot) -> None:

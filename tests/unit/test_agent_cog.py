@@ -59,6 +59,87 @@ def test_format_agent_response_renders_tool_error() -> None:
     assert "- task_write.update_task: failed (Task TASK-999 was not found)" in message
 
 
+def test_format_agent_response_renders_github_issue_results() -> None:
+    cog = AgentCog.__new__(AgentCog)
+
+    message = cog._format_agent_response(
+        {
+            "status": "executed",
+            "results": [
+                {
+                    "tool_name": "github_issue.search_issues",
+                    "status": "succeeded",
+                    "result": {
+                        "issues": [
+                            {
+                                "number": 42,
+                                "title": "Fix onboarding sync",
+                                "html_url": "https://github.example/issues/42",
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+    )
+
+    assert "- github_issue.search_issues: 1 issues" in message
+    assert "#42 Fix onboarding sync https://github.example/issues/42" in message
+
+
+def test_format_agent_response_renders_contact_results() -> None:
+    cog = AgentCog.__new__(AgentCog)
+
+    message = cog._format_agent_response(
+        {
+            "status": "executed",
+            "results": [
+                {
+                    "tool_name": "crm_read.search_contacts",
+                    "status": "succeeded",
+                    "result": {
+                        "contacts": [
+                            {
+                                "id": "contact-1",
+                                "name": "Sarah Example",
+                                "emailAddress": "sarah@example.com",
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+    )
+
+    assert "- crm_read.search_contacts: 1 contacts" in message
+    assert "Sarah Example sarah@example.com contact-1" in message
+
+
+def test_format_agent_response_renders_kimai_results() -> None:
+    cog = AgentCog.__new__(AgentCog)
+
+    message = cog._format_agent_response(
+        {
+            "status": "executed",
+            "results": [
+                {
+                    "tool_name": "kimai_read.project_hours",
+                    "status": "succeeded",
+                    "result": {
+                        "project": {"name": "Atlas"},
+                        "total_hours": 12.5,
+                        "total_billed": 1250.0,
+                        "user_hours": {"Sarah": {"hours": 7.5}},
+                    },
+                }
+            ],
+        }
+    )
+
+    assert "- kimai_read.project_hours: Atlas 12.5h, $1,250.00" in message
+    assert "Sarah: 7.5h" in message
+
+
 def test_audit_result_treats_error_payload_as_error() -> None:
     assert (
         AgentCog._audit_result_for_agent_response(

@@ -1360,7 +1360,11 @@ async def agent_request_handler(request: Request) -> JSONResponse:
             {"error": "invalid_payload", "detail": str(exc)}, status_code=400
         )
 
-    response = _AGENT_ORCHESTRATOR.plan(payload.message, payload.context)
+    response = await asyncio.to_thread(
+        _AGENT_ORCHESTRATOR.plan,
+        payload.message,
+        payload.context,
+    )
     if response.plan is not None and response.status == "requires_confirmation":
         stored = await _store_pending_agent_plan(response.plan, payload.context)
         if not stored:
@@ -1502,7 +1506,8 @@ async def agent_confirmation_handler(
         original_context=original_context,
         confirmation_context=payload.context,
     )
-    results = _AGENT_ORCHESTRATOR.execute_plan(
+    results = await asyncio.to_thread(
+        _AGENT_ORCHESTRATOR.execute_plan,
         plan,
         execution_context,
         confirmed=True,

@@ -239,6 +239,8 @@ class AgentOrchestrator:
 
     def _parse_action(self, text: str) -> AgentToolAction | None:
         lowered = text.casefold()
+        if "create" in lowered and "task" in lowered:
+            return self._parse_create_task(text)
         if any(
             keyword in lowered
             for keyword in ["find task", "search task", "list task", "show task"]
@@ -266,8 +268,6 @@ class AgentOrchestrator:
             keyword in lowered for keyword in ["create", "provision"]
         ):
             return self._parse_mailbox_create(text)
-        if "create" in lowered and "task" in lowered:
-            return self._parse_create_task(text)
         if any(
             keyword in lowered
             for keyword in ["update task", "change task", "assign task", "close task"]
