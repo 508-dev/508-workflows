@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from five08.langfuse import get_langfuse_client
+from five08.agent.tools import ToolRuntimeConfig
 from five08.settings import SharedSettings
 
 
@@ -61,6 +62,25 @@ def test_langfuse_base_url_is_shared_configuration() -> None:
 def test_langfuse_client_is_disabled_without_base_url() -> None:
     """Langfuse should be lazily initialized only when configured."""
     assert get_langfuse_client(SharedSettings()) is None
+
+
+def test_shared_settings_expose_agent_external_tool_credentials() -> None:
+    """Backend agent tools should receive Kimai and Migadu credentials from env."""
+    settings = SharedSettings(
+        kimai_base_url="https://kimai.example.com",
+        kimai_api_token="kimai-token",
+        migadu_api_user="migadu-user",
+        migadu_api_key="migadu-key",
+        migadu_mailbox_domain="mail.example.com",
+    )
+
+    runtime_config = ToolRuntimeConfig.from_settings(settings)
+
+    assert runtime_config.kimai_base_url == "https://kimai.example.com"
+    assert runtime_config.kimai_api_token == "kimai-token"
+    assert runtime_config.migadu_api_user == "migadu-user"
+    assert runtime_config.migadu_api_key == "migadu-key"
+    assert runtime_config.migadu_mailbox_domain == "mail.example.com"
 
 
 def test_shared_settings_docuseal_template_id_accepts_numeric_string() -> None:

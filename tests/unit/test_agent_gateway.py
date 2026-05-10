@@ -708,6 +708,19 @@ def test_kimai_december_month_query_rolls_end_to_year_boundary() -> None:
     assert action.arguments["end"] == "2026-12-31T23:59:59"
 
 
+def test_kimai_invalid_month_returns_clarification() -> None:
+    orchestrator = AgentOrchestrator()
+
+    response = orchestrator.plan(
+        "Kimai hours for project Atlas in 2026-13",
+        _context(roles=["Admin"]),
+    )
+
+    assert response.status == "needs_clarification"
+    assert response.plan is None
+    assert response.results == []
+
+
 def test_admin_can_draft_docuseal_member_agreement_with_confirmation() -> None:
     orchestrator = AgentOrchestrator()
 

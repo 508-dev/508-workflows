@@ -399,6 +399,8 @@ class AgentOrchestrator:
         month_match = re.search(r"\b(20\d{2}-\d{2})\b", text)
         if month_match:
             year, month = (int(part) for part in month_match.group(1).split("-"))
+            if month < 1 or month > 12:
+                return None
             begin = date(year, month, 1)
             if month == 12:
                 next_month = date(year + 1, 1, 1)
