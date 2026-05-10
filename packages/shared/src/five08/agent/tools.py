@@ -9,6 +9,16 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 from five08.agent.models import RiskLevel
+from five08.clients.docuseal import create_member_agreement_submission
+from five08.clients.espo import EspoClient
+from five08.clients.github import GitHubClient
+from five08.clients.kimai import KimaiAPI
+from five08.clients.migadu import (
+    MigaduClient,
+    MigaduMailboxCreateRequest,
+    normalize_migadu_mailbox_domain,
+)
+from five08.crm_contacts import EspoContactRepository
 
 
 @dataclass(frozen=True)
@@ -22,6 +32,50 @@ class ToolManifest:
     tenant_scoped: bool = True
     idempotent: bool = False
     write: bool = False
+
+
+@dataclass(frozen=True)
+class ToolRuntimeConfig:
+    """Runtime credentials and defaults for deterministic external tools."""
+
+    github_api_token: str | None = None
+    github_default_repo: str | None = None
+    espo_base_url: str | None = None
+    espo_api_key: str | None = None
+    docuseal_base_url: str | None = None
+    docuseal_api_key: str | None = None
+    docuseal_member_agreement_template_id: int | None = None
+    kimai_base_url: str | None = None
+    kimai_api_token: str | None = None
+    migadu_api_user: str | None = None
+    migadu_api_key: str | None = None
+    migadu_mailbox_domain: str = "508.dev"
+
+    @classmethod
+    def from_settings(cls, settings: Any) -> "ToolRuntimeConfig":
+        """Build tool runtime config from service settings without coupling types."""
+        return cls(
+            github_api_token=getattr(settings, "github_api_token", None),
+            github_default_repo=getattr(settings, "github_default_repo", None),
+            espo_base_url=getattr(settings, "espo_base_url", None),
+            espo_api_key=getattr(settings, "espo_api_key", None),
+            docuseal_base_url=getattr(settings, "docuseal_base_url", None),
+            docuseal_api_key=getattr(settings, "docuseal_api_key", None),
+            docuseal_member_agreement_template_id=getattr(
+                settings,
+                "docuseal_member_agreement_template_id",
+                None,
+            ),
+            kimai_base_url=getattr(settings, "kimai_base_url", None),
+            kimai_api_token=getattr(settings, "kimai_api_token", None),
+            migadu_api_user=getattr(settings, "migadu_api_user", None),
+            migadu_api_key=getattr(settings, "migadu_api_key", None),
+            migadu_mailbox_domain=getattr(
+                settings,
+                "migadu_mailbox_domain",
+                "508.dev",
+            ),
+        )
 
 
 @dataclass
@@ -158,8 +212,14 @@ class InMemoryTaskStore:
 class ToolRegistry:
     """Registry that exposes only explicitly declared tools."""
 
-    def __init__(self, task_store: InMemoryTaskStore | None = None) -> None:
+    def __init__(
+        self,
+        task_store: InMemoryTaskStore | None = None,
+        *,
+        runtime_config: ToolRuntimeConfig | None = None,
+    ) -> None:
         self.task_store = task_store or InMemoryTaskStore()
+        self.runtime_config = runtime_config or ToolRuntimeConfig()
         self._manifests = {
             "task_read.search_tasks": ToolManifest(
                 name="task_read.search_tasks",
@@ -182,6 +242,66 @@ class ToolRegistry:
                 name="task_write.update_task",
                 risk="medium",
                 required_scopes=("task:update_own",),
+                requires_confirmation=True,
+                tenant_scoped=True,
+                idempotent=False,
+                write=True,
+            ),
+            "github_issue.search_issues": ToolManifest(
+                name="github_issue.search_issues",
+                risk="low",
+                required_scopes=("github:issue:read",),
+                tenant_scoped=False,
+                idempotent=True,
+                write=False,
+            ),
+            "github_issue.create_issue": ToolManifest(
+                name="github_issue.create_issue",
+                risk="medium",
+                required_scopes=("github:issue:create",),
+                requires_confirmation=True,
+                tenant_scoped=False,
+                idempotent=False,
+                write=True,
+            ),
+            "crm_read.search_contacts": ToolManifest(
+                name="crm_read.search_contacts",
+                risk="low",
+                required_scopes=("crm:contact:read",),
+                tenant_scoped=True,
+                idempotent=True,
+                write=False,
+            ),
+            "crm_write.update_contact": ToolManifest(
+                name="crm_write.update_contact",
+                risk="high",
+                required_scopes=("crm:contact:update",),
+                requires_confirmation=True,
+                tenant_scoped=True,
+                idempotent=False,
+                write=True,
+            ),
+            "docuseal_write.create_member_agreement_submission": ToolManifest(
+                name="docuseal_write.create_member_agreement_submission",
+                risk="high",
+                required_scopes=("docuseal:submission:create",),
+                requires_confirmation=True,
+                tenant_scoped=True,
+                idempotent=False,
+                write=True,
+            ),
+            "kimai_read.project_hours": ToolManifest(
+                name="kimai_read.project_hours",
+                risk="low",
+                required_scopes=("kimai:project_hours:read",),
+                tenant_scoped=True,
+                idempotent=True,
+                write=False,
+            ),
+            "mail_write.create_mailbox": ToolManifest(
+                name="mail_write.create_mailbox",
+                risk="high",
+                required_scopes=("mailbox:create",),
                 requires_confirmation=True,
                 tenant_scoped=True,
                 idempotent=False,
@@ -243,7 +363,174 @@ class ToolRegistry:
                 due_date=updates["due_date"],
                 status=updates["status"],
             )
+        if tool_name == "github_issue.search_issues":
+            return self._github_client().search_issues(
+                repository=self._resolve_repository(arguments),
+                query=str(arguments.get("query") or "").strip(),
+                state=str(arguments.get("state") or "open").strip().lower(),
+                limit=_positive_int(arguments.get("limit"), default=10, maximum=20),
+            )
+        if tool_name == "github_issue.create_issue":
+            title = str(arguments.get("title") or "").strip()
+            if not title:
+                raise ValueError("GitHub issue title is required")
+            return self._github_client().create_issue(
+                repository=self._resolve_repository(arguments),
+                title=title,
+                body=_optional_str(arguments.get("body")),
+                labels=_optional_str_list(arguments.get("labels")),
+            )
+        if tool_name == "crm_read.search_contacts":
+            return self._search_crm_contacts(arguments)
+        if tool_name == "crm_write.update_contact":
+            return self._update_crm_contact(arguments)
+        if tool_name == "docuseal_write.create_member_agreement_submission":
+            return self._create_docuseal_member_agreement(arguments)
+        if tool_name == "kimai_read.project_hours":
+            return self._kimai_project_hours(arguments)
+        if tool_name == "mail_write.create_mailbox":
+            return self._create_migadu_mailbox(arguments)
         raise KeyError(f"Unknown tool {tool_name}")
+
+    def _github_client(self) -> GitHubClient:
+        token = _required_config(
+            self.runtime_config.github_api_token, "GITHUB_API_TOKEN"
+        )
+        return GitHubClient(token=token)
+
+    def _resolve_repository(self, arguments: dict[str, Any]) -> str:
+        repository = _optional_str(arguments.get("repository"))
+        if repository is None:
+            repository = _optional_str(self.runtime_config.github_default_repo)
+        if repository is None:
+            raise ValueError("GitHub repository is required")
+        if "/" not in repository.strip("/"):
+            raise ValueError("GitHub repository must be in owner/name form")
+        return repository.strip().strip("/")
+
+    def _crm_repository(self) -> EspoContactRepository:
+        base_url = _required_config(self.runtime_config.espo_base_url, "ESPO_BASE_URL")
+        api_key = _required_config(self.runtime_config.espo_api_key, "ESPO_API_KEY")
+        return EspoContactRepository(EspoClient(base_url, api_key))
+
+    def _search_crm_contacts(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        query = str(arguments.get("query") or "").strip()
+        if not query:
+            raise ValueError("CRM contact search query is required")
+        limit = _positive_int(arguments.get("limit"), default=5, maximum=10)
+        contacts = self._crm_repository().search(
+            limit=limit,
+            select=[
+                "id",
+                "name",
+                "emailAddress",
+                "phoneNumber",
+                "cRoles",
+                "cOnboardingState",
+            ],
+            name=query,
+        )
+        return {"contacts": [contact.to_dict() for contact in contacts]}
+
+    def _update_crm_contact(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        contact_id = str(arguments.get("contact_id") or "").strip()
+        updates = arguments.get("updates")
+        if not contact_id:
+            raise ValueError("CRM contact id is required")
+        if not isinstance(updates, dict) or not updates:
+            raise ValueError("CRM contact updates are required")
+        repository = self._crm_repository()
+        contact = repository.get(contact_id)
+        contact.set(**updates)
+        return {"contact": contact.save().to_dict()}
+
+    def _create_docuseal_member_agreement(
+        self,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        base_url = _required_config(
+            self.runtime_config.docuseal_base_url,
+            "DOCUSEAL_BASE_URL",
+        )
+        api_key = _required_config(
+            self.runtime_config.docuseal_api_key,
+            "DOCUSEAL_API_KEY",
+        )
+        template_id = self.runtime_config.docuseal_member_agreement_template_id
+        if template_id is None:
+            raise ValueError("DOCUSEAL_MEMBER_AGREEMENT_TEMPLATE_ID is required")
+        email = str(arguments.get("submitter_email") or "").strip()
+        if not email:
+            raise ValueError("Submitter email is required")
+        return create_member_agreement_submission(
+            base_url=base_url,
+            api_key=api_key,
+            template_id=template_id,
+            submitter_name=_optional_str(arguments.get("submitter_name")),
+            submitter_email=email,
+            send_email=bool(arguments.get("send_email", True)),
+        )
+
+    def _kimai_project_hours(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        project_name = str(arguments.get("project") or "").strip()
+        if not project_name:
+            raise ValueError("Kimai project name is required")
+        base_url = _required_config(
+            self.runtime_config.kimai_base_url, "KIMAI_BASE_URL"
+        )
+        api_token = _required_config(
+            self.runtime_config.kimai_api_token,
+            "KIMAI_API_TOKEN",
+        )
+        api = KimaiAPI(base_url, api_token)
+        project = api.get_project_by_name(project_name)
+        if not project:
+            raise KeyError(f"Kimai project {project_name!r} was not found")
+        project_id = int(project["id"])
+        begin = _optional_datetime(arguments.get("begin"))
+        end = _optional_datetime(arguments.get("end"))
+        user_hours = api.get_project_hours_by_user(
+            project_id=project_id, begin=begin, end=end
+        )
+        total_hours = sum(float(item.get("hours", 0)) for item in user_hours.values())
+        total_billed = sum(
+            float(item.get("billed_amount", 0)) for item in user_hours.values()
+        )
+        return {
+            "project": project,
+            "total_hours": total_hours,
+            "total_billed": total_billed,
+            "user_hours": user_hours,
+        }
+
+    def _create_migadu_mailbox(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        local_part = str(arguments.get("local_part") or "").strip().lower()
+        backup_email = str(arguments.get("backup_email") or "").strip()
+        name = str(arguments.get("name") or "").strip()
+        if not local_part or not backup_email or not name:
+            raise ValueError("Mailbox local_part, backup_email, and name are required")
+        username = _required_config(
+            self.runtime_config.migadu_api_user,
+            "MIGADU_API_USER",
+        )
+        api_key = _required_config(
+            self.runtime_config.migadu_api_key,
+            "MIGADU_API_KEY",
+        )
+        client = MigaduClient(
+            username=username,
+            api_key=api_key,
+            domain=normalize_migadu_mailbox_domain(
+                self.runtime_config.migadu_mailbox_domain
+            ),
+        )
+        return client.create_mailbox(
+            MigaduMailboxCreateRequest(
+                local_part=local_part,
+                backup_email=backup_email,
+                name=name,
+            )
+        )
 
 
 def _optional_str(value: Any) -> str | None:
@@ -266,4 +553,47 @@ def _optional_date(value: Any) -> str | None:
             return date.fromisoformat(stripped).isoformat()
         except ValueError as exc:
             raise ValueError("Expected date value as valid ISO date") from exc
+    return None
+
+
+def _optional_str_list(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        items = [item.strip() for item in value.split(",")]
+    elif isinstance(value, list):
+        items = [str(item).strip() for item in value]
+    else:
+        return None
+    normalized = [item for item in items if item]
+    return normalized or None
+
+
+def _required_config(value: str | None, name: str) -> str:
+    normalized = (value or "").strip()
+    if not normalized:
+        raise RuntimeError(f"{name} is required for this tool")
+    return normalized
+
+
+def _positive_int(value: Any, *, default: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return min(max(parsed, 1), maximum)
+
+
+def _optional_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime.combine(value, datetime.min.time())
+    if isinstance(value, str):
+        normalized = value.strip()
+        if not normalized:
+            return None
+        return datetime.fromisoformat(normalized)
     return None

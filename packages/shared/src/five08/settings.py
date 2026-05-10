@@ -51,6 +51,8 @@ class SharedSettings(BaseSettings):
     docuseal_base_url: str | None = None
     docuseal_api_key: str | None = None
     docuseal_member_agreement_template_id: int | None = None
+    github_api_token: str | None = None
+    github_default_repo: str | None = None
     authentik_api_base_url: str | None = None
     authentik_api_token: str | None = None
     authentik_api_timeout_seconds: float = 20.0

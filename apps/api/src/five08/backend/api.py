@@ -40,6 +40,7 @@ from five08.agent import (
     InMemoryTaskStore,
     PolicyEngine,
     ToolRegistry,
+    ToolRuntimeConfig,
 )
 from five08.logging import configure_observability
 from five08.queue import (
@@ -134,7 +135,10 @@ process_docuseal_agreement_job = JOB_FUNCTIONS["process_docuseal_agreement_job"]
 # swap this registry for a persistent task service before multi-worker use.
 _AGENT_TASK_STORE = InMemoryTaskStore()
 _AGENT_ORCHESTRATOR = AgentOrchestrator(
-    registry=ToolRegistry(_AGENT_TASK_STORE),
+    registry=ToolRegistry(
+        _AGENT_TASK_STORE,
+        runtime_config=ToolRuntimeConfig.from_settings(settings),
+    ),
     model_config=AgentModelConfig.from_settings(settings),
 )
 _PENDING_AGENT_PLANS: dict[str, tuple[AgentPlan, AgentIdentityContext]] = {}

@@ -32,6 +32,7 @@ _ROLE_SCOPES: dict[str, frozenset[str]] = {
     "engineer": frozenset(
         {
             "project:read",
+            "github:issue:read",
             "github:issue:create",
             "github:pr:create",
             "worker:job:rerun_dev",
@@ -46,8 +47,14 @@ _ROLE_SCOPES: dict[str, frozenset[str]] = {
             "task:update_own",
             "task:assign",
             "task:delete",
+            "github:issue:read",
             "github:issue:create",
             "github:pr:create",
+            "crm:contact:read",
+            "crm:contact:update",
+            "docuseal:submission:create",
+            "kimai:project_hours:read",
+            "mailbox:create",
             "deploy:request",
             "user:manage",
             "integration:manage",

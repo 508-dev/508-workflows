@@ -15,6 +15,7 @@ from five08.agent import (
     InMemoryTaskStore,
     PolicyEngine,
     ToolManifest,
+    ToolRuntimeConfig,
 )
 from five08.agent.tools import ToolRegistry
 
@@ -545,6 +546,130 @@ def test_linked_user_can_update_task_created_before_linking() -> None:
 
     assert results[0].status == "succeeded"
     assert results[0].result["due_date"] is not None
+
+
+def test_engineer_can_draft_github_issue_write_with_confirmation() -> None:
+    orchestrator = AgentOrchestrator()
+
+    response = orchestrator.plan(
+        "Create GitHub issue in repo 508-dev/508-workflows titled Fix onboarding sync",
+        _context(roles=["Engineer"]),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    action = response.plan.actions[0]
+    assert action.tool_name == "github_issue.create_issue"
+    assert action.arguments == {
+        "title": "Fix onboarding sync",
+        "repository": "508-dev/508-workflows",
+    }
+
+
+def test_member_cannot_create_github_issue() -> None:
+    orchestrator = AgentOrchestrator()
+
+    response = orchestrator.plan(
+        "Create GitHub issue in repo 508-dev/508-workflows titled Fix onboarding sync",
+        _context(roles=["Member"]),
+    )
+
+    assert response.status == "denied"
+    assert "github:issue:create" in response.message
+
+
+def test_admin_can_draft_docuseal_member_agreement_with_confirmation() -> None:
+    orchestrator = AgentOrchestrator()
+
+    response = orchestrator.plan(
+        "Send member agreement to Sarah Example sarah@example.com",
+        _context(roles=["Admin"]),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    action = response.plan.actions[0]
+    assert action.tool_name == "docuseal_write.create_member_agreement_submission"
+    assert action.arguments == {
+        "submitter_email": "sarah@example.com",
+        "submitter_name": "Sarah Example",
+        "send_email": True,
+    }
+
+
+def test_admin_can_search_crm_contacts() -> None:
+    captured: dict[str, object] = {}
+
+    class FakeContact:
+        def to_dict(self) -> dict[str, object]:
+            return {"id": "1", "name": "Sarah Example"}
+
+    class FakeRepository:
+        def search(self, **kwargs: object) -> list[FakeContact]:
+            captured.update(kwargs)
+            return [FakeContact()]
+
+    class FakeRegistry(ToolRegistry):
+        def _crm_repository(self) -> FakeRepository:
+            return FakeRepository()
+
+    orchestrator = AgentOrchestrator(
+        registry=FakeRegistry(
+            runtime_config=ToolRuntimeConfig(
+                espo_base_url="https://crm.example.test",
+                espo_api_key="key",
+            ),
+        )
+    )
+
+    response = orchestrator.plan(
+        "Find contact Sarah Example", _context(roles=["Admin"])
+    )
+
+    assert response.status == "executed"
+    assert captured["name"] == "Sarah Example"
+    assert response.results[0].result["contacts"][0]["name"] == "Sarah Example"
+
+
+def test_github_issue_create_uses_runtime_configured_default_repo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
+
+    def fake_create_issue(
+        self: object,
+        *,
+        repository: str,
+        title: str,
+        body: str | None = None,
+        labels: list[str] | None = None,
+    ) -> dict[str, object]:
+        calls.update(
+            {"repository": repository, "title": title, "body": body, "labels": labels}
+        )
+        return {"number": 42, "html_url": "https://github.example/issue/42"}
+
+    monkeypatch.setattr(
+        "five08.clients.github.GitHubClient.create_issue",
+        fake_create_issue,
+    )
+    registry = ToolRegistry(
+        runtime_config=ToolRuntimeConfig(
+            github_api_token="token",
+            github_default_repo="508-dev/508-workflows",
+        )
+    )
+
+    result = registry.execute(
+        "github_issue.create_issue",
+        {"title": "Fix onboarding sync"},
+        organization_id="org-1",
+        actor_id="123",
+        actor_scopes={"github:issue:create"},
+    )
+
+    assert result["number"] == 42
+    assert calls["repository"] == "508-dev/508-workflows"
 
 
 def test_member_cannot_assign_task_without_assign_scope() -> None:

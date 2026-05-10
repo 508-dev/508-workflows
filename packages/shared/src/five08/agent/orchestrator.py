@@ -244,6 +244,28 @@ class AgentOrchestrator:
             for keyword in ["find task", "search task", "list task", "show task"]
         ):
             return self._parse_search_task(text)
+        if "github issue" in lowered or "gh issue" in lowered:
+            return self._parse_github_issue(text)
+        if any(
+            keyword in lowered
+            for keyword in [
+                "search crm",
+                "find contact",
+                "lookup contact",
+                "find member",
+            ]
+        ):
+            return self._parse_crm_contact_search(text)
+        if "member agreement" in lowered and any(
+            keyword in lowered for keyword in ["send", "create"]
+        ):
+            return self._parse_member_agreement(text)
+        if "kimai" in lowered and "hour" in lowered:
+            return self._parse_kimai_project_hours(text)
+        if "mailbox" in lowered and any(
+            keyword in lowered for keyword in ["create", "provision"]
+        ):
+            return self._parse_mailbox_create(text)
         if "create" in lowered and "task" in lowered:
             return self._parse_create_task(text)
         if any(
@@ -267,6 +289,139 @@ class AgentOrchestrator:
             tool_name="task_read.search_tasks",
             arguments={"query": query, "project": project},
             summary=f"Search tasks matching: {query}",
+        )
+
+    def _parse_github_issue(self, text: str) -> AgentToolAction | None:
+        lowered = text.casefold()
+        if any(keyword in lowered for keyword in ["search", "find", "list", "show"]):
+            query = self._extract_github_issue_query(text)
+            repository = self._extract_repository(text)
+            args = {"query": query, "repository": repository, "state": "open"}
+            return AgentToolAction(
+                tool_name="github_issue.search_issues",
+                arguments={
+                    key: value for key, value in args.items() if value is not None
+                },
+                summary=f"Search GitHub issues matching: {query}",
+            )
+
+        if any(keyword in lowered for keyword in ["create", "open"]):
+            title = self._extract_github_issue_title(text)
+            if not title:
+                return None
+            repository = self._extract_repository(text)
+            body = self._extract_body(text)
+            args = {"title": title, "repository": repository, "body": body}
+            return AgentToolAction(
+                tool_name="github_issue.create_issue",
+                arguments={
+                    key: value for key, value in args.items() if value is not None
+                },
+                summary=f'Create GitHub issue: "{title}"',
+            )
+        return None
+
+    def _parse_crm_contact_search(self, text: str) -> AgentToolAction | None:
+        match = re.search(
+            r"\b(?:search crm(?: contacts)?|find contact|lookup contact|find member)"
+            r"\s+(?:for\s+)?(.+)",
+            text,
+            re.IGNORECASE,
+        )
+        query = _clean_text(match.group(1)) if match else None
+        if not query:
+            return None
+        return AgentToolAction(
+            tool_name="crm_read.search_contacts",
+            arguments={"query": query, "limit": 5},
+            summary=f"Search CRM contacts matching: {query}",
+        )
+
+    def _parse_member_agreement(self, text: str) -> AgentToolAction | None:
+        email_match = re.search(
+            r"\b([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})\b",
+            text,
+            re.IGNORECASE,
+        )
+        if email_match is None:
+            return None
+        before_email = text[: email_match.start()]
+        name_match = re.search(
+            r"\b(?:to|for)\s+([A-Za-z][A-Za-z .'-]{0,80})\s*$",
+            before_email,
+            re.IGNORECASE,
+        )
+        submitter_name = _clean_text(name_match.group(1)) if name_match else None
+        return AgentToolAction(
+            tool_name="docuseal_write.create_member_agreement_submission",
+            arguments={
+                "submitter_email": email_match.group(1),
+                "submitter_name": submitter_name,
+                "send_email": True,
+            },
+            summary=(
+                "Create DocuSeal member agreement submission for "
+                f"{submitter_name or email_match.group(1)}"
+            ),
+        )
+
+    def _parse_kimai_project_hours(self, text: str) -> AgentToolAction | None:
+        match = re.search(
+            r"\b(?:kimai\s+)?(?:project\s+)?hours\s+(?:for|on)\s+project\s+(.+)",
+            text,
+            re.IGNORECASE,
+        )
+        if match is None:
+            return None
+        project = re.split(
+            r"\s+\b(?:in|for|during)\s+\d{4}-\d{2}\b",
+            match.group(1),
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0]
+        project_name = _clean_text(project)
+        if not project_name:
+            return None
+        args: dict[str, str] = {"project": project_name}
+        month_match = re.search(r"\b(20\d{2}-\d{2})\b", text)
+        if month_match:
+            args["begin"] = f"{month_match.group(1)}-01"
+        return AgentToolAction(
+            tool_name="kimai_read.project_hours",
+            arguments=args,
+            summary=f"Read Kimai hours for project {project_name}",
+        )
+
+    def _parse_mailbox_create(self, text: str) -> AgentToolAction | None:
+        email_match = re.search(
+            r"\b([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})\b",
+            text,
+            re.IGNORECASE,
+        )
+        local_match = re.search(
+            r"\bmailbox\s+(?:for\s+)?([A-Za-z0-9._%+-]+)(?:@|\s)",
+            text,
+            re.IGNORECASE,
+        )
+        name_match = re.search(
+            r"\b(?:named|name)\s+([A-Za-z][A-Za-z .'-]{0,80})",
+            text,
+            re.IGNORECASE,
+        )
+        if email_match is None or local_match is None or name_match is None:
+            return None
+        local_part = local_match.group(1).strip().lower()
+        name = _clean_text(name_match.group(1))
+        if not local_part or not name:
+            return None
+        return AgentToolAction(
+            tool_name="mail_write.create_mailbox",
+            arguments={
+                "local_part": local_part,
+                "backup_email": email_match.group(1),
+                "name": name,
+            },
+            summary=f"Create mailbox {local_part} for {name}",
         )
 
     def _parse_create_task(self, text: str) -> AgentToolAction | None:
@@ -502,6 +657,50 @@ class AgentOrchestrator:
         return None
 
     @staticmethod
+    def _extract_repository(text: str) -> str | None:
+        match = re.search(
+            r"\b(?:in|for)\s+(?:repo|repository)\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)",
+            text,
+            re.IGNORECASE,
+        )
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _extract_body(text: str) -> str | None:
+        match = re.search(r"\bwith\s+body\s+(.+)", text, re.IGNORECASE)
+        return _clean_text(match.group(1)) if match else None
+
+    @staticmethod
+    def _extract_github_issue_title(text: str) -> str | None:
+        match = re.search(
+            r"\b(?:create|open)\s+(?:a\s+)?(?:github|gh)\s+issue"
+            r"(?:\s+(?:in|for)\s+(?:repo|repository)\s+[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?"
+            r"(?:\s+(?:titled|for|to)\s+|:\s*)(.+)",
+            text,
+            re.IGNORECASE,
+        )
+        if match is None:
+            return None
+        title = re.split(r"\s+\bwith\s+body\b", match.group(1), maxsplit=1, flags=re.I)[
+            0
+        ]
+        return _clean_text(title)
+
+    @staticmethod
+    def _extract_github_issue_query(text: str) -> str:
+        match = re.search(
+            r"\b(?:search|find|list|show)\s+(?:github|gh)\s+issues?"
+            r"(?:\s+(?:in|for)\s+(?:repo|repository)\s+[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?"
+            r"(?:\s+(?:for|matching|about)\s+)?(.+)?",
+            text,
+            re.IGNORECASE,
+        )
+        if match is None:
+            return ""
+        query = match.group(1) or ""
+        return _clean_text(query) or ""
+
+    @staticmethod
     def _choose_model_tier(text: str, actions: list[AgentToolAction]) -> ModelTier:
         if len(actions) > 1:
             return "strong"
@@ -517,6 +716,13 @@ class AgentOrchestrator:
             "task_read.search_tasks": "search_tasks",
             "task_write.create_task": "create_task",
             "task_write.update_task": "update_task",
+            "github_issue.search_issues": "search_github_issues",
+            "github_issue.create_issue": "create_github_issue",
+            "crm_read.search_contacts": "search_crm_contacts",
+            "crm_write.update_contact": "update_crm_contact",
+            "docuseal_write.create_member_agreement_submission": "send_member_agreement",
+            "kimai_read.project_hours": "read_kimai_project_hours",
+            "mail_write.create_mailbox": "create_mailbox",
         }.get(tool_name, "unknown")
 
     @staticmethod
