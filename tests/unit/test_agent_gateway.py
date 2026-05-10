@@ -464,6 +464,46 @@ def test_admin_can_update_task_created_by_someone_else() -> None:
     assert results[0].result["due_date"] is not None
 
 
+def test_member_cannot_assign_task_without_assign_scope() -> None:
+    task_store = InMemoryTaskStore()
+    task_store.create_task(
+        title="Update onboarding docs",
+        project="Atlas",
+        assignee=None,
+        due_date=None,
+        organization_id="org-1",
+        created_by="123",
+    )
+    orchestrator = AgentOrchestrator(registry=ToolRegistry(task_store))
+
+    response = orchestrator.plan("Assign TASK-001 to Sarah", _context())
+
+    assert response.status == "denied"
+    assert "task:assign" in response.message
+
+
+def test_project_manager_can_assign_task() -> None:
+    task_store = InMemoryTaskStore()
+    task_store.create_task(
+        title="Update onboarding docs",
+        project="Atlas",
+        assignee=None,
+        due_date=None,
+        organization_id="org-1",
+        created_by="123",
+    )
+    orchestrator = AgentOrchestrator(registry=ToolRegistry(task_store))
+    context = _context(roles=["Project Manager"])
+
+    response = orchestrator.plan("Assign TASK-001 to Sarah", context)
+
+    assert response.plan is not None
+    results = orchestrator.execute_plan(response.plan, context, confirmed=True)
+
+    assert results[0].status == "succeeded"
+    assert results[0].result["assignee"] == "Sarah"
+
+
 def test_tool_registry_rejects_malformed_write_arguments() -> None:
     task_store = InMemoryTaskStore()
     registry = ToolRegistry(task_store)
