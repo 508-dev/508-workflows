@@ -1764,7 +1764,7 @@ async def auth_discord_link_redirect_handler(
     if grant is None:
         return JSONResponse({"error": "link_not_found"}, status_code=404)
 
-    _, session = await _current_session(request)
+    session_id, session = await _current_session(request)
     if not settings.discord_link_require_oidc_identity_checks:
         verifier = _discord_admin_verifier_from_app(request.app)
         http_client = _http_client_from_app(request.app)
@@ -1830,10 +1830,11 @@ async def auth_discord_link_redirect_handler(
             )
 
         verifier = _discord_admin_verifier_from_app(request.app)
+        http_client = _http_client_from_app(request.app)
         linked = await verifier.is_admin_email_for_discord_user(
             email=session.email,
             discord_user_id=grant.discord_user_id,
-            http_client=_http_client_from_app(request.app),
+            http_client=http_client,
         )
         if not linked:
             return JSONResponse(
@@ -1844,7 +1845,49 @@ async def auth_discord_link_redirect_handler(
                 status_code=403,
             )
 
+        identity = await verifier.resolve_admin_identity(
+            discord_user_id=grant.discord_user_id,
+            http_client=http_client,
+        )
+        if identity is None:
+            return JSONResponse(
+                {"error": "forbidden", "detail": "discord_user_not_admin"},
+                status_code=403,
+            )
+
+        assert session_id is not None
+        await store.save_session(
+            session_id=session_id,
+            payload=AuthSession(
+                subject=grant.discord_user_id,
+                email=identity.email,
+                display_name=identity.display_name,
+                groups=["discord_admin"],
+                is_admin=True,
+                id_token=session.id_token,
+                expires_at=session.expires_at,
+                actor_provider=ActorProvider.DISCORD.value,
+                crm_contact_id=identity.crm_contact_id,
+            ),
+            ttl_seconds=settings.auth_session_ttl_seconds,
+        )
         await store.delete_discord_link(token)
+        await _write_auth_audit_event(
+            action="auth.login",
+            result=AuditResult.SUCCESS,
+            actor_subject=grant.discord_user_id,
+            actor_display_name=identity.display_name,
+            actor_provider=ActorProvider.DISCORD,
+            metadata={
+                "is_admin": True,
+                "groups": ["discord_admin"],
+                "via_discord_link": True,
+                "discord_link_identity_checks_enforced": True,
+                "upgraded_existing_session": True,
+            },
+            resource_id=session_id,
+            correlation_id=token,
+        )
         return RedirectResponse(url=grant.next_path, status_code=302)
 
     login_query = urlencode({"next": grant.next_path, "discord_link_token": token})

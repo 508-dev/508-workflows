@@ -1225,6 +1225,71 @@ def test_auth_discord_link_redirect_creates_discord_session_when_disabled(
     assert audit_payload.metadata["discord_link_identity_checks_enforced"] is False
 
 
+def test_auth_discord_link_redirect_upgrades_existing_oidc_session(
+    client: TestClient,
+) -> None:
+    store = Mock()
+    store.get_discord_link = AsyncMock(
+        return_value=api.DiscordLinkGrant(
+            discord_user_id="123456789",
+            next_path="/dashboard",
+        )
+    )
+    store.save_session = AsyncMock()
+    store.delete_discord_link = AsyncMock()
+    session = api.AuthSession(
+        subject="authentik-user-1",
+        email="admin@508.dev",
+        display_name="OIDC Admin",
+        groups=["authentik Admins"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+    verifier = Mock()
+    verifier.is_admin_email_for_discord_user = AsyncMock(return_value=True)
+    verifier.resolve_admin_identity = AsyncMock(
+        return_value=Mock(
+            discord_user_id="123456789",
+            crm_contact_id="contact-123",
+            email="admin@508.dev",
+            display_name="Discord Admin",
+        )
+    )
+
+    with (
+        patch("five08.backend.api._auth_store_from_app", return_value=store),
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._discord_admin_verifier_from_app",
+            return_value=verifier,
+        ),
+        patch("five08.backend.api._http_client_from_app", return_value=Mock()),
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
+    ):
+        response = client.get("/auth/discord/link/link-1", follow_redirects=False)
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "/dashboard"
+    store.save_session.assert_awaited_once()
+    saved_session = store.save_session.call_args.kwargs["payload"]
+    assert store.save_session.call_args.kwargs["session_id"] == "session-1"
+    assert saved_session.subject == "123456789"
+    assert saved_session.actor_provider == api.ActorProvider.DISCORD.value
+    assert saved_session.crm_contact_id == "contact-123"
+    assert saved_session.id_token == "id-token-1"
+    store.delete_discord_link.assert_awaited_once_with("link-1")
+    audit_payload = mock_insert.call_args.args[1]
+    assert audit_payload.actor_provider == api.ActorProvider.DISCORD
+    assert audit_payload.actor_subject == "123456789"
+    assert audit_payload.metadata is not None
+    assert audit_payload.metadata["upgraded_existing_session"] is True
+
+
 def test_auth_logout_writes_logout_audit(client: TestClient) -> None:
     store = Mock()
     store.delete_session = AsyncMock()
