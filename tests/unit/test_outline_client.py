@@ -5,7 +5,25 @@ from unittest.mock import Mock, patch
 import pytest
 import requests
 
-from five08.clients.outline import OutlineAPIError, OutlineClient
+from five08.clients.outline import (
+    OutlineAPIError,
+    OutlineClient,
+    normalize_outline_api_base_url,
+)
+
+
+def test_normalize_outline_api_base_url_accepts_root_url() -> None:
+    assert (
+        normalize_outline_api_base_url("https://outline.example.com/")
+        == "https://outline.example.com/api"
+    )
+
+
+def test_normalize_outline_api_base_url_accepts_api_url() -> None:
+    assert (
+        normalize_outline_api_base_url("https://outline.example.com/api/")
+        == "https://outline.example.com/api"
+    )
 
 
 def test_invite_user_posts_outline_rpc_payload() -> None:
@@ -22,7 +40,7 @@ def test_invite_user_posts_outline_rpc_payload() -> None:
     with patch("five08.clients.outline.requests.post", return_value=response) as post:
         result = OutlineClient(
             api_key="outline-key",
-            base_url="https://outline.example.com/api/",
+            base_url="https://outline.example.com/",
             timeout_seconds=7.0,
         ).invite_user(email="jane@508.dev", name="Jane Doe")
 

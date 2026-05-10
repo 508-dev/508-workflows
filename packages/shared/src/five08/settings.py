@@ -55,7 +55,7 @@ class SharedSettings(BaseSettings):
     authentik_api_timeout_seconds: float = 20.0
     authentik_recovery_email_stage_id: str | None = None
     authentik_recovery_email_stage_name: str = "default-recovery-email"
-    outline_api_base_url: str = "https://app.getoutline.com/api"
+    outline_base_url: str = "https://app.getoutline.com"
     outline_api_key: str | None = None
     outline_api_timeout_seconds: float = 20.0
 

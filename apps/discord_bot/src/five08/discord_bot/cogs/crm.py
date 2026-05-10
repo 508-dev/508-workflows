@@ -3608,8 +3608,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             raise ValueError("OUTLINE_API_KEY is not configured.")
 
         base_url = (
-            self._contact_text_value(settings.outline_api_base_url)
-            or "https://app.getoutline.com/api"
+            self._contact_text_value(settings.outline_base_url)
+            or "https://app.getoutline.com"
         )
         return OutlineClient(
             api_key=api_key,
