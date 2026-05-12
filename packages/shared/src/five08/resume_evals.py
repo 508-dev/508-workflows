@@ -120,6 +120,7 @@ def run_resume_eval_suite(
     model: str = "primary",
     include_profile_payload: bool = True,
     max_tokens: int = 2000,
+    timeout_seconds: float | None = None,
 ) -> ResumeEvalReport:
     """Run resume extraction against a local directory of resume files."""
     profile = resolve_eval_model_profile(model)
@@ -139,6 +140,7 @@ def run_resume_eval_suite(
         base_url=profile.live_base_url,
         model=profile.live_model,
         max_tokens=max_tokens,
+        timeout_seconds=timeout_seconds,
     )
     observations = [
         _run_resume_file(
@@ -399,6 +401,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             model=model,
             include_profile_payload=not args.no_profile_payload,
             max_tokens=args.max_tokens,
+            timeout_seconds=args.timeout_seconds,
         )
         write_resume_report(report, output_dir=args.output_dir)
         reports.append(report)

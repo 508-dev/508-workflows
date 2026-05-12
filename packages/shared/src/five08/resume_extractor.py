@@ -1853,6 +1853,7 @@ class ResumeProfileExtractor:
         model: str = "gpt-5-mini",
         max_tokens: int = 2000,
         snippet_chars: int = 12000,
+        timeout_seconds: float | None = None,
     ) -> None:
         self.model = model.strip() if model else "gpt-5-mini"
         if not self.model:
@@ -1863,10 +1864,13 @@ class ResumeProfileExtractor:
         self.client: Any = None
 
         if api_key and OpenAIClient is not None:
-            self.client = OpenAIClient(
-                api_key=api_key,
-                base_url=base_url,
-            )
+            client_kwargs: dict[str, Any] = {
+                "api_key": api_key,
+                "base_url": base_url,
+            }
+            if timeout_seconds is not None:
+                client_kwargs["timeout"] = timeout_seconds
+            self.client = OpenAIClient(**client_kwargs)
 
     @staticmethod
     def _build_extract_messages(
@@ -1926,7 +1930,9 @@ class ResumeProfileExtractor:
         }
         if self._uses_openai_gpt5_chat_params():
             kwargs["max_completion_tokens"] = max_tokens
-            kwargs["reasoning_effort"] = "minimal"
+            kwargs["reasoning_effort"] = (
+                "low" if self.model.casefold().startswith("gpt-5.5") else "minimal"
+            )
             kwargs["verbosity"] = "low"
         else:
             kwargs["temperature"] = temperature
