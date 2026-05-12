@@ -950,6 +950,7 @@ def test_extract_preserves_raw_llm_output_on_fallback() -> None:
         (),
         {"chat": type("Chat", (), {"completions": fake_completions})()},
     )()
+    extractor.model = "fake-model"
 
     with patch.object(extractor, "_split_name_with_llm", return_value=None):
         result = extractor.extract("Jane Doe\nSoftware Engineer\nBerlin, Germany")
@@ -961,6 +962,55 @@ def test_extract_preserves_raw_llm_output_on_fallback() -> None:
     assert result.raw_llm_json is None
     assert result.llm_fallback_reason is not None
     assert "JSONDecodeError" in result.llm_fallback_reason
+
+
+def test_extract_uses_gpt5_chat_completion_token_parameter() -> None:
+    """Direct GPT-5 requests should use the chat-completions token parameter it supports."""
+
+    response = type(
+        "Response",
+        (),
+        {
+            "choices": [
+                type(
+                    "Choice",
+                    (),
+                    {
+                        "finish_reason": "stop",
+                        "message": type(
+                            "Message",
+                            (),
+                            {
+                                "content": (
+                                    '{"name":"Jane Doe","firstName":"Jane",'
+                                    '"lastName":"Doe","email":"jane@example.com"}'
+                                )
+                            },
+                        )(),
+                    },
+                )()
+            ]
+        },
+    )()
+    fake_completions = Mock()
+    fake_completions.create.return_value = response
+    extractor = ResumeProfileExtractor(api_key="test-key", max_tokens=40)
+    extractor.client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": fake_completions})()},
+    )()
+
+    with patch.object(extractor, "_split_name_with_llm", return_value=("Jane", "Doe")):
+        result = extractor.extract("Jane Doe\nSoftware Engineer")
+
+    kwargs = fake_completions.create.call_args.kwargs
+    assert kwargs["max_completion_tokens"] == 40
+    assert "max_tokens" not in kwargs
+    assert "temperature" not in kwargs
+    assert kwargs["reasoning_effort"] == "minimal"
+    assert kwargs["verbosity"] == "low"
+    assert result.email == "jane@example.com"
 
 
 def test_extract_repairs_json_with_comments_trailing_commas_and_prose() -> None:
@@ -1323,10 +1373,7 @@ def test_extract_retries_length_response_twice_before_succeeding() -> None:
     assert fake_completions.create.call_args_list[0].kwargs["max_tokens"] == 40
     assert fake_completions.create.call_args_list[1].kwargs["max_tokens"] == 80
     assert fake_completions.create.call_args_list[2].kwargs["max_tokens"] == 160
-    assert fake_completions.create.call_args_list[0].kwargs["reasoning_effort"] == (
-        "minimal"
-    )
-    assert fake_completions.create.call_args_list[0].kwargs["verbosity"] == "low"
+    assert fake_completions.create.call_args_list[0].kwargs["temperature"] == 0.1
     assert result.first_name == "Jane"
     assert result.last_name == "Doe"
     assert result.llm_fallback_reason is None
@@ -1481,6 +1528,7 @@ def test_extract_uses_structured_output_parse_when_supported() -> None:
         },
     )()
     extractor.model = "fake-model"
+    extractor.model = "fake-model"
 
     result = extractor.extract("Jane Doe\nSenior Software Engineer\nBerlin, Germany")
 
@@ -1559,6 +1607,7 @@ def test_extract_retries_once_on_structured_validation_failure() -> None:
             )()
         },
     )()
+    extractor.model = "fake-model"
 
     result = extractor.extract("Jane Doe\nSoftware Engineer")
 
@@ -1707,6 +1756,7 @@ def test_extract_falls_back_to_json_object_when_structured_api_errors() -> None:
             )(),
         },
     )()
+    extractor.model = "fake-model"
 
     result = extractor.extract("Jane Doe\nSoftware Engineer")
 

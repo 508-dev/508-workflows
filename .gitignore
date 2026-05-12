@@ -60,6 +60,8 @@ logs/
 htmlcov/
 .tox/
 tests/evals/discord-agent/reports/
+tests/evals/resume-extraction/reports/
+resumes/
 
 # Database files (if any are added later)
 *.db

@@ -1857,6 +1857,7 @@ class ResumeProfileExtractor:
         self.model = model.strip() if model else "gpt-5-mini"
         if not self.model:
             self.model = "gpt-5-mini"
+        self.base_url = (base_url or "").strip()
         self.max_tokens = max(1, max_tokens)
         self.snippet_chars = max(1000, snippet_chars)
         self.client: Any = None
@@ -1919,14 +1920,23 @@ class ResumeProfileExtractor:
         temperature: float,
         max_tokens: int,
     ) -> dict[str, Any]:
-        return {
+        kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "reasoning_effort": "minimal",
-            "verbosity": "low",
         }
+        if self._uses_openai_gpt5_chat_params():
+            kwargs["max_completion_tokens"] = max_tokens
+            kwargs["reasoning_effort"] = "minimal"
+            kwargs["verbosity"] = "low"
+        else:
+            kwargs["temperature"] = temperature
+            kwargs["max_tokens"] = max_tokens
+        return kwargs
+
+    def _uses_openai_gpt5_chat_params(self) -> bool:
+        base_url = self.base_url.casefold()
+        uses_openai_api = not base_url or "api.openai.com" in base_url
+        return uses_openai_api and self.model.casefold().startswith("gpt-5")
 
     def _next_length_retry_max_tokens(self, current_max_tokens: int) -> int:
         return max(self.max_tokens * 2, current_max_tokens * 2)
