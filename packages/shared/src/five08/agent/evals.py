@@ -3,22 +3,69 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
-from copy import deepcopy
+import time
 from collections.abc import Iterable, Sequence
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
+from uuid import uuid4
 
-from pydantic import BaseModel, Field
+import requests
+from pydantic import BaseModel, Field, ValidationError
 
-from five08.agent.models import AgentIdentityContext, AgentResponse
+from five08.agent.models import (
+    AgentIdentityContext,
+    AgentModelSelection,
+    AgentPlan,
+    AgentResponse,
+    AgentToolAction,
+    ModelTier,
+)
 from five08.agent.model_routing import AgentModelConfig, AgentTierModelConfig
 from five08.agent.orchestrator import AgentOrchestrator
 from five08.agent.tools import InMemoryTaskStore, ToolRegistry, ToolRuntimeConfig
+from five08.tls import default_ca_bundle_path
 
 EvalSuite = Literal["canonical", "weekly"]
 EvalStatus = Literal["passed", "failed", "known_failure"]
+EvalMode = Literal["deterministic", "live_planner"]
+LiveProvider = Literal["openai_compatible", "anthropic"]
+
+_LIVE_PLANNER_SYSTEM_PROMPT = """You are the planner for a Discord operations agent.
+Return only valid JSON. Do not include markdown.
+
+Draft tool calls only. Do not authorize, execute, or decide permissions.
+The backend will run deterministic policy checks and require confirmation for writes.
+
+Output schema:
+{
+  "status": "planned" | "needs_clarification",
+  "intent": "short_snake_case_or_null",
+  "clarification_question": "question or null",
+  "actions": [
+    {"tool_name": "name", "arguments": {}, "summary": "brief user-facing summary"}
+  ]
+}
+
+Available tools and arguments:
+- task_read.search_tasks: query string, project string. Requires an explicit project.
+- task_write.create_task: title string, optional assignee, project, due_date YYYY-MM-DD.
+- task_write.update_task: task_id, optional title, project, assignee, due_date, status.
+- github_issue.search_issues: query string, repository owner/name, state open.
+- github_issue.create_issue: title string, repository owner/name, optional body.
+- crm_read.search_contacts: query string, limit number.
+- crm_write.update_contact: contact_id string, updates object. Onboarding state field is cOnboardingState.
+- docuseal_write.create_member_agreement_submission: submitter_email, submitter_name, send_email true.
+- kimai_read.project_hours: project string, optional begin YYYY-MM-DD, optional end YYYY-MM-DDTHH:MM:SS.
+- mail_write.create_mailbox: local_part, backup_email, name.
+
+If a task search lacks a project, return needs_clarification with "Which project should I search?"
+For writes, still return the intended write action; confirmation is handled by policy.
+For permission-sensitive requests, still return the intended action; policy handles denial.
+"""
 
 
 class AgentEvalSuiteConfig(BaseModel):
@@ -178,6 +225,10 @@ class AgentEvalObserved(BaseModel):
     intent: str | None = None
     model_tier: str | None = None
     model: dict[str, Any] | None = None
+    latency_ms: int | None = None
+    parse_success: bool | None = None
+    parse_error: str | None = None
+    raw_model_output: str | None = None
     requires_confirmation: bool | None = None
     actions: list[AgentEvalObservedAction] = Field(default_factory=list)
     results: list[AgentEvalObservedResult] = Field(default_factory=list)
@@ -207,10 +258,12 @@ class AgentEvalReport(BaseModel):
     """Top-level eval report."""
 
     version: Literal["discord-agent-observed.v1"] = "discord-agent-observed.v1"
+    mode: EvalMode = "deterministic"
     generated_at: str
     suite: EvalSuite
     model: str
     summary: dict[str, int]
+    metrics: dict[str, Any] = Field(default_factory=dict)
     scenarios: list[AgentEvalScenarioResult]
 
 
@@ -221,7 +274,70 @@ class AgentEvalModelProfile(BaseModel):
     label: str
     configured: bool
     notes: str | None = None
+    live_provider: LiveProvider = "openai_compatible"
+    live_model: str | None = None
+    live_base_url: str | None = None
+    live_api_key: str | None = Field(default=None, exclude=True)
     agent_model_config: AgentModelConfig
+
+
+class LivePlannerActionDraft(BaseModel):
+    """One tool action drafted by a live model."""
+
+    tool_name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    summary: str | None = None
+
+
+class LivePlannerDraft(BaseModel):
+    """Structured planner output requested from live models."""
+
+    status: Literal["planned", "needs_clarification"]
+    intent: str | None = None
+    clarification_question: str | None = None
+    actions: list[LivePlannerActionDraft] = Field(default_factory=list)
+
+
+class LivePlannerCallResult(BaseModel):
+    """Raw live-model planner call result."""
+
+    draft: LivePlannerDraft | None = None
+    raw_output: str | None = None
+    latency_ms: int
+    parse_success: bool
+    error: str | None = None
+
+
+class _EvalToolRegistry(ToolRegistry):
+    """Tool registry with deterministic fixture payloads for external tools."""
+
+    def __init__(
+        self,
+        *args: Any,
+        stub_results: dict[str, dict[str, Any]] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._stub_results = stub_results or {}
+
+    def execute(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        organization_id: str | None,
+        actor_id: str | None,
+        actor_scopes: set[str] | None = None,
+    ) -> dict[str, Any]:
+        if tool_name in self._stub_results:
+            return deepcopy(self._stub_results[tool_name])
+        return super().execute(
+            tool_name,
+            arguments,
+            organization_id=organization_id,
+            actor_id=actor_id,
+            actor_scopes=actor_scopes,
+        )
 
 
 def default_eval_root() -> Path:
@@ -301,6 +417,67 @@ def run_eval_suite(
     )
 
 
+def run_live_planner_eval_suite(
+    *,
+    eval_root: Path | None = None,
+    suite: EvalSuite = "weekly",
+    model: str = "primary",
+    ids: Iterable[str] | None = None,
+    tags: Iterable[str] | None = None,
+    timeout_seconds: float = 45.0,
+) -> AgentEvalReport:
+    """Run fixtures through a live model planner and deterministic policy/tools."""
+    fixtures = load_fixtures(eval_root=eval_root, suite=suite, ids=ids, tags=tags)
+    profile = resolve_eval_model_profile(model)
+    if not profile.configured:
+        raise RuntimeError(f"Eval profile {model} is missing credentials")
+    scenario_results = [
+        run_fixture_with_live_planner(
+            fixture=fixture,
+            profile=profile,
+            timeout_seconds=timeout_seconds,
+        )
+        for fixture in fixtures
+    ]
+    passed = sum(1 for result in scenario_results if result.status == "passed")
+    failed = sum(1 for result in scenario_results if result.status == "failed")
+    known_failures = sum(
+        1 for result in scenario_results if result.status == "known_failure"
+    )
+    parse_successes = sum(
+        1 for result in scenario_results if result.observed.parse_success is True
+    )
+    latencies = [
+        result.observed.latency_ms
+        for result in scenario_results
+        if result.observed.latency_ms is not None
+    ]
+    return AgentEvalReport(
+        mode="live_planner",
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        suite=suite,
+        model=model,
+        summary={
+            "scenarios": len(scenario_results),
+            "passed": passed,
+            "failed": failed,
+            "known_failures": known_failures,
+        },
+        metrics={
+            "parse_successes": parse_successes,
+            "parse_failures": len(scenario_results) - parse_successes,
+            "parse_success_rate": _rate(parse_successes, len(scenario_results)),
+            "bad_plans": failed,
+            "bad_plan_rate": _rate(failed, len(scenario_results)),
+            "avg_latency_ms": round(sum(latencies) / len(latencies), 1)
+            if latencies
+            else None,
+            "max_latency_ms": max(latencies) if latencies else None,
+        },
+        scenarios=scenario_results,
+    )
+
+
 def run_fixture(
     *, fixture: AgentEvalFixture, model: str = "primary"
 ) -> AgentEvalScenarioResult:
@@ -317,36 +494,6 @@ def run_fixture_with_profile(
     model_config: AgentModelConfig,
 ) -> AgentEvalScenarioResult:
     """Run one fixture with an already resolved model profile."""
-
-    class EvalToolRegistry(ToolRegistry):
-        def __init__(
-            self,
-            *args: Any,
-            stub_results: dict[str, dict[str, Any]] | None = None,
-            **kwargs: Any,
-        ) -> None:
-            super().__init__(*args, **kwargs)
-            self._stub_results = stub_results or {}
-
-        def execute(
-            self,
-            tool_name: str,
-            arguments: dict[str, Any],
-            *,
-            organization_id: str | None,
-            actor_id: str | None,
-            actor_scopes: set[str] | None = None,
-        ) -> dict[str, Any]:
-            if tool_name in self._stub_results:
-                return deepcopy(self._stub_results[tool_name])
-            return super().execute(
-                tool_name,
-                arguments,
-                organization_id=organization_id,
-                actor_id=actor_id,
-                actor_scopes=actor_scopes,
-            )
-
     task_store = InMemoryTaskStore()
     context = fixture.context.to_identity_context()
     for task in fixture.seed.tasks:
@@ -361,7 +508,7 @@ def run_fixture_with_profile(
 
     runtime_config = ToolRuntimeConfig(**fixture.runtime_config)
     orchestrator = AgentOrchestrator(
-        registry=EvalToolRegistry(
+        registry=_EvalToolRegistry(
             task_store=task_store,
             runtime_config=runtime_config,
             stub_results=fixture.stub_results,
@@ -376,6 +523,86 @@ def run_fixture_with_profile(
         response=response,
     )
     checks = evaluate_observed(fixture.expect, observed)
+    passed = all(check.passed for check in checks)
+    status: EvalStatus
+    if passed:
+        status = "passed"
+    elif fixture.known_failure is not None:
+        status = "known_failure"
+    else:
+        status = "failed"
+    return AgentEvalScenarioResult(
+        id=observed.id,
+        fixture_id=fixture.id,
+        status=status,
+        known_failure=fixture.known_failure,
+        checks=checks,
+        observed=observed,
+    )
+
+
+def run_fixture_with_live_planner(
+    *,
+    fixture: AgentEvalFixture,
+    profile: AgentEvalModelProfile,
+    timeout_seconds: float,
+) -> AgentEvalScenarioResult:
+    """Run one fixture by asking a live model to draft the tool plan."""
+    task_store = InMemoryTaskStore()
+    context = fixture.context.to_identity_context()
+    for task in fixture.seed.tasks:
+        task_store.create_task(
+            title=task.title,
+            project=task.project,
+            assignee=task.assignee,
+            due_date=task.due_date,
+            organization_id=task.organization_id or context.organization_id,
+            created_by=task.created_by or context.discord_user_id,
+        )
+
+    runtime_config = ToolRuntimeConfig(**fixture.runtime_config)
+    orchestrator = AgentOrchestrator(
+        registry=_EvalToolRegistry(
+            task_store=task_store,
+            runtime_config=runtime_config,
+            stub_results=fixture.stub_results,
+        ),
+        model_config=profile.agent_model_config,
+    )
+    message = fixture.request.current_message()
+    call = _call_live_planner(
+        profile=profile,
+        fixture=fixture,
+        message=message,
+        timeout_seconds=timeout_seconds,
+    )
+    response = _response_from_live_draft(
+        orchestrator=orchestrator,
+        draft=call.draft,
+        message=message,
+        context=context,
+        profile=profile,
+        parse_error=call.error,
+    )
+    observed = observe_response(
+        fixture=fixture,
+        message=message,
+        response=response,
+        latency_ms=call.latency_ms,
+        parse_success=call.parse_success,
+        parse_error=call.error,
+        raw_model_output=call.raw_output,
+    )
+    checks = evaluate_observed(fixture.expect, observed)
+    if not call.parse_success:
+        checks.append(
+            AgentEvalCheck(
+                name="live_planner.parse_success",
+                passed=False,
+                expected=True,
+                observed=call.error,
+            )
+        )
     passed = all(check.passed for check in checks)
     status: EvalStatus
     if passed:
@@ -419,6 +646,9 @@ def resolve_eval_model_profile(profile_id: str) -> AgentEvalModelProfile:
             label="Primary OpenAI-compatible profile",
             configured=bool(api_key),
             notes="Uses OPENAI_API_KEY_DIRECT only; OPENAI_API_KEY may route through Bifrost.",
+            live_model=model,
+            live_base_url="https://api.openai.com/v1",
+            live_api_key=api_key,
             agent_model_config=AgentModelConfig(
                 openai_model=model,
                 openai_base_url="https://api.openai.com/v1",
@@ -433,6 +663,9 @@ def resolve_eval_model_profile(profile_id: str) -> AgentEvalModelProfile:
             label="OpenAI direct",
             configured=bool(api_key),
             notes="Uses OPENAI_API_KEY_DIRECT only.",
+            live_model=model,
+            live_base_url="https://api.openai.com/v1",
+            live_api_key=api_key,
             agent_model_config=AgentModelConfig(
                 openai_model=model,
                 openai_base_url="https://api.openai.com/v1",
@@ -454,6 +687,9 @@ def resolve_eval_model_profile(profile_id: str) -> AgentEvalModelProfile:
             label="Fireworks Kimi",
             configured=bool(api_key),
             notes="Uses FIREWORKS_API_KEY and an OpenAI-compatible Fireworks endpoint.",
+            live_model=model,
+            live_base_url="https://api.fireworks.ai/inference/v1",
+            live_api_key=api_key,
             agent_model_config=AgentModelConfig(
                 fast=tier,
                 strong=tier,
@@ -473,6 +709,9 @@ def resolve_eval_model_profile(profile_id: str) -> AgentEvalModelProfile:
             label="OpenRouter",
             configured=bool(api_key),
             notes="Uses OPENROUTER_API_KEY and an OpenAI-compatible OpenRouter endpoint.",
+            live_model=model,
+            live_base_url="https://openrouter.ai/api/v1",
+            live_api_key=api_key,
             agent_model_config=AgentModelConfig(
                 fast=tier,
                 strong=tier,
@@ -480,17 +719,291 @@ def resolve_eval_model_profile(profile_id: str) -> AgentEvalModelProfile:
             ),
         )
     if normalized == "anthropic":
+        api_key = _env("ANTHROPIC_API_KEY")
+        model = _env("AGENT_EVAL_ANTHROPIC_MODEL") or "claude-3-5-sonnet-latest"
         return AgentEvalModelProfile(
             id="anthropic",
             label="Anthropic",
-            configured=bool(_env("ANTHROPIC_API_KEY")),
+            configured=bool(api_key),
             notes=(
-                "Reserved for a future Anthropic adapter; the current agent model "
-                "router only supports OpenAI-compatible base URLs."
+                "Uses ANTHROPIC_API_KEY through the native Messages API for live planner evals."
             ),
+            live_provider="anthropic",
+            live_model=model,
+            live_base_url="https://api.anthropic.com/v1",
+            live_api_key=api_key,
             agent_model_config=AgentModelConfig(),
         )
     raise ValueError(f"Unknown eval model profile: {profile_id}")
+
+
+def _call_live_planner(
+    *,
+    profile: AgentEvalModelProfile,
+    fixture: AgentEvalFixture,
+    message: str,
+    timeout_seconds: float,
+) -> LivePlannerCallResult:
+    started = time.perf_counter()
+    try:
+        if profile.live_provider == "anthropic":
+            raw_output = _call_anthropic_live_planner(
+                profile=profile,
+                fixture=fixture,
+                message=message,
+                timeout_seconds=timeout_seconds,
+            )
+        else:
+            raw_output = _call_openai_compatible_live_planner(
+                profile=profile,
+                fixture=fixture,
+                message=message,
+                timeout_seconds=timeout_seconds,
+            )
+        draft = _parse_live_planner_json(raw_output)
+        return LivePlannerCallResult(
+            draft=draft,
+            raw_output=raw_output,
+            latency_ms=_elapsed_ms(started),
+            parse_success=True,
+        )
+    except Exception as exc:
+        return LivePlannerCallResult(
+            raw_output=None,
+            latency_ms=_elapsed_ms(started),
+            parse_success=False,
+            error=str(exc),
+        )
+
+
+def _call_openai_compatible_live_planner(
+    *,
+    profile: AgentEvalModelProfile,
+    fixture: AgentEvalFixture,
+    message: str,
+    timeout_seconds: float,
+) -> str:
+    if not profile.live_api_key or not profile.live_model or not profile.live_base_url:
+        raise RuntimeError(f"Profile {profile.id} is not configured for live evals")
+    payload: dict[str, Any] = {
+        "model": profile.live_model,
+        "messages": [
+            {"role": "system", "content": _LIVE_PLANNER_SYSTEM_PROMPT},
+            {"role": "user", "content": _live_planner_user_prompt(fixture, message)},
+        ],
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+    }
+    response = requests.post(
+        f"{profile.live_base_url.rstrip('/')}/chat/completions",
+        headers={
+            "Authorization": f"Bearer {profile.live_api_key}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=timeout_seconds,
+        verify=default_ca_bundle_path(),
+    )
+    if response.status_code >= 400 and "response_format" in payload:
+        payload.pop("response_format", None)
+        response = requests.post(
+            f"{profile.live_base_url.rstrip('/')}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {profile.live_api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=timeout_seconds,
+            verify=default_ca_bundle_path(),
+        )
+    response.raise_for_status()
+    data = response.json()
+    return str(data["choices"][0]["message"]["content"])
+
+
+def _call_anthropic_live_planner(
+    *,
+    profile: AgentEvalModelProfile,
+    fixture: AgentEvalFixture,
+    message: str,
+    timeout_seconds: float,
+) -> str:
+    if not profile.live_api_key or not profile.live_model:
+        raise RuntimeError(f"Profile {profile.id} is not configured for live evals")
+    response = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key": profile.live_api_key,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": profile.live_model,
+            "max_tokens": 1200,
+            "temperature": 0,
+            "system": _LIVE_PLANNER_SYSTEM_PROMPT,
+            "messages": [
+                {"role": "user", "content": _live_planner_user_prompt(fixture, message)}
+            ],
+        },
+        timeout=timeout_seconds,
+        verify=default_ca_bundle_path(),
+    )
+    response.raise_for_status()
+    data = response.json()
+    parts = [
+        block.get("text", "")
+        for block in data.get("content", [])
+        if isinstance(block, dict) and block.get("type") == "text"
+    ]
+    return "\n".join(parts)
+
+
+def _live_planner_user_prompt(fixture: AgentEvalFixture, message: str) -> str:
+    return json.dumps(
+        {
+            "scenario_id": fixture.id,
+            "message": message,
+            "thread": [item.model_dump() for item in fixture.request.thread],
+            "context": fixture.context.model_dump(),
+        },
+        indent=2,
+        sort_keys=True,
+    )
+
+
+def _parse_live_planner_json(raw_output: str) -> LivePlannerDraft:
+    try:
+        payload = json.loads(raw_output)
+    except json.JSONDecodeError:
+        start = raw_output.find("{")
+        end = raw_output.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        payload = json.loads(raw_output[start : end + 1])
+    try:
+        return LivePlannerDraft.model_validate(payload)
+    except ValidationError:
+        normalized = dict(payload)
+        status = str(normalized.get("status") or "").strip().lower()
+        if status in {"clarify", "clarification", "needs clarification"}:
+            normalized["status"] = "needs_clarification"
+        if status in {"plan", "planned", "ok"}:
+            normalized["status"] = "planned"
+        return LivePlannerDraft.model_validate(normalized)
+
+
+def _response_from_live_draft(
+    *,
+    orchestrator: AgentOrchestrator,
+    draft: LivePlannerDraft | None,
+    message: str,
+    context: AgentIdentityContext,
+    profile: AgentEvalModelProfile,
+    parse_error: str | None,
+) -> AgentResponse:
+    if draft is None:
+        return AgentResponse(
+            status="failed",
+            message=f"Live planner failed: {parse_error or 'unknown error'}",
+        )
+    if draft.status == "needs_clarification" or not draft.actions:
+        question = draft.clarification_question or "What should I do next?"
+        return AgentResponse(
+            status="needs_clarification",
+            message=question,
+            clarification_question=question,
+        )
+
+    actions = [
+        AgentToolAction(
+            tool_name=action.tool_name,
+            arguments=action.arguments,
+            summary=action.summary or f"Call {action.tool_name}",
+        )
+        for action in draft.actions
+    ]
+    for action in actions:
+        manifest = orchestrator.registry.get(action.tool_name)
+        if manifest is None:
+            continue
+        action.risk = manifest.risk
+        action.requires_confirmation = manifest.requires_confirmation
+        action.required_scopes = orchestrator.policy.required_scopes_for_action(
+            manifest=manifest,
+            action=action,
+        )
+
+    model_tier = orchestrator._choose_model_tier(message, actions)
+    model_selection = _live_model_selection(profile=profile, tier=model_tier)
+    for action in actions:
+        manifest = orchestrator.registry.get(action.tool_name)
+        decision = orchestrator.policy.authorize(
+            context=context,
+            manifest=manifest,
+            action=action,
+        )
+        if not decision.allowed:
+            action.requires_confirmation = False
+            plan = AgentPlan(
+                plan_id=f"eval-{uuid4().hex}",
+                intent=draft.intent or orchestrator._intent_for_tool(action.tool_name),
+                planner="live_model",
+                model_tier=model_tier,
+                model=model_selection,
+                actions=actions,
+                human_summary=orchestrator._human_summary(actions),
+                requires_confirmation=False,
+            )
+            return AgentResponse(status="denied", plan=plan, message=decision.reason)
+
+    requires_confirmation = any(action.requires_confirmation for action in actions)
+    plan = AgentPlan(
+        plan_id=f"eval-{uuid4().hex}",
+        intent=draft.intent or orchestrator._intent_for_tool(actions[0].tool_name),
+        planner="live_model",
+        model_tier=model_tier,
+        model=model_selection,
+        actions=actions,
+        human_summary=orchestrator._human_summary(actions),
+        requires_confirmation=requires_confirmation,
+    )
+    if requires_confirmation:
+        return AgentResponse(
+            status="requires_confirmation",
+            plan=plan,
+            message="This action needs confirmation before execution.",
+        )
+
+    results = orchestrator.execute_plan(plan, context)
+    if all(result.status == "succeeded" for result in results):
+        return AgentResponse(
+            status="executed",
+            plan=plan,
+            results=results,
+            message=orchestrator._execution_message(results),
+        )
+    return AgentResponse(
+        status="failed",
+        plan=plan,
+        results=results,
+        message=orchestrator._execution_message(results),
+    )
+
+
+def _live_model_selection(
+    *,
+    profile: AgentEvalModelProfile,
+    tier: ModelTier,
+) -> AgentModelSelection:
+    return AgentModelSelection(
+        tier=tier,
+        model=profile.live_model or profile.id,
+        base_url=profile.live_base_url,
+        source_tier=tier,
+        fallback_used=False,
+        api_key_configured=profile.configured,
+    )
 
 
 def observe_response(
@@ -498,6 +1011,10 @@ def observe_response(
     fixture: AgentEvalFixture,
     message: str,
     response: AgentResponse,
+    latency_ms: int | None = None,
+    parse_success: bool | None = None,
+    parse_error: str | None = None,
+    raw_model_output: str | None = None,
 ) -> AgentEvalObserved:
     """Normalize an AgentResponse into an eval observation."""
     plan = response.plan
@@ -513,6 +1030,10 @@ def observe_response(
         intent=plan.intent if plan is not None else None,
         model_tier=plan.model_tier if plan is not None else None,
         model=plan.model.model_dump(mode="json") if plan is not None else None,
+        latency_ms=latency_ms,
+        parse_success=parse_success,
+        parse_error=parse_error,
+        raw_model_output=raw_model_output,
         requires_confirmation=(
             plan.requires_confirmation if plan is not None else None
         ),
@@ -654,7 +1175,11 @@ def _check_optional(name: str, expected: Any, observed: Any) -> AgentEvalCheck:
 def write_report(report: AgentEvalReport, *, output_dir: Path) -> None:
     """Write JSON and Markdown reports for local and CI use."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"{report.suite}.{report.model}"
+    stem = (
+        f"{report.suite}.{report.model}"
+        if report.mode == "deterministic"
+        else f"{report.mode}.{report.suite}.{report.model}"
+    )
     (output_dir / f"observed.{stem}.json").write_text(
         report.model_dump_json(indent=2) + "\n"
     )
@@ -666,14 +1191,29 @@ def render_markdown_report(report: AgentEvalReport) -> str:
     lines = [
         f"# Discord Agent Eval: {report.suite} / {report.model}",
         "",
+        f"- Mode: {report.mode}",
         f"- Scenarios: {report.summary['scenarios']}",
         f"- Passed: {report.summary['passed']}",
         f"- Failed: {report.summary['failed']}",
         f"- Known failures: {report.summary['known_failures']}",
-        "",
-        "| Scenario | Status | Failed checks |",
-        "| --- | --- | --- |",
     ]
+    if report.metrics:
+        for key in [
+            "parse_success_rate",
+            "parse_failures",
+            "bad_plan_rate",
+            "avg_latency_ms",
+            "max_latency_ms",
+        ]:
+            if key in report.metrics:
+                lines.append(f"- {key}: {report.metrics[key]}")
+    lines.extend(
+        [
+            "",
+            "| Scenario | Status | Failed checks | Latency ms | Parse |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+    )
     for scenario in report.scenarios:
         failed_checks = [check.name for check in scenario.checks if not check.passed]
         lines.append(
@@ -683,6 +1223,10 @@ def render_markdown_report(report: AgentEvalReport) -> str:
                     scenario.fixture_id,
                     scenario.status,
                     ", ".join(failed_checks) if failed_checks else "-",
+                    str(scenario.observed.latency_ms or "-"),
+                    str(scenario.observed.parse_success)
+                    if scenario.observed.parse_success is not None
+                    else "-",
                 ]
             )
             + " |"
@@ -696,6 +1240,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suite", choices=["canonical", "weekly"], default="canonical")
     parser.add_argument("--model", "--profile", dest="model", default="primary")
+    parser.add_argument(
+        "--live-planner",
+        action="store_true",
+        help="Call the configured provider to draft structured plans.",
+    )
+    parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=45.0,
+        help="Per-scenario live planner provider timeout.",
+    )
     parser.add_argument("--scenarios", default="")
     parser.add_argument("--tags", default="")
     parser.add_argument("--eval-root", type=Path, default=default_eval_root())
@@ -717,27 +1272,70 @@ def main(argv: Sequence[str] | None = None) -> int:
         for profile in list_eval_model_profiles():
             status = "configured" if profile.configured else "missing credentials"
             print(f"{profile.id}\t{status}\t{profile.label}")
+            if profile.live_model:
+                print(f"  model: {profile.live_model}")
             if profile.notes:
                 print(f"  {profile.notes}")
         return 0
 
-    report = run_eval_suite(
-        eval_root=args.eval_root,
-        suite=args.suite,
-        model=args.model,
-        ids=_split_csv(args.scenarios),
-        tags=_split_csv(args.tags),
+    requested_models = _resolve_requested_models(
+        args.model, live_only=args.live_planner
     )
-    write_report(report, output_dir=args.output_dir)
+    if not requested_models:
+        print("No configured live planner profiles found.")
+        return 2
+
+    reports: list[AgentEvalReport] = []
+    for model in requested_models:
+        if args.live_planner:
+            report = run_live_planner_eval_suite(
+                eval_root=args.eval_root,
+                suite=args.suite,
+                model=model,
+                ids=_split_csv(args.scenarios),
+                tags=_split_csv(args.tags),
+                timeout_seconds=args.timeout_seconds,
+            )
+        else:
+            report = run_eval_suite(
+                eval_root=args.eval_root,
+                suite=args.suite,
+                model=model,
+                ids=_split_csv(args.scenarios),
+                tags=_split_csv(args.tags),
+            )
+        write_report(report, output_dir=args.output_dir)
+        reports.append(report)
+
     if args.json:
-        print(report.model_dump_json(indent=2))
+        if len(reports) == 1:
+            print(reports[0].model_dump_json(indent=2))
+        else:
+            print(
+                json.dumps(
+                    [report.model_dump(mode="json") for report in reports], indent=2
+                )
+            )
     else:
-        print(render_markdown_report(report))
-    return 1 if report.summary["failed"] else 0
+        for index, report in enumerate(reports):
+            if index:
+                print()
+            print(render_markdown_report(report))
+    return 1 if any(report.summary["failed"] for report in reports) else 0
 
 
 def _split_csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _resolve_requested_models(value: str, *, live_only: bool = False) -> list[str]:
+    requested = _split_csv(value)
+    if requested and requested != ["all"]:
+        return requested
+    profiles = list_eval_model_profiles()
+    if live_only:
+        return [profile.id for profile in profiles if profile.configured]
+    return [profile.id for profile in profiles]
 
 
 def load_env_file(path: Path) -> None:
@@ -764,6 +1362,16 @@ def _env(name: str) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def _elapsed_ms(started: float) -> int:
+    return round((time.perf_counter() - started) * 1000)
+
+
+def _rate(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 0.0
+    return round(numerator / denominator, 4)
 
 
 if __name__ == "__main__":  # pragma: no cover

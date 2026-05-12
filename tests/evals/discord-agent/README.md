@@ -28,6 +28,7 @@ uv run python scripts/agent_eval.py --suite weekly --profile primary
 uv run python scripts/agent_eval.py --list-profiles
 uv run python scripts/agent_eval.py --suite canonical --scenarios create_task_confirmation_001 --json
 uv run agent-eval --suite canonical --profile fireworks-kimi
+uv run agent-eval --suite weekly --live-planner --profile all
 ```
 
 Reports are written to `tests/evals/discord-agent/reports/`.
@@ -37,10 +38,11 @@ another file.
 
 ## Model Profiles
 
-The deterministic eval runner does not let a model authorize or execute tools;
-it only swaps the model-routing metadata used by the planner contract. This is
-enough to compare tier routing and provider configuration while keeping policy
-and tools deterministic.
+By default the eval runner is deterministic: it does not let a model authorize
+or execute tools, and it only swaps the model-routing metadata used by the
+planner contract. Use `--live-planner` to call the configured provider for a
+structured tool-call draft, then score that draft through the deterministic
+policy and tool layer.
 
 Built-in profiles:
 
@@ -48,14 +50,14 @@ Built-in profiles:
 - `openai-direct`: `OPENAI_API_KEY_DIRECT`
 - `fireworks-kimi`: `FIREWORKS_API_KEY`, default model `accounts/fireworks/models/kimi-k2p6`
 - `openrouter`: `OPENROUTER_API_KEY`, default model `openai/gpt-5-mini`
-- `anthropic`: currently listed but not active; the agent model router only
-  supports OpenAI-compatible endpoints today
+- `anthropic`: `ANTHROPIC_API_KEY`, native Messages API for live planner evals
 
 Optional model override env vars:
 
 - `AGENT_EVAL_OPENAI_MODEL`
 - `AGENT_EVAL_FIREWORKS_MODEL`
 - `AGENT_EVAL_OPENROUTER_MODEL`
+- `AGENT_EVAL_ANTHROPIC_MODEL`
 
 ## Fixture Contract
 

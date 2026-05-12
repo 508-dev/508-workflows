@@ -62,7 +62,7 @@ class AgentPlan(BaseModel):
 
     plan_id: str
     intent: str
-    planner: Literal["deterministic_regex"] = "deterministic_regex"
+    planner: Literal["deterministic_regex", "live_model"] = "deterministic_regex"
     model_tier: ModelTier
     model: AgentModelSelection
     actions: list[AgentToolAction] = Field(default_factory=list)

@@ -8,6 +8,7 @@ from five08.agent.evals import (
     load_env_file,
     list_eval_model_profiles,
     resolve_eval_model_profile,
+    run_live_planner_eval_suite,
     run_eval_suite,
     write_report,
 )
@@ -57,6 +58,56 @@ def test_discord_agent_eval_writes_reports(tmp_path: Path) -> None:
     markdown = (tmp_path / "score.canonical.primary.md").read_text()
     assert "missing_project_clarification_001" in markdown
     assert "Failed: 0" in markdown
+
+
+def test_live_planner_eval_uses_provider_response(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"status":"needs_clarification",'
+                                '"intent":null,'
+                                '"clarification_question":"Which project should I search?",'
+                                '"actions":[]}'
+                            )
+                        }
+                    }
+                ]
+            }
+
+    calls: list[dict[str, object]] = []
+
+    def fake_post(*args: object, **kwargs: object) -> FakeResponse:
+        calls.append({"args": args, "kwargs": kwargs})
+        return FakeResponse()
+
+    monkeypatch.setenv("OPENAI_API_KEY_DIRECT", "direct-key")
+    monkeypatch.setattr("five08.agent.evals.requests.post", fake_post)
+
+    report = run_live_planner_eval_suite(
+        suite="canonical",
+        model="openai-direct",
+        ids=["missing_project_clarification_001"],
+        timeout_seconds=1,
+    )
+    write_report(report, output_dir=tmp_path)
+
+    assert report.mode == "live_planner"
+    assert report.summary["passed"] == 1
+    assert report.metrics["parse_success_rate"] == 1.0
+    assert calls
+    assert (tmp_path / "observed.live_planner.canonical.openai-direct.json").exists()
 
 
 def test_eval_primary_profile_uses_direct_openai_key_only(
