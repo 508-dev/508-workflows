@@ -770,8 +770,40 @@ def test_admin_can_search_crm_contacts() -> None:
     )
 
     assert response.status == "executed"
-    assert captured["name"] == "Sarah Example"
+    assert captured["name__contains"] == "Sarah Example"
+    assert "name" not in captured
     assert response.results[0].result["contacts"][0]["name"] == "Sarah Example"
+
+
+def test_admin_can_plan_crm_contact_onboarding_update() -> None:
+    orchestrator = AgentOrchestrator()
+
+    response = orchestrator.plan(
+        "Update CRM contact contact-123 onboarding state to approved",
+        _context(roles=["Admin"]),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    action = response.plan.actions[0]
+    assert action.tool_name == "crm_write.update_contact"
+    assert action.arguments == {
+        "contact_id": "contact-123",
+        "updates": {"cOnboardingState": "approved"},
+    }
+
+
+def test_execute_plan_formats_key_errors_without_repr_quotes() -> None:
+    orchestrator = AgentOrchestrator()
+    context = _context(roles=["Project Manager"])
+
+    response = orchestrator.plan("Close TASK-999", context)
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    results = orchestrator.execute_plan(response.plan, context, confirmed=True)
+    assert results[0].status == "failed"
+    assert results[0].error == "Task TASK-999 was not found"
 
 
 def test_mailbox_create_uses_explicit_backup_email_not_mailbox_address() -> None:

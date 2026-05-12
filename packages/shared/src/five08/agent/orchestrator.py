@@ -206,6 +206,14 @@ class AgentOrchestrator:
                         error=str(exc),
                     )
                 )
+            except KeyError as exc:
+                results.append(
+                    AgentExecutionResult(
+                        tool_name=action.tool_name,
+                        status="failed",
+                        error=str(exc.args[0]) if exc.args else str(exc),
+                    )
+                )
             except Exception as exc:
                 results.append(
                     AgentExecutionResult(
@@ -257,6 +265,8 @@ class AgentOrchestrator:
             for keyword in ["find task", "search task", "list task", "show task"]
         ):
             return self._parse_search_task(text)
+        if self._is_crm_contact_update_request(lowered):
+            return self._parse_crm_contact_update(text)
         if any(
             keyword in lowered
             for keyword in [
@@ -348,6 +358,43 @@ class AgentOrchestrator:
             tool_name="crm_read.search_contacts",
             arguments={"query": query, "limit": 5},
             summary=f"Search CRM contacts matching: {query}",
+        )
+
+    def _is_crm_contact_update_request(self, lowered: str) -> bool:
+        has_update_intent = any(
+            keyword in lowered
+            for keyword in ["update", "change", "set", "mark", "approve", "reject"]
+        )
+        has_contact_target = "contact" in lowered or "crm" in lowered
+        return has_update_intent and has_contact_target
+
+    def _parse_crm_contact_update(self, text: str) -> AgentToolAction | None:
+        contact_id_match = re.search(
+            r"\b(?:crm\s+)?contact\s+([A-Za-z0-9_-]{2,})\b",
+            text,
+            re.IGNORECASE,
+        )
+        if contact_id_match is None:
+            return None
+        contact_id = contact_id_match.group(1)
+        updates: dict[str, object] = {}
+
+        onboarding_match = re.search(
+            r"\bonboarding(?:\s+state)?\s+(?:to|as)\s+(.+)$",
+            text,
+            re.IGNORECASE,
+        )
+        if onboarding_match:
+            value = _clean_text(onboarding_match.group(1))
+            if value:
+                updates["cOnboardingState"] = value
+
+        if not updates:
+            return None
+        return AgentToolAction(
+            tool_name="crm_write.update_contact",
+            arguments={"contact_id": contact_id, "updates": updates},
+            summary=f"Update CRM contact {contact_id}",
         )
 
     def _parse_member_agreement(self, text: str) -> AgentToolAction | None:

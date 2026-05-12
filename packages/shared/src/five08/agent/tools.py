@@ -452,7 +452,7 @@ class ToolRegistry:
                 "cRoles",
                 "cOnboardingState",
             ],
-            name=query,
+            name__contains=query,
         )
         return {"contacts": [contact.to_dict() for contact in contacts]}
 
