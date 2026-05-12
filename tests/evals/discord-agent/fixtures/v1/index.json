@@ -4,8 +4,15 @@
   "scenarios": [
     "create_task_confirmation_001.json",
     "search_project_tasks_001.json",
+    "task_assign_member_denied_001.json",
     "github_issue_create_confirmation_001.json",
+    "github_issue_search_001.json",
     "github_issue_member_denied_001.json",
+    "crm_contact_search_001.json",
+    "crm_contact_update_confirmation_001.json",
+    "kimai_project_hours_month_001.json",
+    "member_agreement_confirmation_001.json",
+    "mailbox_create_confirmation_001.json",
     "missing_project_clarification_001.json",
     "thread_followup_latest_message_001.json"
   ]

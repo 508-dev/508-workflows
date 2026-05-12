@@ -1,0 +1,37 @@
+{
+  "version": "discord-agent-trajectory.v1",
+  "id": "mailbox_create_confirmation_001",
+  "description": "Admins can draft mailbox creation with explicit backup email behind confirmation.",
+  "tags": ["weekly", "mailbox", "write", "confirmation"],
+  "suite": {
+    "canonical": false,
+    "weekly": true
+  },
+  "context": {
+    "discord_user_id": "789",
+    "organization_id": "org-1",
+    "guild_id": "org-1",
+    "roles": ["Admin"]
+  },
+  "request": {
+    "message": "Create mailbox john@508.dev named John with backup john@gmail.com"
+  },
+  "expect": {
+    "status": "requires_confirmation",
+    "intent": "create_mailbox",
+    "model_tier": "strong",
+    "requires_confirmation": true,
+    "actions": [
+      {
+        "tool_name": "mail_write.create_mailbox",
+        "requires_confirmation": true,
+        "required_scopes": ["mailbox:create"],
+        "arguments": {
+          "local_part": "john",
+          "backup_email": "john@gmail.com",
+          "name": "John"
+        }
+      }
+    ]
+  }
+}

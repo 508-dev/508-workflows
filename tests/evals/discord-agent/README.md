@@ -16,6 +16,10 @@ runner uses the latest user message as the turn under test. The initial suite
 focuses on planner/router correctness, policy outcomes, confirmation gates, and
 known-good deterministic tool behavior.
 
+`canonical` is the small PR-gating slice. `weekly` is the broader regression
+slice and can include fixture-level `stub_results` so read-only external tools
+exercise planner, policy, and response shaping without hitting live services.
+
 ## Commands
 
 ```bash
@@ -58,6 +62,7 @@ Optional model override env vars:
 - `version`: `discord-agent-trajectory.v1`
 - `context`: `AgentIdentityContext`-like actor and tenant data
 - `seed.tasks`: deterministic in-memory task records inserted before execution
+- `stub_results`: optional deterministic tool payloads keyed by tool name
 - `request.message`: single current request, or `request.thread` for a thread snapshot
 - `expect`: deterministic checks over response status, plan intent, model tier,
   actions, arguments, scopes, result statuses, and clarification output

@@ -1,0 +1,51 @@
+{
+  "version": "discord-agent-trajectory.v1",
+  "id": "kimai_project_hours_month_001",
+  "description": "Admins can read Kimai project hours for a bounded month window.",
+  "tags": ["weekly", "kimai", "read"],
+  "suite": {
+    "canonical": false,
+    "weekly": true
+  },
+  "context": {
+    "discord_user_id": "789",
+    "organization_id": "org-1",
+    "guild_id": "org-1",
+    "roles": ["Admin"]
+  },
+  "stub_results": {
+    "kimai_read.project_hours": {
+      "project": "Atlas",
+      "begin": "2026-05-01",
+      "end": "2026-05-31T23:59:59",
+      "hours_by_user": [
+        {
+          "user": "Sarah",
+          "hours": 12.5
+        }
+      ]
+    }
+  },
+  "request": {
+    "message": "Kimai hours for project Atlas in 2026-05"
+  },
+  "expect": {
+    "status": "executed",
+    "intent": "read_kimai_project_hours",
+    "model_tier": "fast",
+    "requires_confirmation": false,
+    "result_statuses": ["succeeded"],
+    "actions": [
+      {
+        "tool_name": "kimai_read.project_hours",
+        "requires_confirmation": false,
+        "required_scopes": ["kimai:project_hours:read"],
+        "arguments": {
+          "project": "Atlas",
+          "begin": "2026-05-01",
+          "end": "2026-05-31T23:59:59"
+        }
+      }
+    ]
+  }
+}

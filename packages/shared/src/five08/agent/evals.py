@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from copy import deepcopy
 from collections.abc import Iterable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -128,6 +129,7 @@ class AgentEvalFixture(BaseModel):
     suite: AgentEvalSuiteConfig = Field(default_factory=AgentEvalSuiteConfig)
     context: AgentEvalContext = Field(default_factory=AgentEvalContext)
     runtime_config: dict[str, Any] = Field(default_factory=dict)
+    stub_results: dict[str, dict[str, Any]] = Field(default_factory=dict)
     seed: AgentEvalSeed = Field(default_factory=AgentEvalSeed)
     request: AgentEvalRequest
     expect: AgentEvalExpect
@@ -315,6 +317,36 @@ def run_fixture_with_profile(
     model_config: AgentModelConfig,
 ) -> AgentEvalScenarioResult:
     """Run one fixture with an already resolved model profile."""
+
+    class EvalToolRegistry(ToolRegistry):
+        def __init__(
+            self,
+            *args: Any,
+            stub_results: dict[str, dict[str, Any]] | None = None,
+            **kwargs: Any,
+        ) -> None:
+            super().__init__(*args, **kwargs)
+            self._stub_results = stub_results or {}
+
+        def execute(
+            self,
+            tool_name: str,
+            arguments: dict[str, Any],
+            *,
+            organization_id: str | None,
+            actor_id: str | None,
+            actor_scopes: set[str] | None = None,
+        ) -> dict[str, Any]:
+            if tool_name in self._stub_results:
+                return deepcopy(self._stub_results[tool_name])
+            return super().execute(
+                tool_name,
+                arguments,
+                organization_id=organization_id,
+                actor_id=actor_id,
+                actor_scopes=actor_scopes,
+            )
+
     task_store = InMemoryTaskStore()
     context = fixture.context.to_identity_context()
     for task in fixture.seed.tasks:
@@ -329,7 +361,11 @@ def run_fixture_with_profile(
 
     runtime_config = ToolRuntimeConfig(**fixture.runtime_config)
     orchestrator = AgentOrchestrator(
-        registry=ToolRegistry(task_store=task_store, runtime_config=runtime_config),
+        registry=EvalToolRegistry(
+            task_store=task_store,
+            runtime_config=runtime_config,
+            stub_results=fixture.stub_results,
+        ),
         model_config=model_config,
     )
     message = fixture.request.current_message()

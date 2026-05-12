@@ -1,0 +1,53 @@
+{
+  "version": "discord-agent-trajectory.v1",
+  "id": "github_issue_search_001",
+  "description": "Engineers can search GitHub issues in an allowed repository without confirmation.",
+  "tags": ["weekly", "github", "read"],
+  "suite": {
+    "canonical": false,
+    "weekly": true
+  },
+  "context": {
+    "discord_user_id": "456",
+    "organization_id": "org-1",
+    "guild_id": "org-1",
+    "roles": ["Engineer"]
+  },
+  "runtime_config": {
+    "github_default_repo": "508-dev/508-workflows"
+  },
+  "stub_results": {
+    "github_issue.search_issues": {
+      "issues": [
+        {
+          "number": 42,
+          "title": "Improve onboarding search",
+          "html_url": "https://github.example/issues/42",
+          "state": "open"
+        }
+      ]
+    }
+  },
+  "request": {
+    "message": "Search GitHub issues matching onboarding in repo 508-dev/508-workflows"
+  },
+  "expect": {
+    "status": "executed",
+    "intent": "search_github_issues",
+    "model_tier": "fast",
+    "requires_confirmation": false,
+    "result_statuses": ["succeeded"],
+    "actions": [
+      {
+        "tool_name": "github_issue.search_issues",
+        "requires_confirmation": false,
+        "required_scopes": ["github:issue:read"],
+        "arguments": {
+          "query": "onboarding",
+          "repository": "508-dev/508-workflows",
+          "state": "open"
+        }
+      }
+    ]
+  }
+}

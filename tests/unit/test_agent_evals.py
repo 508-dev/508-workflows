@@ -21,6 +21,15 @@ def test_discord_agent_eval_canonical_suite_passes() -> None:
     assert all(scenario.status == "passed" for scenario in report.scenarios)
 
 
+def test_discord_agent_eval_weekly_suite_is_larger_and_passes() -> None:
+    canonical = run_eval_suite(suite="canonical")
+    weekly = run_eval_suite(suite="weekly")
+
+    assert weekly.summary["scenarios"] > canonical.summary["scenarios"]
+    assert weekly.summary["failed"] == 0
+    assert all(scenario.status == "passed" for scenario in weekly.scenarios)
+
+
 def test_discord_agent_eval_can_filter_scenarios() -> None:
     report = run_eval_suite(
         suite="canonical",

@@ -1,0 +1,49 @@
+{
+  "version": "discord-agent-trajectory.v1",
+  "id": "crm_contact_search_001",
+  "description": "Admins can search CRM contacts by partial name without confirmation.",
+  "tags": ["weekly", "crm", "read"],
+  "suite": {
+    "canonical": false,
+    "weekly": true
+  },
+  "context": {
+    "discord_user_id": "789",
+    "organization_id": "org-1",
+    "guild_id": "org-1",
+    "roles": ["Admin"]
+  },
+  "stub_results": {
+    "crm_read.search_contacts": {
+      "contacts": [
+        {
+          "id": "contact-123",
+          "name": "Sarah Example",
+          "emailAddress": "sarah@example.com",
+          "cOnboardingState": "pending"
+        }
+      ]
+    }
+  },
+  "request": {
+    "message": "Find contact Sarah"
+  },
+  "expect": {
+    "status": "executed",
+    "intent": "search_crm_contacts",
+    "model_tier": "fast",
+    "requires_confirmation": false,
+    "result_statuses": ["succeeded"],
+    "actions": [
+      {
+        "tool_name": "crm_read.search_contacts",
+        "requires_confirmation": false,
+        "required_scopes": ["crm:contact:read"],
+        "arguments": {
+          "query": "Sarah",
+          "limit": 5
+        }
+      }
+    ]
+  }
+}
