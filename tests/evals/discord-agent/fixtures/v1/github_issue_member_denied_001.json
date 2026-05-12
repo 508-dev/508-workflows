@@ -1,0 +1,37 @@
+{
+  "version": "discord-agent-trajectory.v1",
+  "id": "github_issue_member_denied_001",
+  "description": "Member role cannot draft GitHub issue writes.",
+  "tags": ["canonical", "github", "policy", "denied"],
+  "suite": {
+    "canonical": true,
+    "weekly": true
+  },
+  "context": {
+    "discord_user_id": "123",
+    "organization_id": "org-1",
+    "guild_id": "org-1",
+    "roles": ["Member"]
+  },
+  "request": {
+    "message": "Create GitHub issue in repo 508-dev/508-workflows titled Fix onboarding sync"
+  },
+  "expect": {
+    "status": "denied",
+    "intent": "create_github_issue",
+    "model_tier": "strong",
+    "requires_confirmation": false,
+    "message_contains": "Missing required scopes",
+    "actions": [
+      {
+        "tool_name": "github_issue.create_issue",
+        "requires_confirmation": false,
+        "required_scopes": ["github:issue:create"],
+        "arguments_contains": {
+          "repository": "508-dev/508-workflows",
+          "title": "Fix onboarding sync"
+        }
+      }
+    ]
+  }
+}

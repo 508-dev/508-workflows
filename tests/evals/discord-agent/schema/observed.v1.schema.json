@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://508.dev/evals/discord-agent/observed.v1.schema.json",
+  "title": "Discord Agent Eval Observed Report",
+  "type": "object",
+  "required": ["version", "generated_at", "suite", "model", "summary", "scenarios"],
+  "properties": {
+    "version": { "const": "discord-agent-observed.v1" },
+    "generated_at": { "type": "string" },
+    "suite": { "enum": ["canonical", "weekly"] },
+    "model": { "type": "string" },
+    "summary": {
+      "type": "object",
+      "required": ["scenarios", "passed", "failed", "known_failures"],
+      "properties": {
+        "scenarios": { "type": "integer" },
+        "passed": { "type": "integer" },
+        "failed": { "type": "integer" },
+        "known_failures": { "type": "integer" }
+      }
+    },
+    "scenarios": { "type": "array", "items": { "type": "object" } }
+  }
+}

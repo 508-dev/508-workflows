@@ -1,0 +1,12 @@
+{
+  "version": "discord-agent-fixtures.v1",
+  "schema": "../../schema/trajectory.v1.schema.json",
+  "scenarios": [
+    "create_task_confirmation_001.json",
+    "search_project_tasks_001.json",
+    "github_issue_create_confirmation_001.json",
+    "github_issue_member_denied_001.json",
+    "missing_project_clarification_001.json",
+    "thread_followup_latest_message_001.json"
+  ]
+}

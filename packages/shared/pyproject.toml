@@ -20,6 +20,7 @@ dependencies = [
 
 [project.scripts]
 crmctl = "five08.crm_cli:run"
+agent-eval = "five08.agent.evals:main"
 
 [build-system]
 requires = ["hatchling"]

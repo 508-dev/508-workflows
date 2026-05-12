@@ -59,6 +59,7 @@ logs/
 .coverage
 htmlcov/
 .tox/
+tests/evals/discord-agent/reports/
 
 # Database files (if any are added later)
 *.db

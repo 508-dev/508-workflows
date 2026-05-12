@@ -1,0 +1,23 @@
+{
+  "version": "discord-agent-trajectory.v1",
+  "id": "missing_project_clarification_001",
+  "description": "Bare task search asks for the project instead of enumerating guild-wide tasks.",
+  "tags": ["canonical", "task", "clarification", "privacy"],
+  "suite": {
+    "canonical": true,
+    "weekly": true
+  },
+  "context": {
+    "discord_user_id": "123",
+    "organization_id": "org-1",
+    "guild_id": "org-1",
+    "roles": ["Member"]
+  },
+  "request": {
+    "message": "Show tasks"
+  },
+  "expect": {
+    "status": "needs_clarification",
+    "clarification_question": "Which project should I search?"
+  }
+}
