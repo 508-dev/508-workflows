@@ -400,7 +400,7 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
                 "https://github.com/beaprospect",
             )
             page.get_by_role("textbox", name="Onboarder for Bea Prospect").fill("jane")
-            page.get_by_role("button", name="Assign onboarder for Bea Prospect").click()
+            page.get_by_role("button", name="Save onboarder for Bea Prospect").click()
             assert assign_onboarder_requested.wait(timeout=5)
             page.get_by_text("Assigned jane").wait_for()
             expect(

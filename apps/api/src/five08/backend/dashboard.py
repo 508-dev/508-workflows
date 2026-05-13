@@ -477,6 +477,10 @@ def dashboard_html() -> str:
       align-items: center;
       max-width: 260px;
     }
+    .inline-form:not(:focus-within):not(.is-dirty) {
+      grid-template-columns: minmax(100px, 1fr);
+      max-width: 180px;
+    }
     .inline-form input {
       min-height: 32px;
       padding: 6px 8px;
@@ -486,6 +490,9 @@ def dashboard_html() -> str:
       min-height: 32px;
       padding: 6px 10px;
       font-size: 12px;
+    }
+    .inline-form:not(:focus-within):not(.is-dirty) button {
+      display: none;
     }
     .split {
       display: grid;
@@ -1492,11 +1499,25 @@ def dashboard_html() -> str:
         onboarderInput.autocomplete = "off";
         onboarderInput.placeholder = "508 username";
         onboarderInput.value = displayOnboarder(person.onboarder);
+        onboarderInput.dataset.initialValue = onboarderInput.value;
         onboarderInput.setAttribute("aria-label", `Onboarder for ${displayName}`);
         const onboarderButton = document.createElement("button");
         onboarderButton.type = "submit";
-        onboarderButton.textContent = "Assign";
-        onboarderButton.setAttribute("aria-label", `Assign onboarder for ${displayName}`);
+        onboarderButton.textContent = "Save";
+        onboarderButton.setAttribute("aria-label", `Save onboarder for ${displayName}`);
+        onboarderInput.addEventListener("input", () => {
+          onboarderForm.classList.toggle(
+            "is-dirty",
+            onboarderInput.value.trim() !== onboarderInput.dataset.initialValue,
+          );
+        });
+        onboarderInput.addEventListener("keydown", (event) => {
+          if (event.key === "Escape") {
+            onboarderInput.value = onboarderInput.dataset.initialValue || "";
+            onboarderForm.classList.remove("is-dirty");
+            onboarderInput.blur();
+          }
+        });
         onboarderForm.addEventListener("submit", (event) => {
           event.preventDefault();
           assignOnboarder(person.crm_contact_id, onboarderInput.value, onboarderButton);
