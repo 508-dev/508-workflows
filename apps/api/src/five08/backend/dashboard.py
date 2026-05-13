@@ -1123,19 +1123,37 @@ def dashboard_html() -> str:
       return `https://${raw.replace(/^\\/+/, "")}`;
     }
 
+    function parsedExternalUrl(value) {
+      try {
+        return new URL(urlWithProtocol(value));
+      } catch (error) {
+        return null;
+      }
+    }
+
+    function hostMatches(hostname, domain) {
+      const normalized = String(hostname || "").toLowerCase();
+      return normalized === domain || normalized.endsWith(`.${domain}`);
+    }
+
     function linkedinUrl(value) {
       const raw = String(value || "").trim();
       if (!raw) return "";
-      if (raw.toLowerCase().includes("linkedin.com")) return urlWithProtocol(raw);
-      return `https://www.linkedin.com/in/${encodeURIComponent(raw.replace(/^@/, ""))}`;
+      const url = parsedExternalUrl(raw);
+      if (url && hostMatches(url.hostname, "linkedin.com")) return url.href;
+      if (/^https?:\\/\\//i.test(raw)) return "";
+      const profile = raw.replace(/^@/, "").replace(/^\\/+/, "");
+      if (!profile) return "";
+      return `https://www.linkedin.com/in/${encodeURIComponent(profile)}`;
     }
 
     function githubUrl(value) {
       const raw = String(value || "").trim().replace(/^@/, "");
       if (!raw) return "";
-      if (raw.toLowerCase().includes("github.com")) return urlWithProtocol(raw);
+      const url = parsedExternalUrl(raw);
+      if (url && hostMatches(url.hostname, "github.com")) return url.href;
       if (/^https?:\\/\\//i.test(raw)) return "";
-      return `https://github.com/${encodeURIComponent(raw)}`;
+      return `https://github.com/${encodeURIComponent(raw.replace(/^\\/+/, ""))}`;
     }
 
     function appendInlineLink(cell, label, url, ariaLabel, kind = "") {

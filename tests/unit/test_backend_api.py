@@ -1041,7 +1041,8 @@ def test_dashboard_onboarding_returns_filtered_queue(client: TestClient) -> None
     ):
         response = client.get(
             "/dashboard/api/onboarding"
-            "?query=bea&limit=10&onboarding_state=selected&onboarder=michael"
+            "?query=bea&limit=10&onboarding_state=Awaiting%20Contribution"
+            "&onboarder=michael"
             "&skills=missing"
         )
 
@@ -1050,7 +1051,7 @@ def test_dashboard_onboarding_returns_filtered_queue(client: TestClient) -> None
     mock_onboarding.assert_called_once_with(
         query="bea",
         limit=10,
-        onboarding_state="selected",
+        onboarding_state="awaitingcontribution",
         onboarder="michael",
         discord=None,
         email_508=None,

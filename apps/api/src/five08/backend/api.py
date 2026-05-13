@@ -524,11 +524,67 @@ _ONBOARDING_STATUS_LABELS = {
 }
 
 
+_DASHBOARD_PEOPLE_SEARCH_SQL = """
+concat_ws(
+    ' ',
+    crm_contact_id,
+    name,
+    email,
+    email_508,
+    discord_user_id,
+    discord_username,
+    github_username,
+    contact_type,
+    address_country,
+    address_city,
+    address_state,
+    seniority,
+    latest_resume_name
+)
+"""
+
+_DASHBOARD_ONBOARDING_SEARCH_SQL = """
+concat_ws(
+    ' ',
+    name,
+    email,
+    email_508,
+    discord_user_id,
+    discord_username,
+    onboarder,
+    onboarding_state
+)
+"""
+
+_ONBOARDING_STATE_NORMALIZED_SQL = """
+replace(
+    replace(
+        replace(lower(btrim(onboarding_state)), '_', ''),
+        '-',
+        ''
+    ),
+    ' ',
+    ''
+)
+"""
+
+
+def _normalize_onboarding_state_key(value: Any) -> str:
+    return (
+        str(value or "")
+        .strip()
+        .casefold()
+        .replace("_", "")
+        .replace("-", "")
+        .replace(" ", "")
+    )
+
+
 def _onboarding_status_label(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:
         return "No status"
-    normalized = raw.casefold().replace("_", "").replace("-", "").replace(" ", "")
+    normalized = _normalize_onboarding_state_key(raw)
     if normalized in _ONBOARDING_STATUS_LABELS:
         return _ONBOARDING_STATUS_LABELS[normalized]
     return raw.replace("_", " ").replace("-", " ").title()
@@ -634,26 +690,8 @@ def _query_dashboard_people(
     conditions: list[str] = []
     if normalized_query:
         like_query = f"%{normalized_query}%"
-        params.extend([like_query] * 13)
-        conditions.append(
-            """
-            (
-                crm_contact_id ILIKE %s
-                OR name ILIKE %s
-                OR email ILIKE %s
-                OR email_508 ILIKE %s
-                OR discord_user_id ILIKE %s
-                OR discord_username ILIKE %s
-                OR github_username ILIKE %s
-                OR contact_type ILIKE %s
-                OR address_country ILIKE %s
-                OR address_city ILIKE %s
-                OR address_state ILIKE %s
-                OR seniority ILIKE %s
-                OR latest_resume_name ILIKE %s
-            )
-        """
-        )
+        params.append(like_query)
+        conditions.append(f"{_DASHBOARD_PEOPLE_SEARCH_SQL} ILIKE %s")
 
     if sync_status is not None:
         conditions.append("sync_status = %s")
@@ -805,10 +843,10 @@ def _list_dashboard_onboarding(
         "sync_status = 'active'",
         "is_member = false",
         "contact_type ILIKE %s",
-        """
+        f"""
         (
             onboarding_state IS NULL
-            OR lower(btrim(onboarding_state)) NOT IN ('onboarded', 'waitlist', 'rejected')
+            OR {_ONBOARDING_STATE_NORMALIZED_SQL} NOT IN ('onboarded', 'waitlist', 'rejected')
         )
         """,
     ]
@@ -816,22 +854,10 @@ def _list_dashboard_onboarding(
 
     if normalized_query:
         like_query = f"%{normalized_query}%"
-        params.extend([like_query] * 7)
-        conditions.append(
-            """
-            (
-                name ILIKE %s
-                OR email ILIKE %s
-                OR email_508 ILIKE %s
-                OR discord_user_id ILIKE %s
-                OR discord_username ILIKE %s
-                OR onboarder ILIKE %s
-                OR onboarding_state ILIKE %s
-            )
-        """
-        )
+        params.append(like_query)
+        conditions.append(f"{_DASHBOARD_ONBOARDING_SEARCH_SQL} ILIKE %s")
     if onboarding_state is not None:
-        conditions.append("lower(btrim(onboarding_state)) = %s")
+        conditions.append(f"{_ONBOARDING_STATE_NORMALIZED_SQL} = %s")
         params.append(onboarding_state)
     if onboarder:
         conditions.append("onboarder ILIKE %s")
@@ -923,7 +949,7 @@ def _list_dashboard_onboarding(
         FROM people
         WHERE {where_clause}
         ORDER BY
-            CASE WHEN lower(COALESCE(btrim(onboarding_state), '')) = 'pending'
+            CASE WHEN COALESCE({_ONBOARDING_STATE_NORMALIZED_SQL}, '') = 'pending'
                 THEN 1 ELSE 0 END,
             onboarding_updated_at DESC NULLS LAST,
             name ASC NULLS LAST
@@ -1714,7 +1740,9 @@ async def dashboard_onboarding_handler(
     if error_response is not None:
         return error_response
 
-    normalized_state = onboarding_state.strip().casefold() if onboarding_state else None
+    normalized_state = (
+        _normalize_onboarding_state_key(onboarding_state) if onboarding_state else None
+    )
     normalized_onboarder = onboarder.strip() if onboarder else None
     if normalized_state == "":
         normalized_state = None

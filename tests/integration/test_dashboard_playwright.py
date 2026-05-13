@@ -227,6 +227,7 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             ]
         )
         page = context.new_page()
+        crm_base_url = api.settings.espo_base_url.rstrip("/")
 
         job_requests: list[str] = []
         people_requests: list[str] = []
@@ -357,13 +358,13 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
                 page.get_by_role("link", name="Open Alice Prospect in CRM")
             ).to_have_attribute(
                 "href",
-                "https://crm.example.invalid/#Contact/view/contact-123",
+                f"{crm_base_url}/#Contact/view/contact-123",
             )
             expect(
                 page.get_by_role("link", name="Open Alice Prospect resume")
             ).to_have_attribute(
                 "href",
-                "https://crm.example.invalid/api/v1/Attachment/file/resume-file-123",
+                f"{crm_base_url}/api/v1/Attachment/file/resume-file-123",
             )
             page.get_by_text("Skills parsed").wait_for()
             page.locator("#peopleFilterKind").select_option("skills")
@@ -385,7 +386,7 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
                 page.get_by_role("link", name="Open Bea Prospect resume")
             ).to_have_attribute(
                 "href",
-                "https://crm.example.invalid/api/v1/Attachment/file/resume-file-456",
+                f"{crm_base_url}/api/v1/Attachment/file/resume-file-456",
             )
             expect(
                 page.get_by_role("link", name="Open Bea Prospect LinkedIn")
@@ -464,6 +465,20 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             page.get_by_role("link", name="Audit").click()
             expect(page).to_have_url(f"{dashboard_server}/dashboard/audit")
             page.get_by_text("worker.job_rerun").wait_for()
+
+            with page.expect_response(
+                lambda response: (
+                    response.url == f"{dashboard_server}/auth/logout"
+                    and response.status == 200
+                )
+            ):
+                page.get_by_role("button", name="Log out").click()
+            expect(page).to_have_url(f"{dashboard_server}/dashboard")
+            cookies = context.cookies(dashboard_server)
+            assert not any(
+                cookie["name"] == api.settings.auth_session_cookie_name
+                for cookie in cookies
+            )
         finally:
             context.close()
             browser.close()
