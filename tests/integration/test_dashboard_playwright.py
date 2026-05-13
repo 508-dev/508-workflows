@@ -156,6 +156,33 @@ def _people_payload() -> list[dict[str, object]]:
     ]
 
 
+def _onboarding_payload() -> list[dict[str, object]]:
+    return [
+        {
+            "crm_contact_id": "contact-prospect-1",
+            "name": "Bea Prospect",
+            "email": "bea@example.com",
+            "email_508": "",
+            "discord_user_id": "",
+            "discord_username": "",
+            "contact_type": "Prospect",
+            "latest_resume_id": "resume-file-456",
+            "latest_resume_name": "bea-resume.pdf",
+            "onboarding_state": "selected",
+            "onboarder": "michael",
+            "onboarding_updated_at": "2026-05-08T10:03:00+00:00",
+            "profile_status": {
+                "crm_active": True,
+                "is_member": False,
+                "discord_linked": False,
+                "email_508": False,
+                "latest_resume": True,
+                "skills_count": 0,
+            },
+        }
+    ]
+
+
 def _audit_payload() -> list[dict[str, object]]:
     return [
         {
@@ -200,6 +227,7 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
 
         job_requests: list[str] = []
         people_requests: list[str] = []
+        onboarding_requests: list[str] = []
         rerun_requested = threading.Event()
         sync_requested = threading.Event()
         detail_requested = threading.Event()
@@ -250,6 +278,14 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
                 body=json.dumps(_people_payload()),
             )
 
+        def onboarding_route(route: Any) -> None:
+            onboarding_requests.append(route.request.url)
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(_onboarding_payload()),
+            )
+
         def audit_route(route: Any) -> None:
             route.fulfill(
                 status=200,
@@ -275,15 +311,58 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
         page.route("**/dashboard/api/jobs/*/rerun", rerun_route)
         page.route("**/dashboard/api/jobs/job-failed", job_detail_route)
         page.route("**/dashboard/api/jobs?*", jobs_route)
+        page.route("**/dashboard/api/onboarding?*", onboarding_route)
         page.route("**/dashboard/api/people?*", people_route)
         page.route("**/dashboard/api/audit-events?*", audit_route)
         page.route("**/dashboard/api/sync/people", sync_route)
 
         try:
-            page.goto("/dashboard/jobs")
+            page.goto("/dashboard")
             page.get_by_role("heading", name="508 Admin Dashboard").wait_for()
             expect(page.locator("#userName")).to_have_text("Discord Admin")
             expect(page.locator("#userMeta")).to_contain_text("CRM contact-123")
+            expect(page).to_have_url(f"{dashboard_server}/dashboard/people")
+            expect(page.get_by_role("link", name="People")).to_have_attribute(
+                "aria-current", "page"
+            )
+            page.get_by_text("Alice Prospect").wait_for()
+            expect(
+                page.get_by_role("link", name="Open Alice Prospect in CRM")
+            ).to_have_attribute(
+                "href",
+                "https://crm.example.invalid/#Contact/view/contact-123",
+            )
+            expect(page.get_by_role("link", name="alice-resume.pdf")).to_have_attribute(
+                "href",
+                "https://crm.example.invalid/api/v1/Attachment/file/resume-file-123",
+            )
+            page.get_by_text("Skills parsed").wait_for()
+            page.locator("#peopleFilterKind").select_option("skills")
+            page.locator("#peopleFilterValue").select_option("present")
+            page.get_by_role("button", name="Add filter").click()
+            page.get_by_role("button", name="Remove Skills: Parsed filter").wait_for()
+            assert any("skills=present" in url for url in people_requests)
+            expect(page.get_by_role("button", name="Name ↑")).to_be_visible()
+
+            page.get_by_role("button", name="Sync people").click()
+            assert sync_requested.wait(timeout=5)
+            page.get_by_text("Queued people sync job-sync").wait_for()
+
+            page.get_by_role("link", name="Onboarding").click()
+            expect(page).to_have_url(f"{dashboard_server}/dashboard/onboarding")
+            page.get_by_text("Bea Prospect").wait_for()
+            page.get_by_text("selected").wait_for()
+            expect(page.get_by_role("button", name="State ↑")).to_be_visible()
+            page.locator("#onboardingFilterKind").select_option("skills")
+            page.locator("#onboardingFilterValue").select_option("missing")
+            page.get_by_role("button", name="Add filter").click()
+            page.get_by_role(
+                "button", name="Remove Skills: Not parsed onboarding filter"
+            ).wait_for()
+            assert any("skills=missing" in url for url in onboarding_requests)
+
+            page.get_by_role("link", name="Jobs").click()
+            expect(page).to_have_url(f"{dashboard_server}/dashboard/jobs")
             expect(page.get_by_role("link", name="Jobs")).to_have_attribute(
                 "aria-current", "page"
             )
@@ -294,6 +373,7 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             assert page.locator("#metricQueued").inner_text() == "1"
             assert page.locator("#metricFailed").inner_text() == "1"
             expect(page.get_by_text("People lookup")).not_to_be_visible()
+            expect(page.get_by_role("button", name="Updated ↓")).to_be_visible()
 
             with page.expect_response(
                 lambda response: (
@@ -326,30 +406,6 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
                 name="Rerun process_docuseal_agreement_job job job-failed",
             ).click()
             assert rerun_requested.wait(timeout=5)
-
-            page.get_by_role("link", name="People").click()
-            expect(page).to_have_url(f"{dashboard_server}/dashboard/people")
-            page.get_by_text("Alice Prospect").wait_for()
-            expect(
-                page.get_by_role("link", name="Open Alice Prospect in CRM")
-            ).to_have_attribute(
-                "href",
-                "https://crm.example.invalid/#Contact/view/contact-123",
-            )
-            expect(page.get_by_role("link", name="alice-resume.pdf")).to_have_attribute(
-                "href",
-                "https://crm.example.invalid/api/v1/Attachment/file/resume-file-123",
-            )
-            page.get_by_text("alice-resume.pdf | 4 skills").wait_for()
-            page.locator("#peopleFilterKind").select_option("resume")
-            page.locator("#peopleFilterValue").select_option("present")
-            page.get_by_role("button", name="Add filter").click()
-            page.get_by_role("button", name="Remove Resume: Present filter").wait_for()
-            assert any("resume=present" in url for url in people_requests)
-
-            page.get_by_role("button", name="Sync people").click()
-            assert sync_requested.wait(timeout=5)
-            page.get_by_text("Queued people sync job-sync").wait_for()
 
             page.get_by_role("link", name="Audit").click()
             expect(page).to_have_url(f"{dashboard_server}/dashboard/audit")

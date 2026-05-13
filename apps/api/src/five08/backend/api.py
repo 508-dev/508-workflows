@@ -526,6 +526,7 @@ def _list_dashboard_people(query: str | None, limit: int) -> list[dict[str, Any]
         discord=None,
         email_508=None,
         resume=None,
+        skills=None,
     )
 
 
@@ -538,6 +539,7 @@ def _query_dashboard_people(
     discord: str | None,
     email_508: str | None,
     resume: str | None,
+    skills: str | None,
 ) -> list[dict[str, Any]]:
     params: list[Any] = []
     conditions: list[str] = []
@@ -620,6 +622,10 @@ def _query_dashboard_people(
             )
         """
         )
+    if skills == "present":
+        conditions.append("cardinality(skills) > 0")
+    elif skills == "missing":
+        conditions.append("cardinality(skills) = 0")
 
     params.append(limit)
     where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
@@ -645,6 +651,9 @@ def _query_dashboard_people(
             skills,
             latest_resume_id,
             latest_resume_name,
+            onboarding_state,
+            onboarder,
+            onboarding_updated_at,
             sync_status,
             created_at,
             updated_at
@@ -658,6 +667,10 @@ def _query_dashboard_people(
             cursor.execute(sql, params)
             rows = cursor.fetchall()
 
+    return _shape_dashboard_people_rows(rows)
+
+
+def _shape_dashboard_people_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     people: list[dict[str, Any]] = []
     for row in rows:
         roles = row.get("discord_roles") or []
@@ -665,6 +678,9 @@ def _query_dashboard_people(
         person = dict(row)
         person["created_at"] = _datetime_or_none(row.get("created_at"))
         person["updated_at"] = _datetime_or_none(row.get("updated_at"))
+        person["onboarding_updated_at"] = _datetime_or_none(
+            row.get("onboarding_updated_at")
+        )
         person["profile_status"] = {
             "crm_active": row.get("sync_status") == "active",
             "is_member": bool(row.get("is_member")),
@@ -677,6 +693,157 @@ def _query_dashboard_people(
         }
         people.append(person)
     return people
+
+
+def _list_dashboard_onboarding(
+    *,
+    query: str | None,
+    limit: int,
+    onboarding_state: str | None,
+    onboarder: str | None,
+    discord: str | None,
+    email_508: str | None,
+    resume: str | None,
+    skills: str | None,
+) -> list[dict[str, Any]]:
+    normalized_query = (query or "").strip()
+    limit = _limit_dashboard_count(limit)
+    params: list[Any] = []
+    conditions: list[str] = [
+        "sync_status = 'active'",
+        "is_member = false",
+        "contact_type ILIKE %s",
+        """
+        (
+            onboarding_state IS NULL
+            OR lower(btrim(onboarding_state)) NOT IN ('onboarded', 'waitlist', 'rejected')
+        )
+        """,
+    ]
+    params.append("%prospect%")
+
+    if normalized_query:
+        like_query = f"%{normalized_query}%"
+        params.extend([like_query] * 7)
+        conditions.append(
+            """
+            (
+                name ILIKE %s
+                OR email ILIKE %s
+                OR email_508 ILIKE %s
+                OR discord_user_id ILIKE %s
+                OR discord_username ILIKE %s
+                OR onboarder ILIKE %s
+                OR onboarding_state ILIKE %s
+            )
+        """
+        )
+    if onboarding_state is not None:
+        conditions.append("lower(btrim(onboarding_state)) = %s")
+        params.append(onboarding_state)
+    if onboarder:
+        conditions.append("onboarder ILIKE %s")
+        params.append(f"%{onboarder}%")
+    if discord == "linked":
+        conditions.append(
+            """
+            discord_user_id IS NOT NULL
+            AND btrim(discord_user_id) <> ''
+            AND lower(discord_user_id) <> 'no discord'
+        """
+        )
+    elif discord == "missing":
+        conditions.append(
+            """
+            (
+                discord_user_id IS NULL
+                OR btrim(discord_user_id) = ''
+                OR lower(discord_user_id) = 'no discord'
+            )
+        """
+        )
+    if email_508 == "present":
+        conditions.append("email_508 IS NOT NULL AND btrim(email_508) <> ''")
+    elif email_508 == "missing":
+        conditions.append("(email_508 IS NULL OR btrim(email_508) = '')")
+    if resume == "present":
+        conditions.append(
+            """
+            (
+            (
+                latest_resume_id IS NOT NULL
+                AND btrim(latest_resume_id) <> ''
+            )
+            OR (
+                latest_resume_name IS NOT NULL
+                AND btrim(latest_resume_name) <> ''
+            )
+            )
+        """
+        )
+    elif resume == "missing":
+        conditions.append(
+            """
+            (
+                latest_resume_id IS NULL
+                OR btrim(latest_resume_id) = ''
+            )
+            AND (
+                latest_resume_name IS NULL
+                OR btrim(latest_resume_name) = ''
+            )
+        """
+        )
+    if skills == "present":
+        conditions.append("cardinality(skills) > 0")
+    elif skills == "missing":
+        conditions.append("cardinality(skills) = 0")
+
+    where_clause = " AND ".join(conditions)
+    sql = f"""
+        SELECT
+            id::text,
+            crm_contact_id,
+            name,
+            email,
+            email_508,
+            discord_user_id,
+            discord_username,
+            discord_roles,
+            github_username,
+            contact_type,
+            is_member,
+            address_country,
+            address_city,
+            address_state,
+            timezone,
+            seniority,
+            linkedin,
+            skills,
+            latest_resume_id,
+            latest_resume_name,
+            onboarding_state,
+            onboarder,
+            onboarding_updated_at,
+            sync_status,
+            created_at,
+            updated_at
+        FROM people
+        WHERE {where_clause}
+        ORDER BY
+            CASE WHEN lower(COALESCE(btrim(onboarding_state), '')) = 'pending'
+                THEN 1 ELSE 0 END,
+            onboarding_updated_at DESC NULLS LAST,
+            name ASC NULLS LAST
+        LIMIT %s
+    """
+    params.append(limit)
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(sql, params)
+            rows = cursor.fetchall()
+
+    return _shape_dashboard_people_rows(rows)
 
 
 def _list_dashboard_audit_events(limit: int) -> list[dict[str, Any]]:
@@ -1338,6 +1505,7 @@ async def dashboard_people_handler(
     discord: str | None = Query(default=None),
     email_508: str | None = Query(default=None),
     resume: str | None = Query(default=None),
+    skills: str | None = Query(default=None),
 ) -> JSONResponse:
     """Return CRM people-cache rows for dashboard lookup/onboarding views."""
     _, error_response = await _dashboard_admin_session_or_error(request)
@@ -1352,6 +1520,8 @@ async def dashboard_people_handler(
         return JSONResponse({"error": "invalid_email_508_filter"}, status_code=400)
     if resume not in {None, "present", "missing"}:
         return JSONResponse({"error": "invalid_resume_filter"}, status_code=400)
+    if skills not in {None, "present", "missing"}:
+        return JSONResponse({"error": "invalid_skills_filter"}, status_code=400)
 
     people = await asyncio.to_thread(
         _query_dashboard_people,
@@ -1362,6 +1532,52 @@ async def dashboard_people_handler(
         discord=discord,
         email_508=email_508,
         resume=resume,
+        skills=skills,
+    )
+    return JSONResponse(people)
+
+
+async def dashboard_onboarding_handler(
+    request: Request,
+    query: str | None = Query(default=None),
+    limit: int = Query(default=25, ge=1, le=100),
+    onboarding_state: str | None = Query(default=None),
+    onboarder: str | None = Query(default=None),
+    discord: str | None = Query(default=None),
+    email_508: str | None = Query(default=None),
+    resume: str | None = Query(default=None),
+    skills: str | None = Query(default=None),
+) -> JSONResponse:
+    """Return prospect onboarding queue rows from the CRM people cache."""
+    _, error_response = await _dashboard_admin_session_or_error(request)
+    if error_response is not None:
+        return error_response
+
+    normalized_state = onboarding_state.strip().casefold() if onboarding_state else None
+    normalized_onboarder = onboarder.strip() if onboarder else None
+    if normalized_state == "":
+        normalized_state = None
+    if normalized_onboarder == "":
+        normalized_onboarder = None
+    if discord not in {None, "linked", "missing"}:
+        return JSONResponse({"error": "invalid_discord_filter"}, status_code=400)
+    if email_508 not in {None, "present", "missing"}:
+        return JSONResponse({"error": "invalid_email_508_filter"}, status_code=400)
+    if resume not in {None, "present", "missing"}:
+        return JSONResponse({"error": "invalid_resume_filter"}, status_code=400)
+    if skills not in {None, "present", "missing"}:
+        return JSONResponse({"error": "invalid_skills_filter"}, status_code=400)
+
+    people = await asyncio.to_thread(
+        _list_dashboard_onboarding,
+        query=query,
+        limit=limit,
+        onboarding_state=normalized_state,
+        onboarder=normalized_onboarder,
+        discord=discord,
+        email_508=email_508,
+        resume=resume,
+        skills=skills,
     )
     return JSONResponse(people)
 
@@ -2379,6 +2595,11 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
     app.add_api_route(
         "/dashboard/api/people",
         dashboard_people_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/onboarding",
+        dashboard_onboarding_handler,
         methods=["GET"],
     )
     app.add_api_route(

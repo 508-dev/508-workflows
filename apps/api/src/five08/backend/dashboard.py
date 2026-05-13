@@ -338,6 +338,10 @@ def dashboard_html() -> str:
       background: transparent;
       color: var(--text);
     }
+    .sort-indicator {
+      color: var(--accent-strong);
+      margin-left: 4px;
+    }
     .detail-body {
       padding: 16px;
       display: grid;
@@ -439,11 +443,61 @@ def dashboard_html() -> str:
   </header>
   <main>
     <nav class="sidebar" aria-label="Dashboard sections">
-      <a class="nav-link" data-view-link="jobs" href="/dashboard/jobs">Jobs</a>
       <a class="nav-link" data-view-link="people" href="/dashboard/people">People</a>
+      <a class="nav-link" data-view-link="onboarding" href="/dashboard/onboarding">Onboarding</a>
+      <a class="nav-link" data-view-link="jobs" href="/dashboard/jobs">Jobs</a>
       <a class="nav-link" data-view-link="audit" href="/dashboard/audit">Audit</a>
     </nav>
     <div class="content">
+    <section id="view-onboarding" class="view" data-view="onboarding" hidden>
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Onboarding queue</h2>
+          <span id="onboardingStatus" class="status-line"></span>
+        </div>
+        <div class="search-row">
+          <label>
+            Search prospects
+            <input id="onboardingQuery" autocomplete="off" placeholder="Name, email, Discord, onboarder">
+          </label>
+          <button id="searchOnboarding" type="button">Search</button>
+        </div>
+        <div class="filter-row" aria-label="Onboarding filters">
+          <label>
+            State
+            <input id="onboardingState" autocomplete="off" placeholder="Any state">
+          </label>
+          <label>
+            Onboarder
+            <input id="onboarderFilter" autocomplete="off" placeholder="Any onboarder">
+          </label>
+          <label>
+            Add filter
+            <select id="onboardingFilterKind"></select>
+          </label>
+          <label>
+            Value
+            <select id="onboardingFilterValue"></select>
+          </label>
+          <button id="addOnboardingFilter" type="button">Add filter</button>
+          <div id="activeOnboardingFilters" class="chip-list active-filters" aria-label="Active onboarding filters"></div>
+        </div>
+        <div id="onboardingEmptyState" class="empty" hidden>No prospects match this queue view.</div>
+        <table id="onboardingTable" class="compact" aria-label="Onboarding queue">
+          <thead>
+            <tr>
+              <th style="width: 24%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="name" type="button">Name</button></th>
+              <th style="width: 16%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="onboarding_state" type="button">State</button></th>
+              <th style="width: 20%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="onboarder" type="button">Onboarder</button></th>
+              <th style="width: 18%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="updated" type="button">Updated</button></th>
+              <th style="width: 22%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="readiness" type="button">Readiness</button></th>
+            </tr>
+          </thead>
+          <tbody id="onboardingBody"></tbody>
+        </table>
+      </section>
+    </section>
+
     <section id="view-jobs" class="view" data-view="jobs">
     <section class="toolbar" aria-label="Job filters">
       <label>
@@ -520,7 +574,7 @@ def dashboard_html() -> str:
     </section>
     </section>
 
-    <section id="view-people" class="view" data-view="people" hidden>
+    <section id="view-people" class="view" data-view="people">
       <section class="panel">
         <div class="panel-head">
           <h2>People lookup</h2>
@@ -561,7 +615,7 @@ def dashboard_html() -> str:
         <table id="peopleTable" class="compact" aria-label="People lookup results">
           <thead>
             <tr>
-              <th style="width: 27%;"><button class="sort-button" data-sort-scope="people" data-sort-key="name" type="button">Person</button></th>
+              <th style="width: 27%;"><button class="sort-button" data-sort-scope="people" data-sort-key="name" type="button">Name</button></th>
               <th style="width: 28%;"><button class="sort-button" data-sort-scope="people" data-sort-key="status" type="button">Status</button></th>
               <th style="width: 20%;"><button class="sort-button" data-sort-scope="people" data-sort-key="discord" type="button">Discord</button></th>
               <th style="width: 25%;"><button class="sort-button" data-sort-scope="people" data-sort-key="resume" type="button">Resume / skills</button></th>
@@ -596,6 +650,7 @@ def dashboard_html() -> str:
   </main>
   <script>
     const routes = {
+      onboarding: "/dashboard/onboarding",
       jobs: "/dashboard/jobs",
       people: "/dashboard/people",
       audit: "/dashboard/audit",
@@ -603,13 +658,16 @@ def dashboard_html() -> str:
     const state = {
       jobs: [],
       people: [],
+      onboarding: [],
       auditEvents: [],
       crmBaseUrl: "",
       sort: {
+        onboarding: { key: "onboarding_state", direction: "asc" },
         jobs: { key: "updated_at", direction: "desc" },
         people: { key: "name", direction: "asc" },
         audit: { key: "occurred_at", direction: "desc" },
       },
+      onboardingFilters: {},
       peopleFilters: {},
     };
     const peopleFilterDefinitions = {
@@ -634,6 +692,13 @@ def dashboard_html() -> str:
           ["missing", "Missing"],
         ],
       },
+      skills: {
+        label: "Skills",
+        options: [
+          ["present", "Parsed"],
+          ["missing", "Not parsed"],
+        ],
+      },
       sync_status: {
         label: "Sync status",
         options: [
@@ -651,6 +716,18 @@ def dashboard_html() -> str:
       minutes: document.querySelector("#minutes"),
       status: document.querySelector("#status"),
       jobType: document.querySelector("#jobType"),
+      onboardingQuery: document.querySelector("#onboardingQuery"),
+      onboardingState: document.querySelector("#onboardingState"),
+      onboarderFilter: document.querySelector("#onboarderFilter"),
+      onboardingFilterKind: document.querySelector("#onboardingFilterKind"),
+      onboardingFilterValue: document.querySelector("#onboardingFilterValue"),
+      addOnboardingFilter: document.querySelector("#addOnboardingFilter"),
+      activeOnboardingFilters: document.querySelector("#activeOnboardingFilters"),
+      searchOnboarding: document.querySelector("#searchOnboarding"),
+      onboardingStatus: document.querySelector("#onboardingStatus"),
+      onboardingBody: document.querySelector("#onboardingBody"),
+      onboardingTable: document.querySelector("#onboardingTable"),
+      onboardingEmptyState: document.querySelector("#onboardingEmptyState"),
       refreshJobs: document.querySelector("#refreshJobs"),
       syncPeople: document.querySelector("#syncPeople"),
       logout: document.querySelector("#logout"),
@@ -750,16 +827,16 @@ def dashboard_html() -> str:
 
     function rawViewFromPath() {
       const parts = window.location.pathname.split("/").filter(Boolean);
-      return parts[1] || "jobs";
+      return parts[1] || "";
     }
 
     function viewFromPath() {
       const view = rawViewFromPath();
-      return Object.prototype.hasOwnProperty.call(routes, view) ? view : "jobs";
+      return Object.prototype.hasOwnProperty.call(routes, view) ? view : "people";
     }
 
     function setView(view, options = {}) {
-      const normalizedView = Object.prototype.hasOwnProperty.call(routes, view) ? view : "jobs";
+      const normalizedView = Object.prototype.hasOwnProperty.call(routes, view) ? view : "people";
       for (const section of els.views) {
         section.hidden = section.dataset.view !== normalizedView;
       }
@@ -775,6 +852,7 @@ def dashboard_html() -> str:
       } else if (!Object.prototype.hasOwnProperty.call(routes, rawViewFromPath())) {
         window.history.replaceState({ view: normalizedView }, "", routes[normalizedView]);
       }
+      if (normalizedView === "onboarding") loadOnboarding();
       if (normalizedView === "jobs") loadJobs();
       if (normalizedView === "people") loadPeople();
       if (normalizedView === "audit") loadAuditEvents();
@@ -791,6 +869,24 @@ def dashboard_html() -> str:
     }
 
     function valueForSort(scope, item, key) {
+      if (scope === "onboarding") {
+        const status = item.profile_status || {};
+        if (key === "name") return item.name || item.email_508 || item.email || "";
+        if (key === "onboarding_state") {
+          const state = String(item.onboarding_state || "");
+          return state.toLowerCase() === "pending" ? `zzz-${state}` : state;
+        }
+        if (key === "onboarder") return item.onboarder || "";
+        if (key === "updated") return item.onboarding_updated_at || "";
+        if (key === "readiness") {
+          return [
+            status.discord_linked,
+            status.email_508,
+            status.latest_resume,
+            Number(status.skills_count || 0) > 0,
+          ].filter(Boolean).length;
+        }
+      }
       if (scope === "people") {
         const status = item.profile_status || {};
         if (key === "name") return item.name || item.email_508 || item.email || "";
@@ -805,6 +901,7 @@ def dashboard_html() -> str:
         }
         if (key === "discord") return item.discord_username || item.discord_user_id || "";
         if (key === "resume") return item.latest_resume_name || item.latest_resume_id || "";
+        if (key === "skills") return Number(status.skills_count || 0);
       }
       if (scope === "audit") {
         if (key === "actor") return item.actor_display_name || item.actor_subject || item.actor_provider || "";
@@ -829,9 +926,22 @@ def dashboard_html() -> str:
       const current = state.sort[scope];
       const direction = current.key === key && current.direction === "asc" ? "desc" : "asc";
       state.sort[scope] = { key, direction };
+      updateSortIndicators(scope);
+      if (scope === "onboarding") renderOnboarding();
       if (scope === "jobs") renderJobs();
       if (scope === "people") renderPeople();
       if (scope === "audit") renderAuditEvents();
+    }
+
+    function updateSortIndicators(scope) {
+      for (const button of document.querySelectorAll(`[data-sort-scope="${scope}"]`)) {
+        const baseLabel = button.dataset.sortLabel || button.textContent.trim();
+        button.dataset.sortLabel = baseLabel.replace(/ [↑↓]$/, "");
+        const active = button.dataset.sortKey === state.sort[scope].key;
+        const arrow = state.sort[scope].direction === "asc" ? "↑" : "↓";
+        button.textContent = active ? `${button.dataset.sortLabel} ${arrow}` : button.dataset.sortLabel;
+        button.setAttribute("aria-sort", active ? state.sort[scope].direction : "none");
+      }
     }
 
     function labelForPeopleFilter(key, value) {
@@ -891,6 +1001,59 @@ def dashboard_html() -> str:
       renderActivePeopleFilters();
       renderPeopleFilterOptions();
       loadPeople();
+    }
+
+    function renderOnboardingFilterOptions() {
+      els.onboardingFilterKind.replaceChildren();
+      for (const [key, definition] of Object.entries(peopleFilterDefinitions)) {
+        if (key === "sync_status" || state.onboardingFilters[key]) continue;
+        const option = document.createElement("option");
+        option.value = key;
+        option.textContent = definition.label;
+        els.onboardingFilterKind.appendChild(option);
+      }
+      renderOnboardingFilterValues();
+      els.addOnboardingFilter.disabled = els.onboardingFilterKind.options.length === 0;
+    }
+
+    function renderOnboardingFilterValues() {
+      els.onboardingFilterValue.replaceChildren();
+      const definition = peopleFilterDefinitions[els.onboardingFilterKind.value];
+      if (!definition) return;
+      for (const [value, label] of definition.options) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = label;
+        els.onboardingFilterValue.appendChild(option);
+      }
+    }
+
+    function renderActiveOnboardingFilters() {
+      els.activeOnboardingFilters.replaceChildren();
+      for (const [key, value] of Object.entries(state.onboardingFilters)) {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "filter-chip";
+        chip.textContent = `${labelForPeopleFilter(key, value)} x`;
+        chip.setAttribute("aria-label", `Remove ${labelForPeopleFilter(key, value)} onboarding filter`);
+        chip.addEventListener("click", () => {
+          delete state.onboardingFilters[key];
+          renderActiveOnboardingFilters();
+          renderOnboardingFilterOptions();
+          loadOnboarding();
+        });
+        els.activeOnboardingFilters.appendChild(chip);
+      }
+    }
+
+    function addOnboardingFilter() {
+      const key = els.onboardingFilterKind.value;
+      const value = els.onboardingFilterValue.value;
+      if (!key || !value) return;
+      state.onboardingFilters[key] = value;
+      renderActiveOnboardingFilters();
+      renderOnboardingFilterOptions();
+      loadOnboarding();
     }
 
     function updateMetrics() {
@@ -972,6 +1135,53 @@ def dashboard_html() -> str:
       els.jobDetailPanel.scrollIntoView({ block: "nearest" });
     }
 
+    function renderOnboarding() {
+      els.onboardingBody.replaceChildren();
+      els.onboardingEmptyState.hidden = state.onboarding.length !== 0;
+      els.onboardingTable.hidden = state.onboarding.length === 0;
+
+      for (const person of sortItems("onboarding", state.onboarding)) {
+        const row = document.createElement("tr");
+        const nameCell = addTextCell(row, "Name", "");
+        const contactUrl = crmContactUrl(person.crm_contact_id);
+        const displayName = person.name || person.email_508 || person.email || "CRM contact";
+        const nameLink = document.createElement(contactUrl ? "a" : "strong");
+        if (contactUrl) {
+          nameLink.href = contactUrl;
+          nameLink.target = "_blank";
+          nameLink.rel = "noreferrer";
+          nameLink.className = "inline-link";
+          nameLink.setAttribute("aria-label", `Open ${displayName} in CRM`);
+        }
+        nameLink.textContent = displayName;
+        const meta = document.createElement("div");
+        meta.className = "status-line";
+        meta.textContent = person.email || person.email_508 || "";
+        nameCell.appendChild(nameLink);
+        nameCell.appendChild(meta);
+
+        const stateText = person.onboarding_state || "Unknown";
+        const stateCell = addTextCell(row, "State", "");
+        stateCell.appendChild(createBadge(stateText, stateText.toLowerCase() === "pending" ? "neutral" : "queued"));
+        addTextCell(row, "Onboarder", person.onboarder || "Unassigned");
+        addTextCell(row, "Updated", formatDate(person.onboarding_updated_at));
+
+        const readyCell = addTextCell(row, "Readiness", "");
+        readyCell.className = "chip-list";
+        const status = person.profile_status || {};
+        const skillsParsed = Number(status.skills_count || 0) > 0;
+        for (const [label, ok] of [
+          ["Discord", status.discord_linked],
+          ["508 email", status.email_508],
+          ["Resume", status.latest_resume],
+          ["Skills", skillsParsed],
+        ]) {
+          readyCell.appendChild(createBadge(ok ? label : `Missing ${label}`, ok ? "succeeded" : "missing"));
+        }
+        els.onboardingBody.appendChild(row);
+      }
+    }
+
     function renderPeople() {
       els.peopleBody.replaceChildren();
       els.peopleEmptyState.hidden = state.people.length !== 0;
@@ -1030,10 +1240,11 @@ def dashboard_html() -> str:
           resumeLink.className = "inline-link";
           resumeLink.textContent = resume;
           resumeCell.appendChild(resumeLink);
-          resumeCell.append(` | ${skillsCount} skills`);
         } else {
-          resumeCell.textContent = `${resume} | ${skillsCount} skills`;
+          resumeCell.textContent = resume;
         }
+        resumeCell.append(" ");
+        resumeCell.appendChild(createBadge(skillsCount > 0 ? "Skills parsed" : "Skills not parsed", skillsCount > 0 ? "succeeded" : "missing"));
         els.peopleBody.appendChild(row);
       }
     }
@@ -1109,6 +1320,34 @@ def dashboard_html() -> str:
         setToast(error.message || "Unable to load job detail", "error");
       } finally {
         button.disabled = false;
+      }
+    }
+
+    function onboardingUrl() {
+      const params = new URLSearchParams({ limit: "25" });
+      const query = els.onboardingQuery.value.trim();
+      if (query) params.set("query", query);
+      const onboardingState = els.onboardingState.value.trim();
+      if (onboardingState) params.set("onboarding_state", onboardingState);
+      const onboarder = els.onboarderFilter.value.trim();
+      if (onboarder) params.set("onboarder", onboarder);
+      for (const [key, value] of Object.entries(state.onboardingFilters)) {
+        params.set(key, value);
+      }
+      return `/dashboard/api/onboarding?${params.toString()}`;
+    }
+
+    async function loadOnboarding() {
+      els.searchOnboarding.disabled = true;
+      els.onboardingStatus.textContent = "Loading";
+      try {
+        state.onboarding = await requestJson(onboardingUrl());
+        renderOnboarding();
+        els.onboardingStatus.textContent = `${state.onboarding.length} shown`;
+      } catch (error) {
+        els.onboardingStatus.textContent = error.message || "Unable to load onboarding";
+      } finally {
+        els.searchOnboarding.disabled = false;
       }
     }
 
@@ -1196,13 +1435,20 @@ def dashboard_html() -> str:
     els.refreshJobs.addEventListener("click", loadJobs);
     els.syncPeople.addEventListener("click", syncPeople);
     els.logout.addEventListener("click", logout);
+    els.searchOnboarding.addEventListener("click", loadOnboarding);
     els.searchPeople.addEventListener("click", loadPeople);
     els.refreshAudit.addEventListener("click", loadAuditEvents);
+    els.onboardingFilterKind.addEventListener("change", renderOnboardingFilterValues);
+    els.addOnboardingFilter.addEventListener("click", addOnboardingFilter);
     els.peopleFilterKind.addEventListener("change", renderPeopleFilterValues);
     els.addPeopleFilter.addEventListener("click", addPeopleFilter);
     for (const button of document.querySelectorAll("[data-sort-scope]")) {
       button.addEventListener("click", () => setSort(button.dataset.sortScope, button.dataset.sortKey));
     }
+    updateSortIndicators("onboarding");
+    updateSortIndicators("jobs");
+    updateSortIndicators("people");
+    updateSortIndicators("audit");
     for (const link of els.navLinks) {
       link.addEventListener("click", (event) => {
         event.preventDefault();
@@ -1215,11 +1461,21 @@ def dashboard_html() -> str:
     els.jobType.addEventListener("keydown", (event) => {
       if (event.key === "Enter") loadJobs();
     });
+    els.onboardingQuery.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") loadOnboarding();
+    });
+    els.onboardingState.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") loadOnboarding();
+    });
+    els.onboarderFilter.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") loadOnboarding();
+    });
     els.peopleQuery.addEventListener("keydown", (event) => {
       if (event.key === "Enter") loadPeople();
     });
     els.peopleMember.addEventListener("change", loadPeople);
 
+    renderOnboardingFilterOptions();
     renderPeopleFilterOptions();
     loadUser().then(() => {
       setView(viewFromPath());

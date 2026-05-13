@@ -71,6 +71,9 @@ class PersonRecord:
     skill_attrs: dict[str, int] | None = None
     latest_resume_id: str | None = None
     latest_resume_name: str | None = None
+    onboarding_state: str | None = None
+    onboarder: str | None = None
+    onboarding_updated_at: datetime | None = None
     sync_status: PeopleSyncStatus = PeopleSyncStatus.ACTIVE
 
 
@@ -152,13 +155,16 @@ def upsert_person(settings: SharedSettings, person: PersonRecord) -> str:
             skill_attrs,
             latest_resume_id,
             latest_resume_name,
+            onboarding_state,
+            onboarder,
+            onboarding_updated_at,
             sync_status
         ) VALUES (
             %s, %s, %s, %s, %s,
             %s, %s, %s, %s, %s,
             %s, %s, %s, %s, %s,
             %s, %s, %s, %s, %s,
-            %s, %s
+            %s, %s, %s, %s, %s
         )
         ON CONFLICT (crm_contact_id) DO UPDATE
         SET
@@ -181,6 +187,9 @@ def upsert_person(settings: SharedSettings, person: PersonRecord) -> str:
             skill_attrs = EXCLUDED.skill_attrs,
             latest_resume_id = EXCLUDED.latest_resume_id,
             latest_resume_name = EXCLUDED.latest_resume_name,
+            onboarding_state = EXCLUDED.onboarding_state,
+            onboarder = EXCLUDED.onboarder,
+            onboarding_updated_at = EXCLUDED.onboarding_updated_at,
             sync_status = EXCLUDED.sync_status
         RETURNING id::text;
     """
@@ -214,6 +223,9 @@ def upsert_person(settings: SharedSettings, person: PersonRecord) -> str:
                     Jsonb(skill_attrs),
                     _normalize_text(person.latest_resume_id),
                     _normalize_text(person.latest_resume_name),
+                    _normalize_text(person.onboarding_state),
+                    _normalize_text(person.onboarder),
+                    person.onboarding_updated_at,
                     person.sync_status.value,
                 ),
             )

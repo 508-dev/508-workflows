@@ -6,7 +6,7 @@ from five08.worker.crm.people_sync import EspoPeopleSyncClient, PeopleSyncProces
 
 
 def test_list_contact_page_requests_address_state() -> None:
-    """Full-sync contact fetches should include addressState in select fields."""
+    """Full-sync contact fetches should include dashboard cache fields."""
     client = EspoPeopleSyncClient()
     client.api = MagicMock()
     client.api.request.return_value = {"list": [], "total": 0}
@@ -15,6 +15,9 @@ def test_list_contact_page_requests_address_state() -> None:
 
     request_params = client.api.request.call_args.args[2]
     assert "addressState" in request_params["select"]
+    assert "cOnboardingState" in request_params["select"]
+    assert "cOnboarder" in request_params["select"]
+    assert "cOnboardingUpdatedAt" in request_params["select"]
 
 
 def test_to_person_record_parses_discord_snapshot_fields() -> None:
@@ -31,6 +34,9 @@ def test_to_person_record_parses_discord_snapshot_fields() -> None:
             "cDiscordRoles": "Member, Admin",
             "cGithubUsername": "janedoe",
             "addressState": "Washington",
+            "cOnboardingState": "Selected",
+            "cOnboarder": "michael",
+            "cOnboardingUpdatedAt": "2026-05-08 10:03:00",
         }
     )
 
@@ -41,6 +47,9 @@ def test_to_person_record_parses_discord_snapshot_fields() -> None:
     assert person.discord_roles == ["Member", "Admin"]
     assert person.github_username == "janedoe"
     assert person.address_state == "Washington"
+    assert person.onboarding_state == "Selected"
+    assert person.onboarder == "michael"
+    assert person.onboarding_updated_at is not None
 
 
 def test_email_falls_back_to_email_address_data() -> None:

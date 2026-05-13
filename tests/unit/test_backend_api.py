@@ -984,7 +984,7 @@ def test_dashboard_people_returns_lookup_payload(client: TestClient) -> None:
         response = client.get(
             "/dashboard/api/people"
             "?query=alice&limit=10&sync_status=active&is_member=true"
-            "&discord=linked&email_508=present&resume=present"
+            "&discord=linked&email_508=present&resume=present&skills=present"
         )
 
     assert response.status_code == 200
@@ -997,6 +997,58 @@ def test_dashboard_people_returns_lookup_payload(client: TestClient) -> None:
         discord="linked",
         email_508="present",
         resume="present",
+        skills="present",
+    )
+
+
+def test_dashboard_onboarding_returns_filtered_queue(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admins"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+    queue = [
+        {
+            "crm_contact_id": "contact-prospect-1",
+            "name": "Bea Prospect",
+            "contact_type": "Prospect",
+            "onboarding_state": "selected",
+            "onboarder": "michael",
+            "profile_status": {"skills_count": 0},
+        }
+    ]
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._list_dashboard_onboarding", return_value=queue
+        ) as mock_onboarding,
+    ):
+        response = client.get(
+            "/dashboard/api/onboarding"
+            "?query=bea&limit=10&onboarding_state=selected&onboarder=michael"
+            "&skills=missing"
+        )
+
+    assert response.status_code == 200
+    assert response.json() == queue
+    mock_onboarding.assert_called_once_with(
+        query="bea",
+        limit=10,
+        onboarding_state="selected",
+        onboarder="michael",
+        discord=None,
+        email_508=None,
+        resume=None,
+        skills="missing",
     )
 
 
