@@ -20,7 +20,7 @@ from uuid import uuid4
 import httpx
 import uvicorn
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, ValidationError
 from psycopg import Connection
 from psycopg.rows import dict_row
@@ -58,7 +58,7 @@ from five08.backend.auth import (
     make_pkce_pair,
     normalize_next_path,
 )
-from five08.backend.dashboard import dashboard_html
+from five08.backend.dashboard import dashboard_html, login_required_html
 from five08.worker.config import settings
 from five08.worker.db_migrations import run_job_migrations
 from five08.worker.dispatcher import build_queue_client
@@ -890,9 +890,7 @@ def _session_actor_provider(session: AuthSession) -> ActorProvider:
     return ActorProvider.ADMIN_SSO
 
 
-def _set_session_cookie(
-    response: JSONResponse | RedirectResponse, session_id: str
-) -> None:
+def _set_session_cookie(response: Response, session_id: str) -> None:
     samesite = cast(
         Literal["lax", "strict", "none"],
         settings.auth_cookie_samesite,
@@ -908,7 +906,7 @@ def _set_session_cookie(
     )
 
 
-def _clear_session_cookie(response: JSONResponse | RedirectResponse) -> None:
+def _clear_session_cookie(response: Response) -> None:
     response.delete_cookie(key=settings.auth_session_cookie_name, path="/")
 
 
@@ -1410,8 +1408,11 @@ async def dashboard_handler(
     """Serve the admin dashboard for authenticated admin sessions."""
     session_id, session = await _current_session(request)
     if session is None:
-        login_query = urlencode({"next": normalize_next_path(request.url.path)})
-        response = RedirectResponse(url=f"/auth/login?{login_query}", status_code=302)
+        oidc = _oidc_client_from_app(request.app)
+        response = HTMLResponse(
+            login_required_html(oidc_configured=oidc.configured),
+            status_code=401,
+        )
         if session_id is not None:
             _clear_session_cookie(response)
         return response

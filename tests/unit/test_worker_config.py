@@ -163,7 +163,7 @@ def test_intake_resume_allowed_hostnames_normalizes_dots_and_empties() -> None:
     }
 
 
-def test_fixed_worker_defaults_ignore_legacy_env_vars(
+def test_fixed_worker_defaults_ignore_legacy_env_vars_except_session_ttl(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("CRM_LINKEDIN_FIELD", "linkedinCustom")
@@ -186,8 +186,17 @@ def test_fixed_worker_defaults_ignore_legacy_env_vars(
     assert settings.oidc_http_timeout_seconds == 8.0
     assert settings.oidc_jwks_cache_seconds == 300
     assert settings.auth_state_ttl_seconds == 600
-    assert settings.auth_session_ttl_seconds == 28800
+    assert settings.auth_session_ttl_seconds == 120
     assert settings.auth_cookie_samesite == "lax"
+
+
+def test_auth_session_ttl_defaults_to_one_day() -> None:
+    settings = WorkerSettings(
+        espo_base_url="https://crm.test.com",
+        espo_api_key="test-key",
+    )
+
+    assert settings.auth_session_ttl_seconds == 86400
 
 
 def test_auth_cookie_secure_is_false_for_local_even_if_legacy_env_is_true(

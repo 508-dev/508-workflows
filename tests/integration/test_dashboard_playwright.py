@@ -351,8 +351,10 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             page.get_by_role("link", name="Onboarding").click()
             expect(page).to_have_url(f"{dashboard_server}/dashboard/onboarding")
             page.get_by_text("Bea Prospect").wait_for()
-            page.get_by_text("selected").wait_for()
-            expect(page.get_by_role("button", name="State ↑")).to_be_visible()
+            page.locator("#onboardingBody").get_by_text(
+                "Assigned to onboarder"
+            ).wait_for()
+            expect(page.get_by_role("button", name="Status ↑")).to_be_visible()
             page.locator("#onboardingFilterKind").select_option("skills")
             page.locator("#onboardingFilterValue").select_option("missing")
             page.get_by_role("button", name="Add filter").click()

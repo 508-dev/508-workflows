@@ -223,9 +223,10 @@ Use `.env.example` as the source of truth for defaults.
 - `Optional`: `OIDC_CALLBACK_PATH` (default: `/auth/callback`)
 - `Optional`: `OIDC_REDIRECT_BASE_URL` (default: infer from request base URL)
 - `Optional`: `AUTH_SESSION_COOKIE_NAME` (default: `five08_session`)
+- `Optional`: `AUTH_SESSION_TTL_SECONDS` (default: `86400`, one day)
 - `Optional`: `DASHBOARD_DEFAULT_PATH` (default: `/dashboard`)
 - `Optional`: `DASHBOARD_PUBLIC_BASE_URL` (base URL for generated deep links)
-- Note: OIDC timeout/cache/session timings are fixed in code; auth cookies always use `SameSite=Lax` and enable `secure` automatically outside local/dev/test environments.
+- Note: OIDC timeout/cache timings are fixed in code; auth cookies always use `SameSite=Lax` and enable `secure` automatically outside local/dev/test environments.
 
 ### Discord Admin Deep-Link Validation
 

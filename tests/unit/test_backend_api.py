@@ -635,10 +635,12 @@ def test_auth_me_requires_session(client: TestClient) -> None:
     assert response.json()["error"] == "unauthorized"
 
 
-def test_dashboard_redirects_unauthenticated_client(client: TestClient) -> None:
+def test_dashboard_shows_login_recovery_for_unauthenticated_client(
+    client: TestClient,
+) -> None:
     response = client.get("/dashboard", follow_redirects=False)
-    assert response.status_code == 302
-    assert response.headers["location"] == "/auth/login?next=%2Fdashboard"
+    assert response.status_code == 401
+    assert "/dashboard-login" in response.text
 
 
 def test_dashboard_clears_stale_session_cookie(client: TestClient) -> None:
@@ -651,7 +653,8 @@ def test_dashboard_clears_stale_session_cookie(client: TestClient) -> None:
     ):
         response = client.get("/dashboard", follow_redirects=False)
 
-    assert response.status_code == 302
+    assert response.status_code == 401
+    assert "/dashboard-login" in response.text
     set_cookie = response.headers["set-cookie"]
     assert f"{api.settings.auth_session_cookie_name}=" in set_cookie
     assert "Max-Age=0" in set_cookie

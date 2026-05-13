@@ -3,6 +3,97 @@
 from __future__ import annotations
 
 
+def login_required_html(*, oidc_configured: bool) -> str:
+    """Return an unauthenticated dashboard recovery page."""
+    sso_action = (
+        '<a class="button primary" href="/auth/login?next=/dashboard">Continue with SSO</a>'
+        if oidc_configured
+        else ""
+    )
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dashboard Login Required</title>
+  <style>
+    :root {{
+      color-scheme: dark;
+      --bg: #0f1110;
+      --panel: #181b19;
+      --text: #eceee8;
+      --muted: #9ca39a;
+      --line: #343a33;
+      --accent: #3fbfa8;
+      --accent-strong: #61d9c5;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", sans-serif;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      min-height: 100vh;
+      margin: 0;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: var(--bg);
+      color: var(--text);
+    }}
+    main {{
+      width: min(560px, 100%);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 28px;
+      display: grid;
+      gap: 16px;
+    }}
+    h1, p {{ margin: 0; }}
+    h1 {{ font-size: 22px; letter-spacing: 0; }}
+    p {{ color: var(--muted); line-height: 1.5; }}
+    code {{
+      color: var(--text);
+      background: #222720;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 2px 6px;
+    }}
+    .actions {{ display: flex; flex-wrap: wrap; gap: 10px; }}
+    .button {{
+      min-height: 38px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px 12px;
+      color: var(--text);
+      text-decoration: none;
+      font-weight: 800;
+      font-size: 13px;
+    }}
+    .button.primary {{
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #071512;
+    }}
+    .button:hover {{ border-color: var(--accent-strong); }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Log back in to the admin dashboard</h1>
+    <p>Your dashboard session is missing or expired. In Discord, run <code>/dashboard-login</code> and open the new one-time link.</p>
+    <p>Discord links expire quickly, but dashboard sessions now last longer once you use a valid link.</p>
+    <div class="actions">
+      {sso_action}
+    </div>
+  </main>
+</body>
+</html>
+"""
+
+
 def dashboard_html() -> str:
     """Return the self-contained dashboard document."""
     return """<!doctype html>
@@ -464,8 +555,12 @@ def dashboard_html() -> str:
         </div>
         <div class="filter-row" aria-label="Onboarding filters">
           <label>
-            State
-            <input id="onboardingState" autocomplete="off" placeholder="Any state">
+            Status
+            <select id="onboardingState">
+              <option value="">Any state</option>
+              <option value="pending">Needs review</option>
+              <option value="selected">Assigned to onboarder</option>
+            </select>
           </label>
           <label>
             Onboarder
@@ -487,7 +582,7 @@ def dashboard_html() -> str:
           <thead>
             <tr>
               <th style="width: 24%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="name" type="button">Name</button></th>
-              <th style="width: 16%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="onboarding_state" type="button">State</button></th>
+              <th style="width: 16%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="onboarding_state" type="button">Status</button></th>
               <th style="width: 20%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="onboarder" type="button">Onboarder</button></th>
               <th style="width: 18%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="updated" type="button">Updated</button></th>
               <th style="width: 22%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="readiness" type="button">Readiness</button></th>
@@ -708,6 +803,13 @@ def dashboard_html() -> str:
         ],
       },
     };
+    const onboardingStateLabels = {
+      pending: "Needs review",
+      selected: "Assigned to onboarder",
+      onboarded: "Onboarded",
+      waitlist: "Waitlist",
+      rejected: "Rejected",
+    };
     const els = {
       navLinks: document.querySelectorAll("[data-view-link]"),
       views: document.querySelectorAll("[data-view]"),
@@ -776,7 +878,7 @@ def dashboard_html() -> str:
         headers,
       });
       if (response.status === 401) {
-        window.location.assign(`/auth/login?next=${encodeURIComponent("/dashboard")}`);
+        window.location.assign("/dashboard");
         throw new Error("Session expired");
       }
       if (!response.ok) {
@@ -866,6 +968,29 @@ def dashboard_html() -> str:
     function crmAttachmentUrl(attachmentId) {
       if (!state.crmBaseUrl || !attachmentId) return "";
       return `${state.crmBaseUrl}/api/v1/Attachment/file/${encodeURIComponent(attachmentId)}`;
+    }
+
+    function labelForOnboardingState(value) {
+      const raw = String(value || "").trim();
+      if (!raw) return "Unknown";
+      const normalized = raw.toLowerCase();
+      if (onboardingStateLabels[normalized]) return onboardingStateLabels[normalized];
+      return raw
+        .replace(/[-_]+/g, " ")
+        .replace(/\\s+/g, " ")
+        .trim()
+        .replace(/\\b\\w/g, (character) => character.toUpperCase());
+    }
+
+    function toneForOnboardingState(value) {
+      const normalized = String(value || "").trim().toLowerCase();
+      if (!normalized) return "neutral";
+      if (normalized === "pending") return "neutral";
+      if (normalized === "selected") return "queued";
+      if (normalized === "rejected") return "failed";
+      if (normalized === "onboarded") return "succeeded";
+      if (normalized === "waitlist") return "running";
+      return "queued";
     }
 
     function valueForSort(scope, item, key) {
@@ -1160,9 +1285,9 @@ def dashboard_html() -> str:
         nameCell.appendChild(nameLink);
         nameCell.appendChild(meta);
 
-        const stateText = person.onboarding_state || "Unknown";
-        const stateCell = addTextCell(row, "State", "");
-        stateCell.appendChild(createBadge(stateText, stateText.toLowerCase() === "pending" ? "neutral" : "queued"));
+        const stateText = labelForOnboardingState(person.onboarding_state);
+        const stateCell = addTextCell(row, "Status", "");
+        stateCell.appendChild(createBadge(stateText, toneForOnboardingState(person.onboarding_state)));
         addTextCell(row, "Onboarder", person.onboarder || "Unassigned");
         addTextCell(row, "Updated", formatDate(person.onboarding_updated_at));
 
@@ -1424,7 +1549,7 @@ def dashboard_html() -> str:
         if (payload.end_session_url) {
           window.location.assign(payload.end_session_url);
         } else {
-          window.location.assign("/auth/login?next=/dashboard");
+          window.location.assign("/dashboard");
         }
       } catch (error) {
         setToast(error.message || "Unable to log out", "error");
@@ -1464,9 +1589,7 @@ def dashboard_html() -> str:
     els.onboardingQuery.addEventListener("keydown", (event) => {
       if (event.key === "Enter") loadOnboarding();
     });
-    els.onboardingState.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") loadOnboarding();
-    });
+    els.onboardingState.addEventListener("change", loadOnboarding);
     els.onboarderFilter.addEventListener("keydown", (event) => {
       if (event.key === "Enter") loadOnboarding();
     });
