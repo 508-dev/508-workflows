@@ -1,4 +1,4 @@
-"""Discord slash command for one-time admin dashboard login links."""
+"""Discord slash command for one-time operations dashboard login links."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class AdminLoginCog(DiscordAuditCogMixin, commands.Cog):
-    """Mint one-time dashboard login links for Discord admins."""
+    """Mint one-time dashboard login links for Discord operators."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -62,8 +62,11 @@ class AdminLoginCog(DiscordAuditCogMixin, commands.Cog):
 
                 if response.status == 403 and isinstance(data, dict):
                     detail = data.get("detail")
-                    if detail == "discord_user_not_admin":
-                        raise PermissionError("discord_user_not_admin")
+                    if detail in {
+                        "discord_user_not_admin",
+                        "discord_user_not_allowed",
+                    }:
+                        raise PermissionError(str(detail))
 
                 raise RuntimeError(
                     f"Failed creating login link: status={response.status}"
@@ -87,7 +90,7 @@ class AdminLoginCog(DiscordAuditCogMixin, commands.Cog):
 
     @app_commands.command(
         name="dashboard-login",
-        description="Get a one-time admin dashboard login link.",
+        description="Get a one-time operations dashboard login link.",
     )
     async def dashboard_login(self, interaction: discord.Interaction) -> None:
         """Create and return a one-time dashboard login URL."""
@@ -112,10 +115,10 @@ class AdminLoginCog(DiscordAuditCogMixin, commands.Cog):
             self._audit(
                 interaction=interaction,
                 result="denied",
-                metadata={"reason": "discord_user_not_admin"},
+                metadata={"reason": "discord_user_not_allowed"},
             )
             await interaction.followup.send(
-                "❌ You are not allowed to create an admin dashboard login link.",
+                "❌ You are not allowed to create an operations dashboard login link.",
                 ephemeral=True,
             )
             return
@@ -139,7 +142,7 @@ class AdminLoginCog(DiscordAuditCogMixin, commands.Cog):
         )
         await interaction.followup.send(
             (
-                "✅ One-time admin dashboard login link:\n"
+                "✅ One-time operations dashboard login link:\n"
                 f"{link_url}\n\n"
                 f"Expires in {expires_in_seconds} seconds."
             ),
@@ -148,5 +151,5 @@ class AdminLoginCog(DiscordAuditCogMixin, commands.Cog):
 
 
 async def setup(bot: commands.Bot) -> None:
-    """Load the admin login command cog."""
+    """Load the dashboard login command cog."""
     await bot.add_cog(AdminLoginCog(bot))

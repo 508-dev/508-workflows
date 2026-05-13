@@ -47,6 +47,13 @@ from five08.queue import (
 )
 from five08.backend.auth import (
     AuthSession,
+    DASHBOARD_PERMISSION_AUDIT_READ,
+    DASHBOARD_PERMISSION_JOBS_READ,
+    DASHBOARD_PERMISSION_JOBS_WRITE,
+    DASHBOARD_PERMISSION_ONBOARDING_READ,
+    DASHBOARD_PERMISSION_ONBOARDING_WRITE,
+    DASHBOARD_PERMISSION_PEOPLE_READ,
+    DASHBOARD_PERMISSION_PEOPLE_SYNC,
     DiscordAdminVerifier,
     DiscordLinkGrant,
     OIDCProviderClient,
@@ -54,7 +61,9 @@ from five08.backend.auth import (
     RedisAuthStore,
     build_authorization_url,
     build_redirect_uri,
+    dashboard_permissions_for_roles,
     extract_groups,
+    has_role_with_hierarchy,
     is_admin_from_groups,
     make_pkce_pair,
     normalize_next_path,
@@ -422,8 +431,25 @@ async def _current_session(request: Request) -> tuple[str | None, AuthSession | 
     return session_id, session
 
 
-async def _dashboard_admin_session_or_error(
+def _session_dashboard_permissions(session: AuthSession) -> set[str]:
+    if session.permissions:
+        return set(session.permissions)
+    return set(
+        dashboard_permissions_for_roles(session.groups, is_admin=session.is_admin)
+    )
+
+
+def _session_has_dashboard_permission(
+    session: AuthSession,
+    required_permission: str,
+) -> bool:
+    return required_permission in _session_dashboard_permissions(session)
+
+
+async def _dashboard_session_or_error(
     request: Request,
+    *,
+    required_permission: str = DASHBOARD_PERMISSION_PEOPLE_READ,
 ) -> tuple[AuthSession | None, JSONResponse | None]:
     session_id, session = await _current_session(request)
     if session is None:
@@ -431,7 +457,7 @@ async def _dashboard_admin_session_or_error(
         if session_id is not None:
             _clear_session_cookie(response)
         return None, response
-    if not session.is_admin:
+    if not _session_has_dashboard_permission(session, required_permission):
         return None, JSONResponse({"error": "forbidden"}, status_code=403)
     return session, None
 
@@ -471,6 +497,7 @@ def _session_payload(session: AuthSession) -> dict[str, Any]:
         "display_name": session.display_name,
         "groups": session.groups,
         "is_admin": session.is_admin,
+        "permissions": sorted(_session_dashboard_permissions(session)),
         "expires_at": session.expires_at,
         "actor_provider": session.actor_provider,
         "crm_contact_id": session.crm_contact_id,
@@ -1607,7 +1634,7 @@ async def dashboard_handler(
     request: Request,
     view: str | None = None,
 ) -> HTMLResponse | RedirectResponse:
-    """Serve the admin dashboard for authenticated admin sessions."""
+    """Serve the operations dashboard for authenticated operator sessions."""
     session_id, session = await _current_session(request)
     if session is None:
         oidc = _oidc_client_from_app(request.app)
@@ -1618,14 +1645,14 @@ async def dashboard_handler(
         if session_id is not None:
             _clear_session_cookie(response)
         return response
-    if not session.is_admin:
+    if not _session_has_dashboard_permission(session, DASHBOARD_PERMISSION_PEOPLE_READ):
         return HTMLResponse("Forbidden", status_code=403)
     return HTMLResponse(dashboard_html(), status_code=200)
 
 
 async def dashboard_me_handler(request: Request) -> JSONResponse:
     """Return the dashboard session identity."""
-    session, error_response = await _dashboard_admin_session_or_error(request)
+    session, error_response = await _dashboard_session_or_error(request)
     if error_response is not None:
         return error_response
     assert session is not None
@@ -1639,8 +1666,11 @@ async def dashboard_jobs_handler(
     status: str | None = Query(default=None),
     job_type: str | None = Query(default=None, alias="type"),
 ) -> JSONResponse:
-    """Return recent jobs for an authenticated admin dashboard session."""
-    _, error_response = await _dashboard_admin_session_or_error(request)
+    """Return recent jobs for an authenticated dashboard session."""
+    _, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_JOBS_READ,
+    )
     if error_response is not None:
         return error_response
 
@@ -1684,7 +1714,10 @@ async def dashboard_job_detail_handler(
     job_id: str,
 ) -> JSONResponse:
     """Return one job's dashboard detail payload for an authenticated admin."""
-    _, error_response = await _dashboard_admin_session_or_error(request)
+    _, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_JOBS_READ,
+    )
     if error_response is not None:
         return error_response
 
@@ -1711,7 +1744,10 @@ async def dashboard_people_handler(
     skills: str | None = Query(default=None),
 ) -> JSONResponse:
     """Return CRM people-cache rows for dashboard lookup/onboarding views."""
-    _, error_response = await _dashboard_admin_session_or_error(request)
+    _, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_PEOPLE_READ,
+    )
     if error_response is not None:
         return error_response
 
@@ -1752,7 +1788,10 @@ async def dashboard_onboarding_handler(
     skills: str | None = Query(default=None),
 ) -> JSONResponse:
     """Return prospect onboarding queue rows from the CRM people cache."""
-    _, error_response = await _dashboard_admin_session_or_error(request)
+    _, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_ONBOARDING_READ,
+    )
     if error_response is not None:
         return error_response
 
@@ -1792,7 +1831,10 @@ async def dashboard_assign_onboarder_handler(
     contact_id: str,
 ) -> JSONResponse:
     """Assign an onboarder to one CRM contact from the dashboard."""
-    session, error_response = await _dashboard_admin_session_or_error(request)
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_ONBOARDING_WRITE,
+    )
     if error_response is not None:
         return error_response
     assert session is not None
@@ -1879,7 +1921,10 @@ async def dashboard_audit_events_handler(
     limit: int = Query(default=25, ge=1, le=100),
 ) -> JSONResponse:
     """Return recent human audit events for the dashboard."""
-    _, error_response = await _dashboard_admin_session_or_error(request)
+    _, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_AUDIT_READ,
+    )
     if error_response is not None:
         return error_response
 
@@ -1891,8 +1936,11 @@ async def dashboard_rerun_job_handler(
     request: Request,
     job_id: str,
 ) -> JSONResponse:
-    """Rerun one job from the authenticated admin dashboard."""
-    session, error_response = await _dashboard_admin_session_or_error(request)
+    """Rerun one job from the authenticated dashboard."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_JOBS_WRITE,
+    )
     if error_response is not None:
         return error_response
     assert session is not None
@@ -1908,8 +1956,11 @@ async def dashboard_rerun_job_handler(
 
 
 async def dashboard_sync_people_handler(request: Request) -> JSONResponse:
-    """Queue a people-cache sync from the authenticated admin dashboard."""
-    session, error_response = await _dashboard_admin_session_or_error(request)
+    """Queue a people-cache sync from the authenticated dashboard."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_PEOPLE_SYNC,
+    )
     if error_response is not None:
         return error_response
     assert session is not None
@@ -2389,20 +2440,6 @@ async def auth_callback_handler(
             return JSONResponse({"error": "link_not_found"}, status_code=404)
 
         if enforce_discord_link_identity_checks:
-            if not is_admin:
-                await _write_auth_audit_event(
-                    action="auth.login",
-                    result=AuditResult.DENIED,
-                    actor_subject=audit_actor_subject,
-                    actor_display_name=display_name,
-                    metadata={"reason": "admin_group_required", "groups": groups},
-                    correlation_id=state,
-                )
-                return JSONResponse(
-                    {"error": "forbidden", "detail": "admin_group_required"},
-                    status_code=403,
-                )
-
             if not email:
                 await _write_auth_audit_event(
                     action="auth.login",
@@ -2418,7 +2455,7 @@ async def auth_callback_handler(
                 )
 
             verifier = _discord_admin_verifier_from_app(request.app)
-            linked = await verifier.is_admin_email_for_discord_user(
+            linked = await verifier.is_dashboard_email_for_discord_user(
                 email=email,
                 discord_user_id=grant.discord_user_id,
                 http_client=http_client,
@@ -2430,7 +2467,7 @@ async def auth_callback_handler(
                     actor_subject=audit_actor_subject,
                     actor_display_name=display_name,
                     metadata={
-                        "reason": "oidc_user_not_linked_to_discord_admin",
+                        "reason": "oidc_user_not_linked_to_dashboard_user",
                         "discord_user_id": grant.discord_user_id,
                     },
                     correlation_id=state,
@@ -2438,11 +2475,11 @@ async def auth_callback_handler(
                 return JSONResponse(
                     {
                         "error": "forbidden",
-                        "detail": "oidc_user_not_linked_to_discord_admin",
+                        "detail": "oidc_user_not_linked_to_discord_dashboard_user",
                     },
                     status_code=403,
                 )
-            identity = await verifier.resolve_admin_identity(
+            identity = await verifier.resolve_dashboard_identity(
                 discord_user_id=grant.discord_user_id,
                 http_client=http_client,
             )
@@ -2453,28 +2490,59 @@ async def auth_callback_handler(
                     actor_subject=audit_actor_subject,
                     actor_display_name=display_name,
                     metadata={
-                        "reason": "discord_user_not_admin",
+                        "reason": "discord_user_not_dashboard_allowed",
                         "discord_user_id": grant.discord_user_id,
                     },
                     correlation_id=state,
                 )
                 return JSONResponse(
-                    {"error": "forbidden", "detail": "discord_user_not_admin"},
+                    {"error": "forbidden", "detail": "discord_user_not_allowed"},
                     status_code=403,
                 )
             crm_contact_id = identity.crm_contact_id
             session_subject = grant.discord_user_id
             session_email = identity.email or email
             session_display_name = identity.display_name or display_name
-            session_groups = ["discord_admin"]
+            session_groups = identity.discord_roles
+            is_admin = has_role_with_hierarchy(identity.discord_roles, "Admin")
             session_actor_provider = ActorProvider.DISCORD
             audit_actor_subject = grant.discord_user_id
             audit_actor_display_name = session_display_name
             audit_actor_provider = ActorProvider.DISCORD
         else:
-            # Discord deep links are already restricted to Discord admin users.
+            # Discord deep links are already restricted to dashboard-capable users.
             # In bootstrap mode, skip OIDC group/email-link checks for this path.
-            is_admin = True
+            verifier = _discord_admin_verifier_from_app(request.app)
+            identity = await verifier.resolve_dashboard_identity(
+                discord_user_id=grant.discord_user_id,
+                http_client=http_client,
+            )
+            if identity is None:
+                await _write_auth_audit_event(
+                    action="auth.login",
+                    result=AuditResult.DENIED,
+                    actor_subject=audit_actor_subject,
+                    actor_display_name=display_name,
+                    metadata={
+                        "reason": "discord_user_not_dashboard_allowed",
+                        "discord_user_id": grant.discord_user_id,
+                    },
+                    correlation_id=state,
+                )
+                return JSONResponse(
+                    {"error": "forbidden", "detail": "discord_user_not_allowed"},
+                    status_code=403,
+                )
+            crm_contact_id = identity.crm_contact_id
+            session_subject = grant.discord_user_id
+            session_email = identity.email or email
+            session_display_name = identity.display_name or display_name
+            session_groups = identity.discord_roles
+            session_actor_provider = ActorProvider.DISCORD
+            is_admin = has_role_with_hierarchy(identity.discord_roles, "Admin")
+            audit_actor_subject = grant.discord_user_id
+            audit_actor_display_name = session_display_name
+            audit_actor_provider = ActorProvider.DISCORD
 
         await store.delete_discord_link(pending.discord_link_token)
 
@@ -2499,6 +2567,10 @@ async def auth_callback_handler(
             expires_at=expires_at,
             actor_provider=session_actor_provider.value,
             crm_contact_id=crm_contact_id,
+            permissions=dashboard_permissions_for_roles(
+                session_groups,
+                is_admin=is_admin,
+            ),
         ),
         ttl_seconds=settings.auth_session_ttl_seconds,
     )
@@ -2600,7 +2672,7 @@ async def auth_logout_handler(request: Request) -> JSONResponse:
 
 
 async def auth_discord_link_create_handler(request: Request) -> JSONResponse:
-    """Create one-time admin login link for a Discord user."""
+    """Create one-time operations dashboard login link for a Discord user."""
     if not _is_authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
@@ -2623,13 +2695,13 @@ async def auth_discord_link_create_handler(request: Request) -> JSONResponse:
 
     verifier = _discord_admin_verifier_from_app(request.app)
     http_client = _http_client_from_app(request.app)
-    is_admin_user = await verifier.is_admin_discord_user(
+    is_dashboard_user = await verifier.is_dashboard_discord_user(
         discord_user_id=payload.discord_user_id,
         http_client=http_client,
     )
-    if not is_admin_user:
+    if not is_dashboard_user:
         return JSONResponse(
-            {"error": "forbidden", "detail": "discord_user_not_admin"},
+            {"error": "forbidden", "detail": "discord_user_not_allowed"},
             status_code=403,
         )
 
@@ -2678,30 +2750,35 @@ async def auth_discord_link_redirect_handler(
     if not settings.discord_link_require_oidc_identity_checks:
         verifier = _discord_admin_verifier_from_app(request.app)
         http_client = _http_client_from_app(request.app)
-        identity = await verifier.resolve_admin_identity(
+        identity = await verifier.resolve_dashboard_identity(
             discord_user_id=grant.discord_user_id,
             http_client=http_client,
         )
         if identity is None:
             return JSONResponse(
-                {"error": "forbidden", "detail": "discord_user_not_admin"},
+                {"error": "forbidden", "detail": "discord_user_not_allowed"},
                 status_code=403,
             )
 
         session_id = secrets.token_urlsafe(32)
         expires_at = int(time.time()) + max(1, settings.auth_session_ttl_seconds)
+        is_admin = has_role_with_hierarchy(identity.discord_roles, "Admin")
         await store.save_session(
             session_id=session_id,
             payload=AuthSession(
                 subject=grant.discord_user_id,
                 email=identity.email,
                 display_name=identity.display_name,
-                groups=["discord_admin"],
-                is_admin=True,
+                groups=identity.discord_roles,
+                is_admin=is_admin,
                 id_token="",
                 expires_at=expires_at,
                 actor_provider=ActorProvider.DISCORD.value,
                 crm_contact_id=identity.crm_contact_id,
+                permissions=dashboard_permissions_for_roles(
+                    identity.discord_roles,
+                    is_admin=is_admin,
+                ),
             ),
             ttl_seconds=settings.auth_session_ttl_seconds,
         )
@@ -2716,8 +2793,12 @@ async def auth_discord_link_redirect_handler(
             actor_display_name=identity.display_name,
             actor_provider=ActorProvider.DISCORD,
             metadata={
-                "is_admin": True,
-                "groups": ["discord_admin"],
+                "is_admin": is_admin,
+                "groups": identity.discord_roles,
+                "permissions": dashboard_permissions_for_roles(
+                    identity.discord_roles,
+                    is_admin=is_admin,
+                ),
                 "via_discord_link": True,
                 "discord_link_identity_checks_enforced": False,
             },
@@ -2727,12 +2808,6 @@ async def auth_discord_link_redirect_handler(
         return response
 
     if session is not None:
-        if not session.is_admin:
-            return JSONResponse(
-                {"error": "forbidden", "detail": "admin_group_required"},
-                status_code=403,
-            )
-
         if not session.email:
             return JSONResponse(
                 {"error": "forbidden", "detail": "email_claim_required"},
@@ -2741,7 +2816,7 @@ async def auth_discord_link_redirect_handler(
 
         verifier = _discord_admin_verifier_from_app(request.app)
         http_client = _http_client_from_app(request.app)
-        linked = await verifier.is_admin_email_for_discord_user(
+        linked = await verifier.is_dashboard_email_for_discord_user(
             email=session.email,
             discord_user_id=grant.discord_user_id,
             http_client=http_client,
@@ -2750,34 +2825,39 @@ async def auth_discord_link_redirect_handler(
             return JSONResponse(
                 {
                     "error": "forbidden",
-                    "detail": "oidc_user_not_linked_to_discord_admin",
+                    "detail": "oidc_user_not_linked_to_discord_dashboard_user",
                 },
                 status_code=403,
             )
 
-        identity = await verifier.resolve_admin_identity(
+        identity = await verifier.resolve_dashboard_identity(
             discord_user_id=grant.discord_user_id,
             http_client=http_client,
         )
         if identity is None:
             return JSONResponse(
-                {"error": "forbidden", "detail": "discord_user_not_admin"},
+                {"error": "forbidden", "detail": "discord_user_not_allowed"},
                 status_code=403,
             )
 
         assert session_id is not None
+        is_admin = has_role_with_hierarchy(identity.discord_roles, "Admin")
         await store.save_session(
             session_id=session_id,
             payload=AuthSession(
                 subject=grant.discord_user_id,
                 email=identity.email,
                 display_name=identity.display_name,
-                groups=["discord_admin"],
-                is_admin=True,
+                groups=identity.discord_roles,
+                is_admin=is_admin,
                 id_token=session.id_token,
                 expires_at=session.expires_at,
                 actor_provider=ActorProvider.DISCORD.value,
                 crm_contact_id=identity.crm_contact_id,
+                permissions=dashboard_permissions_for_roles(
+                    identity.discord_roles,
+                    is_admin=is_admin,
+                ),
             ),
             ttl_seconds=settings.auth_session_ttl_seconds,
         )
@@ -2789,8 +2869,12 @@ async def auth_discord_link_redirect_handler(
             actor_display_name=identity.display_name,
             actor_provider=ActorProvider.DISCORD,
             metadata={
-                "is_admin": True,
-                "groups": ["discord_admin"],
+                "is_admin": is_admin,
+                "groups": identity.discord_roles,
+                "permissions": dashboard_permissions_for_roles(
+                    identity.discord_roles,
+                    is_admin=is_admin,
+                ),
                 "via_discord_link": True,
                 "discord_link_identity_checks_enforced": True,
                 "upgraded_existing_session": True,

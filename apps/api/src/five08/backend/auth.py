@@ -9,7 +9,7 @@ import json
 import logging
 import secrets
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, cast
 from urllib.parse import urlencode
 
@@ -25,6 +25,32 @@ from five08.worker.config import WorkerSettings
 logger = logging.getLogger(__name__)
 
 DISCORD_API_BASE_URL = "https://discord.com/api/v10"
+ROLE_HIERARCHY = ("Member", "Steering Committee", "Admin", "Owner")
+
+DASHBOARD_PERMISSION_PEOPLE_READ = "people:read"
+DASHBOARD_PERMISSION_ONBOARDING_READ = "onboarding:read"
+DASHBOARD_PERMISSION_ONBOARDING_WRITE = "onboarding:write"
+DASHBOARD_PERMISSION_JOBS_READ = "jobs:read"
+DASHBOARD_PERMISSION_JOBS_WRITE = "jobs:write"
+DASHBOARD_PERMISSION_AUDIT_READ = "audit:read"
+DASHBOARD_PERMISSION_PEOPLE_SYNC = "people:sync"
+
+DASHBOARD_STEERING_PERMISSIONS = frozenset(
+    {
+        DASHBOARD_PERMISSION_PEOPLE_READ,
+        DASHBOARD_PERMISSION_ONBOARDING_READ,
+        DASHBOARD_PERMISSION_ONBOARDING_WRITE,
+    }
+)
+DASHBOARD_ADMIN_PERMISSIONS = frozenset(
+    {
+        *DASHBOARD_STEERING_PERMISSIONS,
+        DASHBOARD_PERMISSION_JOBS_READ,
+        DASHBOARD_PERMISSION_JOBS_WRITE,
+        DASHBOARD_PERMISSION_AUDIT_READ,
+        DASHBOARD_PERMISSION_PEOPLE_SYNC,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -61,6 +87,7 @@ class AuthSession:
     expires_at: int
     actor_provider: str = "admin_sso"
     crm_contact_id: str | None = None
+    permissions: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -79,6 +106,7 @@ class DiscordAdminIdentity:
     crm_contact_id: str
     email: str | None
     display_name: str | None
+    discord_roles: list[str]
 
 
 class RedisAuthStore:
@@ -140,6 +168,7 @@ class RedisAuthStore:
                 expires_at=int(value["expires_at"]),
                 actor_provider=str(value.get("actor_provider") or "admin_sso"),
                 crm_contact_id=_to_optional_str(value.get("crm_contact_id")),
+                permissions=_to_string_list(value.get("permissions")),
             )
         except Exception:
             logger.warning("Invalid auth session payload in Redis")
@@ -481,6 +510,35 @@ def is_admin_from_groups(
     return bool(normalized & configured_admin_groups)
 
 
+def has_role_with_hierarchy(raw_roles: object, required_role: str) -> bool:
+    """Return whether roles satisfy a required Discord hierarchy role."""
+    parsed_roles = _to_string_list(raw_roles)
+    role_names = {role.casefold() for role in parsed_roles}
+    required_key = required_role.casefold()
+    hierarchy = [role.casefold() for role in ROLE_HIERARCHY]
+    if required_key not in hierarchy:
+        return required_key in role_names
+
+    required_level = hierarchy.index(required_key)
+    for role_name in role_names:
+        if role_name in hierarchy and hierarchy.index(role_name) >= required_level:
+            return True
+    return False
+
+
+def dashboard_permissions_for_roles(
+    raw_roles: object,
+    *,
+    is_admin: bool = False,
+) -> list[str]:
+    """Map Discord/OIDC role state to dashboard permission strings."""
+    if is_admin or has_role_with_hierarchy(raw_roles, "Admin"):
+        return sorted(DASHBOARD_ADMIN_PERMISSIONS)
+    if has_role_with_hierarchy(raw_roles, "Steering Committee"):
+        return sorted(DASHBOARD_STEERING_PERMISSIONS)
+    return []
+
+
 class DiscordAdminVerifier:
     """Resolve whether a Discord user is an active CRM-backed Discord admin."""
 
@@ -499,6 +557,18 @@ class DiscordAdminVerifier:
         )
         return identity is not None
 
+    async def is_dashboard_discord_user(
+        self,
+        *,
+        discord_user_id: str,
+        http_client: httpx.AsyncClient,
+    ) -> bool:
+        identity = await self.resolve_dashboard_identity(
+            discord_user_id=discord_user_id,
+            http_client=http_client,
+        )
+        return identity is not None
+
     async def resolve_admin_identity(
         self,
         *,
@@ -506,6 +576,20 @@ class DiscordAdminVerifier:
         http_client: httpx.AsyncClient,
     ) -> DiscordAdminIdentity | None:
         """Return CRM-backed identity details when the Discord user is an admin."""
+        return await self.resolve_dashboard_identity(
+            discord_user_id=discord_user_id,
+            http_client=http_client,
+            required_role="Admin",
+        )
+
+    async def resolve_dashboard_identity(
+        self,
+        *,
+        discord_user_id: str,
+        http_client: httpx.AsyncClient,
+        required_role: str = "Steering Committee",
+    ) -> DiscordAdminIdentity | None:
+        """Return CRM-backed identity details when user can access the dashboard."""
         person = await asyncio.to_thread(
             self._get_active_person_record,
             discord_user_id,
@@ -513,13 +597,15 @@ class DiscordAdminVerifier:
         if person is None:
             return None
 
-        if not self._has_admin_role(person.get("discord_roles")):
-            is_live_admin = await self._is_admin_from_discord_api(
+        discord_roles = _to_string_list(person.get("discord_roles"))
+        if not has_role_with_hierarchy(discord_roles, required_role):
+            live_roles = await self._discord_role_names_from_api(
                 discord_user_id=discord_user_id,
                 http_client=http_client,
             )
-            if not is_live_admin:
+            if not has_role_with_hierarchy(live_roles, required_role):
                 return None
+            discord_roles = live_roles
 
         email = _to_optional_str(person.get("email_508")) or _to_optional_str(
             person.get("email")
@@ -532,6 +618,7 @@ class DiscordAdminVerifier:
             crm_contact_id=crm_contact_id,
             email=email,
             display_name=_to_optional_str(person.get("name")),
+            discord_roles=discord_roles,
         )
 
     async def is_admin_email_for_discord_user(
@@ -564,6 +651,38 @@ class DiscordAdminVerifier:
             http_client=http_client,
         )
 
+    async def is_dashboard_email_for_discord_user(
+        self,
+        *,
+        email: str,
+        discord_user_id: str,
+        http_client: httpx.AsyncClient | None = None,
+        required_role: str = "Steering Committee",
+    ) -> bool:
+        """Check if OIDC email maps to an active dashboard-capable Discord user."""
+        normalized_email = email.strip().lower()
+        if not normalized_email:
+            return False
+
+        person = await asyncio.to_thread(
+            self._get_active_person_record,
+            discord_user_id,
+            normalized_email,
+        )
+        if person is None:
+            return False
+        if not self._email_matches_person(person, normalized_email):
+            return False
+        if has_role_with_hierarchy(person.get("discord_roles"), required_role):
+            return True
+        if http_client is None:
+            return False
+        live_roles = await self._discord_role_names_from_api(
+            discord_user_id=discord_user_id,
+            http_client=http_client,
+        )
+        return has_role_with_hierarchy(live_roles, required_role)
+
     def _get_active_person_record(
         self,
         discord_user_id: str,
@@ -593,11 +712,23 @@ class DiscordAdminVerifier:
         discord_user_id: str,
         http_client: httpx.AsyncClient,
     ) -> bool:
+        role_names = self.settings.discord_admin_role_names
+        member_role_names = await self._discord_role_names_from_api(
+            discord_user_id=discord_user_id,
+            http_client=http_client,
+        )
+        return bool({role.casefold() for role in member_role_names} & role_names)
+
+    async def _discord_role_names_from_api(
+        self,
+        *,
+        discord_user_id: str,
+        http_client: httpx.AsyncClient,
+    ) -> list[str]:
         bot_token = (self.settings.discord_bot_token or "").strip()
         guild_id = (self.settings.discord_server_id or "").strip()
-        role_names = self.settings.discord_admin_role_names
-        if not bot_token or not guild_id or not role_names:
-            return False
+        if not bot_token or not guild_id:
+            return []
 
         headers = {"Authorization": f"Bot {bot_token}"}
 
@@ -607,12 +738,12 @@ class DiscordAdminVerifier:
             timeout=self.settings.discord_api_timeout_seconds,
         )
         if member_response.status_code == 404:
-            return False
+            return []
         member_response.raise_for_status()
 
         member_payload = member_response.json()
         if not isinstance(member_payload, dict):
-            return False
+            return []
 
         member_role_ids = {
             str(role_id)
@@ -620,7 +751,7 @@ class DiscordAdminVerifier:
             if isinstance(role_id, str)
         }
         if not member_role_ids:
-            return False
+            return []
 
         roles_response = await http_client.get(
             f"{DISCORD_API_BASE_URL}/guilds/{guild_id}/roles",
@@ -631,9 +762,9 @@ class DiscordAdminVerifier:
 
         roles_payload = roles_response.json()
         if not isinstance(roles_payload, list):
-            return False
+            return []
 
-        member_role_names: set[str] = set()
+        member_role_names: list[str] = []
         for role_obj in roles_payload:
             if not isinstance(role_obj, dict):
                 continue
@@ -642,14 +773,16 @@ class DiscordAdminVerifier:
             if not isinstance(role_id, str) or not isinstance(role_name, str):
                 continue
             if role_id in member_role_ids:
-                member_role_names.add(role_name.casefold())
+                member_role_names.append(role_name)
 
-        return bool(member_role_names & role_names)
+        return member_role_names
 
     def _has_admin_role(self, raw_roles: object) -> bool:
         role_names = self.settings.discord_admin_role_names
         parsed_roles = {role.casefold() for role in _to_string_list(raw_roles)}
-        return bool(parsed_roles & role_names)
+        if parsed_roles & role_names:
+            return True
+        return has_role_with_hierarchy(raw_roles, "Admin")
 
     @staticmethod
     def _email_matches_person(person: dict[str, Any], email: str) -> bool:

@@ -1,4 +1,4 @@
-"""HTML shell for the admin dashboard."""
+"""HTML shell for the operations dashboard."""
 
 from __future__ import annotations
 
@@ -82,7 +82,7 @@ def login_required_html(*, oidc_configured: bool) -> str:
 </head>
 <body>
   <main>
-    <h1>Log back in to the admin dashboard</h1>
+    <h1>Log back in to the operations dashboard</h1>
     <p>Your dashboard session is missing or expired. In Discord, run <code>/dashboard-login</code> and open the new one-time link.</p>
     <div class="actions">
       {sso_action}
@@ -100,7 +100,7 @@ def dashboard_html() -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>508 Admin Dashboard</title>
+  <title>508 Operations Dashboard</title>
   <style>
     :root {
       color-scheme: dark;
@@ -648,8 +648,8 @@ def dashboard_html() -> str:
   <header>
     <div class="topbar">
       <div>
-        <h1>508 Admin Dashboard</h1>
-        <p class="status-line">Operations view for authenticated admins.</p>
+        <h1>508 Operations Dashboard</h1>
+        <p class="status-line">Operations view for authenticated 508 operators.</p>
       </div>
       <div class="header-actions">
         <div class="identity" aria-live="polite">
@@ -663,10 +663,10 @@ def dashboard_html() -> str:
   </header>
   <main>
     <nav class="sidebar" aria-label="Dashboard sections">
-      <a class="nav-link" data-view-link="people" href="/dashboard/people">People</a>
-      <a class="nav-link" data-view-link="onboarding" href="/dashboard/onboarding">Onboarding</a>
-      <a class="nav-link" data-view-link="jobs" href="/dashboard/jobs">Jobs</a>
-      <a class="nav-link" data-view-link="audit" href="/dashboard/audit">Audit</a>
+      <a class="nav-link" data-view-link="people" data-permission="people:read" href="/dashboard/people">People</a>
+      <a class="nav-link" data-view-link="onboarding" data-permission="onboarding:read" href="/dashboard/onboarding">Onboarding</a>
+      <a class="nav-link" data-view-link="jobs" data-permission="jobs:read" href="/dashboard/jobs">Jobs</a>
+      <a class="nav-link" data-view-link="audit" data-permission="audit:read" href="/dashboard/audit">Audit</a>
     </nav>
     <div class="content">
     <section id="view-onboarding" class="view" data-view="onboarding" hidden>
@@ -810,7 +810,7 @@ def dashboard_html() -> str:
         <div class="panel-head">
           <h2>People lookup</h2>
           <div class="actions">
-            <button id="syncPeople" type="button">Sync people</button>
+            <button id="syncPeople" data-permission="people:sync" type="button">Sync people</button>
             <a id="crmHomeLink" class="inline-link" href="#" target="_blank" rel="noreferrer" hidden>Open CRM</a>
             <span id="peopleStatus" class="status-line"></span>
           </div>
@@ -885,9 +885,9 @@ def dashboard_html() -> str:
   </main>
   <script>
     const routes = {
+      people: "/dashboard/people",
       onboarding: "/dashboard/onboarding",
       jobs: "/dashboard/jobs",
-      people: "/dashboard/people",
       audit: "/dashboard/audit",
     };
     const state = {
@@ -896,6 +896,7 @@ def dashboard_html() -> str:
       onboarding: [],
       auditEvents: [],
       crmBaseUrl: "",
+      permissions: [],
       sort: {
         onboarding: { key: "onboarding_state", direction: "asc" },
         jobs: { key: "updated_at", direction: "desc" },
@@ -904,6 +905,12 @@ def dashboard_html() -> str:
       },
       onboardingFilters: {},
       peopleFilters: {},
+    };
+    const routePermissions = {
+      people: "people:read",
+      onboarding: "onboarding:read",
+      jobs: "jobs:read",
+      audit: "audit:read",
     };
     const peopleFilterDefinitions = {
       discord: {
@@ -1083,8 +1090,28 @@ def dashboard_html() -> str:
       return Object.prototype.hasOwnProperty.call(routes, view) ? view : "people";
     }
 
+    function can(permission) {
+      return state.permissions.includes(permission);
+    }
+
+    function canView(view) {
+      const permission = routePermissions[view];
+      return !permission || can(permission);
+    }
+
+    function firstAllowedView() {
+      return Object.keys(routes).find((view) => canView(view)) || "people";
+    }
+
+    function applyPermissions() {
+      for (const element of document.querySelectorAll("[data-permission]")) {
+        element.hidden = !can(element.dataset.permission);
+      }
+    }
+
     function setView(view, options = {}) {
-      const normalizedView = Object.prototype.hasOwnProperty.call(routes, view) ? view : "people";
+      let normalizedView = Object.prototype.hasOwnProperty.call(routes, view) ? view : "people";
+      if (!canView(normalizedView)) normalizedView = firstAllowedView();
       for (const section of els.views) {
         section.hidden = section.dataset.view !== normalizedView;
       }
@@ -1441,7 +1468,7 @@ def dashboard_html() -> str:
         rerun.dataset.jobId = job.job_id;
         rerun.addEventListener("click", () => rerunJob(job.job_id, rerun));
         actions.appendChild(details);
-        actions.appendChild(rerun);
+        if (can("jobs:write")) actions.appendChild(rerun);
         actionCell.appendChild(actions);
         row.appendChild(actionCell);
         els.jobsBody.appendChild(row);
@@ -1681,6 +1708,8 @@ def dashboard_html() -> str:
 
     async function loadUser() {
       const user = await requestJson("/dashboard/api/me");
+      state.permissions = Array.isArray(user.permissions) ? user.permissions : [];
+      applyPermissions();
       state.crmBaseUrl = (user.crm_base_url || "").replace(/\\/+$/, "");
       if (state.crmBaseUrl) {
         els.crmHomeLink.href = state.crmBaseUrl;

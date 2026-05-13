@@ -1,4 +1,4 @@
-"""Playwright integration tests for the admin dashboard UI."""
+"""Playwright integration tests for the operations dashboard UI."""
 
 from __future__ import annotations
 
@@ -346,7 +346,7 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
 
         try:
             page.goto("/dashboard")
-            page.get_by_role("heading", name="508 Admin Dashboard").wait_for()
+            page.get_by_role("heading", name="508 Operations Dashboard").wait_for()
             expect(page.locator("#userName")).to_have_text("Discord Admin")
             expect(page.locator("#userMeta")).to_contain_text("CRM contact-123")
             expect(page).to_have_url(f"{dashboard_server}/dashboard/people")

@@ -51,17 +51,18 @@ Migrations:
 See the API service docs: [`apps/api/README.md#backend-api-endpoints`](./apps/api/README.md#backend-api-endpoints).
 CLI request examples are documented at [`apps/worker/README.md#cli-usage`](./apps/worker/README.md#cli-usage).
 
-The admin dashboard is served at `/dashboard`. It is available only to active
-admin sessions created through the existing OIDC or Discord dashboard login link
-flows, and Discord-backed sessions carry the linked CRM contact id from the
-local `people` cache. It exposes recent jobs, job details/reruns, CRM people
-lookup with profile/onboarding signals, onboarding queue assignment, people-cache
-sync, and recent human audit events.
+The operations dashboard is served at `/dashboard`. It is available only to
+active dashboard sessions created through the existing OIDC or Discord dashboard
+login link flows, and Discord-backed sessions carry the linked CRM contact id
+from the local `people` cache. Steering Committee+ Discord-backed sessions can
+use CRM people lookup and onboarding assignment. Admin+ sessions can also access
+recent jobs, job details/reruns, people-cache sync, and recent human audit
+events.
 
 ### Current API/queue caveats
 
 - Non-dashboard protected API endpoints use a shared `API_SHARED_SECRET` in `X-API-Secret` today. This includes webhook and secret-backed admin routes until per-webhook/per-route auth is introduced.
-- `/dashboard` and `/dashboard/api/*` are browser-facing admin routes that use the HttpOnly session cookie from OIDC or Discord dashboard login flows. They do not accept `X-API-Secret`.
+- `/dashboard` and `/dashboard/api/*` are browser-facing dashboard routes that use the HttpOnly session cookie from OIDC or Discord dashboard login flows. They do not accept `X-API-Secret`.
 - Worker startup uses a single effective queue name for actor registration; keep this explicit if you later add true multi-queue routing.
 - Backend rerun/enqueue behavior relies on one shared job-handler set. Add any new worker callable consistently to both backend handler resolution and worker dispatch.
 
@@ -219,7 +220,7 @@ Use `.env.example` as the source of truth for defaults.
 - `Optional` (required when enabling OIDC login): `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`
 - `Optional`: `OIDC_SCOPE` (default: `openid profile email groups`)
 - `Optional`: `OIDC_GROUPS_CLAIM` (default: `groups`)
-- `Optional`: `OIDC_ADMIN_GROUPS` (default: `Admin,Owner,Steering Committee`)
+- `Optional`: `OIDC_ADMIN_GROUPS` (default: `authentik Admins`; grants full dashboard admin permissions)
 - `Optional`: `OIDC_CALLBACK_PATH` (default: `/auth/callback`)
 - `Optional`: `OIDC_REDIRECT_BASE_URL` (default: infer from request base URL)
 - `Optional`: `AUTH_SESSION_COOKIE_NAME` (default: `five08_session`)
@@ -231,11 +232,15 @@ Use `.env.example` as the source of truth for defaults.
 ### Discord Admin Deep-Link Validation
 
 - `Optional`: `DISCORD_SERVER_ID` (required for Discord API fallback role checks)
-- `Optional`: `DISCORD_ADMIN_ROLES` (default: `Admin,Owner,Steering Committee`)
+- `Optional`: `DISCORD_ADMIN_ROLES` (default: `Admin,Owner`; grants full dashboard admin permissions for Discord-backed sessions)
 - `Optional`: `DISCORD_API_TIMEOUT_SECONDS` (default: `8.0`)
 - `Optional`: `DISCORD_LINK_TTL_SECONDS` (default: `600`)
 - `Optional`: `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS` (code default: `true`; local `.env.example` sets `false` so Discord dashboard links work without OIDC; set `true` in production with Authentik)
 - `Optional`: `DISCORD_BOT_TOKEN` (needed only for fallback Discord API checks; DB role check remains primary)
+- Note: Discord dashboard links are available to active CRM-linked Discord users
+  with Steering Committee role or higher. Admin/Owner roles receive full
+  dashboard admin permissions; Steering Committee receives CRM people lookup and
+  onboarding permissions.
 
 ### Worker Consumer
 

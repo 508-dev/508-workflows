@@ -13,7 +13,7 @@
 ### API auth strategy
 
 - Non-dashboard protected routes (including webhooks) use `X-API-Secret` with `API_SHARED_SECRET`.
-- Dashboard browser routes (`/dashboard` and `/dashboard/api/*`) are session-authenticated admin routes and are intentionally exempt from `X-API-Secret`.
+- Dashboard browser routes (`/dashboard` and `/dashboard/api/*`) are session-authenticated dashboard routes and are intentionally exempt from `X-API-Secret`.
 
 Example:
 
@@ -25,7 +25,7 @@ curl -X GET "http://localhost:8090/jobs/<job_id>" \
 ## Backend API Endpoints
 
 - `GET /health`: Redis/Postgres/worker health check.
-- `GET /dashboard`: Session-authenticated admin dashboard for Discord/OIDC admins.
+- `GET /dashboard`: Session-authenticated operations dashboard for OIDC admins and Discord Steering Committee+ users.
 - `GET /dashboard/api/me`: Dashboard session identity, including linked CRM contact id when available.
 - `GET /dashboard/api/jobs`: Session-authenticated recent jobs list for the dashboard.
 - `GET /dashboard/api/jobs/{job_id}`: Session-authenticated dashboard job detail with sensitive payload keys redacted.
@@ -56,11 +56,12 @@ curl -X GET "http://localhost:8090/jobs/<job_id>" \
 
 Discord deep-link identity policy:
 
-- `DISCORD_ADMIN_ROLES` controls who can mint/use Discord deep links (`Admin,Owner` recommended).
+- Discord deep links are available to active CRM-linked Discord users with Steering Committee role or higher.
+- `DISCORD_ADMIN_ROLES` controls which Discord roles receive full dashboard admin permissions (`Admin,Owner` recommended).
 - `OIDC_ADMIN_GROUPS` controls normal OIDC dashboard admin membership (`authentik Admins` recommended).
 - `AUTH_SESSION_TTL_SECONDS` controls dashboard session lifetime after login (`86400`, one day, by default).
-- `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=true` (default): Discord deep links also require OIDC admin group + OIDC email linked to Discord admin identity.
-- `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=false`: Discord deep links create a Discord-backed admin session directly after re-validating active CRM membership + Discord admin role, without forcing an OIDC roundtrip.
+- `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=true` (default): Discord deep links also require OIDC email identity checks against the linked CRM/Discord dashboard user.
+- `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=false`: Discord deep links create a Discord-backed session directly after re-validating active CRM membership + Discord Steering Committee+ role, without forcing an OIDC roundtrip.
 
 ### Known handler wiring expectation
 

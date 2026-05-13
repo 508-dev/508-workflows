@@ -681,6 +681,28 @@ def test_dashboard_forbids_non_admin_session(client: TestClient) -> None:
     assert response.status_code == 403
 
 
+def test_dashboard_renders_for_steering_committee_session(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/people")
+
+    assert response.status_code == 200
+    assert "508 Operations Dashboard" in response.text
+
+
 def test_dashboard_renders_for_admin_session(client: TestClient) -> None:
     session = api.AuthSession(
         subject="123456789",
@@ -702,7 +724,7 @@ def test_dashboard_renders_for_admin_session(client: TestClient) -> None:
         response = client.get("/dashboard/people")
 
     assert response.status_code == 200
-    assert "508 Admin Dashboard" in response.text
+    assert "508 Operations Dashboard" in response.text
     assert "/dashboard/api/me" in response.text
     assert "/dashboard/people" in response.text
 
@@ -731,6 +753,7 @@ def test_dashboard_me_returns_crm_linked_admin_session(client: TestClient) -> No
     assert response.json()["crm_contact_id"] == "contact-123"
     assert response.json()["actor_provider"] == api.ActorProvider.DISCORD.value
     assert response.json()["crm_base_url"] == api.settings.espo_base_url.rstrip("/")
+    assert "jobs:write" in response.json()["permissions"]
 
 
 def test_dashboard_me_clears_stale_session_cookie(client: TestClient) -> None:
@@ -768,6 +791,30 @@ def test_dashboard_jobs_forbids_non_admin_session(client: TestClient) -> None:
         groups=["Member"],
         is_admin=False,
         id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/api/jobs")
+
+    assert response.status_code == 403
+    assert response.json()["error"] == "forbidden"
+
+
+def test_dashboard_jobs_forbids_steering_committee_session(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="",
         expires_at=4_102_444_800,
     )
 
@@ -1431,7 +1478,7 @@ def test_auth_discord_link_create_forbidden_for_non_admin(
 ) -> None:
     fake_store = _FakeAuthStore()
     fake_verifier = Mock()
-    fake_verifier.is_admin_discord_user = AsyncMock(return_value=False)
+    fake_verifier.is_dashboard_discord_user = AsyncMock(return_value=False)
 
     with (
         patch("five08.backend.api._auth_store_from_app", return_value=fake_store),
@@ -1448,7 +1495,7 @@ def test_auth_discord_link_create_forbidden_for_non_admin(
         )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "discord_user_not_admin"
+    assert response.json()["detail"] == "discord_user_not_allowed"
 
 
 def test_auth_discord_link_create_returns_url_for_admin(
@@ -1461,7 +1508,7 @@ def test_auth_discord_link_create_returns_url_for_admin(
     )
     fake_store = _FakeAuthStore()
     fake_verifier = Mock()
-    fake_verifier.is_admin_discord_user = AsyncMock(return_value=True)
+    fake_verifier.is_dashboard_discord_user = AsyncMock(return_value=True)
 
     with (
         patch("five08.backend.api._auth_store_from_app", return_value=fake_store),
@@ -1559,11 +1606,17 @@ def test_auth_callback_denied_writes_login_audit(client: TestClient) -> None:
             "exp": 4_102_444_800,
         }
     )
+    verifier = Mock()
+    verifier.is_dashboard_email_for_discord_user = AsyncMock(return_value=False)
 
     with (
         patch("five08.backend.api._auth_store_from_app", return_value=store),
         patch("five08.backend.api._oidc_client_from_app", return_value=oidc),
         patch("five08.backend.api._http_client_from_app", return_value=Mock()),
+        patch(
+            "five08.backend.api._discord_admin_verifier_from_app",
+            return_value=verifier,
+        ),
         patch("five08.backend.api.insert_audit_event") as mock_insert,
     ):
         response = client.get(
@@ -1572,7 +1625,7 @@ def test_auth_callback_denied_writes_login_audit(client: TestClient) -> None:
         )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "admin_group_required"
+    assert response.json()["detail"] == "oidc_user_not_linked_to_discord_dashboard_user"
     audit_payload = mock_insert.call_args.args[1]
     assert audit_payload.action == "auth.login"
     assert audit_payload.result == api.AuditResult.DENIED
@@ -1600,13 +1653,14 @@ def test_auth_callback_discord_link_uses_discord_session_after_oidc_checks(
     store.delete_discord_link = AsyncMock()
     store.save_session = AsyncMock()
     verifier = Mock()
-    verifier.is_admin_email_for_discord_user = AsyncMock(return_value=True)
-    verifier.resolve_admin_identity = AsyncMock(
+    verifier.is_dashboard_email_for_discord_user = AsyncMock(return_value=True)
+    verifier.resolve_dashboard_identity = AsyncMock(
         return_value=Mock(
             discord_user_id="123456789",
             crm_contact_id="contact-123",
             email="admin@508.dev",
             display_name="Discord Admin",
+            discord_roles=["Admin"],
         )
     )
 
@@ -1618,7 +1672,7 @@ def test_auth_callback_discord_link_uses_discord_session_after_oidc_checks(
             "sub": "authentik-user-3",
             "email": "Admin@508.dev",
             "name": "OIDC Admin",
-            "groups": ["authentik Admins"],
+            "groups": ["Member"],
             "exp": 4_102_444_800,
         }
     )
@@ -1646,6 +1700,9 @@ def test_auth_callback_discord_link_uses_discord_session_after_oidc_checks(
     assert saved_session.email == "admin@508.dev"
     assert saved_session.display_name == "Discord Admin"
     assert saved_session.id_token == "id-token-1"
+    assert saved_session.groups == ["Admin"]
+    assert saved_session.is_admin is True
+    assert "jobs:write" in saved_session.permissions
     store.delete_discord_link.assert_awaited_once_with("link-1")
     audit_payload = mock_insert.call_args.args[1]
     assert audit_payload.actor_provider == api.ActorProvider.DISCORD
@@ -1678,6 +1735,16 @@ def test_auth_callback_discord_link_can_skip_oidc_identity_checks(
     )
     store.delete_discord_link = AsyncMock()
     store.save_session = AsyncMock()
+    verifier = Mock()
+    verifier.resolve_dashboard_identity = AsyncMock(
+        return_value=Mock(
+            discord_user_id="123456789",
+            crm_contact_id="contact-123",
+            email="steering@508.dev",
+            display_name="Steering User",
+            discord_roles=["Steering Committee"],
+        )
+    )
 
     oidc = Mock()
     oidc.configured = True
@@ -1695,6 +1762,10 @@ def test_auth_callback_discord_link_can_skip_oidc_identity_checks(
         patch("five08.backend.api._auth_store_from_app", return_value=store),
         patch("five08.backend.api._oidc_client_from_app", return_value=oidc),
         patch("five08.backend.api._http_client_from_app", return_value=Mock()),
+        patch(
+            "five08.backend.api._discord_admin_verifier_from_app",
+            return_value=verifier,
+        ),
         patch("five08.backend.api.insert_audit_event") as mock_insert,
     ):
         response = client.get(
@@ -1704,7 +1775,10 @@ def test_auth_callback_discord_link_can_skip_oidc_identity_checks(
 
     assert response.status_code == 302
     saved_session = store.save_session.call_args.kwargs["payload"]
-    assert saved_session.is_admin is True
+    assert saved_session.is_admin is False
+    assert saved_session.groups == ["Steering Committee"]
+    assert "onboarding:write" in saved_session.permissions
+    assert "jobs:write" not in saved_session.permissions
     store.delete_discord_link.assert_awaited_once_with("link-1")
     audit_payload = mock_insert.call_args.args[1]
     assert audit_payload.metadata is not None
@@ -1729,12 +1803,13 @@ def test_auth_discord_link_redirect_creates_discord_session_when_disabled(
     store.save_session = AsyncMock()
     store.delete_discord_link = AsyncMock()
     verifier = Mock()
-    verifier.resolve_admin_identity = AsyncMock(
+    verifier.resolve_dashboard_identity = AsyncMock(
         return_value=Mock(
             discord_user_id="123456789",
             crm_contact_id="contact-123",
             email="admin@508.dev",
             display_name="Discord Admin",
+            discord_roles=["Admin"],
         )
     )
 
@@ -1757,6 +1832,8 @@ def test_auth_discord_link_redirect_creates_discord_session_when_disabled(
     assert saved_session.actor_provider == api.ActorProvider.DISCORD.value
     assert saved_session.crm_contact_id == "contact-123"
     assert saved_session.email == "admin@508.dev"
+    assert saved_session.is_admin is True
+    assert "jobs:write" in saved_session.permissions
     audit_payload = mock_insert.call_args.args[1]
     assert audit_payload.actor_provider == api.ActorProvider.DISCORD
     assert audit_payload.actor_subject == "123456789"
@@ -1778,21 +1855,22 @@ def test_auth_discord_link_redirect_upgrades_existing_oidc_session(
     store.delete_discord_link = AsyncMock()
     session = api.AuthSession(
         subject="authentik-user-1",
-        email="admin@508.dev",
-        display_name="OIDC Admin",
-        groups=["authentik Admins"],
-        is_admin=True,
+        email="steering@508.dev",
+        display_name="OIDC Steering",
+        groups=["Member"],
+        is_admin=False,
         id_token="id-token-1",
         expires_at=4_102_444_800,
     )
     verifier = Mock()
-    verifier.is_admin_email_for_discord_user = AsyncMock(return_value=True)
-    verifier.resolve_admin_identity = AsyncMock(
+    verifier.is_dashboard_email_for_discord_user = AsyncMock(return_value=True)
+    verifier.resolve_dashboard_identity = AsyncMock(
         return_value=Mock(
             discord_user_id="123456789",
             crm_contact_id="contact-123",
-            email="admin@508.dev",
-            display_name="Discord Admin",
+            email="steering@508.dev",
+            display_name="Discord Steering",
+            discord_roles=["Steering Committee"],
         )
     )
 
@@ -1821,6 +1899,9 @@ def test_auth_discord_link_redirect_upgrades_existing_oidc_session(
     assert saved_session.actor_provider == api.ActorProvider.DISCORD.value
     assert saved_session.crm_contact_id == "contact-123"
     assert saved_session.id_token == "id-token-1"
+    assert saved_session.is_admin is False
+    assert "onboarding:write" in saved_session.permissions
+    assert "jobs:write" not in saved_session.permissions
     store.delete_discord_link.assert_awaited_once_with("link-1")
     audit_payload = mock_insert.call_args.args[1]
     assert audit_payload.actor_provider == api.ActorProvider.DISCORD
