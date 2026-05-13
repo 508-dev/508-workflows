@@ -20,6 +20,11 @@ from five08.agent.evals import (
     resolve_eval_model_profile,
 )
 from five08.document_text import extract_document_text
+from five08.model_catalog import (
+    model_chat_completion_options,
+    model_cost_per_1m,
+    model_pricing_source,
+)
 from five08.resume_extractor import ResumeExtractedProfile, ResumeProfileExtractor
 from five08.tls import default_ca_bundle_path
 
@@ -36,9 +41,9 @@ Output schema:
   "name": "candidate full name or null",
   "email": "primary email or null",
   "additional_emails": [],
-  "phone": "phone or null",
-  "primary_roles": ["normalized role labels"],
-  "seniority_level": "junior|mid|senior|lead|principal|executive|unknown",
+  "phone": "E.164 phone with leading + or null",
+  "primary_roles": ["canonical CRM role labels"],
+  "seniority_level": "junior|midlevel|senior|staff|unknown",
   "skills": ["important concrete skills"],
   "current_title": "current or most recent title or null",
   "recent_titles": [],
@@ -54,6 +59,28 @@ Output schema:
   "confidence": 0.0,
   "evidence": {"field_name": ["short quote"]}
 }
+
+Production extractor contract:
+- primary_roles must use our canonical CRM role vocabulary only:
+  developer, data scientist, program manager, product manager, designer,
+  user research, biz dev, marketing.
+- Do not emit language/framework-specific roles like C# Developer, Ruby on
+  Rails Developer, React Developer, Backend Engineer, or AI Product Designer.
+  Put those details in skills/current_title/recent_titles instead.
+- Engineering titles of any kind should usually map to developer. Product
+  design titles should map to designer. Product leadership/PM titles should map
+  to product manager. Include at most 2 canonical roles.
+- seniority_level must use our enum exactly: junior, midlevel, senior, staff,
+  unknown. Map lead/principal/executive/director-style engineering scope to
+  senior or staff as appropriate; never output lead, principal, or executive.
+- Extract LinkedIn profile URLs into linkedin_url when present.
+- Extract GitHub profile usernames into github_username when present. Return the
+  username only, not the URL and not @.
+- Extract phone when present. Normalize to E.164 with a leading + when country
+  can be inferred; otherwise preserve the explicit source value and evidence.
+- For location, fill address_city/address_state/address_country/timezone when
+  supported by resume text. Include evidence under each populated location
+  field key, not a generic "location" key.
 """
 
 
@@ -68,8 +95,11 @@ class ResumeEvalObserved(BaseModel):
     status: str
     text_length: int
     latency_ms: int
+    time_to_first_response_ms: int = 0
     llm_success: bool
     llm_fallback_reason: str | None = None
+    token_usage: dict[str, int] | None = None
+    estimated_cost_usd: float | None = None
     confidence: float | None = None
     score: float
     field_checks: dict[str, bool] = Field(default_factory=dict)
@@ -99,6 +129,9 @@ class ResumeBaselineObserved(BaseModel):
     status: str
     text_length: int
     latency_ms: int
+    time_to_first_response_ms: int = 0
+    token_usage: dict[str, int] | None = None
+    estimated_cost_usd: float | None = None
     baseline: dict[str, Any] | None = None
     error: str | None = None
 
@@ -142,6 +175,7 @@ def run_resume_eval_suite(
         max_tokens=max_tokens,
         timeout_seconds=timeout_seconds,
     )
+    started = time.perf_counter()
     observations = [
         _run_resume_file(
             path=path,
@@ -155,6 +189,11 @@ def run_resume_eval_suite(
     llm_successes = sum(1 for item in observations if item.llm_success)
     scores = [item.score for item in observations]
     latencies = [item.latency_ms for item in observations]
+    costs = [
+        item.estimated_cost_usd
+        for item in observations
+        if item.estimated_cost_usd is not None
+    ]
     return ResumeEvalReport(
         generated_at=datetime.now(timezone.utc).isoformat(),
         input_dir=str(input_dir),
@@ -167,10 +206,15 @@ def run_resume_eval_suite(
             "llm_fallbacks": len(observations) - hard_failures - llm_successes,
             "llm_success_rate": _rate(llm_successes, len(observations)),
             "avg_score": round(sum(scores) / len(scores), 4) if scores else 0.0,
+            "total_elapsed_ms": _elapsed_ms(started),
+            "p50_latency_ms": _percentile(latencies, 0.50),
+            "p95_latency_ms": _percentile(latencies, 0.95),
             "avg_latency_ms": round(sum(latencies) / len(latencies), 1)
             if latencies
             else None,
             "max_latency_ms": max(latencies) if latencies else None,
+            "estimated_cost_usd": round(sum(costs), 6) if costs else None,
+            "pricing_source": model_pricing_source(),
         },
         resumes=observations,
     )
@@ -188,6 +232,7 @@ def generate_resume_baseline_suite(
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY_DIRECT is required for baseline generation")
     files = _collect_resume_files(input_dir)
+    started = time.perf_counter()
     observations = [
         _generate_resume_baseline(
             path=path,
@@ -200,6 +245,11 @@ def generate_resume_baseline_suite(
     ]
     failures = sum(1 for item in observations if item.status == "failed")
     latencies = [item.latency_ms for item in observations]
+    costs = [
+        item.estimated_cost_usd
+        for item in observations
+        if item.estimated_cost_usd is not None
+    ]
     return ResumeBaselineReport(
         generated_at=datetime.now(timezone.utc).isoformat(),
         input_dir=str(input_dir),
@@ -208,10 +258,15 @@ def generate_resume_baseline_suite(
             "resumes": len(observations),
             "succeeded": len(observations) - failures,
             "failed": failures,
+            "total_elapsed_ms": _elapsed_ms(started),
+            "p50_latency_ms": _percentile(latencies, 0.50),
+            "p95_latency_ms": _percentile(latencies, 0.95),
             "avg_latency_ms": round(sum(latencies) / len(latencies), 1)
             if latencies
             else None,
             "max_latency_ms": max(latencies) if latencies else None,
+            "estimated_cost_usd": round(sum(costs), 6) if costs else None,
+            "pricing_source": model_pricing_source(),
         },
         resumes=observations,
     )
@@ -249,11 +304,16 @@ def render_resume_markdown_report(report: ResumeEvalReport) -> str:
         f"- LLM fallbacks: {report.summary['llm_fallbacks']}",
         f"- LLM success rate: {report.summary['llm_success_rate']}",
         f"- Avg score: {report.summary['avg_score']}",
+        f"- Estimated cost USD: {_money(report.summary.get('estimated_cost_usd'))}",
+        f"- Total elapsed ms: {report.summary.get('total_elapsed_ms', '-')}",
+        f"- P50 latency ms: {report.summary.get('p50_latency_ms', '-')}",
+        f"- P95 latency ms: {report.summary.get('p95_latency_ms', '-')}",
         f"- Avg latency ms: {report.summary['avg_latency_ms']}",
         f"- Max latency ms: {report.summary['max_latency_ms']}",
+        f"- Pricing source: {report.summary.get('pricing_source', '-')}",
         "",
-        "| Resume | Status | Score | LLM | Confidence | Missing fields | Latency ms |",
-        "| --- | --- | ---: | --- | ---: | --- | ---: |",
+        "| Resume | Status | Score | LLM | Confidence | Missing fields | Cost USD | TTFR ms | Latency ms |",
+        "| --- | --- | ---: | --- | ---: | --- | ---: | ---: | ---: |",
     ]
     for item in report.resumes:
         missing = [name for name, passed in item.field_checks.items() if not passed]
@@ -267,6 +327,8 @@ def render_resume_markdown_report(report: ResumeEvalReport) -> str:
                     "yes" if item.llm_success else "fallback",
                     f"{item.confidence:.2f}" if item.confidence is not None else "-",
                     ", ".join(missing) if missing else "-",
+                    _money(item.estimated_cost_usd),
+                    str(item.time_to_first_response_ms),
                     str(item.latency_ms),
                 ]
             )
@@ -285,7 +347,12 @@ def render_baseline_markdown_report(report: ResumeBaselineReport) -> str:
         f"- Resumes: {report.summary['resumes']}",
         f"- Succeeded: {report.summary['succeeded']}",
         f"- Failed: {report.summary['failed']}",
+        f"- Estimated cost USD: {_money(report.summary.get('estimated_cost_usd'))}",
+        f"- Total elapsed ms: {report.summary.get('total_elapsed_ms', '-')}",
+        f"- P50 latency ms: {report.summary.get('p50_latency_ms', '-')}",
+        f"- P95 latency ms: {report.summary.get('p95_latency_ms', '-')}",
         f"- Avg latency ms: {report.summary['avg_latency_ms']}",
+        f"- Pricing source: {report.summary.get('pricing_source', '-')}",
         "",
         "| Resume | Status | Name | Email | Roles | Seniority | Skills | Missing Evidence |",
         "| --- | --- | --- | --- | --- | --- | --- | --- |",
@@ -295,9 +362,27 @@ def render_baseline_markdown_report(report: ResumeBaselineReport) -> str:
         evidence = baseline.get("evidence")
         missing_evidence = []
         if isinstance(evidence, dict):
-            for field in ["primary_roles", "seniority_level", "skills", "location"]:
+            for field in ["primary_roles", "seniority_level", "skills"]:
                 if not evidence.get(field):
                     missing_evidence.append(field)
+            if any(
+                baseline.get(field)
+                for field in [
+                    "address_city",
+                    "address_state",
+                    "address_country",
+                    "timezone",
+                ]
+            ) and not any(
+                evidence.get(field)
+                for field in [
+                    "address_city",
+                    "address_state",
+                    "address_country",
+                    "timezone",
+                ]
+            ):
+                missing_evidence.append("location")
         elif item.status == "succeeded":
             missing_evidence.append("all")
         lines.append(
@@ -329,10 +414,24 @@ def list_resume_eval_profiles() -> list[AgentEvalModelProfile]:
     ]
 
 
+def default_resume_eval_input_dir() -> Path:
+    """Return the ignored local resume fixture drop directory."""
+    return (
+        Path(__file__).resolve().parents[4]
+        / "tests"
+        / "evals"
+        / "resume-extraction"
+        / "fixtures"
+        / "local-resumes"
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entrypoint for local resume extraction evals."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input-dir", type=Path, default=Path("resumes"))
+    parser.add_argument(
+        "--input-dir", type=Path, default=default_resume_eval_input_dir()
+    )
     parser.add_argument("--model", "--profile", dest="model", default="primary")
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--no-env-file", action="store_true")
@@ -432,6 +531,8 @@ def _run_resume_file(
         extracted = extractor.extract(text)
         checks = _field_checks(extracted)
         score = _score_checks(checks, extracted)
+        latency_ms = _elapsed_ms(started)
+        token_usage = extracted.llm_usage
         return ResumeEvalObserved(
             id=path.stem,
             path=str(path),
@@ -440,9 +541,15 @@ def _run_resume_file(
             provider=profile.label,
             status="succeeded",
             text_length=len(text),
-            latency_ms=_elapsed_ms(started),
+            latency_ms=latency_ms,
+            time_to_first_response_ms=latency_ms,
             llm_success=extracted.llm_fallback_reason is None,
             llm_fallback_reason=extracted.llm_fallback_reason,
+            token_usage=token_usage,
+            estimated_cost_usd=_estimate_model_cost_usd(
+                profile.live_model or profile.id,
+                token_usage,
+            ),
             confidence=extracted.confidence,
             score=score,
             field_checks=checks,
@@ -451,6 +558,7 @@ def _run_resume_file(
             ),
         )
     except Exception as exc:
+        latency_ms = _elapsed_ms(started)
         return ResumeEvalObserved(
             id=path.stem,
             path=str(path),
@@ -459,7 +567,8 @@ def _run_resume_file(
             provider=profile.label,
             status="failed",
             text_length=0,
-            latency_ms=_elapsed_ms(started),
+            latency_ms=latency_ms,
+            time_to_first_response_ms=latency_ms,
             llm_success=False,
             score=0.0,
             error=f"{type(exc).__name__}: {exc}",
@@ -477,7 +586,7 @@ def _generate_resume_baseline(
     started = time.perf_counter()
     try:
         text = _extract_text(path)
-        baseline = _call_openai_baseline_judge(
+        baseline, token_usage = _call_openai_baseline_judge(
             api_key=api_key,
             model=judge_model,
             text=text,
@@ -485,6 +594,7 @@ def _generate_resume_baseline(
             max_tokens=max_tokens,
             timeout_seconds=timeout_seconds,
         )
+        latency_ms = _elapsed_ms(started)
         return ResumeBaselineObserved(
             id=path.stem,
             path=str(path),
@@ -492,10 +602,14 @@ def _generate_resume_baseline(
             judge_model=judge_model,
             status="succeeded",
             text_length=len(text),
-            latency_ms=_elapsed_ms(started),
+            latency_ms=latency_ms,
+            time_to_first_response_ms=latency_ms,
+            token_usage=token_usage,
+            estimated_cost_usd=_estimate_model_cost_usd(judge_model, token_usage),
             baseline=baseline,
         )
     except Exception as exc:
+        latency_ms = _elapsed_ms(started)
         return ResumeBaselineObserved(
             id=path.stem,
             path=str(path),
@@ -503,7 +617,8 @@ def _generate_resume_baseline(
             judge_model=judge_model,
             status="failed",
             text_length=0,
-            latency_ms=_elapsed_ms(started),
+            latency_ms=latency_ms,
+            time_to_first_response_ms=latency_ms,
             error=f"{type(exc).__name__}: {exc}",
         )
 
@@ -516,7 +631,7 @@ def _call_openai_baseline_judge(
     filename: str,
     max_tokens: int,
     timeout_seconds: float,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, int]]:
     payload: dict[str, Any] = {
         "model": model,
         "messages": [
@@ -534,28 +649,65 @@ def _call_openai_baseline_judge(
         ],
         "response_format": {"type": "json_object"},
     }
-    if model.casefold().startswith("gpt-5"):
-        payload["max_completion_tokens"] = max_tokens
-        payload["reasoning_effort"] = "medium"
-        payload["verbosity"] = "low"
+    model_options = model_chat_completion_options(model, purpose="baseline")
+    max_tokens_parameter = model_options.get("max_tokens_parameter")
+    if isinstance(max_tokens_parameter, str) and max_tokens_parameter:
+        payload[max_tokens_parameter] = max_tokens
+        reasoning_effort = model_options.get("reasoning_effort")
+        if isinstance(reasoning_effort, str) and reasoning_effort:
+            payload["reasoning_effort"] = reasoning_effort
+        verbosity = model_options.get("verbosity")
+        if isinstance(verbosity, str) and verbosity:
+            payload["verbosity"] = verbosity
+        if model_options.get("supports_temperature", True):
+            payload["temperature"] = 0
     else:
         payload["max_tokens"] = max_tokens
         payload["temperature"] = 0
 
-    response = requests.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json=payload,
-        timeout=timeout_seconds,
-        verify=default_ca_bundle_path(),
+    response = _post_openai_with_retries(
+        payload=payload,
+        api_key=api_key,
+        timeout_seconds=timeout_seconds,
     )
     response.raise_for_status()
     data = response.json()
     raw = str(data["choices"][0]["message"]["content"])
-    return _parse_json_object(raw)
+    return _parse_json_object(raw), _usage_from_mapping(data.get("usage"))
+
+
+def _post_openai_with_retries(
+    *,
+    payload: dict[str, Any],
+    api_key: str,
+    timeout_seconds: float,
+) -> requests.Response:
+    retryable_statuses = {408, 409, 429, 500, 502, 503, 504}
+    last_response: requests.Response | None = None
+    for attempt_index in range(4):
+        response = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=timeout_seconds,
+            verify=default_ca_bundle_path(),
+        )
+        if response.status_code not in retryable_statuses:
+            return response
+        last_response = response
+        retry_after = response.headers.get("retry-after")
+        if retry_after:
+            try:
+                delay = float(retry_after)
+            except ValueError:
+                delay = 0.0
+        else:
+            delay = min(2.0 * (2**attempt_index), 15.0)
+        time.sleep(delay)
+    return last_response if last_response is not None else response
 
 
 def _collect_resume_files(input_dir: Path) -> list[Path]:
@@ -670,6 +822,12 @@ def _cell(value: Any, *, limit: int = 3) -> str:
     return text.replace("|", "\\|") if text else "-"
 
 
+def _money(value: Any) -> str:
+    if isinstance(value, int | float):
+        return f"{value:.6f}"
+    return "-"
+
+
 def _slug(value: str) -> str:
     return "".join(ch if ch.isalnum() else "-" for ch in value.lower()).strip("-")
 
@@ -682,6 +840,68 @@ def _rate(numerator: int, denominator: int) -> float:
     if denominator <= 0:
         return 0.0
     return round(numerator / denominator, 4)
+
+
+def _percentile(values: list[int], percentile: float) -> int | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = round((len(ordered) - 1) * percentile)
+    return ordered[index]
+
+
+def _usage_from_mapping(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    input_tokens = _usage_int(value, "prompt_tokens", "input_tokens")
+    output_tokens = _usage_int(value, "completion_tokens", "output_tokens")
+    total_tokens = _usage_int(value, "total_tokens")
+    details = value.get("prompt_tokens_details") or value.get("input_tokens_details")
+    cached_tokens = (
+        _usage_int(details, "cached_tokens") if isinstance(details, dict) else 0
+    )
+    return {
+        "requests": 1,
+        "input_tokens": input_tokens,
+        "cached_input_tokens": cached_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+    }
+
+
+def _usage_int(source: dict[str, Any], *names: str) -> int:
+    for name in names:
+        value = source.get(name)
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    return 0
+
+
+def _estimate_model_cost_usd(
+    model: str,
+    usage: dict[str, int] | None,
+) -> float | None:
+    if not usage:
+        return None
+    prices = model_cost_per_1m(model)
+    if prices is None:
+        return None
+    input_tokens = usage.get("input_tokens", 0)
+    cached_tokens = min(usage.get("cached_input_tokens", 0), input_tokens)
+    billable_input_tokens = max(input_tokens - cached_tokens, 0)
+    output_tokens = usage.get("output_tokens", 0)
+    cost = (
+        billable_input_tokens * prices["input"]
+        + cached_tokens * prices["cached_input"]
+        + output_tokens * prices["output"]
+    ) / 1_000_000
+    return round(cost, 8)
 
 
 if __name__ == "__main__":  # pragma: no cover

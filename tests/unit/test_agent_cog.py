@@ -88,6 +88,30 @@ def test_format_agent_response_renders_github_issue_results() -> None:
     assert "#42 Fix onboarding sync https://github.example/issues/42" in message
 
 
+def test_format_agent_response_renders_created_github_issue() -> None:
+    cog = AgentCog.__new__(AgentCog)
+
+    message = cog._format_agent_response(
+        {
+            "status": "executed",
+            "results": [
+                {
+                    "tool_name": "github_issue.create_issue",
+                    "status": "succeeded",
+                    "result": {
+                        "number": 43,
+                        "title": "Fix task sync",
+                        "html_url": "https://github.example/issues/43",
+                    },
+                }
+            ],
+        }
+    )
+
+    assert "- github_issue.create_issue: 1 issues" in message
+    assert "#43 Fix task sync https://github.example/issues/43" in message
+
+
 def test_format_agent_response_renders_contact_results() -> None:
     cog = AgentCog.__new__(AgentCog)
 
@@ -410,7 +434,7 @@ async def test_confirmation_context_in_dm_uses_cached_original_guild_roles() -> 
         user=SimpleNamespace(id=123),
     )
 
-    context = view._confirmation_context(interaction)
+    context = await view._confirmation_context(interaction)
 
     assert context["organization_id"] == "456"
     assert context["guild_id"] == "456"
@@ -421,8 +445,12 @@ async def test_confirmation_context_in_dm_uses_cached_original_guild_roles() -> 
 
 
 @pytest.mark.asyncio
-async def test_confirmation_context_in_dm_fails_closed_without_fresh_member() -> None:
-    guild = SimpleNamespace(get_member=Mock(return_value=None))
+async def test_confirmation_context_in_dm_fetches_uncached_member_roles() -> None:
+    member = SimpleNamespace(roles=[SimpleNamespace(name="Member")])
+    guild = SimpleNamespace(
+        get_member=Mock(return_value=None),
+        fetch_member=AsyncMock(return_value=member),
+    )
     cog = AgentCog.__new__(AgentCog)
     cog.bot = SimpleNamespace(get_guild=Mock(return_value=guild))
     view = AgentConfirmationView(
@@ -446,12 +474,13 @@ async def test_confirmation_context_in_dm_fails_closed_without_fresh_member() ->
         user=SimpleNamespace(id=123),
     )
 
-    context = view._confirmation_context(interaction)
+    context = await view._confirmation_context(interaction)
 
     assert context["organization_id"] == "456"
     assert context["guild_id"] == "456"
-    assert context["roles"] == []
+    assert context["roles"] == ["Member"]
     assert context["message_id"] == "555"
+    guild.fetch_member.assert_awaited_once_with(123)
 
 
 def test_mention_rate_limit_prunes_expired_user_entries() -> None:

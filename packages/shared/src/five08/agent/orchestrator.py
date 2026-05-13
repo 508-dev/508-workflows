@@ -256,17 +256,21 @@ class AgentOrchestrator:
 
     def _parse_action(self, text: str) -> AgentToolAction | None:
         lowered = text.casefold()
-        if "github issue" in lowered or "gh issue" in lowered:
-            return self._parse_github_issue(text)
         if re.search(r"\bcreate\s+(?:a\s+)?task\b", text, re.IGNORECASE):
             return self._parse_create_task(text)
+        if "github issue" in lowered or "gh issue" in lowered:
+            action = self._parse_github_issue(text)
+            if action is not None:
+                return action
         if any(
             keyword in lowered
             for keyword in ["find task", "search task", "list task", "show task"]
         ):
             return self._parse_search_task(text)
         if self._is_crm_contact_update_request(lowered):
-            return self._parse_crm_contact_update(text)
+            action = self._parse_crm_contact_update(text)
+            if action is not None:
+                return action
         if any(
             keyword in lowered
             for keyword in [
@@ -361,9 +365,8 @@ class AgentOrchestrator:
         )
 
     def _is_crm_contact_update_request(self, lowered: str) -> bool:
-        has_update_intent = any(
-            keyword in lowered
-            for keyword in ["update", "change", "set", "mark", "approve", "reject"]
+        has_update_intent = bool(
+            re.search(r"\b(?:update|change|set|mark|approve|reject)\b", lowered)
         )
         has_contact_target = "contact" in lowered or "crm" in lowered
         return has_update_intent and has_contact_target
@@ -388,6 +391,10 @@ class AgentOrchestrator:
             value = _clean_text(onboarding_match.group(1))
             if value:
                 updates["cOnboardingState"] = value
+        elif re.search(r"\bapprove\b", text, re.IGNORECASE):
+            updates["cOnboardingState"] = "approved"
+        elif re.search(r"\breject\b", text, re.IGNORECASE):
+            updates["cOnboardingState"] = "rejected"
 
         if not updates:
             return None
@@ -405,7 +412,12 @@ class AgentOrchestrator:
         )
         if email_match is None:
             return None
-        before_email = text[: email_match.start()]
+        before_email = re.sub(
+            r"\s+(?:at|with\s+(?:email|e-mail)|email)\s*$",
+            "",
+            text[: email_match.start()],
+            flags=re.IGNORECASE,
+        )
         name_match = re.search(
             r"\b(?:to|for)\s+([A-Za-z][A-Za-z .'-]{0,80})\s*$",
             before_email,

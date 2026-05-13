@@ -5,6 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from five08.agent.evals import (
+    AgentEvalExpect,
+    AgentEvalExpectedAction,
+    AgentEvalObserved,
+    AgentEvalObservedAction,
+    evaluate_observed,
     load_env_file,
     list_eval_model_profiles,
     resolve_eval_model_profile,
@@ -107,7 +112,60 @@ def test_live_planner_eval_uses_provider_response(
     assert report.summary["passed"] == 1
     assert report.metrics["parse_success_rate"] == 1.0
     assert calls
+    kwargs = calls[0]["kwargs"]
+    assert isinstance(kwargs, dict)
+    payload = kwargs["json"]
+    assert isinstance(payload, dict)
+    assert payload["model"] == "gpt-5-mini"
+    assert payload["max_completion_tokens"] == 1200
+    assert payload["reasoning_effort"] == "minimal"
+    assert payload["verbosity"] == "low"
+    assert "temperature" not in payload
     assert (tmp_path / "observed.live_planner.canonical.openai-direct.json").exists()
+
+
+def test_live_eval_matching_allows_harmless_text_variants() -> None:
+    expect = AgentEvalExpect(
+        status="requires_confirmation",
+        intent="create_task",
+        requires_confirmation=True,
+        actions=[
+            AgentEvalExpectedAction(
+                tool_name="task_write.create_task",
+                arguments_contains={"title": "refresh onboarding docs"},
+            )
+        ],
+    )
+    observed = AgentEvalObserved(
+        id="scenario-1",
+        fixture_id="scenario-1",
+        description="",
+        tags=[],
+        request_message="Create a task to refresh onboarding docs",
+        status="requires_confirmation",
+        message="This action needs confirmation before execution.",
+        intent="create_task",
+        requires_confirmation=True,
+        actions=[
+            AgentEvalObservedAction(
+                tool_name="task_write.create_task",
+                arguments={"title": "Refresh onboarding documentation"},
+                risk="medium",
+                requires_confirmation=True,
+                required_scopes=["task:create"],
+                summary="Create task",
+            )
+        ],
+    )
+
+    assert any(
+        not check.passed
+        for check in evaluate_observed(expect, observed)
+        if check.name == "actions[0].arguments.title"
+    )
+    assert all(
+        check.passed for check in evaluate_observed(expect, observed, strict=False)
+    )
 
 
 def test_eval_primary_profile_uses_direct_openai_key_only(

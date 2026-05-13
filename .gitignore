@@ -61,6 +61,8 @@ htmlcov/
 .tox/
 tests/evals/discord-agent/reports/
 tests/evals/resume-extraction/reports/
+tests/evals/resume-extraction/fixtures/local-resumes/*
+!tests/evals/resume-extraction/fixtures/local-resumes/.gitkeep
 resumes/
 
 # Database files (if any are added later)

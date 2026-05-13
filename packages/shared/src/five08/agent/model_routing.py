@@ -8,11 +8,29 @@ from urllib.parse import urlparse
 
 from five08.agent.models import AgentModelSelection, ModelTier
 
-DEFAULT_AGENT_MODEL = "gpt-5-mini"
+DEFAULT_AGENT_MODEL = "gpt-4.1-mini"
+DEFAULT_FIREWORKS_PLANNER_MODEL = "accounts/fireworks/models/kimi-k2p6"
+DEFAULT_BIFROST_FIREWORKS_PLANNER_MODEL = f"fireworks/{DEFAULT_FIREWORKS_PLANNER_MODEL}"
+DEFAULT_FIREWORKS_BASE_URL = "https://api.fireworks.ai/inference/v1"
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+_BIFROST_PROVIDER_PREFIXES = frozenset(
+    {
+        "anthropic",
+        "bedrock",
+        "cohere",
+        "fireworks",
+        "gemini",
+        "groq",
+        "openai",
+        "openrouter",
+        "vertex",
+    }
+)
 _ALLOWED_BASE_URL_HOSTS = frozenset(
     {
         "api.openai.com",
         "api.fireworks.ai",
+        "bifrost.508.dev",
         "openrouter.ai",
     }
 )
@@ -46,35 +64,32 @@ class AgentModelConfig:
     @classmethod
     def from_settings(cls, settings: Any) -> "AgentModelConfig":
         """Build model routing config from a settings object."""
+        default_planner = _default_planner_provider(settings)
+        fallback_base_url = _openai_fallback_base_url(settings)
+        fallback_api_key = _openai_fallback_api_key(settings)
         return cls(
-            fast=AgentTierModelConfig(
-                model=_optional_str(getattr(settings, "agent_fast_model", None)),
-                base_url=_validated_base_url(
-                    getattr(settings, "agent_fast_base_url", None)
-                ),
-                api_key=_optional_str(getattr(settings, "agent_fast_api_key", None)),
+            fast=_tier_config_from_settings(
+                settings,
+                tier="fast",
+                default_provider=default_planner,
             ),
-            strong=AgentTierModelConfig(
-                model=_optional_str(getattr(settings, "agent_strong_model", None)),
-                base_url=_validated_base_url(
-                    getattr(settings, "agent_strong_base_url", None)
-                ),
-                api_key=_optional_str(getattr(settings, "agent_strong_api_key", None)),
+            strong=_tier_config_from_settings(
+                settings,
+                tier="strong",
+                default_provider=default_planner,
             ),
-            reasoning=AgentTierModelConfig(
-                model=_optional_str(getattr(settings, "agent_reasoning_model", None)),
-                base_url=_validated_base_url(
-                    getattr(settings, "agent_reasoning_base_url", None)
-                ),
-                api_key=_optional_str(
-                    getattr(settings, "agent_reasoning_api_key", None)
-                ),
+            reasoning=_tier_config_from_settings(
+                settings,
+                tier="reasoning",
+                default_provider=default_planner,
             ),
-            openai_model=_optional_str(getattr(settings, "openai_model", None)),
-            openai_base_url=_validated_base_url(
-                getattr(settings, "openai_base_url", None)
+            openai_model=(
+                _optional_str(getattr(settings, "agent_fallback_model", None))
+                or _optional_str(getattr(settings, "openai_direct_model", None))
+                or _optional_str(getattr(settings, "openai_model", None))
             ),
-            openai_api_key=_optional_str(getattr(settings, "openai_api_key", None)),
+            openai_base_url=fallback_base_url,
+            openai_api_key=fallback_api_key,
         )
 
     def resolve(self, tier: ModelTier) -> AgentModelSelection:
@@ -83,6 +98,11 @@ class AgentModelConfig:
             tier_config = self._tier_config(fallback_tier)
             if tier_config.model:
                 resolved_base_url = tier_config.base_url or self.openai_base_url
+                if not self._api_key_configured_for_tier(
+                    tier_config=tier_config,
+                    resolved_base_url=resolved_base_url,
+                ):
+                    continue
                 return AgentModelSelection(
                     tier=tier,
                     model=tier_config.model,
@@ -139,6 +159,81 @@ def _optional_str(value: Any) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def _tier_config_from_settings(
+    settings: Any,
+    *,
+    tier: str,
+    default_provider: AgentTierModelConfig,
+) -> AgentTierModelConfig:
+    model = _optional_str(getattr(settings, f"agent_{tier}_model", None))
+    base_url = _validated_base_url(getattr(settings, f"agent_{tier}_base_url", None))
+    api_key = _optional_str(getattr(settings, f"agent_{tier}_api_key", None))
+    if model:
+        return AgentTierModelConfig(model=model, base_url=base_url, api_key=api_key)
+    return default_provider
+
+
+def _default_planner_provider(settings: Any) -> AgentTierModelConfig:
+    planner_model = (
+        _optional_str(getattr(settings, "agent_planner_model", None))
+        or DEFAULT_FIREWORKS_PLANNER_MODEL
+    )
+    openai_base_url = _validated_base_url(getattr(settings, "openai_base_url", None))
+    openai_key = _optional_str(getattr(settings, "openai_api_key", None))
+    if openai_base_url and _is_bifrost_base_url(openai_base_url) and openai_key:
+        return AgentTierModelConfig(
+            model=_bifrost_planner_model(planner_model),
+            base_url=openai_base_url,
+            api_key=openai_key,
+        )
+
+    fireworks_key = _optional_str(getattr(settings, "fireworks_api_key", None))
+    if not fireworks_key:
+        return AgentTierModelConfig()
+    return AgentTierModelConfig(
+        model=planner_model,
+        base_url=DEFAULT_FIREWORKS_BASE_URL,
+        api_key=fireworks_key,
+    )
+
+
+def _openai_fallback_base_url(settings: Any) -> str | None:
+    direct_base_url = _validated_base_url(
+        getattr(settings, "openai_direct_base_url", None)
+    )
+    if direct_base_url is not None:
+        return direct_base_url
+
+    openai_base_url = _validated_base_url(getattr(settings, "openai_base_url", None))
+    direct_key = _optional_str(
+        getattr(settings, "openai_direct_api_key", None)
+    ) or _optional_str(getattr(settings, "openai_api_key_direct", None))
+    if direct_key and openai_base_url and _is_bifrost_base_url(openai_base_url):
+        return DEFAULT_OPENAI_BASE_URL
+    return openai_base_url
+
+
+def _openai_fallback_api_key(settings: Any) -> str | None:
+    return _optional_str(getattr(settings, "openai_direct_api_key", None)) or (
+        _optional_str(getattr(settings, "openai_api_key_direct", None))
+        or _optional_str(getattr(settings, "openai_api_key", None))
+    )
+
+
+def _is_bifrost_base_url(base_url: str) -> bool:
+    parsed = urlparse(base_url)
+    return (parsed.hostname or "").casefold() == "bifrost.508.dev"
+
+
+def _bifrost_planner_model(model: str) -> str:
+    provider, separator, _rest = model.partition("/")
+    if separator and provider in _BIFROST_PROVIDER_PREFIXES:
+        return model
+    if not separator:
+        return model
+    return f"fireworks/{model}"
 
 
 def _validated_base_url(value: Any) -> str | None:

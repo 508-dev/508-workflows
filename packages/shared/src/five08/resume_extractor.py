@@ -22,6 +22,8 @@ from five08.crm_normalization import (
     normalize_timezone_offset as shared_normalize_timezone_offset,
     normalize_website_url as shared_normalize_website_url,
 )
+from five08.model_catalog import model_chat_completion_options
+from five08.openai_fallback import FallbackOpenAIClient, OpenAICompatibleProvider
 from five08.skills import (
     DISALLOWED_RESUME_SKILLS,
     normalize_skill_payload,
@@ -1751,6 +1753,63 @@ def _empty_llm_content_error(response: Any) -> ValueError:
     )
 
 
+def _empty_llm_usage() -> dict[str, int]:
+    return {
+        "requests": 0,
+        "input_tokens": 0,
+        "cached_input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+    }
+
+
+def _extract_llm_usage(response: Any) -> dict[str, int]:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return {}
+    input_tokens = _usage_int(usage, "prompt_tokens", "input_tokens")
+    output_tokens = _usage_int(usage, "completion_tokens", "output_tokens")
+    total_tokens = _usage_int(usage, "total_tokens")
+    cached_tokens = 0
+    details = _usage_value(usage, "prompt_tokens_details", "input_tokens_details")
+    if details is not None:
+        cached_tokens = _usage_int(details, "cached_tokens")
+    return {
+        "requests": 1,
+        "input_tokens": input_tokens,
+        "cached_input_tokens": cached_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+    }
+
+
+def _merge_llm_usage(target: dict[str, int], usage: dict[str, int]) -> None:
+    for key, value in usage.items():
+        target[key] = int(target.get(key, 0)) + int(value or 0)
+
+
+def _usage_value(source: Any, *names: str) -> Any:
+    for name in names:
+        if isinstance(source, dict) and name in source:
+            return source.get(name)
+        if hasattr(source, name):
+            return getattr(source, name)
+    return None
+
+
+def _usage_int(source: Any, *names: str) -> int:
+    value = _usage_value(source, *names)
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return 0
+
+
 class ResumeExtractedProfile(BaseModel):
     """Normalized profile fields extracted from resume text."""
 
@@ -1784,6 +1843,7 @@ class ResumeExtractedProfile(BaseModel):
     skill_attrs: dict[str, int] = Field(default_factory=dict)
     raw_llm_output: str | None = None
     raw_llm_json: dict[str, Any] | None = None
+    llm_usage: dict[str, int] | None = None
     llm_fallback_reason: str | None = None
     confidence: float = Field(..., ge=0.0, le=1.0)
     source: str
@@ -1854,6 +1914,7 @@ class ResumeProfileExtractor:
         max_tokens: int = 2000,
         snippet_chars: int = 12000,
         timeout_seconds: float | None = None,
+        provider_attempts: tuple[OpenAICompatibleProvider, ...] | None = None,
     ) -> None:
         self.model = model.strip() if model else "gpt-5-mini"
         if not self.model:
@@ -1863,11 +1924,18 @@ class ResumeProfileExtractor:
         self.snippet_chars = max(1000, snippet_chars)
         self.client: Any = None
 
-        if api_key and OpenAIClient is not None:
+        if provider_attempts and OpenAIClient is not None:
+            self.client = FallbackOpenAIClient(
+                providers=provider_attempts,
+                client_factory=OpenAIClient,
+                timeout_seconds=timeout_seconds,
+            )
+        elif api_key and OpenAIClient is not None:
             client_kwargs: dict[str, Any] = {
                 "api_key": api_key,
-                "base_url": base_url,
             }
+            if self.base_url:
+                client_kwargs["base_url"] = self.base_url
             if timeout_seconds is not None:
                 client_kwargs["timeout"] = timeout_seconds
             self.client = OpenAIClient(**client_kwargs)
@@ -1928,21 +1996,22 @@ class ResumeProfileExtractor:
             "model": self.model,
             "messages": messages,
         }
-        if self._uses_openai_gpt5_chat_params():
-            kwargs["max_completion_tokens"] = max_tokens
-            kwargs["reasoning_effort"] = (
-                "low" if self.model.casefold().startswith("gpt-5.5") else "minimal"
-            )
-            kwargs["verbosity"] = "low"
+        model_options = model_chat_completion_options(self.model)
+        max_tokens_parameter = model_options.get("max_tokens_parameter")
+        if isinstance(max_tokens_parameter, str) and max_tokens_parameter:
+            kwargs[max_tokens_parameter] = max_tokens
+            reasoning_effort = model_options.get("reasoning_effort")
+            if isinstance(reasoning_effort, str) and reasoning_effort:
+                kwargs["reasoning_effort"] = reasoning_effort
+            verbosity = model_options.get("verbosity")
+            if isinstance(verbosity, str) and verbosity:
+                kwargs["verbosity"] = verbosity
+            if model_options.get("supports_temperature", True):
+                kwargs["temperature"] = temperature
         else:
             kwargs["temperature"] = temperature
             kwargs["max_tokens"] = max_tokens
         return kwargs
-
-    def _uses_openai_gpt5_chat_params(self) -> bool:
-        base_url = self.base_url.casefold()
-        uses_openai_api = not base_url or "api.openai.com" in base_url
-        return uses_openai_api and self.model.casefold().startswith("gpt-5")
 
     def _next_length_retry_max_tokens(self, current_max_tokens: int) -> int:
         return max(self.max_tokens * 2, current_max_tokens * 2)
@@ -1981,6 +2050,7 @@ class ResumeProfileExtractor:
 
         raw_content: str | None = None
         parsed: dict[str, Any] | None = None
+        llm_usage: dict[str, int] = _empty_llm_usage()
         attempt_max_tokens = self.max_tokens
         got_successful_response = False
         retry_reason: str | None = None
@@ -2025,6 +2095,7 @@ class ResumeProfileExtractor:
                         retry_reason = "request_error"
                         continue
                     raise
+                _merge_llm_usage(llm_usage, _extract_llm_usage(response))
 
                 choices = getattr(response, "choices", None)
                 first_choice = choices[0] if choices else None
@@ -2247,17 +2318,19 @@ class ResumeProfileExtractor:
                 skill_attrs=parsed_skill_attrs,
                 raw_llm_output=raw_content,
                 raw_llm_json=parsed,
+                llm_usage=llm_usage if llm_usage.get("requests") else None,
                 confidence=_bounded_confidence(
                     parsed.get("confidence", 0.75),
                     fallback=0.75,
                 ),
-                source=self.model,
+                source=self._last_llm_model(),
             )
         except Exception as exc:
             return self._heuristic_extract(
                 source_texts,
                 raw_llm_output=raw_content,
                 raw_llm_json=parsed,
+                llm_usage=llm_usage if llm_usage.get("requests") else None,
                 llm_fallback_reason=f"{type(exc).__name__}: {exc}",
             )
 
@@ -2360,6 +2433,7 @@ class ResumeProfileExtractor:
         *,
         raw_llm_output: str | None = None,
         raw_llm_json: dict[str, Any] | None = None,
+        llm_usage: dict[str, int] | None = None,
         llm_fallback_reason: str | None = None,
     ) -> ResumeExtractedProfile:
         snippet = self._build_source_blob(source_texts).strip()[: self.snippet_chars]
@@ -2458,6 +2532,7 @@ class ResumeProfileExtractor:
             skill_attrs=skill_attrs,
             raw_llm_output=raw_llm_output,
             raw_llm_json=raw_llm_json,
+            llm_usage=llm_usage,
             llm_fallback_reason=llm_fallback_reason,
             confidence=0.45,
             source="heuristic",
@@ -2731,6 +2806,13 @@ class ResumeProfileExtractor:
             split_first or DEFAULT_FALLBACK_FIRST_NAME,
             split_last or SINGLE_NAME_FALLBACK_LAST_NAME,
         )
+
+    def _last_llm_model(self) -> str:
+        provider = getattr(self.client, "last_provider", None)
+        provider_model = getattr(provider, "model", None)
+        if isinstance(provider_model, str) and provider_model.strip():
+            return provider_model.strip()
+        return self.model
 
     @staticmethod
     def _split_name_heuristically(full_name: str) -> tuple[str, str]:

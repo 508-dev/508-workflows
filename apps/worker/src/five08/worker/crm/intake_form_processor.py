@@ -83,10 +83,11 @@ class IntakeFormProcessor:
         self.api = EspoClient(settings.espo_base_url, settings.espo_api_key)
         self.document_processor = DocumentProcessor()
         self.resume_extractor = ResumeProfileExtractor(
-            api_key=settings.openai_api_key,
-            base_url=settings.openai_base_url,
+            api_key=settings.resolved_resume_ai_api_key,
+            base_url=settings.resolved_resume_ai_base_url,
             model=settings.resolved_resume_ai_model,
             max_tokens=settings.resume_extractor_max_tokens,
+            provider_attempts=settings.resolved_resume_ai_provider_attempts,
         )
         self.skills_extractor = SkillsExtractor()
 

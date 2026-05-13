@@ -135,13 +135,8 @@ process_docuseal_agreement_job = JOB_FUNCTIONS["process_docuseal_agreement_job"]
 # task store and pending plans are non-durable; production task workflows should
 # swap this registry for a persistent task service before multi-worker use.
 _AGENT_TASK_STORE = InMemoryTaskStore()
-_AGENT_ORCHESTRATOR = AgentOrchestrator(
-    registry=ToolRegistry(
-        _AGENT_TASK_STORE,
-        runtime_config=ToolRuntimeConfig.from_settings(settings),
-    ),
-    model_config=AgentModelConfig.from_settings(settings),
-)
+_AGENT_ORCHESTRATOR: AgentOrchestrator | None = None
+_AGENT_ORCHESTRATOR_LOCK = threading.RLock()
 _PENDING_AGENT_PLANS: dict[str, tuple[AgentPlan, AgentIdentityContext]] = {}
 _PENDING_AGENT_PLANS_LOCK: asyncio.Lock | None = None
 _PENDING_AGENT_PLANS_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
@@ -151,6 +146,23 @@ _AGENT_REQUEST_RATE_LIMIT_WINDOW_SECONDS = 60.0
 _AGENT_REQUEST_RATE_LIMIT_MAX_REQUESTS = 10
 _AGENT_REQUEST_TIMESTAMPS: dict[str, list[float]] = {}
 _AGENT_REQUEST_RATE_LIMIT_LOCK = threading.RLock()
+
+
+def _get_agent_orchestrator() -> AgentOrchestrator:
+    """Lazily construct the agent orchestrator so config errors isolate /agent."""
+    global _AGENT_ORCHESTRATOR
+    if _AGENT_ORCHESTRATOR is not None:
+        return _AGENT_ORCHESTRATOR
+    with _AGENT_ORCHESTRATOR_LOCK:
+        if _AGENT_ORCHESTRATOR is None:
+            _AGENT_ORCHESTRATOR = AgentOrchestrator(
+                registry=ToolRegistry(
+                    _AGENT_TASK_STORE,
+                    runtime_config=ToolRuntimeConfig.from_settings(settings),
+                ),
+                model_config=AgentModelConfig.from_settings(settings),
+            )
+    return _AGENT_ORCHESTRATOR
 
 
 def _is_authorized(request: Request) -> bool:
@@ -214,7 +226,7 @@ def _extract_idempotency_key(value: object) -> str | None:
 
 
 def _resume_extract_model_name() -> str:
-    if settings.openai_api_key:
+    if settings.resolved_resume_ai_api_key:
         return settings.resolved_resume_ai_model
     return "heuristic"
 
@@ -1412,8 +1424,21 @@ async def agent_request_handler(request: Request) -> JSONResponse:
             status_code=429,
         )
 
+    try:
+        orchestrator = _get_agent_orchestrator()
+    except Exception as exc:
+        logger.error("Agent orchestrator configuration failed", exc_info=True)
+        return JSONResponse(
+            {
+                "status": "failed",
+                "message": "Agent routes are not configured correctly.",
+                "error": str(exc),
+            },
+            status_code=503,
+        )
+
     response = await asyncio.to_thread(
-        _AGENT_ORCHESTRATOR.plan,
+        orchestrator.plan,
         payload.message,
         payload.context,
     )
@@ -1499,6 +1524,21 @@ async def agent_confirmation_handler(
             {"error": "invalid_payload", "detail": str(exc)}, status_code=400
         )
 
+    orchestrator: AgentOrchestrator | None = None
+    if payload.confirm:
+        try:
+            orchestrator = _get_agent_orchestrator()
+        except Exception as exc:
+            logger.error("Agent orchestrator configuration failed", exc_info=True)
+            return JSONResponse(
+                {
+                    "status": "failed",
+                    "message": "Agent routes are not configured correctly.",
+                    "error": str(exc),
+                },
+                status_code=503,
+            )
+
     claim_status, pending = await _claim_pending_agent_plan(
         plan_id,
         discord_user_id=payload.context.discord_user_id,
@@ -1560,8 +1600,9 @@ async def agent_confirmation_handler(
         original_context=original_context,
         confirmation_context=payload.context,
     )
+    assert orchestrator is not None
     results = await asyncio.to_thread(
-        _AGENT_ORCHESTRATOR.execute_plan,
+        orchestrator.execute_plan,
         plan,
         execution_context,
         confirmed=True,

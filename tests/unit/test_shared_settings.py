@@ -1,5 +1,8 @@
 """Unit tests for shared settings validation."""
 
+import sys
+from types import SimpleNamespace
+
 import pytest
 from pydantic import ValidationError
 
@@ -62,6 +65,31 @@ def test_langfuse_base_url_is_shared_configuration() -> None:
 def test_langfuse_client_is_disabled_without_base_url() -> None:
     """Langfuse should be lazily initialized only when configured."""
     assert get_langfuse_client(SharedSettings()) is None
+
+
+def test_langfuse_client_uses_configured_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Configured Langfuse endpoints should construct the lazy client."""
+
+    calls: dict[str, object] = {}
+
+    class FakeLangfuse:
+        def __init__(self, **kwargs: object) -> None:
+            calls.update(kwargs)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "langfuse",
+        SimpleNamespace(Langfuse=FakeLangfuse),
+    )
+
+    client = get_langfuse_client(
+        SharedSettings(langfuse_base_url=" https://cloud.langfuse.com ")
+    )
+
+    assert isinstance(client, FakeLangfuse)
+    assert calls == {"base_url": "https://cloud.langfuse.com"}
 
 
 def test_shared_settings_expose_agent_external_tool_credentials() -> None:

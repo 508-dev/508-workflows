@@ -48,7 +48,7 @@ def test_create_task_requires_confirmation_and_uses_stronger_model() -> None:
     assert response.plan.expires_at is not None
     assert response.plan.expires_at.tzinfo == timezone.utc
     assert response.plan.model_tier == "strong"
-    assert response.plan.model.model == "gpt-5-mini"
+    assert response.plan.model.model == "gpt-4.1-mini"
     assert response.plan.model.source_tier == "built_in_default"
     action = response.plan.actions[0]
     assert action.tool_name == "task_write.create_task"
@@ -629,6 +629,24 @@ def test_github_issue_create_title_can_include_task_word() -> None:
     assert action.arguments["title"] == "show task counts on the dashboard"
 
 
+def test_explicit_task_create_can_mention_github_issue() -> None:
+    orchestrator = AgentOrchestrator()
+
+    response = orchestrator.plan(
+        "Create a task to follow up on GitHub issue 123 in project Atlas",
+        _context(roles=["Project Manager"]),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    action = response.plan.actions[0]
+    assert action.tool_name == "task_write.create_task"
+    assert action.arguments == {
+        "title": "follow up on GitHub issue 123",
+        "project": "Atlas",
+    }
+
+
 def test_github_issue_create_strips_trailing_repository_clause() -> None:
     orchestrator = AgentOrchestrator()
 
@@ -740,6 +758,19 @@ def test_admin_can_draft_docuseal_member_agreement_with_confirmation() -> None:
     }
 
 
+def test_member_agreement_strips_email_introducer_from_name() -> None:
+    orchestrator = AgentOrchestrator()
+
+    response = orchestrator.plan(
+        "Send member agreement to Jane Doe at jane@example.com",
+        _context(roles=["Admin"]),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    assert response.plan.actions[0].arguments["submitter_name"] == "Jane Doe"
+
+
 def test_admin_can_search_crm_contacts() -> None:
     captured: dict[str, object] = {}
 
@@ -791,6 +822,55 @@ def test_admin_can_plan_crm_contact_onboarding_update() -> None:
         "contact_id": "contact-123",
         "updates": {"cOnboardingState": "approved"},
     }
+
+
+def test_admin_can_approve_crm_contact_by_verb() -> None:
+    orchestrator = AgentOrchestrator()
+
+    response = orchestrator.plan(
+        "Approve CRM contact contact-123",
+        _context(roles=["Admin"]),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    action = response.plan.actions[0]
+    assert action.tool_name == "crm_write.update_contact"
+    assert action.arguments == {
+        "contact_id": "contact-123",
+        "updates": {"cOnboardingState": "approved"},
+    }
+
+
+def test_crm_contact_search_for_mark_is_not_update_intent() -> None:
+    captured: dict[str, object] = {}
+
+    class FakeContact:
+        def to_dict(self) -> dict[str, object]:
+            return {"id": "1", "name": "Mark Smith"}
+
+    class FakeRepository:
+        def search(self, **kwargs: object) -> list[FakeContact]:
+            captured.update(kwargs)
+            return [FakeContact()]
+
+    class FakeRegistry(ToolRegistry):
+        def _crm_repository(self) -> FakeRepository:
+            return FakeRepository()
+
+    orchestrator = AgentOrchestrator(
+        registry=FakeRegistry(
+            runtime_config=ToolRuntimeConfig(
+                espo_base_url="https://crm.example.test",
+                espo_api_key="key",
+            ),
+        )
+    )
+
+    response = orchestrator.plan("Find contact Mark Smith", _context(roles=["Admin"]))
+
+    assert response.status == "executed"
+    assert captured["name__contains"] == "Mark Smith"
 
 
 def test_execute_plan_formats_key_errors_without_repr_quotes() -> None:
@@ -1083,9 +1163,11 @@ def test_agent_model_config_uses_tier_specific_provider() -> None:
 
 def test_agent_model_config_falls_back_between_tiers() -> None:
     settings = SimpleNamespace(
-        openai_api_key=None,
+        openai_api_key="openai-key",
         openai_base_url="https://api.openai.com/v1",
         openai_model="gpt-5-mini",
+        agent_fallback_model=None,
+        fireworks_api_key=None,
         agent_fast_model="gpt-5-nano",
         agent_fast_base_url=None,
         agent_fast_api_key=None,
@@ -1110,6 +1192,8 @@ def test_agent_model_config_requires_tier_key_for_external_provider() -> None:
         openai_api_key="openai-key",
         openai_base_url="https://api.openai.com/v1",
         openai_model="gpt-5-mini",
+        agent_fallback_model="gpt-4.1-mini",
+        fireworks_api_key=None,
         agent_fast_model=None,
         agent_fast_base_url=None,
         agent_fast_api_key=None,
@@ -1123,8 +1207,96 @@ def test_agent_model_config_requires_tier_key_for_external_provider() -> None:
 
     selection = AgentModelConfig.from_settings(settings).resolve("strong")
 
+    assert selection.model == "gpt-4.1-mini"
+    assert selection.base_url == "https://api.openai.com/v1"
+    assert selection.source_tier == "openai_default"
+    assert selection.fallback_used is True
+    assert selection.api_key_configured is True
+
+
+def test_agent_model_config_defaults_to_fireworks_when_configured() -> None:
+    settings = SimpleNamespace(
+        openai_api_key="openai-key",
+        openai_base_url="https://api.openai.com/v1",
+        openai_model="gpt-5-mini",
+        agent_fallback_model="gpt-4.1-mini",
+        fireworks_api_key="fireworks-key",
+        agent_fast_model=None,
+        agent_fast_base_url=None,
+        agent_fast_api_key=None,
+        agent_strong_model=None,
+        agent_strong_base_url=None,
+        agent_strong_api_key=None,
+        agent_reasoning_model=None,
+        agent_reasoning_base_url=None,
+        agent_reasoning_api_key=None,
+    )
+
+    selection = AgentModelConfig.from_settings(settings).resolve("strong")
+
+    assert selection.model == "accounts/fireworks/models/kimi-k2p6"
     assert selection.base_url == "https://api.fireworks.ai/inference/v1"
-    assert selection.api_key_configured is False
+    assert selection.source_tier == "strong"
+    assert selection.fallback_used is False
+    assert selection.api_key_configured is True
+
+
+def test_agent_model_config_prefers_bifrost_fireworks_provider() -> None:
+    settings = SimpleNamespace(
+        openai_api_key="bifrost-key",
+        openai_base_url="https://bifrost.508.dev/openai",
+        openai_model="gpt-5-mini",
+        openai_direct_api_key="openai-direct-key",
+        openai_direct_base_url="https://api.openai.com/v1",
+        agent_fallback_model="gpt-4.1-mini",
+        fireworks_api_key="fireworks-key",
+        agent_planner_model="accounts/fireworks/models/kimi-k2p6",
+        agent_fast_model=None,
+        agent_fast_base_url=None,
+        agent_fast_api_key=None,
+        agent_strong_model=None,
+        agent_strong_base_url=None,
+        agent_strong_api_key=None,
+        agent_reasoning_model=None,
+        agent_reasoning_base_url=None,
+        agent_reasoning_api_key=None,
+    )
+
+    selection = AgentModelConfig.from_settings(settings).resolve("strong")
+
+    assert selection.model == "fireworks/accounts/fireworks/models/kimi-k2p6"
+    assert selection.base_url == "https://bifrost.508.dev/openai"
+    assert selection.source_tier == "strong"
+    assert selection.fallback_used is False
+    assert selection.api_key_configured is True
+
+
+def test_agent_model_config_preserves_explicit_bifrost_provider_model() -> None:
+    settings = SimpleNamespace(
+        openai_api_key="bifrost-key",
+        openai_base_url="https://bifrost.508.dev/openai",
+        openai_model="gpt-5-mini",
+        agent_fallback_model="gpt-4.1-mini",
+        fireworks_api_key="fireworks-key",
+        agent_planner_model="openrouter/openai/gpt-4.1-mini",
+        agent_fast_model=None,
+        agent_fast_base_url=None,
+        agent_fast_api_key=None,
+        agent_strong_model=None,
+        agent_strong_base_url=None,
+        agent_strong_api_key=None,
+        agent_reasoning_model=None,
+        agent_reasoning_base_url=None,
+        agent_reasoning_api_key=None,
+    )
+
+    selection = AgentModelConfig.from_settings(settings).resolve("strong")
+
+    assert selection.model == "openrouter/openai/gpt-4.1-mini"
+    assert selection.base_url == "https://bifrost.508.dev/openai"
+    assert selection.source_tier == "strong"
+    assert selection.fallback_used is False
+    assert selection.api_key_configured is True
 
 
 def test_agent_model_config_falls_back_to_openai_model() -> None:
@@ -1132,11 +1304,12 @@ def test_agent_model_config_falls_back_to_openai_model() -> None:
         openai_api_key="openai-key",
         openai_base_url="https://api.openai.com/v1",
         openai_model="gpt-5-mini",
+        agent_fallback_model="gpt-4.1-mini",
     )
 
     selection = AgentModelConfig.from_settings(settings).resolve("strong")
 
-    assert selection.model == "gpt-5-mini"
+    assert selection.model == "gpt-4.1-mini"
     assert selection.base_url == "https://api.openai.com/v1"
     assert selection.source_tier == "openai_default"
     assert selection.fallback_used is True
@@ -1147,6 +1320,7 @@ def test_agent_model_config_rejects_disallowed_base_url() -> None:
         openai_api_key="openai-key",
         openai_base_url="https://metadata.google.internal",
         openai_model="gpt-5-mini",
+        agent_fallback_model=None,
     )
 
     with pytest.raises(ValueError, match="Disallowed agent model base_url"):

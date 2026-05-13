@@ -5,6 +5,7 @@ import logging
 import re
 from typing import Any
 
+from five08.openai_fallback import FallbackOpenAIClient
 from five08.skills import (
     DISALLOWED_RESUME_SKILLS,
     normalize_skill,
@@ -65,10 +66,15 @@ class SkillsExtractor:
         self.model = settings.resolved_resume_ai_model
         self.client: Any = None
 
-        if settings.openai_api_key and OpenAIClient is not None:
+        if settings.resolved_resume_ai_provider_attempts and OpenAIClient is not None:
+            self.client = FallbackOpenAIClient(
+                providers=settings.resolved_resume_ai_provider_attempts,
+                client_factory=OpenAIClient,
+            )
+        elif settings.resolved_resume_ai_api_key and OpenAIClient is not None:
             self.client = OpenAIClient(
-                api_key=settings.openai_api_key,
-                base_url=settings.openai_base_url,
+                api_key=settings.resolved_resume_ai_api_key,
+                base_url=settings.resolved_resume_ai_base_url,
             )
 
     def extract_skills(self, resume_text: str) -> ExtractedSkills:
@@ -110,11 +116,18 @@ class SkillsExtractor:
                 skills_value=parsed.get("skills", []),
                 skill_attrs_value=parsed.get("skill_attrs", {}),
                 confidence=confidence,
-                source=self.model,
+                source=self._last_llm_model(),
             )
         except Exception as exc:
             logger.warning("LLM skills extraction failed, using fallback: %s", exc)
             return self._extract_skills_heuristic(resume_text)
+
+    def _last_llm_model(self) -> str:
+        provider = getattr(self.client, "last_provider", None)
+        provider_model = getattr(provider, "model", None)
+        if isinstance(provider_model, str) and provider_model.strip():
+            return provider_model.strip()
+        return self.model
 
     def _extract_skills_heuristic(self, resume_text: str) -> ExtractedSkills:
         """Simple keyword and token-based extraction fallback."""

@@ -6,8 +6,11 @@ from pathlib import Path
 
 from five08.resume_extractor import ResumeExtractedProfile
 from five08.resume_evals import (
+    ResumeBaselineObserved,
+    ResumeBaselineReport,
     load_env_file,
     list_resume_eval_profiles,
+    render_baseline_markdown_report,
     render_resume_markdown_report,
     resolve_eval_model_profile,
     run_resume_eval_suite,
@@ -31,6 +34,13 @@ class _FakeResumeProfileExtractor:
             seniority_level="senior",
             address_country="United States",
             linkedin_url="https://linkedin.com/in/candidate",
+            llm_usage={
+                "requests": 1,
+                "input_tokens": 1000,
+                "cached_input_tokens": 200,
+                "output_tokens": 100,
+                "total_tokens": 1100,
+            },
             confidence=0.9,
             source="fake",
         )
@@ -61,6 +71,8 @@ def test_resume_eval_runs_against_text_file(
     assert report.summary["hard_failures"] == 0
     assert report.resumes[0].field_checks["name"] is True
     assert report.resumes[0].field_checks["email"] is True
+    assert report.resumes[0].estimated_cost_usd == 0.000405
+    assert report.summary["estimated_cost_usd"] == 0.000405
     assert report.resumes[0].extracted_profile is None
 
 
@@ -138,3 +150,46 @@ def test_resume_eval_markdown_renders_empty_missing_fields(
     markdown = render_resume_markdown_report(report)
 
     assert "# Resume Extraction Eval: openai-direct" in markdown
+
+
+def test_baseline_markdown_uses_location_field_evidence() -> None:
+    report = ResumeBaselineReport(
+        generated_at="2026-05-12T00:00:00+00:00",
+        input_dir="resumes",
+        judge_model="gpt-5.5",
+        summary={"resumes": 1, "succeeded": 1, "failed": 0, "avg_latency_ms": 1},
+        resumes=[
+            ResumeBaselineObserved(
+                id="candidate",
+                path="resumes/candidate.txt",
+                filename="candidate.txt",
+                judge_model="gpt-5.5",
+                status="succeeded",
+                text_length=100,
+                latency_ms=1,
+                baseline={
+                    "name": "Candidate",
+                    "email": "candidate@example.com",
+                    "primary_roles": ["developer"],
+                    "seniority_level": "senior",
+                    "skills": ["python"],
+                    "address_city": "Leeds",
+                    "address_state": "NY",
+                    "address_country": "United States",
+                    "evidence": {
+                        "primary_roles": ["Software Engineer"],
+                        "seniority_level": ["Senior Engineer"],
+                        "skills": ["Python"],
+                        "address_city": ["Leeds, NY"],
+                        "address_state": ["Leeds, NY"],
+                        "address_country": ["Leeds, NY"],
+                    },
+                },
+            )
+        ],
+    )
+
+    markdown = render_baseline_markdown_report(report)
+
+    assert "| candidate.txt | succeeded | Candidate | candidate@example.com" in markdown
+    assert "| developer | senior | python | - |" in markdown

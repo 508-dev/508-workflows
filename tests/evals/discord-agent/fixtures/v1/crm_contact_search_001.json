@@ -39,9 +39,8 @@
         "tool_name": "crm_read.search_contacts",
         "requires_confirmation": false,
         "required_scopes": ["crm:contact:read"],
-        "arguments": {
-          "query": "Sarah",
-          "limit": 5
+        "arguments_contains": {
+          "query": "Sarah"
         }
       }
     ]

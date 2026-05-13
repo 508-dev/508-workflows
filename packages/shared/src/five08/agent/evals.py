@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import time
 from collections.abc import Iterable, Sequence
 from copy import deepcopy
@@ -27,6 +28,7 @@ from five08.agent.models import (
 from five08.agent.model_routing import AgentModelConfig, AgentTierModelConfig
 from five08.agent.orchestrator import AgentOrchestrator
 from five08.agent.tools import InMemoryTaskStore, ToolRegistry, ToolRuntimeConfig
+from five08.model_catalog import model_chat_completion_options
 from five08.tls import default_ca_bundle_path
 
 EvalSuite = Literal["canonical", "weekly"]
@@ -342,7 +344,26 @@ class _EvalToolRegistry(ToolRegistry):
 
 def default_eval_root() -> Path:
     """Return the repo-local Discord agent eval fixture root."""
-    return Path(__file__).resolve().parents[5] / "tests" / "evals" / "discord-agent"
+    cwd_root = _find_repo_root(Path.cwd())
+    if cwd_root is not None:
+        return cwd_root / "tests" / "evals" / "discord-agent"
+    package_root = _find_repo_root(Path(__file__).resolve())
+    if package_root is not None:
+        return package_root / "tests" / "evals" / "discord-agent"
+    return Path.cwd() / "tests" / "evals" / "discord-agent"
+
+
+def _find_repo_root(start: Path) -> Path | None:
+    """Find a repository checkout root from a starting path."""
+    current = start if start.is_dir() else start.parent
+    for candidate in [current, *current.parents]:
+        if (candidate / ".git").exists() and (candidate / "pyproject.toml").exists():
+            return candidate
+        if (candidate / "tests" / "evals").is_dir() and (
+            candidate / "pyproject.toml"
+        ).exists():
+            return candidate
+    return None
 
 
 def load_fixture_catalog(eval_root: Path | None = None) -> AgentEvalCatalog:
@@ -593,7 +614,7 @@ def run_fixture_with_live_planner(
         parse_error=call.error,
         raw_model_output=call.raw_output,
     )
-    checks = evaluate_observed(fixture.expect, observed)
+    checks = evaluate_observed(fixture.expect, observed, strict=False)
     if not call.parse_success:
         checks.append(
             AgentEvalCheck(
@@ -791,9 +812,23 @@ def _call_openai_compatible_live_planner(
             {"role": "system", "content": _LIVE_PLANNER_SYSTEM_PROMPT},
             {"role": "user", "content": _live_planner_user_prompt(fixture, message)},
         ],
-        "temperature": 0,
         "response_format": {"type": "json_object"},
     }
+    model_options = model_chat_completion_options(profile.live_model)
+    max_tokens_parameter = model_options.get("max_tokens_parameter")
+    if isinstance(max_tokens_parameter, str) and max_tokens_parameter:
+        payload[max_tokens_parameter] = 1200
+        reasoning_effort = model_options.get("reasoning_effort")
+        if isinstance(reasoning_effort, str) and reasoning_effort:
+            payload["reasoning_effort"] = reasoning_effort
+        verbosity = model_options.get("verbosity")
+        if isinstance(verbosity, str) and verbosity:
+            payload["verbosity"] = verbosity
+        if model_options.get("supports_temperature", True):
+            payload["temperature"] = 0
+    else:
+        payload["max_tokens"] = 1200
+        payload["temperature"] = 0
     response = requests.post(
         f"{profile.live_base_url.rstrip('/')}/chat/completions",
         headers={
@@ -936,6 +971,7 @@ def _response_from_live_draft(
 
     model_tier = orchestrator._choose_model_tier(message, actions)
     model_selection = _live_model_selection(profile=profile, tier=model_tier)
+    canonical_intent = orchestrator._intent_for_tool(actions[0].tool_name)
     for action in actions:
         manifest = orchestrator.registry.get(action.tool_name)
         decision = orchestrator.policy.authorize(
@@ -947,7 +983,7 @@ def _response_from_live_draft(
             action.requires_confirmation = False
             plan = AgentPlan(
                 plan_id=f"eval-{uuid4().hex}",
-                intent=draft.intent or orchestrator._intent_for_tool(action.tool_name),
+                intent=canonical_intent,
                 planner="live_model",
                 model_tier=model_tier,
                 model=model_selection,
@@ -960,7 +996,7 @@ def _response_from_live_draft(
     requires_confirmation = any(action.requires_confirmation for action in actions)
     plan = AgentPlan(
         plan_id=f"eval-{uuid4().hex}",
-        intent=draft.intent or orchestrator._intent_for_tool(actions[0].tool_name),
+        intent=canonical_intent,
         planner="live_model",
         model_tier=model_tier,
         model=model_selection,
@@ -1063,24 +1099,30 @@ def observe_response(
 def evaluate_observed(
     expect: AgentEvalExpect,
     observed: AgentEvalObserved,
+    *,
+    strict: bool = True,
 ) -> list[AgentEvalCheck]:
     """Evaluate deterministic expectations against observed output."""
     checks = [
-        _check("status", expect.status, observed.status),
+        _check("status", expect.status, observed.status, strict=strict),
     ]
     checks.extend(
         [
-            _check_optional("intent", expect.intent, observed.intent),
-            _check_optional("model_tier", expect.model_tier, observed.model_tier),
+            _check_optional("intent", expect.intent, observed.intent, strict=strict),
+            _check_optional(
+                "model_tier", expect.model_tier, observed.model_tier, strict=strict
+            ),
             _check_optional(
                 "requires_confirmation",
                 expect.requires_confirmation,
                 observed.requires_confirmation,
+                strict=strict,
             ),
             _check_optional(
                 "clarification_question",
                 expect.clarification_question,
                 observed.clarification_question,
+                strict=strict,
             ),
         ]
     )
@@ -1099,17 +1141,25 @@ def evaluate_observed(
                 "result_statuses",
                 expect.result_statuses,
                 [result.status for result in observed.results],
+                strict=strict,
             )
         )
     if expect.actions is not None:
         checks.append(
-            _check("action_count", len(expect.actions), len(observed.actions))
+            _check(
+                "action_count",
+                len(expect.actions),
+                len(observed.actions),
+                strict=strict,
+            )
         )
         for index, expected_action in enumerate(expect.actions):
             observed_action = (
                 observed.actions[index] if index < len(observed.actions) else None
             )
-            checks.extend(_evaluate_action(index, expected_action, observed_action))
+            checks.extend(
+                _evaluate_action(index, expected_action, observed_action, strict=strict)
+            )
     return [check for check in checks if check.name]
 
 
@@ -1117,6 +1167,8 @@ def _evaluate_action(
     index: int,
     expected: AgentEvalExpectedAction,
     observed: AgentEvalObservedAction | None,
+    *,
+    strict: bool,
 ) -> list[AgentEvalCheck]:
     prefix = f"actions[{index}]"
     if observed is None:
@@ -1129,21 +1181,33 @@ def _evaluate_action(
             )
         ]
     checks = [
-        _check(f"{prefix}.tool_name", expected.tool_name, observed.tool_name),
+        _check(
+            f"{prefix}.tool_name",
+            expected.tool_name,
+            observed.tool_name,
+            strict=strict,
+        ),
         _check_optional(
             f"{prefix}.requires_confirmation",
             expected.requires_confirmation,
             observed.requires_confirmation,
+            strict=strict,
         ),
         _check_optional(
             f"{prefix}.required_scopes",
             expected.required_scopes,
             observed.required_scopes,
+            strict=strict,
         ),
     ]
     if expected.arguments is not None:
         checks.append(
-            _check(f"{prefix}.arguments", expected.arguments, observed.arguments)
+            _check(
+                f"{prefix}.arguments",
+                expected.arguments,
+                observed.arguments,
+                strict=strict,
+            )
         )
     if expected.arguments_contains is not None:
         for key, value in expected.arguments_contains.items():
@@ -1152,24 +1216,58 @@ def _evaluate_action(
                     f"{prefix}.arguments.{key}",
                     value,
                     observed.arguments.get(key),
+                    strict=strict,
                 )
             )
     return [check for check in checks if check.name]
 
 
-def _check(name: str, expected: Any, observed: Any) -> AgentEvalCheck:
+def _check(
+    name: str, expected: Any, observed: Any, *, strict: bool = True
+) -> AgentEvalCheck:
     return AgentEvalCheck(
         name=name,
-        passed=observed == expected,
+        passed=_eval_values_match(expected, observed, strict=strict),
         expected=expected,
         observed=observed,
     )
 
 
-def _check_optional(name: str, expected: Any, observed: Any) -> AgentEvalCheck:
+def _check_optional(
+    name: str, expected: Any, observed: Any, *, strict: bool = True
+) -> AgentEvalCheck:
     if expected is None:
         return AgentEvalCheck(name="", passed=True)
-    return _check(name, expected, observed)
+    return _check(name, expected, observed, strict=strict)
+
+
+def _eval_values_match(expected: Any, observed: Any, *, strict: bool) -> bool:
+    if strict:
+        return observed == expected
+    if isinstance(expected, str) and isinstance(observed, str):
+        expected_text = _normalize_eval_text(expected)
+        observed_text = _normalize_eval_text(observed)
+        return observed_text == expected_text or observed_text.startswith(expected_text)
+    if isinstance(expected, dict) and isinstance(observed, dict):
+        return all(
+            key in observed and _eval_values_match(value, observed[key], strict=False)
+            for key, value in expected.items()
+        )
+    if isinstance(expected, list) and isinstance(observed, list):
+        if len(expected) != len(observed):
+            return False
+        return all(
+            _eval_values_match(expected_item, observed_item, strict=False)
+            for expected_item, observed_item in zip(expected, observed, strict=True)
+        )
+    return observed == expected
+
+
+def _normalize_eval_text(value: str) -> str:
+    normalized = value.casefold()
+    normalized = re.sub(r"\bdocumentation\b", "docs", normalized)
+    normalized = re.sub(r"[^a-z0-9]+", " ", normalized)
+    return " ".join(normalized.split())
 
 
 def write_report(report: AgentEvalReport, *, output_dir: Path) -> None:

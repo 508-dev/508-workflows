@@ -62,7 +62,7 @@ class AgentConfirmationView(discord.ui.View):
     ) -> None:
         await interaction.response.defer(ephemeral=True)
         try:
-            confirmation_context = self._confirmation_context(interaction)
+            confirmation_context = await self._confirmation_context(interaction)
             response = await self.cog._post_agent_confirmation(
                 plan_id=self.plan_id,
                 context=confirmation_context,
@@ -105,7 +105,7 @@ class AgentConfirmationView(discord.ui.View):
     ) -> None:
         await interaction.response.defer(ephemeral=True)
         try:
-            confirmation_context = self._confirmation_context(interaction)
+            confirmation_context = await self._confirmation_context(interaction)
             response = await self.cog._post_agent_confirmation(
                 plan_id=self.plan_id,
                 context=confirmation_context,
@@ -140,7 +140,7 @@ class AgentConfirmationView(discord.ui.View):
                     "Failed disabling agent confirmation view", exc_info=True
                 )
 
-    def _confirmation_context(
+    async def _confirmation_context(
         self,
         interaction: discord.Interaction,
     ) -> dict[str, Any]:
@@ -150,7 +150,7 @@ class AgentConfirmationView(discord.ui.View):
             context["organization_id"] = self.context.get("organization_id")
             context["guild_id"] = original_guild_id
             context["channel_id"] = self.context.get("channel_id")
-            fresh_roles = self.cog._cached_guild_role_names(
+            fresh_roles = await self.cog._guild_role_names(
                 guild_id=str(original_guild_id),
                 user_id=interaction.user.id,
             )
@@ -456,6 +456,23 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             return []
         return self._role_names_from_user(member)
 
+    async def _guild_role_names(self, *, guild_id: str, user_id: int) -> list[str]:
+        try:
+            guild = self.bot.get_guild(int(guild_id))
+        except (TypeError, ValueError):
+            return []
+        if guild is None:
+            return []
+        member = guild.get_member(user_id)
+        if member is None and hasattr(guild, "fetch_member"):
+            try:
+                member = await guild.fetch_member(user_id)
+            except (discord.HTTPException, discord.NotFound, discord.Forbidden):
+                member = None
+        if member is None:
+            return []
+        return self._role_names_from_user(member)
+
     def _audit_message_safe(
         self,
         *,
@@ -465,38 +482,11 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         metadata: dict[str, Any] | None = None,
     ) -> None:
         try:
-            if not (self.audit_logger.enabled or self.audit_logger.webhook_enabled):
-                return
-            if not self.audit_logger._should_log_command_event(
+            self.audit_logger.log_message(
+                message=message,
                 action=action,
                 result=result,
-            ):
-                return
-            guild_id = message.guild.id if message.guild is not None else None
-            channel_id = getattr(message.channel, "id", None)
-            actor_display_name = getattr(message.author, "display_name", None)
-            if not actor_display_name:
-                actor_display_name = getattr(message.author, "name", None)
-            base_metadata: dict[str, Any] = {
-                "guild_id": str(guild_id) if guild_id else None,
-                "channel_id": str(channel_id) if channel_id is not None else None,
-                "message_id": str(message.id),
-            }
-            if metadata:
-                base_metadata.update(metadata)
-            self.audit_logger._queue_event(
-                {
-                    "source": "discord",
-                    "action": action,
-                    "result": result,
-                    "actor_provider": "discord",
-                    "actor_subject": str(message.author.id),
-                    "actor_display_name": actor_display_name,
-                    "resource_type": "discord_message",
-                    "resource_id": str(message.id),
-                    "correlation_id": str(message.id),
-                    "metadata": base_metadata,
-                }
+                metadata=metadata,
             )
         except Exception:
             logger.warning("Audit logging failed for action=%s", action, exc_info=True)
@@ -627,6 +617,14 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                 elif isinstance(result_payload, dict) and "issues" in result_payload:
                     lines.extend(
                         self._format_issue_result_lines(tool_name, result_payload)
+                    )
+                elif isinstance(result_payload, dict) and result_payload.get(
+                    "html_url"
+                ):
+                    lines.extend(
+                        self._format_issue_result_lines(
+                            tool_name, {"issues": [result_payload]}
+                        )
                     )
                 elif isinstance(result_payload, dict) and "contacts" in result_payload:
                     lines.extend(

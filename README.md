@@ -245,8 +245,13 @@ Use `.env.example` as the source of truth for defaults.
 - `Optional`: `ALLOWED_FILE_TYPES` (default: `pdf,doc,docx,txt`)
 - `Optional`: `OPENAI_API_KEY` (if unset, heuristic extraction is used)
 - `Optional`: `OPENAI_BASE_URL` (set `https://openrouter.ai/api/v1` for OpenRouter)
+- `Optional`: `OPENAI_DIRECT_API_KEY` / `OPENAI_API_KEY_DIRECT`, `OPENAI_DIRECT_BASE_URL`, `OPENAI_DIRECT_MODEL` (direct OpenAI fallback when the primary base URL is Bifrost)
+- `Optional`: `FIREWORKS_API_KEY` (direct fallback when Bifrost is not routing Fireworks)
+- `Optional`: `OPENROUTER_API_KEY` (direct OpenRouter fallback when Bifrost is unavailable or misconfigured)
 - `Optional`: `LANGFUSE_BASE_URL` (Langfuse endpoint for LLM tracing/observability)
-- `Optional`: `RESUME_AI_MODEL` (default: `gpt-5-mini`; use plain names like `gpt-5-mini`, OpenRouter gets auto-prefixed to `openai/<model>`)
+- `Optional`: `RESUME_AI_API_KEY`, `RESUME_AI_BASE_URL` (resume-specific provider; falls back to `OPENAI_API_KEY` / `OPENAI_BASE_URL` when unset or incomplete)
+- `Optional`: `RESUME_AI_MODEL` (default: `gpt-4.1-mini`; use plain names like `gpt-4.1-mini`, OpenRouter gets auto-prefixed to `openai/<model>`)
+- Note: resume/profile LLM calls retry matching direct providers after Bifrost request failures. For example, `RESUME_AI_MODEL=openrouter/openai/gpt-4.1-mini` through Bifrost retries direct OpenRouter as `openai/gpt-4.1-mini`, then direct OpenAI when those keys are configured.
 - `Optional`: `OPENAI_MODEL` (default: `gpt-5-mini`; fallback/legacy model setting)
 - `Optional`: `RESUME_EXTRACTOR_VERSION` (default: `v1`; used in resume processing idempotency/ledger keys)
 - `Optional`: `INTAKE_RESUME_FETCH_TIMEOUT_SECONDS` (default: `20.0`; timeout for intake resume URL downloads)
@@ -272,7 +277,8 @@ Use `.env.example` as the source of truth for defaults.
 - `Optional`: `AGENT_FAST_MODEL`, `AGENT_FAST_BASE_URL`, `AGENT_FAST_API_KEY`
 - `Optional`: `AGENT_STRONG_MODEL`, `AGENT_STRONG_BASE_URL`, `AGENT_STRONG_API_KEY`
 - `Optional`: `AGENT_REASONING_MODEL`, `AGENT_REASONING_BASE_URL`, `AGENT_REASONING_API_KEY`
-- Note: tier-specific agent models can point at OpenAI-compatible providers such as Fireworks. Agent model base URLs must be HTTPS endpoints on `api.openai.com`, `api.fireworks.ai`, or `openrouter.ai`. If a tier is not configured, fallback order is `reasoning -> strong -> fast -> OPENAI_MODEL -> gpt-5-mini`; `strong` falls back through `fast`, and `fast` falls back through `OPENAI_MODEL`.
+- `Optional`: `AGENT_FALLBACK_MODEL` (default: `gpt-4.1-mini`; uses `OPENAI_API_KEY` / `OPENAI_BASE_URL`)
+- Note: tier-specific agent models can point at OpenAI-compatible providers such as Bifrost or Fireworks. Agent model base URLs must be HTTPS endpoints on `bifrost.508.dev`, `api.openai.com`, `api.fireworks.ai`, or `openrouter.ai`. If `OPENAI_BASE_URL` points at Bifrost and tier-specific `AGENT_*` values are unset, the planner defaults to Fireworks Kimi via Bifrost as `fireworks/accounts/fireworks/models/kimi-k2p6`. Explicit Bifrost provider-prefixed planner models, such as `openrouter/openai/gpt-4.1-mini`, are passed through unchanged. If Bifrost is not configured and `FIREWORKS_API_KEY` is set, the planner falls back to direct Fireworks as `accounts/fireworks/models/kimi-k2p6`. If a configured provider is missing its usable API key, it is skipped and the fallback order is `reasoning -> strong -> fast -> AGENT_FALLBACK_MODEL -> gpt-4.1-mini`; `strong` falls back through `fast`, and `fast` falls back through the OpenAI fallback.
 - Note: the Discord bot accepts agent requests through `/agent` and explicit bot mentions. Mentioned requests work in server channels and threads, but results and confirmation buttons are sent by DM to avoid leaking task or plan details into public channels. Thread follow-ups should mention the bot again to trigger a fresh request.
 - Agent tools follow the deterministic path: planner drafts the action, policy authorizes scopes, write tools require confirmation, and the backend executes known-good tool code.
 - `Optional`: `GITHUB_API_TOKEN`, `GITHUB_DEFAULT_REPO`, `GITHUB_ALLOWED_REPOS` (comma-separated; GitHub Issues are the canonical code-task backend for agent-created code work, and agent tools only access the default/allowed repositories).

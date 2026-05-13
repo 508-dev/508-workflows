@@ -89,6 +89,8 @@ Relevant configuration:
 - `AGENT_FAST_*`, `AGENT_STRONG_*`, `AGENT_REASONING_*`: backend model
   tier configuration for OpenAI-compatible providers. Credentials stay in the
   backend process; the bot only receives non-secret plan metadata.
+- `RESUME_AI_*`: optional resume-specific extraction provider for direct CRM
+  resume parsing in the bot; falls back to the normal `OPENAI_*` settings.
 
 ## Permissions
 

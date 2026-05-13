@@ -3256,10 +3256,11 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         # Store base URL for profile links
         self.base_url = settings.espo_base_url.rstrip("/")
         self.resume_extractor = ResumeProfileExtractor(
-            api_key=settings.openai_api_key,
-            base_url=settings.openai_base_url,
-            model=settings.openai_model,
+            api_key=settings.resolved_resume_ai_api_key,
+            base_url=settings.resolved_resume_ai_base_url,
+            model=settings.resolved_resume_ai_model,
             max_tokens=settings.resume_extractor_max_tokens,
+            provider_attempts=settings.resolved_resume_ai_provider_attempts,
         )
         self._resume_profile_cache: (
             tuple[tuple[int, str], ResumeExtractedProfile] | None
