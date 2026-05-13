@@ -32,4 +32,4 @@ EOF
 fi
 
 cd "$repo_root"
-exec docker compose "$@"
+exec docker compose -f compose.yaml -f compose.local.yaml "$@"

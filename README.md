@@ -18,7 +18,9 @@ This repository follows a service-oriented monorepo layout:
 ├── packages/
 │   └── shared/
 │       └── src/five08/      # Shared settings, queue helpers, shared clients
-├── docker-compose.yml      # full container stack for Coolify/local parity
+├── compose.yaml            # canonical Coolify/base container stack
+├── compose.local.yaml      # local host port publishing override
+├── docker-compose.yml      # compatibility wrapper including compose.yaml
 ├── tests/                  # Unit and integration tests
 └── pyproject.toml          # uv workspace root
 ```
@@ -131,10 +133,31 @@ uv run --package five08 crmctl batch-update --where timezone__is_null=true --whe
 service URLs so the apps can run on the host without manual overrides. Use
 the lower-level Compose wrapper when you want full containerized parity.
 
-For full containerized runs, including Coolify-style deployment parity:
+For local full-container runs, including deterministic localhost ports:
 
 ```bash
 ./scripts/docker-compose.sh up --build
+```
+
+Coolify should use `/compose.yaml` as the base Compose file. A small
+`docker-compose.yml` compatibility wrapper includes it for tools still configured
+to read the older filename. The base file intentionally
+does not publish Redis, Postgres, MinIO, or API host ports; Coolify should expose
+only the services/domains it manages. The app services also attach to the external
+infra network named by `INFRA_DOCKER_NETWORK` so they can reach Portainer-managed
+Bifrost and Langfuse by Docker DNS.
+
+```bash
+docker network create 508-infra
+```
+
+Set `INFRA_DOCKER_NETWORK` if the shared external network has a different name.
+With Portainer services attached to the same network using aliases like `bifrost`
+and `langfuse`, configure:
+
+```env
+OPENAI_BASE_URL=http://bifrost:8080/openai
+LANGFUSE_BASE_URL=http://langfuse:3000
 ```
 
 Note: the service Dockerfiles use BuildKit cache mounts, so containerized builds
