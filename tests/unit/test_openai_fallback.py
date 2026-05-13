@@ -32,6 +32,22 @@ def test_bifrost_openrouter_attempts_fall_back_to_direct_openrouter() -> None:
     assert providers[2].base_url == "https://api.openai.com/v1"
 
 
+def test_internal_bifrost_dns_attempts_fall_back_to_direct_openrouter() -> None:
+    providers = build_openai_compatible_provider_attempts(
+        primary_model="openrouter/openai/gpt-4.1-mini",
+        primary_api_key="bifrost-key",
+        primary_base_url="http://bifrost:8080/openai",
+        openrouter_api_key="openrouter-key",
+    )
+
+    assert [provider.label for provider in providers] == [
+        "primary",
+        "openrouter-direct",
+    ]
+    assert providers[1].model == "openai/gpt-4.1-mini"
+    assert providers[1].base_url == "https://openrouter.ai/api/v1"
+
+
 def test_bifrost_fireworks_attempts_fall_back_to_direct_fireworks() -> None:
     providers = build_openai_compatible_provider_attempts(
         primary_model="fireworks/accounts/fireworks/models/kimi-k2p6",

@@ -160,6 +160,10 @@ OPENAI_BASE_URL=http://bifrost:8080/openai
 LANGFUSE_BASE_URL=http://langfuse:3000
 ```
 
+Agent model routing allows this exact internal Docker DNS Bifrost URL for
+same-host deployments. Public/provider base URLs remain restricted to HTTPS
+allowlisted hosts.
+
 Note: the service Dockerfiles use BuildKit cache mounts, so containerized builds
 require BuildKit-capable Docker / `docker compose build` support.
 
@@ -301,7 +305,7 @@ Use `.env.example` as the source of truth for defaults.
 - `Optional`: `AGENT_STRONG_MODEL`, `AGENT_STRONG_BASE_URL`, `AGENT_STRONG_API_KEY`
 - `Optional`: `AGENT_REASONING_MODEL`, `AGENT_REASONING_BASE_URL`, `AGENT_REASONING_API_KEY`
 - `Optional`: `AGENT_FALLBACK_MODEL` (default: `gpt-4.1-mini`; uses `OPENAI_API_KEY` / `OPENAI_BASE_URL`)
-- Note: tier-specific agent models can point at OpenAI-compatible providers such as Bifrost or Fireworks. Agent model base URLs must be HTTPS endpoints on `bifrost.508.dev`, `api.openai.com`, `api.fireworks.ai`, or `openrouter.ai`. If `OPENAI_BASE_URL` points at Bifrost and tier-specific `AGENT_*` values are unset, the planner defaults to Fireworks Kimi via Bifrost as `fireworks/accounts/fireworks/models/kimi-k2p6`. Explicit Bifrost provider-prefixed planner models, such as `openrouter/openai/gpt-4.1-mini`, are passed through unchanged. If Bifrost is not configured and `FIREWORKS_API_KEY` is set, the planner falls back to direct Fireworks as `accounts/fireworks/models/kimi-k2p6`. If a configured provider is missing its usable API key, it is skipped and the fallback order is `reasoning -> strong -> fast -> AGENT_FALLBACK_MODEL -> gpt-4.1-mini`; `strong` falls back through `fast`, and `fast` falls back through the OpenAI fallback.
+- Note: tier-specific agent models can point at OpenAI-compatible providers such as Bifrost or Fireworks. Agent model base URLs must be HTTPS endpoints on `bifrost.508.dev`, `api.openai.com`, `api.fireworks.ai`, or `openrouter.ai`, except the internal Docker-network Bifrost URL `http://bifrost:8080/openai` is also allowed for same-host deployments. If `OPENAI_BASE_URL` points at Bifrost and tier-specific `AGENT_*` values are unset, the planner defaults to Fireworks Kimi via Bifrost as `fireworks/accounts/fireworks/models/kimi-k2p6`. Explicit Bifrost provider-prefixed planner models, such as `openrouter/openai/gpt-4.1-mini`, are passed through unchanged. If Bifrost is not configured and `FIREWORKS_API_KEY` is set, the planner falls back to direct Fireworks as `accounts/fireworks/models/kimi-k2p6`. If a configured provider is missing its usable API key, it is skipped and the fallback order is `reasoning -> strong -> fast -> AGENT_FALLBACK_MODEL -> gpt-4.1-mini`; `strong` falls back through `fast`, and `fast` falls back through the OpenAI fallback.
 - Note: the Discord bot accepts agent requests through `/agent` and explicit bot mentions. Mentioned requests work in server channels and threads, but results and confirmation buttons are sent by DM to avoid leaking task or plan details into public channels. Thread follow-ups should mention the bot again to trigger a fresh request.
 - Agent tools follow the deterministic path: planner drafts the action, policy authorizes scopes, write tools require confirmation, and the backend executes known-good tool code.
 - `Optional`: `GITHUB_API_TOKEN`, `GITHUB_DEFAULT_REPO`, `GITHUB_ALLOWED_REPOS` (comma-separated; GitHub Issues are the canonical code-task backend for agent-created code work, and agent tools only access the default/allowed repositories).

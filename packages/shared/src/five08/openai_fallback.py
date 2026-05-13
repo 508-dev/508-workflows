@@ -375,7 +375,7 @@ def _strip_provider_prefix(model: str, provider: str) -> str:
 
 def _is_bifrost_base_url(base_url: str) -> bool:
     parsed = urlparse(base_url)
-    return (parsed.hostname or "").casefold() == "bifrost.508.dev"
+    return (parsed.hostname or "").casefold() in {"bifrost.508.dev", "bifrost"}
 
 
 def _clean(value: str | None) -> str | None:

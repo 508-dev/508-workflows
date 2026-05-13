@@ -224,7 +224,7 @@ def _openai_fallback_api_key(settings: Any) -> str | None:
 
 def _is_bifrost_base_url(base_url: str) -> bool:
     parsed = urlparse(base_url)
-    return (parsed.hostname or "").casefold() == "bifrost.508.dev"
+    return (parsed.hostname or "").casefold() in {"bifrost.508.dev", "bifrost"}
 
 
 def _bifrost_planner_model(model: str) -> str:
@@ -241,6 +241,22 @@ def _validated_base_url(value: Any) -> str | None:
     if base_url is None:
         return None
     parsed = urlparse(base_url)
-    if parsed.scheme != "https" or parsed.hostname not in _ALLOWED_BASE_URL_HOSTS:
+    if not _is_allowed_base_url(parsed):
         raise ValueError(f"Disallowed agent model base_url: {base_url}")
     return base_url
+
+
+def _is_allowed_base_url(parsed: Any) -> bool:
+    hostname = (parsed.hostname or "").casefold()
+    if parsed.scheme == "https" and hostname in _ALLOWED_BASE_URL_HOSTS:
+        return True
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme == "http"
+        and hostname == "bifrost"
+        and port == 8080
+        and parsed.path.rstrip("/") == "/openai"
+    )

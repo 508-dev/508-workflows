@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import json
 from functools import lru_cache
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
+_EMPTY_MODEL_PROFILES: dict[str, Any] = {
+    "version": "model-profiles.v1",
+    "models": {},
+}
+_PACKAGED_MODEL_PROFILES = "data/model-profiles.json"
+
 
 def default_model_profiles_path() -> Path:
-    """Return the repo-local model profile catalog path."""
+    """Return the development/eval model profile catalog path."""
     return (
         Path(__file__).resolve().parents[4] / "tests" / "evals" / "model-profiles.json"
     )
@@ -17,13 +24,31 @@ def default_model_profiles_path() -> Path:
 
 @lru_cache(maxsize=1)
 def load_model_profiles() -> dict[str, Any]:
-    """Load model profile metadata from the repo-local JSON catalog."""
+    """Load model profile metadata from packaged data with a dev fallback."""
+    packaged_data = _load_packaged_model_profiles()
+    if packaged_data is not None:
+        return _normalize_model_profiles(packaged_data)
+
     path = default_model_profiles_path()
     if not path.exists():
-        return {"version": "model-profiles.v1", "models": {}}
+        return dict(_EMPTY_MODEL_PROFILES)
     data = json.loads(path.read_text())
+    return _normalize_model_profiles(data)
+
+
+def _load_packaged_model_profiles() -> dict[str, Any] | None:
+    try:
+        data = json.loads(
+            files("five08").joinpath(_PACKAGED_MODEL_PROFILES).read_text()
+        )
+    except (FileNotFoundError, ModuleNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _normalize_model_profiles(data: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(data, dict):
-        return {"version": "model-profiles.v1", "models": {}}
+        return dict(_EMPTY_MODEL_PROFILES)
     models = data.get("models")
     if not isinstance(models, dict):
         data["models"] = {}

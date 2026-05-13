@@ -4,13 +4,21 @@ from __future__ import annotations
 
 from five08.model_catalog import (
     default_model_profiles_path,
+    load_model_profiles,
     model_chat_completion_options,
     model_cost_per_1m,
     model_profile_for,
 )
 
 
-def test_model_catalog_loads_repo_json() -> None:
+def test_model_catalog_loads_packaged_json() -> None:
+    profiles = load_model_profiles()
+
+    assert profiles["version"] == "model-profiles.v1"
+    assert "gpt-4.1-mini" in profiles["models"]
+
+
+def test_model_catalog_keeps_repo_eval_json_available() -> None:
     assert default_model_profiles_path().name == "model-profiles.json"
     assert default_model_profiles_path().exists()
 

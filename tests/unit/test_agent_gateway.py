@@ -1271,6 +1271,36 @@ def test_agent_model_config_prefers_bifrost_fireworks_provider() -> None:
     assert selection.api_key_configured is True
 
 
+def test_agent_model_config_allows_internal_bifrost_docker_dns() -> None:
+    settings = SimpleNamespace(
+        openai_api_key="bifrost-key",
+        openai_base_url="http://bifrost:8080/openai",
+        openai_model="gpt-5-mini",
+        openai_direct_api_key="openai-direct-key",
+        openai_direct_base_url="https://api.openai.com/v1",
+        agent_fallback_model="gpt-4.1-mini",
+        fireworks_api_key="fireworks-key",
+        agent_planner_model="accounts/fireworks/models/kimi-k2p6",
+        agent_fast_model=None,
+        agent_fast_base_url=None,
+        agent_fast_api_key=None,
+        agent_strong_model=None,
+        agent_strong_base_url=None,
+        agent_strong_api_key=None,
+        agent_reasoning_model=None,
+        agent_reasoning_base_url=None,
+        agent_reasoning_api_key=None,
+    )
+
+    selection = AgentModelConfig.from_settings(settings).resolve("strong")
+
+    assert selection.model == "fireworks/accounts/fireworks/models/kimi-k2p6"
+    assert selection.base_url == "http://bifrost:8080/openai"
+    assert selection.source_tier == "strong"
+    assert selection.fallback_used is False
+    assert selection.api_key_configured is True
+
+
 def test_agent_model_config_preserves_explicit_bifrost_provider_model() -> None:
     settings = SimpleNamespace(
         openai_api_key="bifrost-key",
@@ -1319,6 +1349,18 @@ def test_agent_model_config_rejects_disallowed_base_url() -> None:
     settings = SimpleNamespace(
         openai_api_key="openai-key",
         openai_base_url="https://metadata.google.internal",
+        openai_model="gpt-5-mini",
+        agent_fallback_model=None,
+    )
+
+    with pytest.raises(ValueError, match="Disallowed agent model base_url"):
+        AgentModelConfig.from_settings(settings)
+
+
+def test_agent_model_config_rejects_non_openai_internal_bifrost_url() -> None:
+    settings = SimpleNamespace(
+        openai_api_key="bifrost-key",
+        openai_base_url="http://bifrost:8080/admin",
         openai_model="gpt-5-mini",
         agent_fallback_model=None,
     )
