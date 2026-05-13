@@ -588,7 +588,7 @@ def dashboard_html() -> str:
               <th style="width: 16%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="onboarder" type="button">Onboarder</button></th>
               <th style="width: 15%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="updated" type="button">Updated</button></th>
               <th style="width: 16%;">Links</th>
-              <th style="width: 17%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="readiness" type="button">Readiness</button></th>
+              <th style="width: 17%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="profile_gaps" type="button">Needs</button></th>
             </tr>
           </thead>
           <tbody id="onboardingBody"></tbody>
@@ -1010,9 +1010,13 @@ def dashboard_html() -> str:
       return true;
     }
 
+    function onboardingStateValue(person) {
+      return person.onboarding_state || person.onboardingState || person.cOnboardingState || "";
+    }
+
     function labelForOnboardingState(value) {
       const raw = String(value || "").trim();
-      if (!raw) return "Unknown";
+      if (!raw) return "No status";
       const normalized = raw.toLowerCase();
       if (onboardingStateLabels[normalized]) return onboardingStateLabels[normalized];
       return raw
@@ -1038,16 +1042,16 @@ def dashboard_html() -> str:
         const status = item.profile_status || {};
         if (key === "name") return item.name || item.email_508 || item.email || "";
         if (key === "onboarding_state") {
-          const state = String(item.onboarding_state || "");
+          const state = String(onboardingStateValue(item));
           return state.toLowerCase() === "pending" ? `zzz-${state}` : state;
         }
         if (key === "onboarder") return item.onboarder || "";
         if (key === "updated") return item.onboarding_updated_at || "";
-        if (key === "readiness") {
+        if (key === "profile_gaps") {
           return [
-            status.discord_linked,
-            status.latest_resume,
-            Number(status.skills_count || 0) > 0,
+            !status.discord_linked,
+            !status.latest_resume,
+            Number(status.skills_count || 0) <= 0,
           ].filter(Boolean).length;
         }
       }
@@ -1324,34 +1328,36 @@ def dashboard_html() -> str:
         nameCell.appendChild(nameLink);
         nameCell.appendChild(meta);
 
-        const stateText = labelForOnboardingState(person.onboarding_state);
+        const stateValue = onboardingStateValue(person);
+        const stateText = person.onboarding_status_label || labelForOnboardingState(stateValue);
         const stateCell = addTextCell(row, "Status", "");
-        stateCell.appendChild(createBadge(stateText, toneForOnboardingState(person.onboarding_state)));
+        stateCell.appendChild(createBadge(stateText, toneForOnboardingState(stateValue)));
         addTextCell(row, "Onboarder", person.onboarder || "Unassigned");
         addTextCell(row, "Updated", formatDate(person.onboarding_updated_at));
 
         const linksCell = addTextCell(row, "Links", "");
         linksCell.className = "chip-list";
         const resumeUrl = crmAttachmentUrl(person.latest_resume_id);
-        const resumeLabel = person.latest_resume_name || "Resume";
         const linkCount = [
-          appendInlineLink(linksCell, resumeLabel, resumeUrl, `Open ${displayName} resume`),
+          appendInlineLink(linksCell, "Resume", resumeUrl, `Open ${displayName} resume`),
           appendInlineLink(linksCell, "LinkedIn", linkedinUrl(person.linkedin), `Open ${displayName} LinkedIn`),
           appendInlineLink(linksCell, person.github_username || "GitHub", githubUrl(person.github_username), `Open ${displayName} GitHub`),
         ].filter(Boolean).length;
         if (linkCount === 0) linksCell.textContent = "None";
 
-        const readyCell = addTextCell(row, "Readiness", "");
-        readyCell.className = "chip-list";
+        const needsCell = addTextCell(row, "Needs", "");
+        needsCell.className = "chip-list";
         const status = person.profile_status || {};
         const skillsParsed = Number(status.skills_count || 0) > 0;
-        for (const [label, ok] of [
+        const gaps = [
           ["Discord", status.discord_linked],
           ["Resume", status.latest_resume],
           ["Skills", skillsParsed],
-        ]) {
-          readyCell.appendChild(createBadge(ok ? label : `Missing ${label}`, ok ? "succeeded" : "missing"));
+        ].filter(([, ok]) => !ok);
+        for (const [label] of gaps) {
+          needsCell.appendChild(createBadge(`Missing ${label}`, "missing"));
         }
+        if (gaps.length === 0) needsCell.textContent = "None";
         els.onboardingBody.appendChild(row);
       }
     }
@@ -1387,14 +1393,18 @@ def dashboard_html() -> str:
         statusCell.className = "chip-list";
         const status = person.profile_status || {};
         const checks = [
-          ["CRM", status.crm_active],
           ["Member", status.is_member],
           ["Discord", status.discord_linked],
           ["508 email", status.email_508],
-          ["Resume", status.latest_resume],
         ];
+        if (!status.crm_active) {
+          statusCell.appendChild(createBadge(person.sync_status || "CRM sync issue", "missing"));
+        }
         for (const [label, ok] of checks) {
           statusCell.appendChild(createBadge(ok ? label : `Missing ${label}`, ok ? "succeeded" : "missing"));
+        }
+        if (!status.latest_resume) {
+          statusCell.appendChild(createBadge("Missing Resume", "missing"));
         }
 
         const discord = [person.discord_username, person.discord_user_id]
@@ -1412,7 +1422,8 @@ def dashboard_html() -> str:
           resumeLink.target = "_blank";
           resumeLink.rel = "noreferrer";
           resumeLink.className = "inline-link";
-          resumeLink.textContent = resume;
+          resumeLink.textContent = "Resume";
+          resumeLink.setAttribute("aria-label", `Open ${displayName} resume`);
           resumeCell.appendChild(resumeLink);
         } else {
           resumeCell.textContent = resume;

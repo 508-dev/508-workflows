@@ -454,6 +454,27 @@ def _datetime_or_none(value: Any) -> str | None:
     return None
 
 
+_ONBOARDING_STATUS_LABELS = {
+    "pending": "Needs review",
+    "selected": "Assigned to onboarder",
+    "reachingout": "Reaching out",
+    "awaitingcontribution": "Awaiting contribution",
+    "onboarded": "Onboarded",
+    "waitlist": "Waitlist",
+    "rejected": "Rejected",
+}
+
+
+def _onboarding_status_label(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "No status"
+    normalized = raw.casefold().replace("_", "").replace("-", "").replace(" ", "")
+    if normalized in _ONBOARDING_STATUS_LABELS:
+        return _ONBOARDING_STATUS_LABELS[normalized]
+    return raw.replace("_", " ").replace("-", " ").title()
+
+
 def _dashboard_job_payload(job: Any) -> dict[str, Any]:
     payload = job.payload if isinstance(job.payload, dict) else {}
     result = payload.get("result")
@@ -680,6 +701,9 @@ def _shape_dashboard_people_rows(rows: list[dict[str, Any]]) -> list[dict[str, A
         person["updated_at"] = _datetime_or_none(row.get("updated_at"))
         person["onboarding_updated_at"] = _datetime_or_none(
             row.get("onboarding_updated_at")
+        )
+        person["onboarding_status_label"] = _onboarding_status_label(
+            row.get("onboarding_state")
         )
         person["profile_status"] = {
             "crm_active": row.get("sync_status") == "active",

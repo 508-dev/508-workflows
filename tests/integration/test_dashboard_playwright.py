@@ -334,7 +334,9 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
                 "href",
                 "https://crm.example.invalid/#Contact/view/contact-123",
             )
-            expect(page.get_by_role("link", name="alice-resume.pdf")).to_have_attribute(
+            expect(
+                page.get_by_role("link", name="Open Alice Prospect resume")
+            ).to_have_attribute(
                 "href",
                 "https://crm.example.invalid/api/v1/Attachment/file/resume-file-123",
             )
