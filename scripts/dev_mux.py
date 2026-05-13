@@ -15,13 +15,13 @@ from urllib.parse import urlparse
 
 
 SERVICES: list[tuple[str, list[str]]] = [
-    ("api", ["uv", "run", "--package", "api", "backend-api"]),
+    ("web", ["uv", "run", "--package", "api", "backend-api"]),
     ("worker", ["uv", "run", "--package", "worker", "worker-consumer"]),
     ("discord-bot", ["uv", "run", "--package", "discord_bot", "discord-bot"]),
 ]
 
 PORT_SERVICES: list[tuple[str, str]] = [
-    ("api", "BACKEND_API_BASE_URL"),
+    ("web", "BACKEND_API_BASE_URL"),
     ("discord-bot", "DISCORD_BOT_INTERNAL_BASE_URL"),
 ]
 
@@ -193,7 +193,7 @@ def main() -> int:
     env.setdefault("PYTHONUNBUFFERED", "1")
 
     print("Launching host-run services with shared worktree env:")
-    print(f"  API:      {env.get('BACKEND_API_BASE_URL', '')}")
+    print(f"  Web:      {env.get('BACKEND_API_BASE_URL', '')}")
     print(f"  Worker:   {env.get('WORKER_API_BASE_URL', '')}")
     print(f"  Bot:      {env.get('DISCORD_BOT_INTERNAL_BASE_URL', '')}")
     print()

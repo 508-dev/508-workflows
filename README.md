@@ -85,7 +85,7 @@ processes on the host:
 
 ```bash
 ./scripts/dev.sh infra
-./scripts/dev.sh api
+./scripts/dev.sh web
 ./scripts/dev.sh worker
 ./scripts/dev.sh discord-bot
 ```
@@ -116,7 +116,7 @@ avoids printing the resolved Postgres password directly.
 # Discord bot
 uv run --package discord_bot discord-bot
 
-# API ingest service
+# Web/API dashboard and ingest service
 uv run --package api backend-api
 
 # Worker queue consumer
@@ -231,6 +231,7 @@ Use `.env.example` as the source of truth for defaults.
 - `Optional`: `DISCORD_ADMIN_ROLES` (default: `Admin,Owner,Steering Committee`)
 - `Optional`: `DISCORD_API_TIMEOUT_SECONDS` (default: `8.0`)
 - `Optional`: `DISCORD_LINK_TTL_SECONDS` (default: `600`)
+- `Optional`: `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS` (code default: `true`; local `.env.example` sets `false` so Discord dashboard links work without OIDC; set `true` in production with Authentik)
 - `Optional`: `DISCORD_BOT_TOKEN` (needed only for fallback Discord API checks; DB role check remains primary)
 
 ### Worker Consumer
@@ -267,7 +268,7 @@ Use `.env.example` as the source of truth for defaults.
 ### Discord Bot Core
 
 - `Required`: `DISCORD_BOT_TOKEN`
-- `Optional`: `BACKEND_API_BASE_URL` (default: `http://127.0.0.1:8090`; `./scripts/dev.sh` overrides it to the worktree API port, Compose injects `http://api:8090`)
+- `Optional`: `BACKEND_API_BASE_URL` (default: `http://127.0.0.1:8090`; `./scripts/dev.sh` overrides it to the worktree web/API port, Compose injects `http://api:8090`)
 - `Optional`: `HEALTHCHECK_PORT` (host-run `./scripts/dev.sh` ignores `.env` for this key and defaults to a deterministic per-worktree value near `30000 + WORKTREE_ENV_SLOT`; export it in your shell only when you intentionally want a fixed port, and avoid browser-unsafe ports such as `5060`)
 - Note: bot message chunking uses Discord's 2000 character limit in code.
 

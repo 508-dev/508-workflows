@@ -42,11 +42,11 @@ Infrastructure is running in Docker on localhost:
   Console:  127.0.0.1:${MINIO_CONSOLE_HOST_PORT}
 
 Host-run app ports for this worktree:
-  API:      127.0.0.1:${WEBHOOK_INGEST_PORT}
+  Web/API:  127.0.0.1:${WEBHOOK_INGEST_PORT}
   Bot:      127.0.0.1:${HEALTHCHECK_PORT}
 
 Run app services on the host with:
-  ./scripts/dev.sh api
+  ./scripts/dev.sh web
   ./scripts/dev.sh worker
   ./scripts/dev.sh discord-bot
   ./scripts/dev.sh all
@@ -88,7 +88,7 @@ EOF
   print-postgres-url)
     printf '%s\n' "$POSTGRES_URL"
     ;;
-  api)
+  web)
     exec uv run --package api backend-api
     ;;
   worker)
@@ -98,7 +98,7 @@ EOF
     exec uv run --package discord_bot discord-bot
     ;;
   *)
-    echo "Usage: ./scripts/dev.sh [infra|all|down|ports|env|api|worker|discord-bot]" >&2
+    echo "Usage: ./scripts/dev.sh [infra|all|down|ports|env|web|worker|discord-bot]" >&2
     exit 1
     ;;
 esac
