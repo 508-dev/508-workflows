@@ -282,6 +282,35 @@ def test_project_search_about_project_plan_keeps_project_as_query_text() -> None
     assert response.results[0].result["tasks"][0]["title"] == "Update project plan"
 
 
+def test_project_search_keeps_project_prefixed_query_before_project_filter() -> None:
+    task_store = InMemoryTaskStore()
+    task_store.create_task(
+        title="Update project plan",
+        project="Atlas",
+        assignee="Sarah",
+        due_date=None,
+        organization_id="org-1",
+        created_by="123",
+    )
+    task_store.create_task(
+        title="Review onboarding docs",
+        project="Atlas",
+        assignee="Sarah",
+        due_date=None,
+        organization_id="org-1",
+        created_by="123",
+    )
+    orchestrator = AgentOrchestrator(registry=ToolRegistry(task_store))
+
+    response = orchestrator.plan(
+        "Show tasks about project plan in project Atlas", _context()
+    )
+
+    assert response.status == "executed"
+    assert len(response.results[0].result["tasks"]) == 1
+    assert response.results[0].result["tasks"][0]["title"] == "Update project plan"
+
+
 def test_create_task_parses_capitalized_for_assignee() -> None:
     orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
 

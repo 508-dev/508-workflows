@@ -154,11 +154,21 @@ class AgentConfirmationView(discord.ui.View):
                 guild_id=str(original_guild_id),
                 user_id=interaction.user.id,
             )
-            context["roles"] = fresh_roles
+            context["roles"] = fresh_roles or self._original_roles()
         original_message_id = self.context.get("message_id")
         if original_message_id:
             context["message_id"] = original_message_id
         return context
+
+    def _original_roles(self) -> list[str]:
+        roles = self.context.get("roles")
+        if not isinstance(roles, list):
+            return []
+        return [
+            str(role).strip()
+            for role in roles
+            if isinstance(role, str) and str(role).strip()
+        ]
 
 
 class AgentCog(DiscordAuditCogMixin, commands.Cog):

@@ -731,12 +731,11 @@ class AgentOrchestrator:
         has_explicit_project_clause = (
             re.search(r"\b(?:for|in)\s+project\s+", text, re.IGNORECASE) is not None
         )
-        leading_project_pattern = (
-            r"^(?:in\s+project|for\s+project|project)\s+(.+)"
-            if has_explicit_project_clause
-            else r"^(?:in\s+project|for\s+project)\s+(.+)"
+        leading_project = re.match(
+            r"^(?:in\s+project|for\s+project)\s+(.+)",
+            raw_query,
+            re.IGNORECASE,
         )
-        leading_project = re.match(leading_project_pattern, raw_query, re.IGNORECASE)
         if leading_project is not None:
             trailing_query = re.search(
                 r"\b(?:matching|about)\s+(.+)",
@@ -746,12 +745,31 @@ class AgentOrchestrator:
             return (
                 (_clean_text(trailing_query.group(1)) or "") if trailing_query else ""
             )
-        project_only_pattern = (
-            r"^(?:in\s+project|for\s+project|project)\b"
+
+        bare_project_filter = (
+            re.match(r"^project\s+(.+)", raw_query, re.IGNORECASE)
             if has_explicit_project_clause
-            else r"^(?:in\s+project|for\s+project)\b"
+            else None
         )
-        if re.match(project_only_pattern, raw_query, re.I):
+        if (
+            bare_project_filter is not None
+            and re.search(
+                r"\b(?:in|for)\s+project\s+",
+                raw_query,
+                re.IGNORECASE,
+            )
+            is None
+        ):
+            trailing_query = re.search(
+                r"\b(?:matching|about)\s+(.+)",
+                bare_project_filter.group(1),
+                re.IGNORECASE,
+            )
+            return (
+                (_clean_text(trailing_query.group(1)) or "") if trailing_query else ""
+            )
+
+        if re.match(r"^(?:in\s+project|for\s+project)\b", raw_query, re.I):
             return ""
         query = re.split(
             r"\s+\b(?:in project|for project)\b",

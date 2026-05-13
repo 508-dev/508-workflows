@@ -483,6 +483,41 @@ async def test_confirmation_context_in_dm_fetches_uncached_member_roles() -> Non
     guild.fetch_member.assert_awaited_once_with(123)
 
 
+@pytest.mark.asyncio
+async def test_confirmation_context_in_dm_preserves_original_roles_when_guild_missing() -> (
+    None
+):
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(get_guild=Mock(return_value=None))
+    view = AgentConfirmationView(
+        cog=cog,
+        requester_id=123,
+        plan_id="plan-1",
+        context={
+            "discord_user_id": "123",
+            "organization_id": "456",
+            "guild_id": "456",
+            "channel_id": "789",
+            "message_id": "555",
+            "roles": ["Admin", "Member"],
+        },
+    )
+    interaction = SimpleNamespace(
+        id=999,
+        guild_id=None,
+        channel_id=111,
+        message=SimpleNamespace(id=222),
+        user=SimpleNamespace(id=123),
+    )
+
+    context = await view._confirmation_context(interaction)
+
+    assert context["organization_id"] == "456"
+    assert context["guild_id"] == "456"
+    assert context["roles"] == ["Admin", "Member"]
+    assert context["message_id"] == "555"
+
+
 def test_mention_rate_limit_prunes_expired_user_entries() -> None:
     cog = AgentCog.__new__(AgentCog)
     cog._mention_request_timestamps = {
