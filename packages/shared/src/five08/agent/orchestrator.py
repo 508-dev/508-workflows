@@ -78,6 +78,12 @@ class AgentOrchestrator:
 
         action = self._parse_action(text)
         if action is None:
+            if re.search(r"\bcreate\s+(?:a\s+)?task\b", text, re.IGNORECASE):
+                return AgentResponse(
+                    status="needs_clarification",
+                    message="I need a task title before I can create it.",
+                    clarification_question="What should the task be?",
+                )
             return AgentResponse(
                 status="needs_clarification",
                 message="I could not turn that into a supported task action.",
@@ -600,7 +606,19 @@ class AgentOrchestrator:
             maxsplit=1,
             flags=re.IGNORECASE,
         )[0]
-        return _clean_text(title)
+        title = _clean_text(title)
+        if title and self._is_target_only_task_title(title):
+            return None
+        return title
+
+    def _is_target_only_task_title(self, title: str) -> bool:
+        return bool(
+            re.match(
+                r"^(?:for\b|in\s+project\b|assign(?:ed)?\b|assign(?:ed)?\s+to\b)",
+                title,
+                re.IGNORECASE,
+            )
+        )
 
     def _extract_update_title(self, text: str) -> str | None:
         match = re.search(

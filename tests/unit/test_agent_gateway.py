@@ -308,6 +308,26 @@ def test_create_task_project_clause_stops_before_title() -> None:
     assert "assignee" not in response.plan.actions[0].arguments
 
 
+def test_create_task_project_only_clause_asks_for_title() -> None:
+    orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
+
+    response = orchestrator.plan("Create a task for project Atlas", _context())
+
+    assert response.status == "needs_clarification"
+    assert response.clarification_question == "What should the task be?"
+    assert response.plan is None
+
+
+def test_create_task_assignee_only_clause_asks_for_title() -> None:
+    orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
+
+    response = orchestrator.plan("Create a task for Sarah", _context())
+
+    assert response.status == "needs_clarification"
+    assert response.clarification_question == "What should the task be?"
+    assert response.plan is None
+
+
 def test_create_task_in_project_clause_stops_before_title() -> None:
     orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
 

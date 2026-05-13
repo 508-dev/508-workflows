@@ -37,6 +37,20 @@ def test_model_catalog_matches_model_prefixes_longest_first() -> None:
     assert prices == {"input": 0.25, "cached_input": 0.025, "output": 2.0}
 
 
+def test_model_catalog_matches_provider_prefixed_aliases() -> None:
+    prices = model_cost_per_1m("openrouter/openai/gpt-5-mini")
+
+    assert prices == {"input": 0.25, "cached_input": 0.025, "output": 2.0}
+    assert (
+        model_chat_completion_options("openai/gpt-5-mini")["max_tokens_parameter"]
+        == "max_completion_tokens"
+    )
+    assert (
+        model_chat_completion_options("openai/gpt-5-mini")["supports_temperature"]
+        is False
+    )
+
+
 def test_model_catalog_chat_options_are_data_driven() -> None:
     assert model_chat_completion_options("gpt-5")["reasoning_effort"] == "minimal"
     assert model_chat_completion_options("gpt-5.5")["reasoning_effort"] == "low"

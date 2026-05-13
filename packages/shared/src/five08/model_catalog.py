@@ -13,6 +13,19 @@ _EMPTY_MODEL_PROFILES: dict[str, Any] = {
     "models": {},
 }
 _PACKAGED_MODEL_PROFILES = "data/model-profiles.json"
+_KNOWN_PROVIDER_PREFIXES = frozenset(
+    {
+        "anthropic",
+        "bedrock",
+        "cohere",
+        "fireworks",
+        "gemini",
+        "groq",
+        "openai",
+        "openrouter",
+        "vertex",
+    }
+)
 
 
 def default_model_profiles_path() -> Path:
@@ -57,8 +70,8 @@ def _normalize_model_profiles(data: dict[str, Any]) -> dict[str, Any]:
 
 def model_profile_for(model: str) -> dict[str, Any] | None:
     """Return the best matching profile for a model id or alias."""
-    normalized = model.casefold().strip()
-    if not normalized:
+    normalized_aliases = _model_lookup_aliases(model)
+    if not normalized_aliases:
         return None
     models = load_model_profiles().get("models", {})
     if not isinstance(models, dict):
@@ -72,15 +85,34 @@ def model_profile_for(model: str) -> dict[str, Any] | None:
             str(raw_profile.get("name") or "").casefold(),
             str(raw_profile.get("model") or "").casefold(),
         }
-        if normalized in candidates or any(
-            normalized.startswith(f"{candidate}-")
+        if any(
+            _model_alias_matches_candidate(alias, candidate)
+            for alias in normalized_aliases
             for candidate in candidates
-            if candidate
         ):
             key_text = str(key)
             if best is None or len(key_text) > len(best[0]):
                 best = (key_text, raw_profile)
     return best[1] if best else None
+
+
+def _model_lookup_aliases(model: str) -> tuple[str, ...]:
+    normalized = model.casefold().strip()
+    if not normalized:
+        return ()
+    aliases = [normalized]
+    current = normalized
+    while "/" in current:
+        provider, rest = current.split("/", 1)
+        if provider not in _KNOWN_PROVIDER_PREFIXES or not rest:
+            break
+        current = rest
+        aliases.append(current)
+    return tuple(aliases)
+
+
+def _model_alias_matches_candidate(alias: str, candidate: str) -> bool:
+    return bool(candidate) and (alias == candidate or alias.startswith(f"{candidate}-"))
 
 
 def model_pricing_source() -> str:
