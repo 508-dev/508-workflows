@@ -783,8 +783,10 @@ def test_dashboard_me_normalizes_crm_api_base_url(
 
 
 def test_dashboard_me_limits_sensitive_permissions_without_sso(
+    monkeypatch: pytest.MonkeyPatch,
     client: TestClient,
 ) -> None:
+    monkeypatch.setattr(api.settings, "environment", "production")
     session = api.AuthSession(
         subject="123456789",
         email="admin@508.dev",
@@ -807,6 +809,34 @@ def test_dashboard_me_limits_sensitive_permissions_without_sso(
     assert "people:read" in response.json()["permissions"]
     assert "onboarding:write" in response.json()["permissions"]
     assert "jobs:write" not in response.json()["permissions"]
+
+
+def test_dashboard_me_allows_sensitive_permissions_without_sso_in_dev(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    monkeypatch.setattr(api.settings, "environment", "development")
+    session = api.AuthSession(
+        subject="123456789",
+        email="admin@508.dev",
+        display_name="Discord Admin",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/api/me")
+
+    assert response.status_code == 200
+    assert "jobs:write" in response.json()["permissions"]
+    assert "audit:read" in response.json()["permissions"]
 
 
 def test_dashboard_me_clears_stale_session_cookie(client: TestClient) -> None:
@@ -883,8 +913,10 @@ def test_dashboard_jobs_forbids_steering_committee_session(
 
 
 def test_dashboard_jobs_forbids_discord_admin_without_sso(
+    monkeypatch: pytest.MonkeyPatch,
     client: TestClient,
 ) -> None:
+    monkeypatch.setattr(api.settings, "environment", "production")
     session = api.AuthSession(
         subject="123456789",
         email="admin@508.dev",
@@ -1870,6 +1902,7 @@ def test_auth_discord_link_redirect_creates_discord_session_when_disabled(
     monkeypatch: pytest.MonkeyPatch,
     client: TestClient,
 ) -> None:
+    monkeypatch.setattr(api.settings, "environment", "production")
     monkeypatch.setattr(
         api.settings, "discord_link_require_oidc_identity_checks", False
     )

@@ -433,7 +433,16 @@ async def _current_session(request: Request) -> tuple[str | None, AuthSession | 
 
 
 def _has_sso_validated_session(session: AuthSession) -> bool:
-    return bool(session.id_token.strip())
+    return bool(session.id_token.strip()) or _dashboard_dev_sensitive_access_enabled()
+
+
+def _dashboard_dev_sensitive_access_enabled() -> bool:
+    return settings.environment.strip().lower() in {
+        "local",
+        "dev",
+        "development",
+        "test",
+    }
 
 
 def _dashboard_permissions_for_identity(
@@ -443,7 +452,7 @@ def _dashboard_permissions_for_identity(
     id_token: str,
 ) -> list[str]:
     permissions = set(dashboard_permissions_for_roles(raw_roles, is_admin=is_admin))
-    if not id_token.strip():
+    if not id_token.strip() and not _dashboard_dev_sensitive_access_enabled():
         permissions -= DASHBOARD_SENSITIVE_PERMISSIONS
     return sorted(permissions)
 

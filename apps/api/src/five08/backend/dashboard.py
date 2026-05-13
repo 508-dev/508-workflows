@@ -202,6 +202,25 @@ def dashboard_html() -> str:
       background: var(--panel-2);
       color: var(--text);
     }
+    .nav-link[aria-disabled="true"] {
+      opacity: 0.54;
+      cursor: not-allowed;
+    }
+    .nav-link[aria-disabled="true"]:hover {
+      border-color: transparent;
+      background: transparent;
+      color: var(--muted);
+    }
+    .nav-link[aria-disabled="true"]::after {
+      content: "SSO";
+      margin-left: auto;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 2px 6px;
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1;
+    }
     .nav-link[aria-current="page"] {
       border-color: var(--accent);
       background: var(--accent-muted);
@@ -1103,15 +1122,29 @@ def dashboard_html() -> str:
       return Object.keys(routes).find((view) => canView(view)) || "people";
     }
 
+    function ssoLoginUrl(view) {
+      const next = routes[view] || "/dashboard";
+      return `/auth/login?next=${encodeURIComponent(next)}`;
+    }
+
     function applyPermissions() {
       for (const element of document.querySelectorAll("[data-permission]")) {
-        element.hidden = !can(element.dataset.permission);
+        const allowed = can(element.dataset.permission);
+        if (element.classList.contains("nav-link")) {
+          element.setAttribute("aria-disabled", allowed ? "false" : "true");
+          element.title = allowed ? "" : "Requires SSO validation. Click to continue with SSO.";
+        } else {
+          element.hidden = !allowed;
+        }
       }
     }
 
     function setView(view, options = {}) {
       let normalizedView = Object.prototype.hasOwnProperty.call(routes, view) ? view : "people";
-      if (!canView(normalizedView)) normalizedView = firstAllowedView();
+      if (!canView(normalizedView)) {
+        setToast(`${normalizedView[0].toUpperCase()}${normalizedView.slice(1)} requires SSO validation`, "error");
+        normalizedView = firstAllowedView();
+      }
       for (const section of els.views) {
         section.hidden = section.dataset.view !== normalizedView;
       }
@@ -1920,6 +1953,11 @@ def dashboard_html() -> str:
     for (const link of els.navLinks) {
       link.addEventListener("click", (event) => {
         event.preventDefault();
+        if (!canView(link.dataset.viewLink)) {
+          setToast(`Continuing to SSO for ${link.textContent.trim()}`, "ok");
+          window.location.assign(ssoLoginUrl(link.dataset.viewLink));
+          return;
+        }
         setView(link.dataset.viewLink, { push: true });
       });
     }

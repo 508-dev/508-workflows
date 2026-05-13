@@ -240,7 +240,8 @@ Use `.env.example` as the source of truth for defaults.
 - Note: Discord dashboard links are available to active CRM-linked Discord users
   with Steering Committee role or higher. Steering Committee receives CRM people
   lookup and onboarding permissions. Jobs, reruns, people sync, and audit are
-  sensitive admin permissions and require an SSO-validated dashboard session.
+  sensitive admin permissions and require an SSO-validated dashboard session in
+  production; local/dev/test environments allow them for development.
 
 ### Worker Consumer
 
