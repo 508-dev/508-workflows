@@ -13,18 +13,24 @@ def dashboard_html() -> str:
   <title>508 Admin Dashboard</title>
   <style>
     :root {
-      color-scheme: light;
-      --bg: #f7f8fa;
-      --panel: #ffffff;
-      --panel-2: #f0f4f8;
-      --text: #17202a;
-      --muted: #607080;
-      --line: #d9e1e8;
-      --accent: #1d6f5f;
-      --accent-strong: #145346;
-      --danger: #b42318;
-      --ok: #15703b;
-      --warn: #a15c00;
+      color-scheme: dark;
+      --bg: #0f1110;
+      --panel: #181b19;
+      --panel-2: #222720;
+      --panel-3: #111411;
+      --text: #eceee8;
+      --muted: #9ca39a;
+      --line: #343a33;
+      --line-strong: #485046;
+      --accent: #3fbfa8;
+      --accent-strong: #61d9c5;
+      --accent-muted: rgba(63, 191, 168, 0.16);
+      --danger: #ff7b72;
+      --danger-bg: rgba(248, 81, 73, 0.16);
+      --ok: #56d364;
+      --ok-bg: rgba(46, 160, 67, 0.17);
+      --warn: #e3b341;
+      --warn-bg: rgba(187, 128, 9, 0.2);
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
         "Segoe UI", sans-serif;
     }
@@ -37,7 +43,8 @@ def dashboard_html() -> str:
     }
     header {
       border-bottom: 1px solid var(--line);
-      background: var(--panel);
+      background: rgba(15, 17, 16, 0.92);
+      backdrop-filter: blur(16px);
     }
     .topbar {
       max-width: 1180px;
@@ -80,6 +87,7 @@ def dashboard_html() -> str:
       border: 1px solid var(--line);
       border-radius: 8px;
       background: var(--panel);
+      box-shadow: 0 18px 44px rgba(0, 0, 0, 0.22);
     }
     label {
       display: grid;
@@ -93,28 +101,41 @@ def dashboard_html() -> str:
       min-height: 38px;
       border: 1px solid var(--line);
       border-radius: 6px;
-      background: #fff;
+      background: var(--panel-3);
       color: var(--text);
       padding: 8px 10px;
       font: inherit;
+    }
+    input::placeholder { color: #6e7681; }
+    input:focus, select:focus, button:focus-visible {
+      outline: 2px solid var(--accent-strong);
+      outline-offset: 2px;
+      border-color: var(--accent);
     }
     button {
       min-height: 38px;
       border: 1px solid var(--line);
       border-radius: 6px;
-      background: #fff;
+      background: var(--panel-2);
       color: var(--text);
       padding: 8px 12px;
       font: inherit;
       font-weight: 700;
       cursor: pointer;
     }
+    button:hover {
+      border-color: var(--line-strong);
+      background: #28302b;
+    }
     button.primary {
       border-color: var(--accent);
       background: var(--accent);
-      color: #fff;
+      color: #061412;
     }
-    button.primary:hover { background: var(--accent-strong); }
+    button.primary:hover {
+      border-color: var(--accent-strong);
+      background: var(--accent-strong);
+    }
     button:disabled {
       cursor: not-allowed;
       opacity: 0.58;
@@ -131,6 +152,7 @@ def dashboard_html() -> str:
       padding: 14px;
       display: grid;
       gap: 6px;
+      box-shadow: 0 12px 34px rgba(0, 0, 0, 0.18);
     }
     .metric span { color: var(--muted); font-size: 12px; font-weight: 700; }
     .metric strong { font-size: 24px; letter-spacing: 0; }
@@ -139,6 +161,7 @@ def dashboard_html() -> str:
       border-radius: 8px;
       background: var(--panel);
       overflow: hidden;
+      box-shadow: 0 18px 44px rgba(0, 0, 0, 0.22);
     }
     .panel-head {
       padding: 14px 16px;
@@ -168,6 +191,8 @@ def dashboard_html() -> str:
       font-size: 12px;
       font-weight: 800;
     }
+    tbody tr:hover { background: rgba(139, 148, 158, 0.08); }
+    .compact td, .compact th { padding: 10px 12px; }
     tr:last-child td { border-bottom: 0; }
     .job-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
     .badge {
@@ -176,15 +201,19 @@ def dashboard_html() -> str:
       min-height: 22px;
       padding: 2px 8px;
       border-radius: 999px;
-      background: #edf2f7;
+      border: 1px solid var(--line);
+      background: #222821;
       color: var(--muted);
       font-weight: 800;
       font-size: 11px;
       text-transform: uppercase;
     }
-    .badge.succeeded { background: #e6f4ec; color: var(--ok); }
-    .badge.failed, .badge.dead { background: #fcebea; color: var(--danger); }
-    .badge.running { background: #fff4de; color: var(--warn); }
+    .badge.succeeded { border-color: rgba(86, 211, 100, 0.36); background: var(--ok-bg); color: var(--ok); }
+    .badge.failed, .badge.dead { border-color: rgba(255, 123, 114, 0.4); background: var(--danger-bg); color: var(--danger); }
+    .badge.running { border-color: rgba(227, 179, 65, 0.38); background: var(--warn-bg); color: var(--warn); }
+    .badge.queued { border-color: rgba(47, 158, 143, 0.38); background: var(--accent-muted); color: var(--accent-strong); }
+    .badge.missing { border-color: rgba(255, 123, 114, 0.4); background: var(--danger-bg); color: var(--danger); }
+    .badge.neutral { border-color: var(--line); background: var(--panel-2); color: var(--muted); }
     .empty {
       padding: 28px 16px;
       color: var(--muted);
@@ -203,13 +232,73 @@ def dashboard_html() -> str:
       justify-content: flex-end;
       flex-wrap: wrap;
     }
+    .split {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(320px, 0.62fr);
+      gap: 18px;
+      align-items: start;
+    }
+    .search-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+    }
+    .detail-body {
+      padding: 16px;
+      display: grid;
+      gap: 14px;
+    }
+    .detail-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .detail-item {
+      display: grid;
+      gap: 4px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel-3);
+      min-width: 0;
+    }
+    .detail-item span {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+    .detail-item strong {
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+    .code-block {
+      margin: 0;
+      max-height: 260px;
+      overflow: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #0b0d0c;
+      color: var(--text);
+      padding: 12px;
+      font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .chip-list {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
     @media (max-width: 820px) {
       .topbar {
         align-items: start;
         flex-direction: column;
       }
       .identity { text-align: left; }
-      .toolbar, .summary { grid-template-columns: 1fr; }
+      .toolbar, .summary, .split, .detail-grid, .search-row { grid-template-columns: 1fr; }
       table, thead, tbody, th, td, tr { display: block; }
       thead { display: none; }
       tr { border-bottom: 1px solid var(--line); }
@@ -297,15 +386,80 @@ def dashboard_html() -> str:
             <th style="width: 12%;">Status</th>
             <th style="width: 12%;">Attempts</th>
             <th style="width: 17%;">Updated</th>
-            <th style="width: 9%;">Action</th>
+            <th style="width: 9%;">Actions</th>
           </tr>
         </thead>
         <tbody id="jobsBody"></tbody>
       </table>
     </section>
+
+    <section id="jobDetailPanel" class="panel" hidden>
+      <div class="panel-head">
+        <h2>Job detail</h2>
+        <span id="jobDetailStatus" class="status-line"></span>
+      </div>
+      <div class="detail-body">
+        <div id="jobDetailGrid" class="detail-grid"></div>
+        <div>
+          <h2>Payload</h2>
+          <pre id="jobPayload" class="code-block"></pre>
+        </div>
+        <div>
+          <h2>Result</h2>
+          <pre id="jobResult" class="code-block"></pre>
+        </div>
+      </div>
+    </section>
+
+    <section class="split">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>People lookup</h2>
+          <span id="peopleStatus" class="status-line"></span>
+        </div>
+        <div class="search-row">
+          <label>
+            Search CRM people cache
+            <input id="peopleQuery" autocomplete="off" placeholder="Name, email, CRM id, Discord, resume">
+          </label>
+          <button id="searchPeople" type="button">Search</button>
+        </div>
+        <div id="peopleEmptyState" class="empty" hidden>No people match this lookup.</div>
+        <table id="peopleTable" class="compact" aria-label="People lookup results">
+          <thead>
+            <tr>
+              <th style="width: 25%;">Person</th>
+              <th style="width: 28%;">Status</th>
+              <th style="width: 22%;">Discord</th>
+              <th style="width: 25%;">Resume / skills</th>
+            </tr>
+          </thead>
+          <tbody id="peopleBody"></tbody>
+        </table>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Recent audit</h2>
+          <button id="refreshAudit" type="button">Refresh</button>
+        </div>
+        <div id="auditEmptyState" class="empty" hidden>No audit events found.</div>
+        <table id="auditTable" class="compact" aria-label="Recent audit events">
+          <thead>
+            <tr>
+              <th style="width: 24%;">Time</th>
+              <th style="width: 28%;">Actor</th>
+              <th style="width: 28%;">Action</th>
+              <th style="width: 20%;">Result</th>
+            </tr>
+          </thead>
+          <tbody id="auditBody"></tbody>
+        </table>
+      </section>
+    </section>
   </main>
   <script>
-    const state = { jobs: [] };
+    const state = { jobs: [], people: [], auditEvents: [] };
     const els = {
       userName: document.querySelector("#userName"),
       userMeta: document.querySelector("#userMeta"),
@@ -323,6 +477,21 @@ def dashboard_html() -> str:
       metricQueued: document.querySelector("#metricQueued"),
       metricRunning: document.querySelector("#metricRunning"),
       metricFailed: document.querySelector("#metricFailed"),
+      jobDetailPanel: document.querySelector("#jobDetailPanel"),
+      jobDetailStatus: document.querySelector("#jobDetailStatus"),
+      jobDetailGrid: document.querySelector("#jobDetailGrid"),
+      jobPayload: document.querySelector("#jobPayload"),
+      jobResult: document.querySelector("#jobResult"),
+      peopleQuery: document.querySelector("#peopleQuery"),
+      searchPeople: document.querySelector("#searchPeople"),
+      peopleStatus: document.querySelector("#peopleStatus"),
+      peopleBody: document.querySelector("#peopleBody"),
+      peopleTable: document.querySelector("#peopleTable"),
+      peopleEmptyState: document.querySelector("#peopleEmptyState"),
+      refreshAudit: document.querySelector("#refreshAudit"),
+      auditBody: document.querySelector("#auditBody"),
+      auditTable: document.querySelector("#auditTable"),
+      auditEmptyState: document.querySelector("#auditEmptyState"),
     };
 
     function setToast(message, tone = "") {
@@ -367,6 +536,27 @@ def dashboard_html() -> str:
       });
     }
 
+    function jsonPreview(value) {
+      if (value === null || value === undefined) return "";
+      return JSON.stringify(value, null, 2);
+    }
+
+    function addTextCell(row, label, value, className = "") {
+      const cell = document.createElement("td");
+      cell.dataset.label = label;
+      cell.textContent = value || "";
+      if (className) cell.className = className;
+      row.appendChild(cell);
+      return cell;
+    }
+
+    function createBadge(text, className = "neutral") {
+      const badge = document.createElement("span");
+      badge.className = `badge ${className}`;
+      badge.textContent = text;
+      return badge;
+    }
+
     function updateMetrics() {
       const counts = state.jobs.reduce((acc, job) => {
         acc[job.status] = (acc[job.status] || 0) + 1;
@@ -385,41 +575,130 @@ def dashboard_html() -> str:
 
       for (const job of state.jobs) {
         const row = document.createElement("tr");
-        const cells = [
-          ["Job id", job.job_id, "job-id"],
-          ["Type", job.type, ""],
-          ["Status", job.status, "status"],
-          ["Attempts", `${job.attempts}/${job.max_attempts}`, ""],
-          ["Updated", formatDate(job.updated_at), ""],
-        ];
-        for (const [label, value, className] of cells) {
-          const cell = document.createElement("td");
-          cell.dataset.label = label;
-          if (className === "status") {
-            const badge = document.createElement("span");
-            badge.className = `badge ${job.status}`;
-            badge.textContent = job.status;
-            cell.appendChild(badge);
-          } else {
-            cell.textContent = value || "";
-            if (className) cell.className = className;
-          }
-          row.appendChild(cell);
-        }
+        addTextCell(row, "Job id", job.job_id, "job-id");
+        addTextCell(row, "Type", job.type);
+        const statusCell = addTextCell(row, "Status", "");
+        statusCell.appendChild(createBadge(job.status, job.status));
+        addTextCell(row, "Attempts", `${job.attempts}/${job.max_attempts}`);
+        addTextCell(row, "Updated", formatDate(job.updated_at));
 
         const actionCell = document.createElement("td");
-        actionCell.dataset.label = "Action";
+        actionCell.dataset.label = "Actions";
+        const actions = document.createElement("div");
+        actions.className = "actions";
+        const details = document.createElement("button");
+        details.type = "button";
+        details.textContent = "Details";
+        details.setAttribute("aria-label", `View details for ${job.type} job ${job.job_id}`);
+        details.addEventListener("click", () => loadJobDetail(job.job_id, details));
         const rerun = document.createElement("button");
         rerun.type = "button";
         rerun.textContent = "Rerun";
         rerun.setAttribute("aria-label", `Rerun ${job.type} job ${job.job_id}`);
         rerun.dataset.jobId = job.job_id;
         rerun.addEventListener("click", () => rerunJob(job.job_id, rerun));
-        actionCell.appendChild(rerun);
+        actions.appendChild(details);
+        actions.appendChild(rerun);
+        actionCell.appendChild(actions);
         row.appendChild(actionCell);
         els.jobsBody.appendChild(row);
       }
       updateMetrics();
+    }
+
+    function renderJobDetail(detail) {
+      els.jobDetailPanel.hidden = false;
+      els.jobDetailStatus.textContent = detail.job_id || "";
+      els.jobDetailGrid.replaceChildren();
+      const fields = [
+        ["Type", detail.type],
+        ["Status", detail.status],
+        ["Attempts", `${detail.attempts}/${detail.max_attempts}`],
+        ["Updated", formatDate(detail.updated_at)],
+        ["Created", formatDate(detail.created_at)],
+        ["Run after", formatDate(detail.run_after)],
+        ["Locked by", detail.locked_by],
+        ["Last error", detail.last_error],
+      ];
+      for (const [label, value] of fields) {
+        const item = document.createElement("div");
+        item.className = "detail-item";
+        const name = document.createElement("span");
+        name.textContent = label;
+        const content = document.createElement("strong");
+        content.textContent = value || "None";
+        item.appendChild(name);
+        item.appendChild(content);
+        els.jobDetailGrid.appendChild(item);
+      }
+      els.jobPayload.textContent = jsonPreview(detail.payload) || "No payload";
+      els.jobResult.textContent = jsonPreview(detail.result) || "No result";
+      els.jobDetailPanel.scrollIntoView({ block: "nearest" });
+    }
+
+    function renderPeople() {
+      els.peopleBody.replaceChildren();
+      els.peopleEmptyState.hidden = state.people.length !== 0;
+      els.peopleTable.hidden = state.people.length === 0;
+
+      for (const person of state.people) {
+        const row = document.createElement("tr");
+        const personCell = addTextCell(row, "Person", "");
+        const personName = document.createElement("strong");
+        personName.textContent = person.name || person.crm_contact_id;
+        const meta = document.createElement("div");
+        meta.className = "status-line";
+        meta.textContent = [person.email_508 || person.email, person.crm_contact_id]
+          .filter(Boolean)
+          .join(" | ");
+        personCell.appendChild(personName);
+        personCell.appendChild(meta);
+
+        const statusCell = addTextCell(row, "Status", "");
+        statusCell.className = "chip-list";
+        const status = person.profile_status || {};
+        const checks = [
+          ["CRM", status.crm_active],
+          ["Member", status.is_member],
+          ["Discord", status.discord_linked],
+          ["508 email", status.email_508],
+          ["Resume", status.latest_resume],
+        ];
+        for (const [label, ok] of checks) {
+          statusCell.appendChild(createBadge(ok ? label : `Missing ${label}`, ok ? "succeeded" : "missing"));
+        }
+
+        const discord = [person.discord_username, person.discord_user_id]
+          .filter(Boolean)
+          .join(" | ");
+        addTextCell(row, "Discord", discord || "Not linked");
+
+        const resumeCell = addTextCell(row, "Resume / skills", "");
+        const resume = person.latest_resume_name || person.latest_resume_id || "No resume";
+        const skillsCount = Number(status.skills_count || 0);
+        resumeCell.textContent = `${resume} | ${skillsCount} skills`;
+        els.peopleBody.appendChild(row);
+      }
+    }
+
+    function renderAuditEvents() {
+      els.auditBody.replaceChildren();
+      els.auditEmptyState.hidden = state.auditEvents.length !== 0;
+      els.auditTable.hidden = state.auditEvents.length === 0;
+
+      for (const event of state.auditEvents) {
+        const row = document.createElement("tr");
+        addTextCell(row, "Time", formatDate(event.occurred_at));
+        addTextCell(
+          row,
+          "Actor",
+          event.actor_display_name || event.actor_subject || event.actor_provider
+        );
+        addTextCell(row, "Action", event.action);
+        const resultCell = addTextCell(row, "Result", "");
+        resultCell.appendChild(createBadge(event.result, event.result === "success" ? "succeeded" : "failed"));
+        els.auditBody.appendChild(row);
+      }
     }
 
     function jobsUrl() {
@@ -454,6 +733,53 @@ def dashboard_html() -> str:
         setToast(error.message || "Unable to load jobs", "error");
       } finally {
         els.refreshJobs.disabled = false;
+      }
+    }
+
+    async function loadJobDetail(jobId, button) {
+      button.disabled = true;
+      setToast(`Loading ${jobId}`);
+      try {
+        const detail = await requestJson(`/dashboard/api/jobs/${encodeURIComponent(jobId)}`);
+        renderJobDetail(detail);
+        setToast(`Loaded ${jobId}`, "ok");
+      } catch (error) {
+        setToast(error.message || "Unable to load job detail", "error");
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    function peopleUrl() {
+      const params = new URLSearchParams({ limit: "25" });
+      const query = els.peopleQuery.value.trim();
+      if (query) params.set("query", query);
+      return `/dashboard/api/people?${params.toString()}`;
+    }
+
+    async function loadPeople() {
+      els.searchPeople.disabled = true;
+      els.peopleStatus.textContent = "Loading";
+      try {
+        state.people = await requestJson(peopleUrl());
+        renderPeople();
+        els.peopleStatus.textContent = `${state.people.length} shown`;
+      } catch (error) {
+        els.peopleStatus.textContent = error.message || "Unable to load people";
+      } finally {
+        els.searchPeople.disabled = false;
+      }
+    }
+
+    async function loadAuditEvents() {
+      els.refreshAudit.disabled = true;
+      try {
+        state.auditEvents = await requestJson("/dashboard/api/audit-events?limit=25");
+        renderAuditEvents();
+      } catch (error) {
+        setToast(error.message || "Unable to load audit events", "error");
+      } finally {
+        els.refreshAudit.disabled = false;
       }
     }
 
@@ -504,13 +830,18 @@ def dashboard_html() -> str:
     els.refreshJobs.addEventListener("click", loadJobs);
     els.syncPeople.addEventListener("click", syncPeople);
     els.logout.addEventListener("click", logout);
+    els.searchPeople.addEventListener("click", loadPeople);
+    els.refreshAudit.addEventListener("click", loadAuditEvents);
     els.status.addEventListener("change", loadJobs);
     els.minutes.addEventListener("change", loadJobs);
     els.jobType.addEventListener("keydown", (event) => {
       if (event.key === "Enter") loadJobs();
     });
+    els.peopleQuery.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") loadPeople();
+    });
 
-    Promise.all([loadUser(), loadJobs()]).catch((error) => {
+    Promise.all([loadUser(), loadJobs(), loadPeople(), loadAuditEvents()]).catch((error) => {
       setToast(error.message || "Dashboard failed to load", "error");
     });
   </script>

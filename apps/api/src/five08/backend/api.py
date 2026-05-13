@@ -22,6 +22,7 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, ValidationError
 from psycopg import Connection
+from psycopg.rows import dict_row
 
 from five08.audit import (
     ActorProvider,
@@ -101,6 +102,15 @@ class DiscordLinkCreateRequest(BaseModel):
 
 
 _JOB_FUNCTIONS = JOB_FUNCTIONS
+_SENSITIVE_PAYLOAD_KEY_MARKERS = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "password",
+    "refresh_token",
+    "secret",
+    "token",
+)
 
 # Backward-compatible direct handler exports expected by existing call sites/tests.
 process_webhook_event = JOB_FUNCTIONS["process_webhook_event"]
@@ -407,6 +417,183 @@ def _session_payload(session: AuthSession) -> dict[str, Any]:
         "actor_provider": session.actor_provider,
         "crm_contact_id": session.crm_contact_id,
     }
+
+
+def _redact_sensitive_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            normalized_key = key_text.lower()
+            if any(
+                marker in normalized_key for marker in _SENSITIVE_PAYLOAD_KEY_MARKERS
+            ):
+                redacted[key_text] = "[redacted]"
+            else:
+                redacted[key_text] = _redact_sensitive_payload(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_sensitive_payload(item) for item in value]
+    return value
+
+
+def _datetime_or_none(value: Any) -> str | None:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return None
+
+
+def _dashboard_job_payload(job: Any) -> dict[str, Any]:
+    payload = job.payload if isinstance(job.payload, dict) else {}
+    result = payload.get("result")
+    return {
+        "job_id": job.id,
+        "type": job.type,
+        "status": job.status.value,
+        "attempts": job.attempts,
+        "max_attempts": job.max_attempts,
+        "run_after": _datetime_or_none(job.run_after),
+        "locked_at": _datetime_or_none(job.locked_at),
+        "locked_by": job.locked_by,
+        "last_error": job.last_error,
+        "idempotency_key": job.idempotency_key,
+        "created_at": job.created_at.isoformat(),
+        "updated_at": job.updated_at.isoformat(),
+        "payload": _redact_sensitive_payload(payload),
+        "result": _redact_sensitive_payload(result),
+    }
+
+
+def _is_present(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        normalized = value.strip()
+        return bool(normalized) and normalized.lower() not in {"no discord", "none"}
+    return bool(value)
+
+
+def _limit_dashboard_count(value: int) -> int:
+    return max(1, min(value, 100))
+
+
+def _list_dashboard_people(query: str | None, limit: int) -> list[dict[str, Any]]:
+    normalized_query = (query or "").strip()
+    limit = _limit_dashboard_count(limit)
+    params: list[Any] = []
+    where_clause = ""
+    if normalized_query:
+        like_query = f"%{normalized_query}%"
+        params.extend([like_query] * 13)
+        where_clause = """
+            WHERE
+                crm_contact_id ILIKE %s
+                OR name ILIKE %s
+                OR email ILIKE %s
+                OR email_508 ILIKE %s
+                OR discord_user_id ILIKE %s
+                OR discord_username ILIKE %s
+                OR github_username ILIKE %s
+                OR contact_type ILIKE %s
+                OR address_country ILIKE %s
+                OR address_city ILIKE %s
+                OR address_state ILIKE %s
+                OR seniority ILIKE %s
+                OR latest_resume_name ILIKE %s
+        """
+
+    params.append(limit)
+    sql = f"""
+        SELECT
+            id::text,
+            crm_contact_id,
+            name,
+            email,
+            email_508,
+            discord_user_id,
+            discord_username,
+            discord_roles,
+            github_username,
+            contact_type,
+            is_member,
+            address_country,
+            address_city,
+            address_state,
+            timezone,
+            seniority,
+            linkedin,
+            skills,
+            latest_resume_id,
+            latest_resume_name,
+            sync_status,
+            created_at,
+            updated_at
+        FROM people
+        {where_clause}
+        ORDER BY updated_at DESC
+        LIMIT %s
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(sql, params)
+            rows = cursor.fetchall()
+
+    people: list[dict[str, Any]] = []
+    for row in rows:
+        roles = row.get("discord_roles") or []
+        skills = row.get("skills") or []
+        person = dict(row)
+        person["created_at"] = _datetime_or_none(row.get("created_at"))
+        person["updated_at"] = _datetime_or_none(row.get("updated_at"))
+        person["profile_status"] = {
+            "crm_active": row.get("sync_status") == "active",
+            "is_member": bool(row.get("is_member")),
+            "discord_linked": _is_present(row.get("discord_user_id")),
+            "email_508": _is_present(row.get("email_508")),
+            "latest_resume": _is_present(row.get("latest_resume_id"))
+            or _is_present(row.get("latest_resume_name")),
+            "roles_count": len(roles) if isinstance(roles, list) else 0,
+            "skills_count": len(skills) if isinstance(skills, list) else 0,
+        }
+        people.append(person)
+    return people
+
+
+def _list_dashboard_audit_events(limit: int) -> list[dict[str, Any]]:
+    limit = _limit_dashboard_count(limit)
+    sql = """
+        SELECT
+            id::text,
+            occurred_at,
+            source,
+            action,
+            resource_type,
+            resource_id,
+            result,
+            actor_provider,
+            actor_subject,
+            actor_display_name,
+            person_id::text,
+            correlation_id,
+            metadata,
+            created_at
+        FROM audit_events
+        ORDER BY occurred_at DESC
+        LIMIT %s
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(sql, (limit,))
+            rows = cursor.fetchall()
+
+    events: list[dict[str, Any]] = []
+    for row in rows:
+        event = dict(row)
+        event["occurred_at"] = _datetime_or_none(row.get("occurred_at"))
+        event["created_at"] = _datetime_or_none(row.get("created_at"))
+        event["metadata"] = row.get("metadata") or {}
+        events.append(event)
+    return events
 
 
 def _session_actor_provider(session: AuthSession) -> ActorProvider:
@@ -1009,6 +1196,53 @@ async def dashboard_jobs_handler(
             for job in recent_jobs
         ]
     )
+
+
+async def dashboard_job_detail_handler(
+    request: Request,
+    job_id: str,
+) -> JSONResponse:
+    """Return one job's dashboard detail payload for an authenticated admin."""
+    _, error_response = await _dashboard_admin_session_or_error(request)
+    if error_response is not None:
+        return error_response
+
+    normalized_job_id = job_id.strip()
+    if not normalized_job_id:
+        return JSONResponse({"error": "job_id_required"}, status_code=400)
+
+    job = await asyncio.to_thread(get_job, settings, normalized_job_id)
+    if job is None:
+        return JSONResponse({"error": "job_not_found"}, status_code=404)
+
+    return JSONResponse(_dashboard_job_payload(job))
+
+
+async def dashboard_people_handler(
+    request: Request,
+    query: str | None = Query(default=None),
+    limit: int = Query(default=25, ge=1, le=100),
+) -> JSONResponse:
+    """Return CRM people-cache rows for dashboard lookup/onboarding views."""
+    _, error_response = await _dashboard_admin_session_or_error(request)
+    if error_response is not None:
+        return error_response
+
+    people = await asyncio.to_thread(_list_dashboard_people, query, limit)
+    return JSONResponse(people)
+
+
+async def dashboard_audit_events_handler(
+    request: Request,
+    limit: int = Query(default=25, ge=1, le=100),
+) -> JSONResponse:
+    """Return recent human audit events for the dashboard."""
+    _, error_response = await _dashboard_admin_session_or_error(request)
+    if error_response is not None:
+        return error_response
+
+    events = await asyncio.to_thread(_list_dashboard_audit_events, limit)
+    return JSONResponse(events)
 
 
 async def dashboard_rerun_job_handler(
@@ -1993,9 +2227,24 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
     app.add_api_route("/dashboard/api/me", dashboard_me_handler, methods=["GET"])
     app.add_api_route("/dashboard/api/jobs", dashboard_jobs_handler, methods=["GET"])
     app.add_api_route(
+        "/dashboard/api/jobs/{job_id}",
+        dashboard_job_detail_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
         "/dashboard/api/jobs/{job_id}/rerun",
         dashboard_rerun_job_handler,
         methods=["POST"],
+    )
+    app.add_api_route(
+        "/dashboard/api/people",
+        dashboard_people_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/audit-events",
+        dashboard_audit_events_handler,
+        methods=["GET"],
     )
     app.add_api_route(
         "/dashboard/api/sync/people",

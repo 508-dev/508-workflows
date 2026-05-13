@@ -111,6 +111,68 @@ def _jobs_payload() -> list[dict[str, object]]:
     ]
 
 
+def _job_detail_payload() -> dict[str, object]:
+    return {
+        "job_id": "job-failed",
+        "type": "process_docuseal_agreement_job",
+        "status": "failed",
+        "attempts": 2,
+        "max_attempts": 8,
+        "run_after": None,
+        "locked_at": None,
+        "locked_by": None,
+        "last_error": "timeout",
+        "idempotency_key": "webhook:docuseal:1",
+        "created_at": "2026-05-08T11:55:00+00:00",
+        "updated_at": "2026-05-08T11:58:00+00:00",
+        "payload": {
+            "args": [],
+            "kwargs": {"submission_id": "sub-123", "api_key": "[redacted]"},
+        },
+        "result": None,
+    }
+
+
+def _people_payload() -> list[dict[str, object]]:
+    return [
+        {
+            "crm_contact_id": "contact-123",
+            "name": "Alice Prospect",
+            "email": "alice@example.com",
+            "email_508": "alice@508.dev",
+            "discord_user_id": "123456789",
+            "discord_username": "alice",
+            "latest_resume_name": "alice-resume.pdf",
+            "profile_status": {
+                "crm_active": True,
+                "is_member": True,
+                "discord_linked": True,
+                "email_508": True,
+                "latest_resume": True,
+                "skills_count": 4,
+            },
+        }
+    ]
+
+
+def _audit_payload() -> list[dict[str, object]]:
+    return [
+        {
+            "id": "event-1",
+            "occurred_at": "2026-05-08T12:03:00+00:00",
+            "source": "admin_dashboard",
+            "action": "worker.job_rerun",
+            "resource_type": "worker_job",
+            "resource_id": "job-rerun",
+            "result": "success",
+            "actor_provider": "discord",
+            "actor_subject": "123456789",
+            "actor_display_name": "Discord Admin",
+            "metadata": {"job_type": "process_docuseal_agreement_job"},
+        }
+    ]
+
+
 def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
     playwright_api = pytest.importorskip("playwright.sync_api")
     sync_playwright = playwright_api.sync_playwright
@@ -138,6 +200,7 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
         job_requests: list[str] = []
         rerun_requested = threading.Event()
         sync_requested = threading.Event()
+        detail_requested = threading.Event()
 
         def jobs_route(route: Any) -> None:
             request = route.request
@@ -169,6 +232,28 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
                 ),
             )
 
+        def job_detail_route(route: Any) -> None:
+            detail_requested.set()
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(_job_detail_payload()),
+            )
+
+        def people_route(route: Any) -> None:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(_people_payload()),
+            )
+
+        def audit_route(route: Any) -> None:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(_audit_payload()),
+            )
+
         def sync_route(route: Any) -> None:
             sync_requested.set()
             route.fulfill(
@@ -185,20 +270,26 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             )
 
         page.route("**/dashboard/api/jobs/*/rerun", rerun_route)
+        page.route("**/dashboard/api/jobs/job-failed", job_detail_route)
         page.route("**/dashboard/api/jobs?*", jobs_route)
+        page.route("**/dashboard/api/people?*", people_route)
+        page.route("**/dashboard/api/audit-events?*", audit_route)
         page.route("**/dashboard/api/sync/people", sync_route)
 
         try:
             page.goto("/dashboard")
             page.get_by_role("heading", name="508 Admin Dashboard").wait_for()
-            page.get_by_text("Discord Admin", exact=True).wait_for()
-            page.get_by_text("CRM contact-123").wait_for()
+            expect(page.locator("#userName")).to_have_text("Discord Admin")
+            expect(page.locator("#userMeta")).to_contain_text("CRM contact-123")
 
-            page.locator("tbody tr").first.wait_for()
-            assert page.locator("tbody tr").count() == 2
+            page.locator("#jobsBody tr").first.wait_for()
+            assert page.locator("#jobsBody tr").count() == 2
             assert page.locator("#metricTotal").inner_text() == "2"
             assert page.locator("#metricQueued").inner_text() == "1"
             assert page.locator("#metricFailed").inner_text() == "1"
+            page.get_by_text("Alice Prospect").wait_for()
+            page.get_by_text("alice-resume.pdf | 4 skills").wait_for()
+            page.get_by_text("worker.job_rerun").wait_for()
 
             with page.expect_response(
                 lambda response: (
@@ -210,12 +301,21 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
                 page.locator("#status").select_option("failed")
 
             assert any("status=failed" in url for url in job_requests)
-            expect(page.locator("tbody tr")).to_have_count(1)
+            expect(page.locator("#jobsBody tr")).to_have_count(1)
             expect(page.locator("#metricTotal")).to_have_text("1")
             expect(page.locator("#metricQueued")).to_have_text("0")
             expect(page.locator("#metricFailed")).to_have_text("1")
             expect(page.get_by_text("job-queued")).not_to_be_visible()
             expect(page.get_by_text("job-failed")).to_be_visible()
+
+            page.get_by_role(
+                "button",
+                name="View details for process_docuseal_agreement_job job job-failed",
+            ).click()
+            assert detail_requested.wait(timeout=5)
+            page.get_by_role("heading", name="Job detail").wait_for()
+            page.get_by_text('"submission_id": "sub-123"').wait_for()
+            page.get_by_text('"api_key": "[redacted]"').wait_for()
 
             page.get_by_role(
                 "button",

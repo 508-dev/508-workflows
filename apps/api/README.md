@@ -28,7 +28,10 @@ curl -X GET "http://localhost:8090/jobs/<job_id>" \
 - `GET /dashboard`: Session-authenticated admin dashboard for Discord/OIDC admins.
 - `GET /dashboard/api/me`: Dashboard session identity, including linked CRM contact id when available.
 - `GET /dashboard/api/jobs`: Session-authenticated recent jobs list for the dashboard.
+- `GET /dashboard/api/jobs/{job_id}`: Session-authenticated dashboard job detail with sensitive payload keys redacted.
 - `POST /dashboard/api/jobs/{job_id}/rerun`: Session-authenticated dashboard job rerun.
+- `GET /dashboard/api/people`: Session-authenticated CRM people-cache lookup with profile/onboarding signals.
+- `GET /dashboard/api/audit-events`: Session-authenticated recent human audit events.
 - `POST /dashboard/api/sync/people`: Session-authenticated dashboard people-cache sync.
 - `GET /jobs/{job_id}`: Fetch queued job status/result payload.
 - `POST /jobs/{job_id}/rerun`: Enqueue a duplicate rerun of an existing job id.

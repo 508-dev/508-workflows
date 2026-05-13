@@ -887,6 +887,149 @@ def test_dashboard_jobs_ignores_empty_type_filter(client: TestClient) -> None:
     assert mock_list_jobs.call_args.kwargs["job_type"] is None
 
 
+def test_dashboard_job_detail_returns_redacted_payload(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admins"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+    created_at = datetime(2026, 2, 25, 12, 0, 0, tzinfo=timezone.utc)
+    updated_at = datetime(2026, 2, 25, 12, 5, 0, tzinfo=timezone.utc)
+    job = Mock(
+        id="job-1",
+        type="extract_resume_profile_job",
+        status=api.JobStatus.SUCCEEDED,
+        payload={
+            "args": ["contact-1"],
+            "kwargs": {"refresh_token": "secret-refresh-token"},
+            "result": {"status": "ok", "api_key": "secret-key"},
+        },
+        idempotency_key="job-key",
+        attempts=1,
+        max_attempts=5,
+        run_after=None,
+        locked_at=None,
+        locked_by=None,
+        last_error=None,
+        created_at=created_at,
+        updated_at=updated_at,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.get_job", return_value=job),
+    ):
+        response = client.get("/dashboard/api/jobs/job-1")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["job_id"] == "job-1"
+    assert payload["payload"]["kwargs"]["refresh_token"] == "[redacted]"
+    assert payload["result"]["api_key"] == "[redacted]"
+    assert "secret-refresh-token" not in response.text
+
+
+def test_dashboard_people_returns_lookup_payload(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admins"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+    people = [
+        {
+            "crm_contact_id": "contact-123",
+            "name": "Alice Prospect",
+            "email": "alice@example.com",
+            "email_508": "alice@508.dev",
+            "discord_user_id": "123456789",
+            "discord_username": "alice",
+            "sync_status": "active",
+            "profile_status": {
+                "crm_active": True,
+                "is_member": True,
+                "discord_linked": True,
+                "email_508": True,
+                "latest_resume": True,
+                "roles_count": 2,
+                "skills_count": 4,
+            },
+            "updated_at": "2026-02-25T12:05:00+00:00",
+        }
+    ]
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._list_dashboard_people", return_value=people
+        ) as mock_people,
+    ):
+        response = client.get("/dashboard/api/people?query=alice&limit=10")
+
+    assert response.status_code == 200
+    assert response.json() == people
+    mock_people.assert_called_once_with("alice", 10)
+
+
+def test_dashboard_audit_events_returns_recent_events(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admins"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+    events = [
+        {
+            "id": "event-1",
+            "occurred_at": "2026-02-25T12:05:00+00:00",
+            "source": "admin_dashboard",
+            "action": "worker.job_rerun",
+            "resource_type": "worker_job",
+            "resource_id": "job-new-1",
+            "result": "success",
+            "actor_provider": "discord",
+            "actor_subject": "123456789",
+            "actor_display_name": "Discord Admin",
+            "metadata": {"job_type": "sync_people_from_crm_job"},
+        }
+    ]
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._list_dashboard_audit_events",
+            return_value=events,
+        ) as mock_events,
+    ):
+        response = client.get("/dashboard/api/audit-events?limit=10")
+
+    assert response.status_code == 200
+    assert response.json() == events
+    mock_events.assert_called_once_with(10)
+
+
 def test_dashboard_rerun_crm_job_audits_discord_session(
     client: TestClient,
 ) -> None:
