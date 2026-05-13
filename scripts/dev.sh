@@ -42,7 +42,7 @@ Infrastructure is running in Docker on localhost:
   Console:  127.0.0.1:${MINIO_CONSOLE_HOST_PORT}
 
 Host-run app ports for this worktree:
-  Web/API:  127.0.0.1:${WEBHOOK_INGEST_PORT}
+  Web/API:  127.0.0.1:${WEBHOOK_INGEST_PORT} (hot reload)
   Bot:      127.0.0.1:${HEALTHCHECK_PORT}
 
 Run app services on the host with:
@@ -89,10 +89,23 @@ EOF
     printf '%s\n' "$POSTGRES_URL"
     ;;
   web|api)
-    exec uv run --package api backend-api
+    exec uv run --package api uvicorn five08.backend.api:create_app \
+      --factory \
+      --host "${WEBHOOK_INGEST_HOST:-0.0.0.0}" \
+      --port "$WEBHOOK_INGEST_PORT" \
+      --reload \
+      --reload-dir apps/api/src \
+      --reload-dir apps/worker/src \
+      --reload-dir packages/shared/src
     ;;
   worker)
-    exec uv run --package worker worker-consumer
+    exec uv run watchfiles \
+      --filter python \
+      --sigint-timeout 5 \
+      --sigkill-timeout 10 \
+      'uv run --package worker worker-consumer' \
+      apps/worker/src \
+      packages/shared/src
     ;;
   discord-bot|bot)
     exec uv run --package discord_bot discord-bot

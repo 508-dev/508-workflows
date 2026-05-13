@@ -14,16 +14,56 @@ from collections.abc import Iterable
 from urllib.parse import urlparse
 
 
-SERVICES: list[tuple[str, list[str]]] = [
-    ("web", ["uv", "run", "--package", "api", "backend-api"]),
-    ("worker", ["uv", "run", "--package", "worker", "worker-consumer"]),
-    ("discord-bot", ["uv", "run", "--package", "discord_bot", "discord-bot"]),
-]
-
 PORT_SERVICES: list[tuple[str, str]] = [
     ("web", "BACKEND_API_BASE_URL"),
     ("discord-bot", "DISCORD_BOT_INTERNAL_BASE_URL"),
 ]
+
+
+def _service_commands(env: dict[str, str]) -> list[tuple[str, list[str]]]:
+    return [
+        (
+            "web",
+            [
+                "uv",
+                "run",
+                "--package",
+                "api",
+                "uvicorn",
+                "five08.backend.api:create_app",
+                "--factory",
+                "--host",
+                env.get("WEBHOOK_INGEST_HOST", "0.0.0.0"),
+                "--port",
+                env["WEBHOOK_INGEST_PORT"],
+                "--reload",
+                "--reload-dir",
+                "apps/api/src",
+                "--reload-dir",
+                "apps/worker/src",
+                "--reload-dir",
+                "packages/shared/src",
+            ],
+        ),
+        (
+            "worker",
+            [
+                "uv",
+                "run",
+                "watchfiles",
+                "--filter",
+                "python",
+                "--sigint-timeout",
+                "5",
+                "--sigkill-timeout",
+                "10",
+                "uv run --package worker worker-consumer",
+                "apps/worker/src",
+                "packages/shared/src",
+            ],
+        ),
+        ("discord-bot", ["uv", "run", "--package", "discord_bot", "discord-bot"]),
+    ]
 
 
 def _stream_output(name: str, process: subprocess.Popen[str]) -> None:
@@ -220,7 +260,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, handle_signal)
 
     try:
-        for name, command in SERVICES:
+        for name, command in _service_commands(env):
             process = subprocess.Popen(
                 command,
                 cwd=env.get("WORKTREE_ENV_REPO_ROOT") or None,
