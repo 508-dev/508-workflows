@@ -18,7 +18,7 @@ This document captures Discord bot behavior, permissions, and slash command usag
 
 ## Slash Commands
 
-- `/login`
+- `/dashboard-login`
   - Description: Generate a one-time admin dashboard login link.
   - Required role: any role listed in `DISCORD_ADMIN_ROLES` (`Admin,Owner` by default).
   - Behavior:

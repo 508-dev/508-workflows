@@ -100,10 +100,10 @@ class AdminLoginCog(DiscordAuditCogMixin, commands.Cog):
         )
 
     @app_commands.command(
-        name="login",
+        name="dashboard-login",
         description="Get a one-time admin dashboard login link.",
     )
-    async def login(self, interaction: discord.Interaction) -> None:
+    async def dashboard_login(self, interaction: discord.Interaction) -> None:
         """Create and return a one-time dashboard login URL."""
         if not self._user_can_request_login_link(interaction):
             self._audit(

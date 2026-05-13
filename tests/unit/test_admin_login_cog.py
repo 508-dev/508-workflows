@@ -29,7 +29,7 @@ def cog() -> AdminLoginCog:
 
 
 @pytest.mark.asyncio
-async def test_login_command_returns_link(
+async def test_dashboard_login_command_returns_link(
     cog: AdminLoginCog, mock_interaction: AsyncMock
 ) -> None:
     with (
@@ -42,7 +42,7 @@ async def test_login_command_returns_link(
         ),
         patch.object(cog, "_audit") as mock_audit,
     ):
-        await cog.login.callback(cog, mock_interaction)
+        await cog.dashboard_login.callback(cog, mock_interaction)
 
     mock_interaction.response.defer.assert_awaited_once_with(ephemeral=True)
     mock_interaction.followup.send.assert_awaited_once()
@@ -52,7 +52,7 @@ async def test_login_command_returns_link(
 
 
 @pytest.mark.asyncio
-async def test_login_command_denied_when_user_not_admin(
+async def test_dashboard_login_command_denied_when_user_not_admin(
     cog: AdminLoginCog, mock_interaction: AsyncMock
 ) -> None:
     with (
@@ -63,14 +63,14 @@ async def test_login_command_denied_when_user_not_admin(
         ),
         patch.object(cog, "_audit"),
     ):
-        await cog.login.callback(cog, mock_interaction)
+        await cog.dashboard_login.callback(cog, mock_interaction)
 
     sent_message = mock_interaction.followup.send.call_args.args[0]
     assert "not allowed" in sent_message
 
 
 @pytest.mark.asyncio
-async def test_login_command_handles_missing_secret(
+async def test_dashboard_login_command_handles_missing_secret(
     cog: AdminLoginCog, mock_interaction: AsyncMock
 ) -> None:
     with (
@@ -81,14 +81,14 @@ async def test_login_command_handles_missing_secret(
         ),
         patch.object(cog, "_audit"),
     ):
-        await cog.login.callback(cog, mock_interaction)
+        await cog.dashboard_login.callback(cog, mock_interaction)
 
     sent_message = mock_interaction.followup.send.call_args.args[0]
     assert "not configured" in sent_message
 
 
 @pytest.mark.asyncio
-async def test_login_command_uses_configured_admin_roles(
+async def test_dashboard_login_command_uses_configured_admin_roles(
     monkeypatch: pytest.MonkeyPatch,
     cog: AdminLoginCog,
     mock_interaction: AsyncMock,
@@ -97,7 +97,7 @@ async def test_login_command_uses_configured_admin_roles(
     mock_interaction.user.roles[0].name = "Admin"
 
     with patch.object(cog, "_create_login_link", new=AsyncMock()) as mock_create:
-        await cog.login.callback(cog, mock_interaction)
+        await cog.dashboard_login.callback(cog, mock_interaction)
 
     mock_interaction.response.send_message.assert_awaited_once()
     mock_create.assert_not_awaited()
