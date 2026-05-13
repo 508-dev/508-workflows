@@ -122,10 +122,13 @@ PY
 
 Discord deep-link identity policy:
 
-- `DISCORD_ADMIN_ROLES` controls who can mint/use Discord deep links (`Admin,Owner` recommended).
+- Discord deep links are available to active CRM-linked Discord users with Steering Committee role or higher.
+- `DISCORD_ADMIN_ROLES` controls which Discord roles can receive admin dashboard permissions (`Admin,Owner` recommended).
 - `OIDC_ADMIN_GROUPS` controls normal OIDC dashboard admin membership (`authentik Admins` recommended).
-- `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=true` (default): Discord deep links also require OIDC admin group + OIDC email linked to Discord admin identity.
-- `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=false`: bootstrap mode; Discord deep links skip OIDC group/email-link checks after successful OIDC authentication.
+- `AUTH_SESSION_TTL_SECONDS` controls dashboard session lifetime after login (`86400`, one day, by default).
+- `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=true` (default): Discord deep links also require OIDC email identity checks against the linked CRM/Discord dashboard user.
+- `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=false`: Discord deep links create a Discord-backed session directly after re-validating active CRM membership + Discord Steering Committee+ role, without forcing an OIDC roundtrip.
+- Jobs, reruns, people sync, and audit are sensitive admin permissions and require an SSO-validated dashboard session even when the user entered through a Discord link. Local/dev/test environments allow these permissions for development.
 
 ### Current API/Worker behavior
 

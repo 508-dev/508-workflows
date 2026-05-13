@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 from five08.audit import PeopleSyncStatus, PersonRecord, upsert_person
@@ -32,7 +33,8 @@ class EspoPeopleSyncClient:
             "cDiscordUsername,cDiscordUserId,cDiscordRoles,cDiscordUserID,"
             "cGithubUsername,githubUsername,type,contactType,"
             "addressCountry,addressCity,addressState,cTimezone,cSeniority,"
-            "cMemberAgreementSignedAt,"
+            "cMemberAgreementSignedAt,cOnboardingState,cOnboarder,"
+            "cOnboardingUpdatedAt,"
             f"{LINKEDIN_FIELD},skills,cSkillAttrs,resumeIds,resumeNames"
         )
         raw = self.api.request(
@@ -199,8 +201,29 @@ class PeopleSyncProcessor:
             skill_attrs=skill_attrs,
             latest_resume_id=latest_resume_id,
             latest_resume_name=latest_resume_name,
+            onboarding_state=_text_or_none(raw_contact.get("cOnboardingState")),
+            onboarder=_text_or_none(raw_contact.get("cOnboarder")),
+            onboarding_updated_at=self._parse_datetime(
+                raw_contact.get("cOnboardingUpdatedAt")
+            ),
             sync_status=PeopleSyncStatus.ACTIVE,
         )
+
+    @staticmethod
+    def _parse_datetime(value: Any) -> datetime | None:
+        text = _text_or_none(value)
+        if text is None:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                parsed = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
 
     @staticmethod
     def _first_not_none(*values: Any) -> Any | None:

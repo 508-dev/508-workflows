@@ -51,9 +51,18 @@ Migrations:
 See the API service docs: [`apps/api/README.md#backend-api-endpoints`](./apps/api/README.md#backend-api-endpoints).
 CLI request examples are documented at [`apps/worker/README.md#cli-usage`](./apps/worker/README.md#cli-usage).
 
+The operations dashboard is served at `/dashboard`. It is available only to
+active dashboard sessions created through the existing OIDC or Discord dashboard
+login link flows, and Discord-backed sessions carry the linked CRM contact id
+from the local `people` cache. Steering Committee+ Discord-backed sessions can
+use CRM people lookup and onboarding assignment. Admin+ sessions can also access
+recent jobs, job details/reruns, people-cache sync, and recent human audit
+events.
+
 ### Current API/queue caveats
 
-- Protected API endpoints use a shared `API_SHARED_SECRET` in `X-API-Secret` today. This includes webhook and admin routes until per-webhook/per-route auth is introduced.
+- Non-dashboard protected API endpoints use a shared `API_SHARED_SECRET` in `X-API-Secret` today. This includes webhook and secret-backed admin routes until per-webhook/per-route auth is introduced.
+- `/dashboard` and `/dashboard/api/*` are browser-facing dashboard routes that use the HttpOnly session cookie from OIDC or Discord dashboard login flows. They do not accept `X-API-Secret`.
 - Worker startup uses a single effective queue name for actor registration; keep this explicit if you later add true multi-queue routing.
 - Backend rerun/enqueue behavior relies on one shared job-handler set. Add any new worker callable consistently to both backend handler resolution and worker dispatch.
 
@@ -79,7 +88,7 @@ processes on the host:
 
 ```bash
 ./scripts/dev.sh infra
-./scripts/dev.sh api
+./scripts/dev.sh web
 ./scripts/dev.sh worker
 ./scripts/dev.sh discord-bot
 ```
@@ -110,7 +119,7 @@ avoids printing the resolved Postgres password directly.
 # Discord bot
 uv run --package discord_bot discord-bot
 
-# API ingest service
+# Web/API dashboard and ingest service
 uv run --package api backend-api
 
 # Worker queue consumer
@@ -200,7 +209,7 @@ Use `.env.example` as the source of truth for defaults.
 
 ### Backend API Ingest
 
-- `Required` for protected endpoints: `API_SHARED_SECRET` (ingest requests are rejected when unset)
+- `Required` for non-dashboard protected endpoints: `API_SHARED_SECRET` (ingest requests are rejected when unset)
 - `Optional`: `WEBHOOK_INGEST_HOST` (default: `0.0.0.0`)
 - `Optional`: `WEBHOOK_INGEST_HOST_BIND` (default: `127.0.0.1`; Compose host bind for local exposure)
 - `Optional`: `WEBHOOK_INGEST_PORT` (host-run `./scripts/dev.sh` ignores `.env` for this key and defaults to a deterministic per-worktree value near `18080 + WORKTREE_ENV_SLOT`; export it in your shell only when you intentionally want a fixed port, and avoid browser-unsafe ports such as `5060`)
@@ -211,21 +220,28 @@ Use `.env.example` as the source of truth for defaults.
 - `Optional` (required when enabling OIDC login): `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`
 - `Optional`: `OIDC_SCOPE` (default: `openid profile email groups`)
 - `Optional`: `OIDC_GROUPS_CLAIM` (default: `groups`)
-- `Optional`: `OIDC_ADMIN_GROUPS` (default: `Admin,Owner,Steering Committee`)
+- `Optional`: `OIDC_ADMIN_GROUPS` (default: `authentik Admins`; grants full dashboard admin permissions)
 - `Optional`: `OIDC_CALLBACK_PATH` (default: `/auth/callback`)
 - `Optional`: `OIDC_REDIRECT_BASE_URL` (default: infer from request base URL)
 - `Optional`: `AUTH_SESSION_COOKIE_NAME` (default: `five08_session`)
+- `Optional`: `AUTH_SESSION_TTL_SECONDS` (default: `86400`, one day)
 - `Optional`: `DASHBOARD_DEFAULT_PATH` (default: `/dashboard`)
 - `Optional`: `DASHBOARD_PUBLIC_BASE_URL` (base URL for generated deep links)
-- Note: OIDC timeout/cache/session timings are fixed in code; auth cookies always use `SameSite=Lax` and enable `secure` automatically outside local/dev/test environments.
+- Note: OIDC timeout/cache timings are fixed in code; auth cookies always use `SameSite=Lax` and enable `secure` automatically outside local/dev/test environments.
 
 ### Discord Admin Deep-Link Validation
 
 - `Optional`: `DISCORD_SERVER_ID` (required for Discord API fallback role checks)
-- `Optional`: `DISCORD_ADMIN_ROLES` (default: `Admin,Owner,Steering Committee`)
+- `Optional`: `DISCORD_ADMIN_ROLES` (default: `Admin,Owner`; marks Discord roles eligible for admin dashboard permissions)
 - `Optional`: `DISCORD_API_TIMEOUT_SECONDS` (default: `8.0`)
 - `Optional`: `DISCORD_LINK_TTL_SECONDS` (default: `600`)
+- `Optional`: `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS` (code default: `true`; local `.env.example` sets `false` so Discord dashboard links work without OIDC; set `true` in production with Authentik)
 - `Optional`: `DISCORD_BOT_TOKEN` (needed only for fallback Discord API checks; DB role check remains primary)
+- Note: Discord dashboard links are available to active CRM-linked Discord users
+  with Steering Committee role or higher. Steering Committee receives CRM people
+  lookup and onboarding permissions. Jobs, reruns, people sync, and audit are
+  sensitive admin permissions and require an SSO-validated dashboard session in
+  production; local/dev/test environments allow them for development.
 
 ### Worker Consumer
 
@@ -261,7 +277,7 @@ Use `.env.example` as the source of truth for defaults.
 ### Discord Bot Core
 
 - `Required`: `DISCORD_BOT_TOKEN`
-- `Optional`: `BACKEND_API_BASE_URL` (default: `http://127.0.0.1:8090`; `./scripts/dev.sh` overrides it to the worktree API port, Compose injects `http://api:8090`)
+- `Optional`: `BACKEND_API_BASE_URL` (default: `http://127.0.0.1:8090`; `./scripts/dev.sh` overrides it to the worktree web/API port, Compose injects `http://api:8090`)
 - `Optional`: `HEALTHCHECK_PORT` (host-run `./scripts/dev.sh` ignores `.env` for this key and defaults to a deterministic per-worktree value near `30000 + WORKTREE_ENV_SLOT`; export it in your shell only when you intentionally want a fixed port, and avoid browser-unsafe ports such as `5060`)
 - Note: bot message chunking uses Discord's 2000 character limit in code.
 

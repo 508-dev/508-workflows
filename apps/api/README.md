@@ -2,15 +2,18 @@
 
 ## Auth
 
-- Protected ingest/job endpoints require `API_SHARED_SECRET` to be configured on the API.
+- Non-dashboard protected ingest/job endpoints require `API_SHARED_SECRET` to be configured on the API.
 - Send the secret in header `X-API-Secret`.
 - Header name is exactly `X-API-Secret` (not `X-API-Secret-Key`).
+- `GET /dashboard` and `/dashboard/api/*` use the HttpOnly session cookie created by OIDC or Discord dashboard login flows. They do not accept `X-API-Secret`.
+- Dashboard session cookies are expected to stay `SameSite=Lax` or stricter; dashboard mutating POSTs rely on that cookie policy for CSRF protection.
 - `GET /health` and most OIDC session routes (`/auth/login`, `/auth/callback`, `/auth/me`, `/auth/logout`) do not use `X-API-Secret`.
 - `POST /auth/discord/links` does use `X-API-Secret` because it is called by trusted backend/bot components.
 
 ### API auth strategy
 
-- Protected routes (including webhooks) use `X-API-Secret` with `API_SHARED_SECRET`.
+- Non-dashboard protected routes (including webhooks) use `X-API-Secret` with `API_SHARED_SECRET`.
+- Dashboard browser routes (`/dashboard` and `/dashboard/api/*`) are session-authenticated dashboard routes and are intentionally exempt from `X-API-Secret`.
 
 Example:
 
@@ -22,6 +25,16 @@ curl -X GET "http://localhost:8090/jobs/<job_id>" \
 ## Backend API Endpoints
 
 - `GET /health`: Redis/Postgres/worker health check.
+- `GET /dashboard`: Session-authenticated operations dashboard for OIDC admins and Discord Steering Committee+ users.
+- `GET /dashboard/api/me`: Dashboard session identity, including linked CRM contact id when available.
+- `GET /dashboard/api/jobs`: Session-authenticated recent jobs list for the dashboard.
+- `GET /dashboard/api/jobs/{job_id}`: Session-authenticated dashboard job detail with sensitive payload keys redacted.
+- `POST /dashboard/api/jobs/{job_id}/rerun`: Session-authenticated dashboard job rerun.
+- `GET /dashboard/api/people`: Session-authenticated CRM people-cache lookup with profile/onboarding signals.
+- `GET /dashboard/api/onboarding`: Session-authenticated prospect onboarding queue from the CRM people cache.
+- `POST /dashboard/api/onboarding/{contact_id}/onboarder`: Session-authenticated CRM onboarder assignment for one prospect.
+- `GET /dashboard/api/audit-events`: Session-authenticated recent human audit events.
+- `POST /dashboard/api/sync/people`: Session-authenticated dashboard people-cache sync.
 - `GET /jobs/{job_id}`: Fetch queued job status/result payload.
 - `POST /jobs/{job_id}/rerun`: Enqueue a duplicate rerun of an existing job id.
 - `POST /jobs/resume-extract`: Enqueue resume profile extraction.
@@ -43,10 +56,13 @@ curl -X GET "http://localhost:8090/jobs/<job_id>" \
 
 Discord deep-link identity policy:
 
-- `DISCORD_ADMIN_ROLES` controls who can mint/use Discord deep links (`Admin,Owner` recommended).
+- Discord deep links are available to active CRM-linked Discord users with Steering Committee role or higher.
+- `DISCORD_ADMIN_ROLES` controls which Discord roles can receive admin dashboard permissions (`Admin,Owner` recommended).
 - `OIDC_ADMIN_GROUPS` controls normal OIDC dashboard admin membership (`authentik Admins` recommended).
-- `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=true` (default): Discord deep links also require OIDC admin group + OIDC email linked to Discord admin identity.
-- `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=false`: Discord deep links create a Discord-backed admin session directly after re-validating active CRM membership + Discord admin role, without forcing an OIDC roundtrip.
+- `AUTH_SESSION_TTL_SECONDS` controls dashboard session lifetime after login (`86400`, one day, by default).
+- `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=true` (default): Discord deep links also require OIDC email identity checks against the linked CRM/Discord dashboard user.
+- `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=false`: Discord deep links create a Discord-backed session directly after re-validating active CRM membership + Discord Steering Committee+ role, without forcing an OIDC roundtrip.
+- Jobs, reruns, people sync, and audit are sensitive admin permissions and require an SSO-validated dashboard session even when the user entered through a Discord link. Local/dev/test environments allow these permissions for development.
 
 ### Known handler wiring expectation
 

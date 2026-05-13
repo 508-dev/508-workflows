@@ -69,6 +69,7 @@ class WorkerSettings(SharedSettings):
     oidc_callback_path: str = "/auth/callback"
     oidc_redirect_base_url: str | None = None
     auth_session_cookie_name: str = "five08_session"
+    auth_session_ttl_seconds: int = Field(default=86400, ge=60)
     dashboard_default_path: str = "/dashboard"
     dashboard_public_base_url: str | None = None
     discord_bot_token: str | None = None
@@ -136,11 +137,6 @@ class WorkerSettings(SharedSettings):
     def auth_state_ttl_seconds(self) -> int:
         """Short-lived state tokens reduce replay risk during login."""
         return 600
-
-    @property
-    def auth_session_ttl_seconds(self) -> int:
-        """Dashboard sessions expire after one workday."""
-        return 28800
 
     @property
     def auth_cookie_secure(self) -> bool:

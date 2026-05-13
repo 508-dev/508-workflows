@@ -42,11 +42,11 @@ Infrastructure is running in Docker on localhost:
   Console:  127.0.0.1:${MINIO_CONSOLE_HOST_PORT}
 
 Host-run app ports for this worktree:
-  API:      127.0.0.1:${WEBHOOK_INGEST_PORT}
+  Web/API:  127.0.0.1:${WEBHOOK_INGEST_PORT} (hot reload)
   Bot:      127.0.0.1:${HEALTHCHECK_PORT}
 
 Run app services on the host with:
-  ./scripts/dev.sh api
+  ./scripts/dev.sh web  # ./scripts/dev.sh api also works
   ./scripts/dev.sh worker
   ./scripts/dev.sh discord-bot
   ./scripts/dev.sh all
@@ -88,17 +88,30 @@ EOF
   print-postgres-url)
     printf '%s\n' "$POSTGRES_URL"
     ;;
-  api)
-    exec uv run --package api backend-api
+  web|api)
+    exec uv run --package api uvicorn five08.backend.api:create_app \
+      --factory \
+      --host "${WEBHOOK_INGEST_HOST:-0.0.0.0}" \
+      --port "$WEBHOOK_INGEST_PORT" \
+      --reload \
+      --reload-dir apps/api/src \
+      --reload-dir apps/worker/src \
+      --reload-dir packages/shared/src
     ;;
   worker)
-    exec uv run --package worker worker-consumer
+    exec uv run watchfiles \
+      --filter python \
+      --sigint-timeout 5 \
+      --sigkill-timeout 10 \
+      'uv run --package worker worker-consumer' \
+      apps/worker/src \
+      packages/shared/src
     ;;
   discord-bot|bot)
     exec uv run --package discord_bot discord-bot
     ;;
   *)
-    echo "Usage: ./scripts/dev.sh [infra|all|down|ports|env|api|worker|discord-bot]" >&2
+    echo "Usage: ./scripts/dev.sh [infra|all|down|ports|env|web|api|worker|discord-bot]" >&2
     exit 1
     ;;
 esac
