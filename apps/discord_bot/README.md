@@ -20,7 +20,7 @@ This document captures Discord bot behavior, permissions, and slash command usag
 
 - `/dashboard-login`
   - Description: Generate a one-time admin dashboard login link.
-  - Required role: any role listed in `DISCORD_ADMIN_ROLES` (`Admin,Owner` by default).
+  - Required role: validated by the backend against `DISCORD_ADMIN_ROLES` (`Admin,Owner` by default) and the CRM people cache.
   - Behavior:
     - Calls backend `POST /auth/discord/links` using `API_SHARED_SECRET`.
     - Returns an ephemeral one-time URL with expiry.
