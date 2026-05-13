@@ -496,6 +496,22 @@ def _redact_sensitive_payload(value: Any) -> Any:
     return value
 
 
+_DASHBOARD_REDACT_POSITIONAL_ARGS_JOB_TYPES = {
+    "process_mailbox_message_job",
+}
+
+
+def _redact_dashboard_job_payload(job_type: str, payload: dict[str, Any]) -> Any:
+    redacted = _redact_sensitive_payload(payload)
+    if (
+        job_type in _DASHBOARD_REDACT_POSITIONAL_ARGS_JOB_TYPES
+        and isinstance(redacted, dict)
+        and isinstance(redacted.get("args"), list)
+    ):
+        redacted["args"] = ["[redacted]"] * len(redacted["args"])
+    return redacted
+
+
 def _redact_dashboard_idempotency_key(value: Any) -> str | None:
     if value is None:
         return None
@@ -606,7 +622,7 @@ def _dashboard_job_payload(job: Any) -> dict[str, Any]:
         "idempotency_key": _redact_dashboard_idempotency_key(job.idempotency_key),
         "created_at": job.created_at.isoformat(),
         "updated_at": job.updated_at.isoformat(),
-        "payload": _redact_sensitive_payload(payload),
+        "payload": _redact_dashboard_job_payload(job.type, payload),
         "result": _redact_sensitive_payload(result),
     }
 

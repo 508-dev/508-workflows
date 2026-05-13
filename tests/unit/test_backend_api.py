@@ -946,6 +946,56 @@ def test_dashboard_job_detail_returns_redacted_payload(client: TestClient) -> No
     assert "secret-refresh-token" not in response.text
 
 
+def test_dashboard_job_detail_redacts_sensitive_positional_args(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admins"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+    created_at = datetime(2026, 2, 25, 12, 0, 0, tzinfo=timezone.utc)
+    updated_at = datetime(2026, 2, 25, 12, 5, 0, tzinfo=timezone.utc)
+    job = Mock(
+        id="job-mailbox",
+        type="process_mailbox_message_job",
+        status=api.JobStatus.QUEUED,
+        payload={
+            "args": ["raw-message-b64-with-email-and-resume"],
+            "kwargs": {},
+            "result": None,
+        },
+        idempotency_key="mailbox-inbox:message-1",
+        attempts=0,
+        max_attempts=5,
+        run_after=None,
+        locked_at=None,
+        locked_by=None,
+        last_error=None,
+        created_at=created_at,
+        updated_at=updated_at,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.get_job", return_value=job),
+    ):
+        response = client.get("/dashboard/api/jobs/job-mailbox")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["payload"]["args"] == ["[redacted]"]
+    assert "raw-message-b64-with-email-and-resume" not in response.text
+
+
 def test_dashboard_people_returns_lookup_payload(client: TestClient) -> None:
     session = api.AuthSession(
         subject="admin-1",
