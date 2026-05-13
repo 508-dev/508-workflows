@@ -84,7 +84,6 @@ def login_required_html(*, oidc_configured: bool) -> str:
   <main>
     <h1>Log back in to the admin dashboard</h1>
     <p>Your dashboard session is missing or expired. In Discord, run <code>/dashboard-login</code> and open the new one-time link.</p>
-    <p>Discord links expire quickly, but dashboard sessions now last longer once you use a valid link.</p>
     <div class="actions">
       {sso_action}
     </div>
