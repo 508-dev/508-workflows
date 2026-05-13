@@ -560,6 +560,8 @@ def dashboard_html() -> str:
               <option value="">Any state</option>
               <option value="pending">Needs review</option>
               <option value="selected">Assigned to onboarder</option>
+              <option value="reachingout">Reaching out</option>
+              <option value="awaitingcontribution">Awaiting contribution</option>
             </select>
           </label>
           <label>
@@ -581,11 +583,12 @@ def dashboard_html() -> str:
         <table id="onboardingTable" class="compact" aria-label="Onboarding queue">
           <thead>
             <tr>
-              <th style="width: 24%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="name" type="button">Name</button></th>
-              <th style="width: 16%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="onboarding_state" type="button">Status</button></th>
-              <th style="width: 20%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="onboarder" type="button">Onboarder</button></th>
-              <th style="width: 18%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="updated" type="button">Updated</button></th>
-              <th style="width: 22%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="readiness" type="button">Readiness</button></th>
+              <th style="width: 22%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="name" type="button">Name</button></th>
+              <th style="width: 14%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="onboarding_state" type="button">Status</button></th>
+              <th style="width: 16%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="onboarder" type="button">Onboarder</button></th>
+              <th style="width: 15%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="updated" type="button">Updated</button></th>
+              <th style="width: 16%;">Links</th>
+              <th style="width: 17%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="readiness" type="button">Readiness</button></th>
             </tr>
           </thead>
           <tbody id="onboardingBody"></tbody>
@@ -806,6 +809,8 @@ def dashboard_html() -> str:
     const onboardingStateLabels = {
       pending: "Needs review",
       selected: "Assigned to onboarder",
+      reachingout: "Reaching out",
+      awaitingcontribution: "Awaiting contribution",
       onboarded: "Onboarded",
       waitlist: "Waitlist",
       rejected: "Rejected",
@@ -970,6 +975,41 @@ def dashboard_html() -> str:
       return `${state.crmBaseUrl}/api/v1/Attachment/file/${encodeURIComponent(attachmentId)}`;
     }
 
+    function urlWithProtocol(value) {
+      const raw = String(value || "").trim();
+      if (!raw) return "";
+      if (/^https?:\\/\\//i.test(raw)) return raw;
+      return `https://${raw.replace(/^\\/+/, "")}`;
+    }
+
+    function linkedinUrl(value) {
+      const raw = String(value || "").trim();
+      if (!raw) return "";
+      if (raw.toLowerCase().includes("linkedin.com")) return urlWithProtocol(raw);
+      return `https://www.linkedin.com/in/${encodeURIComponent(raw.replace(/^@/, ""))}`;
+    }
+
+    function githubUrl(value) {
+      const raw = String(value || "").trim().replace(/^@/, "");
+      if (!raw) return "";
+      if (raw.toLowerCase().includes("github.com")) return urlWithProtocol(raw);
+      if (/^https?:\\/\\//i.test(raw)) return "";
+      return `https://github.com/${encodeURIComponent(raw)}`;
+    }
+
+    function appendInlineLink(cell, label, url, ariaLabel) {
+      if (!url) return false;
+      const link = document.createElement("a");
+      link.href = url;
+      link.target = "_blank";
+      link.rel = "noreferrer";
+      link.className = "inline-link";
+      link.textContent = label;
+      if (ariaLabel) link.setAttribute("aria-label", ariaLabel);
+      cell.appendChild(link);
+      return true;
+    }
+
     function labelForOnboardingState(value) {
       const raw = String(value || "").trim();
       if (!raw) return "Unknown";
@@ -1006,7 +1046,6 @@ def dashboard_html() -> str:
         if (key === "readiness") {
           return [
             status.discord_linked,
-            status.email_508,
             status.latest_resume,
             Number(status.skills_count || 0) > 0,
           ].filter(Boolean).length;
@@ -1131,7 +1170,7 @@ def dashboard_html() -> str:
     function renderOnboardingFilterOptions() {
       els.onboardingFilterKind.replaceChildren();
       for (const [key, definition] of Object.entries(peopleFilterDefinitions)) {
-        if (key === "sync_status" || state.onboardingFilters[key]) continue;
+        if (key === "sync_status" || key === "email_508" || state.onboardingFilters[key]) continue;
         const option = document.createElement("option");
         option.value = key;
         option.textContent = definition.label;
@@ -1291,13 +1330,23 @@ def dashboard_html() -> str:
         addTextCell(row, "Onboarder", person.onboarder || "Unassigned");
         addTextCell(row, "Updated", formatDate(person.onboarding_updated_at));
 
+        const linksCell = addTextCell(row, "Links", "");
+        linksCell.className = "chip-list";
+        const resumeUrl = crmAttachmentUrl(person.latest_resume_id);
+        const resumeLabel = person.latest_resume_name || "Resume";
+        const linkCount = [
+          appendInlineLink(linksCell, resumeLabel, resumeUrl, `Open ${displayName} resume`),
+          appendInlineLink(linksCell, "LinkedIn", linkedinUrl(person.linkedin), `Open ${displayName} LinkedIn`),
+          appendInlineLink(linksCell, person.github_username || "GitHub", githubUrl(person.github_username), `Open ${displayName} GitHub`),
+        ].filter(Boolean).length;
+        if (linkCount === 0) linksCell.textContent = "None";
+
         const readyCell = addTextCell(row, "Readiness", "");
         readyCell.className = "chip-list";
         const status = person.profile_status || {};
         const skillsParsed = Number(status.skills_count || 0) > 0;
         for (const [label, ok] of [
           ["Discord", status.discord_linked],
-          ["508 email", status.email_508],
           ["Resume", status.latest_resume],
           ["Skills", skillsParsed],
         ]) {

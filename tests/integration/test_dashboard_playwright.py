@@ -168,7 +168,9 @@ def _onboarding_payload() -> list[dict[str, object]]:
             "contact_type": "Prospect",
             "latest_resume_id": "resume-file-456",
             "latest_resume_name": "bea-resume.pdf",
-            "onboarding_state": "selected",
+            "linkedin": "linkedin.com/in/bea-prospect",
+            "github_username": "beaprospect",
+            "onboarding_state": "Reachingout",
             "onboarder": "michael",
             "onboarding_updated_at": "2026-05-08T10:03:00+00:00",
             "profile_status": {
@@ -351,9 +353,25 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             page.get_by_role("link", name="Onboarding").click()
             expect(page).to_have_url(f"{dashboard_server}/dashboard/onboarding")
             page.get_by_text("Bea Prospect").wait_for()
-            page.locator("#onboardingBody").get_by_text(
-                "Assigned to onboarder"
-            ).wait_for()
+            page.locator("#onboardingBody").get_by_text("Reaching out").wait_for()
+            expect(
+                page.get_by_role("link", name="Open Bea Prospect resume")
+            ).to_have_attribute(
+                "href",
+                "https://crm.example.invalid/api/v1/Attachment/file/resume-file-456",
+            )
+            expect(
+                page.get_by_role("link", name="Open Bea Prospect LinkedIn")
+            ).to_have_attribute(
+                "href",
+                "https://linkedin.com/in/bea-prospect",
+            )
+            expect(
+                page.get_by_role("link", name="Open Bea Prospect GitHub")
+            ).to_have_attribute(
+                "href",
+                "https://github.com/beaprospect",
+            )
             expect(page.get_by_role("button", name="Status ↑")).to_be_visible()
             page.locator("#onboardingFilterKind").select_option("skills")
             page.locator("#onboardingFilterValue").select_option("missing")
