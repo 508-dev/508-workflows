@@ -567,6 +567,70 @@ async def test_agent_mention_sends_agent_response_by_dm() -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_mention_posts_clarification_in_thread() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))
+    cog._post_agent_request = AsyncMock(
+        return_value={
+            "status": "needs_clarification",
+            "message": "I could not turn that into a supported task action.",
+        }
+    )
+    cog._audit_message_safe = Mock()
+    author = SimpleNamespace(id=123, bot=False, roles=[], send=AsyncMock())
+    thread = SimpleNamespace(send=AsyncMock())
+    message = SimpleNamespace(
+        id=555,
+        content="<@999> what can you do",
+        author=author,
+        mentions=[SimpleNamespace(id=999)],
+        guild=SimpleNamespace(id=456),
+        channel=SimpleNamespace(id=789, typing=Mock(return_value=_AsyncTyping())),
+        create_thread=AsyncMock(return_value=thread),
+        reply=AsyncMock(),
+    )
+
+    await cog.agent_mention(message)
+
+    author.send.assert_not_awaited()
+    message.create_thread.assert_awaited_once()
+    thread.send.assert_awaited_once()
+    assert "Agent status: needs_clarification" in thread.send.await_args.args[0]
+    message.reply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_agent_mention_routes_unlinked_member_report_to_ephemeral_command() -> (
+    None
+):
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))
+    cog._post_agent_request = AsyncMock()
+    cog._audit_message_safe = Mock()
+    author = SimpleNamespace(id=123, bot=False, roles=[], send=AsyncMock())
+    thread = SimpleNamespace(send=AsyncMock())
+    message = SimpleNamespace(
+        id=555,
+        content="<@999> can you look up people with no discord linked but are members",
+        author=author,
+        mentions=[SimpleNamespace(id=999)],
+        guild=SimpleNamespace(id=456),
+        channel=SimpleNamespace(id=789, typing=Mock(return_value=_AsyncTyping())),
+        create_thread=AsyncMock(return_value=thread),
+        reply=AsyncMock(),
+    )
+
+    await cog.agent_mention(message)
+
+    cog._post_agent_request.assert_not_awaited()
+    author.send.assert_not_awaited()
+    thread.send.assert_awaited_once()
+    assert "/unlinked-discord-users" in thread.send.await_args.args[0]
+    assert "ephemeral" in thread.send.await_args.args[0]
+    message.reply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_agent_mention_ignores_dms() -> None:
     cog = AgentCog.__new__(AgentCog)
     cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))

@@ -279,6 +279,23 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
+        if self._is_unlinked_discord_members_request(request):
+            self._audit_message_safe(
+                message=message,
+                action="agent.mention",
+                result="success",
+                metadata={"routed_to": "crm.unlinked_discord_users"},
+            )
+            await self._send_mention_public_response(
+                message=message,
+                request=request,
+                content=(
+                    "That report includes member identity/linkage data, so use "
+                    "`/unlinked-discord-users` for the private ephemeral response."
+                ),
+            )
+            return
+
         context = self._build_agent_context_from_message(message)
         try:
             async with message.channel.typing():
@@ -323,6 +340,14 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                     context=context,
                 )
 
+        if self._should_reply_publicly_to_mention(response=response, view=view):
+            await self._send_mention_public_response(
+                message=message,
+                request=request,
+                content=self._format_agent_response(response),
+            )
+            return
+
         sent_dm = await self._send_mention_response_dm(message, response, view)
         if sent_dm:
             await message.reply(
@@ -365,6 +390,71 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         timestamps.append(now)
         self._mention_request_timestamps[user_id] = timestamps
         return False
+
+    @staticmethod
+    def _is_unlinked_discord_members_request(request: str) -> bool:
+        normalized = request.casefold()
+        has_unlinked_discord = (
+            "unlinked" in normalized
+            or "no discord linked" in normalized
+            or "not linked" in normalized
+            or "without discord" in normalized
+        )
+        return has_unlinked_discord and "member" in normalized
+
+    @staticmethod
+    def _should_reply_publicly_to_mention(
+        *,
+        response: dict[str, Any],
+        view: AgentConfirmationView | None,
+    ) -> bool:
+        if view is not None:
+            return False
+        status = str(response.get("status") or "").casefold()
+        return status in {"needs_clarification", "canceled"}
+
+    async def _send_mention_public_response(
+        self,
+        *,
+        message: discord.Message,
+        request: str,
+        content: str,
+    ) -> None:
+        thread = await self._mention_response_thread(message=message, request=request)
+        if thread is not None:
+            await thread.send(content[:1900])
+            return
+        await message.reply(content[:1900], mention_author=False)
+
+    async def _mention_response_thread(
+        self,
+        *,
+        message: discord.Message,
+        request: str,
+    ) -> Any | None:
+        channel = getattr(message, "channel", None)
+        if isinstance(channel, discord.Thread):
+            return channel
+        create_thread = getattr(message, "create_thread", None)
+        if not callable(create_thread):
+            return None
+        try:
+            return await create_thread(
+                name=self._mention_thread_name(request),
+                auto_archive_duration=60,
+            )
+        except discord.HTTPException:
+            logger.warning(
+                "Failed creating agent mention response thread", exc_info=True
+            )
+            return None
+
+    @staticmethod
+    def _mention_thread_name(request: str) -> str:
+        cleaned = re.sub(r"\s+", " ", request).strip()
+        if not cleaned:
+            return "Agent response"
+        return f"Agent: {cleaned[:70]}"
 
     async def _send_mention_response_dm(
         self,
