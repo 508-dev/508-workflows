@@ -331,7 +331,7 @@ def dashboard_html() -> str:
       width: 100%;
       overflow-x: auto;
     }
-    .onboarding-table { min-width: 1080px; }
+    .onboarding-table { min-width: 1180px; }
     .people-table { min-width: 900px; }
     .jobs-table {
       min-width: 980px;
@@ -469,6 +469,23 @@ def dashboard_html() -> str:
       gap: 8px;
       justify-content: flex-end;
       flex-wrap: wrap;
+    }
+    .inline-form {
+      display: grid;
+      grid-template-columns: minmax(100px, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      max-width: 260px;
+    }
+    .inline-form input {
+      min-height: 32px;
+      padding: 6px 8px;
+      font-size: 12px;
+    }
+    .inline-form button {
+      min-height: 32px;
+      padding: 6px 10px;
+      font-size: 12px;
     }
     .split {
       display: grid;
@@ -690,11 +707,11 @@ def dashboard_html() -> str:
           <table id="onboardingTable" class="compact onboarding-table" aria-label="Onboarding queue">
             <thead>
               <tr>
-                <th style="width: 22%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="name" type="button">Name</button></th>
-                <th style="width: 14%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="onboarding_state" type="button">Status</button></th>
-                <th style="width: 16%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="onboarder" type="button">Onboarder</button></th>
-                <th style="width: 15%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="updated" type="button">Updated</button></th>
-                <th style="width: 16%;">Links</th>
+                <th style="width: 20%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="name" type="button">Name</button></th>
+                <th style="width: 13%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="onboarding_state" type="button">Status</button></th>
+                <th style="width: 22%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="onboarder" type="button">Onboarder</button></th>
+                <th style="width: 13%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="updated" type="button">Updated</button></th>
+                <th style="width: 15%;">Links</th>
                 <th style="width: 17%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="profile_gaps" type="button">Needs</button></th>
               </tr>
             </thead>
@@ -1164,6 +1181,12 @@ def dashboard_html() -> str:
       return "queued";
     }
 
+    function displayOnboarder(value) {
+      const raw = String(value || "").trim();
+      if (!raw || raw.toLowerCase() === "none") return "";
+      return raw;
+    }
+
     function valueForSort(scope, item, key) {
       if (scope === "onboarding") {
         const status = item.profile_status || {};
@@ -1461,7 +1484,26 @@ def dashboard_html() -> str:
         const stateText = person.onboarding_status_label || labelForOnboardingState(stateValue);
         const stateCell = addTextCell(row, "Status", "");
         stateCell.appendChild(createBadge(stateText, toneForOnboardingState(stateValue)));
-        addTextCell(row, "Onboarder", person.onboarder || "Unassigned");
+        const onboarderCell = addTextCell(row, "Onboarder", "");
+        const onboarderForm = document.createElement("form");
+        onboarderForm.className = "inline-form";
+        const onboarderInput = document.createElement("input");
+        onboarderInput.type = "text";
+        onboarderInput.autocomplete = "off";
+        onboarderInput.placeholder = "508 username";
+        onboarderInput.value = displayOnboarder(person.onboarder);
+        onboarderInput.setAttribute("aria-label", `Onboarder for ${displayName}`);
+        const onboarderButton = document.createElement("button");
+        onboarderButton.type = "submit";
+        onboarderButton.textContent = "Assign";
+        onboarderButton.setAttribute("aria-label", `Assign onboarder for ${displayName}`);
+        onboarderForm.addEventListener("submit", (event) => {
+          event.preventDefault();
+          assignOnboarder(person.crm_contact_id, onboarderInput.value, onboarderButton);
+        });
+        onboarderForm.appendChild(onboarderInput);
+        onboarderForm.appendChild(onboarderButton);
+        onboarderCell.appendChild(onboarderForm);
         addTextCell(row, "Updated", formatDate(person.onboarding_updated_at));
 
         const linksCell = addTextCell(row, "Links", "");
@@ -1733,6 +1775,46 @@ def dashboard_html() -> str:
         setToast(error.message || "Unable to queue people sync", "error");
       } finally {
         els.syncPeople.disabled = false;
+      }
+    }
+
+    async function assignOnboarder(contactId, onboarder, button) {
+      const normalizedContactId = String(contactId || "").trim();
+      const normalizedOnboarder = String(onboarder || "").trim();
+      if (!normalizedContactId) {
+        setToast("Missing CRM contact id", "error");
+        return;
+      }
+      if (!normalizedOnboarder) {
+        setToast("Enter a 508 username", "error");
+        return;
+      }
+
+      button.disabled = true;
+      setToast(`Assigning ${normalizedOnboarder}`);
+      try {
+        const payload = await requestJson(
+          `/dashboard/api/onboarding/${encodeURIComponent(normalizedContactId)}/onboarder`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ onboarder: normalizedOnboarder }),
+          },
+        );
+        const row = state.onboarding.find((person) => person.crm_contact_id === payload.contact_id);
+        if (row) {
+          row.onboarder = payload.onboarder;
+          if (payload.state_updated && payload.onboarding_state) {
+            row.onboarding_state = payload.onboarding_state;
+            row.onboarding_status_label = labelForOnboardingState(payload.onboarding_state);
+          }
+        }
+        renderOnboarding();
+        setToast(`Assigned ${payload.onboarder}`, "ok");
+      } catch (error) {
+        setToast(error.message || "Unable to assign onboarder", "error");
+      } finally {
+        button.disabled = false;
       }
     }
 

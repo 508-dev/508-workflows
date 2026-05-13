@@ -55,8 +55,8 @@ The admin dashboard is served at `/dashboard`. It is available only to active
 admin sessions created through the existing OIDC or Discord dashboard login link
 flows, and Discord-backed sessions carry the linked CRM contact id from the
 local `people` cache. It exposes recent jobs, job details/reruns, CRM people
-lookup with profile/onboarding signals, people-cache sync, and recent human
-audit events.
+lookup with profile/onboarding signals, onboarding queue assignment, people-cache
+sync, and recent human audit events.
 
 ### Current API/queue caveats
 

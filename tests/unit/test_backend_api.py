@@ -1059,6 +1059,117 @@ def test_dashboard_onboarding_returns_filtered_queue(client: TestClient) -> None
     )
 
 
+def test_dashboard_assign_onboarder_updates_crm_and_audits(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="admin@508.dev",
+        display_name="Discord Admin",
+        groups=["discord_admin"],
+        is_admin=True,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    espo_client = Mock()
+    espo_client.request.side_effect = [
+        {
+            "id": "contact-prospect-1",
+            "name": "Bea Prospect",
+            "cOnboarder": "none",
+            "cOnboardingState": "pending",
+        },
+        {"id": "contact-prospect-1"},
+    ]
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.EspoClient", return_value=espo_client),
+        patch(
+            "five08.backend.api.enqueue_job", return_value=Mock(id="sync-job-1")
+        ) as mock_enqueue,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            "/dashboard/api/onboarding/contact-prospect-1/onboarder",
+            json={"onboarder": "Jane@508.dev"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["contact_id"] == "contact-prospect-1"
+    assert payload["contact_name"] == "Bea Prospect"
+    assert payload["onboarder"] == "jane"
+    assert payload["previous_state"] == "pending"
+    assert payload["onboarding_state"] == "selected"
+    assert payload["state_updated"] is True
+    assert payload["sync_job_id"] == "sync-job-1"
+    assert espo_client.request.call_args_list[0].args == (
+        "GET",
+        "Contact/contact-prospect-1",
+    )
+    assert espo_client.request.call_args_list[1].args == (
+        "PUT",
+        "Contact/contact-prospect-1",
+        {"cOnboarder": "jane", "cOnboardingState": "selected"},
+    )
+    assert mock_enqueue.call_args.kwargs["args"] == ("contact-prospect-1",)
+    audit_kwargs = mock_audit.call_args.kwargs
+    assert audit_kwargs["action"] == "crm.assign_onboarder"
+    assert audit_kwargs["result"] == api.AuditResult.SUCCESS
+    assert audit_kwargs["actor_provider"] == api.ActorProvider.DISCORD
+    assert audit_kwargs["actor_subject"] == "123456789"
+    assert audit_kwargs["resource_id"] == "contact-prospect-1"
+    assert audit_kwargs["metadata"]["onboarder"] == "jane"
+
+
+def test_dashboard_assign_onboarder_rejects_invalid_onboarder(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admins"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.EspoClient") as mock_espo_client,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            "/dashboard/api/onboarding/contact-prospect-1/onboarder",
+            json={"onboarder": "<@123456789>"},
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "invalid_onboarder"}
+    mock_espo_client.assert_not_called()
+    audit_kwargs = mock_audit.call_args.kwargs
+    assert audit_kwargs["action"] == "crm.assign_onboarder"
+    assert audit_kwargs["result"] == api.AuditResult.ERROR
+    assert audit_kwargs["metadata"]["reason"] == "invalid_onboarder"
+
+
 def test_dashboard_audit_events_returns_recent_events(client: TestClient) -> None:
     session = api.AuthSession(
         subject="admin-1",

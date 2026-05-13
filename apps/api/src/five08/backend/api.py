@@ -32,6 +32,7 @@ from five08.audit import (
     AuditSource,
     insert_audit_event,
 )
+from five08.clients.espo import EspoAPIError, EspoClient
 from five08.logging import configure_observability
 from five08.queue import (
     EnqueuedJob,
@@ -102,6 +103,12 @@ class DiscordLinkCreateRequest(BaseModel):
     next_path: str | None = None
 
 
+class DashboardAssignOnboarderRequest(BaseModel):
+    """Payload for assigning an onboarder from the dashboard."""
+
+    onboarder: str
+
+
 @dataclass(frozen=True)
 class JobsQueryFilters:
     """Normalized query filters for job-list endpoints."""
@@ -112,6 +119,8 @@ class JobsQueryFilters:
 
 
 _JOB_FUNCTIONS = JOB_FUNCTIONS
+_ONBOARDING_STATUS_FIELD = "cOnboardingState"
+_ONBOARDER_FIELD = "cOnboarder"
 _SENSITIVE_PAYLOAD_KEY_MARKERS = (
     "api_key",
     "apikey",
@@ -121,6 +130,17 @@ _SENSITIVE_PAYLOAD_KEY_MARKERS = (
     "secret",
     "token",
 )
+_ONBOARDER_USERNAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789._-")
+
+
+class DashboardOnboarderAssignmentError(Exception):
+    """Expected dashboard onboarder assignment validation error."""
+
+    def __init__(self, error: str, *, status_code: int = 400) -> None:
+        super().__init__(error)
+        self.error = error
+        self.status_code = status_code
+
 
 # Backward-compatible direct handler exports expected by existing call sites/tests.
 process_webhook_event = JOB_FUNCTIONS["process_webhook_event"]
@@ -544,6 +564,30 @@ def _is_present(value: Any) -> bool:
     return bool(value)
 
 
+def _normalize_508_username(value: str | None) -> str | None:
+    """Normalize a dashboard onboarder value into a 508 username."""
+    if not value:
+        return None
+
+    normalized = value.strip().lstrip("@").strip()
+    normalized = " ".join(normalized.split())
+    if not normalized or normalized.startswith("<@"):
+        return None
+
+    if "@" in normalized:
+        username, _, domain = normalized.partition("@")
+        if not username:
+            return None
+        normalized = username
+
+    normalized = normalized.casefold()
+    if not normalized or any(
+        char not in _ONBOARDER_USERNAME_CHARS for char in normalized
+    ):
+        return None
+    return normalized
+
+
 def _limit_dashboard_count(value: int) -> int:
     return max(1, min(value, 100))
 
@@ -931,6 +975,48 @@ def _list_dashboard_audit_events(limit: int) -> list[dict[str, Any]]:
     return events
 
 
+def _assign_dashboard_onboarder_in_crm(
+    *,
+    contact_id: str,
+    onboarder: str,
+) -> dict[str, Any]:
+    normalized_contact_id = contact_id.strip()
+    if not normalized_contact_id:
+        raise DashboardOnboarderAssignmentError("contact_id_required")
+
+    onboarder_username = _normalize_508_username(onboarder)
+    if onboarder_username is None:
+        raise DashboardOnboarderAssignmentError("invalid_onboarder")
+
+    client = EspoClient(settings.espo_base_url, settings.espo_api_key)
+    full_contact = client.request("GET", f"Contact/{normalized_contact_id}")
+    if _ONBOARDER_FIELD not in full_contact:
+        raise DashboardOnboarderAssignmentError(
+            "missing_onboarder_field",
+            status_code=422,
+        )
+
+    current_state = str(full_contact.get(_ONBOARDING_STATUS_FIELD) or "").strip()
+    normalized_state = current_state.casefold()
+    update_payload: dict[str, str] = {_ONBOARDER_FIELD: onboarder_username}
+    state_updated = False
+    if normalized_state == "pending":
+        update_payload[_ONBOARDING_STATUS_FIELD] = "selected"
+        state_updated = True
+
+    client.request("PUT", f"Contact/{normalized_contact_id}", update_payload)
+    resulting_state = "selected" if state_updated else current_state
+    return {
+        "status": "updated",
+        "contact_id": normalized_contact_id,
+        "contact_name": full_contact.get("name") or "CRM contact",
+        "onboarder": onboarder_username,
+        "previous_state": normalized_state or None,
+        "onboarding_state": resulting_state or None,
+        "state_updated": state_updated,
+    }
+
+
 def _session_actor_provider(session: AuthSession) -> ActorProvider:
     raw_provider = session.actor_provider.strip().lower()
     if raw_provider == ActorProvider.DISCORD.value:
@@ -1040,6 +1126,32 @@ async def _audit_dashboard_job_rerun(
             "job_type": job_type,
             "queue": settings.redis_queue_name,
         },
+    )
+
+
+async def _audit_dashboard_assign_onboarder(
+    session: AuthSession,
+    *,
+    result: AuditResult,
+    contact_id: str,
+    onboarder: str | None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    actor_provider, actor_subject = _session_audit_actor(session)
+    audit_metadata = {
+        "source": "dashboard",
+        "onboarder": onboarder,
+    }
+    audit_metadata.update(metadata or {})
+    await _write_auth_audit_event(
+        action="crm.assign_onboarder",
+        result=result,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="crm_contact",
+        resource_id=contact_id,
+        metadata=audit_metadata,
     )
 
 
@@ -1629,6 +1741,93 @@ async def dashboard_onboarding_handler(
         skills=skills,
     )
     return JSONResponse(people)
+
+
+async def dashboard_assign_onboarder_handler(
+    request: Request,
+    contact_id: str,
+) -> JSONResponse:
+    """Assign an onboarder to one CRM contact from the dashboard."""
+    session, error_response = await _dashboard_admin_session_or_error(request)
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    try:
+        body = await request.json()
+        payload = DashboardAssignOnboarderRequest.model_validate(body)
+    except Exception:
+        return JSONResponse({"error": "invalid_request"}, status_code=400)
+
+    try:
+        result = await asyncio.to_thread(
+            _assign_dashboard_onboarder_in_crm,
+            contact_id=contact_id,
+            onboarder=payload.onboarder,
+        )
+    except DashboardOnboarderAssignmentError as exc:
+        await _audit_dashboard_assign_onboarder(
+            session,
+            result=AuditResult.ERROR,
+            contact_id=contact_id,
+            onboarder=_normalize_508_username(payload.onboarder),
+            metadata={"reason": exc.error},
+        )
+        return JSONResponse({"error": exc.error}, status_code=exc.status_code)
+    except EspoAPIError as exc:
+        logger.error(
+            "CRM onboarder assignment failed contact_id=%s error=%s",
+            contact_id,
+            exc,
+        )
+        await _audit_dashboard_assign_onboarder(
+            session,
+            result=AuditResult.ERROR,
+            contact_id=contact_id,
+            onboarder=_normalize_508_username(payload.onboarder),
+            metadata={"reason": "crm_update_failed", "error": str(exc)},
+        )
+        return JSONResponse(
+            {"error": "crm_update_failed", "detail": str(exc)},
+            status_code=502,
+        )
+
+    sync_job_id: str | None = None
+    try:
+        sync_job = await asyncio.to_thread(
+            enqueue_job,
+            queue=request.app.state.queue,
+            fn=JOB_FUNCTIONS["sync_person_from_crm_job"],
+            args=(result["contact_id"],),
+            settings=settings,
+            idempotency_key=f"dashboard-onboarder-sync:{result['contact_id']}:{_generate_ulid()}",
+        )
+        sync_job_id = sync_job.id
+    except Exception:
+        logger.warning(
+            "Failed enqueueing post-assignment people sync contact_id=%s",
+            result["contact_id"],
+            exc_info=True,
+        )
+
+    await _audit_dashboard_assign_onboarder(
+        session,
+        result=AuditResult.SUCCESS,
+        contact_id=result["contact_id"],
+        onboarder=result["onboarder"],
+        metadata={
+            "contact_name": result["contact_name"],
+            "previous_state": result["previous_state"],
+            "state_updated": result["state_updated"],
+            "sync_job_id": sync_job_id,
+        },
+    )
+    result["sync_job_id"] = sync_job_id
+    return JSONResponse(result, status_code=200)
 
 
 async def dashboard_audit_events_handler(
@@ -2658,6 +2857,11 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
         "/dashboard/api/onboarding",
         dashboard_onboarding_handler,
         methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/onboarding/{contact_id}/onboarder",
+        dashboard_assign_onboarder_handler,
+        methods=["POST"],
     )
     app.add_api_route(
         "/dashboard/api/audit-events",
