@@ -133,6 +133,9 @@ def dashboard_html() -> str:
       color: var(--text);
     }
     header {
+      position: sticky;
+      top: 0;
+      z-index: 20;
       border-bottom: 1px solid var(--line);
       background: rgba(15, 17, 16, 0.92);
       backdrop-filter: blur(16px);
@@ -166,6 +169,7 @@ def dashboard_html() -> str:
       display: flex;
       align-items: center;
       gap: 12px;
+      min-width: 0;
     }
     main {
       max-width: 1280px;
@@ -183,7 +187,9 @@ def dashboard_html() -> str:
       gap: 6px;
     }
     .nav-link {
-      display: block;
+      display: flex;
+      align-items: center;
+      gap: 8px;
       border: 1px solid transparent;
       border-radius: 6px;
       color: var(--muted);
@@ -201,6 +207,13 @@ def dashboard_html() -> str:
       border-color: var(--accent);
       background: var(--accent-muted);
       color: var(--accent-strong);
+    }
+    .nav-link[aria-current="page"]::before {
+      content: "";
+      width: 3px;
+      height: 18px;
+      border-radius: 999px;
+      background: var(--accent-strong);
     }
     .content {
       min-width: 0;
@@ -314,7 +327,17 @@ def dashboard_html() -> str:
       border-collapse: collapse;
       table-layout: fixed;
     }
-    .jobs-table { table-layout: auto; }
+    .table-scroll {
+      width: 100%;
+      overflow-x: auto;
+    }
+    .onboarding-table { min-width: 1080px; }
+    .people-table { min-width: 900px; }
+    .jobs-table {
+      min-width: 980px;
+      table-layout: auto;
+    }
+    .audit-table { min-width: 760px; }
     .jobs-table th:last-child,
     .jobs-table td:last-child {
       width: 168px;
@@ -326,7 +349,7 @@ def dashboard_html() -> str:
       text-align: left;
       vertical-align: middle;
       font-size: 13px;
-      overflow-wrap: anywhere;
+      overflow-wrap: break-word;
     }
     th {
       background: var(--panel-2);
@@ -338,6 +361,10 @@ def dashboard_html() -> str:
     .compact td, .compact th { padding: 10px 12px; }
     tr:last-child td { border-bottom: 0; }
     .job-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .job-id,
+    .detail-item strong {
+      overflow-wrap: anywhere;
+    }
     .badge {
       display: inline-flex;
       align-items: center;
@@ -364,8 +391,12 @@ def dashboard_html() -> str:
     }
     .toast {
       min-height: 22px;
+      max-width: 260px;
       color: var(--muted);
       font-size: 13px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     .toast.error { color: var(--danger); }
     .toast.ok { color: var(--ok); }
@@ -391,14 +422,14 @@ def dashboard_html() -> str:
       text-decoration: none;
     }
     .resource-link:hover {
-      border-color: var(--accent);
-      background: var(--accent-muted);
+      border-color: var(--resource-border, var(--accent));
+      background: var(--resource-bg, var(--accent-muted));
       text-decoration: none;
     }
     .resource-mark {
       display: inline-grid;
       place-items: center;
-      min-width: 20px;
+      min-width: 24px;
       height: 20px;
       border-radius: 4px;
       background: var(--panel-3);
@@ -406,9 +437,33 @@ def dashboard_html() -> str:
       font-size: 10px;
       font-weight: 900;
     }
-    .resource-link.resume .resource-mark { color: var(--accent-strong); }
-    .resource-link.linkedin .resource-mark { color: #8ab4f8; }
-    .resource-link.github .resource-mark { color: #e6edf3; }
+    .resource-link.resume {
+      --resource-border: rgba(227, 179, 65, 0.5);
+      --resource-bg: rgba(187, 128, 9, 0.18);
+    }
+    .resource-link.linkedin {
+      --resource-border: rgba(10, 102, 194, 0.58);
+      --resource-bg: rgba(10, 102, 194, 0.18);
+    }
+    .resource-link.github {
+      --resource-border: rgba(139, 148, 158, 0.55);
+      --resource-bg: rgba(139, 148, 158, 0.16);
+    }
+    .resource-link.resume .resource-mark {
+      background: rgba(187, 128, 9, 0.26);
+      color: #f2cc60;
+    }
+    .resource-link.linkedin .resource-mark {
+      background: rgba(10, 102, 194, 0.26);
+      color: #8ab4f8;
+      font-family: ui-serif, Georgia, serif;
+      font-size: 13px;
+      font-weight: 900;
+    }
+    .resource-link.github .resource-mark {
+      background: rgba(139, 148, 158, 0.2);
+      color: #e6edf3;
+    }
     .actions {
       display: flex;
       gap: 8px;
@@ -430,7 +485,12 @@ def dashboard_html() -> str:
     }
     .filter-row {
       display: grid;
-      grid-template-columns: minmax(150px, 0.8fr) minmax(160px, 1fr) minmax(160px, 1fr) auto;
+      grid-template-columns:
+        minmax(140px, 0.8fr)
+        minmax(150px, 1fr)
+        minmax(150px, 1fr)
+        minmax(120px, 0.7fr)
+        auto;
       gap: 10px;
       align-items: end;
       padding: 14px 16px;
@@ -456,6 +516,10 @@ def dashboard_html() -> str:
       font: inherit;
       font-weight: inherit;
       text-align: left;
+    }
+    th[aria-sort="ascending"] .sort-button,
+    th[aria-sort="descending"] .sort-button {
+      color: var(--accent-strong);
     }
     .sort-button:hover {
       border-color: transparent;
@@ -528,7 +592,13 @@ def dashboard_html() -> str:
         position: static;
         grid-template-columns: repeat(3, minmax(0, 1fr));
       }
-      .nav-link { text-align: center; }
+      .nav-link {
+        justify-content: center;
+        text-align: center;
+      }
+      .nav-link[aria-current="page"]::before { display: none; }
+      .table-scroll { overflow-x: visible; }
+      .table-scroll table { min-width: 0; }
       table, thead, tbody, th, td, tr { display: block; }
       thead { display: none; }
       tr { border-bottom: 1px solid var(--line); }
@@ -538,12 +608,15 @@ def dashboard_html() -> str:
         display: grid;
         grid-template-columns: 110px minmax(0, 1fr);
         gap: 10px;
+        align-items: start;
       }
       td::before {
         content: attr(data-label);
+        grid-column: 1;
         color: var(--muted);
         font-weight: 800;
       }
+      td > * { grid-column: 2; }
       .actions { justify-content: start; }
     }
   </style>
@@ -613,19 +686,21 @@ def dashboard_html() -> str:
           <div id="activeOnboardingFilters" class="chip-list active-filters" aria-label="Active onboarding filters"></div>
         </div>
         <div id="onboardingEmptyState" class="empty" hidden>No prospects match this queue view.</div>
-        <table id="onboardingTable" class="compact" aria-label="Onboarding queue">
-          <thead>
-            <tr>
-              <th style="width: 22%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="name" type="button">Name</button></th>
-              <th style="width: 14%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="onboarding_state" type="button">Status</button></th>
-              <th style="width: 16%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="onboarder" type="button">Onboarder</button></th>
-              <th style="width: 15%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="updated" type="button">Updated</button></th>
-              <th style="width: 16%;">Links</th>
-              <th style="width: 17%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="profile_gaps" type="button">Needs</button></th>
-            </tr>
-          </thead>
-          <tbody id="onboardingBody"></tbody>
-        </table>
+        <div class="table-scroll">
+          <table id="onboardingTable" class="compact onboarding-table" aria-label="Onboarding queue">
+            <thead>
+              <tr>
+                <th style="width: 22%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="name" type="button">Name</button></th>
+                <th style="width: 14%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="onboarding_state" type="button">Status</button></th>
+                <th style="width: 16%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="onboarder" type="button">Onboarder</button></th>
+                <th style="width: 15%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="updated" type="button">Updated</button></th>
+                <th style="width: 16%;">Links</th>
+                <th style="width: 17%;"><button class="sort-button" data-sort-scope="onboarding" data-sort-key="profile_gaps" type="button">Needs</button></th>
+              </tr>
+            </thead>
+            <tbody id="onboardingBody"></tbody>
+          </table>
+        </div>
       </section>
     </section>
 
@@ -671,19 +746,21 @@ def dashboard_html() -> str:
         <h2>Recent jobs</h2>
       </div>
       <div id="emptyState" class="empty" hidden>No jobs match these filters.</div>
-      <table id="jobsTable" class="jobs-table" aria-label="Recent jobs">
-        <thead>
-          <tr>
-            <th style="width: 22%;"><button class="sort-button" data-sort-scope="jobs" data-sort-key="job_id" type="button">Job id</button></th>
-            <th style="width: 24%;"><button class="sort-button" data-sort-scope="jobs" data-sort-key="type" type="button">Type</button></th>
-            <th style="width: 12%;"><button class="sort-button" data-sort-scope="jobs" data-sort-key="status" type="button">Status</button></th>
-            <th style="width: 12%;"><button class="sort-button" data-sort-scope="jobs" data-sort-key="attempts" type="button">Attempts</button></th>
-            <th style="width: 18%;"><button class="sort-button" data-sort-scope="jobs" data-sort-key="updated_at" type="button">Updated</button></th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody id="jobsBody"></tbody>
-      </table>
+      <div class="table-scroll">
+        <table id="jobsTable" class="jobs-table" aria-label="Recent jobs">
+          <thead>
+            <tr>
+              <th style="width: 22%;"><button class="sort-button" data-sort-scope="jobs" data-sort-key="job_id" type="button">Job id</button></th>
+              <th style="width: 24%;"><button class="sort-button" data-sort-scope="jobs" data-sort-key="type" type="button">Type</button></th>
+              <th style="width: 12%;"><button class="sort-button" data-sort-scope="jobs" data-sort-key="status" type="button">Status</button></th>
+              <th style="width: 12%;"><button class="sort-button" data-sort-scope="jobs" data-sort-key="attempts" type="button">Attempts</button></th>
+              <th style="width: 18%;"><button class="sort-button" data-sort-scope="jobs" data-sort-key="updated_at" type="button">Updated</button></th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="jobsBody"></tbody>
+        </table>
+      </div>
     </section>
 
     <section id="jobDetailPanel" class="panel" hidden>
@@ -743,17 +820,19 @@ def dashboard_html() -> str:
           <div id="activePeopleFilters" class="chip-list active-filters" aria-label="Active people filters"></div>
         </div>
         <div id="peopleEmptyState" class="empty" hidden>No people match this lookup.</div>
-        <table id="peopleTable" class="compact" aria-label="People lookup results">
-          <thead>
-            <tr>
-              <th style="width: 27%;"><button class="sort-button" data-sort-scope="people" data-sort-key="name" type="button">Name</button></th>
-              <th style="width: 28%;"><button class="sort-button" data-sort-scope="people" data-sort-key="status" type="button">Status</button></th>
-              <th style="width: 20%;"><button class="sort-button" data-sort-scope="people" data-sort-key="discord" type="button">Discord</button></th>
-              <th style="width: 25%;"><button class="sort-button" data-sort-scope="people" data-sort-key="resume" type="button">Resume / skills</button></th>
-            </tr>
-          </thead>
-          <tbody id="peopleBody"></tbody>
-        </table>
+        <div class="table-scroll">
+          <table id="peopleTable" class="compact people-table" aria-label="People lookup results">
+            <thead>
+              <tr>
+                <th style="width: 27%;"><button class="sort-button" data-sort-scope="people" data-sort-key="name" type="button">Name</button></th>
+                <th style="width: 28%;"><button class="sort-button" data-sort-scope="people" data-sort-key="status" type="button">Status</button></th>
+                <th style="width: 20%;"><button class="sort-button" data-sort-scope="people" data-sort-key="discord" type="button">Discord</button></th>
+                <th style="width: 25%;"><button class="sort-button" data-sort-scope="people" data-sort-key="resume" type="button">Resume / skills</button></th>
+              </tr>
+            </thead>
+            <tbody id="peopleBody"></tbody>
+          </table>
+        </div>
       </section>
     </section>
 
@@ -764,17 +843,19 @@ def dashboard_html() -> str:
           <button id="refreshAudit" type="button">Refresh</button>
         </div>
         <div id="auditEmptyState" class="empty" hidden>No audit events found.</div>
-        <table id="auditTable" class="compact" aria-label="Recent audit events">
-          <thead>
-            <tr>
-              <th style="width: 24%;"><button class="sort-button" data-sort-scope="audit" data-sort-key="occurred_at" type="button">Time</button></th>
-              <th style="width: 28%;"><button class="sort-button" data-sort-scope="audit" data-sort-key="actor" type="button">Actor</button></th>
-              <th style="width: 28%;"><button class="sort-button" data-sort-scope="audit" data-sort-key="action" type="button">Action</button></th>
-              <th style="width: 20%;"><button class="sort-button" data-sort-scope="audit" data-sort-key="result" type="button">Result</button></th>
-            </tr>
-          </thead>
-          <tbody id="auditBody"></tbody>
-        </table>
+        <div class="table-scroll">
+          <table id="auditTable" class="compact audit-table" aria-label="Recent audit events">
+            <thead>
+              <tr>
+                <th style="width: 24%;"><button class="sort-button" data-sort-scope="audit" data-sort-key="occurred_at" type="button">Time</button></th>
+                <th style="width: 28%;"><button class="sort-button" data-sort-scope="audit" data-sort-key="actor" type="button">Actor</button></th>
+                <th style="width: 28%;"><button class="sort-button" data-sort-scope="audit" data-sort-key="action" type="button">Action</button></th>
+                <th style="width: 20%;"><button class="sort-button" data-sort-scope="audit" data-sort-key="result" type="button">Result</button></th>
+              </tr>
+            </thead>
+            <tbody id="auditBody"></tbody>
+          </table>
+        </div>
       </section>
     </section>
     </div>
@@ -1045,7 +1126,7 @@ def dashboard_html() -> str:
         const mark = document.createElement("span");
         mark.className = "resource-mark";
         mark.setAttribute("aria-hidden", "true");
-        mark.textContent = kind === "resume" ? "CV" : kind === "linkedin" ? "in" : "GH";
+        mark.textContent = kind === "resume" ? "DOC" : kind === "linkedin" ? "in" : "GH";
         link.appendChild(mark);
         link.append(label);
       } else {
@@ -1155,7 +1236,8 @@ def dashboard_html() -> str:
         const arrow = state.sort[scope].direction === "asc" ? "↑" : "↓";
         button.textContent = active ? `${button.dataset.sortLabel} ${arrow}` : button.dataset.sortLabel;
         const ariaSort = state.sort[scope].direction === "asc" ? "ascending" : "descending";
-        button.setAttribute("aria-sort", active ? ariaSort : "none");
+        const header = button.closest("th");
+        if (header) header.setAttribute("aria-sort", active ? ariaSort : "none");
       }
     }
 
@@ -1473,7 +1555,7 @@ def dashboard_html() -> str:
           const mark = document.createElement("span");
           mark.className = "resource-mark";
           mark.setAttribute("aria-hidden", "true");
-          mark.textContent = "CV";
+          mark.textContent = "DOC";
           resumeLink.appendChild(mark);
           resumeLink.append("Resume");
           resumeCell.appendChild(resumeLink);
