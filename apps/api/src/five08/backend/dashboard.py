@@ -71,16 +71,61 @@ def dashboard_html() -> str:
       font-size: 14px;
       overflow-wrap: anywhere;
     }
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
     main {
-      max-width: 1180px;
+      max-width: 1280px;
       margin: 0 auto;
       padding: 22px;
       display: grid;
+      grid-template-columns: 190px minmax(0, 1fr);
       gap: 18px;
+      align-items: start;
+    }
+    .sidebar {
+      position: sticky;
+      top: 16px;
+      display: grid;
+      gap: 6px;
+    }
+    .nav-link {
+      display: block;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      color: var(--muted);
+      padding: 10px 12px;
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 800;
+    }
+    .nav-link:hover {
+      border-color: var(--line);
+      background: var(--panel-2);
+      color: var(--text);
+    }
+    .nav-link[aria-current="page"] {
+      border-color: var(--accent);
+      background: var(--accent-muted);
+      color: var(--accent-strong);
+    }
+    .content {
+      min-width: 0;
+      display: grid;
+      gap: 18px;
+    }
+    .view {
+      display: grid;
+      gap: 18px;
+    }
+    .view[hidden] {
+      display: none;
     }
     .toolbar {
       display: grid;
-      grid-template-columns: repeat(5, minmax(0, 1fr));
+      grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 12px;
       align-items: end;
       padding: 16px;
@@ -121,6 +166,7 @@ def dashboard_html() -> str:
       padding: 8px 12px;
       font: inherit;
       font-weight: 700;
+      white-space: nowrap;
       cursor: pointer;
     }
     button:hover {
@@ -177,6 +223,12 @@ def dashboard_html() -> str:
       border-collapse: collapse;
       table-layout: fixed;
     }
+    .jobs-table { table-layout: auto; }
+    .jobs-table th:last-child,
+    .jobs-table td:last-child {
+      width: 168px;
+      min-width: 168px;
+    }
     th, td {
       padding: 12px 14px;
       border-bottom: 1px solid var(--line);
@@ -226,6 +278,13 @@ def dashboard_html() -> str:
     }
     .toast.error { color: var(--danger); }
     .toast.ok { color: var(--ok); }
+    .inline-link {
+      color: var(--accent-strong);
+      font-size: 13px;
+      font-weight: 800;
+      text-decoration: none;
+    }
+    .inline-link:hover { text-decoration: underline; }
     .actions {
       display: flex;
       gap: 8px;
@@ -244,6 +303,40 @@ def dashboard_html() -> str:
       gap: 10px;
       padding: 14px 16px;
       border-bottom: 1px solid var(--line);
+    }
+    .filter-row {
+      display: grid;
+      grid-template-columns: minmax(150px, 0.8fr) minmax(160px, 1fr) minmax(160px, 1fr) auto;
+      gap: 10px;
+      align-items: end;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel-3);
+    }
+    .active-filters {
+      grid-column: 1 / -1;
+      min-height: 28px;
+    }
+    .filter-chip {
+      min-height: 28px;
+      border-radius: 999px;
+      padding: 3px 10px;
+      font-size: 12px;
+    }
+    .sort-button {
+      min-height: 0;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      padding: 0;
+      font: inherit;
+      font-weight: inherit;
+      text-align: left;
+    }
+    .sort-button:hover {
+      border-color: transparent;
+      background: transparent;
+      color: var(--text);
     }
     .detail-body {
       padding: 16px;
@@ -297,8 +390,17 @@ def dashboard_html() -> str:
         align-items: start;
         flex-direction: column;
       }
+      .header-actions {
+        width: 100%;
+        justify-content: space-between;
+      }
       .identity { text-align: left; }
-      .toolbar, .summary, .split, .detail-grid, .search-row { grid-template-columns: 1fr; }
+      main, .toolbar, .summary, .split, .detail-grid, .search-row, .filter-row { grid-template-columns: 1fr; }
+      .sidebar {
+        position: static;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+      .nav-link { text-align: center; }
       table, thead, tbody, th, td, tr { display: block; }
       thead { display: none; }
       tr { border-bottom: 1px solid var(--line); }
@@ -325,13 +427,24 @@ def dashboard_html() -> str:
         <h1>508 Admin Dashboard</h1>
         <p class="status-line">Operations view for authenticated admins.</p>
       </div>
-      <div class="identity" aria-live="polite">
-        <strong id="userName">Loading user</strong>
-        <span id="userMeta">Checking session</span>
+      <div class="header-actions">
+        <div class="identity" aria-live="polite">
+          <strong id="userName">Loading user</strong>
+          <span id="userMeta">Checking session</span>
+        </div>
+        <span id="toast" class="toast" role="status"></span>
+        <button id="logout" type="button">Log out</button>
       </div>
     </div>
   </header>
   <main>
+    <nav class="sidebar" aria-label="Dashboard sections">
+      <a class="nav-link" data-view-link="jobs" href="/dashboard/jobs">Jobs</a>
+      <a class="nav-link" data-view-link="people" href="/dashboard/people">People</a>
+      <a class="nav-link" data-view-link="audit" href="/dashboard/audit">Audit</a>
+    </nav>
+    <div class="content">
+    <section id="view-jobs" class="view" data-view="jobs">
     <section class="toolbar" aria-label="Job filters">
       <label>
         Window
@@ -359,7 +472,6 @@ def dashboard_html() -> str:
         <input id="jobType" autocomplete="off" placeholder="Any type">
       </label>
       <button id="refreshJobs" class="primary" type="button">Refresh jobs</button>
-      <button id="syncPeople" type="button">Sync people</button>
     </section>
 
     <section class="summary" aria-label="Job summary">
@@ -372,21 +484,17 @@ def dashboard_html() -> str:
     <section class="panel">
       <div class="panel-head">
         <h2>Recent jobs</h2>
-        <div class="actions">
-          <span id="toast" class="toast" role="status"></span>
-          <button id="logout" type="button">Log out</button>
-        </div>
       </div>
       <div id="emptyState" class="empty" hidden>No jobs match these filters.</div>
-      <table id="jobsTable" aria-label="Recent jobs">
+      <table id="jobsTable" class="jobs-table" aria-label="Recent jobs">
         <thead>
           <tr>
-            <th style="width: 24%;">Job id</th>
-            <th style="width: 26%;">Type</th>
-            <th style="width: 12%;">Status</th>
-            <th style="width: 12%;">Attempts</th>
-            <th style="width: 17%;">Updated</th>
-            <th style="width: 9%;">Actions</th>
+            <th style="width: 22%;"><button class="sort-button" data-sort-scope="jobs" data-sort-key="job_id" type="button">Job id</button></th>
+            <th style="width: 24%;"><button class="sort-button" data-sort-scope="jobs" data-sort-key="type" type="button">Type</button></th>
+            <th style="width: 12%;"><button class="sort-button" data-sort-scope="jobs" data-sort-key="status" type="button">Status</button></th>
+            <th style="width: 12%;"><button class="sort-button" data-sort-scope="jobs" data-sort-key="attempts" type="button">Attempts</button></th>
+            <th style="width: 18%;"><button class="sort-button" data-sort-scope="jobs" data-sort-key="updated_at" type="button">Updated</button></th>
+            <th>Actions</th>
           </tr>
         </thead>
         <tbody id="jobsBody"></tbody>
@@ -410,12 +518,17 @@ def dashboard_html() -> str:
         </div>
       </div>
     </section>
+    </section>
 
-    <section class="split">
+    <section id="view-people" class="view" data-view="people" hidden>
       <section class="panel">
         <div class="panel-head">
           <h2>People lookup</h2>
-          <span id="peopleStatus" class="status-line"></span>
+          <div class="actions">
+            <button id="syncPeople" type="button">Sync people</button>
+            <a id="crmHomeLink" class="inline-link" href="#" target="_blank" rel="noreferrer" hidden>Open CRM</a>
+            <span id="peopleStatus" class="status-line"></span>
+          </div>
         </div>
         <div class="search-row">
           <label>
@@ -424,20 +537,42 @@ def dashboard_html() -> str:
           </label>
           <button id="searchPeople" type="button">Search</button>
         </div>
+        <div class="filter-row" aria-label="People filters">
+          <label>
+            Member
+            <select id="peopleMember">
+              <option value="">Any</option>
+              <option value="true">Member</option>
+              <option value="false">Not member</option>
+            </select>
+          </label>
+          <label>
+            Add filter
+            <select id="peopleFilterKind"></select>
+          </label>
+          <label>
+            Value
+            <select id="peopleFilterValue"></select>
+          </label>
+          <button id="addPeopleFilter" type="button">Add filter</button>
+          <div id="activePeopleFilters" class="chip-list active-filters" aria-label="Active people filters"></div>
+        </div>
         <div id="peopleEmptyState" class="empty" hidden>No people match this lookup.</div>
         <table id="peopleTable" class="compact" aria-label="People lookup results">
           <thead>
             <tr>
-              <th style="width: 25%;">Person</th>
-              <th style="width: 28%;">Status</th>
-              <th style="width: 22%;">Discord</th>
-              <th style="width: 25%;">Resume / skills</th>
+              <th style="width: 27%;"><button class="sort-button" data-sort-scope="people" data-sort-key="name" type="button">Person</button></th>
+              <th style="width: 28%;"><button class="sort-button" data-sort-scope="people" data-sort-key="status" type="button">Status</button></th>
+              <th style="width: 20%;"><button class="sort-button" data-sort-scope="people" data-sort-key="discord" type="button">Discord</button></th>
+              <th style="width: 25%;"><button class="sort-button" data-sort-scope="people" data-sort-key="resume" type="button">Resume / skills</button></th>
             </tr>
           </thead>
           <tbody id="peopleBody"></tbody>
         </table>
       </section>
+    </section>
 
+    <section id="view-audit" class="view" data-view="audit" hidden>
       <section class="panel">
         <div class="panel-head">
           <h2>Recent audit</h2>
@@ -447,20 +582,70 @@ def dashboard_html() -> str:
         <table id="auditTable" class="compact" aria-label="Recent audit events">
           <thead>
             <tr>
-              <th style="width: 24%;">Time</th>
-              <th style="width: 28%;">Actor</th>
-              <th style="width: 28%;">Action</th>
-              <th style="width: 20%;">Result</th>
+              <th style="width: 24%;"><button class="sort-button" data-sort-scope="audit" data-sort-key="occurred_at" type="button">Time</button></th>
+              <th style="width: 28%;"><button class="sort-button" data-sort-scope="audit" data-sort-key="actor" type="button">Actor</button></th>
+              <th style="width: 28%;"><button class="sort-button" data-sort-scope="audit" data-sort-key="action" type="button">Action</button></th>
+              <th style="width: 20%;"><button class="sort-button" data-sort-scope="audit" data-sort-key="result" type="button">Result</button></th>
             </tr>
           </thead>
           <tbody id="auditBody"></tbody>
         </table>
       </section>
     </section>
+    </div>
   </main>
   <script>
-    const state = { jobs: [], people: [], auditEvents: [] };
+    const routes = {
+      jobs: "/dashboard/jobs",
+      people: "/dashboard/people",
+      audit: "/dashboard/audit",
+    };
+    const state = {
+      jobs: [],
+      people: [],
+      auditEvents: [],
+      crmBaseUrl: "",
+      sort: {
+        jobs: { key: "updated_at", direction: "desc" },
+        people: { key: "name", direction: "asc" },
+        audit: { key: "occurred_at", direction: "desc" },
+      },
+      peopleFilters: {},
+    };
+    const peopleFilterDefinitions = {
+      discord: {
+        label: "Discord",
+        options: [
+          ["linked", "Linked"],
+          ["missing", "Missing"],
+        ],
+      },
+      email_508: {
+        label: "508 email",
+        options: [
+          ["present", "Present"],
+          ["missing", "Missing"],
+        ],
+      },
+      resume: {
+        label: "Resume",
+        options: [
+          ["present", "Present"],
+          ["missing", "Missing"],
+        ],
+      },
+      sync_status: {
+        label: "Sync status",
+        options: [
+          ["active", "Active"],
+          ["conflict", "Conflict"],
+          ["missing_in_crm", "Missing in CRM"],
+        ],
+      },
+    };
     const els = {
+      navLinks: document.querySelectorAll("[data-view-link]"),
+      views: document.querySelectorAll("[data-view]"),
       userName: document.querySelector("#userName"),
       userMeta: document.querySelector("#userMeta"),
       minutes: document.querySelector("#minutes"),
@@ -483,8 +668,14 @@ def dashboard_html() -> str:
       jobPayload: document.querySelector("#jobPayload"),
       jobResult: document.querySelector("#jobResult"),
       peopleQuery: document.querySelector("#peopleQuery"),
+      peopleMember: document.querySelector("#peopleMember"),
+      peopleFilterKind: document.querySelector("#peopleFilterKind"),
+      peopleFilterValue: document.querySelector("#peopleFilterValue"),
+      addPeopleFilter: document.querySelector("#addPeopleFilter"),
+      activePeopleFilters: document.querySelector("#activePeopleFilters"),
       searchPeople: document.querySelector("#searchPeople"),
       peopleStatus: document.querySelector("#peopleStatus"),
+      crmHomeLink: document.querySelector("#crmHomeLink"),
       peopleBody: document.querySelector("#peopleBody"),
       peopleTable: document.querySelector("#peopleTable"),
       peopleEmptyState: document.querySelector("#peopleEmptyState"),
@@ -557,6 +748,151 @@ def dashboard_html() -> str:
       return badge;
     }
 
+    function rawViewFromPath() {
+      const parts = window.location.pathname.split("/").filter(Boolean);
+      return parts[1] || "jobs";
+    }
+
+    function viewFromPath() {
+      const view = rawViewFromPath();
+      return Object.prototype.hasOwnProperty.call(routes, view) ? view : "jobs";
+    }
+
+    function setView(view, options = {}) {
+      const normalizedView = Object.prototype.hasOwnProperty.call(routes, view) ? view : "jobs";
+      for (const section of els.views) {
+        section.hidden = section.dataset.view !== normalizedView;
+      }
+      for (const link of els.navLinks) {
+        if (link.dataset.viewLink === normalizedView) {
+          link.setAttribute("aria-current", "page");
+        } else {
+          link.removeAttribute("aria-current");
+        }
+      }
+      if (options.push) {
+        window.history.pushState({ view: normalizedView }, "", routes[normalizedView]);
+      } else if (!Object.prototype.hasOwnProperty.call(routes, rawViewFromPath())) {
+        window.history.replaceState({ view: normalizedView }, "", routes[normalizedView]);
+      }
+      if (normalizedView === "jobs") loadJobs();
+      if (normalizedView === "people") loadPeople();
+      if (normalizedView === "audit") loadAuditEvents();
+    }
+
+    function crmContactUrl(contactId) {
+      if (!state.crmBaseUrl || !contactId) return "";
+      return `${state.crmBaseUrl}/#Contact/view/${encodeURIComponent(contactId)}`;
+    }
+
+    function crmAttachmentUrl(attachmentId) {
+      if (!state.crmBaseUrl || !attachmentId) return "";
+      return `${state.crmBaseUrl}/api/v1/Attachment/file/${encodeURIComponent(attachmentId)}`;
+    }
+
+    function valueForSort(scope, item, key) {
+      if (scope === "people") {
+        const status = item.profile_status || {};
+        if (key === "name") return item.name || item.email_508 || item.email || "";
+        if (key === "status") {
+          return [
+            status.crm_active,
+            status.is_member,
+            status.discord_linked,
+            status.email_508,
+            status.latest_resume,
+          ].filter(Boolean).length;
+        }
+        if (key === "discord") return item.discord_username || item.discord_user_id || "";
+        if (key === "resume") return item.latest_resume_name || item.latest_resume_id || "";
+      }
+      if (scope === "audit") {
+        if (key === "actor") return item.actor_display_name || item.actor_subject || item.actor_provider || "";
+      }
+      return item[key] ?? "";
+    }
+
+    function sortItems(scope, items) {
+      const { key, direction } = state.sort[scope];
+      const multiplier = direction === "asc" ? 1 : -1;
+      return [...items].sort((a, b) => {
+        const left = valueForSort(scope, a, key);
+        const right = valueForSort(scope, b, key);
+        if (typeof left === "number" && typeof right === "number") {
+          return (left - right) * multiplier;
+        }
+        return String(left).localeCompare(String(right), undefined, { numeric: true }) * multiplier;
+      });
+    }
+
+    function setSort(scope, key) {
+      const current = state.sort[scope];
+      const direction = current.key === key && current.direction === "asc" ? "desc" : "asc";
+      state.sort[scope] = { key, direction };
+      if (scope === "jobs") renderJobs();
+      if (scope === "people") renderPeople();
+      if (scope === "audit") renderAuditEvents();
+    }
+
+    function labelForPeopleFilter(key, value) {
+      const definition = peopleFilterDefinitions[key];
+      const option = definition.options.find(([candidate]) => candidate === value);
+      return `${definition.label}: ${option ? option[1] : value}`;
+    }
+
+    function renderPeopleFilterOptions() {
+      els.peopleFilterKind.replaceChildren();
+      for (const [key, definition] of Object.entries(peopleFilterDefinitions)) {
+        if (state.peopleFilters[key]) continue;
+        const option = document.createElement("option");
+        option.value = key;
+        option.textContent = definition.label;
+        els.peopleFilterKind.appendChild(option);
+      }
+      renderPeopleFilterValues();
+      els.addPeopleFilter.disabled = els.peopleFilterKind.options.length === 0;
+    }
+
+    function renderPeopleFilterValues() {
+      els.peopleFilterValue.replaceChildren();
+      const definition = peopleFilterDefinitions[els.peopleFilterKind.value];
+      if (!definition) return;
+      for (const [value, label] of definition.options) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = label;
+        els.peopleFilterValue.appendChild(option);
+      }
+    }
+
+    function renderActivePeopleFilters() {
+      els.activePeopleFilters.replaceChildren();
+      for (const [key, value] of Object.entries(state.peopleFilters)) {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "filter-chip";
+        chip.textContent = `${labelForPeopleFilter(key, value)} x`;
+        chip.setAttribute("aria-label", `Remove ${labelForPeopleFilter(key, value)} filter`);
+        chip.addEventListener("click", () => {
+          delete state.peopleFilters[key];
+          renderActivePeopleFilters();
+          renderPeopleFilterOptions();
+          loadPeople();
+        });
+        els.activePeopleFilters.appendChild(chip);
+      }
+    }
+
+    function addPeopleFilter() {
+      const key = els.peopleFilterKind.value;
+      const value = els.peopleFilterValue.value;
+      if (!key || !value) return;
+      state.peopleFilters[key] = value;
+      renderActivePeopleFilters();
+      renderPeopleFilterOptions();
+      loadPeople();
+    }
+
     function updateMetrics() {
       const counts = state.jobs.reduce((acc, job) => {
         acc[job.status] = (acc[job.status] || 0) + 1;
@@ -573,7 +909,7 @@ def dashboard_html() -> str:
       els.emptyState.hidden = state.jobs.length !== 0;
       els.jobsTable.hidden = state.jobs.length === 0;
 
-      for (const job of state.jobs) {
+      for (const job of sortItems("jobs", state.jobs)) {
         const row = document.createElement("tr");
         addTextCell(row, "Job id", job.job_id, "job-id");
         addTextCell(row, "Type", job.type);
@@ -641,14 +977,23 @@ def dashboard_html() -> str:
       els.peopleEmptyState.hidden = state.people.length !== 0;
       els.peopleTable.hidden = state.people.length === 0;
 
-      for (const person of state.people) {
+      for (const person of sortItems("people", state.people)) {
         const row = document.createElement("tr");
         const personCell = addTextCell(row, "Person", "");
-        const personName = document.createElement("strong");
-        personName.textContent = person.name || person.crm_contact_id;
+        const contactUrl = crmContactUrl(person.crm_contact_id);
+        const personName = document.createElement(contactUrl ? "a" : "strong");
+        const displayName = person.name || person.email_508 || person.email || "CRM contact";
+        if (contactUrl) {
+          personName.href = contactUrl;
+          personName.target = "_blank";
+          personName.rel = "noreferrer";
+          personName.className = "inline-link";
+          personName.setAttribute("aria-label", `Open ${displayName} in CRM`);
+        }
+        personName.textContent = displayName;
         const meta = document.createElement("div");
         meta.className = "status-line";
-        meta.textContent = [person.email_508 || person.email, person.crm_contact_id]
+        meta.textContent = [person.email_508 || person.email, person.contact_type]
           .filter(Boolean)
           .join(" | ");
         personCell.appendChild(personName);
@@ -676,7 +1021,19 @@ def dashboard_html() -> str:
         const resumeCell = addTextCell(row, "Resume / skills", "");
         const resume = person.latest_resume_name || person.latest_resume_id || "No resume";
         const skillsCount = Number(status.skills_count || 0);
-        resumeCell.textContent = `${resume} | ${skillsCount} skills`;
+        const resumeUrl = crmAttachmentUrl(person.latest_resume_id);
+        if (resumeUrl) {
+          const resumeLink = document.createElement("a");
+          resumeLink.href = resumeUrl;
+          resumeLink.target = "_blank";
+          resumeLink.rel = "noreferrer";
+          resumeLink.className = "inline-link";
+          resumeLink.textContent = resume;
+          resumeCell.appendChild(resumeLink);
+          resumeCell.append(` | ${skillsCount} skills`);
+        } else {
+          resumeCell.textContent = `${resume} | ${skillsCount} skills`;
+        }
         els.peopleBody.appendChild(row);
       }
     }
@@ -686,7 +1043,7 @@ def dashboard_html() -> str:
       els.auditEmptyState.hidden = state.auditEvents.length !== 0;
       els.auditTable.hidden = state.auditEvents.length === 0;
 
-      for (const event of state.auditEvents) {
+      for (const event of sortItems("audit", state.auditEvents)) {
         const row = document.createElement("tr");
         addTextCell(row, "Time", formatDate(event.occurred_at));
         addTextCell(
@@ -714,6 +1071,11 @@ def dashboard_html() -> str:
 
     async function loadUser() {
       const user = await requestJson("/dashboard/api/me");
+      state.crmBaseUrl = (user.crm_base_url || "").replace(/\\/+$/, "");
+      if (state.crmBaseUrl) {
+        els.crmHomeLink.href = state.crmBaseUrl;
+        els.crmHomeLink.hidden = false;
+      }
       els.userName.textContent = user.display_name || user.email || user.subject;
       const pieces = [];
       if (user.email) pieces.push(user.email);
@@ -754,6 +1116,10 @@ def dashboard_html() -> str:
       const params = new URLSearchParams({ limit: "25" });
       const query = els.peopleQuery.value.trim();
       if (query) params.set("query", query);
+      if (els.peopleMember.value) params.set("is_member", els.peopleMember.value);
+      for (const [key, value] of Object.entries(state.peopleFilters)) {
+        params.set(key, value);
+      }
       return `/dashboard/api/people?${params.toString()}`;
     }
 
@@ -832,6 +1198,18 @@ def dashboard_html() -> str:
     els.logout.addEventListener("click", logout);
     els.searchPeople.addEventListener("click", loadPeople);
     els.refreshAudit.addEventListener("click", loadAuditEvents);
+    els.peopleFilterKind.addEventListener("change", renderPeopleFilterValues);
+    els.addPeopleFilter.addEventListener("click", addPeopleFilter);
+    for (const button of document.querySelectorAll("[data-sort-scope]")) {
+      button.addEventListener("click", () => setSort(button.dataset.sortScope, button.dataset.sortKey));
+    }
+    for (const link of els.navLinks) {
+      link.addEventListener("click", (event) => {
+        event.preventDefault();
+        setView(link.dataset.viewLink, { push: true });
+      });
+    }
+    window.addEventListener("popstate", () => setView(viewFromPath()));
     els.status.addEventListener("change", loadJobs);
     els.minutes.addEventListener("change", loadJobs);
     els.jobType.addEventListener("keydown", (event) => {
@@ -840,8 +1218,12 @@ def dashboard_html() -> str:
     els.peopleQuery.addEventListener("keydown", (event) => {
       if (event.key === "Enter") loadPeople();
     });
+    els.peopleMember.addEventListener("change", loadPeople);
 
-    Promise.all([loadUser(), loadJobs(), loadPeople(), loadAuditEvents()]).catch((error) => {
+    renderPeopleFilterOptions();
+    loadUser().then(() => {
+      setView(viewFromPath());
+    }).catch((error) => {
       setToast(error.message || "Dashboard failed to load", "error");
     });
   </script>

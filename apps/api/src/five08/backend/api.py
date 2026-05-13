@@ -11,6 +11,7 @@ import secrets
 import time
 import json
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, cast
 from urllib.parse import urlencode
@@ -99,6 +100,15 @@ class DiscordLinkCreateRequest(BaseModel):
 
     discord_user_id: str
     next_path: str | None = None
+
+
+@dataclass(frozen=True)
+class JobsQueryFilters:
+    """Normalized query filters for job-list endpoints."""
+
+    created_after: datetime
+    status: JobStatus | None
+    job_type: str | None
 
 
 _JOB_FUNCTIONS = JOB_FUNCTIONS
@@ -416,6 +426,7 @@ def _session_payload(session: AuthSession) -> dict[str, Any]:
         "expires_at": session.expires_at,
         "actor_provider": session.actor_provider,
         "crm_contact_id": session.crm_contact_id,
+        "crm_base_url": settings.espo_base_url.rstrip("/"),
     }
 
 
@@ -477,16 +488,65 @@ def _limit_dashboard_count(value: int) -> int:
     return max(1, min(value, 100))
 
 
+def _normalize_jobs_query_filters(
+    *,
+    minutes: int,
+    status: str | None,
+    job_type: str | None,
+) -> tuple[JobsQueryFilters | None, JSONResponse | None]:
+    job_status: JobStatus | None = None
+    if status is not None:
+        try:
+            job_status = JobStatus(status)
+        except ValueError:
+            return None, JSONResponse(
+                {"error": "invalid_status", "status": status},
+                status_code=400,
+            )
+
+    normalized_job_type = job_type.strip() if job_type is not None else None
+    if normalized_job_type == "":
+        normalized_job_type = None
+
+    return JobsQueryFilters(
+        created_after=datetime.now(tz=timezone.utc) - timedelta(minutes=minutes),
+        status=job_status,
+        job_type=normalized_job_type,
+    ), None
+
+
 def _list_dashboard_people(query: str | None, limit: int) -> list[dict[str, Any]]:
     normalized_query = (query or "").strip()
     limit = _limit_dashboard_count(limit)
+    return _query_dashboard_people(
+        normalized_query=normalized_query,
+        limit=limit,
+        sync_status=None,
+        is_member=None,
+        discord=None,
+        email_508=None,
+        resume=None,
+    )
+
+
+def _query_dashboard_people(
+    *,
+    normalized_query: str,
+    limit: int,
+    sync_status: str | None,
+    is_member: bool | None,
+    discord: str | None,
+    email_508: str | None,
+    resume: str | None,
+) -> list[dict[str, Any]]:
     params: list[Any] = []
-    where_clause = ""
+    conditions: list[str] = []
     if normalized_query:
         like_query = f"%{normalized_query}%"
         params.extend([like_query] * 13)
-        where_clause = """
-            WHERE
+        conditions.append(
+            """
+            (
                 crm_contact_id ILIKE %s
                 OR name ILIKE %s
                 OR email ILIKE %s
@@ -500,9 +560,69 @@ def _list_dashboard_people(query: str | None, limit: int) -> list[dict[str, Any]
                 OR address_state ILIKE %s
                 OR seniority ILIKE %s
                 OR latest_resume_name ILIKE %s
+            )
         """
+        )
+
+    if sync_status is not None:
+        conditions.append("sync_status = %s")
+        params.append(sync_status)
+    if is_member is not None:
+        conditions.append("is_member = %s")
+        params.append(is_member)
+    if discord == "linked":
+        conditions.append(
+            """
+            discord_user_id IS NOT NULL
+            AND btrim(discord_user_id) <> ''
+            AND lower(discord_user_id) <> 'no discord'
+        """
+        )
+    elif discord == "missing":
+        conditions.append(
+            """
+            (
+                discord_user_id IS NULL
+                OR btrim(discord_user_id) = ''
+                OR lower(discord_user_id) = 'no discord'
+            )
+        """
+        )
+    if email_508 == "present":
+        conditions.append("email_508 IS NOT NULL AND btrim(email_508) <> ''")
+    elif email_508 == "missing":
+        conditions.append("(email_508 IS NULL OR btrim(email_508) = '')")
+    if resume == "present":
+        conditions.append(
+            """
+            (
+            (
+                latest_resume_id IS NOT NULL
+                AND btrim(latest_resume_id) <> ''
+            )
+            OR (
+                latest_resume_name IS NOT NULL
+                AND btrim(latest_resume_name) <> ''
+            )
+            )
+        """
+        )
+    elif resume == "missing":
+        conditions.append(
+            """
+            (
+                latest_resume_id IS NULL
+                OR btrim(latest_resume_id) = ''
+            )
+            AND (
+                latest_resume_name IS NULL
+                OR btrim(latest_resume_name) = ''
+            )
+        """
+        )
 
     params.append(limit)
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     sql = f"""
         SELECT
             id::text,
@@ -996,28 +1116,22 @@ async def jobs_handler(
     if not _is_authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
-    cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=minutes)
-    job_status: JobStatus | None = None
-    if status is not None:
-        try:
-            job_status = JobStatus(status)
-        except ValueError:
-            return JSONResponse(
-                {"error": "invalid_status", "status": status},
-                status_code=400,
-            )
-
-    normalized_job_type = job_type.strip() if job_type is not None else None
-    if normalized_job_type == "":
-        normalized_job_type = None
+    filters, error_response = _normalize_jobs_query_filters(
+        minutes=minutes,
+        status=status,
+        job_type=job_type,
+    )
+    if error_response is not None:
+        return error_response
+    assert filters is not None
 
     recent_jobs = await asyncio.to_thread(
         list_jobs,
         settings,
-        created_after=cutoff,
+        created_after=filters.created_after,
         limit=limit,
-        status=job_status,
-        job_type=normalized_job_type,
+        status=filters.status,
+        job_type=filters.job_type,
     )
 
     payload = [
@@ -1122,7 +1236,10 @@ async def sync_people_handler(request: Request) -> JSONResponse:
     )
 
 
-async def dashboard_handler(request: Request) -> HTMLResponse | RedirectResponse:
+async def dashboard_handler(
+    request: Request,
+    view: str | None = None,
+) -> HTMLResponse | RedirectResponse:
     """Serve the admin dashboard for authenticated admin sessions."""
     session_id, session = await _current_session(request)
     if session is None:
@@ -1157,28 +1274,22 @@ async def dashboard_jobs_handler(
     if error_response is not None:
         return error_response
 
-    cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=minutes)
-    job_status: JobStatus | None = None
-    if status is not None:
-        try:
-            job_status = JobStatus(status)
-        except ValueError:
-            return JSONResponse(
-                {"error": "invalid_status", "status": status},
-                status_code=400,
-            )
-
-    normalized_job_type = job_type.strip() if job_type is not None else None
-    if normalized_job_type == "":
-        normalized_job_type = None
+    filters, error_response = _normalize_jobs_query_filters(
+        minutes=minutes,
+        status=status,
+        job_type=job_type,
+    )
+    if error_response is not None:
+        return error_response
+    assert filters is not None
 
     recent_jobs = await asyncio.to_thread(
         list_jobs,
         settings,
-        created_after=cutoff,
+        created_after=filters.created_after,
         limit=limit,
-        status=job_status,
-        job_type=normalized_job_type,
+        status=filters.status,
+        job_type=filters.job_type,
     )
 
     return JSONResponse(
@@ -1222,13 +1333,36 @@ async def dashboard_people_handler(
     request: Request,
     query: str | None = Query(default=None),
     limit: int = Query(default=25, ge=1, le=100),
+    sync_status: str | None = Query(default=None),
+    is_member: bool | None = Query(default=None),
+    discord: str | None = Query(default=None),
+    email_508: str | None = Query(default=None),
+    resume: str | None = Query(default=None),
 ) -> JSONResponse:
     """Return CRM people-cache rows for dashboard lookup/onboarding views."""
     _, error_response = await _dashboard_admin_session_or_error(request)
     if error_response is not None:
         return error_response
 
-    people = await asyncio.to_thread(_list_dashboard_people, query, limit)
+    if sync_status not in {None, "active", "missing_in_crm", "conflict"}:
+        return JSONResponse({"error": "invalid_sync_status"}, status_code=400)
+    if discord not in {None, "linked", "missing"}:
+        return JSONResponse({"error": "invalid_discord_filter"}, status_code=400)
+    if email_508 not in {None, "present", "missing"}:
+        return JSONResponse({"error": "invalid_email_508_filter"}, status_code=400)
+    if resume not in {None, "present", "missing"}:
+        return JSONResponse({"error": "invalid_resume_filter"}, status_code=400)
+
+    people = await asyncio.to_thread(
+        _query_dashboard_people,
+        normalized_query=(query or "").strip(),
+        limit=_limit_dashboard_count(limit),
+        sync_status=sync_status,
+        is_member=is_member,
+        discord=discord,
+        email_508=email_508,
+        resume=resume,
+    )
     return JSONResponse(people)
 
 
@@ -2220,6 +2354,12 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
 
     app.add_api_route(
         "/dashboard",
+        dashboard_handler,
+        methods=["GET"],
+        response_model=None,
+    )
+    app.add_api_route(
+        "/dashboard/{view}",
         dashboard_handler,
         methods=["GET"],
         response_model=None,

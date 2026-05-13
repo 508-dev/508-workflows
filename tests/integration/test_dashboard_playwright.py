@@ -142,6 +142,7 @@ def _people_payload() -> list[dict[str, object]]:
             "email_508": "alice@508.dev",
             "discord_user_id": "123456789",
             "discord_username": "alice",
+            "latest_resume_id": "resume-file-123",
             "latest_resume_name": "alice-resume.pdf",
             "profile_status": {
                 "crm_active": True,
@@ -198,6 +199,7 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
         page = context.new_page()
 
         job_requests: list[str] = []
+        people_requests: list[str] = []
         rerun_requested = threading.Event()
         sync_requested = threading.Event()
         detail_requested = threading.Event()
@@ -241,6 +243,7 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             )
 
         def people_route(route: Any) -> None:
+            people_requests.append(route.request.url)
             route.fulfill(
                 status=200,
                 content_type="application/json",
@@ -277,19 +280,20 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
         page.route("**/dashboard/api/sync/people", sync_route)
 
         try:
-            page.goto("/dashboard")
+            page.goto("/dashboard/jobs")
             page.get_by_role("heading", name="508 Admin Dashboard").wait_for()
             expect(page.locator("#userName")).to_have_text("Discord Admin")
             expect(page.locator("#userMeta")).to_contain_text("CRM contact-123")
+            expect(page.get_by_role("link", name="Jobs")).to_have_attribute(
+                "aria-current", "page"
+            )
 
             page.locator("#jobsBody tr").first.wait_for()
             assert page.locator("#jobsBody tr").count() == 2
             assert page.locator("#metricTotal").inner_text() == "2"
             assert page.locator("#metricQueued").inner_text() == "1"
             assert page.locator("#metricFailed").inner_text() == "1"
-            page.get_by_text("Alice Prospect").wait_for()
-            page.get_by_text("alice-resume.pdf | 4 skills").wait_for()
-            page.get_by_text("worker.job_rerun").wait_for()
+            expect(page.get_by_text("People lookup")).not_to_be_visible()
 
             with page.expect_response(
                 lambda response: (
@@ -323,9 +327,33 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             ).click()
             assert rerun_requested.wait(timeout=5)
 
+            page.get_by_role("link", name="People").click()
+            expect(page).to_have_url(f"{dashboard_server}/dashboard/people")
+            page.get_by_text("Alice Prospect").wait_for()
+            expect(
+                page.get_by_role("link", name="Open Alice Prospect in CRM")
+            ).to_have_attribute(
+                "href",
+                "https://crm.example.invalid/#Contact/view/contact-123",
+            )
+            expect(page.get_by_role("link", name="alice-resume.pdf")).to_have_attribute(
+                "href",
+                "https://crm.example.invalid/api/v1/Attachment/file/resume-file-123",
+            )
+            page.get_by_text("alice-resume.pdf | 4 skills").wait_for()
+            page.locator("#peopleFilterKind").select_option("resume")
+            page.locator("#peopleFilterValue").select_option("present")
+            page.get_by_role("button", name="Add filter").click()
+            page.get_by_role("button", name="Remove Resume: Present filter").wait_for()
+            assert any("resume=present" in url for url in people_requests)
+
             page.get_by_role("button", name="Sync people").click()
             assert sync_requested.wait(timeout=5)
             page.get_by_text("Queued people sync job-sync").wait_for()
+
+            page.get_by_role("link", name="Audit").click()
+            expect(page).to_have_url(f"{dashboard_server}/dashboard/audit")
+            page.get_by_text("worker.job_rerun").wait_for()
         finally:
             context.close()
             browser.close()

@@ -696,11 +696,12 @@ def test_dashboard_renders_for_admin_session(client: TestClient) -> None:
         new_callable=AsyncMock,
         return_value=("session-1", session),
     ):
-        response = client.get("/dashboard")
+        response = client.get("/dashboard/people")
 
     assert response.status_code == 200
     assert "508 Admin Dashboard" in response.text
     assert "/dashboard/api/me" in response.text
+    assert "/dashboard/people" in response.text
 
 
 def test_dashboard_me_returns_crm_linked_admin_session(client: TestClient) -> None:
@@ -726,6 +727,7 @@ def test_dashboard_me_returns_crm_linked_admin_session(client: TestClient) -> No
     assert response.status_code == 200
     assert response.json()["crm_contact_id"] == "contact-123"
     assert response.json()["actor_provider"] == api.ActorProvider.DISCORD.value
+    assert response.json()["crm_base_url"] == api.settings.espo_base_url.rstrip("/")
 
 
 def test_dashboard_me_clears_stale_session_cookie(client: TestClient) -> None:
@@ -976,14 +978,26 @@ def test_dashboard_people_returns_lookup_payload(client: TestClient) -> None:
             return_value=("session-1", session),
         ),
         patch(
-            "five08.backend.api._list_dashboard_people", return_value=people
+            "five08.backend.api._query_dashboard_people", return_value=people
         ) as mock_people,
     ):
-        response = client.get("/dashboard/api/people?query=alice&limit=10")
+        response = client.get(
+            "/dashboard/api/people"
+            "?query=alice&limit=10&sync_status=active&is_member=true"
+            "&discord=linked&email_508=present&resume=present"
+        )
 
     assert response.status_code == 200
     assert response.json() == people
-    mock_people.assert_called_once_with("alice", 10)
+    mock_people.assert_called_once_with(
+        normalized_query="alice",
+        limit=10,
+        sync_status="active",
+        is_member=True,
+        discord="linked",
+        email_508="present",
+        resume="present",
+    )
 
 
 def test_dashboard_audit_events_returns_recent_events(client: TestClient) -> None:
