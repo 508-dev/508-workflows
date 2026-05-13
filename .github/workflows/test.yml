@@ -87,7 +87,7 @@ jobs:
         echo "IMAP_SERVER=imap.test.com" >> "$GITHUB_ENV"
         echo "SMTP_SERVER=smtp.test.com" >> "$GITHUB_ENV"
         echo "ESPO_API_KEY=test_espo_key" >> "$GITHUB_ENV"
-        echo "ESPO_BASE_URL=https://espo.example.invalid" >> "$GITHUB_ENV"
+        echo "ESPO_BASE_URL=https://crm.example.invalid" >> "$GITHUB_ENV"
 
     - name: Run dashboard Playwright tests
       run: |

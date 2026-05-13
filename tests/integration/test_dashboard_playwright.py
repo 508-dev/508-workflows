@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import threading
 import time
@@ -57,7 +58,7 @@ def dashboard_server() -> Iterator[str]:
         display_name="Discord Admin",
         groups=["discord_admin"],
         is_admin=True,
-        id_token="",
+        id_token="id-token-1",
         expires_at=4_102_444_800,
         actor_provider=api.ActorProvider.DISCORD.value,
         crm_contact_id="contact-123",
@@ -214,6 +215,8 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
         try:
             browser = playwright.chromium.launch()
         except playwright_error as exc:
+            if os.environ.get("CI"):
+                raise
             pytest.skip(f"Playwright chromium is not installed: {exc}")
 
         context = browser.new_context(base_url=dashboard_server)
@@ -227,7 +230,7 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             ]
         )
         page = context.new_page()
-        crm_base_url = api.settings.espo_base_url.rstrip("/")
+        crm_base_url = api._crm_base_url()
 
         job_requests: list[str] = []
         people_requests: list[str] = []

@@ -20,7 +20,7 @@ This document captures Discord bot behavior, permissions, and slash command usag
 
 - `/dashboard-login`
   - Description: Generate a one-time operations dashboard login link.
-  - Required role: validated by the backend against active CRM-linked Discord roles. Steering Committee+ can access CRM/onboarding dashboard views; Admin/Owner roles receive full dashboard admin permissions.
+  - Required role: validated by the backend against active CRM-linked Discord roles. Steering Committee+ can access CRM/onboarding dashboard views; Admin/Owner roles can receive admin permissions, with sensitive job/audit/sync views requiring SSO validation.
   - Behavior:
     - Calls backend `POST /auth/discord/links` using `API_SHARED_SECRET`.
     - Returns an ephemeral one-time URL with expiry.

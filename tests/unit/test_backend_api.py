@@ -710,7 +710,7 @@ def test_dashboard_renders_for_admin_session(client: TestClient) -> None:
         display_name="Discord Admin",
         groups=["discord_admin"],
         is_admin=True,
-        id_token="",
+        id_token="id-token-1",
         expires_at=4_102_444_800,
         actor_provider=api.ActorProvider.DISCORD.value,
         crm_contact_id="contact-123",
@@ -736,7 +736,7 @@ def test_dashboard_me_returns_crm_linked_admin_session(client: TestClient) -> No
         display_name="Discord Admin",
         groups=["discord_admin"],
         is_admin=True,
-        id_token="",
+        id_token="id-token-1",
         expires_at=4_102_444_800,
         actor_provider=api.ActorProvider.DISCORD.value,
         crm_contact_id="contact-123",
@@ -752,8 +752,61 @@ def test_dashboard_me_returns_crm_linked_admin_session(client: TestClient) -> No
     assert response.status_code == 200
     assert response.json()["crm_contact_id"] == "contact-123"
     assert response.json()["actor_provider"] == api.ActorProvider.DISCORD.value
-    assert response.json()["crm_base_url"] == api.settings.espo_base_url.rstrip("/")
+    assert response.json()["crm_base_url"] == api._crm_base_url()
     assert "jobs:write" in response.json()["permissions"]
+
+
+def test_dashboard_me_normalizes_crm_api_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    monkeypatch.setattr(api.settings, "espo_base_url", "https://crm.example/api/v1/")
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admins"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/api/me")
+
+    assert response.status_code == 200
+    assert response.json()["crm_base_url"] == "https://crm.example"
+
+
+def test_dashboard_me_limits_sensitive_permissions_without_sso(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="admin@508.dev",
+        display_name="Discord Admin",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/api/me")
+
+    assert response.status_code == 200
+    assert "people:read" in response.json()["permissions"]
+    assert "onboarding:write" in response.json()["permissions"]
+    assert "jobs:write" not in response.json()["permissions"]
 
 
 def test_dashboard_me_clears_stale_session_cookie(client: TestClient) -> None:
@@ -816,6 +869,31 @@ def test_dashboard_jobs_forbids_steering_committee_session(
         is_admin=False,
         id_token="",
         expires_at=4_102_444_800,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/api/jobs")
+
+    assert response.status_code == 403
+    assert response.json()["error"] == "forbidden"
+
+
+def test_dashboard_jobs_forbids_discord_admin_without_sso(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="admin@508.dev",
+        display_name="Discord Admin",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
     )
 
     with patch(
@@ -1166,7 +1244,7 @@ def test_dashboard_assign_onboarder_updates_crm_and_audits(
         display_name="Discord Admin",
         groups=["discord_admin"],
         is_admin=True,
-        id_token="",
+        id_token="id-token-1",
         expires_at=4_102_444_800,
         actor_provider=api.ActorProvider.DISCORD.value,
     )
@@ -1321,7 +1399,7 @@ def test_dashboard_rerun_crm_job_audits_discord_session(
         display_name="Discord Admin",
         groups=["discord_admin"],
         is_admin=True,
-        id_token="",
+        id_token="id-token-1",
         expires_at=4_102_444_800,
         actor_provider=api.ActorProvider.DISCORD.value,
         crm_contact_id="contact-123",
@@ -1375,7 +1453,7 @@ def test_dashboard_rerun_rejects_cross_origin_post(client: TestClient) -> None:
         display_name="Admin User",
         groups=["Admins"],
         is_admin=True,
-        id_token="",
+        id_token="id-token-1",
         expires_at=4_102_444_800,
     )
 
@@ -1404,7 +1482,7 @@ def test_dashboard_sync_people_audits_discord_session(client: TestClient) -> Non
         display_name="Discord Admin",
         groups=["discord_admin"],
         is_admin=True,
-        id_token="",
+        id_token="id-token-1",
         expires_at=4_102_444_800,
         actor_provider=api.ActorProvider.DISCORD.value,
         crm_contact_id="contact-123",
@@ -1447,7 +1525,7 @@ def test_dashboard_sync_people_rejects_cross_origin_post(client: TestClient) -> 
         display_name="Admin User",
         groups=["Admins"],
         is_admin=True,
-        id_token="",
+        id_token="id-token-1",
         expires_at=4_102_444_800,
     )
 
@@ -1702,6 +1780,8 @@ def test_auth_callback_discord_link_uses_discord_session_after_oidc_checks(
     assert saved_session.id_token == "id-token-1"
     assert saved_session.groups == ["Admin"]
     assert saved_session.is_admin is True
+    assert "people:read" in saved_session.permissions
+    assert "onboarding:write" in saved_session.permissions
     assert "jobs:write" in saved_session.permissions
     store.delete_discord_link.assert_awaited_once_with("link-1")
     audit_payload = mock_insert.call_args.args[1]
@@ -1833,7 +1913,9 @@ def test_auth_discord_link_redirect_creates_discord_session_when_disabled(
     assert saved_session.crm_contact_id == "contact-123"
     assert saved_session.email == "admin@508.dev"
     assert saved_session.is_admin is True
-    assert "jobs:write" in saved_session.permissions
+    assert "people:read" in saved_session.permissions
+    assert "onboarding:write" in saved_session.permissions
+    assert "jobs:write" not in saved_session.permissions
     audit_payload = mock_insert.call_args.args[1]
     assert audit_payload.actor_provider == api.ActorProvider.DISCORD
     assert audit_payload.actor_subject == "123456789"

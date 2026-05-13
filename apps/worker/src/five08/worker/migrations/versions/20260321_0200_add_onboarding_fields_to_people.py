@@ -21,6 +21,7 @@ def upgrade() -> None:
     )
     op.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
     with op.get_context().autocommit_block():
+        # Match the dashboard's normalized onboarding_state filter expression.
         op.execute(
             """
             CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_people_onboarding_state

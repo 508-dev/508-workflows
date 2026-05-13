@@ -54,6 +54,7 @@ from five08.backend.auth import (
     DASHBOARD_PERMISSION_ONBOARDING_WRITE,
     DASHBOARD_PERMISSION_PEOPLE_READ,
     DASHBOARD_PERMISSION_PEOPLE_SYNC,
+    DASHBOARD_SENSITIVE_PERMISSIONS,
     DiscordAdminVerifier,
     DiscordLinkGrant,
     OIDCProviderClient,
@@ -431,12 +432,43 @@ async def _current_session(request: Request) -> tuple[str | None, AuthSession | 
     return session_id, session
 
 
+def _has_sso_validated_session(session: AuthSession) -> bool:
+    return bool(session.id_token.strip())
+
+
+def _dashboard_permissions_for_identity(
+    raw_roles: object,
+    *,
+    is_admin: bool,
+    id_token: str,
+) -> list[str]:
+    permissions = set(dashboard_permissions_for_roles(raw_roles, is_admin=is_admin))
+    if not id_token.strip():
+        permissions -= DASHBOARD_SENSITIVE_PERMISSIONS
+    return sorted(permissions)
+
+
 def _session_dashboard_permissions(session: AuthSession) -> set[str]:
     if session.permissions:
-        return set(session.permissions)
-    return set(
-        dashboard_permissions_for_roles(session.groups, is_admin=session.is_admin)
-    )
+        permissions = set(session.permissions)
+    else:
+        permissions = set(
+            dashboard_permissions_for_roles(session.groups, is_admin=session.is_admin)
+        )
+    if not _has_sso_validated_session(session):
+        permissions -= DASHBOARD_SENSITIVE_PERMISSIONS
+    return permissions
+
+
+def _crm_web_base_url(value: str) -> str:
+    normalized = value.strip().rstrip("/")
+    if normalized.lower().endswith("/api/v1"):
+        normalized = normalized[: -len("/api/v1")].rstrip("/")
+    return normalized
+
+
+def _crm_base_url() -> str:
+    return _crm_web_base_url(settings.espo_base_url)
 
 
 def _session_has_dashboard_permission(
@@ -501,7 +533,7 @@ def _session_payload(session: AuthSession) -> dict[str, Any]:
         "expires_at": session.expires_at,
         "actor_provider": session.actor_provider,
         "crm_contact_id": session.crm_contact_id,
-        "crm_base_url": settings.espo_base_url.rstrip("/"),
+        "crm_base_url": _crm_base_url(),
     }
 
 
@@ -2567,9 +2599,10 @@ async def auth_callback_handler(
             expires_at=expires_at,
             actor_provider=session_actor_provider.value,
             crm_contact_id=crm_contact_id,
-            permissions=dashboard_permissions_for_roles(
+            permissions=_dashboard_permissions_for_identity(
                 session_groups,
                 is_admin=is_admin,
+                id_token=id_token,
             ),
         ),
         ttl_seconds=settings.auth_session_ttl_seconds,
@@ -2775,9 +2808,10 @@ async def auth_discord_link_redirect_handler(
                 expires_at=expires_at,
                 actor_provider=ActorProvider.DISCORD.value,
                 crm_contact_id=identity.crm_contact_id,
-                permissions=dashboard_permissions_for_roles(
+                permissions=_dashboard_permissions_for_identity(
                     identity.discord_roles,
                     is_admin=is_admin,
+                    id_token="",
                 ),
             ),
             ttl_seconds=settings.auth_session_ttl_seconds,
@@ -2795,9 +2829,10 @@ async def auth_discord_link_redirect_handler(
             metadata={
                 "is_admin": is_admin,
                 "groups": identity.discord_roles,
-                "permissions": dashboard_permissions_for_roles(
+                "permissions": _dashboard_permissions_for_identity(
                     identity.discord_roles,
                     is_admin=is_admin,
+                    id_token="",
                 ),
                 "via_discord_link": True,
                 "discord_link_identity_checks_enforced": False,
@@ -2854,9 +2889,10 @@ async def auth_discord_link_redirect_handler(
                 expires_at=session.expires_at,
                 actor_provider=ActorProvider.DISCORD.value,
                 crm_contact_id=identity.crm_contact_id,
-                permissions=dashboard_permissions_for_roles(
+                permissions=_dashboard_permissions_for_identity(
                     identity.discord_roles,
                     is_admin=is_admin,
+                    id_token=session.id_token,
                 ),
             ),
             ttl_seconds=settings.auth_session_ttl_seconds,
@@ -2871,9 +2907,10 @@ async def auth_discord_link_redirect_handler(
             metadata={
                 "is_admin": is_admin,
                 "groups": identity.discord_roles,
-                "permissions": dashboard_permissions_for_roles(
+                "permissions": _dashboard_permissions_for_identity(
                     identity.discord_roles,
                     is_admin=is_admin,
+                    id_token=session.id_token,
                 ),
                 "via_discord_link": True,
                 "discord_link_identity_checks_enforced": True,

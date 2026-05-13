@@ -57,11 +57,12 @@ curl -X GET "http://localhost:8090/jobs/<job_id>" \
 Discord deep-link identity policy:
 
 - Discord deep links are available to active CRM-linked Discord users with Steering Committee role or higher.
-- `DISCORD_ADMIN_ROLES` controls which Discord roles receive full dashboard admin permissions (`Admin,Owner` recommended).
+- `DISCORD_ADMIN_ROLES` controls which Discord roles can receive admin dashboard permissions (`Admin,Owner` recommended).
 - `OIDC_ADMIN_GROUPS` controls normal OIDC dashboard admin membership (`authentik Admins` recommended).
 - `AUTH_SESSION_TTL_SECONDS` controls dashboard session lifetime after login (`86400`, one day, by default).
 - `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=true` (default): Discord deep links also require OIDC email identity checks against the linked CRM/Discord dashboard user.
 - `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=false`: Discord deep links create a Discord-backed session directly after re-validating active CRM membership + Discord Steering Committee+ role, without forcing an OIDC roundtrip.
+- Jobs, reruns, people sync, and audit are sensitive admin permissions and require an SSO-validated dashboard session even when the user entered through a Discord link.
 
 ### Known handler wiring expectation
 

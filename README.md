@@ -232,15 +232,15 @@ Use `.env.example` as the source of truth for defaults.
 ### Discord Admin Deep-Link Validation
 
 - `Optional`: `DISCORD_SERVER_ID` (required for Discord API fallback role checks)
-- `Optional`: `DISCORD_ADMIN_ROLES` (default: `Admin,Owner`; grants full dashboard admin permissions for Discord-backed sessions)
+- `Optional`: `DISCORD_ADMIN_ROLES` (default: `Admin,Owner`; marks Discord roles eligible for admin dashboard permissions)
 - `Optional`: `DISCORD_API_TIMEOUT_SECONDS` (default: `8.0`)
 - `Optional`: `DISCORD_LINK_TTL_SECONDS` (default: `600`)
 - `Optional`: `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS` (code default: `true`; local `.env.example` sets `false` so Discord dashboard links work without OIDC; set `true` in production with Authentik)
 - `Optional`: `DISCORD_BOT_TOKEN` (needed only for fallback Discord API checks; DB role check remains primary)
 - Note: Discord dashboard links are available to active CRM-linked Discord users
-  with Steering Committee role or higher. Admin/Owner roles receive full
-  dashboard admin permissions; Steering Committee receives CRM people lookup and
-  onboarding permissions.
+  with Steering Committee role or higher. Steering Committee receives CRM people
+  lookup and onboarding permissions. Jobs, reruns, people sync, and audit are
+  sensitive admin permissions and require an SSO-validated dashboard session.
 
 ### Worker Consumer
 
