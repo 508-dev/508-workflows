@@ -376,6 +376,39 @@ def dashboard_html() -> str:
       text-decoration: none;
     }
     .inline-link:hover { text-decoration: underline; }
+    .resource-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 26px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel-2);
+      color: var(--text);
+      padding: 3px 8px 3px 5px;
+      font-size: 12px;
+      font-weight: 800;
+      text-decoration: none;
+    }
+    .resource-link:hover {
+      border-color: var(--accent);
+      background: var(--accent-muted);
+      text-decoration: none;
+    }
+    .resource-mark {
+      display: inline-grid;
+      place-items: center;
+      min-width: 20px;
+      height: 20px;
+      border-radius: 4px;
+      background: var(--panel-3);
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 900;
+    }
+    .resource-link.resume .resource-mark { color: var(--accent-strong); }
+    .resource-link.linkedin .resource-mark { color: #8ab4f8; }
+    .resource-link.github .resource-mark { color: #e6edf3; }
     .actions {
       display: flex;
       gap: 8px;
@@ -883,7 +916,8 @@ def dashboard_html() -> str:
         headers,
       });
       if (response.status === 401) {
-        window.location.assign("/dashboard");
+        const next = `${window.location.pathname}${window.location.search}`;
+        window.location.assign(next || "/dashboard");
         throw new Error("Session expired");
       }
       if (!response.ok) {
@@ -893,6 +927,9 @@ def dashboard_html() -> str:
           detail = payload.detail || payload.error || detail;
         } catch (error) {
           detail = response.statusText;
+        }
+        if (typeof detail !== "string") {
+          detail = JSON.stringify(detail);
         }
         throw new Error(detail);
       }
@@ -997,14 +1034,23 @@ def dashboard_html() -> str:
       return `https://github.com/${encodeURIComponent(raw)}`;
     }
 
-    function appendInlineLink(cell, label, url, ariaLabel) {
+    function appendInlineLink(cell, label, url, ariaLabel, kind = "") {
       if (!url) return false;
       const link = document.createElement("a");
       link.href = url;
       link.target = "_blank";
       link.rel = "noreferrer";
-      link.className = "inline-link";
-      link.textContent = label;
+      link.className = kind ? `resource-link ${kind}` : "inline-link";
+      if (kind) {
+        const mark = document.createElement("span");
+        mark.className = "resource-mark";
+        mark.setAttribute("aria-hidden", "true");
+        mark.textContent = kind === "resume" ? "CV" : kind === "linkedin" ? "in" : "GH";
+        link.appendChild(mark);
+        link.append(label);
+      } else {
+        link.textContent = label;
+      }
       if (ariaLabel) link.setAttribute("aria-label", ariaLabel);
       cell.appendChild(link);
       return true;
@@ -1108,7 +1154,8 @@ def dashboard_html() -> str:
         const active = button.dataset.sortKey === state.sort[scope].key;
         const arrow = state.sort[scope].direction === "asc" ? "↑" : "↓";
         button.textContent = active ? `${button.dataset.sortLabel} ${arrow}` : button.dataset.sortLabel;
-        button.setAttribute("aria-sort", active ? state.sort[scope].direction : "none");
+        const ariaSort = state.sort[scope].direction === "asc" ? "ascending" : "descending";
+        button.setAttribute("aria-sort", active ? ariaSort : "none");
       }
     }
 
@@ -1339,9 +1386,9 @@ def dashboard_html() -> str:
         linksCell.className = "chip-list";
         const resumeUrl = crmAttachmentUrl(person.latest_resume_id);
         const linkCount = [
-          appendInlineLink(linksCell, "Resume", resumeUrl, `Open ${displayName} resume`),
-          appendInlineLink(linksCell, "LinkedIn", linkedinUrl(person.linkedin), `Open ${displayName} LinkedIn`),
-          appendInlineLink(linksCell, person.github_username || "GitHub", githubUrl(person.github_username), `Open ${displayName} GitHub`),
+          appendInlineLink(linksCell, "Resume", resumeUrl, `Open ${displayName} resume`, "resume"),
+          appendInlineLink(linksCell, "LinkedIn", linkedinUrl(person.linkedin), `Open ${displayName} LinkedIn`, "linkedin"),
+          appendInlineLink(linksCell, person.github_username || "GitHub", githubUrl(person.github_username), `Open ${displayName} GitHub`, "github"),
         ].filter(Boolean).length;
         if (linkCount === 0) linksCell.textContent = "None";
 
@@ -1421,9 +1468,14 @@ def dashboard_html() -> str:
           resumeLink.href = resumeUrl;
           resumeLink.target = "_blank";
           resumeLink.rel = "noreferrer";
-          resumeLink.className = "inline-link";
-          resumeLink.textContent = "Resume";
+          resumeLink.className = "resource-link resume";
           resumeLink.setAttribute("aria-label", `Open ${displayName} resume`);
+          const mark = document.createElement("span");
+          mark.className = "resource-mark";
+          mark.setAttribute("aria-hidden", "true");
+          mark.textContent = "CV";
+          resumeLink.appendChild(mark);
+          resumeLink.append("Resume");
           resumeCell.appendChild(resumeLink);
         } else {
           resumeCell.textContent = resume;

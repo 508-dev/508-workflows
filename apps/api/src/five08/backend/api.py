@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, cast
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from uuid import uuid4
 
 import httpx
@@ -416,6 +416,34 @@ async def _dashboard_admin_session_or_error(
     return session, None
 
 
+def _origin_from_url(value: str) -> str | None:
+    parsed = urlparse(value)
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+
+
+def _request_origin(request: Request) -> str | None:
+    return _origin_from_url(str(request.base_url))
+
+
+def _dashboard_same_origin_post_or_error(request: Request) -> JSONResponse | None:
+    expected_origin = _request_origin(request)
+    if expected_origin is None:
+        return JSONResponse({"error": "invalid_request_origin"}, status_code=403)
+
+    origin = request.headers.get("origin")
+    if origin is not None and _origin_from_url(origin) != expected_origin:
+        return JSONResponse({"error": "csrf_check_failed"}, status_code=403)
+
+    referer = request.headers.get("referer")
+    if origin is None and referer is not None:
+        if _origin_from_url(referer) != expected_origin:
+            return JSONResponse({"error": "csrf_check_failed"}, status_code=403)
+
+    return None
+
+
 def _session_payload(session: AuthSession) -> dict[str, Any]:
     return {
         "subject": session.subject,
@@ -446,6 +474,17 @@ def _redact_sensitive_payload(value: Any) -> Any:
     if isinstance(value, list):
         return [_redact_sensitive_payload(item) for item in value]
     return value
+
+
+def _redact_dashboard_idempotency_key(value: Any) -> str | None:
+    if value is None:
+        return None
+    key = str(value)
+    if key.startswith("resume-extract:"):
+        parts = key.split(":")
+        if len(parts) > 5:
+            return ":".join(parts[:5] + ["[redacted]"])
+    return key
 
 
 def _datetime_or_none(value: Any) -> str | None:
@@ -488,7 +527,7 @@ def _dashboard_job_payload(job: Any) -> dict[str, Any]:
         "locked_at": _datetime_or_none(job.locked_at),
         "locked_by": job.locked_by,
         "last_error": job.last_error,
-        "idempotency_key": job.idempotency_key,
+        "idempotency_key": _redact_dashboard_idempotency_key(job.idempotency_key),
         "created_at": job.created_at.isoformat(),
         "updated_at": job.updated_at.isoformat(),
         "payload": _redact_sensitive_payload(payload),
@@ -534,21 +573,6 @@ def _normalize_jobs_query_filters(
         status=job_status,
         job_type=normalized_job_type,
     ), None
-
-
-def _list_dashboard_people(query: str | None, limit: int) -> list[dict[str, Any]]:
-    normalized_query = (query or "").strip()
-    limit = _limit_dashboard_count(limit)
-    return _query_dashboard_people(
-        normalized_query=normalized_query,
-        limit=limit,
-        sync_status=None,
-        is_member=None,
-        discord=None,
-        email_508=None,
-        resume=None,
-        skills=None,
-    )
 
 
 def _query_dashboard_people(
@@ -598,7 +622,7 @@ def _query_dashboard_people(
             """
             discord_user_id IS NOT NULL
             AND btrim(discord_user_id) <> ''
-            AND lower(discord_user_id) <> 'no discord'
+            AND lower(btrim(discord_user_id)) NOT IN ('no discord', 'none')
         """
         )
     elif discord == "missing":
@@ -607,7 +631,7 @@ def _query_dashboard_people(
             (
                 discord_user_id IS NULL
                 OR btrim(discord_user_id) = ''
-                OR lower(discord_user_id) = 'no discord'
+                OR lower(btrim(discord_user_id)) IN ('no discord', 'none')
             )
         """
         )
@@ -644,9 +668,9 @@ def _query_dashboard_people(
         """
         )
     if skills == "present":
-        conditions.append("cardinality(skills) > 0")
+        conditions.append("COALESCE(cardinality(skills), 0) > 0")
     elif skills == "missing":
-        conditions.append("cardinality(skills) = 0")
+        conditions.append("COALESCE(cardinality(skills), 0) = 0")
 
     params.append(limit)
     where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
@@ -773,7 +797,7 @@ def _list_dashboard_onboarding(
             """
             discord_user_id IS NOT NULL
             AND btrim(discord_user_id) <> ''
-            AND lower(discord_user_id) <> 'no discord'
+            AND lower(btrim(discord_user_id)) NOT IN ('no discord', 'none')
         """
         )
     elif discord == "missing":
@@ -782,7 +806,7 @@ def _list_dashboard_onboarding(
             (
                 discord_user_id IS NULL
                 OR btrim(discord_user_id) = ''
-                OR lower(discord_user_id) = 'no discord'
+                OR lower(btrim(discord_user_id)) IN ('no discord', 'none')
             )
         """
         )
@@ -819,9 +843,9 @@ def _list_dashboard_onboarding(
         """
         )
     if skills == "present":
-        conditions.append("cardinality(skills) > 0")
+        conditions.append("COALESCE(cardinality(skills), 0) > 0")
     elif skills == "missing":
-        conditions.append("cardinality(skills) = 0")
+        conditions.append("COALESCE(cardinality(skills), 0) = 0")
 
     where_clause = " AND ".join(conditions)
     sql = f"""
@@ -1630,6 +1654,10 @@ async def dashboard_rerun_job_handler(
         return error_response
     assert session is not None
 
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
     payload, status_code = await _rerun_job(job_id, request.app.state.queue)
     if status_code == 202:
         await _audit_dashboard_job_rerun(session, payload)
@@ -1642,6 +1670,10 @@ async def dashboard_sync_people_handler(request: Request) -> JSONResponse:
     if error_response is not None:
         return error_response
     assert session is not None
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
 
     job = await _enqueue_full_crm_sync_job(request.app.state.queue, reason="dashboard")
     actor_provider, actor_subject = _session_audit_actor(session)

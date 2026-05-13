@@ -31,6 +31,7 @@ curl -X GET "http://localhost:8090/jobs/<job_id>" \
 - `GET /dashboard/api/jobs/{job_id}`: Session-authenticated dashboard job detail with sensitive payload keys redacted.
 - `POST /dashboard/api/jobs/{job_id}/rerun`: Session-authenticated dashboard job rerun.
 - `GET /dashboard/api/people`: Session-authenticated CRM people-cache lookup with profile/onboarding signals.
+- `GET /dashboard/api/onboarding`: Session-authenticated prospect onboarding queue from the CRM people cache.
 - `GET /dashboard/api/audit-events`: Session-authenticated recent human audit events.
 - `POST /dashboard/api/sync/people`: Session-authenticated dashboard people-cache sync.
 - `GET /jobs/{job_id}`: Fetch queued job status/result payload.

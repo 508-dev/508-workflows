@@ -19,16 +19,23 @@ def upgrade() -> None:
         "people",
         sa.Column("onboarding_updated_at", sa.DateTime(timezone=True), nullable=True),
     )
-    op.create_index(
-        "idx_people_onboarding_state",
-        "people",
-        ["onboarding_state", "onboarding_updated_at"],
-    )
+    with op.get_context().autocommit_block():
+        op.create_index(
+            "idx_people_onboarding_state",
+            "people",
+            ["onboarding_state", "onboarding_updated_at"],
+            postgresql_concurrently=True,
+        )
 
 
 def downgrade() -> None:
     """Remove CRM onboarding state fields."""
-    op.drop_index("idx_people_onboarding_state", table_name="people")
+    with op.get_context().autocommit_block():
+        op.drop_index(
+            "idx_people_onboarding_state",
+            table_name="people",
+            postgresql_concurrently=True,
+        )
     op.drop_column("people", "onboarding_updated_at")
     op.drop_column("people", "onboarder")
     op.drop_column("people", "onboarding_state")

@@ -203,6 +203,7 @@ def _audit_payload() -> list[dict[str, object]]:
     ]
 
 
+@pytest.mark.playwright
 def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
     playwright_api = pytest.importorskip("playwright.sync_api")
     sync_playwright = playwright_api.sync_playwright

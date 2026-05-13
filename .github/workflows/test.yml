@@ -28,16 +28,16 @@ jobs:
 
     - name: Set environment variables for tests
       run: |
-        echo "DISCORD_BOT_TOKEN=test_token_for_ci" >> $GITHUB_ENV
-        echo "EMAIL_USERNAME=test@example.com" >> $GITHUB_ENV
-        echo "EMAIL_PASSWORD=test_password" >> $GITHUB_ENV
-        echo "CHANNEL_ID=123456789" >> $GITHUB_ENV
-        echo "IMAP_SERVER=imap.test.com" >> $GITHUB_ENV
-        echo "SMTP_SERVER=smtp.test.com" >> $GITHUB_ENV
-        echo "ESPO_API_KEY=${{ secrets.ESPO_API_KEY }}" >> $GITHUB_ENV
-        echo "ESPO_BASE_URL=${{ secrets.ESPO_BASE_URL }}" >> $GITHUB_ENV
-        echo "KIMAI_BASE_URL=${{ secrets.KIMAI_BASE_URL }}" >> $GITHUB_ENV
-        echo "KIMAI_API_TOKEN=${{ secrets.KIMAI_API_TOKEN }}" >> $GITHUB_ENV
+        echo "DISCORD_BOT_TOKEN=test_token_for_ci" >> "$GITHUB_ENV"
+        echo "EMAIL_USERNAME=test@example.com" >> "$GITHUB_ENV"
+        echo "EMAIL_PASSWORD=test_password" >> "$GITHUB_ENV"
+        echo "CHANNEL_ID=123456789" >> "$GITHUB_ENV"
+        echo "IMAP_SERVER=imap.test.com" >> "$GITHUB_ENV"
+        echo "SMTP_SERVER=smtp.test.com" >> "$GITHUB_ENV"
+        echo "ESPO_API_KEY=${{ secrets.ESPO_API_KEY }}" >> "$GITHUB_ENV"
+        echo "ESPO_BASE_URL=${{ secrets.ESPO_BASE_URL }}" >> "$GITHUB_ENV"
+        echo "KIMAI_BASE_URL=${{ secrets.KIMAI_BASE_URL }}" >> "$GITHUB_ENV"
+        echo "KIMAI_API_TOKEN=${{ secrets.KIMAI_API_TOKEN }}" >> "$GITHUB_ENV"
 
     - name: Run tests with pytest
       run: |
@@ -80,14 +80,14 @@ jobs:
 
     - name: Set environment variables for dashboard tests
       run: |
-        echo "DISCORD_BOT_TOKEN=test_token_for_ci" >> $GITHUB_ENV
-        echo "EMAIL_USERNAME=test@example.com" >> $GITHUB_ENV
-        echo "EMAIL_PASSWORD=test_password" >> $GITHUB_ENV
-        echo "CHANNEL_ID=123456789" >> $GITHUB_ENV
-        echo "IMAP_SERVER=imap.test.com" >> $GITHUB_ENV
-        echo "SMTP_SERVER=smtp.test.com" >> $GITHUB_ENV
-        echo "ESPO_API_KEY=test_espo_key" >> $GITHUB_ENV
-        echo "ESPO_BASE_URL=https://espo.example.invalid" >> $GITHUB_ENV
+        echo "DISCORD_BOT_TOKEN=test_token_for_ci" >> "$GITHUB_ENV"
+        echo "EMAIL_USERNAME=test@example.com" >> "$GITHUB_ENV"
+        echo "EMAIL_PASSWORD=test_password" >> "$GITHUB_ENV"
+        echo "CHANNEL_ID=123456789" >> "$GITHUB_ENV"
+        echo "IMAP_SERVER=imap.test.com" >> "$GITHUB_ENV"
+        echo "SMTP_SERVER=smtp.test.com" >> "$GITHUB_ENV"
+        echo "ESPO_API_KEY=test_espo_key" >> "$GITHUB_ENV"
+        echo "ESPO_BASE_URL=https://espo.example.invalid" >> "$GITHUB_ENV"
 
     - name: Run dashboard Playwright tests
       run: |

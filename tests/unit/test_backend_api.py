@@ -913,7 +913,7 @@ def test_dashboard_job_detail_returns_redacted_payload(client: TestClient) -> No
             "kwargs": {"refresh_token": "secret-refresh-token"},
             "result": {"status": "ok", "api_key": "secret-key"},
         },
-        idempotency_key="job-key",
+        idempotency_key="resume-extract:contact-1:attachment-1:v1:gpt-test:secret-refresh-token",
         attempts=1,
         max_attempts=5,
         run_after=None,
@@ -937,6 +937,10 @@ def test_dashboard_job_detail_returns_redacted_payload(client: TestClient) -> No
     assert response.status_code == 200
     payload = response.json()
     assert payload["job_id"] == "job-1"
+    assert (
+        payload["idempotency_key"]
+        == "resume-extract:contact-1:attachment-1:v1:gpt-test:[redacted]"
+    )
     assert payload["payload"]["kwargs"]["refresh_token"] == "[redacted]"
     assert payload["result"]["api_key"] == "[redacted]"
     assert "secret-refresh-token" not in response.text
@@ -1155,6 +1159,35 @@ def test_dashboard_rerun_crm_job_audits_discord_session(
     assert audit_payload.metadata["job_type"] == "sync_people_from_crm_job"
 
 
+def test_dashboard_rerun_rejects_cross_origin_post(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admins"],
+        is_admin=True,
+        id_token="",
+        expires_at=4_102_444_800,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api._rerun_job", new_callable=AsyncMock) as mock_rerun,
+    ):
+        response = client.post(
+            "/dashboard/api/jobs/job-old-1/rerun",
+            headers={"Origin": "https://evil.example.invalid"},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["error"] == "csrf_check_failed"
+    mock_rerun.assert_not_called()
+
+
 def test_dashboard_sync_people_audits_discord_session(client: TestClient) -> None:
     session = api.AuthSession(
         subject="123456789",
@@ -1196,6 +1229,38 @@ def test_dashboard_sync_people_audits_discord_session(client: TestClient) -> Non
     assert audit_payload.resource_id == "job-sync-1"
     assert audit_payload.metadata is not None
     assert audit_payload.metadata["source"] == "dashboard"
+
+
+def test_dashboard_sync_people_rejects_cross_origin_post(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admins"],
+        is_admin=True,
+        id_token="",
+        expires_at=4_102_444_800,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._enqueue_full_crm_sync_job",
+            new_callable=AsyncMock,
+        ) as mock_enqueue,
+    ):
+        response = client.post(
+            "/dashboard/api/sync/people",
+            headers={"Origin": "https://evil.example.invalid"},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["error"] == "csrf_check_failed"
+    mock_enqueue.assert_not_called()
 
 
 def test_auth_discord_link_create_forbidden_for_non_admin(
