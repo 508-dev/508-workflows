@@ -49,6 +49,6 @@ def test_ensure_ports_available_handles_missing_lsof_gracefully(
 
     assert ok is False
     assert error == (
-        f"api port {port} is already in use; "
+        f"web port {port} is already in use; "
         "install lsof for owner details or stop the existing listener and retry."
     )

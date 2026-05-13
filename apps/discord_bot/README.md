@@ -121,9 +121,9 @@ Relevant configuration:
     - Supports the same confirmation buttons for writes.
   - Example: `@508.dev Bot show tasks for project Atlas`
 
-- `/login`
-  - Description: Generate a one-time admin dashboard login link.
-  - Required role: any role listed in `DISCORD_ADMIN_ROLES` (`Admin,Owner` by default).
+- `/dashboard-login`
+  - Description: Generate a one-time operations dashboard login link.
+  - Required role: validated by the backend against active CRM-linked Discord roles. Steering Committee+ can access CRM/onboarding dashboard views; Admin/Owner roles can receive admin permissions, with sensitive job/audit/sync views requiring SSO validation.
   - Behavior:
     - Calls backend `POST /auth/discord/links` using `API_SHARED_SECRET`.
     - Returns an ephemeral one-time URL with expiry.

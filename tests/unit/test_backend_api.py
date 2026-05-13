@@ -1293,13 +1293,1086 @@ def test_auth_me_requires_session(client: TestClient) -> None:
     assert response.json()["error"] == "unauthorized"
 
 
+def test_dashboard_shows_login_recovery_for_unauthenticated_client(
+    client: TestClient,
+) -> None:
+    response = client.get("/dashboard", follow_redirects=False)
+    assert response.status_code == 401
+    assert "/dashboard-login" in response.text
+
+
+def test_dashboard_clears_stale_session_cookie(client: TestClient) -> None:
+    client.cookies.set(api.settings.auth_session_cookie_name, "stale-session")
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("stale-session", None),
+    ):
+        response = client.get("/dashboard", follow_redirects=False)
+
+    assert response.status_code == 401
+    assert "/dashboard-login" in response.text
+    set_cookie = response.headers["set-cookie"]
+    assert f"{api.settings.auth_session_cookie_name}=" in set_cookie
+    assert "Max-Age=0" in set_cookie
+
+
+def test_dashboard_forbids_non_admin_session(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="member-1",
+        email="member@508.dev",
+        display_name="Member User",
+        groups=["Member"],
+        is_admin=False,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard")
+
+    assert response.status_code == 403
+
+
+def test_dashboard_renders_for_steering_committee_session(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/people")
+
+    assert response.status_code == 200
+    assert "508 Operations Dashboard" in response.text
+
+
+def test_dashboard_renders_for_admin_session(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="admin@508.dev",
+        display_name="Discord Admin",
+        groups=["discord_admin"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+        crm_contact_id="contact-123",
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/people")
+
+    assert response.status_code == 200
+    assert "508 Operations Dashboard" in response.text
+    assert "/dashboard/api/me" in response.text
+    assert "/dashboard/people" in response.text
+
+
+def test_dashboard_me_returns_crm_linked_admin_session(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="admin@508.dev",
+        display_name="Discord Admin",
+        groups=["discord_admin"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+        crm_contact_id="contact-123",
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/api/me")
+
+    assert response.status_code == 200
+    assert response.json()["crm_contact_id"] == "contact-123"
+    assert response.json()["actor_provider"] == api.ActorProvider.DISCORD.value
+    assert response.json()["crm_base_url"] == api._crm_base_url()
+    assert "jobs:write" in response.json()["permissions"]
+
+
+def test_dashboard_me_normalizes_crm_api_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    monkeypatch.setattr(api.settings, "espo_base_url", "https://crm.example/api/v1/")
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admins"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/api/me")
+
+    assert response.status_code == 200
+    assert response.json()["crm_base_url"] == "https://crm.example"
+
+
+def test_dashboard_me_limits_sensitive_permissions_without_sso(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    monkeypatch.setattr(api.settings, "environment", "production")
+    session = api.AuthSession(
+        subject="123456789",
+        email="admin@508.dev",
+        display_name="Discord Admin",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/api/me")
+
+    assert response.status_code == 200
+    assert "people:read" in response.json()["permissions"]
+    assert "onboarding:write" in response.json()["permissions"]
+    assert "jobs:write" not in response.json()["permissions"]
+
+
+def test_dashboard_me_allows_sensitive_permissions_without_sso_in_dev(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    monkeypatch.setattr(api.settings, "environment", "development")
+    session = api.AuthSession(
+        subject="123456789",
+        email="admin@508.dev",
+        display_name="Discord Admin",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/api/me")
+
+    assert response.status_code == 200
+    assert "jobs:write" in response.json()["permissions"]
+    assert "audit:read" in response.json()["permissions"]
+
+
+def test_dashboard_me_does_not_trust_literal_oidc_admin_group(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="oidc-user-1",
+        email="user@508.dev",
+        display_name="OIDC User",
+        groups=["Admin"],
+        is_admin=False,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/api/me")
+
+    assert response.status_code == 403
+    assert response.json()["error"] == "forbidden"
+
+
+def test_dashboard_me_does_not_trust_stale_oidc_permissions(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="oidc-user-1",
+        email="user@508.dev",
+        display_name="OIDC User",
+        groups=["Admin"],
+        is_admin=False,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+        permissions=["people:read", "jobs:write"],
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/api/me")
+
+    assert response.status_code == 403
+    assert response.json()["error"] == "forbidden"
+
+
+def test_dashboard_me_honors_configured_discord_admin_role(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    monkeypatch.setattr(api.settings, "discord_admin_roles", "Operations")
+    session = api.AuthSession(
+        subject="123456789",
+        email="ops@508.dev",
+        display_name="Ops User",
+        groups=["Operations"],
+        is_admin=False,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/api/me")
+
+    assert response.status_code == 200
+    assert "jobs:write" in response.json()["permissions"]
+
+
+def test_dashboard_me_clears_stale_session_cookie(client: TestClient) -> None:
+    client.cookies.set(api.settings.auth_session_cookie_name, "stale-session")
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("stale-session", None),
+    ):
+        response = client.get("/dashboard/api/me")
+
+    assert response.status_code == 401
+    set_cookie = response.headers["set-cookie"]
+    assert f"{api.settings.auth_session_cookie_name}=" in set_cookie
+    assert "Max-Age=0" in set_cookie
+
+
+def test_dashboard_jobs_requires_admin_session(client: TestClient) -> None:
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=(None, None),
+    ):
+        response = client.get("/dashboard/api/jobs")
+
+    assert response.status_code == 401
+
+
+def test_dashboard_jobs_forbids_non_admin_session(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="member-1",
+        email="member@508.dev",
+        display_name="Member User",
+        groups=["Member"],
+        is_admin=False,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/api/jobs")
+
+    assert response.status_code == 403
+    assert response.json()["error"] == "forbidden"
+
+
+def test_dashboard_jobs_forbids_steering_committee_session(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/api/jobs")
+
+    assert response.status_code == 403
+    assert response.json()["error"] == "forbidden"
+
+
+def test_dashboard_jobs_forbids_discord_admin_without_sso(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    monkeypatch.setattr(api.settings, "environment", "production")
+    session = api.AuthSession(
+        subject="123456789",
+        email="admin@508.dev",
+        display_name="Discord Admin",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/api/jobs")
+
+    assert response.status_code == 403
+    assert response.json()["error"] == "forbidden"
+
+
+def test_dashboard_jobs_returns_filtered_job_payload(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admins"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+    created_at = datetime(2026, 2, 25, 12, 0, 0, tzinfo=timezone.utc)
+    updated_at = datetime(2026, 2, 25, 12, 5, 0, tzinfo=timezone.utc)
+    job = Mock(
+        id="job-failed-1",
+        type="sync_people_from_crm_job",
+        status=api.JobStatus.FAILED,
+        attempts=2,
+        max_attempts=5,
+        last_error="crm timeout",
+        created_at=created_at,
+        updated_at=updated_at,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.list_jobs", return_value=[job]) as mock_list_jobs,
+    ):
+        response = client.get(
+            "/dashboard/api/jobs"
+            "?minutes=15&limit=2&status=failed&type=sync_people_from_crm_job"
+        )
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "job_id": "job-failed-1",
+            "type": "sync_people_from_crm_job",
+            "status": "failed",
+            "attempts": 2,
+            "max_attempts": 5,
+            "last_error": "crm timeout",
+            "created_at": created_at.isoformat(),
+            "updated_at": updated_at.isoformat(),
+        }
+    ]
+    called_kwargs = mock_list_jobs.call_args.kwargs
+    assert called_kwargs["limit"] == 2
+    assert called_kwargs["status"] == api.JobStatus.FAILED
+    assert called_kwargs["job_type"] == "sync_people_from_crm_job"
+    assert called_kwargs["created_after"].tzinfo == timezone.utc
+
+
+def test_dashboard_jobs_rejects_invalid_status(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admins"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.list_jobs") as mock_list_jobs,
+    ):
+        response = client.get("/dashboard/api/jobs?status=not-a-status")
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": "invalid_status",
+        "status": "not-a-status",
+    }
+    mock_list_jobs.assert_not_called()
+
+
+def test_dashboard_jobs_ignores_empty_type_filter(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admins"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.list_jobs", return_value=[]) as mock_list_jobs,
+    ):
+        response = client.get("/dashboard/api/jobs?type=")
+
+    assert response.status_code == 200
+    assert mock_list_jobs.call_args.kwargs["job_type"] is None
+
+
+def test_dashboard_job_detail_returns_redacted_payload(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admins"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+    created_at = datetime(2026, 2, 25, 12, 0, 0, tzinfo=timezone.utc)
+    updated_at = datetime(2026, 2, 25, 12, 5, 0, tzinfo=timezone.utc)
+    job = Mock(
+        id="job-1",
+        type="extract_resume_profile_job",
+        status=api.JobStatus.SUCCEEDED,
+        payload={
+            "args": ["contact-1"],
+            "kwargs": {"refresh_token": "secret-refresh-token"},
+            "result": {"status": "ok", "api_key": "secret-key"},
+        },
+        idempotency_key="resume-extract:contact-1:attachment-1:v1:gpt-test:secret-refresh-token",
+        attempts=1,
+        max_attempts=5,
+        run_after=None,
+        locked_at=None,
+        locked_by=None,
+        last_error=None,
+        created_at=created_at,
+        updated_at=updated_at,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.get_job", return_value=job),
+    ):
+        response = client.get("/dashboard/api/jobs/job-1")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["job_id"] == "job-1"
+    assert (
+        payload["idempotency_key"]
+        == "resume-extract:contact-1:attachment-1:v1:gpt-test:[redacted]"
+    )
+    assert payload["payload"]["kwargs"]["refresh_token"] == "[redacted]"
+    assert payload["result"]["api_key"] == "[redacted]"
+    assert "secret-refresh-token" not in response.text
+
+
+def test_dashboard_job_detail_redacts_sensitive_positional_args(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admins"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+    created_at = datetime(2026, 2, 25, 12, 0, 0, tzinfo=timezone.utc)
+    updated_at = datetime(2026, 2, 25, 12, 5, 0, tzinfo=timezone.utc)
+    job = Mock(
+        id="job-mailbox",
+        type="process_mailbox_message_job",
+        status=api.JobStatus.QUEUED,
+        payload={
+            "args": ["raw-message-b64-with-email-and-resume"],
+            "kwargs": {},
+            "result": None,
+        },
+        idempotency_key="mailbox-inbox:message-1",
+        attempts=0,
+        max_attempts=5,
+        run_after=None,
+        locked_at=None,
+        locked_by=None,
+        last_error=None,
+        created_at=created_at,
+        updated_at=updated_at,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.get_job", return_value=job),
+    ):
+        response = client.get("/dashboard/api/jobs/job-mailbox")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["payload"]["args"] == ["[redacted]"]
+    assert "raw-message-b64-with-email-and-resume" not in response.text
+
+
+def test_dashboard_people_returns_lookup_payload(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admins"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+    people = [
+        {
+            "crm_contact_id": "contact-123",
+            "name": "Alice Prospect",
+            "email": "alice@example.com",
+            "email_508": "alice@508.dev",
+            "discord_user_id": "123456789",
+            "discord_username": "alice",
+            "sync_status": "active",
+            "profile_status": {
+                "crm_active": True,
+                "is_member": True,
+                "discord_linked": True,
+                "email_508": True,
+                "latest_resume": True,
+                "roles_count": 2,
+                "skills_count": 4,
+            },
+            "updated_at": "2026-02-25T12:05:00+00:00",
+        }
+    ]
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._query_dashboard_people", return_value=people
+        ) as mock_people,
+    ):
+        response = client.get(
+            "/dashboard/api/people"
+            "?query=alice&limit=10&sync_status=active&is_member=true"
+            "&discord=linked&email_508=present&resume=present&skills=present"
+        )
+
+    assert response.status_code == 200
+    assert response.json() == people
+    mock_people.assert_called_once_with(
+        normalized_query="alice",
+        limit=10,
+        sync_status="active",
+        is_member=True,
+        discord="linked",
+        email_508="present",
+        resume="present",
+        skills="present",
+    )
+
+
+def test_dashboard_onboarding_returns_filtered_queue(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admins"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+    queue = [
+        {
+            "crm_contact_id": "contact-prospect-1",
+            "name": "Bea Prospect",
+            "contact_type": "Prospect",
+            "onboarding_state": "selected",
+            "onboarder": "michael",
+            "profile_status": {"skills_count": 0},
+        }
+    ]
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._list_dashboard_onboarding", return_value=queue
+        ) as mock_onboarding,
+    ):
+        response = client.get(
+            "/dashboard/api/onboarding"
+            "?query=bea&limit=10&onboarding_state=Awaiting%20Contribution"
+            "&onboarder=michael"
+            "&skills=missing"
+        )
+
+    assert response.status_code == 200
+    assert response.json() == queue
+    mock_onboarding.assert_called_once_with(
+        query="bea",
+        limit=10,
+        onboarding_state="awaitingcontribution",
+        onboarder="michael",
+        discord=None,
+        email_508=None,
+        resume=None,
+        skills="missing",
+    )
+
+
+def test_dashboard_assign_onboarder_updates_crm_and_audits(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="admin@508.dev",
+        display_name="Discord Admin",
+        groups=["discord_admin"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    espo_client = Mock()
+    espo_client.request.side_effect = [
+        {
+            "id": "contact-prospect-1",
+            "name": "Bea Prospect",
+            "cOnboarder": "none",
+            "cOnboardingState": "pending",
+        },
+        {"id": "contact-prospect-1"},
+    ]
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._is_dashboard_onboarding_contact_eligible",
+            return_value=True,
+        ),
+        patch("five08.backend.api.EspoClient", return_value=espo_client),
+        patch(
+            "five08.backend.api.enqueue_job", return_value=Mock(id="sync-job-1")
+        ) as mock_enqueue,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            "/dashboard/api/onboarding/contact-prospect-1/onboarder",
+            json={"onboarder": "Jane@508.dev"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["contact_id"] == "contact-prospect-1"
+    assert payload["contact_name"] == "Bea Prospect"
+    assert payload["onboarder"] == "jane"
+    assert payload["previous_state"] == "pending"
+    assert payload["onboarding_state"] == "selected"
+    assert payload["state_updated"] is True
+    assert payload["sync_job_id"] == "sync-job-1"
+    assert espo_client.request.call_args_list[0].args == (
+        "GET",
+        "Contact/contact-prospect-1",
+    )
+    assert espo_client.request.call_args_list[1].args == (
+        "PUT",
+        "Contact/contact-prospect-1",
+        {"cOnboarder": "jane", "cOnboardingState": "selected"},
+    )
+    assert mock_enqueue.call_args.kwargs["args"] == ("contact-prospect-1",)
+    audit_kwargs = mock_audit.call_args.kwargs
+    assert audit_kwargs["action"] == "crm.assign_onboarder"
+    assert audit_kwargs["result"] == api.AuditResult.SUCCESS
+    assert audit_kwargs["actor_provider"] == api.ActorProvider.DISCORD
+    assert audit_kwargs["actor_subject"] == "123456789"
+    assert audit_kwargs["resource_id"] == "contact-prospect-1"
+    assert audit_kwargs["metadata"]["onboarder"] == "jane"
+
+
+def test_dashboard_assign_onboarder_rejects_ineligible_contact(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._is_dashboard_onboarding_contact_eligible",
+            return_value=False,
+        ),
+        patch("five08.backend.api.EspoClient") as mock_espo_client,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            "/dashboard/api/onboarding/contact-member-1/onboarder",
+            json={"onboarder": "jane"},
+        )
+
+    assert response.status_code == 403
+    assert response.json() == {"error": "contact_not_onboarding_eligible"}
+    mock_espo_client.assert_not_called()
+    audit_kwargs = mock_audit.call_args.kwargs
+    assert audit_kwargs["action"] == "crm.assign_onboarder"
+    assert audit_kwargs["result"] == api.AuditResult.ERROR
+    assert audit_kwargs["metadata"]["reason"] == "contact_not_onboarding_eligible"
+
+
+def test_dashboard_assign_onboarder_rejects_invalid_onboarder(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admins"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.EspoClient") as mock_espo_client,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            "/dashboard/api/onboarding/contact-prospect-1/onboarder",
+            json={"onboarder": "<@123456789>"},
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "invalid_onboarder"}
+    mock_espo_client.assert_not_called()
+    audit_kwargs = mock_audit.call_args.kwargs
+    assert audit_kwargs["action"] == "crm.assign_onboarder"
+    assert audit_kwargs["result"] == api.AuditResult.ERROR
+    assert audit_kwargs["metadata"]["reason"] == "invalid_onboarder"
+
+
+def test_dashboard_audit_events_returns_recent_events(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admins"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+    events = [
+        {
+            "id": "event-1",
+            "occurred_at": "2026-02-25T12:05:00+00:00",
+            "source": "admin_dashboard",
+            "action": "worker.job_rerun",
+            "resource_type": "worker_job",
+            "resource_id": "job-new-1",
+            "result": "success",
+            "actor_provider": "discord",
+            "actor_subject": "123456789",
+            "actor_display_name": "Discord Admin",
+            "metadata": {"job_type": "sync_people_from_crm_job"},
+        }
+    ]
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._list_dashboard_audit_events",
+            return_value=events,
+        ) as mock_events,
+    ):
+        response = client.get("/dashboard/api/audit-events?limit=10")
+
+    assert response.status_code == 200
+    assert response.json() == events
+    mock_events.assert_called_once_with(10)
+
+
+def test_dashboard_rerun_crm_job_audits_discord_session(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="admin@508.dev",
+        display_name="Discord Admin",
+        groups=["discord_admin"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+        crm_contact_id="contact-123",
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._rerun_job",
+            new_callable=AsyncMock,
+            return_value=(
+                {
+                    "status": "queued",
+                    "source_job_id": "job-old-1",
+                    "job_id": "job-new-1",
+                    "type": "sync_people_from_crm_job",
+                    "created": True,
+                },
+                202,
+            ),
+        ),
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
+    ):
+        response = client.post("/dashboard/api/jobs/job-old-1/rerun")
+
+    assert response.status_code == 202
+    assert response.json()["job_id"] == "job-new-1"
+    audit_payload = mock_insert.call_args.args[1]
+    assert audit_payload.source == api.AuditSource.ADMIN_DASHBOARD
+    assert audit_payload.action == "worker.job_rerun"
+    assert audit_payload.result == api.AuditResult.SUCCESS
+    assert audit_payload.actor_provider == api.ActorProvider.DISCORD
+    assert audit_payload.actor_subject == "123456789"
+    assert audit_payload.actor_display_name == "Discord Admin"
+    assert audit_payload.resource_type == "worker_job"
+    assert audit_payload.resource_id == "job-new-1"
+    assert audit_payload.metadata is not None
+    assert audit_payload.metadata["source"] == "dashboard"
+    assert audit_payload.metadata["source_job_id"] == "job-old-1"
+    assert audit_payload.metadata["job_type"] == "sync_people_from_crm_job"
+
+
+def test_dashboard_rerun_rejects_cross_origin_post(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admins"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api._rerun_job", new_callable=AsyncMock) as mock_rerun,
+    ):
+        response = client.post(
+            "/dashboard/api/jobs/job-old-1/rerun",
+            headers={"Origin": "https://evil.example.invalid"},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["error"] == "csrf_check_failed"
+    mock_rerun.assert_not_called()
+
+
+def test_dashboard_sync_people_audits_discord_session(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="admin@508.dev",
+        display_name="Discord Admin",
+        groups=["discord_admin"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+        crm_contact_id="contact-123",
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._enqueue_full_crm_sync_job",
+            new_callable=AsyncMock,
+            return_value=Mock(id="job-sync-1", created=True),
+        ),
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
+    ):
+        response = client.post("/dashboard/api/sync/people")
+
+    assert response.status_code == 202
+    assert response.json()["job_id"] == "job-sync-1"
+    audit_payload = mock_insert.call_args.args[1]
+    assert audit_payload.source == api.AuditSource.ADMIN_DASHBOARD
+    assert audit_payload.action == "crm.people_sync"
+    assert audit_payload.result == api.AuditResult.SUCCESS
+    assert audit_payload.actor_provider == api.ActorProvider.DISCORD
+    assert audit_payload.actor_subject == "123456789"
+    assert audit_payload.actor_display_name == "Discord Admin"
+    assert audit_payload.resource_type == "crm_people_sync"
+    assert audit_payload.resource_id == "job-sync-1"
+    assert audit_payload.metadata is not None
+    assert audit_payload.metadata["source"] == "dashboard"
+
+
+def test_dashboard_sync_people_rejects_cross_origin_post(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admins"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._enqueue_full_crm_sync_job",
+            new_callable=AsyncMock,
+        ) as mock_enqueue,
+    ):
+        response = client.post(
+            "/dashboard/api/sync/people",
+            headers={"Origin": "https://evil.example.invalid"},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["error"] == "csrf_check_failed"
+    mock_enqueue.assert_not_called()
+
+
 def test_auth_discord_link_create_forbidden_for_non_admin(
     client: TestClient,
     auth_headers: dict[str, str],
 ) -> None:
     fake_store = _FakeAuthStore()
     fake_verifier = Mock()
-    fake_verifier.is_admin_discord_user = AsyncMock(return_value=False)
+    fake_verifier.is_dashboard_discord_user = AsyncMock(return_value=False)
 
     with (
         patch("five08.backend.api._auth_store_from_app", return_value=fake_store),
@@ -1316,7 +2389,7 @@ def test_auth_discord_link_create_forbidden_for_non_admin(
         )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "discord_user_not_admin"
+    assert response.json()["detail"] == "discord_user_not_allowed"
 
 
 def test_auth_discord_link_create_returns_url_for_admin(
@@ -1329,7 +2402,7 @@ def test_auth_discord_link_create_returns_url_for_admin(
     )
     fake_store = _FakeAuthStore()
     fake_verifier = Mock()
-    fake_verifier.is_admin_discord_user = AsyncMock(return_value=True)
+    fake_verifier.is_dashboard_discord_user = AsyncMock(return_value=True)
 
     with (
         patch("five08.backend.api._auth_store_from_app", return_value=fake_store),
@@ -1427,11 +2500,17 @@ def test_auth_callback_denied_writes_login_audit(client: TestClient) -> None:
             "exp": 4_102_444_800,
         }
     )
+    verifier = Mock()
+    verifier.is_dashboard_email_for_discord_user = AsyncMock(return_value=False)
 
     with (
         patch("five08.backend.api._auth_store_from_app", return_value=store),
         patch("five08.backend.api._oidc_client_from_app", return_value=oidc),
         patch("five08.backend.api._http_client_from_app", return_value=Mock()),
+        patch(
+            "five08.backend.api._discord_admin_verifier_from_app",
+            return_value=verifier,
+        ),
         patch("five08.backend.api.insert_audit_event") as mock_insert,
     ):
         response = client.get(
@@ -1440,11 +2519,92 @@ def test_auth_callback_denied_writes_login_audit(client: TestClient) -> None:
         )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "admin_group_required"
+    assert response.json()["detail"] == "oidc_user_not_linked_to_discord_dashboard_user"
     audit_payload = mock_insert.call_args.args[1]
     assert audit_payload.action == "auth.login"
     assert audit_payload.result == api.AuditResult.DENIED
     assert audit_payload.actor_subject == "member@508.dev"
+
+
+def test_auth_callback_discord_link_uses_discord_session_after_oidc_checks(
+    client: TestClient,
+) -> None:
+    store = Mock()
+    store.pop_oidc_state = AsyncMock(
+        return_value=api.PendingOIDCState(
+            nonce="nonce-1",
+            code_verifier="verifier-1",
+            next_path="/dashboard",
+            discord_link_token="link-1",
+        )
+    )
+    store.get_discord_link = AsyncMock(
+        return_value=api.DiscordLinkGrant(
+            discord_user_id="123456789",
+            next_path="/dashboard",
+        )
+    )
+    store.delete_discord_link = AsyncMock()
+    store.save_session = AsyncMock()
+    verifier = Mock()
+    verifier.is_dashboard_email_for_discord_user = AsyncMock(return_value=True)
+    verifier.resolve_dashboard_identity = AsyncMock(
+        return_value=Mock(
+            discord_user_id="123456789",
+            crm_contact_id="contact-123",
+            email="admin@508.dev",
+            display_name="Discord Admin",
+            discord_roles=["Admin"],
+        )
+    )
+
+    oidc = Mock()
+    oidc.configured = True
+    oidc.exchange_code = AsyncMock(return_value={"id_token": "id-token-1"})
+    oidc.validate_id_token = AsyncMock(
+        return_value={
+            "sub": "authentik-user-3",
+            "email": "Admin@508.dev",
+            "name": "OIDC Admin",
+            "groups": ["Member"],
+            "exp": 4_102_444_800,
+        }
+    )
+
+    with (
+        patch("five08.backend.api._auth_store_from_app", return_value=store),
+        patch("five08.backend.api._oidc_client_from_app", return_value=oidc),
+        patch("five08.backend.api._http_client_from_app", return_value=Mock()),
+        patch(
+            "five08.backend.api._discord_admin_verifier_from_app",
+            return_value=verifier,
+        ),
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
+    ):
+        response = client.get(
+            "/auth/callback?code=code-1&state=state-1",
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 302
+    saved_session = store.save_session.call_args.kwargs["payload"]
+    assert saved_session.subject == "123456789"
+    assert saved_session.actor_provider == api.ActorProvider.DISCORD.value
+    assert saved_session.crm_contact_id == "contact-123"
+    assert saved_session.email == "admin@508.dev"
+    assert saved_session.display_name == "Discord Admin"
+    assert saved_session.id_token == "id-token-1"
+    assert saved_session.groups == ["Admin"]
+    assert saved_session.is_admin is True
+    assert "people:read" in saved_session.permissions
+    assert "onboarding:write" in saved_session.permissions
+    assert "jobs:write" in saved_session.permissions
+    store.delete_discord_link.assert_awaited_once_with("link-1")
+    audit_payload = mock_insert.call_args.args[1]
+    assert audit_payload.actor_provider == api.ActorProvider.DISCORD
+    assert audit_payload.actor_subject == "123456789"
+    assert audit_payload.metadata is not None
+    assert audit_payload.metadata["discord_link_identity_checks_enforced"] is True
 
 
 def test_auth_callback_discord_link_can_skip_oidc_identity_checks(
@@ -1471,6 +2631,16 @@ def test_auth_callback_discord_link_can_skip_oidc_identity_checks(
     )
     store.delete_discord_link = AsyncMock()
     store.save_session = AsyncMock()
+    verifier = Mock()
+    verifier.resolve_dashboard_identity = AsyncMock(
+        return_value=Mock(
+            discord_user_id="123456789",
+            crm_contact_id="contact-123",
+            email="steering@508.dev",
+            display_name="Steering User",
+            discord_roles=["Steering Committee"],
+        )
+    )
 
     oidc = Mock()
     oidc.configured = True
@@ -1488,6 +2658,10 @@ def test_auth_callback_discord_link_can_skip_oidc_identity_checks(
         patch("five08.backend.api._auth_store_from_app", return_value=store),
         patch("five08.backend.api._oidc_client_from_app", return_value=oidc),
         patch("five08.backend.api._http_client_from_app", return_value=Mock()),
+        patch(
+            "five08.backend.api._discord_admin_verifier_from_app",
+            return_value=verifier,
+        ),
         patch("five08.backend.api.insert_audit_event") as mock_insert,
     ):
         response = client.get(
@@ -1497,7 +2671,10 @@ def test_auth_callback_discord_link_can_skip_oidc_identity_checks(
 
     assert response.status_code == 302
     saved_session = store.save_session.call_args.kwargs["payload"]
-    assert saved_session.is_admin is True
+    assert saved_session.is_admin is False
+    assert saved_session.groups == ["Steering Committee"]
+    assert "onboarding:write" in saved_session.permissions
+    assert "jobs:write" not in saved_session.permissions
     store.delete_discord_link.assert_awaited_once_with("link-1")
     audit_payload = mock_insert.call_args.args[1]
     assert audit_payload.metadata is not None
@@ -1509,6 +2686,7 @@ def test_auth_discord_link_redirect_creates_discord_session_when_disabled(
     monkeypatch: pytest.MonkeyPatch,
     client: TestClient,
 ) -> None:
+    monkeypatch.setattr(api.settings, "environment", "production")
     monkeypatch.setattr(
         api.settings, "discord_link_require_oidc_identity_checks", False
     )
@@ -1522,11 +2700,13 @@ def test_auth_discord_link_redirect_creates_discord_session_when_disabled(
     store.save_session = AsyncMock()
     store.delete_discord_link = AsyncMock()
     verifier = Mock()
-    verifier.resolve_admin_identity = AsyncMock(
+    verifier.resolve_dashboard_identity = AsyncMock(
         return_value=Mock(
             discord_user_id="123456789",
+            crm_contact_id="contact-123",
             email="admin@508.dev",
             display_name="Discord Admin",
+            discord_roles=["Admin"],
         )
     )
 
@@ -1547,12 +2727,86 @@ def test_auth_discord_link_redirect_creates_discord_session_when_disabled(
     saved_session = store.save_session.call_args.kwargs["payload"]
     assert saved_session.subject == "123456789"
     assert saved_session.actor_provider == api.ActorProvider.DISCORD.value
+    assert saved_session.crm_contact_id == "contact-123"
     assert saved_session.email == "admin@508.dev"
+    assert saved_session.is_admin is True
+    assert "people:read" in saved_session.permissions
+    assert "onboarding:write" in saved_session.permissions
+    assert "jobs:write" not in saved_session.permissions
     audit_payload = mock_insert.call_args.args[1]
     assert audit_payload.actor_provider == api.ActorProvider.DISCORD
     assert audit_payload.actor_subject == "123456789"
     assert audit_payload.metadata is not None
     assert audit_payload.metadata["discord_link_identity_checks_enforced"] is False
+
+
+def test_auth_discord_link_redirect_upgrades_existing_oidc_session(
+    client: TestClient,
+) -> None:
+    store = Mock()
+    store.get_discord_link = AsyncMock(
+        return_value=api.DiscordLinkGrant(
+            discord_user_id="123456789",
+            next_path="/dashboard",
+        )
+    )
+    store.save_session = AsyncMock()
+    store.delete_discord_link = AsyncMock()
+    session = api.AuthSession(
+        subject="authentik-user-1",
+        email="steering@508.dev",
+        display_name="OIDC Steering",
+        groups=["Member"],
+        is_admin=False,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+    verifier = Mock()
+    verifier.is_dashboard_email_for_discord_user = AsyncMock(return_value=True)
+    verifier.resolve_dashboard_identity = AsyncMock(
+        return_value=Mock(
+            discord_user_id="123456789",
+            crm_contact_id="contact-123",
+            email="steering@508.dev",
+            display_name="Discord Steering",
+            discord_roles=["Steering Committee"],
+        )
+    )
+
+    with (
+        patch("five08.backend.api._auth_store_from_app", return_value=store),
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._discord_admin_verifier_from_app",
+            return_value=verifier,
+        ),
+        patch("five08.backend.api._http_client_from_app", return_value=Mock()),
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
+    ):
+        response = client.get("/auth/discord/link/link-1", follow_redirects=False)
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "/dashboard"
+    store.save_session.assert_awaited_once()
+    saved_session = store.save_session.call_args.kwargs["payload"]
+    assert store.save_session.call_args.kwargs["session_id"] == "session-1"
+    assert saved_session.subject == "123456789"
+    assert saved_session.actor_provider == api.ActorProvider.DISCORD.value
+    assert saved_session.crm_contact_id == "contact-123"
+    assert saved_session.id_token == "id-token-1"
+    assert saved_session.is_admin is False
+    assert "onboarding:write" in saved_session.permissions
+    assert "jobs:write" not in saved_session.permissions
+    store.delete_discord_link.assert_awaited_once_with("link-1")
+    audit_payload = mock_insert.call_args.args[1]
+    assert audit_payload.actor_provider == api.ActorProvider.DISCORD
+    assert audit_payload.actor_subject == "123456789"
+    assert audit_payload.metadata is not None
+    assert audit_payload.metadata["upgraded_existing_session"] is True
 
 
 def test_auth_logout_writes_logout_audit(client: TestClient) -> None:

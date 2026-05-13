@@ -147,8 +147,22 @@ Use `.env.example` as the source of defaults.
 
 ## Migadu Mailbox Automation
 
-- `Required for /create-mailbox`: `MIGADU_API_USER`, `MIGADU_API_KEY`
+- `Required for /create-mailbox and /create-user-accounts`: `MIGADU_API_USER`, `MIGADU_API_KEY`
 - `Optional`: `MIGADU_MAILBOX_DOMAIN` (default: `508.dev`)
+
+## Authentik SSO Provisioning
+
+- `Required for /create-sso-user and /create-user-accounts`: `AUTHENTIK_API_BASE_URL`, `AUTHENTIK_API_TOKEN`
+- `Optional`: `AUTHENTIK_API_TIMEOUT_SECONDS` (default: `20.0`)
+- `Optional`: `AUTHENTIK_RECOVERY_EMAIL_STAGE_ID` (when unset, the bot resolves by name)
+- `Optional`: `AUTHENTIK_RECOVERY_EMAIL_STAGE_NAME` (default: `default-recovery-email`)
+
+## Outline Invitations
+
+- `Required for /create-user-accounts and /invite-outline-user`: `OUTLINE_API_KEY`
+- Note: `/create-user-accounts` also requires the Migadu and Authentik settings above.
+- `Optional`: `OUTLINE_BASE_URL` (default: `https://app.getoutline.com`; root and `/api` URLs are both accepted)
+- `Optional`: `OUTLINE_API_TIMEOUT_SECONDS` (default: `20.0`)
 
 ## Discord CRM Audit Logging (Best Effort)
 

@@ -120,3 +120,15 @@ async def setup(bot: commands.Bot) -> None:
 - Prefer adding reusable helpers/clients to `packages/shared/src/five08/`.
 - Update docs and `.env.example` when introducing new config.
 - Keep changes incremental and testable.
+
+## Agent Operating Rules
+
+- State material assumptions before acting. If a request has multiple reasonable interpretations and the difference changes the outcome, ask first.
+- Read before writing: inspect the target file, immediate callers, exports, and obvious shared utilities before adding new code.
+- Keep changes surgical and minimal. Do not refactor adjacent code, reformat unrelated files, or introduce abstractions for single-use code.
+- Match existing conventions for naming, error handling, async patterns, configuration, and tests. If local patterns conflict, choose the more established or better-tested pattern and flag the inconsistency instead of blending them.
+- Use code for deterministic decisions. Do not use LLM calls for routing, retries, status-code handling, validation that code can perform, or deterministic transforms.
+- For non-trivial changes, reason through state ownership, observability, blast radius, timing/order of operations, security, and rollback before implementation.
+- Tests should verify intent, not just surface behavior. Avoid tests that would still pass if the business logic were replaced with a constant or no-op.
+- Fail loud and report uncertainty. Do not call work complete if records, tests, migrations, jobs, or checks were skipped silently.
+- Checkpoint multi-step work: keep track of what changed, what was verified, and what remains. If the state of the work becomes unclear, stop and restate before continuing.

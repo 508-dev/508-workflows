@@ -1921,7 +1921,7 @@ class TestCRMCog:
         )
 
         mock_interaction.followup.send.assert_called_once_with(
-            "❌ Failed to download resume: API Error"
+            "❌ Failed to download resume: API Error", ephemeral=True
         )
 
     def test_role_id_cache_initializes_empty(self, jobs_cog):
