@@ -534,13 +534,32 @@ def has_role_with_hierarchy(raw_roles: object, required_role: str) -> bool:
     return False
 
 
+def has_dashboard_discord_role(
+    raw_roles: object,
+    required_role: str,
+    *,
+    admin_role_names: set[str] | None = None,
+) -> bool:
+    """Return whether Discord roles satisfy dashboard access requirements."""
+    parsed_roles = _to_string_list(raw_roles)
+    role_names = {role.casefold() for role in parsed_roles}
+    if admin_role_names and role_names & admin_role_names:
+        return True
+    return has_role_with_hierarchy(parsed_roles, required_role)
+
+
 def dashboard_permissions_for_roles(
     raw_roles: object,
     *,
     is_admin: bool = False,
+    admin_role_names: set[str] | None = None,
 ) -> list[str]:
-    """Map Discord/OIDC role state to dashboard permission strings."""
-    if is_admin or has_role_with_hierarchy(raw_roles, "Admin"):
+    """Map trusted Discord role state to dashboard permission strings."""
+    if is_admin or has_dashboard_discord_role(
+        raw_roles,
+        "Admin",
+        admin_role_names=admin_role_names,
+    ):
         return sorted(DASHBOARD_ADMIN_PERMISSIONS)
     if has_role_with_hierarchy(raw_roles, "Steering Committee"):
         return sorted(DASHBOARD_STEERING_PERMISSIONS)
@@ -606,12 +625,20 @@ class DiscordAdminVerifier:
             return None
 
         discord_roles = _to_string_list(person.get("discord_roles"))
-        if not has_role_with_hierarchy(discord_roles, required_role):
+        if not has_dashboard_discord_role(
+            discord_roles,
+            required_role,
+            admin_role_names=self.settings.discord_admin_role_names,
+        ):
             live_roles = await self._discord_role_names_from_api(
                 discord_user_id=discord_user_id,
                 http_client=http_client,
             )
-            if not has_role_with_hierarchy(live_roles, required_role):
+            if not has_dashboard_discord_role(
+                live_roles,
+                required_role,
+                admin_role_names=self.settings.discord_admin_role_names,
+            ):
                 return None
             discord_roles = live_roles
 
@@ -681,7 +708,11 @@ class DiscordAdminVerifier:
             return False
         if not self._email_matches_person(person, normalized_email):
             return False
-        if has_role_with_hierarchy(person.get("discord_roles"), required_role):
+        if has_dashboard_discord_role(
+            person.get("discord_roles"),
+            required_role,
+            admin_role_names=self.settings.discord_admin_role_names,
+        ):
             return True
         if http_client is None:
             return False
@@ -689,7 +720,11 @@ class DiscordAdminVerifier:
             discord_user_id=discord_user_id,
             http_client=http_client,
         )
-        return has_role_with_hierarchy(live_roles, required_role)
+        return has_dashboard_discord_role(
+            live_roles,
+            required_role,
+            admin_role_names=self.settings.discord_admin_role_names,
+        )
 
     def _get_active_person_record(
         self,

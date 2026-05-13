@@ -690,6 +690,7 @@ def test_dashboard_renders_for_steering_committee_session(client: TestClient) ->
         is_admin=False,
         id_token="",
         expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
     )
 
     with patch(
@@ -839,6 +840,82 @@ def test_dashboard_me_allows_sensitive_permissions_without_sso_in_dev(
     assert "audit:read" in response.json()["permissions"]
 
 
+def test_dashboard_me_does_not_trust_literal_oidc_admin_group(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="oidc-user-1",
+        email="user@508.dev",
+        display_name="OIDC User",
+        groups=["Admin"],
+        is_admin=False,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/api/me")
+
+    assert response.status_code == 403
+    assert response.json()["error"] == "forbidden"
+
+
+def test_dashboard_me_does_not_trust_stale_oidc_permissions(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="oidc-user-1",
+        email="user@508.dev",
+        display_name="OIDC User",
+        groups=["Admin"],
+        is_admin=False,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+        permissions=["people:read", "jobs:write"],
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/api/me")
+
+    assert response.status_code == 403
+    assert response.json()["error"] == "forbidden"
+
+
+def test_dashboard_me_honors_configured_discord_admin_role(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    monkeypatch.setattr(api.settings, "discord_admin_roles", "Operations")
+    session = api.AuthSession(
+        subject="123456789",
+        email="ops@508.dev",
+        display_name="Ops User",
+        groups=["Operations"],
+        is_admin=False,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/api/me")
+
+    assert response.status_code == 200
+    assert "jobs:write" in response.json()["permissions"]
+
+
 def test_dashboard_me_clears_stale_session_cookie(client: TestClient) -> None:
     client.cookies.set(api.settings.auth_session_cookie_name, "stale-session")
 
@@ -899,6 +976,7 @@ def test_dashboard_jobs_forbids_steering_committee_session(
         is_admin=False,
         id_token="",
         expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
     )
 
     with patch(
@@ -1297,6 +1375,10 @@ def test_dashboard_assign_onboarder_updates_crm_and_audits(
             new_callable=AsyncMock,
             return_value=("session-1", session),
         ),
+        patch(
+            "five08.backend.api._is_dashboard_onboarding_contact_eligible",
+            return_value=True,
+        ),
         patch("five08.backend.api.EspoClient", return_value=espo_client),
         patch(
             "five08.backend.api.enqueue_job", return_value=Mock(id="sync-job-1")
@@ -1337,6 +1419,50 @@ def test_dashboard_assign_onboarder_updates_crm_and_audits(
     assert audit_kwargs["actor_subject"] == "123456789"
     assert audit_kwargs["resource_id"] == "contact-prospect-1"
     assert audit_kwargs["metadata"]["onboarder"] == "jane"
+
+
+def test_dashboard_assign_onboarder_rejects_ineligible_contact(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._is_dashboard_onboarding_contact_eligible",
+            return_value=False,
+        ),
+        patch("five08.backend.api.EspoClient") as mock_espo_client,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            "/dashboard/api/onboarding/contact-member-1/onboarder",
+            json={"onboarder": "jane"},
+        )
+
+    assert response.status_code == 403
+    assert response.json() == {"error": "contact_not_onboarding_eligible"}
+    mock_espo_client.assert_not_called()
+    audit_kwargs = mock_audit.call_args.kwargs
+    assert audit_kwargs["action"] == "crm.assign_onboarder"
+    assert audit_kwargs["result"] == api.AuditResult.ERROR
+    assert audit_kwargs["metadata"]["reason"] == "contact_not_onboarding_eligible"
 
 
 def test_dashboard_assign_onboarder_rejects_invalid_onboarder(

@@ -47,6 +47,7 @@ from five08.queue import (
 )
 from five08.backend.auth import (
     AuthSession,
+    DASHBOARD_ADMIN_PERMISSIONS,
     DASHBOARD_PERMISSION_AUDIT_READ,
     DASHBOARD_PERMISSION_JOBS_READ,
     DASHBOARD_PERMISSION_JOBS_WRITE,
@@ -64,7 +65,7 @@ from five08.backend.auth import (
     build_redirect_uri,
     dashboard_permissions_for_roles,
     extract_groups,
-    has_role_with_hierarchy,
+    has_dashboard_discord_role,
     is_admin_from_groups,
     make_pkce_pair,
     normalize_next_path,
@@ -450,19 +451,37 @@ def _dashboard_permissions_for_identity(
     *,
     is_admin: bool,
     id_token: str,
+    actor_provider: ActorProvider = ActorProvider.ADMIN_SSO,
 ) -> list[str]:
-    permissions = set(dashboard_permissions_for_roles(raw_roles, is_admin=is_admin))
+    if actor_provider == ActorProvider.DISCORD:
+        permissions = set(
+            dashboard_permissions_for_roles(
+                raw_roles,
+                is_admin=is_admin,
+                admin_role_names=settings.discord_admin_role_names,
+            )
+        )
+    else:
+        permissions = set(DASHBOARD_ADMIN_PERMISSIONS if is_admin else ())
     if not id_token.strip() and not _dashboard_dev_sensitive_access_enabled():
         permissions -= DASHBOARD_SENSITIVE_PERMISSIONS
     return sorted(permissions)
 
 
 def _session_dashboard_permissions(session: AuthSession) -> set[str]:
+    actor_provider = _session_actor_provider(session)
     if session.permissions:
         permissions = set(session.permissions)
+        if actor_provider != ActorProvider.DISCORD and not session.is_admin:
+            permissions = set()
     else:
         permissions = set(
-            dashboard_permissions_for_roles(session.groups, is_admin=session.is_admin)
+            _dashboard_permissions_for_identity(
+                session.groups,
+                is_admin=session.is_admin,
+                id_token=session.id_token,
+                actor_provider=actor_provider,
+            )
         )
     if not _has_sso_validated_session(session):
         permissions -= DASHBOARD_SENSITIVE_PERMISSIONS
@@ -609,34 +628,32 @@ _ONBOARDING_STATUS_LABELS = {
 
 
 _DASHBOARD_PEOPLE_SEARCH_SQL = """
-concat_ws(
-    ' ',
-    crm_contact_id,
-    name,
-    email,
-    email_508,
-    discord_user_id,
-    discord_username,
-    github_username,
-    contact_type,
-    address_country,
-    address_city,
-    address_state,
-    seniority,
-    latest_resume_name
+(
+    coalesce(crm_contact_id, '') || ' ' ||
+    coalesce(name, '') || ' ' ||
+    coalesce(email, '') || ' ' ||
+    coalesce(email_508, '') || ' ' ||
+    coalesce(discord_user_id, '') || ' ' ||
+    coalesce(discord_username, '') || ' ' ||
+    coalesce(github_username, '') || ' ' ||
+    coalesce(contact_type, '') || ' ' ||
+    coalesce(address_country, '') || ' ' ||
+    coalesce(address_city, '') || ' ' ||
+    coalesce(address_state, '') || ' ' ||
+    coalesce(seniority, '') || ' ' ||
+    coalesce(latest_resume_name, '')
 )
 """
 
 _DASHBOARD_ONBOARDING_SEARCH_SQL = """
-concat_ws(
-    ' ',
-    name,
-    email,
-    email_508,
-    discord_user_id,
-    discord_username,
-    onboarder,
-    onboarding_state
+(
+    coalesce(name, '') || ' ' ||
+    coalesce(email, '') || ' ' ||
+    coalesce(email_508, '') || ' ' ||
+    coalesce(discord_user_id, '') || ' ' ||
+    coalesce(discord_username, '') || ' ' ||
+    coalesce(onboarder, '') || ' ' ||
+    coalesce(onboarding_state, '')
 )
 """
 
@@ -715,7 +732,7 @@ def _normalize_508_username(value: str | None) -> str | None:
         return None
 
     if "@" in normalized:
-        username, _, domain = normalized.partition("@")
+        username, _, _domain = normalized.partition("@")
         if not username:
             return None
         normalized = username
@@ -1048,6 +1065,28 @@ def _list_dashboard_onboarding(
     return _shape_dashboard_people_rows(rows)
 
 
+def _is_dashboard_onboarding_contact_eligible(contact_id: str) -> bool:
+    sql = f"""
+        SELECT 1
+        FROM people
+        WHERE
+            crm_contact_id = %s
+            AND sync_status = 'active'
+            AND is_member = false
+            AND contact_type ILIKE %s
+            AND (
+                onboarding_state IS NULL
+                OR {_ONBOARDING_STATE_NORMALIZED_SQL}
+                    NOT IN ('onboarded', 'waitlist', 'rejected')
+            )
+        LIMIT 1
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(sql, (contact_id, "%prospect%"))
+            return cursor.fetchone() is not None
+
+
 def _list_dashboard_audit_events(limit: int) -> list[dict[str, Any]]:
     limit = _limit_dashboard_count(limit)
     sql = """
@@ -1097,6 +1136,12 @@ def _assign_dashboard_onboarder_in_crm(
     onboarder_username = _normalize_508_username(onboarder)
     if onboarder_username is None:
         raise DashboardOnboarderAssignmentError("invalid_onboarder")
+
+    if not _is_dashboard_onboarding_contact_eligible(normalized_contact_id):
+        raise DashboardOnboarderAssignmentError(
+            "contact_not_onboarding_eligible",
+            status_code=403,
+        )
 
     client = EspoClient(settings.espo_base_url, settings.espo_api_key)
     full_contact = client.request("GET", f"Contact/{normalized_contact_id}")
@@ -2545,7 +2590,11 @@ async def auth_callback_handler(
             session_email = identity.email or email
             session_display_name = identity.display_name or display_name
             session_groups = identity.discord_roles
-            is_admin = has_role_with_hierarchy(identity.discord_roles, "Admin")
+            is_admin = has_dashboard_discord_role(
+                identity.discord_roles,
+                "Admin",
+                admin_role_names=settings.discord_admin_role_names,
+            )
             session_actor_provider = ActorProvider.DISCORD
             audit_actor_subject = grant.discord_user_id
             audit_actor_display_name = session_display_name
@@ -2580,7 +2629,11 @@ async def auth_callback_handler(
             session_display_name = identity.display_name or display_name
             session_groups = identity.discord_roles
             session_actor_provider = ActorProvider.DISCORD
-            is_admin = has_role_with_hierarchy(identity.discord_roles, "Admin")
+            is_admin = has_dashboard_discord_role(
+                identity.discord_roles,
+                "Admin",
+                admin_role_names=settings.discord_admin_role_names,
+            )
             audit_actor_subject = grant.discord_user_id
             audit_actor_display_name = session_display_name
             audit_actor_provider = ActorProvider.DISCORD
@@ -2612,6 +2665,7 @@ async def auth_callback_handler(
                 session_groups,
                 is_admin=is_admin,
                 id_token=id_token,
+                actor_provider=session_actor_provider,
             ),
         ),
         ttl_seconds=settings.auth_session_ttl_seconds,
@@ -2804,7 +2858,11 @@ async def auth_discord_link_redirect_handler(
 
         session_id = secrets.token_urlsafe(32)
         expires_at = int(time.time()) + max(1, settings.auth_session_ttl_seconds)
-        is_admin = has_role_with_hierarchy(identity.discord_roles, "Admin")
+        is_admin = has_dashboard_discord_role(
+            identity.discord_roles,
+            "Admin",
+            admin_role_names=settings.discord_admin_role_names,
+        )
         await store.save_session(
             session_id=session_id,
             payload=AuthSession(
@@ -2821,6 +2879,7 @@ async def auth_discord_link_redirect_handler(
                     identity.discord_roles,
                     is_admin=is_admin,
                     id_token="",
+                    actor_provider=ActorProvider.DISCORD,
                 ),
             ),
             ttl_seconds=settings.auth_session_ttl_seconds,
@@ -2842,6 +2901,7 @@ async def auth_discord_link_redirect_handler(
                     identity.discord_roles,
                     is_admin=is_admin,
                     id_token="",
+                    actor_provider=ActorProvider.DISCORD,
                 ),
                 "via_discord_link": True,
                 "discord_link_identity_checks_enforced": False,
@@ -2885,7 +2945,11 @@ async def auth_discord_link_redirect_handler(
             )
 
         assert session_id is not None
-        is_admin = has_role_with_hierarchy(identity.discord_roles, "Admin")
+        is_admin = has_dashboard_discord_role(
+            identity.discord_roles,
+            "Admin",
+            admin_role_names=settings.discord_admin_role_names,
+        )
         await store.save_session(
             session_id=session_id,
             payload=AuthSession(
@@ -2902,6 +2966,7 @@ async def auth_discord_link_redirect_handler(
                     identity.discord_roles,
                     is_admin=is_admin,
                     id_token=session.id_token,
+                    actor_provider=ActorProvider.DISCORD,
                 ),
             ),
             ttl_seconds=settings.auth_session_ttl_seconds,
@@ -2920,6 +2985,7 @@ async def auth_discord_link_redirect_handler(
                     identity.discord_roles,
                     is_admin=is_admin,
                     id_token=session.id_token,
+                    actor_provider=ActorProvider.DISCORD,
                 ),
                 "via_discord_link": True,
                 "discord_link_identity_checks_enforced": True,

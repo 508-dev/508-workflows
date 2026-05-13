@@ -43,22 +43,21 @@ def upgrade() -> None:
             """
             CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_people_dashboard_search_trgm
             ON people USING gin (
-                (concat_ws(
-                    ' ',
-                    crm_contact_id,
-                    name,
-                    email,
-                    email_508,
-                    discord_user_id,
-                    discord_username,
-                    github_username,
-                    contact_type,
-                    address_country,
-                    address_city,
-                    address_state,
-                    seniority,
-                    latest_resume_name
-                )) gin_trgm_ops
+                (
+                    coalesce(crm_contact_id, '') || ' ' ||
+                    coalesce(name, '') || ' ' ||
+                    coalesce(email, '') || ' ' ||
+                    coalesce(email_508, '') || ' ' ||
+                    coalesce(discord_user_id, '') || ' ' ||
+                    coalesce(discord_username, '') || ' ' ||
+                    coalesce(github_username, '') || ' ' ||
+                    coalesce(contact_type, '') || ' ' ||
+                    coalesce(address_country, '') || ' ' ||
+                    coalesce(address_city, '') || ' ' ||
+                    coalesce(address_state, '') || ' ' ||
+                    coalesce(seniority, '') || ' ' ||
+                    coalesce(latest_resume_name, '')
+                ) gin_trgm_ops
             )
             """
         )
@@ -66,16 +65,15 @@ def upgrade() -> None:
             """
             CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_people_onboarding_search_trgm
             ON people USING gin (
-                (concat_ws(
-                    ' ',
-                    name,
-                    email,
-                    email_508,
-                    discord_user_id,
-                    discord_username,
-                    onboarder,
-                    onboarding_state
-                )) gin_trgm_ops
+                (
+                    coalesce(name, '') || ' ' ||
+                    coalesce(email, '') || ' ' ||
+                    coalesce(email_508, '') || ' ' ||
+                    coalesce(discord_user_id, '') || ' ' ||
+                    coalesce(discord_username, '') || ' ' ||
+                    coalesce(onboarder, '') || ' ' ||
+                    coalesce(onboarding_state, '')
+                ) gin_trgm_ops
             )
             """
         )

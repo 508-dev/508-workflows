@@ -746,7 +746,7 @@ def dashboard_html() -> str:
       </section>
     </section>
 
-    <section id="view-jobs" class="view" data-view="jobs">
+    <section id="view-jobs" class="view" data-view="jobs" hidden>
     <section class="toolbar" aria-label="Job filters">
       <label>
         Window
@@ -1140,7 +1140,8 @@ def dashboard_html() -> str:
     }
 
     function setView(view, options = {}) {
-      let normalizedView = Object.prototype.hasOwnProperty.call(routes, view) ? view : "people";
+      const requestedView = Object.prototype.hasOwnProperty.call(routes, view) ? view : "people";
+      let normalizedView = requestedView;
       if (!canView(normalizedView)) {
         setToast(`${normalizedView[0].toUpperCase()}${normalizedView.slice(1)} requires SSO validation`, "error");
         normalizedView = firstAllowedView();
@@ -1157,7 +1158,10 @@ def dashboard_html() -> str:
       }
       if (options.push) {
         window.history.pushState({ view: normalizedView }, "", routes[normalizedView]);
-      } else if (!Object.prototype.hasOwnProperty.call(routes, rawViewFromPath())) {
+      } else if (
+        !Object.prototype.hasOwnProperty.call(routes, rawViewFromPath())
+        || normalizedView !== requestedView
+      ) {
         window.history.replaceState({ view: normalizedView }, "", routes[normalizedView]);
       }
       if (normalizedView === "onboarding") loadOnboarding();
