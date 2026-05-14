@@ -602,6 +602,53 @@ async def test_agent_mention_posts_clarification_in_thread() -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_mention_dms_sensitive_crm_clarification() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))
+    cog._post_agent_request = AsyncMock(
+        return_value={
+            "status": "needs_clarification",
+            "message": (
+                "I found multiple CRM contacts for Sarah: Sarah Chen "
+                "<sarah@example.com> (contact-1); Sarah Jones "
+                "<sjones@example.com> (contact-2). Which one should I use?"
+            ),
+        }
+    )
+    cog._audit_message_safe = Mock()
+    cog._format_agent_response = Mock(
+        return_value=(
+            "Agent status: needs_clarification\n\n"
+            "I found multiple CRM contacts for Sarah: Sarah Chen "
+            "<sarah@example.com> (contact-1); Sarah Jones "
+            "<sjones@example.com> (contact-2). Which one should I use?"
+        )
+    )
+    author = SimpleNamespace(id=123, bot=False, roles=[], send=AsyncMock())
+    message = SimpleNamespace(
+        id=555,
+        content="<@999> send member agreement to Sarah",
+        author=author,
+        mentions=[SimpleNamespace(id=999)],
+        guild=SimpleNamespace(id=456),
+        channel=SimpleNamespace(id=789, typing=Mock(return_value=_AsyncTyping())),
+        create_thread=AsyncMock(),
+        reply=AsyncMock(),
+    )
+
+    await cog.agent_mention(message)
+
+    message.create_thread.assert_not_awaited()
+    author.send.assert_awaited_once()
+    assert "sarah@example.com" in author.send.await_args.args[0]
+    message.reply.assert_awaited_once_with(
+        "I sent the agent response by DM.",
+        mention_author=False,
+    )
+    cog._audit_message_safe.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_agent_mention_answers_help_without_backend() -> None:
     cog = AgentCog.__new__(AgentCog)
     cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))

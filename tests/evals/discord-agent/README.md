@@ -20,12 +20,13 @@ focuses on planner/router correctness, policy outcomes, confirmation gates, and
 known-good deterministic tool behavior.
 
 `canonical` is the PR-gating suite. CI always runs the deterministic parser path
-so pull requests do not depend on provider secrets. The CI job is attached to
-the GitHub `test` environment; when `OPENAI_API_KEY_DIRECT` or `OPENAI_API_KEY`
-is available there, CI also runs `--live-planner` and honors environment-level
-`OPENAI_BASE_URL` for OpenAI-compatible providers such as OpenRouter. Fixture-level
-`stub_results` keep read-only external tools from hitting CRM, GitHub, Kimai, or
-other live systems.
+so pull requests do not depend on provider secrets, but the job first checks the
+changed files and skips eval execution for unrelated changes. The CI job is
+attached to the GitHub `test` environment; when `OPENAI_API_KEY_DIRECT` or
+`OPENAI_API_KEY` is available there, CI also runs `--live-planner` and honors
+environment-level `OPENAI_BASE_URL` for OpenAI-compatible providers such as
+OpenRouter. Fixture-level `stub_results` keep read-only external tools from
+hitting CRM, GitHub, Kimai, or other live systems.
 
 ## Commands
 

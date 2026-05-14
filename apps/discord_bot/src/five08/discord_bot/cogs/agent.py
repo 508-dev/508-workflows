@@ -20,6 +20,13 @@ from five08.tls import default_ca_bundle_path
 logger = logging.getLogger(__name__)
 _MENTION_RATE_LIMIT_WINDOW_SECONDS = 60.0
 _MENTION_RATE_LIMIT_MAX_REQUESTS = 5
+_PUBLIC_SAFE_CLARIFICATION_MESSAGES = frozenset(
+    {
+        "I could not turn that into a supported task action.",
+        "Which project should I search?",
+        "What should the task be?",
+    }
+)
 
 
 class AgentConfirmationView(discord.ui.View):
@@ -583,7 +590,20 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         if view is not None:
             return False
         status = str(response.get("status") or "").casefold()
-        return status in {"needs_clarification", "canceled"}
+        if status == "canceled":
+            return True
+        if status != "needs_clarification":
+            return False
+        return AgentCog._is_public_safe_clarification(response)
+
+    @staticmethod
+    def _is_public_safe_clarification(response: dict[str, Any]) -> bool:
+        if response.get("plan") or response.get("results"):
+            return False
+        if response.get("error") or response.get("detail"):
+            return False
+        message = str(response.get("message") or "").strip()
+        return message in _PUBLIC_SAFE_CLARIFICATION_MESSAGES
 
     async def _send_mention_public_response(
         self,

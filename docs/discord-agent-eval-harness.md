@@ -25,9 +25,15 @@ uv run python scripts/agent_eval.py --suite canonical --model primary --no-env-f
 ```
 
 The canonical PR run executes the deterministic parser path so pull requests do
-not fail just because provider secrets are unavailable. The CI eval job is
-attached to the GitHub `test` environment. If `OPENAI_API_KEY_DIRECT` or
-`OPENAI_API_KEY` is present there, the workflow also runs:
+not fail just because provider secrets are unavailable. The CI eval job first
+checks the changed files and skips dependency install/eval execution unless the
+PR touched Discord agent, shared planner, eval fixture/runner, model catalog, or
+dependency/workflow files. The job itself still completes successfully so the
+aggregate status check has a stable dependency.
+
+The CI eval job is attached to the GitHub `test` environment. If
+`OPENAI_API_KEY_DIRECT` or `OPENAI_API_KEY` is present there, the workflow also
+runs:
 
 ```bash
 uv run python scripts/agent_eval.py --suite canonical --model primary --live-planner --no-env-file
