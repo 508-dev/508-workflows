@@ -127,7 +127,7 @@ Use `.env.example` as the source of defaults.
 
 ## Discord Bot Core
 
-- `Optional`: `BACKEND_API_BASE_URL` (default: `http://127.0.0.1:8090`; `./scripts/dev.sh` overrides it to the worktree API port, Compose injects `http://api:8090`)
+- `Optional`: `BACKEND_API_BASE_URL` (default: `http://127.0.0.1:8090`; `./scripts/dev.sh` overrides it to the worktree web/API port, Compose injects `http://web:8090`)
 - `Optional`: `HEALTHCHECK_PORT` (host-run `./scripts/dev.sh` ignores `.env` for this key and defaults to a deterministic per-worktree value near `30000 + WORKTREE_ENV_SLOT`; export it in your shell only when you intentionally want a fixed port, and avoid browser-unsafe ports such as `5060`)
 - Note: bot message chunking follows Discord's 2000 character limit in code.
 
@@ -168,7 +168,7 @@ Use `.env.example` as the source of defaults.
 
 ## Discord CRM Audit Logging (Best Effort)
 
-- `Optional`: `AUDIT_API_BASE_URL` (when set with `API_SHARED_SECRET`, CRM commands emit best-effort audit events)
+- `Optional`: `AUDIT_API_BASE_URL` (defaults to `BACKEND_API_BASE_URL`; Compose clears stale `.env` values so the fallback uses the injected backend URL)
 - `Optional`: `AUDIT_API_TIMEOUT_SECONDS` (default: `2.0`)
 - `Optional`: `DISCORD_LOGS_WEBHOOK_URL` (if set, command and job events are posted to this Discord webhook)
 - `Optional`: `DISCORD_LOGS_WEBHOOK_WAIT` (default: `true`; appends `wait=true` unless already present in the webhook URL)
