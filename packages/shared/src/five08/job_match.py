@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from five08.discord_webhook import DiscordWebhookLogger
+from five08.llm import ProviderModel
 from five08.skills import normalize_skill, normalize_skill_list
 
 logger = logging.getLogger(__name__)
@@ -692,25 +693,31 @@ def rerank_shortlisted_candidates(
     except ImportError as exc:
         raise RuntimeError("openai package is not installed") from exc
 
-    client = _OpenAI(api_key=api_key, base_url=base_url or None)
+    provider_model = ProviderModel.openai_compatible(
+        model=model,
+        api_key=api_key,
+        base_url=base_url or None,
+    )
+    client = _OpenAI(**provider_model.client_kwargs())
     prompt = _build_rerank_prompt(posting_text, requirements, candidates)
 
     try:
         response = client.chat.completions.create(
-            model=model,
-            temperature=0.1,
-            response_format={"type": "json_object"},
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a senior recruiting coordinator. Rerank a shortlist "
-                        "using only the provided evidence. Return only valid JSON."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=2500,
+            **provider_model.chat_completion_kwargs(
+                temperature=0.1,
+                response_format={"type": "json_object"},
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a senior recruiting coordinator. Rerank a shortlist "
+                            "using only the provided evidence. Return only valid JSON."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=2500,
+            )
         )
     except Exception as exc:
         logger.error("OpenAI candidate rerank call failed: %s", exc)
@@ -794,27 +801,33 @@ def extract_job_requirements(
     except ImportError as exc:
         raise RuntimeError("openai package is not installed") from exc
 
-    client = _OpenAI(api_key=api_key, base_url=base_url or None)
+    provider_model = ProviderModel.openai_compatible(
+        model=model,
+        api_key=api_key,
+        base_url=base_url or None,
+    )
+    client = _OpenAI(**provider_model.client_kwargs())
 
     hints = _regex_hints(posting_text)
     prompt = _build_prompt(posting_text, hints)
 
     try:
         response = client.chat.completions.create(
-            model=model,
-            temperature=0.1,
-            response_format={"type": "json_object"},
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a recruiting assistant. Extract structured hiring requirements "
-                        "from job postings. Return only valid JSON."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=2048,
+            **provider_model.chat_completion_kwargs(
+                temperature=0.1,
+                response_format={"type": "json_object"},
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a recruiting assistant. Extract structured hiring requirements "
+                            "from job postings. Return only valid JSON."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=2048,
+            )
         )
     except Exception as exc:
         logger.error("OpenAI job extraction call failed: %s", exc)

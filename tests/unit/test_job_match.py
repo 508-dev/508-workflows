@@ -175,6 +175,10 @@ def test_extract_normalizes_required_skills() -> None:
     assert result.required_skills == ["python", "react", "django"]
     assert result.seniority == "senior"
     assert result.title == "Backend Engineer"
+    create_kwargs = mock_client.chat.completions.create.call_args.kwargs
+    assert create_kwargs["model"] == "gpt-5-mini"
+    assert create_kwargs["response_format"] == {"type": "json_object"}
+    assert "temperature" not in create_kwargs
 
 
 def test_extract_backfills_hard_and_soft_from_legacy_required_skills() -> None:
@@ -398,6 +402,10 @@ def test_rerank_shortlisted_candidates_parses_structured_response() -> None:
             missing_requirements=["live webflow projects"],
         )
     ]
+    create_kwargs = mock_client.chat.completions.create.call_args.kwargs
+    assert create_kwargs["model"] == "gpt-5-mini"
+    assert create_kwargs["response_format"] == {"type": "json_object"}
+    assert "temperature" not in create_kwargs
 
 
 def test_rerank_shortlisted_candidates_parse_error_does_not_log_raw_content() -> None:

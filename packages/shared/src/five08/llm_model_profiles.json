@@ -1,0 +1,140 @@
+{
+  "models": {
+    "gpt-5.5": {
+      "name": "gpt-5.5",
+      "provider": "openai-compatible",
+      "model": "gpt-5.5",
+      "request_options": {
+        "temperature": false,
+        "response_format": true,
+        "reasoning_effort": true,
+        "verbosity": true
+      }
+    },
+    "gpt-5.4": {
+      "name": "gpt-5.4",
+      "provider": "openai-compatible",
+      "model": "gpt-5.4",
+      "request_options": {
+        "temperature": false,
+        "response_format": true,
+        "reasoning_effort": true,
+        "verbosity": true
+      }
+    },
+    "gpt-5.4-mini": {
+      "name": "gpt-5.4-mini",
+      "provider": "openai-compatible",
+      "model": "gpt-5.4-mini",
+      "request_options": {
+        "temperature": false,
+        "response_format": true,
+        "reasoning_effort": true,
+        "verbosity": true
+      }
+    },
+    "gpt-5.2": {
+      "name": "gpt-5.2",
+      "provider": "openai-compatible",
+      "model": "gpt-5.2",
+      "request_options": {
+        "temperature": false,
+        "response_format": true,
+        "reasoning_effort": true,
+        "verbosity": true
+      }
+    },
+    "gpt-5.1": {
+      "name": "gpt-5.1",
+      "provider": "openai-compatible",
+      "model": "gpt-5.1",
+      "request_options": {
+        "temperature": false,
+        "response_format": true,
+        "reasoning_effort": true,
+        "verbosity": true
+      }
+    },
+    "gpt-5": {
+      "name": "gpt-5",
+      "provider": "openai-compatible",
+      "model": "gpt-5",
+      "request_options": {
+        "temperature": false,
+        "response_format": true,
+        "reasoning_effort": true,
+        "verbosity": true
+      }
+    },
+    "gpt-5-mini": {
+      "name": "gpt-5-mini",
+      "provider": "openai-compatible",
+      "model": "gpt-5-mini",
+      "request_options": {
+        "temperature": false,
+        "response_format": true,
+        "reasoning_effort": true,
+        "verbosity": true
+      }
+    },
+    "gpt-5-nano": {
+      "name": "gpt-5-nano",
+      "provider": "openai-compatible",
+      "model": "gpt-5-nano",
+      "request_options": {
+        "temperature": false,
+        "response_format": true,
+        "reasoning_effort": true,
+        "verbosity": true
+      }
+    },
+    "gpt-5-chat-latest": {
+      "name": "gpt-5-chat-latest",
+      "provider": "openai-compatible",
+      "model": "gpt-5-chat-latest",
+      "request_options": {
+        "temperature": true,
+        "response_format": true,
+        "reasoning_effort": true,
+        "verbosity": true
+      }
+    },
+    "gpt-4.1": {
+      "name": "gpt-4.1",
+      "provider": "openai-compatible",
+      "model": "gpt-4.1",
+      "request_options": {
+        "temperature": true,
+        "response_format": true
+      }
+    },
+    "gpt-4.1-mini": {
+      "name": "gpt-4.1-mini",
+      "provider": "openai-compatible",
+      "model": "gpt-4.1-mini",
+      "request_options": {
+        "temperature": true,
+        "response_format": true
+      }
+    },
+    "gpt-4o-mini": {
+      "name": "gpt-4o-mini",
+      "provider": "openai-compatible",
+      "model": "gpt-4o-mini",
+      "request_options": {
+        "temperature": true,
+        "response_format": true
+      }
+    },
+    "o4-mini": {
+      "name": "o4-mini",
+      "provider": "openai-compatible",
+      "model": "o4-mini",
+      "request_options": {
+        "temperature": false,
+        "response_format": true,
+        "reasoning_effort": true
+      }
+    }
+  }
+}

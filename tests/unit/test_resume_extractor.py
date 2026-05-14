@@ -950,6 +950,7 @@ def test_extract_preserves_raw_llm_output_on_fallback() -> None:
         (),
         {"chat": type("Chat", (), {"completions": fake_completions})()},
     )()
+    extractor.model = "fake-model"
 
     with patch.object(extractor, "_split_name_with_llm", return_value=None):
         result = extractor.extract("Jane Doe\nSoftware Engineer\nBerlin, Germany")
@@ -1314,7 +1315,6 @@ def test_extract_retries_length_response_twice_before_succeeding() -> None:
         (),
         {"chat": type("Chat", (), {"completions": fake_completions})()},
     )()
-    extractor.model = "fake-model"
 
     with patch.object(extractor, "_split_name_with_llm", return_value=("Jane", "Doe")):
         result = extractor.extract("Jane Doe\nSoftware Engineer")
@@ -1559,6 +1559,7 @@ def test_extract_retries_once_on_structured_validation_failure() -> None:
             )()
         },
     )()
+    extractor.model = "fake-model"
 
     result = extractor.extract("Jane Doe\nSoftware Engineer")
 
@@ -1637,6 +1638,7 @@ def test_extract_accepts_nullable_website_url_candidates() -> None:
             )()
         },
     )()
+    extractor.model = "fake-model"
 
     result = extractor.extract("Jane Doe\nSoftware Engineer")
 
@@ -1707,6 +1709,7 @@ def test_extract_falls_back_to_json_object_when_structured_api_errors() -> None:
             )(),
         },
     )()
+    extractor.model = "fake-model"
 
     result = extractor.extract("Jane Doe\nSoftware Engineer")
 

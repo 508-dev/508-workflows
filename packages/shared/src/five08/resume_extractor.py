@@ -22,6 +22,7 @@ from five08.crm_normalization import (
     normalize_timezone_offset as shared_normalize_timezone_offset,
     normalize_website_url as shared_normalize_website_url,
 )
+from five08.llm import ProviderModel
 from five08.skills import (
     DISALLOWED_RESUME_SKILLS,
     normalize_skill_payload,
@@ -1857,6 +1858,7 @@ class ResumeProfileExtractor:
         self.model = model.strip() if model else "gpt-5-mini"
         if not self.model:
             self.model = "gpt-5-mini"
+        self.base_url = base_url
         self.max_tokens = max(1, max_tokens)
         self.snippet_chars = max(1000, snippet_chars)
         self.client: Any = None
@@ -1918,15 +1920,22 @@ class ResumeProfileExtractor:
         messages: list[dict[str, str]],
         temperature: float,
         max_tokens: int,
+        response_format: Any | None = None,
     ) -> dict[str, Any]:
-        return {
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "reasoning_effort": "minimal",
-            "verbosity": "low",
-        }
+        return self._provider_model().chat_completion_kwargs(
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=response_format,
+            reasoning_effort="minimal",
+            verbosity="low",
+        )
+
+    def _provider_model(self) -> ProviderModel:
+        return ProviderModel.openai_compatible(
+            model=self.model,
+            base_url=self.base_url,
+        )
 
     def _next_length_retry_max_tokens(self, current_max_tokens: int) -> int:
         return max(self.max_tokens * 2, current_max_tokens * 2)
@@ -1980,22 +1989,25 @@ class ResumeProfileExtractor:
                     retry_reason=retry_reason,
                 )
                 attempt_temperature = 0.1 if attempt_index == 0 else 0.0
-                request_kwargs = self._build_completion_kwargs(
-                    messages=messages,
-                    temperature=attempt_temperature,
-                    max_tokens=attempt_max_tokens,
-                )
 
                 try:
                     if use_structured_output:
                         response = self.client.beta.chat.completions.parse(
-                            response_format=ResumeLLMExtractionResponse,
-                            **request_kwargs,
+                            **self._build_completion_kwargs(
+                                messages=messages,
+                                temperature=attempt_temperature,
+                                max_tokens=attempt_max_tokens,
+                                response_format=ResumeLLMExtractionResponse,
+                            ),
                         )
                     else:
                         response = self.client.chat.completions.create(
-                            response_format={"type": "json_object"},
-                            **request_kwargs,
+                            **self._build_completion_kwargs(
+                                messages=messages,
+                                temperature=attempt_temperature,
+                                max_tokens=attempt_max_tokens,
+                                response_format={"type": "json_object"},
+                            ),
                         )
                 except (ValidationError, json.JSONDecodeError, ValueError):
                     if attempt_index == 0:
@@ -2672,25 +2684,26 @@ class ResumeProfileExtractor:
             return None
 
         response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Split person names into firstName and lastName for CRM fields. "
-                        "Return JSON only with no extra keys."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"Name: {full_name}. "
-                        'If this is a single name, set lastName to "Unknown".'
-                    ),
-                },
-            ],
-            temperature=0.0,
-            max_tokens=80,
+            **self._provider_model().chat_completion_kwargs(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Split person names into firstName and lastName for CRM fields. "
+                            "Return JSON only with no extra keys."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Name: {full_name}. "
+                            'If this is a single name, set lastName to "Unknown".'
+                        ),
+                    },
+                ],
+                temperature=0.0,
+                max_tokens=80,
+            )
         )
         raw_content = response.choices[0].message.content
         if not raw_content:
