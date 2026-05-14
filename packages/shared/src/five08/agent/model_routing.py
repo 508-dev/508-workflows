@@ -206,10 +206,10 @@ def _openai_fallback_base_url(settings: Any) -> str | None:
     )
     if direct_key and direct_base_url is not None:
         return direct_base_url
+    if direct_key:
+        return DEFAULT_OPENAI_BASE_URL
 
     openai_base_url = _validated_base_url(getattr(settings, "openai_base_url", None))
-    if direct_key and openai_base_url and _is_bifrost_base_url(openai_base_url):
-        return DEFAULT_OPENAI_BASE_URL
     return openai_base_url
 
 
