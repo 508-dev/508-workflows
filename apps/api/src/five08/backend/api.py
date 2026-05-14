@@ -7,9 +7,11 @@ import contextlib
 import hashlib
 import logging
 import os
+import re
 import secrets
-import time
 import json
+import threading
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -31,6 +33,19 @@ from five08.audit import (
     AuditResult,
     AuditSource,
     insert_audit_event,
+)
+from five08.agent import (
+    AgentIdentityContext,
+    AgentModelConfig,
+    AgentOrchestrator,
+    AgentPlan,
+    AgentRequest,
+    AgentResponse,
+    InMemoryTaskStore,
+    OpenAICompatibleIntentNormalizer,
+    PolicyEngine,
+    ToolRegistry,
+    ToolRuntimeConfig,
 )
 from five08.clients.espo import EspoAPIError, EspoClient
 from five08.logging import configure_observability
@@ -114,6 +129,13 @@ class DiscordLinkCreateRequest(BaseModel):
     next_path: str | None = None
 
 
+class AgentConfirmationRequest(BaseModel):
+    """Payload for confirming or canceling a frozen agent plan."""
+
+    context: AgentIdentityContext
+    confirm: bool = True
+
+
 class DashboardAssignOnboarderRequest(BaseModel):
     """Payload for assigning an onboarder from the dashboard."""
 
@@ -132,6 +154,9 @@ class JobsQueryFilters:
 _JOB_FUNCTIONS = JOB_FUNCTIONS
 _ONBOARDING_STATUS_FIELD = "cOnboardingState"
 _ONBOARDER_FIELD = "cOnboarder"
+_GENERIC_UNSUPPORTED_AGENT_MESSAGE = (
+    "I could not turn that into a supported task action."
+)
 _SENSITIVE_PAYLOAD_KEY_MARKERS = (
     "api_key",
     "apikey",
@@ -163,6 +188,42 @@ process_mailbox_message_job = JOB_FUNCTIONS["process_mailbox_message_job"]
 sync_people_from_crm_job = JOB_FUNCTIONS["sync_people_from_crm_job"]
 sync_person_from_crm_job = JOB_FUNCTIONS["sync_person_from_crm_job"]
 process_docuseal_agreement_job = JOB_FUNCTIONS["process_docuseal_agreement_job"]
+# Process-local MVP agent tools stay synchronous for Discord button UX. Both the
+# task store and pending plans are non-durable; production task workflows should
+# swap this registry for a persistent task service before multi-worker use.
+_AGENT_TASK_STORE = InMemoryTaskStore()
+_AGENT_ORCHESTRATOR: AgentOrchestrator | None = None
+_AGENT_ORCHESTRATOR_LOCK = threading.RLock()
+_PENDING_AGENT_PLANS: dict[str, tuple[AgentPlan, AgentIdentityContext]] = {}
+_PENDING_AGENT_PLANS_LOCK: asyncio.Lock | None = None
+_PENDING_AGENT_PLANS_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
+_MAX_PENDING_AGENT_PLANS = 1000
+_MAX_PENDING_AGENT_PLANS_PER_ACTOR = 25
+_AGENT_REQUEST_RATE_LIMIT_WINDOW_SECONDS = 60.0
+_AGENT_REQUEST_RATE_LIMIT_MAX_REQUESTS = 10
+_AGENT_REQUEST_TIMESTAMPS: dict[str, list[float]] = {}
+_AGENT_REQUEST_RATE_LIMIT_LOCK = threading.RLock()
+_AGENT_AUDIT_TASKS: set[asyncio.Task[None]] = set()
+
+
+def _get_agent_orchestrator() -> AgentOrchestrator:
+    """Lazily construct the agent orchestrator so config errors isolate /agent."""
+    global _AGENT_ORCHESTRATOR
+    if _AGENT_ORCHESTRATOR is not None:
+        return _AGENT_ORCHESTRATOR
+    with _AGENT_ORCHESTRATOR_LOCK:
+        if _AGENT_ORCHESTRATOR is None:
+            _AGENT_ORCHESTRATOR = AgentOrchestrator(
+                registry=ToolRegistry(
+                    _AGENT_TASK_STORE,
+                    runtime_config=ToolRuntimeConfig.from_settings(settings),
+                ),
+                model_config=AgentModelConfig.from_settings(settings),
+                intent_normalizer=OpenAICompatibleIntentNormalizer.from_settings(
+                    settings
+                ),
+            )
+    return _AGENT_ORCHESTRATOR
 
 
 def _is_authorized(request: Request) -> bool:
@@ -176,6 +237,32 @@ def _is_authorized(request: Request) -> bool:
         return True
     logger.warning("Rejecting request: invalid X-API-Secret")
     return False
+
+
+def _agent_request_rate_limited(discord_user_id: str) -> bool:
+    now = time.monotonic()
+    window_start = now - _AGENT_REQUEST_RATE_LIMIT_WINDOW_SECONDS
+    with _AGENT_REQUEST_RATE_LIMIT_LOCK:
+        for stored_user_id, stored_timestamps in list(
+            _AGENT_REQUEST_TIMESTAMPS.items()
+        ):
+            active_timestamps = [
+                timestamp
+                for timestamp in stored_timestamps
+                if timestamp >= window_start
+            ]
+            if active_timestamps:
+                _AGENT_REQUEST_TIMESTAMPS[stored_user_id] = active_timestamps
+            else:
+                del _AGENT_REQUEST_TIMESTAMPS[stored_user_id]
+
+        timestamps = _AGENT_REQUEST_TIMESTAMPS.get(discord_user_id, [])
+        if len(timestamps) >= _AGENT_REQUEST_RATE_LIMIT_MAX_REQUESTS:
+            _AGENT_REQUEST_TIMESTAMPS[discord_user_id] = timestamps
+            return True
+        timestamps.append(now)
+        _AGENT_REQUEST_TIMESTAMPS[discord_user_id] = timestamps
+        return False
 
 
 def _encode_ulid_base32(value: int, length: int) -> str:
@@ -200,8 +287,12 @@ def _extract_idempotency_key(value: object) -> str | None:
 
 
 def _resume_extract_model_name() -> str:
-    if settings.openai_api_key:
-        return settings.resolved_resume_ai_model
+    attempts = settings.resolved_resume_ai_provider_attempts
+    if attempts:
+        provider = attempts[0]
+        if provider.label == "primary":
+            return provider.model
+        return f"{provider.label}/{provider.model}"
     return "heuristic"
 
 
@@ -608,6 +699,67 @@ def _redact_dashboard_idempotency_key(value: Any) -> str | None:
         if len(parts) > 5:
             return ":".join(parts[:5] + ["[redacted]"])
     return key
+
+
+def _sanitize_agent_improvement_message(message: str) -> str:
+    sanitized = re.sub(r"\s+", " ", message).strip()
+    sanitized = re.sub(
+        r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+        "[email]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"https?://\S+|www\.\S+", "[url]", sanitized, flags=re.IGNORECASE
+    )
+    sanitized = re.sub(r"<@!?\d+>", "[discord_user]", sanitized)
+    sanitized = re.sub(
+        r"\bcontact[-_][A-Za-z0-9_-]+\b", "[contact_id]", sanitized, flags=re.IGNORECASE
+    )
+    sanitized = re.sub(r"\b(?:\+?\d[\d .()/-]{7,}\d)\b", "[phone]", sanitized)
+    for person_pattern in [
+        r"(member agreement\s+(?:to|for)\s+)([^,.;!?]+)",
+        r"((?:look\s*up|lookup|find|show)\s+(?:info|information|profile)\s+"
+        r"(?:on|for|about)\s+)([^,.;!?]+)",
+        r"((?:find|lookup|search)\s+(?:contact|member)\s+)([^,.;!?]+)",
+    ]:
+        sanitized = re.sub(
+            person_pattern,
+            r"\1[person]",
+            sanitized,
+            flags=re.IGNORECASE,
+        )
+    return sanitized[:256]
+
+
+def _agent_request_audit_metadata(
+    *,
+    message: str,
+    response: AgentResponse,
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "status": response.status,
+        "intent": response.plan.intent if response.plan else None,
+        "planner": response.plan.planner if response.plan else None,
+        "requires_confirmation": (
+            response.plan.requires_confirmation if response.plan else False
+        ),
+    }
+    if (
+        response.status == "needs_clarification"
+        and response.plan is None
+        and response.message == _GENERIC_UNSUPPORTED_AGENT_MESSAGE
+    ):
+        metadata.update(
+            {
+                "reason": "unsupported_agent_request",
+                "improvement_log": True,
+                "message_sanitized": _sanitize_agent_improvement_message(message),
+            }
+        )
+        return metadata
+    metadata["message"] = message[:256]
+    return metadata
 
 
 def _datetime_or_none(value: Any) -> str | None:
@@ -1122,6 +1274,118 @@ def _list_dashboard_audit_events(limit: int) -> list[dict[str, Any]]:
         event["metadata"] = row.get("metadata") or {}
         events.append(event)
     return events
+
+
+def _increment_dashboard_count(counts: dict[str, int], value: Any) -> None:
+    key = str(value or "unknown").strip() or "unknown"
+    counts[key] = counts.get(key, 0) + 1
+
+
+def _dashboard_agent_actor(row: dict[str, Any]) -> str:
+    return str(
+        row.get("actor_display_name")
+        or row.get("actor_subject")
+        or row.get("actor_provider")
+        or "Unknown"
+    )
+
+
+def _shape_dashboard_agent_request_report(
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    summary = {
+        "total": len(rows),
+        "handled": 0,
+        "requires_confirmation": 0,
+        "needs_clarification": 0,
+        "unsupported": 0,
+        "denied_or_failed": 0,
+    }
+    status_counts: dict[str, int] = {}
+    intent_counts: dict[str, int] = {}
+    planner_counts: dict[str, int] = {}
+    recent_unsupported: list[dict[str, Any]] = []
+
+    for row in rows:
+        metadata = row.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        status = str(metadata.get("status") or "unknown")
+        intent = metadata.get("intent") or "unknown"
+        planner = metadata.get("planner") or "unknown"
+
+        _increment_dashboard_count(status_counts, status)
+        _increment_dashboard_count(intent_counts, intent)
+        _increment_dashboard_count(planner_counts, planner)
+
+        if status in {"executed", "requires_confirmation"}:
+            summary["handled"] += 1
+        if status == "requires_confirmation" or metadata.get("requires_confirmation"):
+            summary["requires_confirmation"] += 1
+        if status == "needs_clarification":
+            summary["needs_clarification"] += 1
+        if status == "denied" or row.get("result") in {
+            AuditResult.DENIED,
+            AuditResult.ERROR,
+            "denied",
+            "error",
+        }:
+            summary["denied_or_failed"] += 1
+
+        is_unsupported = (
+            metadata.get("improvement_log") is True
+            or metadata.get("reason") == "unsupported_agent_request"
+        )
+        if not is_unsupported:
+            continue
+
+        summary["unsupported"] += 1
+        message_sanitized = str(metadata.get("message_sanitized") or "").strip()
+        if not message_sanitized:
+            continue
+        recent_unsupported.append(
+            {
+                "id": row.get("id"),
+                "occurred_at": _datetime_or_none(row.get("occurred_at")),
+                "actor": _dashboard_agent_actor(row),
+                "message_sanitized": message_sanitized,
+                "result": row.get("result"),
+                "correlation_id": row.get("correlation_id"),
+            }
+        )
+
+    return {
+        "summary": summary,
+        "status_counts": status_counts,
+        "intent_counts": intent_counts,
+        "planner_counts": planner_counts,
+        "recent_unsupported": recent_unsupported,
+    }
+
+
+def _dashboard_agent_request_report(limit: int) -> dict[str, Any]:
+    limit = _limit_dashboard_count(limit)
+    sql = """
+        SELECT
+            id::text,
+            occurred_at,
+            result,
+            actor_provider,
+            actor_subject,
+            actor_display_name,
+            correlation_id,
+            metadata
+        FROM audit_events
+        WHERE action = 'agent.request'
+        ORDER BY occurred_at DESC
+        LIMIT %s
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(sql, (limit,))
+            rows = cursor.fetchall()
+
+    return _shape_dashboard_agent_request_report(rows)
 
 
 def _assign_dashboard_onboarder_in_crm(
@@ -2018,6 +2282,22 @@ async def dashboard_audit_events_handler(
     return JSONResponse(events)
 
 
+async def dashboard_agent_report_handler(
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=100),
+) -> JSONResponse:
+    """Return admin-only agent request analytics for the dashboard."""
+    _, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_AUDIT_READ,
+    )
+    if error_response is not None:
+        return error_response
+
+    report = await asyncio.to_thread(_dashboard_agent_request_report, limit)
+    return JSONResponse(report)
+
+
 async def dashboard_rerun_job_handler(
     request: Request,
     job_id: str,
@@ -2370,6 +2650,437 @@ async def audit_event_handler(request: Request) -> JSONResponse:
             "person_id": created.person_id,
         },
         status_code=201,
+    )
+
+
+async def _write_agent_audit_event(
+    *,
+    context: AgentIdentityContext,
+    action: str,
+    result: AuditResult,
+    plan: AgentPlan | None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Best-effort agent audit write that never breaks command execution."""
+    try:
+        await asyncio.to_thread(
+            insert_audit_event,
+            settings,
+            AuditEventInput(
+                source=AuditSource.DISCORD,
+                action=action,
+                result=result,
+                actor_provider=ActorProvider.DISCORD,
+                actor_subject=context.discord_user_id,
+                resource_type="agent_plan" if plan is not None else "agent_request",
+                resource_id=plan.plan_id if plan is not None else None,
+                correlation_id=context.interaction_id or context.message_id,
+                metadata=metadata or {},
+            ),
+        )
+    except Exception:
+        logger.warning(
+            "Best-effort agent audit write failed action=%s user=%s",
+            action,
+            context.discord_user_id,
+            exc_info=True,
+        )
+
+
+def _schedule_agent_audit_event(
+    *,
+    context: AgentIdentityContext,
+    action: str,
+    result: AuditResult,
+    plan: AgentPlan | None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Schedule a best-effort agent audit write and keep it alive until done."""
+    task = asyncio.create_task(
+        _write_agent_audit_event(
+            context=context,
+            action=action,
+            result=result,
+            plan=plan,
+            metadata=metadata,
+        )
+    )
+    _AGENT_AUDIT_TASKS.add(task)
+    task.add_done_callback(_AGENT_AUDIT_TASKS.discard)
+
+
+def _is_agent_plan_expired(plan: AgentPlan, *, now: datetime | None = None) -> bool:
+    if plan.expires_at is None:
+        return False
+    expires_at = plan.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    comparison_time = now or datetime.now(timezone.utc)
+    return comparison_time > expires_at.astimezone(timezone.utc)
+
+
+def _cleanup_expired_pending_agent_plans(*, now: datetime | None = None) -> None:
+    comparison_time = now or datetime.now(timezone.utc)
+    expired_plan_ids = [
+        plan_id
+        for plan_id, (plan, _context) in _PENDING_AGENT_PLANS.items()
+        if _is_agent_plan_expired(plan, now=comparison_time)
+    ]
+    for plan_id in expired_plan_ids:
+        _PENDING_AGENT_PLANS.pop(plan_id, None)
+
+
+def _pending_agent_plan_count_for_actor(discord_user_id: str) -> int:
+    return sum(
+        1
+        for _plan, context in _PENDING_AGENT_PLANS.values()
+        if context.discord_user_id == discord_user_id
+    )
+
+
+def _confirmation_execution_context(
+    *,
+    original_context: AgentIdentityContext,
+    confirmation_context: AgentIdentityContext,
+) -> AgentIdentityContext:
+    roles = [role for role in confirmation_context.roles if role.strip()]
+    return AgentIdentityContext(
+        discord_user_id=original_context.discord_user_id,
+        internal_user_id=original_context.internal_user_id,
+        organization_id=original_context.organization_id,
+        workspace_id=original_context.workspace_id,
+        project_id=original_context.project_id,
+        guild_id=original_context.guild_id,
+        channel_id=original_context.channel_id,
+        roles=roles,
+        scopes=[],
+        impersonation=(
+            original_context.impersonation or confirmation_context.impersonation
+        ),
+        interaction_id=(
+            confirmation_context.interaction_id or original_context.interaction_id
+        ),
+        message_id=confirmation_context.message_id or original_context.message_id,
+    )
+
+
+def _confirmation_execution_scopes(
+    *,
+    original_context: AgentIdentityContext,
+    confirmation_context: AgentIdentityContext,
+) -> set[str]:
+    policy = PolicyEngine()
+    original_scopes = policy.scopes_for_context(original_context)
+    confirmation_scopes = policy.scopes_for_context(confirmation_context)
+    return original_scopes & confirmation_scopes
+
+
+def _pending_agent_plans_lock() -> asyncio.Lock:
+    global _PENDING_AGENT_PLANS_LOCK, _PENDING_AGENT_PLANS_LOCK_LOOP
+    loop = asyncio.get_running_loop()
+    if _PENDING_AGENT_PLANS_LOCK is None or _PENDING_AGENT_PLANS_LOCK_LOOP is not loop:
+        _PENDING_AGENT_PLANS_LOCK = asyncio.Lock()
+        _PENDING_AGENT_PLANS_LOCK_LOOP = loop
+    return _PENDING_AGENT_PLANS_LOCK
+
+
+async def _store_pending_agent_plan(
+    plan: AgentPlan,
+    context: AgentIdentityContext,
+) -> bool:
+    async with _pending_agent_plans_lock():
+        _cleanup_expired_pending_agent_plans()
+        if (
+            len(_PENDING_AGENT_PLANS) >= _MAX_PENDING_AGENT_PLANS
+            or _pending_agent_plan_count_for_actor(context.discord_user_id)
+            >= _MAX_PENDING_AGENT_PLANS_PER_ACTOR
+        ):
+            return False
+        _PENDING_AGENT_PLANS[plan.plan_id] = (plan, context)
+        return True
+
+
+async def _claim_pending_agent_plan(
+    plan_id: str,
+    *,
+    discord_user_id: str,
+) -> tuple[str, tuple[AgentPlan, AgentIdentityContext] | None]:
+    async with _pending_agent_plans_lock():
+        now = datetime.now(timezone.utc)
+        pending = _PENDING_AGENT_PLANS.get(plan_id)
+        if pending is None:
+            _cleanup_expired_pending_agent_plans(now=now)
+            return "not_found", None
+
+        plan, original_context = pending
+        if original_context.discord_user_id != discord_user_id:
+            _cleanup_expired_pending_agent_plans(now=now)
+            return "actor_mismatch", pending
+
+        if _is_agent_plan_expired(plan, now=now):
+            _PENDING_AGENT_PLANS.pop(plan_id, None)
+            _cleanup_expired_pending_agent_plans(now=now)
+            return "expired", pending
+
+        claimed = _PENDING_AGENT_PLANS.pop(plan_id, pending)
+        _cleanup_expired_pending_agent_plans(now=now)
+        return "claimed", claimed
+
+
+async def agent_request_handler(request: Request) -> JSONResponse:
+    """Plan and execute supported English agent commands."""
+    if not _is_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    try:
+        payload_data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+
+    if not isinstance(payload_data, dict):
+        return JSONResponse({"error": "payload_must_be_object"}, status_code=400)
+
+    try:
+        payload = AgentRequest.model_validate(payload_data)
+    except ValidationError as exc:
+        return JSONResponse(
+            {"error": "invalid_payload", "detail": str(exc)}, status_code=400
+        )
+    if _agent_request_rate_limited(payload.context.discord_user_id):
+        _schedule_agent_audit_event(
+            context=payload.context,
+            action="agent.request",
+            result=AuditResult.DENIED,
+            plan=None,
+            metadata={
+                "status": "denied",
+                "reason": "rate_limited",
+                "message": payload.message[:256],
+            },
+        )
+        return JSONResponse(
+            {
+                "status": "denied",
+                "message": "Too many agent requests. Try again in a minute.",
+            },
+            status_code=429,
+        )
+
+    try:
+        orchestrator = _get_agent_orchestrator()
+    except Exception as exc:
+        logger.error("Agent orchestrator configuration failed", exc_info=True)
+        return JSONResponse(
+            {
+                "status": "failed",
+                "message": "Agent routes are not configured correctly.",
+                "error": str(exc),
+            },
+            status_code=503,
+        )
+
+    response = await asyncio.to_thread(
+        orchestrator.plan,
+        payload.message,
+        payload.context,
+    )
+    if response.plan is not None and response.status == "requires_confirmation":
+        stored = await _store_pending_agent_plan(response.plan, payload.context)
+        if not stored:
+            _schedule_agent_audit_event(
+                context=payload.context,
+                action="agent.request",
+                result=AuditResult.ERROR,
+                plan=response.plan,
+                metadata={
+                    "status": "failed",
+                    "reason": "pending_plan_capacity_exceeded",
+                    "message": payload.message[:256],
+                },
+            )
+            response = AgentResponse(
+                status="failed",
+                message=("Agent confirmation capacity is full. Try again shortly."),
+            )
+            return JSONResponse(
+                response.model_dump(mode="json"),
+                status_code=503,
+            )
+
+    audit_result = AuditResult.SUCCESS
+    if response.status == "denied":
+        audit_result = AuditResult.DENIED
+    elif response.status == "failed":
+        audit_result = AuditResult.ERROR
+    _schedule_agent_audit_event(
+        context=payload.context,
+        action="agent.request",
+        result=audit_result,
+        plan=response.plan,
+        metadata=_agent_request_audit_metadata(
+            message=payload.message,
+            response=response,
+        ),
+    )
+
+    status_code = {
+        "executed": 200,
+        "requires_confirmation": 202,
+        "needs_clarification": 422,
+        "canceled": 200,
+        "denied": 403,
+        "failed": 500,
+    }[response.status]
+    return JSONResponse(response.model_dump(mode="json"), status_code=status_code)
+
+
+async def agent_confirmation_handler(
+    request: Request,
+    plan_id: str,
+) -> JSONResponse:
+    """Execute or cancel a frozen agent plan after user confirmation."""
+    if not _is_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    try:
+        payload_data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+
+    if not isinstance(payload_data, dict):
+        return JSONResponse({"error": "payload_must_be_object"}, status_code=400)
+
+    try:
+        payload = AgentConfirmationRequest.model_validate(payload_data)
+    except ValidationError as exc:
+        return JSONResponse(
+            {"error": "invalid_payload", "detail": str(exc)}, status_code=400
+        )
+
+    orchestrator: AgentOrchestrator | None = None
+    if payload.confirm:
+        try:
+            orchestrator = _get_agent_orchestrator()
+        except Exception as exc:
+            logger.error("Agent orchestrator configuration failed", exc_info=True)
+            return JSONResponse(
+                {
+                    "status": "failed",
+                    "message": "Agent routes are not configured correctly.",
+                    "error": str(exc),
+                },
+                status_code=503,
+            )
+
+    claim_status, pending = await _claim_pending_agent_plan(
+        plan_id,
+        discord_user_id=payload.context.discord_user_id,
+    )
+    if pending is None:
+        _schedule_agent_audit_event(
+            context=payload.context,
+            action="agent.confirmation",
+            result=AuditResult.DENIED,
+            plan=None,
+            metadata={"reason": "plan_not_found", "plan_id": plan_id},
+        )
+        return JSONResponse({"error": "plan_not_found"}, status_code=404)
+
+    plan, original_context = pending
+    if claim_status == "actor_mismatch":
+        _schedule_agent_audit_event(
+            context=payload.context,
+            action="agent.confirmation",
+            result=AuditResult.DENIED,
+            plan=plan,
+            metadata={"reason": "actor_mismatch"},
+        )
+        return JSONResponse({"error": "actor_mismatch"}, status_code=403)
+    if claim_status == "expired":
+        _schedule_agent_audit_event(
+            context=original_context,
+            action="agent.confirmation",
+            result=AuditResult.DENIED,
+            plan=plan,
+            metadata={"reason": "plan_expired"},
+        )
+        return JSONResponse({"error": "plan_expired"}, status_code=410)
+
+    if not payload.confirm:
+        _schedule_agent_audit_event(
+            context=original_context,
+            action="agent.confirmation",
+            result=AuditResult.SUCCESS,
+            plan=plan,
+            metadata={"status": "canceled"},
+        )
+        response = AgentResponse(
+            status="canceled",
+            plan=plan,
+            message="Agent plan was canceled before execution.",
+        )
+        return JSONResponse(response.model_dump(mode="json"), status_code=200)
+
+    execution_context = _confirmation_execution_context(
+        original_context=original_context,
+        confirmation_context=payload.context,
+    )
+    assert orchestrator is not None
+    results = await asyncio.to_thread(
+        orchestrator.execute_plan,
+        plan,
+        execution_context,
+        confirmed=True,
+        effective_scopes=_confirmation_execution_scopes(
+            original_context=original_context,
+            confirmation_context=payload.context,
+        ),
+    )
+    if any(result.status == "denied" for result in results):
+        status = "denied"
+    elif all(result.status == "succeeded" for result in results):
+        status = "executed"
+    else:
+        status = "failed"
+    if status == "executed":
+        response = AgentResponse(
+            status="executed",
+            plan=plan,
+            results=results,
+            message="Executed the confirmed agent plan.",
+        )
+    elif status == "denied":
+        response = AgentResponse(
+            status="denied",
+            plan=plan,
+            results=results,
+            message="The confirmed agent plan was denied by policy.",
+        )
+    else:
+        response = AgentResponse(
+            status="failed",
+            plan=plan,
+            results=results,
+            message="One or more confirmed agent actions failed.",
+        )
+    audit_result = {
+        "executed": AuditResult.SUCCESS,
+        "denied": AuditResult.DENIED,
+        "failed": AuditResult.ERROR,
+    }[status]
+    _schedule_agent_audit_event(
+        context=execution_context,
+        action="agent.confirmation",
+        result=audit_result,
+        plan=plan,
+        metadata={
+            "status": response.status,
+            "results": [result.model_dump(mode="json") for result in results],
+        },
+    )
+    return JSONResponse(
+        response.model_dump(mode="json"),
+        status_code={"executed": 200, "denied": 403, "failed": 500}[status],
     )
 
 
@@ -3109,6 +3820,11 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
         methods=["GET"],
     )
     app.add_api_route(
+        "/dashboard/api/agent",
+        dashboard_agent_report_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
         "/dashboard/api/sync/people",
         dashboard_sync_people_handler,
         methods=["POST"],
@@ -3145,6 +3861,12 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
     )
     app.add_api_route("/sync/people", sync_people_handler, methods=["POST"])
     app.add_api_route("/audit/events", audit_event_handler, methods=["POST"])
+    app.add_api_route("/agent/requests", agent_request_handler, methods=["POST"])
+    app.add_api_route(
+        "/agent/confirmations/{plan_id}",
+        agent_confirmation_handler,
+        methods=["POST"],
+    )
 
     app.add_api_route(
         "/auth/login", auth_login_handler, methods=["GET"], response_model=None
@@ -3178,8 +3900,8 @@ def run() -> None:
     )
     uvicorn.run(
         create_app(),
-        host=settings.webhook_ingest_host,
-        port=settings.webhook_ingest_port,
+        host=settings.web_host,
+        port=settings.web_port,
         log_level=settings.log_level.lower(),
     )
 

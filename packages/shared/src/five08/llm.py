@@ -10,6 +10,8 @@ from importlib import resources
 from typing import Any, Mapping, TypedDict
 from urllib.parse import urlparse
 
+from five08.model_catalog import model_chat_completion_options
+
 logger = logging.getLogger(__name__)
 
 _PROFILE_RESOURCE = "llm_model_profiles.json"
@@ -97,20 +99,43 @@ class ProviderModel:
             "model": self.model,
             "messages": messages,
         }
+        model_options = model_chat_completion_options(self.model)
         if max_tokens is not None:
-            kwargs["max_tokens"] = max_tokens
+            max_tokens_parameter = model_options.get("max_tokens_parameter")
+            if isinstance(max_tokens_parameter, str) and max_tokens_parameter:
+                kwargs[max_tokens_parameter] = max_tokens
+            else:
+                kwargs["max_tokens"] = max_tokens
         if response_format is not None and self.supports("response_format"):
             kwargs["response_format"] = response_format
         if temperature is not None and self.supports("temperature"):
             kwargs["temperature"] = temperature
         if reasoning_effort is not None and self.supports("reasoning_effort"):
-            kwargs["reasoning_effort"] = reasoning_effort
+            configured_reasoning_effort = model_options.get("reasoning_effort")
+            kwargs["reasoning_effort"] = (
+                configured_reasoning_effort
+                if isinstance(configured_reasoning_effort, str)
+                and configured_reasoning_effort
+                else reasoning_effort
+            )
         if verbosity is not None and self.supports("verbosity"):
-            kwargs["verbosity"] = verbosity
+            configured_verbosity = model_options.get("verbosity")
+            kwargs["verbosity"] = (
+                configured_verbosity
+                if isinstance(configured_verbosity, str) and configured_verbosity
+                else verbosity
+            )
         return kwargs
 
     def supports(self, option: str) -> bool:
         """Return whether the configured model supports a request option."""
+        model_options = model_chat_completion_options(self.model)
+        if option == "temperature" and "supports_temperature" in model_options:
+            return bool(model_options["supports_temperature"])
+        if option in {"reasoning_effort", "verbosity"} and option in model_options:
+            return isinstance(model_options[option], str) and bool(
+                model_options[option]
+            )
         profile = self.profile or _fallback_profile(self.model)
         if option == "temperature":
             return profile.supports_temperature

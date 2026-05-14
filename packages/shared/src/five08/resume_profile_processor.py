@@ -39,6 +39,10 @@ from five08.skills import (
     normalize_skill_payload,
 )
 from five08.resume_document_processor import DocumentProcessor
+from five08.openai_fallback import (
+    OpenAICompatibleProvider,
+    build_openai_compatible_provider_attempts,
+)
 from five08.resume_extractor import ResumeExtractedProfile, ResumeProfileExtractor
 from five08.resume_processing_models import (
     ResumeApplyResult,
@@ -259,6 +263,7 @@ class ResumeProcessorConfig:
     max_file_size_mb: int = DEFAULT_RESUME_MAX_FILE_SIZE_MB
     resume_extractor_version: str = "v1"
     postgres_url: str = ""
+    llm_provider_attempts: tuple[OpenAICompatibleProvider, ...] = ()
 
     @property
     def allowed_attachment_suffixes(self) -> frozenset[str]:
@@ -301,11 +306,47 @@ class ResumeProcessorConfig:
             or "gpt-5-mini"
         )
 
+        openai_api_key = getattr(
+            settings, "resolved_resume_ai_api_key", None
+        ) or getattr(settings, "openai_api_key", None)
+        openai_base_url = getattr(
+            settings, "resolved_resume_ai_base_url", None
+        ) or getattr(settings, "openai_base_url", None)
+        configured_attempts = getattr(
+            settings,
+            "resolved_resume_ai_provider_attempts",
+            (),
+        )
+        provider_attempts = (
+            configured_attempts
+            if isinstance(configured_attempts, tuple)
+            else build_openai_compatible_provider_attempts(
+                primary_model=resume_model,
+                primary_api_key=openai_api_key,
+                primary_base_url=openai_base_url,
+                openai_direct_api_key=(
+                    getattr(settings, "openai_direct_api_key", None)
+                    or getattr(settings, "openai_api_key_direct", None)
+                ),
+                openai_direct_base_url=getattr(
+                    settings,
+                    "openai_direct_base_url",
+                    None,
+                ),
+                openai_direct_model=(
+                    getattr(settings, "openai_direct_model", None)
+                    or getattr(settings, "agent_fallback_model", None)
+                ),
+                fireworks_api_key=getattr(settings, "fireworks_api_key", None),
+                openrouter_api_key=getattr(settings, "openrouter_api_key", None),
+            )
+        )
+
         return cls(
             espo_base_url=str(getattr(settings, "espo_base_url")),
             espo_api_key=str(getattr(settings, "espo_api_key")),
-            openai_api_key=getattr(settings, "openai_api_key", None),
-            openai_base_url=getattr(settings, "openai_base_url", None),
+            openai_api_key=openai_api_key,
+            openai_base_url=openai_base_url,
             resume_model=resume_model,
             resume_extractor_max_tokens=int(
                 getattr(settings, "resume_extractor_max_tokens", 2000)
@@ -321,6 +362,7 @@ class ResumeProcessorConfig:
             ).strip()
             or "v1",
             postgres_url=str(getattr(settings, "postgres_url", "")).strip(),
+            llm_provider_attempts=provider_attempts,
         )
 
 
@@ -368,11 +410,13 @@ class ResumeProfileProcessor:
             base_url=config.openai_base_url,
             model=config.resume_model,
             max_tokens=config.resume_extractor_max_tokens,
+            provider_attempts=config.llm_provider_attempts,
         )
         self.skills_extractor = SkillsExtractor(
             model=config.resume_model,
             openai_api_key=config.openai_api_key,
             openai_base_url=config.openai_base_url,
+            provider_attempts=config.llm_provider_attempts,
         )
         self.document_processor = DocumentProcessor(
             allowed_extensions=config.allowed_file_extensions,

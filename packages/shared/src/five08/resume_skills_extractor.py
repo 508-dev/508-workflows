@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from five08.llm import ProviderModel
+from five08.openai_fallback import FallbackOpenAIClient, OpenAICompatibleProvider
 from five08.skills import (
     DISALLOWED_RESUME_SKILLS,
     normalize_skill,
@@ -67,6 +68,7 @@ class SkillsExtractor:
         model: str,
         openai_api_key: str | None,
         openai_base_url: str | None,
+        provider_attempts: tuple[OpenAICompatibleProvider, ...] | None = None,
     ) -> None:
         self.provider_model = ProviderModel.openai_compatible(
             model=model,
@@ -76,7 +78,12 @@ class SkillsExtractor:
         self.model = self.provider_model.model
         self.client: Any = None
 
-        if openai_api_key and OpenAIClient is not None:
+        if provider_attempts and OpenAIClient is not None:
+            self.client = FallbackOpenAIClient(
+                providers=provider_attempts,
+                client_factory=OpenAIClient,
+            )
+        elif openai_api_key and OpenAIClient is not None:
             self.client = OpenAIClient(**self.provider_model.client_kwargs())
 
     def extract_skills(self, resume_text: str) -> ExtractedSkills:
@@ -119,11 +126,18 @@ class SkillsExtractor:
                 skills_value=parsed.get("skills", []),
                 skill_attrs_value=parsed.get("skill_attrs", {}),
                 confidence=confidence,
-                source=self.model,
+                source=self._last_llm_model(),
             )
         except Exception as exc:
             logger.warning("LLM skills extraction failed, using fallback: %s", exc)
             return self._extract_skills_heuristic(resume_text)
+
+    def _last_llm_model(self) -> str:
+        provider = getattr(self.client, "last_provider", None)
+        provider_model = getattr(provider, "model", None)
+        if isinstance(provider_model, str) and provider_model.strip():
+            return provider_model.strip()
+        return self.model
 
     def _extract_skills_heuristic(self, resume_text: str) -> ExtractedSkills:
         """Simple keyword and token-based extraction fallback."""

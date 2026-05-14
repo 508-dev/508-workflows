@@ -1,0 +1,46 @@
+{
+  "version": "discord-agent-trajectory.v1",
+  "id": "task_complete_confirmation_001",
+  "description": "Members can mark their own task complete behind confirmation.",
+  "tags": ["canonical", "task", "write", "confirmation"],
+  "suite": {
+    "canonical": true,
+    "weekly": true
+  },
+  "context": {
+    "discord_user_id": "123",
+    "organization_id": "org-1",
+    "guild_id": "org-1",
+    "roles": ["Member"]
+  },
+  "seed": {
+    "tasks": [
+      {
+        "title": "Update onboarding docs",
+        "project": "Atlas",
+        "assignee": "Sarah",
+        "due_date": "2026-05-15"
+      }
+    ]
+  },
+  "request": {
+    "message": "Mark TASK-001 as done"
+  },
+  "expect": {
+    "status": "requires_confirmation",
+    "intent": "update_task",
+    "model_tier": "strong",
+    "requires_confirmation": true,
+    "actions": [
+      {
+        "tool_name": "task_write.update_task",
+        "requires_confirmation": true,
+        "required_scopes": ["task:update_own"],
+        "arguments_contains": {
+          "task_id": "TASK-001",
+          "status": "done"
+        }
+      }
+    ]
+  }
+}

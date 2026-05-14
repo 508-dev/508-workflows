@@ -132,6 +132,72 @@ def test_discord_admin_roles_default_is_admin_owner() -> None:
     assert settings.discord_admin_role_names == {"admin", "owner"}
 
 
+def test_resume_model_defaults_to_gpt_4_1_mini() -> None:
+    settings = WorkerSettings(
+        espo_base_url="https://crm.test.com",
+        espo_api_key="test-key",
+    )
+
+    assert settings.resolved_resume_ai_model == "gpt-4.1-mini"
+
+
+def test_resume_provider_uses_specific_credentials_when_configured() -> None:
+    settings = WorkerSettings(
+        espo_base_url="https://crm.test.com",
+        espo_api_key="test-key",
+        openai_api_key="openai-key",
+        openai_base_url="https://api.openai.com/v1",
+        resume_ai_api_key="resume-key",
+        resume_ai_base_url="https://openrouter.ai/api/v1",
+        resume_ai_model="gpt-4.1-mini",
+    )
+
+    assert settings.resolved_resume_ai_api_key == "resume-key"
+    assert settings.resolved_resume_ai_base_url == "https://openrouter.ai/api/v1"
+    assert settings.resolved_resume_ai_model == "openai/gpt-4.1-mini"
+
+
+def test_resume_provider_falls_back_to_openai_when_specific_key_missing() -> None:
+    settings = WorkerSettings(
+        espo_base_url="https://crm.test.com",
+        espo_api_key="test-key",
+        openai_api_key="openai-key",
+        openai_base_url="https://api.openai.com/v1",
+        resume_ai_base_url="https://openrouter.ai/api/v1",
+        resume_ai_model="gpt-4.1-mini",
+    )
+
+    assert settings.resolved_resume_ai_api_key == "openai-key"
+    assert settings.resolved_resume_ai_base_url == "https://api.openai.com/v1"
+    assert settings.resolved_resume_ai_model == "gpt-4.1-mini"
+
+
+def test_resume_provider_attempts_include_direct_fallbacks_for_bifrost() -> None:
+    settings = WorkerSettings(
+        espo_base_url="https://crm.test.com",
+        espo_api_key="test-key",
+        openai_api_key="bifrost-key",
+        openai_base_url="https://bifrost.508.dev/openai",
+        resume_ai_model="openrouter/openai/gpt-4.1-mini",
+        openrouter_api_key="openrouter-key",
+        openai_api_key_direct="openai-direct-key",
+        agent_fallback_model="gpt-4.1-mini",
+    )
+
+    attempts = settings.resolved_resume_ai_provider_attempts
+
+    assert [attempt.label for attempt in attempts] == [
+        "primary",
+        "openrouter-direct",
+        "openai-direct",
+    ]
+    assert attempts[0].model == "openrouter/openai/gpt-4.1-mini"
+    assert attempts[1].model == "openai/gpt-4.1-mini"
+    assert attempts[1].base_url == "https://openrouter.ai/api/v1"
+    assert attempts[2].model == "gpt-4.1-mini"
+    assert attempts[2].base_url == "https://api.openai.com/v1"
+
+
 def test_intake_resume_fetch_timeout_must_be_positive() -> None:
     with pytest.raises(ValidationError):
         WorkerSettings(

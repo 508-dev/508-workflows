@@ -1,0 +1,36 @@
+{
+  "version": "discord-agent-trajectory.v1",
+  "id": "task_create_mentions_github_issue_001",
+  "description": "Explicit task creation wins even when the task title mentions a GitHub issue.",
+  "tags": ["canonical", "task", "write", "routing"],
+  "suite": {
+    "canonical": true,
+    "weekly": true
+  },
+  "context": {
+    "discord_user_id": "123",
+    "organization_id": "org-1",
+    "guild_id": "org-1",
+    "roles": ["Member"]
+  },
+  "request": {
+    "message": "Create a task to follow up on GitHub issue 123 in project Atlas"
+  },
+  "expect": {
+    "status": "requires_confirmation",
+    "intent": "create_task",
+    "model_tier": "strong",
+    "requires_confirmation": true,
+    "actions": [
+      {
+        "tool_name": "task_write.create_task",
+        "requires_confirmation": true,
+        "required_scopes": ["task:create"],
+        "arguments_contains": {
+          "title": "follow up on GitHub issue 123",
+          "project": "Atlas"
+        }
+      }
+    ]
+  }
+}

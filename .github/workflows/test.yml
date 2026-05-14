@@ -123,6 +123,108 @@ jobs:
       run: |
         uv run mypy apps/discord_bot/src/five08/ apps/worker/src/five08/ packages/shared/src/five08/ --ignore-missing-imports --explicit-package-bases
 
+  discord-agent-evals:
+    runs-on: ubuntu-latest
+    environment: test
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+
+    - name: Detect agent eval relevant changes
+      id: agent-eval-changes
+      env:
+        BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        HEAD_SHA: ${{ github.sha }}
+      run: |
+        if [[ -z "${BASE_SHA:-}" || "$BASE_SHA" =~ ^0+$ ]]; then
+          echo "run=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        changed_files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+        echo "$changed_files"
+        while IFS= read -r file; do
+          case "$file" in
+            .github/workflows/test.yml|scripts/agent_eval.py|packages/shared/src/five08/agent/*|packages/shared/src/five08/model_catalog.py|packages/shared/src/five08/data/model-profiles.json|apps/discord_bot/src/five08/discord_bot/cogs/agent.py|tests/evals/discord-agent/*|tests/unit/test_agent_cog.py|tests/unit/test_agent_evals.py|tests/unit/test_agent_gateway.py|pyproject.toml|uv.lock)
+              echo "run=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+        done <<< "$changed_files"
+        echo "run=false" >> "$GITHUB_OUTPUT"
+
+    - name: Skip Discord agent evals for unrelated changes
+      if: steps.agent-eval-changes.outputs.run != 'true'
+      run: |
+        echo "No Discord agent/planner changes detected; skipping agent evals."
+
+    - name: Install uv
+      if: steps.agent-eval-changes.outputs.run == 'true'
+      uses: astral-sh/setup-uv@v7
+      with:
+        version: "0.6.6"
+
+    - name: Set up Python
+      if: steps.agent-eval-changes.outputs.run == 'true'
+      run: uv python install 3.12
+
+    - name: Install dependencies
+      if: steps.agent-eval-changes.outputs.run == 'true'
+      run: |
+        uv sync --all-extras
+
+    - name: Run canonical Discord agent deterministic evals
+      if: steps.agent-eval-changes.outputs.run == 'true'
+      run: |
+        uv run python scripts/agent_eval.py --suite canonical --model primary --no-env-file
+
+    - name: Check live planner credentials
+      if: steps.agent-eval-changes.outputs.run == 'true'
+      id: live-planner-key
+      env:
+        LIVE_EVAL_DIRECT_KEY: ${{ secrets.OPENAI_API_KEY_DIRECT }}
+        LIVE_EVAL_PROVIDER_KEY: ${{ secrets.OPENAI_API_KEY }}
+        LIVE_EVAL_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
+      run: |
+        if [[ -n "${LIVE_EVAL_BASE_URL:-}" ]]; then
+          if [[ -n "${LIVE_EVAL_PROVIDER_KEY:-}" ]]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+        elif [[ -n "${LIVE_EVAL_DIRECT_KEY:-}" || -n "${LIVE_EVAL_PROVIDER_KEY:-}" ]]; then
+          echo "available=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "available=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Run canonical Discord agent live-planner evals
+      if: steps.agent-eval-changes.outputs.run == 'true' && steps.live-planner-key.outputs.available == 'true'
+      env:
+        LIVE_EVAL_DIRECT_KEY: ${{ secrets.OPENAI_API_KEY_DIRECT }}
+        LIVE_EVAL_PROVIDER_KEY: ${{ secrets.OPENAI_API_KEY }}
+        LIVE_EVAL_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
+      run: |
+        if [[ -n "${LIVE_EVAL_BASE_URL:-}" ]]; then
+          OPENAI_API_KEY="$LIVE_EVAL_PROVIDER_KEY" OPENAI_BASE_URL="$LIVE_EVAL_BASE_URL" uv run python scripts/agent_eval.py --suite canonical --model primary --live-planner --no-env-file
+        else
+          LIVE_EVAL_KEY="${LIVE_EVAL_DIRECT_KEY:-$LIVE_EVAL_PROVIDER_KEY}"
+          OPENAI_API_KEY="$LIVE_EVAL_KEY" uv run python scripts/agent_eval.py --suite canonical --model primary --live-planner --no-env-file
+        fi
+
+    - name: Skip live planner evals without provider credentials
+      if: steps.agent-eval-changes.outputs.run == 'true' && steps.live-planner-key.outputs.available != 'true'
+      run: |
+        echo "Skipping live planner evals because the matching OPENAI_API_KEY_DIRECT/OPENAI_API_KEY credential is not configured."
+
+    - name: Upload Discord agent eval reports
+      uses: actions/upload-artifact@v7
+      if: always() && steps.agent-eval-changes.outputs.run == 'true'
+      with:
+        name: discord-agent-eval-reports
+        path: tests/evals/discord-agent/reports/
+
   security:
     runs-on: ubuntu-latest
     steps:
@@ -161,7 +263,7 @@ jobs:
   # Status check for PRs - ensures all tests pass before merge
   all-tests-passed:
     if: always()
-    needs: [test, playwright-dashboard, lint, security]
+    needs: [test, playwright-dashboard, lint, discord-agent-evals, security]
     runs-on: ubuntu-latest
     steps:
     - name: Check all jobs
@@ -176,6 +278,10 @@ jobs:
         fi
         if [[ "${{ needs.lint.result }}" != "success" ]]; then
           echo "Linting failed"
+          exit 1
+        fi
+        if [[ "${{ needs['discord-agent-evals'].result }}" != "success" && "${{ needs['discord-agent-evals'].result }}" != "skipped" ]]; then
+          echo "Discord agent evals failed"
           exit 1
         fi
         if [[ "${{ needs.security.result }}" != "success" ]]; then

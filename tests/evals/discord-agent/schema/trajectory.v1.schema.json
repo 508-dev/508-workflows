@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://508.dev/evals/discord-agent/trajectory.v1.schema.json",
+  "title": "Discord Agent Trajectory Fixture",
+  "type": "object",
+  "required": ["version", "id", "description", "request", "expect"],
+  "properties": {
+    "version": { "const": "discord-agent-trajectory.v1" },
+    "id": { "type": "string", "minLength": 1 },
+    "description": { "type": "string", "minLength": 1 },
+    "tags": { "type": "array", "items": { "type": "string" } },
+    "suite": {
+      "type": "object",
+      "properties": {
+        "canonical": { "type": "boolean" },
+        "weekly": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "context": { "type": "object" },
+    "runtime_config": { "type": "object" },
+    "stub_results": { "type": "object" },
+    "seed": {
+      "type": "object",
+      "properties": {
+        "tasks": { "type": "array", "items": { "type": "object" } }
+      },
+      "additionalProperties": false
+    },
+    "request": {
+      "type": "object",
+      "properties": {
+        "message": { "type": ["string", "null"] },
+        "thread": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["role", "content"],
+            "properties": {
+              "role": { "enum": ["user", "assistant", "bot"] },
+              "content": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "expect": { "type": "object" },
+    "known_failure": {
+      "type": "object",
+      "required": ["reason"],
+      "properties": {
+        "reason": { "type": "string" },
+        "issue": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

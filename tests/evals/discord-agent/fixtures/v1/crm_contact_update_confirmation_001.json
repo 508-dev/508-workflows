@@ -1,0 +1,38 @@
+{
+  "version": "discord-agent-trajectory.v1",
+  "id": "crm_contact_update_confirmation_001",
+  "description": "Admins can draft CRM contact onboarding updates behind confirmation.",
+  "tags": ["weekly", "crm", "write", "confirmation"],
+  "suite": {
+    "canonical": true,
+    "weekly": true
+  },
+  "context": {
+    "discord_user_id": "789",
+    "organization_id": "org-1",
+    "guild_id": "org-1",
+    "roles": ["Admin"]
+  },
+  "request": {
+    "message": "Update CRM contact contact-123 onboarding state to approved"
+  },
+  "expect": {
+    "status": "requires_confirmation",
+    "intent": "update_crm_contact",
+    "model_tier": "strong",
+    "requires_confirmation": true,
+    "actions": [
+      {
+        "tool_name": "crm_write.update_contact",
+        "requires_confirmation": true,
+        "required_scopes": ["crm:contact:update"],
+        "arguments": {
+          "contact_id": "contact-123",
+          "updates": {
+            "cOnboardingState": "approved"
+          }
+        }
+      }
+    ]
+  }
+}

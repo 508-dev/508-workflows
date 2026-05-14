@@ -1,0 +1,39 @@
+{
+  "version": "discord-agent-trajectory.v1",
+  "id": "member_agreement_crm_ambiguous_001",
+  "description": "The agent asks the user to choose when multiple viable CRM contacts match a member agreement recipient.",
+  "tags": ["canonical", "docuseal", "crm", "clarification"],
+  "suite": {
+    "canonical": true,
+    "weekly": true
+  },
+  "context": {
+    "discord_user_id": "789",
+    "organization_id": "org-1",
+    "guild_id": "org-1",
+    "roles": ["Admin"]
+  },
+  "stub_results": {
+    "crm_read.search_contacts": {
+      "contacts": [
+        {
+          "id": "contact-456",
+          "name": "Caleb Smith",
+          "emailAddress": "caleb.smith@example.com"
+        },
+        {
+          "id": "contact-789",
+          "name": "Caleb Jones",
+          "emailAddress": "caleb.jones@example.com"
+        }
+      ]
+    }
+  },
+  "request": {
+    "message": "Send member agreement to Caleb"
+  },
+  "expect": {
+    "status": "needs_clarification",
+    "message_contains": "Which one should I use?"
+  }
+}

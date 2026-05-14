@@ -10,8 +10,8 @@ worktree_env_load "$script_dir"
 export REDIS_URL="redis://127.0.0.1:${REDIS_HOST_PORT}/0"
 export POSTGRES_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:${POSTGRES_HOST_PORT}/${POSTGRES_DB}"
 export MINIO_ENDPOINT="http://127.0.0.1:${MINIO_API_HOST_PORT}"
-export BACKEND_API_BASE_URL="http://127.0.0.1:${WEBHOOK_INGEST_PORT}"
-export WORKER_API_BASE_URL="http://127.0.0.1:${WEBHOOK_INGEST_PORT}"
+export BACKEND_API_BASE_URL="http://127.0.0.1:${WEB_PORT}"
+export WORKER_API_BASE_URL="http://127.0.0.1:${WEB_PORT}"
 export DISCORD_BOT_INTERNAL_BASE_URL="http://127.0.0.1:${HEALTHCHECK_PORT}"
 
 shell_quote() {
@@ -42,7 +42,7 @@ Infrastructure is running in Docker on localhost:
   Console:  127.0.0.1:${MINIO_CONSOLE_HOST_PORT}
 
 Host-run app ports for this worktree:
-  Web/API:  127.0.0.1:${WEBHOOK_INGEST_PORT} (hot reload)
+  Web/API:  127.0.0.1:${WEB_PORT} (hot reload)
   Bot:      127.0.0.1:${HEALTHCHECK_PORT}
 
 Run app services on the host with:
@@ -65,7 +65,7 @@ REDIS_HOST_PORT=$REDIS_HOST_PORT
 POSTGRES_HOST_PORT=$POSTGRES_HOST_PORT
 MINIO_API_HOST_PORT=$MINIO_API_HOST_PORT
 MINIO_CONSOLE_HOST_PORT=$MINIO_CONSOLE_HOST_PORT
-WEBHOOK_INGEST_PORT=$WEBHOOK_INGEST_PORT
+WEB_PORT=$WEB_PORT
 HEALTHCHECK_PORT=$HEALTHCHECK_PORT
 EOF
     ;;
@@ -76,7 +76,7 @@ EOF
     emit_export POSTGRES_DB "$POSTGRES_DB"
     emit_export MINIO_API_HOST_PORT "$MINIO_API_HOST_PORT"
     emit_export MINIO_CONSOLE_HOST_PORT "$MINIO_CONSOLE_HOST_PORT"
-    emit_export WEBHOOK_INGEST_PORT "$WEBHOOK_INGEST_PORT"
+    emit_export WEB_PORT "$WEB_PORT"
     emit_export HEALTHCHECK_PORT "$HEALTHCHECK_PORT"
     emit_export REDIS_URL "$REDIS_URL"
     emit_export MINIO_ENDPOINT "$MINIO_ENDPOINT"
@@ -91,8 +91,8 @@ EOF
   web|api)
     exec uv run --package api uvicorn five08.backend.api:create_app \
       --factory \
-      --host "${WEBHOOK_INGEST_HOST:-0.0.0.0}" \
-      --port "$WEBHOOK_INGEST_PORT" \
+      --host "${WEB_HOST:-${WEBHOOK_INGEST_HOST:-0.0.0.0}}" \
+      --port "$WEB_PORT" \
       --reload \
       --reload-dir apps/api/src \
       --reload-dir apps/worker/src \

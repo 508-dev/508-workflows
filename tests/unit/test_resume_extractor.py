@@ -964,6 +964,155 @@ def test_extract_preserves_raw_llm_output_on_fallback() -> None:
     assert "JSONDecodeError" in result.llm_fallback_reason
 
 
+def test_extract_uses_gpt5_chat_completion_token_parameter() -> None:
+    """Direct GPT-5 requests should use the chat-completions token parameter it supports."""
+
+    response = type(
+        "Response",
+        (),
+        {
+            "choices": [
+                type(
+                    "Choice",
+                    (),
+                    {
+                        "finish_reason": "stop",
+                        "message": type(
+                            "Message",
+                            (),
+                            {
+                                "content": (
+                                    '{"name":"Jane Doe","firstName":"Jane",'
+                                    '"lastName":"Doe","email":"jane@example.com"}'
+                                )
+                            },
+                        )(),
+                    },
+                )()
+            ]
+        },
+    )()
+    fake_completions = Mock()
+    fake_completions.create.return_value = response
+    extractor = ResumeProfileExtractor(api_key="test-key", max_tokens=40)
+    extractor.client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": fake_completions})()},
+    )()
+
+    with patch.object(extractor, "_split_name_with_llm", return_value=("Jane", "Doe")):
+        result = extractor.extract("Jane Doe\nSoftware Engineer")
+
+    kwargs = fake_completions.create.call_args.kwargs
+    assert kwargs["max_completion_tokens"] == 40
+    assert "max_tokens" not in kwargs
+    assert "temperature" not in kwargs
+    assert kwargs["reasoning_effort"] == "minimal"
+    assert kwargs["verbosity"] == "low"
+    assert result.email == "jane@example.com"
+
+
+def test_extract_uses_supported_gpt55_reasoning_effort() -> None:
+    """GPT-5.5 should not use the GPT-5 minimal reasoning-effort value."""
+
+    response = type(
+        "Response",
+        (),
+        {
+            "choices": [
+                type(
+                    "Choice",
+                    (),
+                    {
+                        "finish_reason": "stop",
+                        "message": type(
+                            "Message",
+                            (),
+                            {
+                                "content": (
+                                    '{"name":"Jane Doe","firstName":"Jane",'
+                                    '"lastName":"Doe","email":"jane@example.com"}'
+                                )
+                            },
+                        )(),
+                    },
+                )()
+            ]
+        },
+    )()
+    fake_completions = Mock()
+    fake_completions.create.return_value = response
+    extractor = ResumeProfileExtractor(
+        api_key="test-key",
+        model="gpt-5.5",
+        max_tokens=40,
+    )
+    extractor.client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": fake_completions})()},
+    )()
+
+    with patch.object(extractor, "_split_name_with_llm", return_value=("Jane", "Doe")):
+        extractor.extract("Jane Doe\nSoftware Engineer")
+
+    kwargs = fake_completions.create.call_args.kwargs
+    assert kwargs["max_completion_tokens"] == 40
+    assert kwargs["reasoning_effort"] == "low"
+    assert kwargs["verbosity"] == "low"
+
+
+def test_extract_uses_supported_gpt54_reasoning_effort() -> None:
+    """GPT-5.4 should not use the GPT-5 minimal reasoning-effort value."""
+
+    response = type(
+        "Response",
+        (),
+        {
+            "choices": [
+                type(
+                    "Choice",
+                    (),
+                    {
+                        "finish_reason": "stop",
+                        "message": type(
+                            "Message",
+                            (),
+                            {
+                                "content": (
+                                    '{"name":"Jane Doe","firstName":"Jane",'
+                                    '"lastName":"Doe","email":"jane@example.com"}'
+                                )
+                            },
+                        )(),
+                    },
+                )()
+            ]
+        },
+    )()
+    fake_completions = Mock()
+    fake_completions.create.return_value = response
+    extractor = ResumeProfileExtractor(
+        api_key="test-key",
+        model="gpt-5.4-mini",
+        max_tokens=40,
+    )
+    extractor.client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": fake_completions})()},
+    )()
+
+    with patch.object(extractor, "_split_name_with_llm", return_value=("Jane", "Doe")):
+        extractor.extract("Jane Doe\nSoftware Engineer")
+
+    kwargs = fake_completions.create.call_args.kwargs
+    assert kwargs["max_completion_tokens"] == 40
+    assert kwargs["reasoning_effort"] == "low"
+    assert kwargs["verbosity"] == "low"
+
+
 def test_extract_repairs_json_with_comments_trailing_commas_and_prose() -> None:
     """Common near-JSON formatting issues should not force heuristic fallback."""
 
@@ -1315,6 +1464,7 @@ def test_extract_retries_length_response_twice_before_succeeding() -> None:
         (),
         {"chat": type("Chat", (), {"completions": fake_completions})()},
     )()
+    extractor.model = "fake-model"
 
     with patch.object(extractor, "_split_name_with_llm", return_value=("Jane", "Doe")):
         result = extractor.extract("Jane Doe\nSoftware Engineer")
@@ -1323,10 +1473,7 @@ def test_extract_retries_length_response_twice_before_succeeding() -> None:
     assert fake_completions.create.call_args_list[0].kwargs["max_tokens"] == 40
     assert fake_completions.create.call_args_list[1].kwargs["max_tokens"] == 80
     assert fake_completions.create.call_args_list[2].kwargs["max_tokens"] == 160
-    assert fake_completions.create.call_args_list[0].kwargs["reasoning_effort"] == (
-        "minimal"
-    )
-    assert fake_completions.create.call_args_list[0].kwargs["verbosity"] == "low"
+    assert fake_completions.create.call_args_list[0].kwargs["temperature"] == 0.1
     assert result.first_name == "Jane"
     assert result.last_name == "Doe"
     assert result.llm_fallback_reason is None

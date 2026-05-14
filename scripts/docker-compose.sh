@@ -9,12 +9,14 @@ repo_root=$WORKTREE_ENV_REPO_ROOT
 export COMPOSE_PROJECT_NAME
 export REDIS_HOST_PORT
 export POSTGRES_HOST_PORT
+export WEB_HOST_PORT
 export WEBHOOK_INGEST_HOST_PORT
 export MINIO_API_HOST_PORT
 export MINIO_CONSOLE_HOST_PORT
 
-# Host-run-only app ports must not leak into Compose interpolation, or the API
+# Host-run-only app ports must not leak into Compose interpolation, or the web
 # container can start on a high worktree port while peers still target :8090.
+unset WEB_PORT
 unset WEBHOOK_INGEST_PORT
 unset HEALTHCHECK_PORT
 
@@ -24,7 +26,7 @@ WORKTREE=$repo_root
 COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME
 REDIS_HOST_PORT=$REDIS_HOST_PORT
 POSTGRES_HOST_PORT=$POSTGRES_HOST_PORT
-WEBHOOK_INGEST_HOST_PORT=$WEBHOOK_INGEST_HOST_PORT
+WEB_HOST_PORT=$WEB_HOST_PORT
 MINIO_API_HOST_PORT=$MINIO_API_HOST_PORT
 MINIO_CONSOLE_HOST_PORT=$MINIO_CONSOLE_HOST_PORT
 EOF
@@ -32,4 +34,4 @@ EOF
 fi
 
 cd "$repo_root"
-exec docker compose "$@"
+exec docker compose -f compose.yaml -f compose.local.yaml "$@"

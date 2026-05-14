@@ -106,8 +106,14 @@ Use `.env.example` as the source of defaults.
 - `Optional`: `ALLOWED_FILE_TYPES` (default: `pdf,doc,docx,txt`)
 - `Optional`: `OPENAI_API_KEY` (if unset, heuristic extraction is used)
 - `Optional`: `OPENAI_BASE_URL` (set `https://openrouter.ai/api/v1` for OpenRouter)
-- `Optional`: `RESUME_AI_MODEL` (default: `gpt-4o-mini`; use plain names like `gpt-4o-mini`, OpenRouter gets auto-prefixed to `openai/<model>`)
-- `Optional`: `OPENAI_MODEL` (default: `gpt-4o-mini`; fallback/legacy model setting)
+- `Optional`: `OPENAI_DIRECT_API_KEY` / `OPENAI_API_KEY_DIRECT`, `OPENAI_DIRECT_BASE_URL`, `OPENAI_DIRECT_MODEL` (direct OpenAI fallback when the primary base URL is Bifrost)
+- `Optional`: `FIREWORKS_API_KEY` (direct fallback when Bifrost is not routing Fireworks)
+- `Optional`: `OPENROUTER_API_KEY` (direct OpenRouter fallback when Bifrost is unavailable or misconfigured)
+- `Optional`: `LANGFUSE_BASE_URL` (Langfuse endpoint for LLM tracing/observability)
+- `Optional`: `RESUME_AI_API_KEY`, `RESUME_AI_BASE_URL` (resume-specific provider; falls back to `OPENAI_API_KEY` / `OPENAI_BASE_URL` when unset or incomplete)
+- `Optional`: `RESUME_AI_MODEL` (default: `gpt-4.1-mini`; use plain names like `gpt-4.1-mini`, OpenRouter gets auto-prefixed to `openai/<model>`)
+- Note: resume/profile LLM calls retry matching direct providers after Bifrost request failures. For example, `RESUME_AI_MODEL=openrouter/openai/gpt-4.1-mini` through Bifrost retries direct OpenRouter as `openai/gpt-4.1-mini`, then direct OpenAI when those keys are configured.
+- `Optional`: `OPENAI_MODEL` (default: `gpt-5-mini`; fallback/legacy model setting)
 - `Optional`: `RESUME_EXTRACTOR_VERSION` (default: `v1`; used in resume processing idempotency/ledger keys)
 - `Optional`: `INTAKE_RESUME_FETCH_TIMEOUT_SECONDS` (default: `20.0`; timeout for intake resume URL downloads)
 - `Optional`: `INTAKE_RESUME_MAX_REDIRECTS` (default: `3`; max redirects followed for intake resume URL downloads)
@@ -124,6 +130,22 @@ Use `.env.example` as the source of defaults.
 - `Optional`: `BACKEND_API_BASE_URL` (default: `http://127.0.0.1:8090`; `./scripts/dev.sh` overrides it to the worktree API port, Compose injects `http://api:8090`)
 - `Optional`: `HEALTHCHECK_PORT` (host-run `./scripts/dev.sh` ignores `.env` for this key and defaults to a deterministic per-worktree value near `30000 + WORKTREE_ENV_SLOT`; export it in your shell only when you intentionally want a fixed port, and avoid browser-unsafe ports such as `5060`)
 - Note: bot message chunking follows Discord's 2000 character limit in code.
+
+## Discord Agent Gateway
+
+- `Optional`: `AGENT_API_TIMEOUT_SECONDS` (default: `8.0`; timeout for synchronous Discord agent gateway calls)
+- `Optional`: `AGENT_FAST_MODEL`, `AGENT_FAST_BASE_URL`, `AGENT_FAST_API_KEY`
+- `Optional`: `AGENT_STRONG_MODEL`, `AGENT_STRONG_BASE_URL`, `AGENT_STRONG_API_KEY`
+- `Optional`: `AGENT_REASONING_MODEL`, `AGENT_REASONING_BASE_URL`, `AGENT_REASONING_API_KEY`
+- `Optional`: `AGENT_PLANNER_MODEL` (default: `accounts/fireworks/models/kimi-k2p6`)
+- `Optional`: `AGENT_FALLBACK_MODEL` (default: `gpt-4.1-mini`; uses `OPENAI_API_KEY` / `OPENAI_BASE_URL`)
+- `Optional`: `AGENT_INTENT_NORMALIZER_ENABLED` (default: `true`; when deterministic parsing fails, asks the fast agent model to rewrite loose phrasing into one supported command shape)
+- `Optional`: `AGENT_INTENT_NORMALIZER_TIMEOUT_SECONDS` (default: `3.0`)
+- Note: tier-specific agent models can point at OpenAI-compatible providers such as Bifrost or Fireworks. Agent model base URLs must be HTTPS endpoints on `bifrost.508.dev`, `api.openai.com`, `api.fireworks.ai`, or `openrouter.ai`, except the internal Docker-network Bifrost URL `http://bifrost:8080/openai` is also allowed for same-host deployments. If `OPENAI_BASE_URL` points at Bifrost and tier-specific `AGENT_*` values are unset, the planner defaults to Fireworks Kimi via Bifrost as `fireworks/accounts/fireworks/models/kimi-k2p6`. Explicit Bifrost provider-prefixed planner models, such as `openrouter/openai/gpt-4.1-mini`, are passed through unchanged. If Bifrost is not configured and `FIREWORKS_API_KEY` is set, the planner falls back to direct Fireworks as `accounts/fireworks/models/kimi-k2p6`. If a configured provider is missing its usable API key, it is skipped and the fallback order is `reasoning -> strong -> fast -> AGENT_FALLBACK_MODEL -> gpt-4.1-mini`; `strong` falls back through `fast`, and `fast` falls back through the OpenAI fallback.
+- Agent tools follow the deterministic path: deterministic parsing runs first, the optional LLM intent normalizer can only rewrite unsupported phrasing into supported command shapes, policy authorizes scopes, write tools require confirmation, and the backend executes known-good tool code.
+- `Optional`: `GITHUB_API_TOKEN`, `GITHUB_DEFAULT_REPO`, `GITHUB_ALLOWED_REPOS` (comma-separated; GitHub Issues are the canonical code-task backend for agent-created code work, and agent tools only access the default/allowed repositories).
+- Existing integration tools also expose CRM contact search/update, DocuSeal member-agreement submission, and Migadu mailbox creation when their normal service env vars are configured.
+- Note: the current generic task tool registry is process-local and non-durable for non-code/org tasks until the task-management platform is selected.
 
 ## Migadu Mailbox Automation
 

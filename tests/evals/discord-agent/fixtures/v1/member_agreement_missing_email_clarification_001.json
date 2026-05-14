@@ -1,0 +1,22 @@
+{
+  "version": "discord-agent-trajectory.v1",
+  "id": "member_agreement_missing_email_clarification_001",
+  "description": "The agent must not create a member agreement when only a name is provided and no CRM resolver exists.",
+  "tags": ["canonical", "docuseal", "clarification", "privacy"],
+  "suite": {
+    "canonical": true,
+    "weekly": true
+  },
+  "context": {
+    "discord_user_id": "789",
+    "organization_id": "org-1",
+    "guild_id": "org-1",
+    "roles": ["Admin"]
+  },
+  "request": {
+    "message": "Send member agreement to Caleb"
+  },
+  "expect": {
+    "status": "needs_clarification"
+  }
+}

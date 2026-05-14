@@ -1,0 +1,591 @@
+{
+  "version": "model-profiles.v1",
+  "pricing_source": "official provider pricing docs; OpenAI org usage/cost API requires api.usage.read",
+  "models": {
+    "gpt-5.5": {
+      "name": "gpt-5.5",
+      "provider": "openai-compatible",
+      "model": "gpt-5.5",
+      "api_key_env": "OPENAI_API_KEY",
+      "base_url": "https://api.openai.com/v1",
+      "request_options": {
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "chat_completion_options": {
+        "max_tokens_parameter": "max_completion_tokens",
+        "reasoning_effort": "low",
+        "verbosity": "low",
+        "supports_temperature": false
+      },
+      "cost_per_1m": {
+        "input": 5.0,
+        "cached": 0.5,
+        "output": 30.0
+      },
+      "observed_behavior": {
+        "resume_baseline": {
+          "date": "2026-05-12",
+          "corpus": "local-resumes",
+          "succeeded": 11,
+          "total": 11,
+          "estimated_cost_usd": 0.386096,
+          "total_elapsed_ms": 203051,
+          "p50_latency_ms": 17570,
+          "p95_latency_ms": 32016,
+          "suggested_use": "quality ceiling / review baseline"
+        },
+        "live_planner_weekly": {
+          "date": "2026-05-13",
+          "suite": "discord-agent-weekly",
+          "eval_profile": "openai-direct",
+          "model": "gpt-5.5",
+          "passed": 13,
+          "total": 13,
+          "parse_success_rate": 1.0,
+          "bad_plan_rate": 0.0,
+          "avg_latency_ms": 2653.5,
+          "max_latency_ms": 3982,
+          "suggested_use": "planner quality ceiling; too expensive for default bulk planning"
+        }
+      },
+      "baseline_chat_completion_options": {
+        "max_tokens_parameter": "max_completion_tokens",
+        "reasoning_effort": "medium",
+        "verbosity": "low",
+        "supports_temperature": false
+      }
+    },
+    "gpt-5.4": {
+      "name": "gpt-5.4",
+      "provider": "openai-compatible",
+      "model": "gpt-5.4",
+      "api_key_env": "OPENAI_API_KEY",
+      "base_url": "https://api.openai.com/v1",
+      "request_options": {
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "chat_completion_options": {
+        "max_tokens_parameter": "max_completion_tokens",
+        "reasoning_effort": "low",
+        "verbosity": "low",
+        "supports_temperature": false
+      },
+      "cost_per_1m": {
+        "input": 2.5,
+        "cached": 0.25,
+        "output": 15.0
+      },
+      "observed_behavior": {
+        "resume_extraction": {
+          "date": "2026-05-12",
+          "corpus": "local-resumes",
+          "llm_successes": 11,
+          "total": 11,
+          "avg_score": 0.9422,
+          "estimated_cost_usd": 0.191121,
+          "total_elapsed_ms": 158040,
+          "p50_latency_ms": 13077,
+          "p95_latency_ms": 21933,
+          "suggested_use": "high-cost quality fallback"
+        }
+      }
+    },
+    "gpt-5.4-mini": {
+      "name": "gpt-5.4-mini",
+      "provider": "openai-compatible",
+      "model": "gpt-5.4-mini",
+      "api_key_env": "OPENAI_API_KEY",
+      "base_url": "https://api.openai.com/v1",
+      "request_options": {
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "chat_completion_options": {
+        "max_tokens_parameter": "max_completion_tokens",
+        "reasoning_effort": "low",
+        "verbosity": "low",
+        "supports_temperature": false
+      },
+      "cost_per_1m": {
+        "input": 0.75,
+        "cached": 0.075,
+        "output": 4.5
+      }
+    },
+    "gpt-5.4-nano": {
+      "name": "gpt-5.4-nano",
+      "provider": "openai-compatible",
+      "model": "gpt-5.4-nano",
+      "api_key_env": "OPENAI_API_KEY",
+      "base_url": "https://api.openai.com/v1",
+      "request_options": {
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "chat_completion_options": {
+        "max_tokens_parameter": "max_completion_tokens",
+        "reasoning_effort": "low",
+        "verbosity": "low",
+        "supports_temperature": false
+      },
+      "cost_per_1m": {
+        "input": 0.2,
+        "cached": 0.02,
+        "output": 1.25
+      },
+      "observed_behavior": {
+        "resume_extraction": {
+          "date": "2026-05-12",
+          "corpus": "local-resumes",
+          "llm_successes": 10,
+          "total": 11,
+          "avg_score": 0.8998,
+          "estimated_cost_usd": 0.013254,
+          "total_elapsed_ms": 178075,
+          "p50_latency_ms": 7560,
+          "p95_latency_ms": 73269,
+          "suggested_use": "not default; one fallback in latest run"
+        }
+      }
+    },
+    "gpt-5": {
+      "name": "gpt-5",
+      "provider": "openai-compatible",
+      "model": "gpt-5",
+      "api_key_env": "OPENAI_API_KEY",
+      "base_url": "https://api.openai.com/v1",
+      "request_options": {
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "chat_completion_options": {
+        "max_tokens_parameter": "max_completion_tokens",
+        "reasoning_effort": "minimal",
+        "verbosity": "low",
+        "supports_temperature": false
+      },
+      "cost_per_1m": {
+        "input": 1.25,
+        "cached": 0.125,
+        "output": 10.0
+      },
+      "observed_behavior": {
+        "resume_extraction": {
+          "date": "2026-05-12",
+          "corpus": "local-resumes",
+          "llm_successes": 11,
+          "total": 11,
+          "avg_score": 0.9422,
+          "estimated_cost_usd": 0.087674,
+          "total_elapsed_ms": 282013,
+          "p50_latency_ms": 25908,
+          "p95_latency_ms": 65789,
+          "suggested_use": "quality fallback"
+        }
+      }
+    },
+    "gpt-5-mini": {
+      "name": "gpt-5-mini",
+      "provider": "openai-compatible",
+      "model": "gpt-5-mini",
+      "api_key_env": "OPENAI_API_KEY",
+      "base_url": "https://api.openai.com/v1",
+      "request_options": {
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "chat_completion_options": {
+        "max_tokens_parameter": "max_completion_tokens",
+        "reasoning_effort": "minimal",
+        "verbosity": "low",
+        "supports_temperature": false
+      },
+      "cost_per_1m": {
+        "input": 0.25,
+        "cached": 0.025,
+        "output": 2.0
+      },
+      "observed_behavior": {
+        "resume_extraction": {
+          "date": "2026-05-12",
+          "corpus": "local-resumes",
+          "llm_successes": 11,
+          "total": 11,
+          "avg_score": 0.9422,
+          "estimated_cost_usd": 0.020147,
+          "total_elapsed_ms": 130045,
+          "p50_latency_ms": 8416,
+          "p95_latency_ms": 47531,
+          "suggested_use": "cheap fallback candidate"
+        },
+        "live_planner_weekly_openai_direct": {
+          "date": "2026-05-13",
+          "suite": "discord-agent-weekly",
+          "eval_profile": "openai-direct",
+          "model": "gpt-5-mini",
+          "passed": 11,
+          "total": 13,
+          "parse_success_rate": 1.0,
+          "bad_plan_rate": 0.1538,
+          "avg_latency_ms": 2316.9,
+          "max_latency_ms": 3421,
+          "suggested_use": "not the current live planner default; failed GitHub issue scenarios in rerun"
+        },
+        "live_planner_weekly_openrouter": {
+          "date": "2026-05-12",
+          "suite": "discord-agent-weekly",
+          "eval_profile": "openrouter",
+          "model": "openai/gpt-5-mini",
+          "passed": 4,
+          "total": 13,
+          "parse_success_rate": 1.0,
+          "bad_plan_rate": 0.6923,
+          "avg_latency_ms": 5083.6,
+          "max_latency_ms": 8309,
+          "suggested_use": "not the current live planner default; weaker than Kimi K2.6 in retained weekly reports"
+        }
+      }
+    },
+    "gpt-5-nano": {
+      "name": "gpt-5-nano",
+      "provider": "openai-compatible",
+      "model": "gpt-5-nano",
+      "api_key_env": "OPENAI_API_KEY",
+      "base_url": "https://api.openai.com/v1",
+      "request_options": {
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "chat_completion_options": {
+        "max_tokens_parameter": "max_completion_tokens",
+        "reasoning_effort": "minimal",
+        "verbosity": "low",
+        "supports_temperature": false
+      },
+      "cost_per_1m": {
+        "input": 0.05,
+        "cached": 0.005,
+        "output": 0.4
+      },
+      "observed_behavior": {
+        "live_planner_weekly": {
+          "date": "2026-05-13",
+          "suite": "discord-agent-weekly",
+          "eval_profile": "openai-direct",
+          "model": "gpt-5-nano",
+          "passed": 9,
+          "total": 13,
+          "parse_success_rate": 1.0,
+          "bad_plan_rate": 0.3077,
+          "avg_latency_ms": 2168.8,
+          "max_latency_ms": 3444,
+          "suggested_use": "too weak for live planning default"
+        }
+      }
+    },
+    "gpt-4.1": {
+      "name": "gpt-4.1",
+      "provider": "openai-compatible",
+      "model": "gpt-4.1",
+      "api_key_env": "OPENAI_API_KEY",
+      "base_url": "https://api.openai.com/v1",
+      "request_options": {
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "cost_per_1m": {
+        "input": 2.0,
+        "cached": 0.5,
+        "output": 8.0
+      },
+      "observed_behavior": {
+        "resume_extraction": {
+          "date": "2026-05-12",
+          "corpus": "local-resumes",
+          "llm_successes": 11,
+          "total": 11,
+          "avg_score": 0.9422,
+          "estimated_cost_usd": 0.114688,
+          "total_elapsed_ms": 151975,
+          "p50_latency_ms": 13723,
+          "p95_latency_ms": 22797,
+          "suggested_use": "high-quality fallback"
+        }
+      }
+    },
+    "gpt-4.1-mini": {
+      "name": "gpt-4.1-mini",
+      "provider": "openai-compatible",
+      "model": "gpt-4.1-mini",
+      "api_key_env": "OPENAI_API_KEY",
+      "base_url": "https://api.openai.com/v1",
+      "request_options": {
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "cost_per_1m": {
+        "input": 0.4,
+        "cached": 0.1,
+        "output": 1.6
+      },
+      "observed_behavior": {
+        "resume_extraction": {
+          "date": "2026-05-12",
+          "corpus": "local-resumes",
+          "llm_successes": 11,
+          "total": 11,
+          "avg_score": 0.9504,
+          "estimated_cost_usd": 0.023059,
+          "total_elapsed_ms": 345350,
+          "p50_latency_ms": 11636,
+          "p95_latency_ms": 230770,
+          "suggested_use": "default candidate; ignore observed long-tail latency until rerun on stable network"
+        },
+        "live_planner_weekly": {
+          "date": "2026-05-13",
+          "suite": "discord-agent-weekly",
+          "eval_profile": "openai-direct",
+          "model": "gpt-4.1-mini",
+          "passed": 13,
+          "total": 13,
+          "parse_success_rate": 1.0,
+          "bad_plan_rate": 0.0,
+          "avg_latency_ms": 2634.5,
+          "max_latency_ms": 3189,
+          "suggested_use": "best OpenAI default candidate for live planning; 13/13 pass at much lower cost than gpt-5.5"
+        }
+      }
+    },
+    "gpt-4.1-nano": {
+      "name": "gpt-4.1-nano",
+      "provider": "openai-compatible",
+      "model": "gpt-4.1-nano",
+      "api_key_env": "OPENAI_API_KEY",
+      "base_url": "https://api.openai.com/v1",
+      "request_options": {
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "cost_per_1m": {
+        "input": 0.1,
+        "cached": 0.03,
+        "output": 0.4
+      }
+    },
+    "gpt-4o-mini": {
+      "name": "gpt-4o-mini",
+      "provider": "openai-compatible",
+      "model": "gpt-4o-mini",
+      "api_key_env": "OPENAI_API_KEY",
+      "base_url": "https://api.openai.com/v1",
+      "request_options": {
+        "response_format": {
+          "type": "json_object"
+        }
+      }
+    },
+    "kimi-k2p6-turbo-fireworks": {
+      "name": "kimi-k2p6-turbo-fireworks",
+      "provider": "openai-compatible",
+      "model": "accounts/fireworks/routers/kimi-k2p6-turbo",
+      "api_key_env": "FIREWORKS_API_KEY",
+      "base_url": "https://api.fireworks.ai/inference/v1",
+      "request_options": {
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "cost_per_1m": {
+        "input": 1.5,
+        "cached": 0.22,
+        "output": 6.0
+      }
+    },
+    "kimi-k2p6-fireworks": {
+      "name": "kimi-k2p6-fireworks",
+      "provider": "openai-compatible",
+      "model": "accounts/fireworks/models/kimi-k2p6",
+      "api_key_env": "FIREWORKS_API_KEY",
+      "base_url": "https://api.fireworks.ai/inference/v1",
+      "request_options": {
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "cost_per_1m": {
+        "input": 0.95,
+        "cached": 0.16,
+        "output": 4.0
+      },
+      "observed_behavior": {
+        "live_planner_weekly": {
+          "date": "2026-05-12",
+          "suite": "discord-agent-weekly",
+          "eval_profile": "fireworks-kimi",
+          "model": "accounts/fireworks/models/kimi-k2p6",
+          "passed": 13,
+          "total": 13,
+          "parse_success_rate": 1.0,
+          "bad_plan_rate": 0.0,
+          "avg_latency_ms": 1942.6,
+          "max_latency_ms": 3939,
+          "suggested_use": "best low-latency/cost live planner candidate in rerun; keep deterministic policy gates and confirmations before write actions"
+        }
+      }
+    },
+    "kimi-k2p5-fireworks": {
+      "name": "kimi-k2p5-fireworks",
+      "provider": "openai-compatible",
+      "model": "fireworks/kimi-k2p5",
+      "api_key_env": "FIREWORKS_API_KEY",
+      "base_url": "https://api.fireworks.ai/inference/v1",
+      "request_options": {
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "cost_per_1m": {
+        "input": 0.6,
+        "cached": 0.1,
+        "output": 3.0
+      }
+    },
+    "kimi-k2p5-turbo-fireworks": {
+      "name": "kimi-k2p5-turbo-fireworks",
+      "provider": "openai-compatible",
+      "model": "accounts/fireworks/routers/kimi-k2p5-turbo",
+      "api_key_env": "FIREWORKS_API_KEY",
+      "base_url": "https://api.fireworks.ai/inference/v1",
+      "request_options": {
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "cost_per_1m": {
+        "input": 0.6,
+        "cached": 0.1,
+        "output": 3.0
+      }
+    },
+    "deepseek-v4-pro-fireworks": {
+      "name": "deepseek-v4-pro-fireworks",
+      "provider": "openai-compatible",
+      "model": "accounts/fireworks/models/deepseek-v4-pro",
+      "api_key_env": "FIREWORKS_API_KEY",
+      "base_url": "https://api.fireworks.ai/inference/v1",
+      "request_options": {
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "cost_per_1m": {
+        "input": 1.74,
+        "cached": 0.145,
+        "output": 3.48
+      }
+    },
+    "glm-5p1-fireworks": {
+      "name": "glm-5p1-fireworks",
+      "provider": "openai-compatible",
+      "model": "accounts/fireworks/models/glm-5p1",
+      "api_key_env": "FIREWORKS_API_KEY",
+      "base_url": "https://api.fireworks.ai/inference/v1",
+      "request_options": {
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "cost_per_1m": {
+        "input": 1.4,
+        "cached": 0.26,
+        "output": 4.4
+      }
+    },
+    "glm-5p1-fast-fireworks": {
+      "name": "glm-5p1-fast-fireworks",
+      "provider": "openai-compatible",
+      "model": "accounts/fireworks/routers/glm-5p1-fast",
+      "api_key_env": "FIREWORKS_API_KEY",
+      "base_url": "https://api.fireworks.ai/inference/v1",
+      "request_options": {
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "cost_per_1m": {
+        "input": 2.8,
+        "cached": 0.52,
+        "output": 8.8
+      }
+    },
+    "minimax-m2p7-fireworks": {
+      "name": "minimax-m2p7-fireworks",
+      "provider": "openai-compatible",
+      "model": "accounts/fireworks/models/minimax-m2p7",
+      "api_key_env": "FIREWORKS_API_KEY",
+      "base_url": "https://api.fireworks.ai/inference/v1",
+      "request_options": {
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "cost_per_1m": {
+        "input": 0.3,
+        "cached": 0.06,
+        "output": 1.2
+      }
+    },
+    "qwen3p6-plus-fireworks": {
+      "name": "qwen3p6-plus-fireworks",
+      "provider": "openai-compatible",
+      "model": "accounts/fireworks/models/qwen3p6-plus",
+      "api_key_env": "FIREWORKS_API_KEY",
+      "base_url": "https://api.fireworks.ai/inference/v1",
+      "request_options": {
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "cost_per_1m": {
+        "input": 0.15,
+        "cached": 0.075,
+        "output": 0.6
+      }
+    },
+    "openrouter-auto": {
+      "name": "openrouter-auto",
+      "provider": "openai-compatible",
+      "model": "openrouter/auto",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "base_url": "https://openrouter.ai/api/v1",
+      "request_options": {
+        "response_format": {
+          "type": "json_object"
+        }
+      }
+    }
+  },
+  "recommendations": {
+    "resume_extraction_default": {
+      "model": "gpt-4.1-mini",
+      "reason": "11/11 LLM success, highest observed completeness score, and low estimated cost in the 2026-05-12 local-resumes run; rerun latency on stable network before using latency as a deciding factor."
+    },
+    "planner_live_default": {
+      "model": "kimi-k2p6-fireworks",
+      "eval_profile": "fireworks-kimi",
+      "reason": "Best default tradeoff in the fixed 2026-05-13 Discord live-planner weekly rerun: 13/13 passed with 13/13 parsed, 0% bad-plan rate, and 1942.6ms average latency. gpt-4.1-mini and gpt-5.5 also passed 13/13; gpt-4.1-mini is the best OpenAI fallback, while gpt-5.5 is a quality ceiling. Keep deterministic policy gates and human confirmations for write actions."
+    }
+  }
+}

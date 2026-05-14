@@ -3,7 +3,7 @@
 import os
 import sys
 
-from pydantic import field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,6 +23,7 @@ class SharedSettings(BaseSettings):
     sentry_dsn: str | None = None
     sentry_send_default_pii: bool = False
     sentry_debug: bool = False
+    langfuse_base_url: str | None = None
 
     # Local development defaults to host-run app services. Containerized runtimes
     # should inject Docker-network service URLs explicitly.
@@ -42,14 +43,28 @@ class SharedSettings(BaseSettings):
     minio_root_password: str = ""
     minio_internal_bucket: str = "internal-transfers"
 
-    webhook_ingest_host: str = "0.0.0.0"
-    webhook_ingest_port: int = 8090
+    web_host: str = Field(
+        default="0.0.0.0",
+        validation_alias=AliasChoices("WEB_HOST", "WEBHOOK_INGEST_HOST"),
+    )
+    web_port: int = Field(
+        default=8090,
+        validation_alias=AliasChoices("WEB_PORT", "WEBHOOK_INGEST_PORT"),
+    )
     api_shared_secret: str | None = None
     discord_logs_webhook_url: str | None = None
     discord_logs_webhook_wait: bool = True
     docuseal_base_url: str | None = None
     docuseal_api_key: str | None = None
     docuseal_member_agreement_template_id: int | None = None
+    github_api_token: str | None = None
+    github_default_repo: str | None = None
+    github_allowed_repos: str = ""
+    kimai_base_url: str | None = None
+    kimai_api_token: str | None = None
+    migadu_api_user: str | None = None
+    migadu_api_key: str | None = None
+    migadu_mailbox_domain: str = "508.dev"
     authentik_api_base_url: str | None = None
     authentik_api_token: str | None = None
     authentik_api_timeout_seconds: float = 20.0
@@ -59,7 +74,11 @@ class SharedSettings(BaseSettings):
     outline_api_key: str | None = None
     outline_api_timeout_seconds: float = 20.0
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        extra="ignore",
+        populate_by_name=True,
+    )
 
     @field_validator("docuseal_member_agreement_template_id", mode="before")
     @classmethod

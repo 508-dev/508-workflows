@@ -1,0 +1,28 @@
+{
+  "version": "discord-agent-fixtures.v1",
+  "schema": "../../schema/trajectory.v1.schema.json",
+  "scenarios": [
+    "create_task_confirmation_001.json",
+    "search_project_tasks_001.json",
+    "task_project_prefixed_search_001.json",
+    "task_complete_confirmation_001.json",
+    "task_create_mentions_github_issue_001.json",
+    "task_assign_member_denied_001.json",
+    "github_issue_create_confirmation_001.json",
+    "github_issue_search_001.json",
+    "github_issue_search_default_repo_001.json",
+    "github_issue_member_denied_001.json",
+    "crm_contact_search_001.json",
+    "crm_contact_info_lookup_001.json",
+    "crm_contact_update_confirmation_001.json",
+    "crm_contact_approve_confirmation_001.json",
+    "member_agreement_confirmation_001.json",
+    "member_agreement_email_introducer_001.json",
+    "member_agreement_crm_resolve_001.json",
+    "member_agreement_crm_ambiguous_001.json",
+    "member_agreement_missing_email_clarification_001.json",
+    "mailbox_create_confirmation_001.json",
+    "missing_project_clarification_001.json",
+    "thread_followup_latest_message_001.json"
+  ]
+}

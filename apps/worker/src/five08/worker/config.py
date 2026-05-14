@@ -2,8 +2,12 @@
 
 from urllib.parse import urlparse
 
-from pydantic import Field, PrivateAttr, model_validator
+from pydantic import AliasChoices, Field, PrivateAttr, model_validator
 
+from five08.openai_fallback import (
+    OpenAICompatibleProvider,
+    build_openai_compatible_provider_attempts,
+)
 from five08.settings import SharedSettings
 
 
@@ -24,7 +28,35 @@ class WorkerSettings(SharedSettings):
     openai_api_key: str | None = None
     openai_base_url: str | None = None
     openai_model: str = "gpt-5-mini"
-    resume_ai_model: str = "gpt-5-mini"
+    openai_direct_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "OPENAI_DIRECT_API_KEY",
+            "OPENAI_API_KEY_DIRECT",
+            "openai_direct_api_key",
+            "openai_api_key_direct",
+        ),
+    )
+    openai_direct_base_url: str | None = None
+    openai_direct_model: str | None = None
+    fireworks_api_key: str | None = None
+    openrouter_api_key: str | None = None
+    agent_planner_model: str = "accounts/fireworks/models/kimi-k2p6"
+    agent_fallback_model: str = "gpt-4.1-mini"
+    agent_intent_normalizer_enabled: bool = True
+    agent_intent_normalizer_timeout_seconds: float = 3.0
+    agent_fast_api_key: str | None = None
+    agent_fast_base_url: str | None = None
+    agent_fast_model: str | None = None
+    agent_strong_api_key: str | None = None
+    agent_strong_base_url: str | None = None
+    agent_strong_model: str | None = None
+    agent_reasoning_api_key: str | None = None
+    agent_reasoning_base_url: str | None = None
+    agent_reasoning_model: str | None = None
+    resume_ai_api_key: str | None = None
+    resume_ai_base_url: str | None = None
+    resume_ai_model: str = "gpt-4.1-mini"
     resume_extractor_max_tokens: int = 2000
     resume_extractor_version: str = "v1"
     max_file_size_mb: int = 10
@@ -175,13 +207,13 @@ class WorkerSettings(SharedSettings):
         if not candidate:
             candidate = self.openai_model.strip()
         if not candidate:
-            return "gpt-5-mini"
+            return "gpt-4.1-mini"
 
         # Keep explicit provider prefixes intact.
         if "/" in candidate:
             return candidate
 
-        base_url = (self.openai_base_url or "").strip()
+        base_url = (self.resolved_resume_ai_base_url or "").strip()
         if not base_url:
             return candidate
 
@@ -190,6 +222,43 @@ class WorkerSettings(SharedSettings):
         if host.endswith("openrouter.ai"):
             return f"openai/{candidate}"
         return candidate
+
+    @property
+    def resolved_resume_ai_api_key(self) -> str | None:
+        """Return the resume-specific API key, falling back to the OpenAI key."""
+        return (self.resume_ai_api_key or "").strip() or (
+            (self.openai_api_key or "").strip() or None
+        )
+
+    @property
+    def resolved_resume_ai_base_url(self) -> str | None:
+        """Return the resume-specific base URL, falling back to the OpenAI base URL."""
+        if (self.resume_ai_api_key or "").strip() and (
+            self.resume_ai_base_url or ""
+        ).strip():
+            return self.resume_ai_base_url
+        return self.openai_base_url
+
+    @property
+    def resolved_openai_direct_api_key(self) -> str | None:
+        """Return the preferred direct OpenAI key, including legacy env support."""
+        return (self.openai_direct_api_key or "").strip() or None
+
+    @property
+    def resolved_resume_ai_provider_attempts(
+        self,
+    ) -> tuple[OpenAICompatibleProvider, ...]:
+        """Ordered resume LLM providers with direct fallbacks after Bifrost."""
+        return build_openai_compatible_provider_attempts(
+            primary_model=self.resolved_resume_ai_model,
+            primary_api_key=self.resolved_resume_ai_api_key,
+            primary_base_url=self.resolved_resume_ai_base_url,
+            openai_direct_api_key=self.resolved_openai_direct_api_key,
+            openai_direct_base_url=self.openai_direct_base_url,
+            openai_direct_model=self.openai_direct_model or self.agent_fallback_model,
+            fireworks_api_key=self.fireworks_api_key,
+            openrouter_api_key=self.openrouter_api_key,
+        )
 
     @property
     def oidc_admin_group_names(self) -> set[str]:
