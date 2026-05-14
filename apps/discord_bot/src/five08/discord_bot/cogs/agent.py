@@ -7,7 +7,7 @@ import difflib
 import logging
 import re
 import time
-from typing import Any
+from typing import Any, Literal
 
 import discord
 import requests
@@ -241,6 +241,15 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         """Send a natural-language request to the backend agent gateway."""
         await interaction.response.defer(ephemeral=True)
 
+        local_response = self._local_agent_response(
+            request=request,
+            roles=self._role_names_from_user(interaction.user),
+            transport="slash",
+        )
+        if local_response is not None:
+            await interaction.followup.send(local_response, ephemeral=True)
+            return
+
         context = self._build_agent_context(interaction)
         try:
             response = await self._post_agent_request(
@@ -334,64 +343,16 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
-        if self._is_agent_help_request(request):
+        local_response = self._local_agent_response(
+            request=request,
+            roles=self._role_names_from_user(message.author),
+            transport="mention",
+        )
+        if local_response is not None:
             await self._send_mention_public_response(
                 message=message,
                 request=request,
-                content=self._agent_capabilities_message(
-                    roles=self._role_names_from_user(message.author)
-                ),
-            )
-            return
-
-        if self._is_agent_presence_check(request):
-            await self._send_mention_public_response(
-                message=message,
-                request=request,
-                content=(
-                    "Yes, I can see this. Ask for a supported workflow, or ask "
-                    "`what can you do?` for examples."
-                ),
-            )
-            return
-
-        if self._is_agent_acknowledgement(request):
-            await self._send_mention_public_response(
-                message=message,
-                request=request,
-                content="Got it.",
-            )
-            return
-
-        if self._is_unlinked_discord_members_request(request):
-            await self._send_mention_public_response(
-                message=message,
-                request=request,
-                content=(
-                    "That report includes member identity/linkage data, so use "
-                    "`/unlinked-discord-users` for the private ephemeral response."
-                ),
-            )
-            return
-
-        if self._is_onboarding_people_request(request):
-            await self._send_mention_public_response(
-                message=message,
-                request=request,
-                content=(
-                    "That is CRM people/onboarding data, so use "
-                    "`/view-onboarding-queue` for the private ephemeral queue view. "
-                    "For targeted lookup, use `/search-members`."
-                ),
-            )
-            return
-
-        member_lookup_target = self._member_info_lookup_target(request)
-        if member_lookup_target is not None:
-            await self._send_mention_public_response(
-                message=message,
-                request=request,
-                content=self._member_lookup_command_message(member_lookup_target),
+                content=local_response,
             )
             return
 
@@ -527,6 +488,51 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         normalized = request.casefold().strip(" ?!.")
         return AgentCog._matches_smalltalk(normalized, _AGENT_ACKNOWLEDGEMENTS)
 
+    def _local_agent_response(
+        self,
+        *,
+        request: str,
+        roles: list[str],
+        transport: Literal["slash", "mention"],
+    ) -> str | None:
+        if self._is_agent_help_request(request):
+            return self._agent_capabilities_message(roles=roles, transport=transport)
+        if self._is_agent_presence_check(request):
+            return (
+                "Yes, I can see this. Ask for a supported workflow, or ask "
+                "`what can you do?` for examples."
+            )
+        if self._is_agent_acknowledgement(request):
+            return "Got it."
+        if self._is_unlinked_discord_members_request(request):
+            if transport == "slash":
+                return (
+                    "That report includes member identity/linkage data, so use "
+                    "`/unlinked-discord-users` for the dedicated report."
+                )
+            return (
+                "That report includes member identity/linkage data, so use "
+                "`/unlinked-discord-users` for the private ephemeral response."
+            )
+        if self._is_onboarding_people_request(request):
+            if transport == "slash":
+                return (
+                    "That is CRM people/onboarding data, so use "
+                    "`/view-onboarding-queue` for the dedicated queue view. "
+                    "For targeted lookup, keep using `/agent`."
+                )
+            return (
+                "That is CRM people/onboarding data, so use "
+                "`/view-onboarding-queue` for the private ephemeral queue view. "
+                "For targeted lookup, use `/search-members`."
+            )
+        if transport == "slash":
+            return None
+        member_lookup_target = self._member_info_lookup_target(request)
+        if member_lookup_target is not None:
+            return self._member_lookup_command_message(member_lookup_target)
+        return None
+
     @staticmethod
     def _matches_smalltalk(normalized: str, phrases: frozenset[str]) -> bool:
         if normalized in phrases:
@@ -539,7 +545,11 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         )
 
     @staticmethod
-    def _agent_capabilities_message(*, roles: list[str]) -> str:
+    def _agent_capabilities_message(
+        *,
+        roles: list[str],
+        transport: Literal["slash", "mention"] = "mention",
+    ) -> str:
         normalized_roles = {role.strip().casefold() for role in roles}
         is_admin = bool(normalized_roles & {"admin", "owner", "steering committee"})
         is_engineer = "engineer" in normalized_roles or is_admin
@@ -556,21 +566,29 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                 ]
             )
         if not capabilities:
-            return "\n".join(
+            lines = [
+                "I do not see any agent workflows available for your current Discord roles."
+            ]
+            if transport == "mention":
+                lines.extend(
+                    [
+                        "",
+                        "Use `/agent` when you want the response kept private.",
+                    ]
+                )
+            return "\n".join(lines)
+        lines = [
+            "I can help with:",
+            *capabilities,
+        ]
+        if transport == "mention":
+            lines.extend(
                 [
-                    "I do not see any agent workflows available for your current Discord roles.",
                     "",
                     "Use `/agent` when you want the response kept private.",
                 ]
             )
-        return "\n".join(
-            [
-                "I can help with:",
-                *capabilities,
-                "",
-                "Use `/agent` when you want the response kept private.",
-            ]
-        )
+        return "\n".join(lines)
 
     @staticmethod
     def _is_unlinked_discord_members_request(request: str) -> bool:
