@@ -2,7 +2,7 @@
 
 from urllib.parse import urlparse
 
-from pydantic import Field, PrivateAttr, model_validator
+from pydantic import AliasChoices, Field, PrivateAttr, model_validator
 
 from five08.openai_fallback import (
     OpenAICompatibleProvider,
@@ -28,8 +28,15 @@ class WorkerSettings(SharedSettings):
     openai_api_key: str | None = None
     openai_base_url: str | None = None
     openai_model: str = "gpt-5-mini"
-    openai_api_key_direct: str | None = None
-    openai_direct_api_key: str | None = None
+    openai_direct_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "OPENAI_DIRECT_API_KEY",
+            "OPENAI_API_KEY_DIRECT",
+            "openai_direct_api_key",
+            "openai_api_key_direct",
+        ),
+    )
     openai_direct_base_url: str | None = None
     openai_direct_model: str | None = None
     fireworks_api_key: str | None = None
@@ -235,9 +242,7 @@ class WorkerSettings(SharedSettings):
     @property
     def resolved_openai_direct_api_key(self) -> str | None:
         """Return the preferred direct OpenAI key, including legacy env support."""
-        return (self.openai_direct_api_key or "").strip() or (
-            (self.openai_api_key_direct or "").strip() or None
-        )
+        return (self.openai_direct_api_key or "").strip() or None
 
     @property
     def resolved_resume_ai_provider_attempts(

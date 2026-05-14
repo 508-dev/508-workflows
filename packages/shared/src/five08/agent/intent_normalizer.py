@@ -77,7 +77,10 @@ class OpenAICompatibleIntentNormalizer:
             timeout=self.timeout_seconds,
             verify=default_ca_bundle_path(),
         )
-        if response.status_code >= 400 and "response_format" in payload:
+        if (
+            _should_retry_without_response_format(response)
+            and "response_format" in payload
+        ):
             payload.pop("response_format", None)
             response = requests.post(
                 f"{self.base_url.rstrip('/')}/chat/completions",
@@ -165,3 +168,15 @@ def _response_content(data: Any) -> str | None:
         return None
     content = message.get("content")
     return content if isinstance(content, str) else None
+
+
+def _should_retry_without_response_format(response: requests.Response) -> bool:
+    if response.status_code != 400:
+        return False
+    body = response.text.casefold()
+    return "response_format" in body and (
+        "unsupported" in body
+        or "not support" in body
+        or "invalid parameter" in body
+        or "unknown parameter" in body
+    )

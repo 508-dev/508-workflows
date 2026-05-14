@@ -19,6 +19,11 @@ from five08.agent.evals import (
     load_env_file,
     resolve_eval_model_profile,
 )
+from five08.crm_normalization import (
+    ROLE_NORMALIZATION_MAP,
+    normalize_roles,
+    normalize_seniority,
+)
 from five08.document_text import extract_document_text
 from five08.model_catalog import (
     model_chat_completion_options,
@@ -47,6 +52,9 @@ Output schema:
   "skills": ["important concrete skills"],
   "current_title": "current or most recent title or null",
   "recent_titles": [],
+  "current_location_raw": "raw current location string or null",
+  "current_location_source": "header|explicit_field|current_role|based_in_statement|other|null",
+  "current_location_evidence": "short quote or null",
   "address_city": "city or null",
   "address_state": "state/region or null",
   "address_country": "country or null",
@@ -79,8 +87,16 @@ Production extractor contract:
 - Extract phone when present. Normalize to E.164 with a leading + when country
   can be inferred; otherwise preserve the explicit source value and evidence.
 - For location, fill address_city/address_state/address_country/timezone when
-  supported by resume text. Include evidence under each populated location
-  field key, not a generic "location" key.
+  supported by resume text. Prefer the header/contact block; e.g. "CA, United
+  States" means address_state=California and address_country=United States,
+  "Leeds, NY" means address_city=Leeds, address_state=New York,
+  address_country=United States, and "Taipei, Taiwan" means address_city=Taipei,
+  address_country=Taiwan.
+- Include current_location_raw/current_location_source/current_location_evidence
+  when any current location is found. Include evidence under each populated
+  location field key, not just a generic "location" key.
+- Include evidence for populated phone, github_username, linkedin_url,
+  primary_roles, seniority_level, and skills.
 """
 
 
@@ -359,32 +375,7 @@ def render_baseline_markdown_report(report: ResumeBaselineReport) -> str:
     ]
     for item in report.resumes:
         baseline = item.baseline or {}
-        evidence = baseline.get("evidence")
-        missing_evidence = []
-        if isinstance(evidence, dict):
-            for field in ["primary_roles", "seniority_level", "skills"]:
-                if not evidence.get(field):
-                    missing_evidence.append(field)
-            if any(
-                baseline.get(field)
-                for field in [
-                    "address_city",
-                    "address_state",
-                    "address_country",
-                    "timezone",
-                ]
-            ) and not any(
-                evidence.get(field)
-                for field in [
-                    "address_city",
-                    "address_state",
-                    "address_country",
-                    "timezone",
-                ]
-            ):
-                missing_evidence.append("location")
-        elif item.status == "succeeded":
-            missing_evidence.append("all")
+        missing_evidence = _missing_baseline_evidence(baseline)
         lines.append(
             "| "
             + " | ".join(
@@ -673,7 +664,10 @@ def _call_openai_baseline_judge(
     response.raise_for_status()
     data = response.json()
     raw = str(data["choices"][0]["message"]["content"])
-    return _parse_json_object(raw), _usage_from_mapping(data.get("usage"))
+    return (
+        _normalize_baseline_payload(_parse_json_object(raw)),
+        _usage_from_mapping(data.get("usage")),
+    )
 
 
 def _post_openai_with_retries(
@@ -809,6 +803,28 @@ def _parse_json_object(raw: str) -> dict[str, Any]:
     return payload
 
 
+def _normalize_baseline_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    allowed_roles = set(ROLE_NORMALIZATION_MAP.values())
+    normalized_roles = [
+        role
+        for role in normalize_roles(
+            normalized.get("primary_roles"),
+            ROLE_NORMALIZATION_MAP,
+        )
+        if role in allowed_roles
+    ]
+    normalized["primary_roles"] = normalized_roles[:2]
+    normalized["seniority_level"] = (
+        normalize_seniority(
+            normalized.get("seniority_level"),
+            empty_as_unknown=True,
+        )
+        or "unknown"
+    )
+    return normalized
+
+
 def _cell(value: Any, *, limit: int = 3) -> str:
     if value is None:
         return "-"
@@ -820,6 +836,51 @@ def _cell(value: Any, *, limit: int = 3) -> str:
         return ", ".join(items[:limit]).replace("|", "\\|") + suffix
     text = str(value).strip()
     return text.replace("|", "\\|") if text else "-"
+
+
+def _missing_baseline_evidence(baseline: dict[str, Any]) -> list[str]:
+    evidence = baseline.get("evidence")
+    if not isinstance(evidence, dict):
+        return ["all"] if baseline else []
+
+    missing: list[str] = []
+    requirements = {
+        "primary_roles": ["primary_roles", "role_rationale", "current_title"],
+        "seniority_level": ["seniority_level", "current_title", "recent_titles"],
+        "skills": ["skills"],
+        "phone": ["phone"],
+        "github_username": ["github_username"],
+        "linkedin_url": ["linkedin_url"],
+    }
+    for field, evidence_keys in requirements.items():
+        if baseline.get(field) and not any(evidence.get(key) for key in evidence_keys):
+            missing.append(field)
+
+    has_location = any(
+        baseline.get(key)
+        for key in [
+            "current_location_raw",
+            "address_city",
+            "address_state",
+            "address_country",
+            "timezone",
+        ]
+    )
+    has_location_evidence = any(
+        evidence.get(key)
+        for key in [
+            "location",
+            "current_location_raw",
+            "current_location_evidence",
+            "address_city",
+            "address_state",
+            "address_country",
+            "timezone",
+        ]
+    )
+    if has_location and not has_location_evidence:
+        missing.append("location")
+    return missing
 
 
 def _money(value: Any) -> str:

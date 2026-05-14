@@ -7,6 +7,8 @@ and configuration with type validation and default values.
 
 from urllib.parse import urlparse
 
+from pydantic import AliasChoices, Field
+
 from five08.openai_fallback import (
     OpenAICompatibleProvider,
     build_openai_compatible_provider_attempts,
@@ -37,14 +39,18 @@ class Settings(SharedSettings):
     audit_api_base_url: str | None = None
     audit_api_timeout_seconds: float = 2.0
     agent_api_timeout_seconds: float = 8.0
-    migadu_api_user: str | None = None
-    migadu_api_key: str | None = None
-    migadu_mailbox_domain: str = "508.dev"
     openai_api_key: str | None = None
     openai_base_url: str | None = None
     openai_model: str = "gpt-5-mini"
-    openai_api_key_direct: str | None = None
-    openai_direct_api_key: str | None = None
+    openai_direct_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "OPENAI_DIRECT_API_KEY",
+            "OPENAI_API_KEY_DIRECT",
+            "openai_direct_api_key",
+            "openai_api_key_direct",
+        ),
+    )
     openai_direct_base_url: str | None = None
     openai_direct_model: str | None = None
     fireworks_api_key: str | None = None
@@ -106,9 +112,7 @@ class Settings(SharedSettings):
     @property
     def resolved_openai_direct_api_key(self) -> str | None:
         """Return the preferred direct OpenAI key, including legacy env support."""
-        return (self.openai_direct_api_key or "").strip() or (
-            (self.openai_api_key_direct or "").strip() or None
-        )
+        return (self.openai_direct_api_key or "").strip() or None
 
     @property
     def resolved_resume_ai_provider_attempts(
