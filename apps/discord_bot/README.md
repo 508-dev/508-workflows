@@ -70,6 +70,14 @@ public channels. A follow-up in the same thread should mention the bot again so
 the bot has an explicit user trigger and fresh Discord role context for that
 request.
 
+Production mention handling depends on Discord gateway and channel access:
+The bot requests all intents in code, but the production Discord application
+should have the Message Content privileged intent enabled or approved in the
+Developer Portal. Direct mentions expose message content even without that
+intent, but follow-up messages in bot-created threads need it because they do
+not mention the bot. The bot also needs channel permissions to view the channel,
+send messages, create public threads, and send messages in threads.
+
 Audit writes are best-effort and do not block command execution. If the audit
 store is unavailable, treat the agent surface as temporarily untraced until the
 audit pipeline is healthy again.

@@ -400,6 +400,160 @@ def test_build_agent_context_from_message_uses_thread_message_context() -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_command_answers_presence_check_without_backend() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog._post_agent_request = AsyncMock()
+    cog._audit_command_safe = Mock()
+    interaction = SimpleNamespace(
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+        user=SimpleNamespace(id=123, roles=[]),
+    )
+
+    await AgentCog.agent_command.callback(cog, interaction, "do you see this")
+
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    interaction.followup.send.assert_awaited_once()
+    assert "I can see this" in interaction.followup.send.await_args.args[0]
+    assert interaction.followup.send.await_args.kwargs["ephemeral"] is True
+    cog._post_agent_request.assert_not_awaited()
+    cog._audit_command_safe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_agent_command_answers_help_without_backend() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog._post_agent_request = AsyncMock()
+    cog._audit_command_safe = Mock()
+    interaction = SimpleNamespace(
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+        user=SimpleNamespace(
+            id=123,
+            roles=[SimpleNamespace(name="Admin")],
+        ),
+    )
+
+    await AgentCog.agent_command.callback(cog, interaction, "what can you do?")
+
+    response = interaction.followup.send.await_args.args[0]
+    assert "I can help with:" in response
+    assert "GitHub issues:" in response
+    assert "CRM:" in response
+    assert "create 508 mailboxes" in response
+    assert "`/agent`" not in response
+    cog._post_agent_request.assert_not_awaited()
+    cog._audit_command_safe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_agent_command_answers_acknowledgement_without_backend() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog._post_agent_request = AsyncMock()
+    cog._audit_command_safe = Mock()
+    interaction = SimpleNamespace(
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+        user=SimpleNamespace(id=123, roles=[]),
+    )
+
+    await AgentCog.agent_command.callback(cog, interaction, "thanks")
+
+    interaction.followup.send.assert_awaited_once_with("Got it.", ephemeral=True)
+    cog._post_agent_request.assert_not_awaited()
+    cog._audit_command_safe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_agent_command_routes_unlinked_member_report_to_dedicated_command() -> (
+    None
+):
+    cog = AgentCog.__new__(AgentCog)
+    cog._post_agent_request = AsyncMock()
+    cog._audit_command_safe = Mock()
+    interaction = SimpleNamespace(
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+        user=SimpleNamespace(id=123, roles=[]),
+    )
+
+    await AgentCog.agent_command.callback(
+        cog,
+        interaction,
+        "can you look up people with no discord linked but are members",
+    )
+
+    response = interaction.followup.send.await_args.args[0]
+    assert "/unlinked-discord-users" in response
+    assert "dedicated report" in response
+    assert "ephemeral" not in response
+    assert interaction.followup.send.await_args.kwargs["ephemeral"] is True
+    cog._post_agent_request.assert_not_awaited()
+    cog._audit_command_safe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_agent_command_routes_onboarding_people_report_to_dedicated_command() -> (
+    None
+):
+    cog = AgentCog.__new__(AgentCog)
+    cog._post_agent_request = AsyncMock()
+    cog._audit_command_safe = Mock()
+    interaction = SimpleNamespace(
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+        user=SimpleNamespace(id=123, roles=[]),
+    )
+
+    await AgentCog.agent_command.callback(
+        cog,
+        interaction,
+        "find me people in the onboarding queue",
+    )
+
+    response = interaction.followup.send.await_args.args[0]
+    assert "/view-onboarding-queue" in response
+    assert "dedicated queue view" in response
+    assert "ephemeral" not in response
+    assert interaction.followup.send.await_args.kwargs["ephemeral"] is True
+    cog._post_agent_request.assert_not_awaited()
+    cog._audit_command_safe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_agent_command_member_info_lookup_reaches_gateway() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog._post_agent_request = AsyncMock(
+        return_value={"status": "executed", "message": "Done"}
+    )
+    cog._audit_command_safe = Mock()
+    interaction = SimpleNamespace(
+        id=999,
+        guild_id=456,
+        channel_id=789,
+        message=None,
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+        user=SimpleNamespace(
+            id=123,
+            roles=[SimpleNamespace(name="Admin")],
+        ),
+    )
+
+    await AgentCog.agent_command.callback(cog, interaction, "Look up info on Caleb")
+
+    cog._post_agent_request.assert_awaited_once()
+    assert cog._post_agent_request.await_args.kwargs["message"] == (
+        "Look up info on Caleb"
+    )
+    assert cog._post_agent_request.await_args.kwargs["context"]["roles"] == ["Admin"]
+    response = interaction.followup.send.await_args.args[0]
+    assert "Agent status: executed" in response
+    assert interaction.followup.send.await_args.kwargs["ephemeral"] is True
+    cog._audit_command_safe.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_confirmation_context_in_dm_uses_cached_original_guild_roles() -> None:
     member = SimpleNamespace(roles=[SimpleNamespace(name="Member")])
     guild = SimpleNamespace(get_member=Mock(return_value=member))
