@@ -287,8 +287,12 @@ def _extract_idempotency_key(value: object) -> str | None:
 
 
 def _resume_extract_model_name() -> str:
-    if settings.resolved_resume_ai_api_key:
-        return settings.resolved_resume_ai_model
+    attempts = settings.resolved_resume_ai_provider_attempts
+    if attempts:
+        provider = attempts[0]
+        if provider.label == "primary":
+            return provider.model
+        return f"{provider.label}/{provider.model}"
     return "heuristic"
 
 
