@@ -43,6 +43,28 @@ def test_resume_processor_config_filters_unsupported_extensions() -> None:
     assert config.max_file_size_bytes == 12 * 1024 * 1024
 
 
+def test_resume_processor_config_uses_resolved_resume_provider() -> None:
+    """Shared resume processor should use the resume-specific provider."""
+    config = ResumeProcessorConfig.from_settings(
+        SimpleNamespace(
+            espo_base_url="https://crm.example.com",
+            espo_api_key="secret",
+            allowed_file_types="pdf,docx",
+            resolved_resume_ai_api_key="resume-key",
+            resolved_resume_ai_base_url="https://api.openai.com/v1",
+            resolved_resume_ai_model="gpt-4.1-mini",
+            resolved_resume_ai_provider_attempts=(),
+            resume_ai_model="gpt-5-mini",
+            openai_api_key="openai-key",
+            openai_base_url="https://openrouter.ai/api/v1",
+        )
+    )
+
+    assert config.openai_api_key == "resume-key"
+    assert config.openai_base_url == "https://api.openai.com/v1"
+    assert config.resume_model == "gpt-4.1-mini"
+
+
 def test_extract_profile_proposal_filters_508_email() -> None:
     """Extract proposal should skip @508.dev email updates by policy."""
     processor = ResumeProfileProcessor()

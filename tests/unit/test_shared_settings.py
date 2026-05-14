@@ -1,8 +1,13 @@
 """Unit tests for shared settings validation."""
 
+import sys
+from types import SimpleNamespace
+
 import pytest
 from pydantic import ValidationError
 
+from five08.langfuse import get_langfuse_client
+from five08.agent.tools import ToolRuntimeConfig
 from five08.settings import SharedSettings
 
 
@@ -48,6 +53,60 @@ def test_sentry_environment_and_sampling_are_not_env_configurable(
     assert settings.sentry_sample_rate == 1.0
     assert settings.sentry_traces_sample_rate == 0.0
     assert settings.sentry_profiles_sample_rate == 0.0
+
+
+def test_langfuse_base_url_is_shared_configuration() -> None:
+    """Shared settings should expose Langfuse endpoint configuration."""
+    settings = SharedSettings(langfuse_base_url="https://cloud.langfuse.com")
+
+    assert settings.langfuse_base_url == "https://cloud.langfuse.com"
+
+
+def test_langfuse_client_is_disabled_without_base_url() -> None:
+    """Langfuse should be lazily initialized only when configured."""
+    assert get_langfuse_client(SharedSettings()) is None
+
+
+def test_langfuse_client_uses_configured_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Configured Langfuse endpoints should construct the lazy client."""
+
+    calls: dict[str, object] = {}
+
+    class FakeLangfuse:
+        def __init__(self, **kwargs: object) -> None:
+            calls.update(kwargs)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "langfuse",
+        SimpleNamespace(Langfuse=FakeLangfuse),
+    )
+
+    client = get_langfuse_client(
+        SharedSettings(langfuse_base_url=" https://cloud.langfuse.com ")
+    )
+
+    assert isinstance(client, FakeLangfuse)
+    assert calls == {"base_url": "https://cloud.langfuse.com"}
+
+
+def test_shared_settings_expose_agent_external_tool_credentials() -> None:
+    """Backend agent tools should receive external tool credentials from env."""
+    settings = SharedSettings(
+        github_allowed_repos="508-dev/508-workflows,508-dev/infra",
+        migadu_api_user="migadu-user",
+        migadu_api_key="migadu-key",
+        migadu_mailbox_domain="mail.example.com",
+    )
+
+    runtime_config = ToolRuntimeConfig.from_settings(settings)
+
+    assert runtime_config.github_allowed_repos == "508-dev/508-workflows,508-dev/infra"
+    assert runtime_config.migadu_api_user == "migadu-user"
+    assert runtime_config.migadu_api_key == "migadu-key"
+    assert runtime_config.migadu_mailbox_domain == "mail.example.com"
 
 
 def test_shared_settings_docuseal_template_id_accepts_numeric_string() -> None:

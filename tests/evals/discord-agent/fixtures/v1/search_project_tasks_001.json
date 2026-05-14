@@ -1,0 +1,47 @@
+{
+  "version": "discord-agent-trajectory.v1",
+  "id": "search_project_tasks_001",
+  "description": "Member searches within a project and receives matching seeded tasks without confirmation.",
+  "tags": ["canonical", "task", "read"],
+  "suite": {
+    "canonical": true,
+    "weekly": true
+  },
+  "context": {
+    "discord_user_id": "123",
+    "organization_id": "org-1",
+    "guild_id": "org-1",
+    "roles": ["Member"]
+  },
+  "seed": {
+    "tasks": [
+      {
+        "title": "Update onboarding docs",
+        "project": "Atlas",
+        "assignee": "Sarah",
+        "due_date": "2026-05-15"
+      }
+    ]
+  },
+  "request": {
+    "message": "Show tasks for project Atlas matching onboarding"
+  },
+  "expect": {
+    "status": "executed",
+    "intent": "search_tasks",
+    "model_tier": "fast",
+    "requires_confirmation": false,
+    "result_statuses": ["succeeded"],
+    "actions": [
+      {
+        "tool_name": "task_read.search_tasks",
+        "requires_confirmation": false,
+        "required_scopes": ["project:read"],
+        "arguments": {
+          "query": "onboarding",
+          "project": "Atlas"
+        }
+      }
+    ]
+  }
+}

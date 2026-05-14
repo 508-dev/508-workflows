@@ -1,0 +1,51 @@
+{
+  "version": "discord-agent-trajectory.v1",
+  "id": "crm_contact_info_lookup_001",
+  "description": "Admins can use loose info lookup phrasing to search CRM contacts.",
+  "tags": ["canonical", "crm", "read", "natural-language"],
+  "suite": {
+    "canonical": true,
+    "weekly": true
+  },
+  "context": {
+    "discord_user_id": "789",
+    "organization_id": "org-1",
+    "guild_id": "org-1",
+    "roles": ["Admin"]
+  },
+  "stub_results": {
+    "crm_read.search_contacts": {
+      "contacts": [
+        {
+          "id": "contact-456",
+          "name": "Caleb Example",
+          "emailAddress": "caleb@example.com",
+          "cOnboardingState": "prospect"
+        }
+      ]
+    }
+  },
+  "request": {
+    "message": "Look up info on Caleb"
+  },
+  "expect": {
+    "status": "executed",
+    "intent": "search_crm_contacts",
+    "model_tier": "fast",
+    "requires_confirmation": false,
+    "result_statuses": ["succeeded"],
+    "actions": [
+      {
+        "tool_name": "crm_read.search_contacts",
+        "requires_confirmation": false,
+        "required_scopes": ["crm:contact:read"],
+        "arguments_contains": {
+          "query": "Caleb"
+        }
+      }
+    ]
+  },
+  "known_failure": {
+    "reason": "Loose info-lookup phrasing intentionally requires the live planner or intent normalizer; deterministic regex only handles explicit contact search commands."
+  }
+}

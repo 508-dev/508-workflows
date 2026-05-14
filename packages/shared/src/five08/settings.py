@@ -23,6 +23,7 @@ class SharedSettings(BaseSettings):
     sentry_dsn: str | None = None
     sentry_send_default_pii: bool = False
     sentry_debug: bool = False
+    langfuse_base_url: str | None = None
 
     # Local development defaults to host-run app services. Containerized runtimes
     # should inject Docker-network service URLs explicitly.
@@ -50,6 +51,14 @@ class SharedSettings(BaseSettings):
     docuseal_base_url: str | None = None
     docuseal_api_key: str | None = None
     docuseal_member_agreement_template_id: int | None = None
+    github_api_token: str | None = None
+    github_default_repo: str | None = None
+    github_allowed_repos: str = ""
+    kimai_base_url: str | None = None
+    kimai_api_token: str | None = None
+    migadu_api_user: str | None = None
+    migadu_api_key: str | None = None
+    migadu_mailbox_domain: str = "508.dev"
     authentik_api_base_url: str | None = None
     authentik_api_token: str | None = None
     authentik_api_timeout_seconds: float = 20.0

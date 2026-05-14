@@ -1,0 +1,17 @@
+services:
+  redis:
+    ports:
+      - "${REDIS_HOST_BIND:-127.0.0.1}:${REDIS_HOST_PORT:-6379}:6379"
+
+  postgres:
+    ports:
+      - "${POSTGRES_HOST_BIND:-127.0.0.1}:${POSTGRES_HOST_PORT:-5432}:5432"
+
+  minio:
+    ports:
+      - "${MINIO_HOST_BIND:-127.0.0.1}:${MINIO_API_HOST_PORT:-9000}:9000"
+      - "${MINIO_HOST_BIND:-127.0.0.1}:${MINIO_CONSOLE_HOST_PORT:-9001}:9001"
+
+  api:
+    ports:
+      - "${WEBHOOK_INGEST_HOST_BIND:-127.0.0.1}:${WEBHOOK_INGEST_HOST_PORT:-8090}:8090"

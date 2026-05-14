@@ -1,0 +1,49 @@
+{
+  "version": "discord-agent-trajectory.v1",
+  "id": "thread_followup_latest_message_001",
+  "description": "Thread fixtures use the latest user message as the turn under test.",
+  "tags": ["canonical", "thread", "task", "write"],
+  "suite": {
+    "canonical": true,
+    "weekly": true
+  },
+  "context": {
+    "discord_user_id": "123",
+    "organization_id": "org-1",
+    "guild_id": "org-1",
+    "roles": ["Member"]
+  },
+  "request": {
+    "thread": [
+      {
+        "role": "user",
+        "content": "@bot let's work on Atlas tasks"
+      },
+      {
+        "role": "assistant",
+        "content": "Which task should I help with?"
+      },
+      {
+        "role": "user",
+        "content": "Create a task to refresh onboarding docs in project Atlas"
+      }
+    ]
+  },
+  "expect": {
+    "status": "requires_confirmation",
+    "intent": "create_task",
+    "model_tier": "strong",
+    "requires_confirmation": true,
+    "actions": [
+      {
+        "tool_name": "task_write.create_task",
+        "requires_confirmation": true,
+        "required_scopes": ["task:create"],
+        "arguments_contains": {
+          "title": "refresh onboarding docs",
+          "project": "Atlas"
+        }
+      }
+    ]
+  }
+}

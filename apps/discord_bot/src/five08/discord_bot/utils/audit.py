@@ -103,6 +103,49 @@ class DiscordAuditLogger:
 
         self._queue_event(event_payload)
 
+    def log_message(
+        self,
+        *,
+        message: discord.Message,
+        action: str,
+        result: str,
+        metadata: dict[str, Any] | None = None,
+        resource_type: str | None = "discord_message",
+        resource_id: str | None = None,
+    ) -> None:
+        """Queue a best-effort audit write for a Discord message event."""
+        if not (self.enabled or self.webhook_enabled):
+            return
+        if not self._should_log_command_event(action=action, result=result):
+            return
+
+        guild_id = message.guild.id if message.guild is not None else None
+        channel_id = getattr(message.channel, "id", None)
+        actor_display_name = getattr(message.author, "display_name", None)
+        if not actor_display_name:
+            actor_display_name = getattr(message.author, "name", None)
+        base_metadata: dict[str, Any] = {
+            "guild_id": str(guild_id) if guild_id else None,
+            "channel_id": str(channel_id) if channel_id is not None else None,
+            "message_id": str(message.id),
+        }
+        if metadata:
+            base_metadata.update(metadata)
+        self._queue_event(
+            {
+                "source": "discord",
+                "action": action,
+                "result": result,
+                "actor_provider": "discord",
+                "actor_subject": str(message.author.id),
+                "actor_display_name": actor_display_name,
+                "resource_type": resource_type,
+                "resource_id": resource_id or str(message.id),
+                "correlation_id": str(message.id),
+                "metadata": base_metadata,
+            }
+        )
+
     @staticmethod
     def _is_failure_result(result: str) -> bool:
         """Return True when command result should always be audited."""

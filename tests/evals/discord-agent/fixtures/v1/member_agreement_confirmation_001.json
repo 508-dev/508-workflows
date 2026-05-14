@@ -1,0 +1,37 @@
+{
+  "version": "discord-agent-trajectory.v1",
+  "id": "member_agreement_confirmation_001",
+  "description": "Admins can draft member agreement submissions behind confirmation.",
+  "tags": ["weekly", "docuseal", "write", "confirmation"],
+  "suite": {
+    "canonical": true,
+    "weekly": true
+  },
+  "context": {
+    "discord_user_id": "789",
+    "organization_id": "org-1",
+    "guild_id": "org-1",
+    "roles": ["Admin"]
+  },
+  "request": {
+    "message": "Send member agreement to Sarah Example sarah@example.com"
+  },
+  "expect": {
+    "status": "requires_confirmation",
+    "intent": "send_member_agreement",
+    "model_tier": "strong",
+    "requires_confirmation": true,
+    "actions": [
+      {
+        "tool_name": "docuseal_write.create_member_agreement_submission",
+        "requires_confirmation": true,
+        "required_scopes": ["docuseal:submission:create"],
+        "arguments": {
+          "submitter_email": "sarah@example.com",
+          "submitter_name": "Sarah Example",
+          "send_email": true
+        }
+      }
+    ]
+  }
+}

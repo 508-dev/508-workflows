@@ -1,0 +1,39 @@
+{
+  "version": "discord-agent-trajectory.v1",
+  "id": "github_issue_create_confirmation_001",
+  "description": "Engineer can draft a GitHub issue write against an allowed repository, gated by confirmation.",
+  "tags": ["canonical", "github", "write", "confirmation"],
+  "suite": {
+    "canonical": true,
+    "weekly": true
+  },
+  "context": {
+    "discord_user_id": "456",
+    "organization_id": "org-1",
+    "guild_id": "org-1",
+    "roles": ["Engineer"]
+  },
+  "runtime_config": {
+    "github_default_repo": "508-dev/508-workflows"
+  },
+  "request": {
+    "message": "Create a GitHub issue to improve search UI in repo 508-dev/508-workflows"
+  },
+  "expect": {
+    "status": "requires_confirmation",
+    "intent": "create_github_issue",
+    "model_tier": "strong",
+    "requires_confirmation": true,
+    "actions": [
+      {
+        "tool_name": "github_issue.create_issue",
+        "requires_confirmation": true,
+        "required_scopes": ["github:issue:create"],
+        "arguments_contains": {
+          "title": "improve search UI",
+          "repository": "508-dev/508-workflows"
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "version": "discord-agent-trajectory.v1",
+  "id": "create_task_confirmation_001",
+  "description": "Member asks to create an org task and should receive a frozen confirmation plan.",
+  "tags": ["canonical", "task", "write", "confirmation"],
+  "suite": {
+    "canonical": true,
+    "weekly": true
+  },
+  "context": {
+    "discord_user_id": "123",
+    "organization_id": "org-1",
+    "guild_id": "org-1",
+    "roles": ["Member"]
+  },
+  "request": {
+    "message": "Create a task for Sarah to update onboarding docs by Friday and link it to project Atlas"
+  },
+  "expect": {
+    "status": "requires_confirmation",
+    "intent": "create_task",
+    "model_tier": "strong",
+    "requires_confirmation": true,
+    "actions": [
+      {
+        "tool_name": "task_write.create_task",
+        "requires_confirmation": true,
+        "required_scopes": ["task:create"],
+        "arguments_contains": {
+          "title": "update onboarding docs",
+          "assignee": "Sarah",
+          "project": "Atlas"
+        }
+      }
+    ]
+  }
+}

@@ -9,6 +9,89 @@ This document captures Discord bot behavior, permissions, and slash command usag
 - Core command cogs: `apps/discord_bot/src/five08/discord_bot/cogs/`
 - Bot settings: `apps/discord_bot/src/five08/discord_bot/config.py`
 
+## Operation Model
+
+The Discord bot is the user-facing gateway for human commands. It should stay
+thin: receive a Discord interaction, resolve Discord context, call the backend
+or an integration client, render the result, and emit best-effort audit events
+for human-triggered writes.
+
+At startup, `Bot508` automatically loads every cog module in
+`five08.discord_bot.cogs` and then syncs slash commands with Discord. The bot
+also starts a small aiohttp HTTP server for health checks and authenticated
+internal callbacks such as member-agreement role application.
+
+Typical command flow:
+
+```text
+Discord slash command
+  -> cog validates Discord roles / request shape
+  -> cog calls backend API or integration client
+  -> backend/service performs durable work or synchronous operation
+  -> cog renders ephemeral or channel-visible result
+  -> cog emits best-effort audit event when appropriate
+```
+
+The bot uses `API_SHARED_SECRET` for protected backend/internal calls. That
+shared secret authenticates service-to-service traffic; command authorization
+still belongs in role checks, backend policy checks, and resource-level checks.
+
+## Agent Gateway
+
+The `/agent` command and explicit bot mentions send natural-language requests to
+the backend agent gateway. The bot does not execute agent tool calls directly and
+does not hold extra service credentials for agent actions.
+
+Agent command flow:
+
+```text
+/agent request or @bot mention
+  -> bot resolves Discord user/guild/channel/role context
+  -> POST /agent/requests on the backend API
+  -> backend parses the request into a typed plan
+  -> deterministic backend policy authorizes each proposed tool
+  -> read actions execute synchronously
+  -> write actions return a frozen confirmation plan
+  -> Discord confirmation button calls POST /agent/confirmations/{plan_id}
+  -> backend executes the exact frozen plan inline and returns the result
+```
+
+Current MVP scope is task-style commands only. The backend agent package keeps
+read and write tools separate, applies capability checks before every tool call,
+requires confirmation for writes, and audits request/confirmation attempts.
+Long-running service changes should be implemented as PR-based workflows rather
+than direct production mutations. Task reads require an explicit project filter
+to avoid guild-wide task enumeration.
+
+Mention flow is opt-in per message: the bot runs the agent only when directly
+mentioned in a server channel or thread. Mention-triggered agent results and
+confirmation buttons are sent by DM to avoid leaking task or plan details into
+public channels. A follow-up in the same thread should mention the bot again so
+the bot has an explicit user trigger and fresh Discord role context for that
+request.
+
+Audit writes are best-effort and do not block command execution. If the audit
+store is unavailable, treat the agent surface as temporarily untraced until the
+audit pipeline is healthy again.
+
+Pending confirmation plans and the MVP task store are currently process-local in
+the backend API. Confirmation plans expire after 10 minutes with opportunistic
+cleanup during agent requests and confirmations. A production multi-process
+deployment should move pending plans to Redis or another shared TTL store and
+swap the task registry for a durable task service before relying on cross-process
+agent behavior.
+
+Relevant configuration:
+
+- `BACKEND_API_BASE_URL`: backend API used by the bot.
+- `API_SHARED_SECRET`: shared service secret for protected backend calls.
+- `AGENT_API_TIMEOUT_SECONDS`: timeout for synchronous agent gateway requests.
+- `AGENT_FAST_*`, `AGENT_STRONG_*`, `AGENT_REASONING_*`: backend model
+  tier configuration for OpenAI-compatible providers. Credentials stay in the
+  backend process; the bot only receives non-secret plan metadata.
+- `RESUME_AI_*`: optional resume-specific extraction provider for direct CRM
+  resume parsing in the bot; falls back to the normal `OPENAI_*` settings.
+
 ## Permissions
 
 - **Everyone**: can see and invoke non-restricted commands.
@@ -17,6 +100,26 @@ This document captures Discord bot behavior, permissions, and slash command usag
 - **Admin**: can run sensitive writes such as ID verification updates.
 
 ## Slash Commands
+
+- `/agent`
+  - Description: Send a natural-language task request through the backend agent gateway.
+  - Behavior:
+    - Sends Discord user, guild, channel, role, and interaction context to the backend.
+    - Executes allowed read-only task lookups synchronously.
+    - Shows a frozen confirmation plan for task writes before execution.
+    - Confirms or cancels writes through backend confirmation endpoints.
+  - Guardrails:
+    - The bot does not authorize agent tool calls itself.
+    - Backend policy checks scopes and tenant context before every tool execution.
+    - Agent write actions are audited and require confirmation.
+
+- `@bot ...`
+  - Description: Run the same agent gateway from a normal channel or thread message.
+  - Behavior:
+    - Strips the bot mention and sends the remaining text as the agent request.
+    - Replies in the same channel or thread.
+    - Supports the same confirmation buttons for writes.
+  - Example: `@508.dev Bot show tasks for project Atlas`
 
 - `/dashboard-login`
   - Description: Generate a one-time operations dashboard login link.
