@@ -26,7 +26,7 @@ attached to the GitHub `test` environment; when `OPENAI_API_KEY_DIRECT` or
 `OPENAI_API_KEY` is available there, CI also runs `--live-planner` and honors
 environment-level `OPENAI_BASE_URL` for OpenAI-compatible providers such as
 OpenRouter. Fixture-level `stub_results` keep read-only external tools from
-hitting CRM, GitHub, Kimai, or other live systems.
+hitting CRM, GitHub, or other live systems.
 
 ## Commands
 

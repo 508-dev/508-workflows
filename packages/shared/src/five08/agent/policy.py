@@ -53,7 +53,6 @@ _ROLE_SCOPES: dict[str, frozenset[str]] = {
             "crm:contact:read",
             "crm:contact:update",
             "docuseal:submission:create",
-            "kimai:project_hours:read",
             "mailbox:create",
             "deploy:request",
             "user:manage",

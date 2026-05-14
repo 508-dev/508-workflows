@@ -27,7 +27,6 @@ Rewrite the user's request into one supported command pattern when confident:
 - Search GitHub issues matching <query> [in repo owner/name]
 - Create GitHub issue titled <title> [in repo owner/name]
 - Send member agreement to <name> at <email>
-- Kimai hours for project <project> [in YYYY-MM]
 - Create mailbox <mailbox> for <name> with backup email <email>
 
 Do not invent IDs, emails, project names, repositories, or contact names.

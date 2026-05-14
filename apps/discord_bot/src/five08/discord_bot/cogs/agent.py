@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import logging
 import re
 import time
@@ -29,6 +30,44 @@ _PUBLIC_SAFE_CLARIFICATION_MESSAGES = frozenset(
 )
 _GENERIC_UNSUPPORTED_AGENT_MESSAGE = (
     "I could not turn that into a supported task action."
+)
+_AGENT_HELP_REQUESTS = frozenset(
+    {
+        "help",
+        "what can you do",
+        "what kind of things can you do",
+        "what things can you do",
+        "what can the agent do",
+        "what can you help with",
+    }
+)
+_AGENT_PRESENCE_CHECKS = frozenset(
+    {
+        "hello",
+        "hi",
+        "hey",
+        "do you see this",
+        "can you see this",
+        "are you there",
+        "are you here",
+        "you there",
+        "ping",
+        "test",
+    }
+)
+_AGENT_ACKNOWLEDGEMENTS = frozenset(
+    {
+        "thanks",
+        "thank you",
+        "thx",
+        "ok",
+        "okay",
+        "got it",
+        "cool",
+        "nevermind",
+        "never mind",
+        "cancel",
+    }
 )
 
 
@@ -193,7 +232,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         name="agent",
         description="Run an approved English workflow through the agent gateway",
     )
-    @app_commands.describe(request="The task or workflow to plan")
+    @app_commands.describe(request="The workflow to plan or execute")
     async def agent_command(
         self,
         interaction: discord.Interaction,
@@ -299,7 +338,9 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             await self._send_mention_public_response(
                 message=message,
                 request=request,
-                content=self._agent_capabilities_message(),
+                content=self._agent_capabilities_message(
+                    roles=self._role_names_from_user(message.author)
+                ),
             )
             return
 
@@ -477,56 +518,58 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
     @staticmethod
     def _is_agent_help_request(request: str) -> bool:
         normalized = request.casefold().strip(" ?!.")
-        return normalized in {
-            "help",
-            "what can you do",
-            "what kind of things can you do",
-            "what things can you do",
-            "what can the agent do",
-            "what can you help with",
-        }
+        return AgentCog._matches_smalltalk(normalized, _AGENT_HELP_REQUESTS)
 
     @staticmethod
     def _is_agent_presence_check(request: str) -> bool:
         normalized = request.casefold().strip(" ?!.")
-        return normalized in {
-            "hello",
-            "hi",
-            "hey",
-            "do you see this",
-            "can you see this",
-            "are you there",
-            "are you here",
-            "you there",
-            "ping",
-            "test",
-        }
+        return AgentCog._matches_smalltalk(normalized, _AGENT_PRESENCE_CHECKS)
 
     @staticmethod
     def _is_agent_acknowledgement(request: str) -> bool:
         normalized = request.casefold().strip(" ?!.")
-        return normalized in {
-            "thanks",
-            "thank you",
-            "thx",
-            "ok",
-            "okay",
-            "got it",
-            "cool",
-            "nevermind",
-            "never mind",
-            "cancel",
-        }
+        return AgentCog._matches_smalltalk(normalized, _AGENT_ACKNOWLEDGEMENTS)
 
     @staticmethod
-    def _agent_capabilities_message() -> str:
+    def _matches_smalltalk(normalized: str, phrases: frozenset[str]) -> bool:
+        if normalized in phrases:
+            return True
+        if len(normalized) < 5 or len(normalized) > 40:
+            return False
+        return any(
+            difflib.SequenceMatcher(None, normalized, phrase).ratio() >= 0.9
+            for phrase in phrases
+        )
+
+    @staticmethod
+    def _agent_capabilities_message(*, roles: list[str]) -> str:
+        normalized_roles = {role.strip().casefold() for role in roles}
+        is_admin = bool(normalized_roles & {"admin", "owner", "steering committee"})
+        is_engineer = "engineer" in normalized_roles or is_admin
+        capabilities: list[str] = []
+        if is_engineer:
+            capabilities.append(
+                "- GitHub issues: search issues or create new code-task issues."
+            )
+        if is_admin:
+            capabilities.extend(
+                [
+                    "- CRM: search contacts, approve/reject onboarding, and submit member agreements.",
+                    "- Ops: create 508 mailboxes.",
+                ]
+            )
+        if not capabilities:
+            return "\n".join(
+                [
+                    "I do not see any agent workflows available for your current Discord roles.",
+                    "",
+                    "Use `/agent` when you want the response kept private.",
+                ]
+            )
         return "\n".join(
             [
                 "I can help with:",
-                "- Tasks: search, create, update, assign, close, and set due dates.",
-                "- GitHub issues: search issues or draft new issues for confirmation.",
-                "- CRM: search contacts, approve/reject onboarding, and submit member agreements.",
-                "- Ops: look up Kimai project hours and draft 508 mailbox creation.",
+                *capabilities,
                 "",
                 "Use `/agent` when you want the response kept private.",
             ]
@@ -939,12 +982,6 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                     lines.extend(
                         self._format_contact_result_lines(tool_name, result_payload)
                     )
-                elif (
-                    isinstance(result_payload, dict) and "user_hours" in result_payload
-                ):
-                    lines.extend(
-                        self._format_kimai_result_lines(tool_name, result_payload)
-                    )
                 else:
                     result_error = str(result.get("error") or "").strip()
                     if result_error:
@@ -988,31 +1025,6 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             contact_id = str(contact.get("id") or "").strip()
             suffix = " ".join(part for part in [email, contact_id] if part)
             lines.append(f"  - {name} {suffix}".strip())
-        return lines
-
-    @staticmethod
-    def _format_kimai_result_lines(
-        tool_name: object,
-        payload: dict[str, Any],
-    ) -> list[str]:
-        project = payload.get("project")
-        project_name = (
-            str(project.get("name") or "").strip()
-            if isinstance(project, dict)
-            else "project"
-        )
-        total_hours = payload.get("total_hours")
-        total_billed = payload.get("total_billed")
-        lines = [f"- {tool_name}: {project_name} {total_hours or 0:g}h"]
-        if isinstance(total_billed, int | float):
-            lines[0] += f", ${total_billed:,.2f}"
-        user_hours = payload.get("user_hours")
-        if isinstance(user_hours, dict):
-            for user_name, data in list(user_hours.items())[:3]:
-                if not isinstance(data, dict):
-                    continue
-                hours = data.get("hours") or 0
-                lines.append(f"  - {user_name}: {hours:g}h")
         return lines
 
 

@@ -822,42 +822,11 @@ def test_member_cannot_create_github_issue() -> None:
     assert "github:issue:create" in response.message
 
 
-def test_kimai_month_query_sets_begin_and_end_bounds() -> None:
+def test_kimai_project_hours_is_not_supported_by_agent() -> None:
     orchestrator = AgentOrchestrator()
 
     response = orchestrator.plan(
         "Kimai hours for project Atlas in 2026-05",
-        _context(roles=["Admin"]),
-    )
-
-    assert response.status == "failed"
-    action = response.plan.actions[0]
-    assert action.tool_name == "kimai_read.project_hours"
-    assert action.arguments["project"] == "Atlas"
-    assert action.arguments["begin"] == "2026-05-01"
-    assert action.arguments["end"] == "2026-05-31T23:59:59"
-    assert response.results[0].status == "failed"
-    assert "KIMAI_BASE_URL" in response.results[0].error
-
-
-def test_kimai_december_month_query_rolls_end_to_year_boundary() -> None:
-    orchestrator = AgentOrchestrator()
-
-    response = orchestrator.plan(
-        "Kimai hours for project Atlas in 2026-12",
-        _context(roles=["Admin"]),
-    )
-
-    action = response.plan.actions[0]
-    assert action.arguments["begin"] == "2026-12-01"
-    assert action.arguments["end"] == "2026-12-31T23:59:59"
-
-
-def test_kimai_invalid_month_returns_clarification() -> None:
-    orchestrator = AgentOrchestrator()
-
-    response = orchestrator.plan(
-        "Kimai hours for project Atlas in 2026-13",
         _context(roles=["Admin"]),
     )
 
@@ -938,6 +907,47 @@ def test_member_agreement_resolves_single_crm_contact_by_name() -> None:
     assert action.arguments == {
         "submitter_email": "caleb@example.com",
         "submitter_name": "Caleb Example",
+        "send_email": True,
+    }
+
+
+def test_member_agreement_submit_verb_resolves_single_crm_contact_by_name() -> None:
+    class FakeRegistry(ToolRegistry):
+        def execute(
+            self,
+            tool_name: str,
+            arguments: dict[str, object],
+            *,
+            organization_id: str | None,
+            actor_id: str | None,
+            actor_scopes: set[str] | None = None,
+        ) -> dict[str, object]:
+            assert tool_name == "crm_read.search_contacts"
+            assert arguments == {"query": "Michael Wu", "limit": 5}
+            return {
+                "contacts": [
+                    {
+                        "id": "contact-1",
+                        "name": "Michael Wu",
+                        "emailAddress": "michael@example.com",
+                    }
+                ]
+            }
+
+    orchestrator = AgentOrchestrator(registry=FakeRegistry())
+
+    response = orchestrator.plan(
+        "Submit a member agreement to Michael Wu",
+        _context(roles=["Admin"]),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    action = response.plan.actions[0]
+    assert action.tool_name == "docuseal_write.create_member_agreement_submission"
+    assert action.arguments == {
+        "submitter_email": "michael@example.com",
+        "submitter_name": "Michael Wu",
         "send_email": True,
     }
 

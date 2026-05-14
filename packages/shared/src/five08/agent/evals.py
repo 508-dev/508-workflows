@@ -68,7 +68,6 @@ Available tools and arguments:
 - crm_read.search_contacts: query string, limit number.
 - crm_write.update_contact: contact_id string, updates object. Onboarding state field is cOnboardingState.
 - docuseal_write.create_member_agreement_submission: submitter_email, submitter_name, send_email true.
-- kimai_read.project_hours: project string, optional begin YYYY-MM-DD, optional end YYYY-MM-DDTHH:MM:SS.
 - mail_write.create_mailbox: local_part, backup_email, name.
 
 If a task search lacks a project, return needs_clarification with "Which project should I search?"
@@ -79,7 +78,6 @@ For GitHub issue search, use context.runtime_config.github_default_repo when the
 For a GitHub issue create request, do not ask for optional body text. Use the phrase after "to" or after "titled" as the issue title and omit body when absent.
 For "Create a GitHub issue to improve search UI in repo 508-dev/508-workflows", call github_issue.create_issue with {"repository":"508-dev/508-workflows","title":"improve search UI"}.
 For "Create GitHub issue in repo 508-dev/508-workflows titled Fix onboarding sync", call github_issue.create_issue with {"repository":"508-dev/508-workflows","title":"Fix onboarding sync"}.
-For "Kimai hours for project Atlas in 2026-05", call kimai_read.project_hours with {"project":"Atlas","begin":"2026-05-01","end":"2026-05-31T23:59:59"}.
 For "Send member agreement to Sarah Example sarah@example.com", call docuseal_write.create_member_agreement_submission with {"submitter_name":"Sarah Example","submitter_email":"sarah@example.com","send_email":true}.
 For "Send member agreement to Jane Doe at jane@example.com", call docuseal_write.create_member_agreement_submission with {"submitter_name":"Jane Doe","submitter_email":"jane@example.com","send_email":true}.
 For writes, still return the intended write action; confirmation is handled by policy.
@@ -1170,10 +1168,6 @@ def _live_action_clarification(
     if tool_name == "docuseal_write.create_member_agreement_submission":
         if not _non_empty_arg(args, "submitter_email"):
             return "What email address should I use for the member agreement?"
-        return None
-    if tool_name == "kimai_read.project_hours":
-        if not _non_empty_arg(args, "project"):
-            return "Which Kimai project should I read?"
         return None
     if tool_name == "mail_write.create_mailbox":
         if not _non_empty_arg(args, "local_part"):

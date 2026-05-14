@@ -12,7 +12,6 @@ from five08.agent.models import RiskLevel
 from five08.clients.docuseal import create_member_agreement_submission
 from five08.clients.espo import EspoClient
 from five08.clients.github import GitHubClient
-from five08.clients.kimai import KimaiAPI
 from five08.clients.migadu import (
     MigaduClient,
     MigaduMailboxCreateRequest,
@@ -46,8 +45,6 @@ class ToolRuntimeConfig:
     docuseal_base_url: str | None = None
     docuseal_api_key: str | None = None
     docuseal_member_agreement_template_id: int | None = None
-    kimai_base_url: str | None = None
-    kimai_api_token: str | None = None
     migadu_api_user: str | None = None
     migadu_api_key: str | None = None
     migadu_mailbox_domain: str = "508.dev"
@@ -68,8 +65,6 @@ class ToolRuntimeConfig:
                 "docuseal_member_agreement_template_id",
                 None,
             ),
-            kimai_base_url=getattr(settings, "kimai_base_url", None),
-            kimai_api_token=getattr(settings, "kimai_api_token", None),
             migadu_api_user=getattr(settings, "migadu_api_user", None),
             migadu_api_key=getattr(settings, "migadu_api_key", None),
             migadu_mailbox_domain=getattr(
@@ -294,14 +289,6 @@ class ToolRegistry:
                 idempotent=False,
                 write=True,
             ),
-            "kimai_read.project_hours": ToolManifest(
-                name="kimai_read.project_hours",
-                risk="low",
-                required_scopes=("kimai:project_hours:read",),
-                tenant_scoped=True,
-                idempotent=True,
-                write=False,
-            ),
             "mail_write.create_mailbox": ToolManifest(
                 name="mail_write.create_mailbox",
                 risk="high",
@@ -390,8 +377,6 @@ class ToolRegistry:
             return self._update_crm_contact(arguments)
         if tool_name == "docuseal_write.create_member_agreement_submission":
             return self._create_docuseal_member_agreement(arguments)
-        if tool_name == "kimai_read.project_hours":
-            return self._kimai_project_hours(arguments)
         if tool_name == "mail_write.create_mailbox":
             return self._create_migadu_mailbox(arguments)
         raise KeyError(f"Unknown tool {tool_name}")
@@ -495,38 +480,6 @@ class ToolRegistry:
             send_email=bool(arguments.get("send_email", True)),
         )
 
-    def _kimai_project_hours(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        project_name = str(arguments.get("project") or "").strip()
-        if not project_name:
-            raise ValueError("Kimai project name is required")
-        base_url = _required_config(
-            self.runtime_config.kimai_base_url, "KIMAI_BASE_URL"
-        )
-        api_token = _required_config(
-            self.runtime_config.kimai_api_token,
-            "KIMAI_API_TOKEN",
-        )
-        api = KimaiAPI(base_url, api_token)
-        project = api.get_project_by_name(project_name)
-        if not project:
-            raise KeyError(f"Kimai project {project_name!r} was not found")
-        project_id = int(project["id"])
-        begin = _optional_datetime(arguments.get("begin"))
-        end = _optional_datetime(arguments.get("end"))
-        user_hours = api.get_project_hours_by_user(
-            project_id=project_id, begin=begin, end=end
-        )
-        total_hours = sum(float(item.get("hours", 0)) for item in user_hours.values())
-        total_billed = sum(
-            float(item.get("billed_amount", 0)) for item in user_hours.values()
-        )
-        return {
-            "project": project,
-            "total_hours": total_hours,
-            "total_billed": total_billed,
-            "user_hours": user_hours,
-        }
-
     def _create_migadu_mailbox(self, arguments: dict[str, Any]) -> dict[str, Any]:
         local_part = str(arguments.get("local_part") or "").strip().lower()
         backup_email = str(arguments.get("backup_email") or "").strip()
@@ -606,18 +559,3 @@ def _positive_int(value: Any, *, default: int, maximum: int) -> int:
     except (TypeError, ValueError):
         parsed = default
     return min(max(parsed, 1), maximum)
-
-
-def _optional_datetime(value: Any) -> datetime | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, date):
-        return datetime.combine(value, datetime.min.time())
-    if isinstance(value, str):
-        normalized = value.strip()
-        if not normalized:
-            return None
-        return datetime.fromisoformat(normalized)
-    return None

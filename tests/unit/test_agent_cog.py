@@ -156,31 +156,6 @@ def test_format_agent_response_renders_contact_results() -> None:
     assert "Sarah Example sarah@example.com contact-1" in message
 
 
-def test_format_agent_response_renders_kimai_results() -> None:
-    cog = AgentCog.__new__(AgentCog)
-
-    message = cog._format_agent_response(
-        {
-            "status": "executed",
-            "results": [
-                {
-                    "tool_name": "kimai_read.project_hours",
-                    "status": "succeeded",
-                    "result": {
-                        "project": {"name": "Atlas"},
-                        "total_hours": 12.5,
-                        "total_billed": 1250.0,
-                        "user_hours": {"Sarah": {"hours": 7.5}},
-                    },
-                }
-            ],
-        }
-    )
-
-    assert "- kimai_read.project_hours: Atlas 12.5h, $1,250.00" in message
-    assert "Sarah: 7.5h" in message
-
-
 def test_audit_result_treats_error_payload_as_error() -> None:
     assert (
         AgentCog._audit_result_for_agent_response(
@@ -677,7 +652,11 @@ async def test_agent_mention_answers_help_without_backend() -> None:
     message = SimpleNamespace(
         id=555,
         content="<@999> what kind of things can you do?",
-        author=SimpleNamespace(id=123, bot=False, roles=[]),
+        author=SimpleNamespace(
+            id=123,
+            bot=False,
+            roles=[SimpleNamespace(name="Admin")],
+        ),
         mentions=[SimpleNamespace(id=999)],
         guild=SimpleNamespace(id=456),
         channel=SimpleNamespace(id=789, typing=Mock(return_value=_AsyncTyping())),
@@ -691,10 +670,46 @@ async def test_agent_mention_answers_help_without_backend() -> None:
     thread.send.assert_awaited_once()
     response = thread.send.await_args.args[0]
     assert "I can help with:" in response
+    assert "GitHub issues:" in response
+    assert "CRM:" in response
+    assert "create 508 mailboxes" in response
+    assert "Tasks:" not in response
+    assert "Kimai" not in response
     assert "`/agent`" in response
     assert "/unlinked-discord-users" not in response
     assert "/view-onboarding-queue" not in response
     cog._audit_message_safe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_agent_mention_help_is_role_aware() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))
+    cog._post_agent_request = AsyncMock()
+    cog._audit_message_safe = Mock()
+    thread = SimpleNamespace(send=AsyncMock())
+    message = SimpleNamespace(
+        id=555,
+        content="<@999> what can you do?",
+        author=SimpleNamespace(
+            id=123,
+            bot=False,
+            roles=[SimpleNamespace(name="Engineer")],
+        ),
+        mentions=[SimpleNamespace(id=999)],
+        guild=SimpleNamespace(id=456),
+        channel=SimpleNamespace(id=789, typing=Mock(return_value=_AsyncTyping())),
+        create_thread=AsyncMock(return_value=thread),
+        reply=AsyncMock(),
+    )
+
+    await cog.agent_mention(message)
+
+    response = thread.send.await_args.args[0]
+    assert "GitHub issues:" in response
+    assert "CRM:" not in response
+    assert "mailboxes" not in response
+    cog._post_agent_request.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -707,6 +722,32 @@ async def test_agent_mention_answers_presence_check_without_backend() -> None:
     message = SimpleNamespace(
         id=555,
         content="<@999> do you see this",
+        author=SimpleNamespace(id=123, bot=False, roles=[]),
+        mentions=[SimpleNamespace(id=999)],
+        guild=SimpleNamespace(id=456),
+        channel=SimpleNamespace(id=789, typing=Mock(return_value=_AsyncTyping())),
+        create_thread=AsyncMock(return_value=thread),
+        reply=AsyncMock(),
+    )
+
+    await cog.agent_mention(message)
+
+    cog._post_agent_request.assert_not_awaited()
+    thread.send.assert_awaited_once()
+    assert "I can see this" in thread.send.await_args.args[0]
+    cog._audit_message_safe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_agent_mention_answers_presence_typo_without_backend() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))
+    cog._post_agent_request = AsyncMock()
+    cog._audit_message_safe = Mock()
+    thread = SimpleNamespace(send=AsyncMock())
+    message = SimpleNamespace(
+        id=555,
+        content="<@999> are you tehre",
         author=SimpleNamespace(id=123, bot=False, roles=[]),
         mentions=[SimpleNamespace(id=999)],
         guild=SimpleNamespace(id=456),

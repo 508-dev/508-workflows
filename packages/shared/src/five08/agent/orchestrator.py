@@ -322,7 +322,7 @@ class AgentOrchestrator:
     def _extract_member_agreement_recipient(text: str) -> str | None:
         lowered = text.casefold()
         if "member agreement" not in lowered or not re.search(
-            r"\b(?:send|create)\b",
+            r"\b(?:send|create|submit)\b",
             text,
             re.IGNORECASE,
         ):
@@ -488,11 +488,9 @@ class AgentOrchestrator:
         ):
             return self._parse_crm_contact_search(text)
         if "member agreement" in lowered and any(
-            keyword in lowered for keyword in ["send", "create"]
+            keyword in lowered for keyword in ["send", "create", "submit"]
         ):
             return self._parse_member_agreement(text)
-        if "kimai" in lowered and "hour" in lowered:
-            return self._parse_kimai_project_hours(text)
         if "mailbox" in lowered and any(
             keyword in lowered for keyword in ["create", "provision"]
         ):
@@ -641,45 +639,6 @@ class AgentOrchestrator:
                 "Create DocuSeal member agreement submission for "
                 f"{submitter_name or email_match.group(1)}"
             ),
-        )
-
-    def _parse_kimai_project_hours(self, text: str) -> AgentToolAction | None:
-        match = re.search(
-            r"\b(?:kimai\s+)?(?:project\s+)?hours\s+(?:for|on)\s+project\s+(.+)",
-            text,
-            re.IGNORECASE,
-        )
-        if match is None:
-            return None
-        project = re.split(
-            r"\s+\b(?:in|for|during)\s+\d{4}-\d{2}\b",
-            match.group(1),
-            maxsplit=1,
-            flags=re.IGNORECASE,
-        )[0]
-        project_name = _clean_text(project)
-        if not project_name:
-            return None
-        args: dict[str, str] = {"project": project_name}
-        month_match = re.search(r"\b(20\d{2}-\d{2})\b", text)
-        if month_match:
-            year, month = (int(part) for part in month_match.group(1).split("-"))
-            if month < 1 or month > 12:
-                return None
-            begin = date(year, month, 1)
-            if month == 12:
-                next_month = date(year + 1, 1, 1)
-            else:
-                next_month = date(year, month + 1, 1)
-            end = datetime.combine(next_month, datetime.min.time()) - timedelta(
-                seconds=1
-            )
-            args["begin"] = begin.isoformat()
-            args["end"] = end.isoformat()
-        return AgentToolAction(
-            tool_name="kimai_read.project_hours",
-            arguments=args,
-            summary=f"Read Kimai hours for project {project_name}",
         )
 
     def _parse_mailbox_create(self, text: str) -> AgentToolAction | None:
@@ -1160,7 +1119,6 @@ class AgentOrchestrator:
             "crm_read.search_contacts": "search_crm_contacts",
             "crm_write.update_contact": "update_crm_contact",
             "docuseal_write.create_member_agreement_submission": "send_member_agreement",
-            "kimai_read.project_hours": "read_kimai_project_hours",
             "mail_write.create_mailbox": "create_mailbox",
         }.get(tool_name, "unknown")
 
