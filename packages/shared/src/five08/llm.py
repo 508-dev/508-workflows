@@ -15,7 +15,19 @@ from five08.model_catalog import model_chat_completion_options
 logger = logging.getLogger(__name__)
 
 _PROFILE_RESOURCE = "llm_model_profiles.json"
-_OPENAI_PROVIDER_PREFIXES = ("openai/",)
+_KNOWN_PROVIDER_PREFIXES = frozenset(
+    {
+        "anthropic",
+        "bedrock",
+        "cohere",
+        "fireworks",
+        "gemini",
+        "groq",
+        "openai",
+        "openrouter",
+        "vertex",
+    }
+)
 
 
 class OpenAIClientKwargs(TypedDict, total=False):
@@ -87,7 +99,7 @@ class ProviderModel:
     def chat_completion_kwargs(
         self,
         *,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         temperature: float | None = None,
         max_tokens: int | None = None,
         response_format: Any | None = None,
@@ -208,9 +220,11 @@ def _fallback_profile(model: str) -> ModelProfile:
 
 def _profile_lookup_key(model: str) -> str:
     value = (model or "").strip()
-    for prefix in _OPENAI_PROVIDER_PREFIXES:
-        if value.startswith(prefix):
-            return value.removeprefix(prefix)
+    while "/" in value:
+        provider, rest = value.split("/", 1)
+        if provider not in _KNOWN_PROVIDER_PREFIXES or not rest:
+            break
+        value = rest
     return value
 
 

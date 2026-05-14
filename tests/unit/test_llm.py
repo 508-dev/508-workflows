@@ -57,6 +57,24 @@ def test_openrouter_plain_openai_model_gets_provider_prefix_for_request() -> Non
     assert "temperature" not in kwargs
 
 
+def test_nested_provider_prefix_model_uses_underlying_profile() -> None:
+    profile = get_model_profile("openrouter/openai/gpt-5-mini")
+    provider_model = ProviderModel.openai_compatible(
+        model="openrouter/openai/gpt-5-mini",
+    )
+
+    kwargs = provider_model.chat_completion_kwargs(
+        messages=[{"role": "user", "content": "Return JSON."}],
+        temperature=0.1,
+        response_format={"type": "json_object"},
+    )
+
+    assert profile.name == "gpt-5-mini"
+    assert kwargs["model"] == "openrouter/openai/gpt-5-mini"
+    assert kwargs["response_format"] == {"type": "json_object"}
+    assert "temperature" not in kwargs
+
+
 def test_unknown_non_reasoning_model_preserves_temperature() -> None:
     profile = get_model_profile("fake-model")
     provider_model = ProviderModel.openai_compatible(model="fake-model")

@@ -32,3 +32,4 @@ packages = ["src/five08"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/five08/data/model-profiles.json" = "five08/data/model-profiles.json"
+"src/five08/llm_model_profiles.json" = "five08/llm_model_profiles.json"

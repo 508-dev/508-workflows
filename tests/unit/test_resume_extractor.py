@@ -192,6 +192,43 @@ def test_split_name_prefers_llm_output() -> None:
     mock_llm_split.assert_called_once_with("Ada Lovelace")
 
 
+def test_split_name_with_llm_requests_json_object_response() -> None:
+    """Name split helper should request JSON because it parses JSON content."""
+    fake_response = type(
+        "Response",
+        (),
+        {
+            "choices": [
+                type(
+                    "Choice",
+                    (),
+                    {
+                        "message": type(
+                            "Message",
+                            (),
+                            {"content": '{"firstName":"Ada","lastName":"Lovelace"}'},
+                        )()
+                    },
+                )()
+            ]
+        },
+    )()
+    fake_create = Mock(return_value=fake_response)
+    extractor = ResumeProfileExtractor(api_key="test-key")
+    extractor.client = type(
+        "Client",
+        (),
+        {
+            "chat": type(
+                "Chat", (), {"completions": type("C", (), {"create": fake_create})()}
+            )()
+        },
+    )()
+
+    assert extractor._split_name_with_llm("Ada Lovelace") == ("Ada", "Lovelace")
+    assert fake_create.call_args.kwargs["response_format"] == {"type": "json_object"}
+
+
 def test_split_name_falls_back_to_heuristic_without_name_hints() -> None:
     """Split-name should still split names using heuristics when LLM fails."""
     extractor = ResumeProfileExtractor(api_key="test-key")

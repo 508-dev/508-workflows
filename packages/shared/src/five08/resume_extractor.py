@@ -2780,6 +2780,7 @@ class ResumeProfileExtractor:
                 ],
                 temperature=0.0,
                 max_tokens=80,
+                response_format={"type": "json_object"},
             )
         )
         raw_content = response.choices[0].message.content
