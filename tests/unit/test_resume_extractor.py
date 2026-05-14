@@ -192,6 +192,43 @@ def test_split_name_prefers_llm_output() -> None:
     mock_llm_split.assert_called_once_with("Ada Lovelace")
 
 
+def test_split_name_with_llm_requests_json_object_response() -> None:
+    """Name split helper should request JSON because it parses JSON content."""
+    fake_response = type(
+        "Response",
+        (),
+        {
+            "choices": [
+                type(
+                    "Choice",
+                    (),
+                    {
+                        "message": type(
+                            "Message",
+                            (),
+                            {"content": '{"firstName":"Ada","lastName":"Lovelace"}'},
+                        )()
+                    },
+                )()
+            ]
+        },
+    )()
+    fake_create = Mock(return_value=fake_response)
+    extractor = ResumeProfileExtractor(api_key="test-key")
+    extractor.client = type(
+        "Client",
+        (),
+        {
+            "chat": type(
+                "Chat", (), {"completions": type("C", (), {"create": fake_create})()}
+            )()
+        },
+    )()
+
+    assert extractor._split_name_with_llm("Ada Lovelace") == ("Ada", "Lovelace")
+    assert fake_create.call_args.kwargs["response_format"] == {"type": "json_object"}
+
+
 def test_split_name_falls_back_to_heuristic_without_name_hints() -> None:
     """Split-name should still split names using heuristics when LLM fails."""
     extractor = ResumeProfileExtractor(api_key="test-key")
@@ -1113,6 +1150,56 @@ def test_extract_uses_supported_gpt54_reasoning_effort() -> None:
     assert kwargs["verbosity"] == "low"
 
 
+def test_extract_uses_supported_gpt51_reasoning_effort() -> None:
+    """GPT-5.1 should not use the GPT-5 minimal reasoning-effort value."""
+
+    response = type(
+        "Response",
+        (),
+        {
+            "choices": [
+                type(
+                    "Choice",
+                    (),
+                    {
+                        "finish_reason": "stop",
+                        "message": type(
+                            "Message",
+                            (),
+                            {
+                                "content": (
+                                    '{"name":"Jane Doe","firstName":"Jane",'
+                                    '"lastName":"Doe","email":"jane@example.com"}'
+                                )
+                            },
+                        )(),
+                    },
+                )()
+            ]
+        },
+    )()
+    fake_completions = Mock()
+    fake_completions.create.return_value = response
+    extractor = ResumeProfileExtractor(
+        api_key="test-key",
+        model="gpt-5.1",
+        max_tokens=40,
+    )
+    extractor.client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": fake_completions})()},
+    )()
+
+    with patch.object(extractor, "_split_name_with_llm", return_value=("Jane", "Doe")):
+        extractor.extract("Jane Doe\nSoftware Engineer")
+
+    kwargs = fake_completions.create.call_args.kwargs
+    assert kwargs["max_completion_tokens"] == 40
+    assert kwargs["reasoning_effort"] == "low"
+    assert kwargs["verbosity"] == "low"
+
+
 def test_extract_repairs_json_with_comments_trailing_commas_and_prose() -> None:
     """Common near-JSON formatting issues should not force heuristic fallback."""
 
@@ -1785,6 +1872,7 @@ def test_extract_accepts_nullable_website_url_candidates() -> None:
             )()
         },
     )()
+    extractor.model = "fake-model"
 
     result = extractor.extract("Jane Doe\nSoftware Engineer")
 

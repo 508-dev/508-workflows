@@ -5,6 +5,7 @@ import logging
 import re
 from typing import Any
 
+from five08.llm import ProviderModel
 from five08.openai_fallback import FallbackOpenAIClient
 from five08.skills import (
     DISALLOWED_RESUME_SKILLS,
@@ -63,7 +64,12 @@ class SkillsExtractor:
     """Extract skills with LLM when configured, fallback heuristics otherwise."""
 
     def __init__(self) -> None:
-        self.model = settings.resolved_resume_ai_model
+        self.provider_model = ProviderModel.openai_compatible(
+            model=settings.resolved_resume_ai_model,
+            api_key=settings.resolved_resume_ai_api_key,
+            base_url=settings.resolved_resume_ai_base_url,
+        )
+        self.model = self.provider_model.model
         self.client: Any = None
 
         if settings.resolved_resume_ai_provider_attempts and OpenAIClient is not None:
@@ -72,10 +78,7 @@ class SkillsExtractor:
                 client_factory=OpenAIClient,
             )
         elif settings.resolved_resume_ai_api_key and OpenAIClient is not None:
-            self.client = OpenAIClient(
-                api_key=settings.resolved_resume_ai_api_key,
-                base_url=settings.resolved_resume_ai_base_url,
-            )
+            self.client = OpenAIClient(**self.provider_model.client_kwargs())
 
     def extract_skills(self, resume_text: str) -> ExtractedSkills:
         """Extract skills from resume text."""
@@ -85,26 +88,27 @@ class SkillsExtractor:
         prompt = self._create_prompt(resume_text)
         try:
             response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You extract professional skills from resumes for a CRM. "
-                            "Focus on white-collar skills for product development orgs: "
-                            "engineering, product, data, design, growth, and marketing. "
-                            "Return JSON only, no prose. "
-                            "Normalize skills to concise canonical names, lowercase. "
-                            "Provide a strength from 1-5 when known, where 5 is strongest. "
-                            "If uncertain, you may omit it or leave it blank. "
-                            "Bias 3 for simple mentions, 4-5 for recent/current project usage, "
-                            "and 1-2 for weak, outdated, or minimal exposure."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.1,
-                max_tokens=1200,
+                **self.provider_model.chat_completion_kwargs(
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You extract professional skills from resumes for a CRM. "
+                                "Focus on white-collar skills for product development orgs: "
+                                "engineering, product, data, design, growth, and marketing. "
+                                "Return JSON only, no prose. "
+                                "Normalize skills to concise canonical names, lowercase. "
+                                "Provide a strength from 1-5 when known, where 5 is strongest. "
+                                "If uncertain, you may omit it or leave it blank. "
+                                "Bias 3 for simple mentions, 4-5 for recent/current project usage, "
+                                "and 1-2 for weak, outdated, or minimal exposure."
+                            ),
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.1,
+                    max_tokens=1200,
+                )
             )
             content = response.choices[0].message.content
             if not content:
