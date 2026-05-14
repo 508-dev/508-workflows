@@ -58,7 +58,7 @@ def test_resolve_browser_safe_port_rejects_explicit_unsafe_override() -> None:
 
 def test_worktree_env_load_rejects_unsafe_compose_http_port_override() -> None:
     env = os.environ.copy()
-    env["WEBHOOK_INGEST_HOST_PORT"] = "5060"
+    env["WEB_HOST_PORT"] = "5060"
 
     result = _run_shell(
         f"""
@@ -71,9 +71,28 @@ def test_worktree_env_load_rejects_unsafe_compose_http_port_override() -> None:
 
     assert result.returncode != 0
     assert (
-        "WEBHOOK_INGEST_HOST_PORT cannot use browser-unsafe port '5060'; "
+        "WEB_HOST_PORT cannot use browser-unsafe port '5060'; "
         "pick a different port." in result.stderr
     )
+
+
+def test_worktree_env_load_accepts_legacy_compose_http_port_override() -> None:
+    env = os.environ.copy()
+    env.pop("WEB_HOST_PORT", None)
+    env["WEBHOOK_INGEST_HOST_PORT"] = "23090"
+
+    result = _run_shell(
+        f"""
+        set -eu
+        . {SCRIPT_PATH}
+        worktree_env_load {REPO_ROOT / "scripts"} compose
+        printf '%s\\n%s\\n' "$WEB_HOST_PORT" "$WEBHOOK_INGEST_HOST_PORT"
+        """,
+        env=env,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.splitlines() == ["23090", "23090"]
 
 
 def test_worktree_env_load_host_mode_ignores_dotenv_host_port_pins() -> None:
@@ -82,10 +101,11 @@ def test_worktree_env_load_host_mode_ignores_dotenv_host_port_pins() -> None:
         scripts_dir = repo_root / "scripts"
         scripts_dir.mkdir()
         env = os.environ.copy()
+        env.pop("WEB_PORT", None)
         env.pop("WEBHOOK_INGEST_PORT", None)
         env.pop("HEALTHCHECK_PORT", None)
         (repo_root / ".env").write_text(
-            "WEBHOOK_INGEST_PORT=8090\nHEALTHCHECK_PORT=3000\n",
+            "WEB_PORT=8090\nHEALTHCHECK_PORT=3000\n",
             encoding="utf-8",
         )
 
@@ -94,7 +114,7 @@ def test_worktree_env_load_host_mode_ignores_dotenv_host_port_pins() -> None:
             set -eu
             . {SCRIPT_PATH}
             worktree_env_load {scripts_dir} host
-            printf '%s\\n%s\\n' "$WEBHOOK_INGEST_PORT" "$HEALTHCHECK_PORT"
+            printf '%s\\n%s\\n%s\\n' "$WEB_PORT" "$WEBHOOK_INGEST_PORT" "$HEALTHCHECK_PORT"
             """,
             env=env,
         )
@@ -114,6 +134,7 @@ def test_worktree_env_load_host_mode_ignores_dotenv_host_port_pins() -> None:
         slot = int(hash_value) % 2000
 
         assert result.stdout.splitlines() == [
+            str(18080 + slot),
             str(18080 + slot),
             str(30000 + slot),
         ]

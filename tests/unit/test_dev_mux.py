@@ -52,3 +52,19 @@ def test_ensure_ports_available_handles_missing_lsof_gracefully(
         f"web port {port} is already in use; "
         "install lsof for owner details or stop the existing listener and retry."
     )
+
+
+def test_service_commands_accept_legacy_webhook_ingest_port() -> None:
+    module = _load_dev_mux_module()
+
+    commands = module._service_commands(
+        {
+            "WEBHOOK_INGEST_HOST": "127.0.0.1",
+            "WEBHOOK_INGEST_PORT": "19090",
+        }
+    )
+
+    web_command = commands[0][1]
+
+    assert web_command[web_command.index("--host") + 1] == "127.0.0.1"
+    assert web_command[web_command.index("--port") + 1] == "19090"

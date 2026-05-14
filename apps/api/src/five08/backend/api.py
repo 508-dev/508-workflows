@@ -3900,8 +3900,8 @@ def run() -> None:
     )
     uvicorn.run(
         create_app(),
-        host=settings.webhook_ingest_host,
-        port=settings.webhook_ingest_port,
+        host=settings.web_host,
+        port=settings.web_port,
         log_level=settings.log_level.lower(),
     )
 

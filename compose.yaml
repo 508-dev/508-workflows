@@ -68,7 +68,7 @@ services:
     environment:
       REDIS_URL: redis://redis:6379/0
       REDIS_QUEUE_NAME: ${REDIS_QUEUE_NAME:-jobs.default}
-      BACKEND_API_BASE_URL: http://api:8090
+      BACKEND_API_BASE_URL: http://web:8090
     restart: unless-stopped
     networks:
       - default
@@ -77,7 +77,7 @@ services:
       redis:
         condition: service_healthy
 
-  api:
+  web:
     build:
       context: .
       dockerfile: apps/api/Dockerfile
@@ -98,8 +98,12 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-internal}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me}
       MINIO_INTERNAL_BUCKET: ${MINIO_INTERNAL_BUCKET:-internal-transfers}
-      WEBHOOK_INGEST_HOST: 0.0.0.0
-      WEBHOOK_INGEST_PORT: 8090
+      # Keep the container's internal listen port fixed; vary only the published
+      # host port for tunnels/local multi-worktree runs.
+      WEB_HOST: 0.0.0.0
+      WEB_PORT: 8090
+    ports:
+      - "${WEB_HOST_BIND:-${WEBHOOK_INGEST_HOST_BIND:-127.0.0.1}}:${WEB_HOST_PORT:-${WEBHOOK_INGEST_HOST_PORT:-8090}}:8090"
     restart: unless-stopped
     networks:
       - default
@@ -127,7 +131,7 @@ services:
     environment:
       REDIS_URL: redis://redis:6379/0
       REDIS_QUEUE_NAME: ${REDIS_QUEUE_NAME:-jobs.default}
-      WORKER_API_BASE_URL: http://api:8090
+      WORKER_API_BASE_URL: http://web:8090
       WORKER_QUEUE_NAMES: ${WORKER_QUEUE_NAMES:-jobs.default}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
@@ -146,7 +150,7 @@ services:
       - default
       - infra
     depends_on:
-      api:
+      web:
         condition: service_started
       redis:
         condition: service_healthy

@@ -182,6 +182,63 @@ worktree_env_resolve_browser_safe_shell_or_default() {
     "$port_label"
 }
 
+worktree_env_resolve_browser_safe_port_preferred() {
+  preferred_key=$1
+  legacy_key=$2
+  default_value=$3
+  env_file=$4
+  port_label=$5
+  source_label=default
+  eval "preferred_value=\${$preferred_key-}"
+  eval "legacy_value=\${$legacy_key-}"
+
+  if [ -n "$preferred_value" ]; then
+    resolved_value=$preferred_value
+    source_label=environment
+  elif file_value=$(worktree_env_get_env_file_value "$preferred_key" "$env_file" 2>/dev/null); then
+    resolved_value=$file_value
+    source_label=.env
+  elif [ -n "$legacy_value" ]; then
+    resolved_value=$legacy_value
+    source_label=environment
+  elif file_value=$(worktree_env_get_env_file_value "$legacy_key" "$env_file" 2>/dev/null); then
+    resolved_value=$file_value
+    source_label=.env
+  else
+    resolved_value=$default_value
+  fi
+
+  worktree_env_finalize_browser_safe_port \
+    "$resolved_value" \
+    "$source_label" \
+    "$port_label"
+}
+
+worktree_env_resolve_browser_safe_shell_or_default_preferred() {
+  preferred_key=$1
+  legacy_key=$2
+  default_value=$3
+  port_label=$4
+  source_label=default
+  eval "preferred_value=\${$preferred_key-}"
+  eval "legacy_value=\${$legacy_key-}"
+
+  if [ -n "$preferred_value" ]; then
+    resolved_value=$preferred_value
+    source_label=environment
+  elif [ -n "$legacy_value" ]; then
+    resolved_value=$legacy_value
+    source_label=environment
+  else
+    resolved_value=$default_value
+  fi
+
+  worktree_env_finalize_browser_safe_port \
+    "$resolved_value" \
+    "$source_label" \
+    "$port_label"
+}
+
 worktree_env_load() {
   script_dir=$1
   mode=${2:-host}
@@ -203,7 +260,7 @@ worktree_env_load() {
   POSTGRES_USER=$(worktree_env_resolve_value POSTGRES_USER "postgres" "$WORKTREE_ENV_FILE")
   POSTGRES_PASSWORD=$(worktree_env_resolve_value POSTGRES_PASSWORD "postgres" "$WORKTREE_ENV_FILE")
   POSTGRES_DB=$(worktree_env_resolve_value POSTGRES_DB "workflows" "$WORKTREE_ENV_FILE")
-  WEBHOOK_INGEST_HOST_PORT=$(worktree_env_resolve_browser_safe_port WEBHOOK_INGEST_HOST_PORT "$((20080 + WORKTREE_ENV_SLOT))" "$WORKTREE_ENV_FILE" "WEBHOOK_INGEST_HOST_PORT")
+  WEB_HOST_PORT=$(worktree_env_resolve_browser_safe_port_preferred WEB_HOST_PORT WEBHOOK_INGEST_HOST_PORT "$((20080 + WORKTREE_ENV_SLOT))" "$WORKTREE_ENV_FILE" "WEB_HOST_PORT")
   MINIO_API_HOST_PORT=$(worktree_env_resolve_browser_safe_port MINIO_API_HOST_PORT "$((24000 + WORKTREE_ENV_SLOT))" "$WORKTREE_ENV_FILE" "MINIO_API_HOST_PORT")
   MINIO_CONSOLE_HOST_PORT=$(worktree_env_resolve_browser_safe_port MINIO_CONSOLE_HOST_PORT "$((28000 + WORKTREE_ENV_SLOT))" "$WORKTREE_ENV_FILE" "MINIO_CONSOLE_HOST_PORT")
 
@@ -216,18 +273,21 @@ worktree_env_load() {
   export POSTGRES_USER
   export POSTGRES_PASSWORD
   export POSTGRES_DB
-  export WEBHOOK_INGEST_HOST_PORT
+  export WEB_HOST_PORT
+  export WEBHOOK_INGEST_HOST_PORT=$WEB_HOST_PORT
   export MINIO_API_HOST_PORT
   export MINIO_CONSOLE_HOST_PORT
 
   if [ "$mode" = "host" ]; then
     # Keep host-run app ports below the Linux default ephemeral range
     # (32768-60999) to avoid rare EADDRINUSE races with outbound sockets.
-    WEBHOOK_INGEST_PORT=$(worktree_env_resolve_browser_safe_shell_or_default WEBHOOK_INGEST_PORT "$((18080 + WORKTREE_ENV_SLOT))" "WEBHOOK_INGEST_PORT")
+    WEB_PORT=$(worktree_env_resolve_browser_safe_shell_or_default_preferred WEB_PORT WEBHOOK_INGEST_PORT "$((18080 + WORKTREE_ENV_SLOT))" "WEB_PORT")
     HEALTHCHECK_PORT=$(worktree_env_resolve_browser_safe_shell_or_default HEALTHCHECK_PORT "$((30000 + WORKTREE_ENV_SLOT))" "HEALTHCHECK_PORT")
-    export WEBHOOK_INGEST_PORT
+    export WEB_PORT
+    export WEBHOOK_INGEST_PORT=$WEB_PORT
     export HEALTHCHECK_PORT
   else
+    unset WEB_PORT
     unset WEBHOOK_INGEST_PORT
     unset HEALTHCHECK_PORT
   fi

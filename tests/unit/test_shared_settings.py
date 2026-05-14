@@ -141,3 +141,33 @@ def test_local_service_defaults_target_host_runtime(
         == "postgresql://postgres:postgres@127.0.0.1:5432/workflows"
     )
     assert settings.minio_endpoint == "http://127.0.0.1:9000"
+
+
+def test_shared_settings_accept_web_service_env_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Web/API service settings should use general web env names."""
+    monkeypatch.setenv("WEB_HOST", "127.0.0.1")
+    monkeypatch.setenv("WEB_PORT", "18090")
+    monkeypatch.delenv("WEBHOOK_INGEST_HOST", raising=False)
+    monkeypatch.delenv("WEBHOOK_INGEST_PORT", raising=False)
+
+    settings = SharedSettings()
+
+    assert settings.web_host == "127.0.0.1"
+    assert settings.web_port == 18090
+
+
+def test_shared_settings_accept_legacy_webhook_ingest_env_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy webhook ingest env names should remain usable during migration."""
+    monkeypatch.delenv("WEB_HOST", raising=False)
+    monkeypatch.delenv("WEB_PORT", raising=False)
+    monkeypatch.setenv("WEBHOOK_INGEST_HOST", "127.0.0.2")
+    monkeypatch.setenv("WEBHOOK_INGEST_PORT", "18091")
+
+    settings = SharedSettings()
+
+    assert settings.web_host == "127.0.0.2"
+    assert settings.web_port == 18091

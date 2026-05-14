@@ -14,7 +14,7 @@ Defaults:
 
 - Base URL:
   - Outside Docker: `http://localhost:8090`
-  - Inside Docker: `http://api:8090`
+  - Inside Docker: `http://web:8090`
   - Override: `$WORKER_API_BASE_URL`
 - API secret: `$API_SHARED_SECRET` (sent as `X-API-Secret`)
 - Timeout: `10.0` seconds
@@ -87,7 +87,7 @@ DiscordWebhookLogger(
             "color": 15158332,
             "fields": [
                 {"name": "Environment", "value": "production", "inline": True},
-                {"name": "Service", "value": "api", "inline": True},
+                {"name": "Service", "value": "web", "inline": True},
             ],
         }
     ],
