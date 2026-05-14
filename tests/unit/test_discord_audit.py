@@ -1,8 +1,12 @@
 """Unit tests for Discord audit helper."""
 
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from five08.discord_bot.utils.audit import DiscordAuditLogger
+from five08.discord_bot.utils.audit import (
+    DiscordAuditLogger,
+    create_discord_audit_logger,
+)
 
 
 def _mock_interaction() -> Mock:
@@ -49,6 +53,38 @@ def test_log_admin_sso_action_disabled_logger_does_not_queue() -> None:
         )
 
     mock_queue.assert_not_called()
+
+
+def test_create_discord_audit_logger_defaults_to_backend_base_url() -> None:
+    mock_settings = SimpleNamespace(
+        audit_api_base_url=None,
+        backend_api_base_url="http://web:8090",
+        api_shared_secret="secret",
+        audit_api_timeout_seconds=1.0,
+        discord_logs_webhook_url=None,
+        discord_logs_webhook_wait=True,
+    )
+
+    with patch("five08.discord_bot.config.settings", mock_settings):
+        logger = create_discord_audit_logger()
+
+    assert logger.base_url == "http://web:8090"
+
+
+def test_create_discord_audit_logger_treats_blank_audit_url_as_unset() -> None:
+    mock_settings = SimpleNamespace(
+        audit_api_base_url="   ",
+        backend_api_base_url="http://web:8090",
+        api_shared_secret="secret",
+        audit_api_timeout_seconds=1.0,
+        discord_logs_webhook_url=None,
+        discord_logs_webhook_wait=True,
+    )
+
+    with patch("five08.discord_bot.config.settings", mock_settings):
+        logger = create_discord_audit_logger()
+
+    assert logger.base_url == "http://web:8090"
 
 
 def test_log_admin_sso_action_skips_blank_actor_email() -> None:

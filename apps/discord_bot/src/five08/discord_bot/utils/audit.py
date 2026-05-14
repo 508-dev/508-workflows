@@ -449,8 +449,10 @@ def create_discord_audit_logger() -> DiscordAuditLogger:
     """Build the standard Discord audit logger from bot settings."""
     from five08.discord_bot.config import settings
 
+    audit_base_url = (settings.audit_api_base_url or "").strip()
+    backend_base_url = settings.backend_api_base_url.strip()
     return DiscordAuditLogger(
-        base_url=settings.audit_api_base_url,
+        base_url=audit_base_url or backend_base_url,
         shared_secret=settings.api_shared_secret,
         timeout_seconds=settings.audit_api_timeout_seconds,
         discord_logs_webhook_url=settings.discord_logs_webhook_url,

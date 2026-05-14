@@ -13,6 +13,9 @@ export MINIO_ENDPOINT="http://127.0.0.1:${MINIO_API_HOST_PORT}"
 export BACKEND_API_BASE_URL="http://127.0.0.1:${WEB_PORT}"
 export WORKER_API_BASE_URL="http://127.0.0.1:${WEB_PORT}"
 export DISCORD_BOT_INTERNAL_BASE_URL="http://127.0.0.1:${HEALTHCHECK_PORT}"
+if [ -z "${AUDIT_API_BASE_URL-}" ]; then
+  export AUDIT_API_BASE_URL="$BACKEND_API_BASE_URL"
+fi
 
 shell_quote() {
   python3 -c 'import shlex, sys; print(shlex.quote(sys.argv[1]))' "$1"
@@ -81,6 +84,7 @@ EOF
     emit_export REDIS_URL "$REDIS_URL"
     emit_export MINIO_ENDPOINT "$MINIO_ENDPOINT"
     emit_export BACKEND_API_BASE_URL "$BACKEND_API_BASE_URL"
+    emit_export AUDIT_API_BASE_URL "$AUDIT_API_BASE_URL"
     emit_export WORKER_API_BASE_URL "$WORKER_API_BASE_URL"
     emit_export DISCORD_BOT_INTERNAL_BASE_URL "$DISCORD_BOT_INTERNAL_BASE_URL"
     printf 'export POSTGRES_URL="$('%s' print-postgres-url)"\n' "$(shell_quote "$script_dir/dev.sh")"

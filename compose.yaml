@@ -69,6 +69,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       REDIS_QUEUE_NAME: ${REDIS_QUEUE_NAME:-jobs.default}
       BACKEND_API_BASE_URL: http://web:8090
+      AUDIT_API_BASE_URL: ""
     restart: unless-stopped
     networks:
       - default

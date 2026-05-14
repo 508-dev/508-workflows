@@ -338,7 +338,7 @@ Use `.env.example` as the source of truth for defaults.
 
 ### Discord CRM Audit Logging (Best Effort)
 
-- `Optional`: `AUDIT_API_BASE_URL` (when set with `API_SHARED_SECRET`, CRM commands emit best-effort audit events)
+- `Optional`: `AUDIT_API_BASE_URL` (defaults to `BACKEND_API_BASE_URL`; Compose clears stale `.env` values so the fallback uses the injected backend URL)
 - `Optional`: `AUDIT_API_TIMEOUT_SECONDS` (default: `2.0`)
 - `Optional`: `DISCORD_LOGS_WEBHOOK_URL` (if set, command and job events are posted to this Discord webhook)
 - `Optional`: `DISCORD_LOGS_WEBHOOK_WAIT` (default: `true`; request delivery confirmation from Discord)
