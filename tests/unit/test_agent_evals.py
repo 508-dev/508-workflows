@@ -131,6 +131,58 @@ def test_live_planner_eval_uses_provider_response(
     assert (tmp_path / "observed.live_planner.canonical.openai-direct.json").exists()
 
 
+def test_live_planner_eval_retries_one_bad_plan(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 200
+
+        def __init__(self, content: str) -> None:
+            self._content = content
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 20,
+                    "total_tokens": 120,
+                },
+                "choices": [{"message": {"content": self._content}}],
+            }
+
+    responses = [
+        '{"status":"needs_clarification","intent":null,'
+        '"clarification_question":"Who should I look up?","actions":[]}',
+        '{"status":"planned","intent":"search_crm_contacts",'
+        '"clarification_question":null,'
+        '"actions":[{"tool_name":"crm_read.search_contacts",'
+        '"arguments":{"query":"Sarah","limit":5},'
+        '"summary":"Search CRM contacts matching Sarah"}]}',
+    ]
+    calls: list[str] = []
+
+    def fake_post(*args: object, **kwargs: object) -> FakeResponse:
+        calls.append("call")
+        return FakeResponse(responses.pop(0))
+
+    monkeypatch.setenv("OPENAI_API_KEY_DIRECT", "direct-key")
+    monkeypatch.setattr("five08.agent.evals.requests.post", fake_post)
+
+    report = run_live_planner_eval_suite(
+        suite="canonical",
+        model="openai-direct",
+        ids=["crm_contact_search_001"],
+        timeout_seconds=1,
+    )
+
+    assert len(calls) == 2
+    assert report.summary["passed"] == 1
+    assert report.summary["failed"] == 0
+    assert report.metrics["retries"] == 1
+    assert report.scenarios[0].status == "passed"
+
+
 def test_live_eval_matching_allows_harmless_text_variants() -> None:
     expect = AgentEvalExpect(
         status="requires_confirmation",

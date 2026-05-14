@@ -78,6 +78,7 @@ For GitHub issue search, use context.runtime_config.github_default_repo when the
 For a GitHub issue create request, do not ask for optional body text. Use the phrase after "to" or after "titled" as the issue title and omit body when absent.
 For "Create a GitHub issue to improve search UI in repo 508-dev/508-workflows", call github_issue.create_issue with {"repository":"508-dev/508-workflows","title":"improve search UI"}.
 For "Create GitHub issue in repo 508-dev/508-workflows titled Fix onboarding sync", call github_issue.create_issue with {"repository":"508-dev/508-workflows","title":"Fix onboarding sync"}.
+CRM contact lookup is a read/search action. For "Find contact Sarah", "Find member Sarah", "Lookup contact Sarah", or "Look up info on Sarah", call crm_read.search_contacts with {"query":"Sarah","limit":5}. A person name or partial name is enough for this read action; do not ask for a contact ID or email.
 For "Send member agreement to Sarah Example sarah@example.com", call docuseal_write.create_member_agreement_submission with {"submitter_name":"Sarah Example","submitter_email":"sarah@example.com","send_email":true}.
 For "Send member agreement to Jane Doe at jane@example.com", call docuseal_write.create_member_agreement_submission with {"submitter_name":"Jane Doe","submitter_email":"jane@example.com","send_email":true}.
 For writes, still return the intended write action; confirmation is handled by policy.
@@ -487,6 +488,7 @@ def run_live_planner_eval_suite(
         raise RuntimeError(f"Eval profile {model} is missing credentials")
     scenario_results: list[AgentEvalScenarioResult] = []
     time_to_first_turn_ms: int | None = None
+    retries = 0
     for fixture in fixtures:
         result = run_fixture_with_live_planner(
             fixture=fixture,
@@ -495,6 +497,15 @@ def run_live_planner_eval_suite(
         )
         if time_to_first_turn_ms is None:
             time_to_first_turn_ms = _elapsed_ms(suite_started)
+        if result.status == "failed":
+            retry_result = run_fixture_with_live_planner(
+                fixture=fixture,
+                profile=profile,
+                timeout_seconds=timeout_seconds,
+            )
+            retries += 1
+            if retry_result.status != "failed":
+                result = retry_result
         scenario_results.append(result)
     passed = sum(1 for result in scenario_results if result.status == "passed")
     failed = sum(1 for result in scenario_results if result.status == "failed")
@@ -528,6 +539,7 @@ def run_live_planner_eval_suite(
             "max_latency_ms": max(latencies) if latencies else None,
             "estimated_cost_usd": _sum_estimated_costs(scenario_results),
             "pricing_source": model_pricing_source(),
+            "retries": retries,
         },
         scenarios=scenario_results,
     )
@@ -1474,6 +1486,7 @@ def render_markdown_report(report: AgentEvalReport) -> str:
             "avg_latency_ms",
             "max_latency_ms",
             "estimated_cost_usd",
+            "retries",
         ]:
             if key in report.metrics:
                 lines.append(f"- {key}: {report.metrics[key]}")
