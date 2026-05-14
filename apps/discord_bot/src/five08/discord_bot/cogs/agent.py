@@ -694,11 +694,8 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             return None
 
     @staticmethod
-    def _mention_thread_name(request: str) -> str:
-        cleaned = re.sub(r"\s+", " ", request).strip()
-        if not cleaned:
-            return "Agent response"
-        return f"Agent: {cleaned[:70]}"
+    def _mention_thread_name(_request: str) -> str:
+        return "Agent response"
 
     async def _send_mention_response_dm(
         self,

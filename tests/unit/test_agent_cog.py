@@ -586,6 +586,7 @@ async def test_agent_mention_posts_clarification_in_thread() -> None:
 
     author.send.assert_not_awaited()
     message.create_thread.assert_awaited_once()
+    assert message.create_thread.await_args.kwargs["name"] == "Agent response"
     thread.send.assert_awaited_once()
     assert (
         "I could not map that to a supported workflow yet"
@@ -593,6 +594,15 @@ async def test_agent_mention_posts_clarification_in_thread() -> None:
     )
     message.reply.assert_not_awaited()
     cog._audit_message_safe.assert_not_called()
+
+
+def test_mention_thread_name_does_not_include_request_content() -> None:
+    assert (
+        AgentCog._mention_thread_name(
+            "send member agreement to michael@example.com +1 415 555 1212"
+        )
+        == "Agent response"
+    )
 
 
 @pytest.mark.asyncio

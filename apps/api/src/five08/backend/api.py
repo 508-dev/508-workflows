@@ -1272,6 +1272,118 @@ def _list_dashboard_audit_events(limit: int) -> list[dict[str, Any]]:
     return events
 
 
+def _increment_dashboard_count(counts: dict[str, int], value: Any) -> None:
+    key = str(value or "unknown").strip() or "unknown"
+    counts[key] = counts.get(key, 0) + 1
+
+
+def _dashboard_agent_actor(row: dict[str, Any]) -> str:
+    return str(
+        row.get("actor_display_name")
+        or row.get("actor_subject")
+        or row.get("actor_provider")
+        or "Unknown"
+    )
+
+
+def _shape_dashboard_agent_request_report(
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    summary = {
+        "total": len(rows),
+        "handled": 0,
+        "requires_confirmation": 0,
+        "needs_clarification": 0,
+        "unsupported": 0,
+        "denied_or_failed": 0,
+    }
+    status_counts: dict[str, int] = {}
+    intent_counts: dict[str, int] = {}
+    planner_counts: dict[str, int] = {}
+    recent_unsupported: list[dict[str, Any]] = []
+
+    for row in rows:
+        metadata = row.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        status = str(metadata.get("status") or "unknown")
+        intent = metadata.get("intent") or "unknown"
+        planner = metadata.get("planner") or "unknown"
+
+        _increment_dashboard_count(status_counts, status)
+        _increment_dashboard_count(intent_counts, intent)
+        _increment_dashboard_count(planner_counts, planner)
+
+        if status in {"executed", "requires_confirmation"}:
+            summary["handled"] += 1
+        if status == "requires_confirmation" or metadata.get("requires_confirmation"):
+            summary["requires_confirmation"] += 1
+        if status == "needs_clarification":
+            summary["needs_clarification"] += 1
+        if status == "denied" or row.get("result") in {
+            AuditResult.DENIED,
+            AuditResult.ERROR,
+            "denied",
+            "error",
+        }:
+            summary["denied_or_failed"] += 1
+
+        is_unsupported = (
+            metadata.get("improvement_log") is True
+            or metadata.get("reason") == "unsupported_agent_request"
+        )
+        if not is_unsupported:
+            continue
+
+        summary["unsupported"] += 1
+        message_sanitized = str(metadata.get("message_sanitized") or "").strip()
+        if not message_sanitized:
+            continue
+        recent_unsupported.append(
+            {
+                "id": row.get("id"),
+                "occurred_at": _datetime_or_none(row.get("occurred_at")),
+                "actor": _dashboard_agent_actor(row),
+                "message_sanitized": message_sanitized,
+                "result": row.get("result"),
+                "correlation_id": row.get("correlation_id"),
+            }
+        )
+
+    return {
+        "summary": summary,
+        "status_counts": status_counts,
+        "intent_counts": intent_counts,
+        "planner_counts": planner_counts,
+        "recent_unsupported": recent_unsupported,
+    }
+
+
+def _dashboard_agent_request_report(limit: int) -> dict[str, Any]:
+    limit = _limit_dashboard_count(limit)
+    sql = """
+        SELECT
+            id::text,
+            occurred_at,
+            result,
+            actor_provider,
+            actor_subject,
+            actor_display_name,
+            correlation_id,
+            metadata
+        FROM audit_events
+        WHERE action = 'agent.request'
+        ORDER BY occurred_at DESC
+        LIMIT %s
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(sql, (limit,))
+            rows = cursor.fetchall()
+
+    return _shape_dashboard_agent_request_report(rows)
+
+
 def _assign_dashboard_onboarder_in_crm(
     *,
     contact_id: str,
@@ -2164,6 +2276,22 @@ async def dashboard_audit_events_handler(
 
     events = await asyncio.to_thread(_list_dashboard_audit_events, limit)
     return JSONResponse(events)
+
+
+async def dashboard_agent_report_handler(
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=100),
+) -> JSONResponse:
+    """Return admin-only agent request analytics for the dashboard."""
+    _, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_AUDIT_READ,
+    )
+    if error_response is not None:
+        return error_response
+
+    report = await asyncio.to_thread(_dashboard_agent_request_report, limit)
+    return JSONResponse(report)
 
 
 async def dashboard_rerun_job_handler(
@@ -3685,6 +3813,11 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
     app.add_api_route(
         "/dashboard/api/audit-events",
         dashboard_audit_events_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/agent",
+        dashboard_agent_report_handler,
         methods=["GET"],
     )
     app.add_api_route(

@@ -1456,6 +1456,7 @@ def test_dashboard_renders_for_admin_session(client: TestClient) -> None:
     assert "508 Operations Dashboard" in response.text
     assert "/dashboard/api/me" in response.text
     assert "/dashboard/people" in response.text
+    assert "/dashboard/agent" in response.text
 
 
 def test_dashboard_me_returns_crm_linked_admin_session(client: TestClient) -> None:
@@ -2274,6 +2275,140 @@ def test_dashboard_audit_events_returns_recent_events(client: TestClient) -> Non
     assert response.status_code == 200
     assert response.json() == events
     mock_events.assert_called_once_with(10)
+
+
+def test_dashboard_agent_report_returns_admin_only_metrics(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admins"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+    report = {
+        "summary": {
+            "total": 1,
+            "handled": 0,
+            "requires_confirmation": 0,
+            "needs_clarification": 1,
+            "unsupported": 1,
+            "denied_or_failed": 0,
+        },
+        "status_counts": {"needs_clarification": 1},
+        "intent_counts": {"unknown": 1},
+        "planner_counts": {"unknown": 1},
+        "recent_unsupported": [
+            {
+                "occurred_at": "2026-02-25T12:05:00+00:00",
+                "actor": "Discord Admin",
+                "message_sanitized": "are you there",
+                "result": "success",
+                "correlation_id": "message-1",
+            }
+        ],
+    }
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._dashboard_agent_request_report",
+            return_value=report,
+        ) as mock_report,
+    ):
+        response = client.get("/dashboard/api/agent?limit=25")
+
+    assert response.status_code == 200
+    assert response.json() == report
+    mock_report.assert_called_once_with(25)
+
+
+def test_dashboard_agent_report_requires_audit_permission(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/api/agent")
+
+    assert response.status_code == 403
+
+
+def test_dashboard_agent_report_shapes_only_sanitized_unsupported_messages() -> None:
+    report = api._shape_dashboard_agent_request_report(
+        [
+            {
+                "id": "event-1",
+                "occurred_at": datetime(2026, 2, 25, 12, 5, tzinfo=timezone.utc),
+                "result": "success",
+                "actor_provider": "discord",
+                "actor_subject": "123",
+                "actor_display_name": "Discord Admin",
+                "correlation_id": "message-1",
+                "metadata": {
+                    "status": "needs_clarification",
+                    "intent": None,
+                    "planner": None,
+                    "requires_confirmation": False,
+                    "reason": "unsupported_agent_request",
+                    "improvement_log": True,
+                    "message_sanitized": "look up info on [person]",
+                    "message": "look up info on Michael Wu",
+                },
+            },
+            {
+                "id": "event-2",
+                "occurred_at": datetime(2026, 2, 25, 12, 6, tzinfo=timezone.utc),
+                "result": "success",
+                "actor_provider": "discord",
+                "actor_subject": "123",
+                "actor_display_name": "Discord Admin",
+                "metadata": {
+                    "status": "executed",
+                    "intent": "crm_search",
+                    "planner": "heuristic",
+                    "message": "find member Michael Wu",
+                },
+            },
+        ]
+    )
+
+    assert report["summary"]["total"] == 2
+    assert report["summary"]["handled"] == 1
+    assert report["summary"]["unsupported"] == 1
+    assert report["status_counts"] == {"needs_clarification": 1, "executed": 1}
+    unsupported = report["recent_unsupported"]
+    assert unsupported == [
+        {
+            "id": "event-1",
+            "occurred_at": "2026-02-25T12:05:00+00:00",
+            "actor": "Discord Admin",
+            "message_sanitized": "look up info on [person]",
+            "result": "success",
+            "correlation_id": "message-1",
+        }
+    ]
+    assert "Michael Wu" not in str(report)
 
 
 def test_dashboard_rerun_crm_job_audits_discord_session(

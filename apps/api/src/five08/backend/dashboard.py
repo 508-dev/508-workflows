@@ -324,6 +324,10 @@ def dashboard_html() -> str:
     }
     .metric span { color: var(--muted); font-size: 12px; font-weight: 700; }
     .metric strong { font-size: 24px; letter-spacing: 0; }
+    #view-agent .summary {
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      padding: 16px;
+    }
     .panel {
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -355,6 +359,7 @@ def dashboard_html() -> str:
       min-width: 980px;
       table-layout: auto;
     }
+    .agent-table { min-width: 860px; }
     .audit-table { min-width: 760px; }
     .jobs-table th:last-child,
     .jobs-table td:last-child {
@@ -685,6 +690,7 @@ def dashboard_html() -> str:
       <a class="nav-link" data-view-link="people" data-permission="people:read" href="/dashboard/people">People</a>
       <a class="nav-link" data-view-link="onboarding" data-permission="onboarding:read" href="/dashboard/onboarding">Onboarding</a>
       <a class="nav-link" data-view-link="jobs" data-permission="jobs:read" href="/dashboard/jobs">Jobs</a>
+      <a class="nav-link" data-view-link="agent" data-permission="audit:read" href="/dashboard/agent">Agent</a>
       <a class="nav-link" data-view-link="audit" data-permission="audit:read" href="/dashboard/audit">Audit</a>
     </nav>
     <div class="content">
@@ -900,6 +906,63 @@ def dashboard_html() -> str:
         </div>
       </section>
     </section>
+
+    <section id="view-agent" class="view" data-view="agent" hidden>
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Agent requests</h2>
+          <button id="refreshAgent" type="button">Refresh</button>
+        </div>
+        <section class="summary" aria-label="Agent request summary">
+          <div class="metric"><span>Total</span><strong id="agentMetricTotal">0</strong></div>
+          <div class="metric"><span>Handled</span><strong id="agentMetricHandled">0</strong></div>
+          <div class="metric"><span>Confirmations</span><strong id="agentMetricConfirmations">0</strong></div>
+          <div class="metric"><span>Clarifications</span><strong id="agentMetricClarifications">0</strong></div>
+          <div class="metric"><span>Not understood</span><strong id="agentMetricUnsupported">0</strong></div>
+        </section>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Request mix</h2>
+          <span class="status-line">Recent agent.request audit events.</span>
+        </div>
+        <div id="agentBreakdownEmptyState" class="empty" hidden>No agent request data found.</div>
+        <div class="table-scroll">
+          <table id="agentBreakdownTable" class="compact agent-table" aria-label="Agent request breakdown">
+            <thead>
+              <tr>
+                <th style="width: 24%;">Dimension</th>
+                <th style="width: 56%;">Value</th>
+                <th style="width: 20%;">Count</th>
+              </tr>
+            </thead>
+            <tbody id="agentBreakdownBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Not understood</h2>
+          <span class="status-line">Sanitized request text only.</span>
+        </div>
+        <div id="agentUnsupportedEmptyState" class="empty" hidden>No unsupported agent requests found.</div>
+        <div class="table-scroll">
+          <table id="agentUnsupportedTable" class="compact agent-table" aria-label="Unsupported agent requests">
+            <thead>
+              <tr>
+                <th style="width: 18%;">Time</th>
+                <th style="width: 22%;">Actor</th>
+                <th style="width: 48%;">Message</th>
+                <th style="width: 12%;">Result</th>
+              </tr>
+            </thead>
+            <tbody id="agentUnsupportedBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
     </div>
   </main>
   <script>
@@ -907,12 +970,14 @@ def dashboard_html() -> str:
       people: "/dashboard/people",
       onboarding: "/dashboard/onboarding",
       jobs: "/dashboard/jobs",
+      agent: "/dashboard/agent",
       audit: "/dashboard/audit",
     };
     const state = {
       jobs: [],
       people: [],
       onboarding: [],
+      agentReport: null,
       auditEvents: [],
       crmBaseUrl: "",
       permissions: [],
@@ -920,6 +985,7 @@ def dashboard_html() -> str:
         onboarding: { key: "onboarding_state", direction: "asc" },
         jobs: { key: "updated_at", direction: "desc" },
         people: { key: "name", direction: "asc" },
+        agent: { key: "occurred_at", direction: "desc" },
         audit: { key: "occurred_at", direction: "desc" },
       },
       onboardingFilters: {},
@@ -929,6 +995,7 @@ def dashboard_html() -> str:
       people: "people:read",
       onboarding: "onboarding:read",
       jobs: "jobs:read",
+      agent: "audit:read",
       audit: "audit:read",
     };
     const peopleFilterDefinitions = {
@@ -1026,6 +1093,18 @@ def dashboard_html() -> str:
       peopleBody: document.querySelector("#peopleBody"),
       peopleTable: document.querySelector("#peopleTable"),
       peopleEmptyState: document.querySelector("#peopleEmptyState"),
+      refreshAgent: document.querySelector("#refreshAgent"),
+      agentMetricTotal: document.querySelector("#agentMetricTotal"),
+      agentMetricHandled: document.querySelector("#agentMetricHandled"),
+      agentMetricConfirmations: document.querySelector("#agentMetricConfirmations"),
+      agentMetricClarifications: document.querySelector("#agentMetricClarifications"),
+      agentMetricUnsupported: document.querySelector("#agentMetricUnsupported"),
+      agentBreakdownBody: document.querySelector("#agentBreakdownBody"),
+      agentBreakdownTable: document.querySelector("#agentBreakdownTable"),
+      agentBreakdownEmptyState: document.querySelector("#agentBreakdownEmptyState"),
+      agentUnsupportedBody: document.querySelector("#agentUnsupportedBody"),
+      agentUnsupportedTable: document.querySelector("#agentUnsupportedTable"),
+      agentUnsupportedEmptyState: document.querySelector("#agentUnsupportedEmptyState"),
       refreshAudit: document.querySelector("#refreshAudit"),
       auditBody: document.querySelector("#auditBody"),
       auditTable: document.querySelector("#auditTable"),
@@ -1167,6 +1246,7 @@ def dashboard_html() -> str:
       if (normalizedView === "onboarding") loadOnboarding();
       if (normalizedView === "jobs") loadJobs();
       if (normalizedView === "people") loadPeople();
+      if (normalizedView === "agent") loadAgentReport();
       if (normalizedView === "audit") loadAuditEvents();
     }
 
@@ -1732,6 +1812,54 @@ def dashboard_html() -> str:
       }
     }
 
+    function renderAgentReport() {
+      const report = state.agentReport || {};
+      const summary = report.summary || {};
+      const breakdownRows = [];
+      for (const [label, counts] of [
+        ["Status", report.status_counts || {}],
+        ["Intent", report.intent_counts || {}],
+        ["Planner", report.planner_counts || {}],
+      ]) {
+        for (const [value, count] of Object.entries(counts)) {
+          breakdownRows.push({ label, value, count });
+        }
+      }
+      breakdownRows.sort((left, right) => right.count - left.count || left.label.localeCompare(right.label));
+      const unsupported = Array.isArray(report.recent_unsupported)
+        ? report.recent_unsupported
+        : [];
+      els.agentMetricTotal.textContent = String(summary.total || 0);
+      els.agentMetricHandled.textContent = String(summary.handled || 0);
+      els.agentMetricConfirmations.textContent = String(summary.requires_confirmation || 0);
+      els.agentMetricClarifications.textContent = String(summary.needs_clarification || 0);
+      els.agentMetricUnsupported.textContent = String(summary.unsupported || 0);
+
+      els.agentBreakdownBody.replaceChildren();
+      els.agentBreakdownEmptyState.hidden = breakdownRows.length !== 0;
+      els.agentBreakdownTable.hidden = breakdownRows.length === 0;
+      for (const item of breakdownRows) {
+        const row = document.createElement("tr");
+        addTextCell(row, "Dimension", item.label);
+        addTextCell(row, "Value", item.value);
+        addTextCell(row, "Count", String(item.count));
+        els.agentBreakdownBody.appendChild(row);
+      }
+
+      els.agentUnsupportedBody.replaceChildren();
+      els.agentUnsupportedEmptyState.hidden = unsupported.length !== 0;
+      els.agentUnsupportedTable.hidden = unsupported.length === 0;
+      for (const event of unsupported) {
+        const row = document.createElement("tr");
+        addTextCell(row, "Time", formatDate(event.occurred_at));
+        addTextCell(row, "Actor", event.actor || "");
+        addTextCell(row, "Message", event.message_sanitized || "");
+        const resultCell = addTextCell(row, "Result", "");
+        resultCell.appendChild(createBadge(event.result || "unknown", event.result === "success" ? "succeeded" : "failed"));
+        els.agentUnsupportedBody.appendChild(row);
+      }
+    }
+
     function jobsUrl() {
       const params = new URLSearchParams({
         minutes: els.minutes.value,
@@ -1853,6 +1981,18 @@ def dashboard_html() -> str:
       }
     }
 
+    async function loadAgentReport() {
+      els.refreshAgent.disabled = true;
+      try {
+        state.agentReport = await requestJson("/dashboard/api/agent?limit=100");
+        renderAgentReport();
+      } catch (error) {
+        setToast(error.message || "Unable to load agent report", "error");
+      } finally {
+        els.refreshAgent.disabled = false;
+      }
+    }
+
     async function rerunJob(jobId, button) {
       button.disabled = true;
       setToast(`Rerunning ${jobId}`);
@@ -1942,6 +2082,7 @@ def dashboard_html() -> str:
     els.logout.addEventListener("click", logout);
     els.searchOnboarding.addEventListener("click", loadOnboarding);
     els.searchPeople.addEventListener("click", loadPeople);
+    els.refreshAgent.addEventListener("click", loadAgentReport);
     els.refreshAudit.addEventListener("click", loadAuditEvents);
     els.onboardingFilterKind.addEventListener("change", renderOnboardingFilterValues);
     els.addOnboardingFilter.addEventListener("click", addOnboardingFilter);
@@ -1953,6 +2094,7 @@ def dashboard_html() -> str:
     updateSortIndicators("onboarding");
     updateSortIndicators("jobs");
     updateSortIndicators("people");
+    updateSortIndicators("agent");
     updateSortIndicators("audit");
     for (const link of els.navLinks) {
       link.addEventListener("click", (event) => {
