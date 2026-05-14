@@ -11,7 +11,7 @@ This repository follows a service-oriented monorepo layout:
 ├── apps/
 │   ├── discord_bot/        # Discord gateway process
 │   │   └── src/five08/discord_bot/
-│   ├── api/                # Backend API + dashboard service
+│   ├── api/                # Backend API + dashboard code
 │   │   └── src/five08/backend/
 │   └── worker/             # Async queue worker
 │       └── src/five08/worker/
@@ -19,7 +19,7 @@ This repository follows a service-oriented monorepo layout:
 │   └── shared/
 │       └── src/five08/      # Shared settings, queue helpers, shared clients
 ├── compose.yaml            # canonical Coolify/base container stack
-├── compose.local.yaml      # local host port publishing override
+├── compose.local.yaml      # local infra host port publishing override
 ├── docker-compose.yml      # compatibility wrapper including compose.yaml
 ├── tests/                  # Unit and integration tests
 └── pyproject.toml          # uv workspace root
@@ -28,7 +28,7 @@ This repository follows a service-oriented monorepo layout:
 ## Services
 
 - `discord_bot`: Discord gateway process.
-- `api`: FastAPI dashboard + ingest service that validates and enqueues jobs.
+- `web`: FastAPI dashboard + ingest service that validates and enqueues jobs.
 - `worker`: Dramatiq worker that executes jobs from Redis queue.
 - `redis`: queue transport between API and worker.
 - `postgres`: job state persistence, retries, idempotency.
@@ -37,7 +37,7 @@ This repository follows a service-oriented monorepo layout:
 Migrations:
 
 - `apps/worker/src/five08/worker/migrations` (Alembic)
-- `api` runs `run_job_migrations()` during startup to keep DB schema current.
+- `web` runs `run_job_migrations()` during startup to keep DB schema current.
 
 ### Job model
 
@@ -150,10 +150,12 @@ For local full-container runs, including deterministic localhost ports:
 
 Coolify should use `/compose.yaml` as the base Compose file. A small
 `docker-compose.yml` compatibility wrapper includes it for tools still configured
-to read the older filename. The base file intentionally
-does not publish Redis, Postgres, MinIO, or API host ports; Coolify should expose
-only the services/domains it manages. The app services also attach to the
-shared infra network named by `INFRA_DOCKER_NETWORK` so they can reach
+to read the older filename. The `web` service publishes container port `8090`
+to `${WEB_HOST_BIND:-127.0.0.1}:${WEB_HOST_PORT:-8090}`
+so a host-side Cloudflare Tunnel can target the dashboard/API at localhost.
+The base file does not publish Redis, Postgres, or MinIO host ports. The app
+services also attach to the shared infra network named by `INFRA_DOCKER_NETWORK`
+so they can reach
 Portainer-managed Bifrost and Langfuse by Docker DNS. The network is declared
 as external, so pre-create it before running Compose if it does not already
 exist.
@@ -236,13 +238,14 @@ Use `.env.example` as the source of truth for defaults.
 - Note: `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` are `SharedSettings` alias properties (`minio_access_key`, `minio_secret_key`) and are not env-loaded fields.
 - Note: use `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` as the actual env vars.
 
-### Backend API Ingest
+### Web/API Service
 
-- `Required` for non-dashboard protected endpoints: `API_SHARED_SECRET` (ingest requests are rejected when unset)
-- `Optional`: `WEBHOOK_INGEST_HOST` (default: `0.0.0.0`)
-- `Optional`: `WEBHOOK_INGEST_HOST_BIND` (default: `127.0.0.1`; Compose host bind for local exposure)
-- `Optional`: `WEBHOOK_INGEST_PORT` (host-run `./scripts/dev.sh` ignores `.env` for this key and defaults to a deterministic per-worktree value near `18080 + WORKTREE_ENV_SLOT`; export it in your shell only when you intentionally want a fixed port, and avoid browser-unsafe ports such as `5060`)
-- `Optional`: `WEBHOOK_INGEST_HOST_PORT` (default: `8090` when running `docker compose` directly; `./scripts/docker-compose.sh` computes a deterministic per-worktree value when unset, and pinned values must avoid browser-unsafe ports such as `5060`; see `./scripts/docker-compose.sh print-ports`)
+- `Required` for non-dashboard protected endpoints: `API_SHARED_SECRET` (protected API requests are rejected when unset)
+- `Optional`: `WEB_HOST` (default: `0.0.0.0`; direct process bind host, while Compose pins the container bind host to `0.0.0.0`)
+- `Optional`: `WEB_HOST_BIND` (default: `127.0.0.1`; Compose host bind for Cloudflare Tunnel/local exposure)
+- `Optional`: `WEB_PORT` (direct process listen port; Compose pins the container's internal listen port to `8090`; host-run `./scripts/dev.sh` ignores `.env` for this key and defaults to a deterministic per-worktree value near `18080 + WORKTREE_ENV_SLOT`)
+- `Optional`: `WEB_HOST_PORT` (published host port for Docker/Cloudflare Tunnel; default `8090` when running `docker compose` directly; `./scripts/docker-compose.sh` computes a deterministic per-worktree value when unset, and pinned values must avoid browser-unsafe ports such as `5060`; see `./scripts/docker-compose.sh print-ports`)
+- Deprecated fallback names still work for now: `WEBHOOK_INGEST_HOST`, `WEBHOOK_INGEST_PORT`, `WEBHOOK_INGEST_HOST_BIND`, `WEBHOOK_INGEST_HOST_PORT`.
 
 ### Backend API OIDC Session Auth
 
@@ -312,7 +315,7 @@ Use `.env.example` as the source of truth for defaults.
 ### Discord Bot Core
 
 - `Required`: `DISCORD_BOT_TOKEN`
-- `Optional`: `BACKEND_API_BASE_URL` (default: `http://127.0.0.1:8090`; `./scripts/dev.sh` overrides it to the worktree web/API port, Compose injects `http://api:8090`)
+- `Optional`: `BACKEND_API_BASE_URL` (default: `http://127.0.0.1:8090`; `./scripts/dev.sh` overrides it to the worktree web/API port, Compose injects `http://web:8090`)
 - `Optional`: `HEALTHCHECK_PORT` (host-run `./scripts/dev.sh` ignores `.env` for this key and defaults to a deterministic per-worktree value near `30000 + WORKTREE_ENV_SLOT`; export it in your shell only when you intentionally want a fixed port, and avoid browser-unsafe ports such as `5060`)
 - Note: bot message chunking uses Discord's 2000 character limit in code.
 
@@ -415,4 +418,4 @@ Deploy as a single Compose application.
 MinIO is used as the internal transfer mechanism so file handoffs stay inside the stack.
 External object storage adapters can be added later for multi-cloud or vendor-specific routing.
 
-This keeps one stack and one shared env set while still allowing independent service scaling/restarts (`discord_bot`, `api`, `worker`).
+This keeps one stack and one shared env set while still allowing independent service scaling/restarts (`discord_bot`, `web`, `worker`).
