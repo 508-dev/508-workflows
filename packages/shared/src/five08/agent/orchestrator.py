@@ -799,6 +799,7 @@ class AgentOrchestrator:
             return None
         title = match.group(1)
         title = self._trim_parseable_due_clause(title)
+        title = self._trim_trailing_assignee_clause(title)
         title = re.split(
             r"\s+\b(?:and assign(?: it)? to|assign(?: it)? to|and link(?: it)? to|in project|for project)\b",
             title,
@@ -839,9 +840,22 @@ class AgentOrchestrator:
     def _trim_parseable_due_clause(self, title: str) -> str:
         for match in re.finditer(r"\b(?:by|before|due)\b", title, re.IGNORECASE):
             candidate = title[match.start() :]
-            if self._extract_due_date(candidate) is not None:
+            if self._extract_due_date_from_clause_start(candidate) is not None:
                 return title[: match.start()].rstrip()
         return title
+
+    def _trim_trailing_assignee_clause(self, title: str) -> str:
+        match = re.search(
+            r"(?i:\bfor)\s+([A-Z][A-Za-z .'-]{0,80}?)"
+            r"(?=\s+(?i:in\s+project|for\s+project|by|before|due)\b|[ .,:;!?]*$)",
+            title,
+        )
+        if match is None:
+            return title
+        assignee = _clean_text(match.group(1))
+        if not assignee or assignee.casefold().startswith("project "):
+            return title
+        return title[: match.start()].rstrip()
 
     def _extract_assignee(self, text: str) -> str | None:
         match = re.search(
@@ -861,6 +875,18 @@ class AgentOrchestrator:
                 re.IGNORECASE,
             )
         if match is None:
+            trailing_match = re.search(
+                r"(?i:\bfor)\s+([A-Z][A-Za-z .'-]{0,80}?)"
+                r"(?=\s+(?i:in\s+project|for\s+project|by|before|due)\b|[ .,:;!?]*$)",
+                text,
+            )
+            if trailing_match is None:
+                return None
+            trailing_assignee = _clean_text(trailing_match.group(1))
+            if trailing_assignee and not trailing_assignee.casefold().startswith(
+                "project "
+            ):
+                return trailing_assignee
             return None
         assignee = re.split(
             r"\s+\b(?:by|before|due|and|in project|for project)\b",
@@ -878,13 +904,48 @@ class AgentOrchestrator:
         )
         if match is None:
             return None
+        project = self._trim_parseable_due_clause(match.group(1))
         project = re.split(
-            r"\s+\b(?:by|before|due|and|assign|to|matching|about)\b",
-            match.group(1),
+            r"\s+\b(?:and assign(?: it)? to|assign(?:ed)?(?:\s+(?:it|task|TASK-\d+))?\s+to|matching|about)\b",
+            project,
             maxsplit=1,
             flags=re.IGNORECASE,
         )[0]
+        project = re.split(
+            r"\s+\bto\s+(?=[a-z])",
+            project,
+            maxsplit=1,
+        )[0]
         return _clean_text(project)
+
+    def _extract_due_date_from_clause_start(self, text: str) -> str | None:
+        due_cue = r"^\s*(?:by|before|due(?:\s+(?:by|on))?)\s+"
+        iso_match = re.search(rf"{due_cue}({_DATE_ISO_RE.pattern})", text, re.I)
+        if iso_match:
+            try:
+                return date.fromisoformat(iso_match.group(2)).isoformat()
+            except ValueError:
+                return None
+        month_match = re.search(rf"{due_cue}({_MONTH_DATE_RE.pattern})", text, re.I)
+        if month_match:
+            month = _MONTHS[month_match.group(2).casefold()]
+            day = int(month_match.group(3))
+            year = int(month_match.group(4))
+            try:
+                return date(year, month, day).isoformat()
+            except ValueError:
+                return None
+        lowered = text.casefold()
+        today = self.today or date.today()
+        if re.search(rf"{due_cue}tomorrow\b", lowered):
+            return (today + timedelta(days=1)).isoformat()
+        for weekday_name, weekday_index in _WEEKDAYS.items():
+            if re.search(rf"{due_cue}(?:next\s+)?{weekday_name}\b", lowered):
+                days_ahead = (weekday_index - today.weekday()) % 7
+                if days_ahead == 0:
+                    days_ahead = 7
+                return (today + timedelta(days=days_ahead)).isoformat()
+        return None
 
     def _extract_due_date(self, text: str) -> str | None:
         due_cue = r"\b(?:by|before|due)\s+(?:on\s+)?"

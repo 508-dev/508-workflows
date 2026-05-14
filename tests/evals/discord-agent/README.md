@@ -19,10 +19,12 @@ runner uses the latest user message as the turn under test. The initial suite
 focuses on planner/router correctness, policy outcomes, confirmation gates, and
 known-good deterministic tool behavior.
 
-`canonical` is the PR-gating suite. In CI it runs with `--live-planner`, so the
-model drafts the tool plan and deterministic policy/tool validation scores the
-result. Fixture-level `stub_results` keep read-only external tools from hitting
-CRM, GitHub, Kimai, or other live systems.
+`canonical` is the PR-gating suite. CI always runs the deterministic parser path
+so pull requests do not depend on provider secrets. When `OPENAI_API_KEY_DIRECT`
+or `OPENAI_API_KEY` is available, CI also runs `--live-planner`, so the model
+drafts the tool plan and deterministic policy/tool validation scores the result.
+Fixture-level `stub_results` keep read-only external tools from hitting CRM,
+GitHub, Kimai, or other live systems.
 
 ## Commands
 
@@ -92,6 +94,13 @@ hide a regression.
 ## PR Gate
 
 GitHub Actions runs the canonical suite on every pull request commit:
+
+```bash
+uv run python scripts/agent_eval.py --suite canonical --model primary --no-env-file
+```
+
+If `OPENAI_API_KEY_DIRECT` or `OPENAI_API_KEY` is configured for the workflow, CI
+also runs:
 
 ```bash
 uv run python scripts/agent_eval.py --suite canonical --model primary --live-planner --no-env-file

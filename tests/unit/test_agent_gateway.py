@@ -311,6 +311,41 @@ def test_project_search_keeps_project_prefixed_query_before_project_filter() -> 
     assert response.results[0].result["tasks"][0]["title"] == "Update project plan"
 
 
+def test_project_search_preserves_stop_words_in_project_name() -> None:
+    task_store = InMemoryTaskStore()
+    task_store.create_task(
+        title="Launch checklist",
+        project="Go To Market",
+        assignee="Sarah",
+        due_date=None,
+        organization_id="org-1",
+        created_by="123",
+    )
+    task_store.create_task(
+        title="Roadmap review",
+        project="Research and Development",
+        assignee="Sarah",
+        due_date=None,
+        organization_id="org-1",
+        created_by="123",
+    )
+    orchestrator = AgentOrchestrator(registry=ToolRegistry(task_store))
+
+    go_to_market = orchestrator.plan(
+        "Show tasks matching launch in project Go To Market", _context()
+    )
+    research = orchestrator.plan(
+        "Show tasks matching roadmap in project Research and Development", _context()
+    )
+
+    assert go_to_market.status == "executed"
+    assert go_to_market.results[0].result["tasks"][0]["project"] == "Go To Market"
+    assert research.status == "executed"
+    assert research.results[0].result["tasks"][0]["project"] == (
+        "Research and Development"
+    )
+
+
 def test_create_task_parses_capitalized_for_assignee() -> None:
     orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
 
@@ -335,6 +370,19 @@ def test_create_task_project_clause_stops_before_title() -> None:
     assert response.plan.actions[0].arguments["project"] == "Atlas"
     assert response.plan.actions[0].arguments["title"] == "update docs"
     assert "assignee" not in response.plan.actions[0].arguments
+
+
+def test_create_task_preserves_stop_words_in_project_name() -> None:
+    orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
+
+    response = orchestrator.plan(
+        "Create a task to draft launch plan in project Go To Market",
+        _context(),
+    )
+
+    assert response.plan is not None
+    assert response.plan.actions[0].arguments["title"] == "draft launch plan"
+    assert response.plan.actions[0].arguments["project"] == "Go To Market"
 
 
 def test_create_task_project_only_clause_asks_for_title() -> None:
@@ -383,6 +431,20 @@ def test_create_task_assignment_clause_stops_before_title() -> None:
     assert response.plan.actions[0].arguments["assignee"] == "Sarah"
 
 
+def test_create_task_trailing_for_assignee_stops_before_project() -> None:
+    orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
+
+    response = orchestrator.plan(
+        "Create a task to draft the onboarding plan for Sarah in project Atlas",
+        _context(),
+    )
+
+    assert response.plan is not None
+    assert response.plan.actions[0].arguments["title"] == "draft the onboarding plan"
+    assert response.plan.actions[0].arguments["assignee"] == "Sarah"
+    assert response.plan.actions[0].arguments["project"] == "Atlas"
+
+
 def test_create_task_title_due_word_without_date_stays_in_title() -> None:
     orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
 
@@ -396,6 +458,22 @@ def test_create_task_title_due_word_without_date_stays_in_title() -> None:
         "prepare due diligence report"
     )
     assert "due_date" not in response.plan.actions[0].arguments
+
+
+def test_create_task_title_due_word_before_real_due_clause_stays_in_title() -> None:
+    orchestrator = AgentOrchestrator(today=date(2026, 5, 8))
+
+    response = orchestrator.plan(
+        "Create a task to prepare due diligence report by tomorrow in project Atlas",
+        _context(),
+    )
+
+    assert response.plan is not None
+    assert response.plan.actions[0].arguments["title"] == (
+        "prepare due diligence report"
+    )
+    assert response.plan.actions[0].arguments["due_date"] == "2026-05-09"
+    assert response.plan.actions[0].arguments["project"] == "Atlas"
 
 
 def test_create_task_title_weekday_does_not_become_due_date_without_cue() -> None:
