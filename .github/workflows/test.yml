@@ -125,6 +125,7 @@ jobs:
 
   discord-agent-evals:
     runs-on: ubuntu-latest
+    environment: test
     steps:
     - uses: actions/checkout@v6
 
@@ -159,8 +160,9 @@ jobs:
       if: steps.live-planner-key.outputs.available == 'true'
       env:
         LIVE_EVAL_KEY: ${{ secrets.OPENAI_API_KEY_DIRECT != '' && secrets.OPENAI_API_KEY_DIRECT || secrets.OPENAI_API_KEY }}
+        LIVE_EVAL_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
       run: |
-        OPENAI_API_KEY_DIRECT="$LIVE_EVAL_KEY" uv run python scripts/agent_eval.py --suite canonical --model primary --live-planner --no-env-file
+        OPENAI_API_KEY="$LIVE_EVAL_KEY" OPENAI_BASE_URL="$LIVE_EVAL_BASE_URL" uv run python scripts/agent_eval.py --suite canonical --model primary --live-planner --no-env-file
 
     - name: Skip live planner evals without provider credentials
       if: steps.live-planner-key.outputs.available != 'true'

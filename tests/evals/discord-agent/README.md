@@ -20,11 +20,12 @@ focuses on planner/router correctness, policy outcomes, confirmation gates, and
 known-good deterministic tool behavior.
 
 `canonical` is the PR-gating suite. CI always runs the deterministic parser path
-so pull requests do not depend on provider secrets. When `OPENAI_API_KEY_DIRECT`
-or `OPENAI_API_KEY` is available, CI also runs `--live-planner`, so the model
-drafts the tool plan and deterministic policy/tool validation scores the result.
-Fixture-level `stub_results` keep read-only external tools from hitting CRM,
-GitHub, Kimai, or other live systems.
+so pull requests do not depend on provider secrets. The CI job is attached to
+the GitHub `test` environment; when `OPENAI_API_KEY_DIRECT` or `OPENAI_API_KEY`
+is available there, CI also runs `--live-planner` and honors environment-level
+`OPENAI_BASE_URL` for OpenAI-compatible providers such as OpenRouter. Fixture-level
+`stub_results` keep read-only external tools from hitting CRM, GitHub, Kimai, or
+other live systems.
 
 ## Commands
 
@@ -64,7 +65,7 @@ useful for local no-key debugging, but it is not the main PR gate.
 
 Built-in profiles:
 
-- `primary`: `OPENAI_API_KEY_DIRECT`, default model `gpt-4.1-mini`
+- `primary`: `OPENAI_API_KEY_DIRECT` or `OPENAI_API_KEY`, optional `OPENAI_BASE_URL`; defaults to `openai/gpt-4.1-mini` for OpenRouter and `gpt-4.1-mini` otherwise
 - `openai-direct`: `OPENAI_API_KEY_DIRECT`, default model `gpt-4.1-mini`
 - `fireworks-kimi`: `FIREWORKS_API_KEY`, default model `accounts/fireworks/models/kimi-k2p6`
 - `openrouter`: `OPENROUTER_API_KEY`, default model `openai/gpt-5-mini`
@@ -99,8 +100,8 @@ GitHub Actions runs the canonical suite on every pull request commit:
 uv run python scripts/agent_eval.py --suite canonical --model primary --no-env-file
 ```
 
-If `OPENAI_API_KEY_DIRECT` or `OPENAI_API_KEY` is configured for the workflow, CI
-also runs:
+If `OPENAI_API_KEY_DIRECT` or `OPENAI_API_KEY` is configured in the GitHub `test`
+environment, CI also runs:
 
 ```bash
 uv run python scripts/agent_eval.py --suite canonical --model primary --live-planner --no-env-file

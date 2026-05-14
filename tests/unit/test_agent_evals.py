@@ -175,16 +175,30 @@ def test_live_eval_matching_allows_harmless_text_variants() -> None:
     )
 
 
-def test_eval_primary_profile_uses_direct_openai_key_only(
+def test_eval_primary_profile_uses_openai_compatible_env(
     monkeypatch,
 ) -> None:
-    monkeypatch.setenv("OPENAI_API_KEY", "bifrost-key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY_DIRECT", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
 
     profile = resolve_eval_model_profile("primary")
 
     assert profile.configured is False
     assert profile.agent_model_config.openai_api_key is None
+
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-compatible-key")
+    profile = resolve_eval_model_profile("primary")
+
+    assert profile.configured is True
+    assert profile.live_base_url == "https://api.openai.com/v1"
+    assert profile.agent_model_config.openai_api_key == "openai-compatible-key"
+
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openrouter.ai/api/v1")
+    profile = resolve_eval_model_profile("primary")
+
+    assert profile.live_base_url == "https://openrouter.ai/api/v1"
+    assert profile.live_model == "openai/gpt-4.1-mini"
 
     monkeypatch.setenv("OPENAI_API_KEY_DIRECT", "direct-key")
     profile = resolve_eval_model_profile("primary")

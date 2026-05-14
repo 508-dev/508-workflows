@@ -700,19 +700,25 @@ def resolve_eval_model_profile(profile_id: str) -> AgentEvalModelProfile:
     """Resolve an eval profile from environment variables."""
     normalized = profile_id.strip().lower() or "primary"
     if normalized == "primary":
-        api_key = _env("OPENAI_API_KEY_DIRECT")
-        model = _env("AGENT_EVAL_OPENAI_MODEL") or "gpt-4.1-mini"
+        api_key = _env("OPENAI_API_KEY_DIRECT") or _env("OPENAI_API_KEY")
+        base_url = _env("OPENAI_BASE_URL") or "https://api.openai.com/v1"
+        default_model = (
+            "openai/gpt-4.1-mini"
+            if "openrouter.ai" in base_url.casefold()
+            else "gpt-4.1-mini"
+        )
+        model = _env("AGENT_EVAL_OPENAI_MODEL") or default_model
         return AgentEvalModelProfile(
             id="primary",
             label="Primary OpenAI-compatible profile",
             configured=bool(api_key),
-            notes="Uses OPENAI_API_KEY_DIRECT only; OPENAI_API_KEY may route through Bifrost.",
+            notes="Uses OPENAI_API_KEY_DIRECT, or OPENAI_API_KEY with optional OPENAI_BASE_URL.",
             live_model=model,
-            live_base_url="https://api.openai.com/v1",
+            live_base_url=base_url,
             live_api_key=api_key,
             agent_model_config=AgentModelConfig(
                 openai_model=model,
-                openai_base_url="https://api.openai.com/v1",
+                openai_base_url=base_url,
                 openai_api_key=api_key,
             ),
         )

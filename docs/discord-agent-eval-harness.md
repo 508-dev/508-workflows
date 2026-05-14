@@ -25,8 +25,9 @@ uv run python scripts/agent_eval.py --suite canonical --model primary --no-env-f
 ```
 
 The canonical PR run executes the deterministic parser path so pull requests do
-not fail just because provider secrets are unavailable. If `OPENAI_API_KEY_DIRECT`
-or `OPENAI_API_KEY` is present in CI, the workflow also runs:
+not fail just because provider secrets are unavailable. The CI eval job is
+attached to the GitHub `test` environment. If `OPENAI_API_KEY_DIRECT` or
+`OPENAI_API_KEY` is present there, the workflow also runs:
 
 ```bash
 uv run python scripts/agent_eval.py --suite canonical --model primary --live-planner --no-env-file
@@ -36,7 +37,8 @@ The live planner run asks the configured model to draft a structured plan, then
 executes the same deterministic policy and tool validation used by the agent
 harness. The model does not get to authorize users or perform side effects.
 Write tools stop at confirmation, and read tools use deterministic in-memory
-state or fixture `stub_results`.
+state or fixture `stub_results`. `OPENAI_BASE_URL` from the `test` environment is
+passed through for OpenAI-compatible providers such as OpenRouter.
 
 For no-key local debugging, omit `--live-planner`:
 
