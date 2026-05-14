@@ -709,9 +709,17 @@ def list_eval_model_profiles() -> list[AgentEvalModelProfile]:
 def resolve_eval_model_profile(profile_id: str) -> AgentEvalModelProfile:
     """Resolve an eval profile from environment variables."""
     normalized = profile_id.strip().lower() or "primary"
+    api_key: str | None
     if normalized == "primary":
-        api_key = _env("OPENAI_API_KEY_DIRECT") or _env("OPENAI_API_KEY")
-        base_url = _env("OPENAI_BASE_URL") or "https://api.openai.com/v1"
+        configured_base_url = _env("OPENAI_BASE_URL")
+        provider_api_key = _env("OPENAI_API_KEY")
+        direct_api_key = _env("OPENAI_API_KEY_DIRECT")
+        if configured_base_url and provider_api_key:
+            api_key = provider_api_key
+            base_url = configured_base_url
+        else:
+            api_key = direct_api_key or provider_api_key
+            base_url = "https://api.openai.com/v1"
         default_model = (
             "openai/gpt-4.1-mini"
             if "openrouter.ai" in base_url.casefold()
@@ -722,7 +730,11 @@ def resolve_eval_model_profile(profile_id: str) -> AgentEvalModelProfile:
             id="primary",
             label="Primary OpenAI-compatible profile",
             configured=bool(api_key),
-            notes="Uses OPENAI_API_KEY_DIRECT, or OPENAI_API_KEY with optional OPENAI_BASE_URL.",
+            notes=(
+                "Uses OPENAI_API_KEY with OPENAI_BASE_URL when configured; "
+                "otherwise uses OPENAI_API_KEY_DIRECT or OPENAI_API_KEY against "
+                "the direct OpenAI endpoint."
+            ),
             live_model=model,
             live_base_url=base_url,
             live_api_key=api_key,

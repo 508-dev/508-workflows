@@ -22,11 +22,13 @@ known-good deterministic tool behavior.
 `canonical` is the PR-gating suite. CI always runs the deterministic parser path
 so pull requests do not depend on provider secrets, but the job first checks the
 changed files and skips eval execution for unrelated changes. The CI job is
-attached to the GitHub `test` environment; when `OPENAI_API_KEY_DIRECT` or
-`OPENAI_API_KEY` is available there, CI also runs `--live-planner` and honors
-environment-level `OPENAI_BASE_URL` for OpenAI-compatible providers such as
-OpenRouter. Fixture-level `stub_results` keep read-only external tools from
-hitting CRM, GitHub, or other live systems.
+attached to the GitHub `test` environment; CI also runs `--live-planner` when
+matching credentials are available. If `OPENAI_BASE_URL` is set for an
+OpenAI-compatible provider such as OpenRouter or Bifrost, CI pairs it with
+`OPENAI_API_KEY`; otherwise it uses `OPENAI_API_KEY_DIRECT` first and falls back
+to `OPENAI_API_KEY` against the direct OpenAI endpoint. Fixture-level
+`stub_results` keep read-only external tools from hitting CRM, GitHub, or other
+live systems.
 
 ## Commands
 
@@ -66,7 +68,7 @@ useful for local no-key debugging, but it is not the main PR gate.
 
 Built-in profiles:
 
-- `primary`: `OPENAI_API_KEY_DIRECT` or `OPENAI_API_KEY`, optional `OPENAI_BASE_URL`; defaults to `openai/gpt-4.1-mini` for OpenRouter and `gpt-4.1-mini` otherwise
+- `primary`: `OPENAI_API_KEY` with `OPENAI_BASE_URL` when a custom provider is configured; otherwise `OPENAI_API_KEY_DIRECT` or `OPENAI_API_KEY` against direct OpenAI. Defaults to `openai/gpt-4.1-mini` for OpenRouter and `gpt-4.1-mini` otherwise
 - `openai-direct`: `OPENAI_API_KEY_DIRECT`, default model `gpt-4.1-mini`
 - `fireworks-kimi`: `FIREWORKS_API_KEY`, default model `accounts/fireworks/models/kimi-k2p6`
 - `openrouter`: `OPENROUTER_API_KEY`, default model `openai/gpt-5-mini`
@@ -101,7 +103,7 @@ GitHub Actions runs the canonical suite on every pull request commit:
 uv run python scripts/agent_eval.py --suite canonical --model primary --no-env-file
 ```
 
-If `OPENAI_API_KEY_DIRECT` or `OPENAI_API_KEY` is configured in the GitHub `test`
+If matching live planner credentials are configured in the GitHub `test`
 environment, CI also runs:
 
 ```bash

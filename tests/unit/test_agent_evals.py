@@ -256,6 +256,14 @@ def test_eval_primary_profile_uses_openai_compatible_env(
     profile = resolve_eval_model_profile("primary")
 
     assert profile.configured is True
+    assert profile.live_base_url == "https://openrouter.ai/api/v1"
+    assert profile.agent_model_config.openai_api_key == "openai-compatible-key"
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    profile = resolve_eval_model_profile("primary")
+
+    assert profile.configured is True
+    assert profile.live_base_url == "https://api.openai.com/v1"
     assert profile.agent_model_config.openai_api_key == "direct-key"
 
 
