@@ -5,10 +5,18 @@ script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
 . "$script_dir/worktree-env.sh"
 worktree_env_load "$script_dir"
 
+url_quote() {
+  python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
+}
+
+POSTGRES_USER_ENC=$(url_quote "$POSTGRES_USER")
+POSTGRES_PASSWORD_ENC=$(url_quote "$POSTGRES_PASSWORD")
+POSTGRES_DB_ENC=$(url_quote "$POSTGRES_DB")
+
 # dev.sh owns host-run service URLs so every launched process shares the same
 # worktree-local infra and app ports.
 export REDIS_URL="redis://127.0.0.1:${REDIS_HOST_PORT}/0"
-export POSTGRES_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:${POSTGRES_HOST_PORT}/${POSTGRES_DB}"
+export POSTGRES_URL="postgresql://${POSTGRES_USER_ENC}:${POSTGRES_PASSWORD_ENC}@127.0.0.1:${POSTGRES_HOST_PORT}/${POSTGRES_DB_ENC}"
 export MINIO_ENDPOINT="http://127.0.0.1:${MINIO_API_HOST_PORT}"
 export BACKEND_API_BASE_URL="http://127.0.0.1:${WEB_PORT}"
 export WORKER_API_BASE_URL="http://127.0.0.1:${WEB_PORT}"
