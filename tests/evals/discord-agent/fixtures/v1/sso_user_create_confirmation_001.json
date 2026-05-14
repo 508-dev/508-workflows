@@ -1,0 +1,35 @@
+{
+  "version": "discord-agent-trajectory.v1",
+  "id": "sso_user_create_confirmation_001",
+  "description": "Admins can draft Authentik SSO user creation behind confirmation.",
+  "tags": ["weekly", "sso", "write", "confirmation"],
+  "suite": {
+    "canonical": true,
+    "weekly": true
+  },
+  "context": {
+    "discord_user_id": "789",
+    "organization_id": "org-1",
+    "guild_id": "org-1",
+    "roles": ["Admin"]
+  },
+  "request": {
+    "message": "Create SSO user for CRM contact abc123"
+  },
+  "expect": {
+    "status": "requires_confirmation",
+    "intent": "create_sso_user",
+    "model_tier": "strong",
+    "requires_confirmation": true,
+    "actions": [
+      {
+        "tool_name": "sso_write.create_user",
+        "requires_confirmation": true,
+        "required_scopes": ["user:manage"],
+        "arguments": {
+          "contact_id": "abc123"
+        }
+      }
+    ]
+  }
+}

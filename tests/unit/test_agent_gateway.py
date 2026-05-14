@@ -1244,6 +1244,79 @@ def test_mailbox_create_rejects_non_configured_mailbox_domain() -> None:
     assert response.plan is None
 
 
+def test_sso_user_create_plans_admin_account_tool() -> None:
+    orchestrator = AgentOrchestrator()
+
+    response = orchestrator.plan(
+        "Create SSO user for CRM contact abc123",
+        _context(roles=["Admin"]),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    assert response.plan.intent == "create_sso_user"
+    action = response.plan.actions[0]
+    assert action.tool_name == "sso_write.create_user"
+    assert action.required_scopes == ["user:manage"]
+    assert action.arguments == {"contact_id": "abc123"}
+
+
+def test_outline_invite_plans_direct_email_tool() -> None:
+    orchestrator = AgentOrchestrator()
+
+    response = orchestrator.plan(
+        "Invite jane@508.dev to Outline",
+        _context(roles=["Admin"]),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    assert response.plan.intent == "invite_outline_user"
+    action = response.plan.actions[0]
+    assert action.tool_name == "outline_write.invite_user"
+    assert action.required_scopes == ["integration:manage"]
+    assert action.arguments == {"email": "jane@508.dev"}
+
+
+def test_user_accounts_create_plans_combined_account_tool() -> None:
+    orchestrator = AgentOrchestrator()
+
+    response = orchestrator.plan(
+        "Create 508 accounts for Jane Doe with mailbox jane@508.dev",
+        _context(roles=["Admin"]),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    assert response.plan.intent == "create_user_accounts"
+    action = response.plan.actions[0]
+    assert action.tool_name == "account_write.create_user_accounts"
+    assert action.required_scopes == [
+        "mailbox:create",
+        "user:manage",
+        "integration:manage",
+    ]
+    assert action.arguments == {
+        "contact_query": "Jane Doe",
+        "mailbox_username": "jane@508.dev",
+    }
+
+
+def test_user_accounts_create_is_admin_only() -> None:
+    orchestrator = AgentOrchestrator()
+
+    response = orchestrator.plan(
+        "Create 508 accounts for Jane Doe with mailbox jane@508.dev",
+        _context(roles=["Engineer"]),
+    )
+
+    assert response.status == "denied"
+    assert response.plan is not None
+    action = response.plan.actions[0]
+    assert action.tool_name == "account_write.create_user_accounts"
+    assert "mailbox:create" in response.message
+
+
 def test_github_issue_create_uses_runtime_configured_default_repo(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

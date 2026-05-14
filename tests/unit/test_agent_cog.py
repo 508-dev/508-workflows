@@ -440,7 +440,9 @@ async def test_agent_command_answers_help_without_backend() -> None:
     assert "I can help with:" in response
     assert "GitHub issues:" in response
     assert "CRM:" in response
-    assert "create 508 mailboxes" in response
+    assert "create 508 accounts" in response
+    assert "Authentik SSO users" in response
+    assert "Outline invites" in response
     assert "`/agent`" not in response
     cog._post_agent_request.assert_not_awaited()
     cog._audit_command_safe.assert_not_called()
@@ -848,7 +850,9 @@ async def test_agent_mention_answers_help_without_backend() -> None:
     assert "I can help with:" in response
     assert "GitHub issues:" in response
     assert "CRM:" in response
-    assert "create 508 mailboxes" in response
+    assert "create 508 accounts" in response
+    assert "Authentik SSO users" in response
+    assert "Outline invites" in response
     assert "Tasks:" not in response
     assert "Kimai" not in response
     assert "`/agent`" in response

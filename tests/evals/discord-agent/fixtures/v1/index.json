@@ -22,6 +22,9 @@
     "member_agreement_crm_ambiguous_001.json",
     "member_agreement_missing_email_clarification_001.json",
     "mailbox_create_confirmation_001.json",
+    "sso_user_create_confirmation_001.json",
+    "outline_invite_confirmation_001.json",
+    "user_accounts_create_confirmation_001.json",
     "missing_project_clarification_001.json",
     "thread_followup_latest_message_001.json"
   ]

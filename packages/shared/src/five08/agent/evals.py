@@ -69,6 +69,9 @@ Available tools and arguments:
 - crm_write.update_contact: contact_id string, updates object. Onboarding state field is cOnboardingState.
 - docuseal_write.create_member_agreement_submission: submitter_email, submitter_name, send_email true.
 - mail_write.create_mailbox: local_part, backup_email, name.
+- sso_write.create_user: contact_id string or contact_query string.
+- outline_write.invite_user: email string, or contact_id/contact_query for a CRM contact.
+- account_write.create_user_accounts: contact_id string or contact_query string, mailbox_username string.
 
 If a task search lacks a project, return needs_clarification with "Which project should I search?"
 For a task search like "Show tasks for project Atlas matching onboarding", call task_read.search_tasks with {"project":"Atlas","query":"onboarding"}.
@@ -81,6 +84,9 @@ For "Create GitHub issue in repo 508-dev/508-workflows titled Fix onboarding syn
 CRM contact lookup is a read/search action. For "Find contact Sarah", "Find member Sarah", "Lookup contact Sarah", or "Look up info on Sarah", call crm_read.search_contacts with {"query":"Sarah","limit":5}. A person name or partial name is enough for this read action; do not ask for a contact ID or email.
 For "Send member agreement to Sarah Example sarah@example.com", call docuseal_write.create_member_agreement_submission with {"submitter_name":"Sarah Example","submitter_email":"sarah@example.com","send_email":true}.
 For "Send member agreement to Jane Doe at jane@example.com", call docuseal_write.create_member_agreement_submission with {"submitter_name":"Jane Doe","submitter_email":"jane@example.com","send_email":true}.
+For "Create SSO user for CRM contact abc123", call sso_write.create_user with {"contact_id":"abc123"}.
+For "Invite jane@508.dev to Outline", call outline_write.invite_user with {"email":"jane@508.dev"}.
+For "Create 508 accounts for Jane Doe with mailbox jane@508.dev", call account_write.create_user_accounts with {"contact_query":"Jane Doe","mailbox_username":"jane@508.dev"}.
 For writes, still return the intended write action; confirmation is handled by policy.
 For permission-sensitive requests, still return the intended action; policy handles denial.
 """
@@ -1200,11 +1206,28 @@ def _live_action_clarification(
             return "What backup email should I use?"
         if not _non_empty_arg(args, "name"):
             return "What display name should I use?"
+    if tool_name == "sso_write.create_user":
+        if not _has_contact_reference(args):
+            return "Which CRM contact should I create the SSO user for?"
+        return None
+    if tool_name == "outline_write.invite_user":
+        if not _non_empty_arg(args, "email") and not _has_contact_reference(args):
+            return "Who should I invite to Outline?"
+        return None
+    if tool_name == "account_write.create_user_accounts":
+        if not _has_contact_reference(args):
+            return "Which CRM contact should I create accounts for?"
+        if not _non_empty_arg(args, "mailbox_username"):
+            return "What 508 mailbox username should I create?"
     return None
 
 
 def _non_empty_arg(args: dict[str, Any], key: str) -> bool:
     return _non_empty_text(args.get(key))
+
+
+def _has_contact_reference(args: dict[str, Any]) -> bool:
+    return _non_empty_arg(args, "contact_id") or _non_empty_arg(args, "contact_query")
 
 
 def _non_empty_text(value: Any) -> bool:

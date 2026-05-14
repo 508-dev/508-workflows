@@ -562,7 +562,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             capabilities.extend(
                 [
                     "- CRM: search contacts, approve/reject onboarding, and submit member agreements.",
-                    "- Ops: create 508 mailboxes.",
+                    "- Ops: create 508 accounts, Authentik SSO users, Outline invites, and mailboxes.",
                 ]
             )
         if not capabilities:
