@@ -38,6 +38,14 @@ class ToolManifest:
     write: bool = False
 
 
+class ToolPartialSuccessError(RuntimeError):
+    """Raised when an irreversible tool step succeeded before a later failure."""
+
+    def __init__(self, message: str, result: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.result = result
+
+
 @dataclass(frozen=True)
 class ToolRuntimeConfig:
     """Runtime credentials and defaults for deterministic external tools."""
@@ -554,35 +562,6 @@ class ToolRegistry:
             send_email=bool(arguments.get("send_email", True)),
         )
 
-    def _create_migadu_mailbox(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        local_part = str(arguments.get("local_part") or "").strip().lower()
-        backup_email = str(arguments.get("backup_email") or "").strip()
-        name = str(arguments.get("name") or "").strip()
-        if not local_part or not backup_email or not name:
-            raise ValueError("Mailbox local_part, backup_email, and name are required")
-        username = _required_config(
-            self.runtime_config.migadu_api_user,
-            "MIGADU_API_USER",
-        )
-        api_key = _required_config(
-            self.runtime_config.migadu_api_key,
-            "MIGADU_API_KEY",
-        )
-        client = MigaduClient(
-            username=username,
-            api_key=api_key,
-            domain=normalize_migadu_mailbox_domain(
-                self.runtime_config.migadu_mailbox_domain
-            ),
-        )
-        return client.create_mailbox(
-            MigaduMailboxCreateRequest(
-                local_part=local_part,
-                backup_email=backup_email,
-                name=name,
-            )
-        )
-
     def _authentik_client(self) -> AuthentikClient:
         return AuthentikClient(
             base_url=_required_config(
@@ -822,10 +801,55 @@ class ToolRegistry:
                 except AuthentikAPIError as exc:
                     recovery_email_error = _short_error(exc)
 
-            self._espo_client().update_contact(contact_id, {SSO_ID_FIELD: str(user_id)})
+            try:
+                self._espo_client().update_contact(
+                    contact_id, {SSO_ID_FIELD: str(user_id)}
+                )
+            except EspoAPIError as exc:
+                result = self._sso_result(
+                    contact_id=contact_id,
+                    contact_name=contact_name,
+                    username=username,
+                    email=email,
+                    user_id=user_id,
+                    created=created,
+                    crm_updated=False,
+                    recovery_email_error=recovery_email_error,
+                    partial_success="sso_user_ready_crm_update_failed",
+                    error=_short_error(exc),
+                )
+                raise ToolPartialSuccessError(
+                    "SSO user is ready, but updating CRM cSsoID failed.",
+                    result,
+                ) from exc
             crm_updated = True
 
-        return {
+        return self._sso_result(
+            contact_id=contact_id,
+            contact_name=contact_name,
+            username=username,
+            email=email,
+            user_id=user_id,
+            created=created,
+            crm_updated=crm_updated,
+            recovery_email_error=recovery_email_error,
+        )
+
+    @staticmethod
+    def _sso_result(
+        *,
+        contact_id: str,
+        contact_name: str,
+        username: str,
+        email: str,
+        user_id: int,
+        created: bool,
+        crm_updated: bool,
+        recovery_email_error: str | None,
+        partial_success: str | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {
             "contact_id": contact_id,
             "contact_name": contact_name,
             "username": username,
@@ -835,6 +859,11 @@ class ToolRegistry:
             "crm_updated": crm_updated,
             "recovery_email_error": recovery_email_error,
         }
+        if partial_success is not None:
+            result["partial_success"] = partial_success
+        if error is not None:
+            result["error"] = error
+        return result
 
     def _resolve_sso_identity_for_contact(
         self,
@@ -950,23 +979,155 @@ class ToolRegistry:
             arguments.get("mailbox_username"),
             "mailbox_username is required",
         )
-        mailbox = self._create_migadu_mailbox_for_contact(
-            contact=contact,
-            mailbox_username=mailbox_username,
+        self._preflight_user_accounts(
+            contact=contact, mailbox_username=mailbox_username
         )
-        sso = self._create_sso_user_for_contact(contact)
-        outline = self._invite_outline_user_for_contact(contact)
-        return {
-            "contact_id": _required_text(
-                contact.get("id"),
-                "Selected contact is missing a CRM ID",
-            ),
-            "contact_name": _optional_str(contact.get("name")) or "Unknown",
-            "email": mailbox["email"],
+        contact_id = _required_text(
+            contact.get("id"),
+            "Selected contact is missing a CRM ID",
+        )
+        contact_name = _optional_str(contact.get("name")) or "Unknown"
+        mailbox: dict[str, Any] | None = None
+        sso: dict[str, Any] | None = None
+        outline: dict[str, Any] | None = None
+
+        try:
+            mailbox = self._create_migadu_mailbox_for_contact(
+                contact=contact,
+                mailbox_username=mailbox_username,
+            )
+            sso = self._create_sso_user_for_contact(contact)
+            outline = self._invite_outline_user_for_contact(contact)
+        except ToolPartialSuccessError as exc:
+            partial_result = exc.result
+            if mailbox is None and _is_mailbox_result(partial_result):
+                mailbox = partial_result
+            elif sso is None and _is_sso_result(partial_result):
+                sso = partial_result
+            raise ToolPartialSuccessError(
+                "User account provisioning partially completed.",
+                self._user_accounts_result(
+                    contact_id=contact_id,
+                    contact_name=contact_name,
+                    email=self._user_accounts_email(mailbox=mailbox, contact=contact),
+                    mailbox=mailbox,
+                    sso=sso,
+                    outline=outline,
+                    partial_success="user_accounts_partial",
+                    error=str(exc),
+                ),
+            ) from exc
+        except Exception as exc:
+            if mailbox is None and sso is None and outline is None:
+                raise
+            raise ToolPartialSuccessError(
+                "User account provisioning partially completed.",
+                self._user_accounts_result(
+                    contact_id=contact_id,
+                    contact_name=contact_name,
+                    email=self._user_accounts_email(mailbox=mailbox, contact=contact),
+                    mailbox=mailbox,
+                    sso=sso,
+                    outline=outline,
+                    partial_success="user_accounts_partial",
+                    error=_short_error(exc),
+                ),
+            ) from exc
+
+        return self._user_accounts_result(
+            contact_id=contact_id,
+            contact_name=contact_name,
+            email=self._user_accounts_email(mailbox=mailbox, contact=contact),
+            mailbox=mailbox,
+            sso=sso,
+            outline=outline,
+        )
+
+    def _preflight_user_accounts(
+        self,
+        *,
+        contact: dict[str, Any],
+        mailbox_username: str,
+    ) -> None:
+        self._authentik_client()
+        self._outline_client()
+        target_email, _local_part = self._normalize_mailbox_username(mailbox_username)
+        existing_email = self._normalize_508_email(contact.get("c508Email"))
+        if existing_email is None:
+            self._migadu_client()
+        elif existing_email != target_email:
+            raise ValueError(
+                f"CRM contact already has a different 508 email: {existing_email}."
+            )
+
+    @staticmethod
+    def _user_accounts_result(
+        *,
+        contact_id: str,
+        contact_name: str,
+        email: str | None,
+        mailbox: dict[str, Any] | None,
+        sso: dict[str, Any] | None,
+        outline: dict[str, Any] | None,
+        partial_success: str | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "contact_id": contact_id,
+            "contact_name": contact_name,
+            "email": email,
             "mailbox": mailbox,
             "sso": sso,
             "outline": outline,
         }
+        if partial_success is not None:
+            result["partial_success"] = partial_success
+        if error is not None:
+            result["error"] = error
+        return result
+
+    def _user_accounts_email(
+        self,
+        *,
+        mailbox: dict[str, Any] | None,
+        contact: dict[str, Any],
+    ) -> str | None:
+        if mailbox is not None:
+            email = _optional_str(mailbox.get("email"))
+            if email is not None:
+                return email
+        return self._contact_508_email(contact)
+
+    def _migadu_client(self) -> MigaduClient:
+        username = _required_config(
+            self.runtime_config.migadu_api_user,
+            "MIGADU_API_USER",
+        )
+        api_key = _required_config(
+            self.runtime_config.migadu_api_key,
+            "MIGADU_API_KEY",
+        )
+        return MigaduClient(
+            username=username,
+            api_key=api_key,
+            domain=normalize_migadu_mailbox_domain(
+                self.runtime_config.migadu_mailbox_domain
+            ),
+        )
+
+    def _create_migadu_mailbox(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        local_part = str(arguments.get("local_part") or "").strip().lower()
+        backup_email = str(arguments.get("backup_email") or "").strip()
+        name = str(arguments.get("name") or "").strip()
+        if not local_part or not backup_email or not name:
+            raise ValueError("Mailbox local_part, backup_email, and name are required")
+        return self._migadu_client().create_mailbox(
+            MigaduMailboxCreateRequest(
+                local_part=local_part,
+                backup_email=backup_email,
+                name=name,
+            )
+        )
 
     def _create_migadu_mailbox_for_contact(
         self,
@@ -984,12 +1145,12 @@ class ToolRegistry:
                 raise ValueError(
                     f"CRM contact already has a different 508 email: {existing_email}."
                 )
-            return {
-                "email": existing_email,
-                "created": False,
-                "crm_updated": False,
-                "backup_email": "",
-            }
+            return self._mailbox_result(
+                email=existing_email,
+                created=False,
+                crm_updated=False,
+                backup_email="",
+            )
 
         backup_email = _normalize_full_email(
             contact.get("emailAddress"),
@@ -1010,14 +1171,50 @@ class ToolRegistry:
                 f"{created_address} than requested {target_email}."
             )
 
-        self._espo_client().update_contact(contact_id, {"c508Email": target_email})
+        try:
+            self._espo_client().update_contact(contact_id, {"c508Email": target_email})
+        except EspoAPIError as exc:
+            result = self._mailbox_result(
+                email=target_email,
+                created=True,
+                crm_updated=False,
+                backup_email=backup_email,
+                partial_success="mailbox_created_crm_update_failed",
+                error=_short_error(exc),
+            )
+            raise ToolPartialSuccessError(
+                "Mailbox was created, but updating CRM c508Email failed.",
+                result,
+            ) from exc
         contact["c508Email"] = target_email
-        return {
-            "email": target_email,
-            "created": True,
-            "crm_updated": True,
+        return self._mailbox_result(
+            email=target_email,
+            created=True,
+            crm_updated=True,
+            backup_email=backup_email,
+        )
+
+    @staticmethod
+    def _mailbox_result(
+        *,
+        email: str,
+        created: bool,
+        crm_updated: bool,
+        backup_email: str,
+        partial_success: str | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "email": email,
+            "created": created,
+            "crm_updated": crm_updated,
             "backup_email": backup_email,
         }
+        if partial_success is not None:
+            result["partial_success"] = partial_success
+        if error is not None:
+            result["error"] = error
+        return result
 
     def _normalize_mailbox_username(self, mailbox_username: str) -> tuple[str, str]:
         normalized = mailbox_username.strip().lower()
@@ -1080,6 +1277,18 @@ def _short_error(exc: Exception) -> str:
     if len(text) > 200:
         return text[:200].rstrip() + "..."
     return text
+
+
+def _is_mailbox_result(value: dict[str, Any]) -> bool:
+    return (
+        _optional_str(value.get("email")) is not None
+        and "backup_email" in value
+        and "crm_updated" in value
+    )
+
+
+def _is_sso_result(value: dict[str, Any]) -> bool:
+    return value.get("user_id") is not None and "crm_updated" in value
 
 
 def _optional_date(value: Any) -> str | None:

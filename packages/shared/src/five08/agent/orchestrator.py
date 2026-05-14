@@ -18,7 +18,7 @@ from five08.agent.models import (
 )
 from five08.agent.model_routing import AgentModelConfig
 from five08.agent.policy import PolicyEngine
-from five08.agent.tools import ToolRegistry
+from five08.agent.tools import ToolPartialSuccessError, ToolRegistry
 from five08.clients.migadu import normalize_migadu_mailbox_domain
 
 _TASK_ID_RE = re.compile(r"\bTASK-\d+\b", re.IGNORECASE)
@@ -404,6 +404,15 @@ class AgentOrchestrator:
                         tool_name=action.tool_name,
                         status="failed",
                         error=str(exc.args[0]) if exc.args else str(exc),
+                    )
+                )
+            except ToolPartialSuccessError as exc:
+                results.append(
+                    AgentExecutionResult(
+                        tool_name=action.tool_name,
+                        status="failed",
+                        result=exc.result,
+                        error=str(exc),
                     )
                 )
             except Exception as exc:

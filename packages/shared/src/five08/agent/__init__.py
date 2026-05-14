@@ -22,6 +22,7 @@ from five08.agent.policy import PolicyDecision, PolicyEngine
 from five08.agent.tools import (
     InMemoryTaskStore,
     ToolManifest,
+    ToolPartialSuccessError,
     ToolRegistry,
     ToolRuntimeConfig,
 )
@@ -45,6 +46,7 @@ __all__ = [
     "PolicyEngine",
     "RiskLevel",
     "ToolManifest",
+    "ToolPartialSuccessError",
     "ToolRegistry",
     "ToolRuntimeConfig",
 ]
