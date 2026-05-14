@@ -41,6 +41,7 @@ from five08.agent import (
     AgentRequest,
     AgentResponse,
     InMemoryTaskStore,
+    OpenAICompatibleIntentNormalizer,
     PolicyEngine,
     ToolRegistry,
     ToolRuntimeConfig,
@@ -213,6 +214,9 @@ def _get_agent_orchestrator() -> AgentOrchestrator:
                     runtime_config=ToolRuntimeConfig.from_settings(settings),
                 ),
                 model_config=AgentModelConfig.from_settings(settings),
+                intent_normalizer=OpenAICompatibleIntentNormalizer.from_settings(
+                    settings
+                ),
             )
     return _AGENT_ORCHESTRATOR
 

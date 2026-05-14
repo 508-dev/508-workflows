@@ -260,10 +260,16 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                 mention_author=False,
             )
             return
-        if not any(user.id == bot_user.id for user in message.mentions):
+        bot_mentioned = any(user.id == bot_user.id for user in message.mentions)
+        agent_thread = self._is_agent_thread(message.channel, bot_user.id)
+        if not bot_mentioned and not agent_thread:
             return
 
-        request = self._extract_mention_request(message.content, bot_user.id)
+        request = (
+            self._extract_mention_request(message.content, bot_user.id)
+            if bot_mentioned
+            else re.sub(r"\s+", " ", message.content).strip()
+        )
         if not request:
             return
         if self._mention_rate_limited(message.author.id):
@@ -279,13 +285,34 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
-        if self._is_unlinked_discord_members_request(request):
-            self._audit_message_safe(
+        if self._is_agent_help_request(request):
+            await self._send_mention_public_response(
                 message=message,
-                action="agent.mention",
-                result="success",
-                metadata={"routed_to": "crm.unlinked_discord_users"},
+                request=request,
+                content=self._agent_capabilities_message(),
             )
+            return
+
+        if self._is_agent_presence_check(request):
+            await self._send_mention_public_response(
+                message=message,
+                request=request,
+                content=(
+                    "Yes, I can see this. Ask for a supported workflow, or ask "
+                    "`what can you do?` for examples."
+                ),
+            )
+            return
+
+        if self._is_agent_acknowledgement(request):
+            await self._send_mention_public_response(
+                message=message,
+                request=request,
+                content="Got it.",
+            )
+            return
+
+        if self._is_unlinked_discord_members_request(request):
             await self._send_mention_public_response(
                 message=message,
                 request=request,
@@ -293,6 +320,27 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                     "That report includes member identity/linkage data, so use "
                     "`/unlinked-discord-users` for the private ephemeral response."
                 ),
+            )
+            return
+
+        if self._is_onboarding_people_request(request):
+            await self._send_mention_public_response(
+                message=message,
+                request=request,
+                content=(
+                    "That is CRM people/onboarding data, so use "
+                    "`/view-onboarding-queue` for the private ephemeral queue view. "
+                    "For targeted lookup, use `/search-members`."
+                ),
+            )
+            return
+
+        member_lookup_target = self._member_info_lookup_target(request)
+        if member_lookup_target is not None:
+            await self._send_mention_public_response(
+                message=message,
+                request=request,
+                content=self._member_lookup_command_message(member_lookup_target),
             )
             return
 
@@ -317,10 +365,9 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
-        self._audit_message_safe(
+        self._audit_agent_mention_response_safe(
             message=message,
-            action="agent.mention",
-            result=self._audit_result_for_agent_response(response),
+            response=response,
             metadata={
                 "status": response.get("status"),
                 "error": response.get("error"),
@@ -391,6 +438,84 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         self._mention_request_timestamps[user_id] = timestamps
         return False
 
+    def _audit_agent_mention_response_safe(
+        self,
+        *,
+        message: discord.Message,
+        response: dict[str, Any],
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        result = self._audit_result_for_agent_response(response)
+        if result == "success":
+            return
+        self._audit_message_safe(
+            message=message,
+            action="agent.mention",
+            result=result,
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _is_agent_thread(channel: object, bot_user_id: int) -> bool:
+        if not isinstance(channel, discord.Thread):
+            return False
+        if getattr(channel, "owner_id", None) == bot_user_id:
+            return True
+        name = str(getattr(channel, "name", "") or "")
+        return name.casefold().startswith("agent:")
+
+    @staticmethod
+    def _is_agent_help_request(request: str) -> bool:
+        normalized = request.casefold().strip(" ?!.")
+        return normalized in {
+            "help",
+            "what can you do",
+            "what kind of things can you do",
+            "what things can you do",
+            "what can the agent do",
+        }
+
+    @staticmethod
+    def _is_agent_presence_check(request: str) -> bool:
+        normalized = request.casefold().strip(" ?!.")
+        return normalized in {
+            "do you see this",
+            "can you see this",
+            "are you here",
+            "ping",
+            "test",
+        }
+
+    @staticmethod
+    def _is_agent_acknowledgement(request: str) -> bool:
+        normalized = request.casefold().strip(" ?!.")
+        return normalized in {
+            "thanks",
+            "thank you",
+            "thx",
+            "ok",
+            "okay",
+            "got it",
+            "cool",
+            "nevermind",
+            "never mind",
+            "cancel",
+        }
+
+    @staticmethod
+    def _agent_capabilities_message() -> str:
+        return "\n".join(
+            [
+                "I can help with:",
+                "- Tasks: search, create, update, assign, close, and set due dates.",
+                "- GitHub issues: search issues or draft new issues for confirmation.",
+                "- CRM: search contacts, approve/reject onboarding, and submit member agreements.",
+                "- Ops: look up Kimai project hours and draft 508 mailbox creation.",
+                "",
+                "Sensitive reports use slash commands with ephemeral replies. For members without CRM Discord links, use `/unlinked-discord-users`; for onboarding prospects, use `/view-onboarding-queue`.",
+            ]
+        )
+
     @staticmethod
     def _is_unlinked_discord_members_request(request: str) -> bool:
         normalized = request.casefold()
@@ -401,6 +526,53 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             or "without discord" in normalized
         )
         return has_unlinked_discord and "member" in normalized
+
+    @staticmethod
+    def _is_onboarding_people_request(request: str) -> bool:
+        normalized = request.casefold()
+        people_target = any(
+            term in normalized
+            for term in ["people", "person", "contacts", "candidates", "prospects"]
+        )
+        onboarding_target = (
+            "onboarding queue" in normalized
+            or "onboarding" in normalized
+            or "prospect" in normalized
+        )
+        lookup_intent = any(
+            term in normalized
+            for term in ["find", "look up", "lookup", "show", "list", "who"]
+        )
+        return people_target and onboarding_target and lookup_intent
+
+    @staticmethod
+    def _member_info_lookup_target(request: str) -> str | None:
+        match = re.search(
+            r"\b(?:look\s*up|lookup|find|show)\s+"
+            r"(?:(?:info|information|profile)\s+)?"
+            r"(?:on|for|about)\s+(.+)$",
+            request,
+            re.IGNORECASE,
+        )
+        if match is None:
+            return None
+        target = re.sub(r"\s+", " ", match.group(1)).strip(" ?!.")
+        if not target:
+            return None
+        return target[:80]
+
+    @staticmethod
+    def _member_lookup_command_message(target: str) -> str:
+        normalized = target.casefold()
+        if normalized in {"me", "myself", "self"}:
+            return (
+                "Use `/search-members query:me show_skills:true` for your private "
+                "CRM profile view."
+            )
+        return (
+            "Use `/search-members query:"
+            f"{target}` for the private CRM member search result."
+        )
 
     @staticmethod
     def _should_reply_publicly_to_mention(

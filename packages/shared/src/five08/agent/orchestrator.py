@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime, timedelta, timezone
+from typing import Literal, Protocol
 from uuid import uuid4
 
 from five08.agent.models import (
@@ -49,6 +50,14 @@ _MONTHS = {
     "november": 11,
     "december": 12,
 }
+LiteralPlanner = Literal["deterministic_regex", "live_model"]
+
+
+class AgentIntentNormalizer(Protocol):
+    """Optional fallback that rewrites loose phrasing into supported commands."""
+
+    def normalize(self, message: str) -> str | None:
+        """Return a supported command-shaped message, or None when uncertain."""
 
 
 class AgentOrchestrator:
@@ -60,11 +69,13 @@ class AgentOrchestrator:
         registry: ToolRegistry | None = None,
         policy: PolicyEngine | None = None,
         model_config: AgentModelConfig | None = None,
+        intent_normalizer: AgentIntentNormalizer | None = None,
         today: date | None = None,
     ) -> None:
         self.registry = registry or ToolRegistry()
         self.policy = policy or PolicyEngine()
         self.model_config = model_config or AgentModelConfig()
+        self.intent_normalizer = intent_normalizer
         self.today = today
 
     def plan(self, message: str, context: AgentIdentityContext) -> AgentResponse:
@@ -76,7 +87,19 @@ class AgentOrchestrator:
                 clarification_question="What task or project action should I take?",
             )
 
+        planner: LiteralPlanner = "deterministic_regex"
+        planning_text = text
         action = self._parse_action(text)
+        if action is None and not re.search(
+            r"\bcreate\s+(?:a\s+)?task\b", text, re.IGNORECASE
+        ):
+            normalized_text = self._normalize_intent(text)
+            if normalized_text:
+                normalized_action = self._parse_action(normalized_text)
+                if normalized_action is not None:
+                    action = normalized_action
+                    planning_text = normalized_text
+                    planner = "live_model"
         if action is None:
             if re.search(r"\bcreate\s+(?:a\s+)?task\b", text, re.IGNORECASE):
                 return AgentResponse(
@@ -119,8 +142,9 @@ class AgentOrchestrator:
             plan = self._build_plan(
                 intent=self._intent_for_tool(action.tool_name),
                 actions=[action],
-                model_tier=self._choose_model_tier(text, [action]),
+                model_tier=self._choose_model_tier(planning_text, [action]),
                 requires_confirmation=False,
+                planner=planner,
             )
             return AgentResponse(
                 status="denied",
@@ -132,8 +156,9 @@ class AgentOrchestrator:
         plan = self._build_plan(
             intent=self._intent_for_tool(action.tool_name),
             actions=[action],
-            model_tier=self._choose_model_tier(text, [action]),
+            model_tier=self._choose_model_tier(planning_text, [action]),
             requires_confirmation=decision.requires_confirmation,
+            planner=planner,
         )
         if plan.requires_confirmation:
             return AgentResponse(
@@ -238,6 +263,18 @@ class AgentOrchestrator:
                 )
         return results
 
+    def _normalize_intent(self, text: str) -> str | None:
+        if self.intent_normalizer is None:
+            return None
+        try:
+            normalized = self.intent_normalizer.normalize(text)
+        except Exception:
+            return None
+        normalized = _clean_text(normalized or "")
+        if not normalized or normalized.casefold() == text.casefold():
+            return None
+        return normalized
+
     def _build_plan(
         self,
         *,
@@ -245,10 +282,12 @@ class AgentOrchestrator:
         actions: list[AgentToolAction],
         model_tier: ModelTier,
         requires_confirmation: bool,
+        planner: LiteralPlanner = "deterministic_regex",
     ) -> AgentPlan:
         return AgentPlan(
             plan_id=str(uuid4()),
             intent=intent,
+            planner=planner,
             model_tier=model_tier,
             model=self._resolve_model(model_tier),
             actions=actions,

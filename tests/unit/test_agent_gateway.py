@@ -855,6 +855,66 @@ def test_admin_can_search_crm_contacts() -> None:
     assert response.results[0].result["contacts"][0]["name"] == "Sarah Example"
 
 
+def test_agent_uses_intent_normalizer_after_deterministic_parse_miss() -> None:
+    captured: dict[str, object] = {}
+
+    class FakeContact:
+        def to_dict(self) -> dict[str, object]:
+            return {"id": "1", "name": "Caleb Example"}
+
+    class FakeRepository:
+        def search(self, **kwargs: object) -> list[FakeContact]:
+            captured.update(kwargs)
+            return [FakeContact()]
+
+    class FakeRegistry(ToolRegistry):
+        def _crm_repository(self) -> FakeRepository:
+            return FakeRepository()
+
+    class FakeNormalizer:
+        def normalize(self, message: str) -> str | None:
+            assert message == "look up info on Caleb"
+            return "Find member Caleb"
+
+    orchestrator = AgentOrchestrator(
+        registry=FakeRegistry(
+            runtime_config=ToolRuntimeConfig(
+                espo_base_url="https://crm.example.test",
+                espo_api_key="key",
+            ),
+        ),
+        intent_normalizer=FakeNormalizer(),
+    )
+
+    response = orchestrator.plan(
+        "look up info on Caleb",
+        _context(roles=["Admin"]),
+    )
+
+    assert response.status == "executed"
+    assert response.plan is not None
+    assert response.plan.planner == "live_model"
+    assert captured["name__contains"] == "Caleb"
+    assert response.results[0].result["contacts"][0]["name"] == "Caleb Example"
+
+
+def test_agent_skips_intent_normalizer_for_deterministic_parse_hit() -> None:
+    class FakeNormalizer:
+        def normalize(self, message: str) -> str | None:
+            raise AssertionError("normalizer should not run")
+
+    orchestrator = AgentOrchestrator(intent_normalizer=FakeNormalizer())
+
+    response = orchestrator.plan(
+        "Create a task to update docs",
+        _context(),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    assert response.plan.planner == "deterministic_regex"
+
+
 def test_admin_can_plan_crm_contact_onboarding_update() -> None:
     orchestrator = AgentOrchestrator()
 

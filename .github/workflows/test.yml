@@ -123,6 +123,36 @@ jobs:
       run: |
         uv run mypy apps/discord_bot/src/five08/ apps/worker/src/five08/ packages/shared/src/five08/ --ignore-missing-imports --explicit-package-bases
 
+  discord-agent-evals:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v7
+      with:
+        version: "0.6.6"
+
+    - name: Set up Python
+      run: uv python install 3.12
+
+    - name: Install dependencies
+      run: |
+        uv sync --all-extras
+
+    - name: Run canonical Discord agent live-planner evals
+      env:
+        OPENAI_API_KEY_DIRECT: ${{ secrets.OPENAI_API_KEY_DIRECT || secrets.OPENAI_API_KEY }}
+      run: |
+        uv run python scripts/agent_eval.py --suite canonical --model primary --live-planner --no-env-file
+
+    - name: Upload Discord agent eval reports
+      uses: actions/upload-artifact@v7
+      if: always()
+      with:
+        name: discord-agent-eval-reports
+        path: tests/evals/discord-agent/reports/
+
   security:
     runs-on: ubuntu-latest
     steps:
@@ -161,7 +191,7 @@ jobs:
   # Status check for PRs - ensures all tests pass before merge
   all-tests-passed:
     if: always()
-    needs: [test, playwright-dashboard, lint, security]
+    needs: [test, playwright-dashboard, lint, discord-agent-evals, security]
     runs-on: ubuntu-latest
     steps:
     - name: Check all jobs
@@ -176,6 +206,10 @@ jobs:
         fi
         if [[ "${{ needs.lint.result }}" != "success" ]]; then
           echo "Linting failed"
+          exit 1
+        fi
+        if [[ "${{ needs['discord-agent-evals'].result }}" != "success" ]]; then
+          echo "Discord agent evals failed"
           exit 1
         fi
         if [[ "${{ needs.security.result }}" != "success" ]]; then

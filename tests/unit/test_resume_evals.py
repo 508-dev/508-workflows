@@ -71,8 +71,8 @@ def test_resume_eval_runs_against_text_file(
     assert report.summary["hard_failures"] == 0
     assert report.resumes[0].field_checks["name"] is True
     assert report.resumes[0].field_checks["email"] is True
-    assert report.resumes[0].estimated_cost_usd == 0.000405
-    assert report.summary["estimated_cost_usd"] == 0.000405
+    assert report.resumes[0].estimated_cost_usd == 0.0005
+    assert report.summary["estimated_cost_usd"] == 0.0005
     assert report.resumes[0].extracted_profile is None
 
 

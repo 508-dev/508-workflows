@@ -36,6 +36,8 @@ class WorkerSettings(SharedSettings):
     openrouter_api_key: str | None = None
     agent_planner_model: str = "accounts/fireworks/models/kimi-k2p6"
     agent_fallback_model: str = "gpt-4.1-mini"
+    agent_intent_normalizer_enabled: bool = True
+    agent_intent_normalizer_timeout_seconds: float = 3.0
     agent_fast_api_key: str | None = None
     agent_fast_base_url: str | None = None
     agent_fast_model: str | None = None

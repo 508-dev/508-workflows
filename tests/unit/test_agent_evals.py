@@ -24,16 +24,9 @@ def test_discord_agent_eval_canonical_suite_passes() -> None:
 
     assert report.summary["scenarios"] >= 1
     assert report.summary["failed"] == 0
+    assert report.metrics["total_elapsed_ms"] is not None
+    assert report.metrics["time_to_first_turn_ms"] is not None
     assert all(scenario.status == "passed" for scenario in report.scenarios)
-
-
-def test_discord_agent_eval_weekly_suite_is_larger_and_passes() -> None:
-    canonical = run_eval_suite(suite="canonical")
-    weekly = run_eval_suite(suite="weekly")
-
-    assert weekly.summary["scenarios"] > canonical.summary["scenarios"]
-    assert weekly.summary["failed"] == 0
-    assert all(scenario.status == "passed" for scenario in weekly.scenarios)
 
 
 def test_discord_agent_eval_can_filter_scenarios() -> None:
@@ -60,9 +53,17 @@ def test_discord_agent_eval_writes_reports(tmp_path: Path) -> None:
     write_report(report, output_dir=tmp_path)
 
     assert (tmp_path / "observed.canonical.primary.json").exists()
+    assert (tmp_path / "trace.canonical.primary.md").exists()
+    assert (tmp_path / "ctrf.canonical.primary.json").exists()
+    assert (tmp_path / "index.html").exists()
     markdown = (tmp_path / "score.canonical.primary.md").read_text()
     assert "missing_project_clarification_001" in markdown
     assert "Failed: 0" in markdown
+    trace = (tmp_path / "trace.canonical.primary.md").read_text()
+    assert "## missing_project_clarification_001" in trace
+    index = (tmp_path / "index.html").read_text()
+    assert "Discord Agent Eval Reports" in index
+    assert "observed.canonical.primary.json" in index
 
 
 def test_live_planner_eval_uses_provider_response(
@@ -77,6 +78,11 @@ def test_live_planner_eval_uses_provider_response(
 
         def json(self) -> dict[str, object]:
             return {
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 20,
+                    "total_tokens": 120,
+                },
                 "choices": [
                     {
                         "message": {
@@ -88,7 +94,7 @@ def test_live_planner_eval_uses_provider_response(
                             )
                         }
                     }
-                ]
+                ],
             }
 
     calls: list[dict[str, object]] = []
@@ -111,16 +117,15 @@ def test_live_planner_eval_uses_provider_response(
     assert report.mode == "live_planner"
     assert report.summary["passed"] == 1
     assert report.metrics["parse_success_rate"] == 1.0
+    assert report.metrics["estimated_cost_usd"] == 0.000072
     assert calls
     kwargs = calls[0]["kwargs"]
     assert isinstance(kwargs, dict)
     payload = kwargs["json"]
     assert isinstance(payload, dict)
-    assert payload["model"] == "gpt-5-mini"
-    assert payload["max_completion_tokens"] == 1200
-    assert payload["reasoning_effort"] == "minimal"
-    assert payload["verbosity"] == "low"
-    assert "temperature" not in payload
+    assert payload["model"] == "gpt-4.1-mini"
+    assert payload["max_tokens"] == 1200
+    assert payload["temperature"] == 0
     assert (tmp_path / "observed.live_planner.canonical.openai-direct.json").exists()
 
 

@@ -564,6 +564,7 @@ async def test_agent_mention_sends_agent_response_by_dm() -> None:
         "I sent the agent response by DM.",
         mention_author=False,
     )
+    cog._audit_message_safe.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -581,7 +582,7 @@ async def test_agent_mention_posts_clarification_in_thread() -> None:
     thread = SimpleNamespace(send=AsyncMock())
     message = SimpleNamespace(
         id=555,
-        content="<@999> what can you do",
+        content="<@999> frobnicate the dashboard",
         author=author,
         mentions=[SimpleNamespace(id=999)],
         guild=SimpleNamespace(id=456),
@@ -597,6 +598,118 @@ async def test_agent_mention_posts_clarification_in_thread() -> None:
     thread.send.assert_awaited_once()
     assert "Agent status: needs_clarification" in thread.send.await_args.args[0]
     message.reply.assert_not_awaited()
+    cog._audit_message_safe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_agent_mention_answers_help_without_backend() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))
+    cog._post_agent_request = AsyncMock()
+    cog._audit_message_safe = Mock()
+    thread = SimpleNamespace(send=AsyncMock())
+    message = SimpleNamespace(
+        id=555,
+        content="<@999> what kind of things can you do?",
+        author=SimpleNamespace(id=123, bot=False, roles=[]),
+        mentions=[SimpleNamespace(id=999)],
+        guild=SimpleNamespace(id=456),
+        channel=SimpleNamespace(id=789, typing=Mock(return_value=_AsyncTyping())),
+        create_thread=AsyncMock(return_value=thread),
+        reply=AsyncMock(),
+    )
+
+    await cog.agent_mention(message)
+
+    cog._post_agent_request.assert_not_awaited()
+    thread.send.assert_awaited_once()
+    assert "I can help with:" in thread.send.await_args.args[0]
+    assert "/unlinked-discord-users" in thread.send.await_args.args[0]
+    cog._audit_message_safe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_agent_mention_answers_presence_check_without_backend() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))
+    cog._post_agent_request = AsyncMock()
+    cog._audit_message_safe = Mock()
+    thread = SimpleNamespace(send=AsyncMock())
+    message = SimpleNamespace(
+        id=555,
+        content="<@999> do you see this",
+        author=SimpleNamespace(id=123, bot=False, roles=[]),
+        mentions=[SimpleNamespace(id=999)],
+        guild=SimpleNamespace(id=456),
+        channel=SimpleNamespace(id=789, typing=Mock(return_value=_AsyncTyping())),
+        create_thread=AsyncMock(return_value=thread),
+        reply=AsyncMock(),
+    )
+
+    await cog.agent_mention(message)
+
+    cog._post_agent_request.assert_not_awaited()
+    thread.send.assert_awaited_once()
+    assert "I can see this" in thread.send.await_args.args[0]
+    cog._audit_message_safe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_agent_mention_answers_acknowledgement_without_backend() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))
+    cog._post_agent_request = AsyncMock()
+    cog._audit_message_safe = Mock()
+    thread = SimpleNamespace(send=AsyncMock())
+    message = SimpleNamespace(
+        id=555,
+        content="<@999> thanks",
+        author=SimpleNamespace(id=123, bot=False, roles=[]),
+        mentions=[SimpleNamespace(id=999)],
+        guild=SimpleNamespace(id=456),
+        channel=SimpleNamespace(id=789, typing=Mock(return_value=_AsyncTyping())),
+        create_thread=AsyncMock(return_value=thread),
+        reply=AsyncMock(),
+    )
+
+    await cog.agent_mention(message)
+
+    cog._post_agent_request.assert_not_awaited()
+    thread.send.assert_awaited_once_with("Got it.")
+    cog._audit_message_safe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_agent_thread_reply_continues_without_mention() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))
+    cog._is_agent_thread = Mock(return_value=True)
+    cog._mention_response_thread = AsyncMock(
+        return_value=SimpleNamespace(send=AsyncMock())
+    )
+    cog._post_agent_request = AsyncMock(
+        return_value={
+            "status": "needs_clarification",
+            "message": "Which project should I search?",
+        }
+    )
+    cog._audit_message_safe = Mock()
+    message = SimpleNamespace(
+        id=555,
+        content="show tasks",
+        author=SimpleNamespace(id=123, bot=False, roles=[]),
+        mentions=[],
+        guild=SimpleNamespace(id=456),
+        channel=SimpleNamespace(id=789, typing=Mock(return_value=_AsyncTyping())),
+        reply=AsyncMock(),
+    )
+
+    await cog.agent_mention(message)
+
+    cog._post_agent_request.assert_awaited_once()
+    assert cog._post_agent_request.await_args.kwargs["message"] == "show tasks"
+    cog._mention_response_thread.assert_awaited_once()
+    cog._audit_message_safe.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -628,6 +741,141 @@ async def test_agent_mention_routes_unlinked_member_report_to_ephemeral_command(
     assert "/unlinked-discord-users" in thread.send.await_args.args[0]
     assert "ephemeral" in thread.send.await_args.args[0]
     message.reply.assert_not_awaited()
+    cog._audit_message_safe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_agent_mention_routes_onboarding_people_report_to_ephemeral_command() -> (
+    None
+):
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))
+    cog._post_agent_request = AsyncMock()
+    cog._audit_message_safe = Mock()
+    thread = SimpleNamespace(send=AsyncMock())
+    message = SimpleNamespace(
+        id=555,
+        content="<@999> find me people in the onboarding queue",
+        author=SimpleNamespace(id=123, bot=False, roles=[]),
+        mentions=[SimpleNamespace(id=999)],
+        guild=SimpleNamespace(id=456),
+        channel=SimpleNamespace(id=789, typing=Mock(return_value=_AsyncTyping())),
+        create_thread=AsyncMock(return_value=thread),
+        reply=AsyncMock(),
+    )
+
+    await cog.agent_mention(message)
+
+    cog._post_agent_request.assert_not_awaited()
+    thread.send.assert_awaited_once()
+    assert "/view-onboarding-queue" in thread.send.await_args.args[0]
+    assert "ephemeral" in thread.send.await_args.args[0]
+    cog._audit_message_safe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_agent_mention_routes_prospect_lookup_to_ephemeral_command() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))
+    cog._post_agent_request = AsyncMock()
+    cog._audit_message_safe = Mock()
+    thread = SimpleNamespace(send=AsyncMock())
+    message = SimpleNamespace(
+        id=555,
+        content="<@999> I want to find people that are prospects",
+        author=SimpleNamespace(id=123, bot=False, roles=[]),
+        mentions=[SimpleNamespace(id=999)],
+        guild=SimpleNamespace(id=456),
+        channel=SimpleNamespace(id=789, typing=Mock(return_value=_AsyncTyping())),
+        create_thread=AsyncMock(return_value=thread),
+        reply=AsyncMock(),
+    )
+
+    await cog.agent_mention(message)
+
+    cog._post_agent_request.assert_not_awaited()
+    thread.send.assert_awaited_once()
+    assert "/view-onboarding-queue" in thread.send.await_args.args[0]
+    cog._audit_message_safe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_agent_mention_routes_self_info_lookup_to_search_members() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))
+    cog._post_agent_request = AsyncMock()
+    cog._audit_message_safe = Mock()
+    thread = SimpleNamespace(send=AsyncMock())
+    message = SimpleNamespace(
+        id=555,
+        content="<@999> look up information on me",
+        author=SimpleNamespace(id=123, bot=False, roles=[]),
+        mentions=[SimpleNamespace(id=999)],
+        guild=SimpleNamespace(id=456),
+        channel=SimpleNamespace(id=789, typing=Mock(return_value=_AsyncTyping())),
+        create_thread=AsyncMock(return_value=thread),
+        reply=AsyncMock(),
+    )
+
+    await cog.agent_mention(message)
+
+    cog._post_agent_request.assert_not_awaited()
+    thread.send.assert_awaited_once()
+    assert "/search-members query:me show_skills:true" in thread.send.await_args.args[0]
+    cog._audit_message_safe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_agent_mention_routes_member_info_lookup_to_search_members() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))
+    cog._post_agent_request = AsyncMock()
+    cog._audit_message_safe = Mock()
+    thread = SimpleNamespace(send=AsyncMock())
+    message = SimpleNamespace(
+        id=555,
+        content="<@999> look up info on Caleb",
+        author=SimpleNamespace(id=123, bot=False, roles=[]),
+        mentions=[SimpleNamespace(id=999)],
+        guild=SimpleNamespace(id=456),
+        channel=SimpleNamespace(id=789, typing=Mock(return_value=_AsyncTyping())),
+        create_thread=AsyncMock(return_value=thread),
+        reply=AsyncMock(),
+    )
+
+    await cog.agent_mention(message)
+
+    cog._post_agent_request.assert_not_awaited()
+    thread.send.assert_awaited_once()
+    assert "/search-members query:Caleb" in thread.send.await_args.args[0]
+    cog._audit_message_safe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_agent_mention_still_audits_errors() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))
+    cog._post_agent_request = AsyncMock(
+        return_value={"status": "failed", "message": "Backend failed"}
+    )
+    cog._audit_message_safe = Mock()
+    cog._format_agent_response = Mock(return_value="Agent status: failed")
+    author = SimpleNamespace(id=123, bot=False, roles=[], send=AsyncMock())
+    message = SimpleNamespace(
+        id=555,
+        content="<@999> show tasks for project Atlas",
+        author=author,
+        mentions=[SimpleNamespace(id=999)],
+        guild=SimpleNamespace(id=456),
+        channel=SimpleNamespace(id=789, typing=Mock(return_value=_AsyncTyping())),
+        reply=AsyncMock(),
+    )
+
+    await cog.agent_mention(message)
+
+    cog._audit_message_safe.assert_called_once()
+    assert cog._audit_message_safe.call_args.kwargs["action"] == "agent.mention"
+    assert cog._audit_message_safe.call_args.kwargs["result"] == "error"
 
 
 @pytest.mark.asyncio

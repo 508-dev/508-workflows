@@ -2,12 +2,15 @@
 
 This directory contains fixture-driven evals for the Discord agent gateway.
 
-The shape is intentionally inspired by the Voy share-chat evals:
+The shape follows the same generic eval-harness pattern as the Voy share-chat
+suite, adapted for this Python/`uv` repo:
 
 - versioned JSON fixtures under `fixtures/v1`
 - an explicit fixture catalog in `fixtures/v1/index.json`
 - normalized observed output in `reports/observed.<suite>.<model>.json`
 - compact Markdown summaries in `reports/score.<suite>.<model>.md`
+- detailed traces in `reports/trace.<suite>.<model>.md`
+- CTRF output in `reports/ctrf.<suite>.<model>.json`
 - deterministic checks that are suitable for PR gating
 
 For this agent flow, multi-turn replay is not the first-class concern. Discord
@@ -16,19 +19,19 @@ runner uses the latest user message as the turn under test. The initial suite
 focuses on planner/router correctness, policy outcomes, confirmation gates, and
 known-good deterministic tool behavior.
 
-`canonical` is the small PR-gating slice. `weekly` is the broader regression
-slice and can include fixture-level `stub_results` so read-only external tools
-exercise planner, policy, and response shaping without hitting live services.
+`canonical` is the PR-gating suite. In CI it runs with `--live-planner`, so the
+model drafts the tool plan and deterministic policy/tool validation scores the
+result. Fixture-level `stub_results` keep read-only external tools from hitting
+CRM, GitHub, Kimai, or other live systems.
 
 ## Commands
 
 ```bash
-uv run python scripts/agent_eval.py --suite canonical
-uv run python scripts/agent_eval.py --suite weekly --profile primary
+uv run python scripts/agent_eval.py --suite canonical --live-planner --profile openai-direct
 uv run python scripts/agent_eval.py --list-profiles
 uv run python scripts/agent_eval.py --suite canonical --scenarios create_task_confirmation_001 --json
-uv run agent-eval --suite canonical --profile fireworks-kimi
-uv run agent-eval --suite weekly --live-planner --profile all
+uv run python scripts/agent_eval.py --suite canonical --tags task
+uv run python scripts/agent_eval.py --suite canonical
 ```
 
 Reports are written to `tests/evals/discord-agent/reports/`.
@@ -36,18 +39,31 @@ The CLI loads `.env` by default without overriding exported environment values.
 Use `--no-env-file` to disable that behavior or `--env-file <path>` to point at
 another file.
 
+## Viewing Results
+
+Open `tests/evals/discord-agent/reports/index.html` after a run. GitHub Actions
+also uploads the whole reports directory as the `discord-agent-eval-reports`
+artifact, including that static viewer.
+
+That directory is plain static HTML/JSON/Markdown. If we want a deployed viewer,
+the simplest path is to publish the latest artifact or copied reports directory
+behind any static host. A richer app can come later if we want run history,
+filtering, or PR comparison across commits.
+
 ## Model Profiles
 
-By default the eval runner is deterministic: it does not let a model authorize
-or execute tools, and it only swaps the model-routing metadata used by the
-planner contract. Use `--live-planner` to call the configured provider for a
-structured tool-call draft, then score that draft through the deterministic
-policy and tool layer.
+With `--live-planner`, the configured provider returns a structured tool-call
+draft. The harness still does not let the model authorize users or perform side
+effects: deterministic policy checks scopes, write actions stop at confirmation,
+and read actions use fixture stubs when provided.
+
+Without `--live-planner`, the runner uses the deterministic parser path. That is
+useful for local no-key debugging, but it is not the main PR gate.
 
 Built-in profiles:
 
-- `primary`: `OPENAI_API_KEY_DIRECT`
-- `openai-direct`: `OPENAI_API_KEY_DIRECT`
+- `primary`: `OPENAI_API_KEY_DIRECT`, default model `gpt-4.1-mini`
+- `openai-direct`: `OPENAI_API_KEY_DIRECT`, default model `gpt-4.1-mini`
 - `fireworks-kimi`: `FIREWORKS_API_KEY`, default model `accounts/fireworks/models/kimi-k2p6`
 - `openrouter`: `OPENROUTER_API_KEY`, default model `openai/gpt-5-mini`
 - `anthropic`: `ANTHROPIC_API_KEY`, native Messages API for live planner evals
@@ -72,3 +88,15 @@ Optional model override env vars:
 
 Write fixtures as behavior contracts. Do not change expected behavior just to
 hide a regression.
+
+## PR Gate
+
+GitHub Actions runs the canonical suite on every pull request commit:
+
+```bash
+uv run python scripts/agent_eval.py --suite canonical --model primary --live-planner --no-env-file
+```
+
+The generated report directory is uploaded as a CI artifact. Open
+`tests/evals/discord-agent/reports/index.html` from the artifact for a simple
+static viewer.

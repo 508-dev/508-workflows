@@ -3,9 +3,10 @@
   "$id": "https://508.dev/evals/discord-agent/observed.v1.schema.json",
   "title": "Discord Agent Eval Observed Report",
   "type": "object",
-  "required": ["version", "generated_at", "suite", "model", "summary", "scenarios"],
+  "required": ["version", "mode", "generated_at", "suite", "model", "summary", "scenarios"],
   "properties": {
     "version": { "const": "discord-agent-observed.v1" },
+    "mode": { "enum": ["deterministic", "live_planner"] },
     "generated_at": { "type": "string" },
     "suite": { "enum": ["canonical", "weekly"] },
     "model": { "type": "string" },
@@ -19,6 +20,7 @@
         "known_failures": { "type": "integer" }
       }
     },
+    "metrics": { "type": "object" },
     "scenarios": { "type": "array", "items": { "type": "object" } }
   }
 }

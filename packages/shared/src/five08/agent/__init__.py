@@ -16,6 +16,7 @@ from five08.agent.model_routing import (
     AgentTierModelConfig,
     DEFAULT_AGENT_MODEL,
 )
+from five08.agent.intent_normalizer import OpenAICompatibleIntentNormalizer
 from five08.agent.orchestrator import AgentOrchestrator
 from five08.agent.policy import PolicyDecision, PolicyEngine
 from five08.agent.tools import (
@@ -39,6 +40,7 @@ __all__ = [
     "DEFAULT_AGENT_MODEL",
     "InMemoryTaskStore",
     "ModelTier",
+    "OpenAICompatibleIntentNormalizer",
     "PolicyDecision",
     "PolicyEngine",
     "RiskLevel",

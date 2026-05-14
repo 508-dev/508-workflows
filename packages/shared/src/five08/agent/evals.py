@@ -28,7 +28,11 @@ from five08.agent.models import (
 from five08.agent.model_routing import AgentModelConfig, AgentTierModelConfig
 from five08.agent.orchestrator import AgentOrchestrator
 from five08.agent.tools import InMemoryTaskStore, ToolRegistry, ToolRuntimeConfig
-from five08.model_catalog import model_chat_completion_options
+from five08.model_catalog import (
+    model_chat_completion_options,
+    model_cost_per_1m,
+    model_pricing_source,
+)
 from five08.tls import default_ca_bundle_path
 
 EvalSuite = Literal["canonical", "weekly"]
@@ -65,6 +69,10 @@ Available tools and arguments:
 - mail_write.create_mailbox: local_part, backup_email, name.
 
 If a task search lacks a project, return needs_clarification with "Which project should I search?"
+For a task search like "Show tasks for project Atlas matching onboarding", call task_read.search_tasks with {"project":"Atlas","query":"onboarding"}.
+For a GitHub issue create request, do not ask for optional body text. Use the phrase after "to" or after "titled" as the issue title and omit body when absent.
+For "Create a GitHub issue to improve search UI in repo 508-dev/508-workflows", call github_issue.create_issue with {"repository":"508-dev/508-workflows","title":"improve search UI"}.
+For "Create GitHub issue in repo 508-dev/508-workflows titled Fix onboarding sync", call github_issue.create_issue with {"repository":"508-dev/508-workflows","title":"Fix onboarding sync"}.
 For writes, still return the intended write action; confirmation is handled by policy.
 For permission-sensitive requests, still return the intended action; policy handles denial.
 """
@@ -231,6 +239,8 @@ class AgentEvalObserved(BaseModel):
     parse_success: bool | None = None
     parse_error: str | None = None
     raw_model_output: str | None = None
+    token_usage: dict[str, int] | None = None
+    estimated_cost_usd: float | None = None
     requires_confirmation: bool | None = None
     actions: list[AgentEvalObservedAction] = Field(default_factory=list)
     results: list[AgentEvalObservedResult] = Field(default_factory=list)
@@ -308,6 +318,8 @@ class LivePlannerCallResult(BaseModel):
     latency_ms: int
     parse_success: bool
     error: str | None = None
+    token_usage: dict[str, int] | None = None
+    estimated_cost_usd: float | None = None
 
 
 class _EvalToolRegistry(ToolRegistry):
@@ -412,15 +424,19 @@ def run_eval_suite(
     tags: Iterable[str] | None = None,
 ) -> AgentEvalReport:
     """Run a fixture suite and return a normalized report."""
+    suite_started = time.perf_counter()
     fixtures = load_fixtures(eval_root=eval_root, suite=suite, ids=ids, tags=tags)
     profile = resolve_eval_model_profile(model)
-    scenario_results = [
-        run_fixture_with_profile(
+    scenario_results: list[AgentEvalScenarioResult] = []
+    time_to_first_turn_ms: int | None = None
+    for fixture in fixtures:
+        result = run_fixture_with_profile(
             fixture=fixture,
             model_config=profile.agent_model_config,
         )
-        for fixture in fixtures
-    ]
+        if time_to_first_turn_ms is None:
+            time_to_first_turn_ms = _elapsed_ms(suite_started)
+        scenario_results.append(result)
     summary = {
         "scenarios": len(scenario_results),
         "passed": sum(1 for result in scenario_results if result.status == "passed"),
@@ -429,11 +445,20 @@ def run_eval_suite(
             1 for result in scenario_results if result.status == "known_failure"
         ),
     }
+    latencies = _scenario_latencies(scenario_results)
     return AgentEvalReport(
         generated_at=datetime.now(timezone.utc).isoformat(),
         suite=suite,
         model=model,
         summary=summary,
+        metrics={
+            "total_elapsed_ms": _elapsed_ms(suite_started),
+            "time_to_first_turn_ms": time_to_first_turn_ms,
+            "avg_latency_ms": _average_int(latencies),
+            "max_latency_ms": max(latencies) if latencies else None,
+            "estimated_cost_usd": _sum_estimated_costs(scenario_results),
+            "pricing_source": model_pricing_source(),
+        },
         scenarios=scenario_results,
     )
 
@@ -448,18 +473,22 @@ def run_live_planner_eval_suite(
     timeout_seconds: float = 45.0,
 ) -> AgentEvalReport:
     """Run fixtures through a live model planner and deterministic policy/tools."""
+    suite_started = time.perf_counter()
     fixtures = load_fixtures(eval_root=eval_root, suite=suite, ids=ids, tags=tags)
     profile = resolve_eval_model_profile(model)
     if not profile.configured:
         raise RuntimeError(f"Eval profile {model} is missing credentials")
-    scenario_results = [
-        run_fixture_with_live_planner(
+    scenario_results: list[AgentEvalScenarioResult] = []
+    time_to_first_turn_ms: int | None = None
+    for fixture in fixtures:
+        result = run_fixture_with_live_planner(
             fixture=fixture,
             profile=profile,
             timeout_seconds=timeout_seconds,
         )
-        for fixture in fixtures
-    ]
+        if time_to_first_turn_ms is None:
+            time_to_first_turn_ms = _elapsed_ms(suite_started)
+        scenario_results.append(result)
     passed = sum(1 for result in scenario_results if result.status == "passed")
     failed = sum(1 for result in scenario_results if result.status == "failed")
     known_failures = sum(
@@ -468,11 +497,7 @@ def run_live_planner_eval_suite(
     parse_successes = sum(
         1 for result in scenario_results if result.observed.parse_success is True
     )
-    latencies = [
-        result.observed.latency_ms
-        for result in scenario_results
-        if result.observed.latency_ms is not None
-    ]
+    latencies = _scenario_latencies(scenario_results)
     return AgentEvalReport(
         mode="live_planner",
         generated_at=datetime.now(timezone.utc).isoformat(),
@@ -485,15 +510,17 @@ def run_live_planner_eval_suite(
             "known_failures": known_failures,
         },
         metrics={
+            "total_elapsed_ms": _elapsed_ms(suite_started),
+            "time_to_first_turn_ms": time_to_first_turn_ms,
             "parse_successes": parse_successes,
             "parse_failures": len(scenario_results) - parse_successes,
             "parse_success_rate": _rate(parse_successes, len(scenario_results)),
             "bad_plans": failed,
             "bad_plan_rate": _rate(failed, len(scenario_results)),
-            "avg_latency_ms": round(sum(latencies) / len(latencies), 1)
-            if latencies
-            else None,
+            "avg_latency_ms": _average_int(latencies),
             "max_latency_ms": max(latencies) if latencies else None,
+            "estimated_cost_usd": _sum_estimated_costs(scenario_results),
+            "pricing_source": model_pricing_source(),
         },
         scenarios=scenario_results,
     )
@@ -537,11 +564,13 @@ def run_fixture_with_profile(
         model_config=model_config,
     )
     message = fixture.request.current_message()
+    started = time.perf_counter()
     response = orchestrator.plan(message, context)
     observed = observe_response(
         fixture=fixture,
         message=message,
         response=response,
+        latency_ms=_elapsed_ms(started),
     )
     checks = evaluate_observed(fixture.expect, observed)
     passed = all(check.passed for check in checks)
@@ -613,6 +642,8 @@ def run_fixture_with_live_planner(
         parse_success=call.parse_success,
         parse_error=call.error,
         raw_model_output=call.raw_output,
+        token_usage=call.token_usage,
+        estimated_cost_usd=call.estimated_cost_usd,
     )
     checks = evaluate_observed(fixture.expect, observed, strict=False)
     if not call.parse_success:
@@ -661,7 +692,7 @@ def resolve_eval_model_profile(profile_id: str) -> AgentEvalModelProfile:
     normalized = profile_id.strip().lower() or "primary"
     if normalized == "primary":
         api_key = _env("OPENAI_API_KEY_DIRECT")
-        model = _env("AGENT_EVAL_OPENAI_MODEL") or _env("OPENAI_MODEL") or "gpt-5-mini"
+        model = _env("AGENT_EVAL_OPENAI_MODEL") or "gpt-4.1-mini"
         return AgentEvalModelProfile(
             id="primary",
             label="Primary OpenAI-compatible profile",
@@ -678,7 +709,7 @@ def resolve_eval_model_profile(profile_id: str) -> AgentEvalModelProfile:
         )
     if normalized == "openai-direct":
         api_key = _env("OPENAI_API_KEY_DIRECT")
-        model = _env("AGENT_EVAL_OPENAI_MODEL") or "gpt-5-mini"
+        model = _env("AGENT_EVAL_OPENAI_MODEL") or "gpt-4.1-mini"
         return AgentEvalModelProfile(
             id="openai-direct",
             label="OpenAI direct",
@@ -768,14 +799,18 @@ def _call_live_planner(
     started = time.perf_counter()
     try:
         if profile.live_provider == "anthropic":
-            raw_output = _call_anthropic_live_planner(
+            raw_output, token_usage, estimated_cost_usd = _call_anthropic_live_planner(
                 profile=profile,
                 fixture=fixture,
                 message=message,
                 timeout_seconds=timeout_seconds,
             )
         else:
-            raw_output = _call_openai_compatible_live_planner(
+            (
+                raw_output,
+                token_usage,
+                estimated_cost_usd,
+            ) = _call_openai_compatible_live_planner(
                 profile=profile,
                 fixture=fixture,
                 message=message,
@@ -787,6 +822,8 @@ def _call_live_planner(
             raw_output=raw_output,
             latency_ms=_elapsed_ms(started),
             parse_success=True,
+            token_usage=token_usage,
+            estimated_cost_usd=estimated_cost_usd,
         )
     except Exception as exc:
         return LivePlannerCallResult(
@@ -803,14 +840,15 @@ def _call_openai_compatible_live_planner(
     fixture: AgentEvalFixture,
     message: str,
     timeout_seconds: float,
-) -> str:
+) -> tuple[str, dict[str, int] | None, float | None]:
     if not profile.live_api_key or not profile.live_model or not profile.live_base_url:
         raise RuntimeError(f"Profile {profile.id} is not configured for live evals")
+    user_prompt = _live_planner_user_prompt(fixture, message)
     payload: dict[str, Any] = {
         "model": profile.live_model,
         "messages": [
             {"role": "system", "content": _LIVE_PLANNER_SYSTEM_PROMPT},
-            {"role": "user", "content": _live_planner_user_prompt(fixture, message)},
+            {"role": "user", "content": user_prompt},
         ],
         "response_format": {"type": "json_object"},
     }
@@ -853,7 +891,18 @@ def _call_openai_compatible_live_planner(
         )
     response.raise_for_status()
     data = response.json()
-    return str(data["choices"][0]["message"]["content"])
+    raw_output = str(data["choices"][0]["message"]["content"])
+    usage = _usage_from_mapping(data.get("usage"))
+    if not usage:
+        usage = _estimate_usage_from_text(
+            input_text=f"{_LIVE_PLANNER_SYSTEM_PROMPT}\n{user_prompt}",
+            output_text=raw_output,
+        )
+    return (
+        raw_output,
+        usage or None,
+        _estimate_model_cost_usd(profile.live_model, usage),
+    )
 
 
 def _call_anthropic_live_planner(
@@ -862,9 +911,10 @@ def _call_anthropic_live_planner(
     fixture: AgentEvalFixture,
     message: str,
     timeout_seconds: float,
-) -> str:
+) -> tuple[str, dict[str, int] | None, float | None]:
     if not profile.live_api_key or not profile.live_model:
         raise RuntimeError(f"Profile {profile.id} is not configured for live evals")
+    user_prompt = _live_planner_user_prompt(fixture, message)
     response = requests.post(
         "https://api.anthropic.com/v1/messages",
         headers={
@@ -877,9 +927,7 @@ def _call_anthropic_live_planner(
             "max_tokens": 1200,
             "temperature": 0,
             "system": _LIVE_PLANNER_SYSTEM_PROMPT,
-            "messages": [
-                {"role": "user", "content": _live_planner_user_prompt(fixture, message)}
-            ],
+            "messages": [{"role": "user", "content": user_prompt}],
         },
         timeout=timeout_seconds,
         verify=default_ca_bundle_path(),
@@ -891,7 +939,18 @@ def _call_anthropic_live_planner(
         for block in data.get("content", [])
         if isinstance(block, dict) and block.get("type") == "text"
     ]
-    return "\n".join(parts)
+    raw_output = "\n".join(parts)
+    usage = _usage_from_mapping(data.get("usage"))
+    if not usage:
+        usage = _estimate_usage_from_text(
+            input_text=f"{_LIVE_PLANNER_SYSTEM_PROMPT}\n{user_prompt}",
+            output_text=raw_output,
+        )
+    return (
+        raw_output,
+        usage or None,
+        _estimate_model_cost_usd(profile.live_model, usage),
+    )
 
 
 def _live_planner_user_prompt(fixture: AgentEvalFixture, message: str) -> str:
@@ -1051,6 +1110,8 @@ def observe_response(
     parse_success: bool | None = None,
     parse_error: str | None = None,
     raw_model_output: str | None = None,
+    token_usage: dict[str, int] | None = None,
+    estimated_cost_usd: float | None = None,
 ) -> AgentEvalObserved:
     """Normalize an AgentResponse into an eval observation."""
     plan = response.plan
@@ -1070,6 +1131,8 @@ def observe_response(
         parse_success=parse_success,
         parse_error=parse_error,
         raw_model_output=raw_model_output,
+        token_usage=token_usage,
+        estimated_cost_usd=estimated_cost_usd,
         requires_confirmation=(
             plan.requires_confirmation if plan is not None else None
         ),
@@ -1282,6 +1345,11 @@ def write_report(report: AgentEvalReport, *, output_dir: Path) -> None:
         report.model_dump_json(indent=2) + "\n"
     )
     (output_dir / f"score.{stem}.md").write_text(render_markdown_report(report))
+    (output_dir / f"trace.{stem}.md").write_text(render_trace_report(report))
+    (output_dir / f"ctrf.{stem}.json").write_text(
+        json.dumps(render_ctrf_report(report), indent=2) + "\n"
+    )
+    write_reports_index(output_dir)
 
 
 def render_markdown_report(report: AgentEvalReport) -> str:
@@ -1297,14 +1365,19 @@ def render_markdown_report(report: AgentEvalReport) -> str:
     ]
     if report.metrics:
         for key in [
+            "total_elapsed_ms",
+            "time_to_first_turn_ms",
             "parse_success_rate",
             "parse_failures",
             "bad_plan_rate",
             "avg_latency_ms",
             "max_latency_ms",
+            "estimated_cost_usd",
         ]:
             if key in report.metrics:
                 lines.append(f"- {key}: {report.metrics[key]}")
+        if report.metrics.get("pricing_source"):
+            lines.append(f"- Pricing source: {report.metrics['pricing_source']}")
     lines.extend(
         [
             "",
@@ -1331,6 +1404,194 @@ def render_markdown_report(report: AgentEvalReport) -> str:
         )
     lines.append("")
     return "\n".join(lines)
+
+
+def render_trace_report(report: AgentEvalReport) -> str:
+    """Render a per-scenario debugging trace."""
+    lines = [
+        f"# Discord Agent Eval Trace: {report.suite} / {report.model}",
+        "",
+        f"- Mode: {report.mode}",
+        f"- Generated at: {report.generated_at}",
+        "",
+    ]
+    for scenario in report.scenarios:
+        failed_checks = [check for check in scenario.checks if not check.passed]
+        lines.extend(
+            [
+                f"## {scenario.fixture_id}",
+                "",
+                f"- Status: {scenario.status}",
+                f"- Description: {scenario.observed.description}",
+                f"- Request: `{scenario.observed.request_message}`",
+                f"- Response status: `{scenario.observed.status}`",
+                f"- Intent: `{scenario.observed.intent or '-'}`",
+                f"- Model tier: `{scenario.observed.model_tier or '-'}`",
+                f"- Latency ms: `{scenario.observed.latency_ms or '-'}`",
+                f"- Estimated cost USD: `{scenario.observed.estimated_cost_usd if scenario.observed.estimated_cost_usd is not None else '-'}`",
+                "",
+                "### Failed Checks",
+                "",
+            ]
+        )
+        if failed_checks:
+            for check in failed_checks:
+                lines.extend(
+                    [
+                        f"- `{check.name}`",
+                        f"  - expected: `{_compact_json(check.expected)}`",
+                        f"  - observed: `{_compact_json(check.observed)}`",
+                    ]
+                )
+        else:
+            lines.append("- none")
+        lines.extend(
+            [
+                "",
+                "### Actions",
+                "",
+            ]
+        )
+        if scenario.observed.actions:
+            for action in scenario.observed.actions:
+                lines.append(
+                    "- "
+                    + _compact_json(
+                        {
+                            "tool_name": action.tool_name,
+                            "arguments": action.arguments,
+                            "requires_confirmation": action.requires_confirmation,
+                            "required_scopes": action.required_scopes,
+                        }
+                    )
+                )
+        else:
+            lines.append("- none")
+        lines.extend(["", "### Message", "", scenario.observed.message or "-", ""])
+    return "\n".join(lines)
+
+
+def render_ctrf_report(report: AgentEvalReport) -> dict[str, Any]:
+    """Render a compact CTRF-compatible report for CI artifact consumers."""
+    tests: list[dict[str, Any]] = []
+    for scenario in report.scenarios:
+        failed_checks = [check.name for check in scenario.checks if not check.passed]
+        status = (
+            "passed" if scenario.status in {"passed", "known_failure"} else "failed"
+        )
+        tests.append(
+            {
+                "name": scenario.fixture_id,
+                "status": status,
+                "duration": scenario.observed.latency_ms or 0,
+                "message": ", ".join(failed_checks) if failed_checks else None,
+                "suite": ["discord-agent", report.suite, report.model],
+                "tags": scenario.observed.tags,
+                "rawStatus": scenario.status,
+                "filePath": f"tests/evals/discord-agent/fixtures/v1/{scenario.fixture_id}.json",
+            }
+        )
+    return {
+        "results": {
+            "tool": {"name": "five08-discord-agent-eval", "version": "v1"},
+            "summary": {
+                "tests": len(tests),
+                "passed": sum(1 for test in tests if test["status"] == "passed"),
+                "failed": sum(1 for test in tests if test["status"] == "failed"),
+                "skipped": 0,
+                "pending": 0,
+                "other": 0,
+                "start": 0,
+                "stop": int(report.metrics.get("total_elapsed_ms") or 0),
+            },
+            "tests": tests,
+        }
+    }
+
+
+def write_reports_index(output_dir: Path) -> None:
+    """Write a static HTML index for generated eval reports."""
+    report_files = sorted(output_dir.glob("observed.*.json"))
+    rows: list[str] = []
+    for observed_path in report_files:
+        try:
+            report = AgentEvalReport.model_validate_json(observed_path.read_text())
+        except (OSError, ValidationError):
+            continue
+        stem = observed_path.name.removeprefix("observed.").removesuffix(".json")
+        failed = report.summary.get("failed", 0)
+        status = "pass" if failed == 0 else "fail"
+        rows.append(
+            "<tr>"
+            f"<td><span class='status {status}'>{status.upper()}</span></td>"
+            f"<td>{_html_escape(report.suite)}</td>"
+            f"<td>{_html_escape(report.mode)}</td>"
+            f"<td>{_html_escape(report.model)}</td>"
+            f"<td>{report.summary.get('passed', 0)} / {report.summary.get('scenarios', 0)}</td>"
+            f"<td>{report.summary.get('failed', 0)}</td>"
+            f"<td>{_html_escape(str(report.metrics.get('total_elapsed_ms') or '-'))}</td>"
+            f"<td>{_html_escape(str(report.metrics.get('estimated_cost_usd') or '-'))}</td>"
+            "<td>"
+            f"<a href='{_html_escape(observed_path.name)}'>observed</a> "
+            f"<a href='score.{_html_escape(stem)}.md'>score</a> "
+            f"<a href='trace.{_html_escape(stem)}.md'>trace</a> "
+            f"<a href='ctrf.{_html_escape(stem)}.json'>ctrf</a>"
+            "</td>"
+            "</tr>"
+        )
+    html = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Discord Agent Eval Reports</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 32px;
+      line-height: 1.45;
+    }
+    h1 { font-size: 24px; margin: 0 0 18px; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border-bottom: 1px solid #d0d7de; padding: 9px 10px; text-align: left; vertical-align: top; }
+    th { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: #57606a; }
+    a { margin-right: 8px; }
+    .status { display: inline-block; border-radius: 4px; padding: 2px 6px; font-size: 12px; font-weight: 700; }
+    .status.pass { background: #dafbe1; color: #116329; }
+    .status.fail { background: #ffebe9; color: #82071e; }
+    .empty { color: #57606a; }
+  </style>
+</head>
+<body>
+  <h1>Discord Agent Eval Reports</h1>
+  <table>
+    <thead>
+      <tr>
+        <th>Status</th>
+        <th>Suite</th>
+        <th>Mode</th>
+        <th>Model</th>
+        <th>Passed</th>
+        <th>Failed</th>
+        <th>Total ms</th>
+        <th>Cost USD</th>
+        <th>Files</th>
+      </tr>
+    </thead>
+    <tbody>
+"""
+    if rows:
+        html += "\n".join(rows)
+    else:
+        html += "<tr><td class='empty' colspan='9'>No observed reports found.</td></tr>"
+    html += """
+    </tbody>
+  </table>
+</body>
+</html>
+"""
+    (output_dir / "index.html").write_text(html)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1464,6 +1725,123 @@ def _env(name: str) -> str | None:
 
 def _elapsed_ms(started: float) -> int:
     return round((time.perf_counter() - started) * 1000)
+
+
+def _scenario_latencies(results: Sequence[AgentEvalScenarioResult]) -> list[int]:
+    return [
+        result.observed.latency_ms
+        for result in results
+        if result.observed.latency_ms is not None
+    ]
+
+
+def _average_int(values: Sequence[int]) -> float | None:
+    if not values:
+        return None
+    return round(sum(values) / len(values), 1)
+
+
+def _sum_estimated_costs(results: Sequence[AgentEvalScenarioResult]) -> float | None:
+    costs = [
+        result.observed.estimated_cost_usd
+        for result in results
+        if result.observed.estimated_cost_usd is not None
+    ]
+    if not costs:
+        return None
+    return round(sum(costs), 8)
+
+
+def _usage_from_mapping(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    input_tokens = _usage_int(value, "prompt_tokens", "input_tokens")
+    output_tokens = _usage_int(value, "completion_tokens", "output_tokens")
+    total_tokens = _usage_int(value, "total_tokens")
+    details = value.get("prompt_tokens_details") or value.get("input_tokens_details")
+    cached_tokens = (
+        _usage_int(details, "cached_tokens") if isinstance(details, dict) else 0
+    )
+    if not total_tokens:
+        total_tokens = input_tokens + output_tokens
+    if input_tokens == 0 and output_tokens == 0 and total_tokens == 0:
+        return {}
+    return {
+        "requests": 1,
+        "input_tokens": input_tokens,
+        "cached_input_tokens": cached_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+    }
+
+
+def _estimate_usage_from_text(*, input_text: str, output_text: str) -> dict[str, int]:
+    input_tokens = _rough_token_count(input_text)
+    output_tokens = _rough_token_count(output_text)
+    return {
+        "requests": 1,
+        "input_tokens": input_tokens,
+        "cached_input_tokens": 0,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        "estimated": 1,
+    }
+
+
+def _rough_token_count(value: str) -> int:
+    if not value:
+        return 0
+    return max(1, round(len(value) / 4))
+
+
+def _usage_int(source: dict[str, Any], *names: str) -> int:
+    for name in names:
+        value = source.get(name)
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    return 0
+
+
+def _estimate_model_cost_usd(
+    model: str,
+    usage: dict[str, int] | None,
+) -> float | None:
+    if not usage:
+        return None
+    prices = model_cost_per_1m(model)
+    if prices is None:
+        return None
+    input_tokens = usage.get("input_tokens", 0)
+    cached_tokens = min(usage.get("cached_input_tokens", 0), input_tokens)
+    billable_input_tokens = max(input_tokens - cached_tokens, 0)
+    output_tokens = usage.get("output_tokens", 0)
+    cost = (
+        billable_input_tokens * prices["input"]
+        + cached_tokens * prices["cached_input"]
+        + output_tokens * prices["output"]
+    ) / 1_000_000
+    return round(cost, 8)
+
+
+def _compact_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=True, sort_keys=True)
+
+
+def _html_escape(value: object) -> str:
+    text = str(value)
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#x27;")
+    )
 
 
 def _rate(numerator: int, denominator: int) -> float:
