@@ -1683,6 +1683,34 @@ def test_agent_model_config_falls_back_to_openai_model() -> None:
     assert selection.fallback_used is True
 
 
+def test_agent_model_config_ignores_direct_base_url_without_direct_key() -> None:
+    settings = SimpleNamespace(
+        openai_api_key="openrouter-key",
+        openai_base_url="https://openrouter.ai/api/v1",
+        openai_direct_api_key=None,
+        openai_api_key_direct=None,
+        openai_direct_base_url="https://api.openai.com/v1",
+        openai_model="openai/gpt-4.1-mini",
+        agent_fallback_model=None,
+        fireworks_api_key=None,
+        agent_fast_model=None,
+        agent_fast_base_url=None,
+        agent_fast_api_key=None,
+        agent_strong_model=None,
+        agent_strong_base_url=None,
+        agent_strong_api_key=None,
+        agent_reasoning_model=None,
+        agent_reasoning_base_url=None,
+        agent_reasoning_api_key=None,
+    )
+
+    selection = AgentModelConfig.from_settings(settings).resolve("strong")
+
+    assert selection.model == "openai/gpt-4.1-mini"
+    assert selection.base_url == "https://openrouter.ai/api/v1"
+    assert selection.api_key_configured is True
+
+
 def test_agent_model_config_rejects_disallowed_base_url() -> None:
     settings = SimpleNamespace(
         openai_api_key="openai-key",

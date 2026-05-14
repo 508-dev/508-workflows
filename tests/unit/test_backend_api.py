@@ -700,6 +700,45 @@ def test_agent_request_rejects_oversized_message(
     assert response.json()["error"] == "invalid_payload"
 
 
+def test_agent_request_audits_unsupported_message_with_sanitized_shape(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api, "_AGENT_ORCHESTRATOR", AgentOrchestrator())
+
+    with patch(
+        "five08.backend.api._write_agent_audit_event", new_callable=AsyncMock
+    ) as mock_audit:
+        response = client.post(
+            "/agent/requests",
+            json={
+                "message": (
+                    "frobnicate member agreement to Michael Wu at "
+                    "michael@example.com +1 415 555 1212"
+                ),
+                "context": {
+                    "discord_user_id": "123",
+                    "organization_id": "org-1",
+                    "guild_id": "org-1",
+                    "roles": ["Admin"],
+                },
+            },
+            headers=auth_headers,
+        )
+        audit_kwargs = mock_audit.call_args.kwargs
+
+    assert response.status_code == 422
+    metadata = audit_kwargs["metadata"]
+    assert metadata["reason"] == "unsupported_agent_request"
+    assert metadata["improvement_log"] is True
+    assert metadata["message_sanitized"] == ("frobnicate member agreement to [person]")
+    assert "message" not in metadata
+    assert "Michael Wu" not in str(metadata)
+    assert "michael@example.com" not in str(metadata)
+    assert "415" not in str(metadata)
+
+
 def test_agent_request_rate_limits_per_user(
     client: TestClient,
     auth_headers: dict[str, str],

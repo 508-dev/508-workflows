@@ -200,26 +200,29 @@ def _default_planner_provider(settings: Any) -> AgentTierModelConfig:
 
 
 def _openai_fallback_base_url(settings: Any) -> str | None:
+    direct_key = _openai_direct_api_key(settings)
     direct_base_url = _validated_base_url(
         getattr(settings, "openai_direct_base_url", None)
     )
-    if direct_base_url is not None:
+    if direct_key and direct_base_url is not None:
         return direct_base_url
 
     openai_base_url = _validated_base_url(getattr(settings, "openai_base_url", None))
-    direct_key = _optional_str(
-        getattr(settings, "openai_direct_api_key", None)
-    ) or _optional_str(getattr(settings, "openai_api_key_direct", None))
     if direct_key and openai_base_url and _is_bifrost_base_url(openai_base_url):
         return DEFAULT_OPENAI_BASE_URL
     return openai_base_url
 
 
 def _openai_fallback_api_key(settings: Any) -> str | None:
-    return _optional_str(getattr(settings, "openai_direct_api_key", None)) or (
-        _optional_str(getattr(settings, "openai_api_key_direct", None))
-        or _optional_str(getattr(settings, "openai_api_key", None))
+    return _openai_direct_api_key(settings) or _optional_str(
+        getattr(settings, "openai_api_key", None)
     )
+
+
+def _openai_direct_api_key(settings: Any) -> str | None:
+    return _optional_str(
+        getattr(settings, "openai_direct_api_key", None)
+    ) or _optional_str(getattr(settings, "openai_api_key_direct", None))
 
 
 def _is_bifrost_base_url(base_url: str) -> bool:

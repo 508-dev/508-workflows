@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import logging
 import os
+import re
 import secrets
 import json
 import threading
@@ -153,6 +154,9 @@ class JobsQueryFilters:
 _JOB_FUNCTIONS = JOB_FUNCTIONS
 _ONBOARDING_STATUS_FIELD = "cOnboardingState"
 _ONBOARDER_FIELD = "cOnboarder"
+_GENERIC_UNSUPPORTED_AGENT_MESSAGE = (
+    "I could not turn that into a supported task action."
+)
 _SENSITIVE_PAYLOAD_KEY_MARKERS = (
     "api_key",
     "apikey",
@@ -691,6 +695,67 @@ def _redact_dashboard_idempotency_key(value: Any) -> str | None:
         if len(parts) > 5:
             return ":".join(parts[:5] + ["[redacted]"])
     return key
+
+
+def _sanitize_agent_improvement_message(message: str) -> str:
+    sanitized = re.sub(r"\s+", " ", message).strip()
+    sanitized = re.sub(
+        r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+        "[email]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"https?://\S+|www\.\S+", "[url]", sanitized, flags=re.IGNORECASE
+    )
+    sanitized = re.sub(r"<@!?\d+>", "[discord_user]", sanitized)
+    sanitized = re.sub(
+        r"\bcontact[-_][A-Za-z0-9_-]+\b", "[contact_id]", sanitized, flags=re.IGNORECASE
+    )
+    sanitized = re.sub(r"\b(?:\+?\d[\d .()/-]{7,}\d)\b", "[phone]", sanitized)
+    for person_pattern in [
+        r"(member agreement\s+(?:to|for)\s+)([^,.;!?]+)",
+        r"((?:look\s*up|lookup|find|show)\s+(?:info|information|profile)\s+"
+        r"(?:on|for|about)\s+)([^,.;!?]+)",
+        r"((?:find|lookup|search)\s+(?:contact|member)\s+)([^,.;!?]+)",
+    ]:
+        sanitized = re.sub(
+            person_pattern,
+            r"\1[person]",
+            sanitized,
+            flags=re.IGNORECASE,
+        )
+    return sanitized[:256]
+
+
+def _agent_request_audit_metadata(
+    *,
+    message: str,
+    response: AgentResponse,
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "status": response.status,
+        "intent": response.plan.intent if response.plan else None,
+        "planner": response.plan.planner if response.plan else None,
+        "requires_confirmation": (
+            response.plan.requires_confirmation if response.plan else False
+        ),
+    }
+    if (
+        response.status == "needs_clarification"
+        and response.plan is None
+        and response.message == _GENERIC_UNSUPPORTED_AGENT_MESSAGE
+    ):
+        metadata.update(
+            {
+                "reason": "unsupported_agent_request",
+                "improvement_log": True,
+                "message_sanitized": _sanitize_agent_improvement_message(message),
+            }
+        )
+        return metadata
+    metadata["message"] = message[:256]
+    return metadata
 
 
 def _datetime_or_none(value: Any) -> str | None:
@@ -2720,15 +2785,10 @@ async def agent_request_handler(request: Request) -> JSONResponse:
         action="agent.request",
         result=audit_result,
         plan=response.plan,
-        metadata={
-            "status": response.status,
-            "message": payload.message[:256],
-            "intent": response.plan.intent if response.plan else None,
-            "planner": response.plan.planner if response.plan else None,
-            "requires_confirmation": (
-                response.plan.requires_confirmation if response.plan else False
-            ),
-        },
+        metadata=_agent_request_audit_metadata(
+            message=payload.message,
+            response=response,
+        ),
     )
 
     status_code = {
