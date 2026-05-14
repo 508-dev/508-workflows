@@ -82,6 +82,9 @@ For a GitHub issue create request, do not ask for optional body text. Use the ph
 For "Create a GitHub issue to improve search UI in repo 508-dev/508-workflows", call github_issue.create_issue with {"repository":"508-dev/508-workflows","title":"improve search UI"}.
 For "Create GitHub issue in repo 508-dev/508-workflows titled Fix onboarding sync", call github_issue.create_issue with {"repository":"508-dev/508-workflows","title":"Fix onboarding sync"}.
 CRM contact lookup is a read/search action. For "Find contact Sarah", "Find member Sarah", "Lookup contact Sarah", or "Look up info on Sarah", call crm_read.search_contacts with {"query":"Sarah","limit":5}. A person name or partial name is enough for this read action; do not ask for a contact ID or email.
+For "Approve CRM contact contact-123", call crm_write.update_contact with {"contact_id":"contact-123","updates":{"cOnboardingState":"approved"}}.
+For "Reject CRM contact contact-123", call crm_write.update_contact with {"contact_id":"contact-123","updates":{"cOnboardingState":"rejected"}}.
+For CRM approval and rejection requests, do not ask what approval action is needed when the verb is approve or reject and the CRM contact ID is present.
 For "Send member agreement to Sarah Example sarah@example.com", call docuseal_write.create_member_agreement_submission with {"submitter_name":"Sarah Example","submitter_email":"sarah@example.com","send_email":true}.
 For "Send member agreement to Jane Doe at jane@example.com", call docuseal_write.create_member_agreement_submission with {"submitter_name":"Jane Doe","submitter_email":"jane@example.com","send_email":true}.
 For "Create SSO user for CRM contact abc123", call sso_write.create_user with {"contact_id":"abc123"}.
