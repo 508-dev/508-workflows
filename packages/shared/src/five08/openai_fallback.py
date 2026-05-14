@@ -96,7 +96,7 @@ class FallbackOpenAIClient:
 
 class _FallbackChat:
     def __init__(self, client: FallbackOpenAIClient) -> None:
-        self.completions = _FallbackCompletions(client, "chat.completions.create")
+        self.completions = _FallbackChatCompletions(client)
 
 
 class _FallbackBeta:
@@ -106,22 +106,23 @@ class _FallbackBeta:
 
 class _FallbackBetaChat:
     def __init__(self, client: FallbackOpenAIClient) -> None:
-        self.completions = _FallbackCompletions(
-            client,
-            "beta.chat.completions.parse",
-        )
+        self.completions = _FallbackBetaChatCompletions(client)
 
 
-class _FallbackCompletions:
-    def __init__(self, client: FallbackOpenAIClient, operation: str) -> None:
+class _FallbackChatCompletions:
+    def __init__(self, client: FallbackOpenAIClient) -> None:
         self.client = client
-        self.operation = operation
 
     def create(self, **kwargs: Any) -> Any:
-        return self.client._invoke(self.operation, kwargs)
+        return self.client._invoke("chat.completions.create", kwargs)
+
+
+class _FallbackBetaChatCompletions:
+    def __init__(self, client: FallbackOpenAIClient) -> None:
+        self.client = client
 
     def parse(self, **kwargs: Any) -> Any:
-        return self.client._invoke(self.operation, kwargs)
+        return self.client._invoke("beta.chat.completions.parse", kwargs)
 
 
 def build_openai_compatible_provider_attempts(

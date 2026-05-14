@@ -129,3 +129,43 @@ def test_fallback_openai_client_retries_next_provider_and_rewrites_model_kwargs(
     assert "max_completion_tokens" not in fallback_kwargs
     assert "reasoning_effort" not in fallback_kwargs
     assert "verbosity" not in fallback_kwargs
+
+
+def test_fallback_openai_client_exposes_matching_completion_operations() -> None:
+    calls: list[str] = []
+
+    class FakeChatCompletions:
+        def create(self, **_: object) -> object:
+            calls.append("chat.completions.create")
+            return SimpleNamespace(choices=[])
+
+    class FakeBetaChatCompletions:
+        def parse(self, **_: object) -> object:
+            calls.append("beta.chat.completions.parse")
+            return SimpleNamespace(choices=[])
+
+    class FakeClient:
+        def __init__(self, *, api_key: str, base_url: str | None = None) -> None:
+            self.chat = SimpleNamespace(completions=FakeChatCompletions())
+            self.beta = SimpleNamespace(
+                chat=SimpleNamespace(completions=FakeBetaChatCompletions())
+            )
+
+    client = FallbackOpenAIClient(
+        providers=[
+            OpenAICompatibleProvider(
+                label="openai-direct",
+                model="gpt-4.1-mini",
+                api_key="direct-key",
+                base_url="https://api.openai.com/v1",
+            ),
+        ],
+        client_factory=FakeClient,
+    )
+
+    client.chat.completions.create(model="gpt-4.1-mini", messages=[])
+    client.beta.chat.completions.parse(model="gpt-4.1-mini", messages=[])
+
+    assert calls == ["chat.completions.create", "beta.chat.completions.parse"]
+    assert not hasattr(client.chat.completions, "parse")
+    assert not hasattr(client.beta.chat.completions, "create")

@@ -154,9 +154,9 @@ to read the older filename. The base file intentionally
 does not publish Redis, Postgres, MinIO, or API host ports; Coolify should expose
 only the services/domains it manages. The app services also attach to the
 shared infra network named by `INFRA_DOCKER_NETWORK` so they can reach
-Portainer-managed Bifrost and Langfuse by Docker DNS. Compose creates this
-network if it does not already exist; pre-create the same named network only
-when another stack needs to join it first.
+Portainer-managed Bifrost and Langfuse by Docker DNS. The network is declared
+as external, so pre-create it before running Compose if it does not already
+exist.
 
 ```bash
 docker network create 508-infra

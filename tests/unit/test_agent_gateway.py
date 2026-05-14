@@ -17,6 +17,7 @@ from five08.agent import (
     ToolManifest,
     ToolRuntimeConfig,
 )
+from five08.agent.intent_normalizer import OpenAICompatibleIntentNormalizer
 from five08.agent.tools import ToolRegistry
 
 
@@ -1681,6 +1682,32 @@ def test_agent_model_config_falls_back_to_openai_model() -> None:
     assert selection.base_url == "https://api.openai.com/v1"
     assert selection.source_tier == "openai_default"
     assert selection.fallback_used is True
+
+
+def test_intent_normalizer_uses_default_openai_base_url() -> None:
+    normalizer = OpenAICompatibleIntentNormalizer.from_settings(
+        SimpleNamespace(
+            agent_intent_normalizer_enabled=True,
+            agent_intent_normalizer_timeout_seconds=3.0,
+            openai_api_key="openai-key",
+            openai_base_url=None,
+            openai_model="gpt-5-mini",
+            agent_fallback_model="gpt-4.1-mini",
+            fireworks_api_key=None,
+            agent_fast_model=None,
+            agent_fast_base_url=None,
+            agent_fast_api_key=None,
+            agent_strong_model=None,
+            agent_strong_base_url=None,
+            agent_strong_api_key=None,
+            agent_reasoning_model=None,
+            agent_reasoning_base_url=None,
+            agent_reasoning_api_key=None,
+        )
+    )
+
+    assert normalizer is not None
+    assert normalizer.base_url == "https://api.openai.com/v1"
 
 
 def test_agent_model_config_ignores_direct_base_url_without_direct_key() -> None:

@@ -510,10 +510,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
     def _is_agent_thread(channel: object, bot_user_id: int) -> bool:
         if not isinstance(channel, discord.Thread):
             return False
-        if getattr(channel, "owner_id", None) == bot_user_id:
-            return True
-        name = str(getattr(channel, "name", "") or "")
-        return name.casefold().startswith("agent:")
+        return getattr(channel, "owner_id", None) == bot_user_id
 
     @staticmethod
     def _is_agent_help_request(request: str) -> bool:

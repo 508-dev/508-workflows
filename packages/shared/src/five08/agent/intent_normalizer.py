@@ -8,7 +8,11 @@ from typing import Any
 
 import requests
 
-from five08.agent.model_routing import AgentModelConfig, AgentTierModelConfig
+from five08.agent.model_routing import (
+    DEFAULT_OPENAI_BASE_URL,
+    AgentModelConfig,
+    AgentTierModelConfig,
+)
 from five08.agent.models import AgentModelSelection
 from five08.model_catalog import model_chat_completion_options
 from five08.tls import default_ca_bundle_path
@@ -52,7 +56,7 @@ class OpenAICompatibleIntentNormalizer:
         config = AgentModelConfig.from_settings(settings)
         selection = config.resolve("fast")
         api_key = _api_key_for_selection(config, selection)
-        base_url = selection.base_url or config.openai_base_url
+        base_url = _base_url_for_selection(config, selection, api_key)
         if not selection.api_key_configured or not api_key or not base_url:
             return None
         return cls(
@@ -144,6 +148,29 @@ def _api_key_for_selection(
             else None
         )
     return config.openai_api_key
+
+
+def _base_url_for_selection(
+    config: AgentModelConfig,
+    selection: AgentModelSelection,
+    api_key: str | None,
+) -> str | None:
+    base_url = selection.base_url or config.openai_base_url
+    if base_url:
+        return base_url
+    if api_key and _selection_uses_openai_fallback_key(config, selection):
+        return DEFAULT_OPENAI_BASE_URL
+    return None
+
+
+def _selection_uses_openai_fallback_key(
+    config: AgentModelConfig,
+    selection: AgentModelSelection,
+) -> bool:
+    if selection.source_tier in {"fast", "strong", "reasoning"}:
+        tier_config = _tier_config(config, selection.source_tier)
+        return tier_config.api_key is None
+    return True
 
 
 def _tier_config(config: AgentModelConfig, tier: str) -> AgentTierModelConfig:

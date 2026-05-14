@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+import discord
 import pytest
 
 from five08.discord_bot.cogs.agent import AgentCog, AgentConfirmationView
@@ -603,6 +604,17 @@ def test_mention_thread_name_does_not_include_request_content() -> None:
         )
         == "Agent response"
     )
+
+
+def test_is_agent_thread_requires_bot_owned_thread() -> None:
+    bot_owned_thread = object.__new__(discord.Thread)
+    bot_owned_thread.owner_id = 999
+    user_owned_prefixed_thread = object.__new__(discord.Thread)
+    user_owned_prefixed_thread.owner_id = 123
+    user_owned_prefixed_thread.name = "agent: renamed by user"
+
+    assert AgentCog._is_agent_thread(bot_owned_thread, 999) is True
+    assert AgentCog._is_agent_thread(user_owned_prefixed_thread, 999) is False
 
 
 @pytest.mark.asyncio
