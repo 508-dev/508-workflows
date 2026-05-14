@@ -197,7 +197,11 @@ jobs:
         LIVE_EVAL_KEY: ${{ secrets.OPENAI_API_KEY_DIRECT != '' && secrets.OPENAI_API_KEY_DIRECT || secrets.OPENAI_API_KEY }}
         LIVE_EVAL_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
       run: |
-        OPENAI_API_KEY="$LIVE_EVAL_KEY" OPENAI_BASE_URL="$LIVE_EVAL_BASE_URL" uv run python scripts/agent_eval.py --suite canonical --model primary --live-planner --no-env-file
+        if [[ -n "${LIVE_EVAL_BASE_URL:-}" ]]; then
+          OPENAI_API_KEY="$LIVE_EVAL_KEY" OPENAI_BASE_URL="$LIVE_EVAL_BASE_URL" uv run python scripts/agent_eval.py --suite canonical --model primary --live-planner --no-env-file
+        else
+          OPENAI_API_KEY="$LIVE_EVAL_KEY" uv run python scripts/agent_eval.py --suite canonical --model primary --live-planner --no-env-file
+        fi
 
     - name: Skip live planner evals without provider credentials
       if: steps.agent-eval-changes.outputs.run == 'true' && steps.live-planner-key.outputs.available != 'true'

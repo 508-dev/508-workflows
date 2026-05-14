@@ -1202,6 +1202,37 @@ def test_mailbox_create_uses_explicit_backup_email_not_mailbox_address() -> None
     }
 
 
+def test_mailbox_create_accepts_for_name_after_address() -> None:
+    orchestrator = AgentOrchestrator()
+
+    response = orchestrator.plan(
+        "Create mailbox jane@508.dev for Jane Doe with backup jane@gmail.com",
+        _context(roles=["Admin"]),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    action = response.plan.actions[0]
+    assert action.tool_name == "mail_write.create_mailbox"
+    assert action.arguments == {
+        "local_part": "jane",
+        "backup_email": "jane@gmail.com",
+        "name": "Jane Doe",
+    }
+
+
+def test_mailbox_create_rejects_non_configured_mailbox_domain() -> None:
+    orchestrator = AgentOrchestrator()
+
+    response = orchestrator.plan(
+        "Create mailbox john@gmail.com named John with backup ops@example.com",
+        _context(roles=["Admin"]),
+    )
+
+    assert response.status == "needs_clarification"
+    assert response.plan is None
+
+
 def test_github_issue_create_uses_runtime_configured_default_repo(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

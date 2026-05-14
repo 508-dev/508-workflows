@@ -27,6 +27,9 @@ _PUBLIC_SAFE_CLARIFICATION_MESSAGES = frozenset(
         "What should the task be?",
     }
 )
+_GENERIC_UNSUPPORTED_AGENT_MESSAGE = (
+    "I could not turn that into a supported task action."
+)
 
 
 class AgentConfirmationView(discord.ui.View):
@@ -480,15 +483,21 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             "what kind of things can you do",
             "what things can you do",
             "what can the agent do",
+            "what can you help with",
         }
 
     @staticmethod
     def _is_agent_presence_check(request: str) -> bool:
         normalized = request.casefold().strip(" ?!.")
         return normalized in {
+            "hello",
+            "hi",
+            "hey",
             "do you see this",
             "can you see this",
+            "are you there",
             "are you here",
+            "you there",
             "ping",
             "test",
         }
@@ -519,7 +528,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                 "- CRM: search contacts, approve/reject onboarding, and submit member agreements.",
                 "- Ops: look up Kimai project hours and draft 508 mailbox creation.",
                 "",
-                "Sensitive reports use slash commands with ephemeral replies. For members without CRM Discord links, use `/unlinked-discord-users`; for onboarding prospects, use `/view-onboarding-queue`.",
+                "Use `/agent` when you want the response kept private.",
             ]
         )
 
@@ -865,6 +874,15 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                 else "unknown"
             )
         )
+        message = str(response.get("message") or "").strip()
+        if (
+            status == "needs_clarification"
+            and message == _GENERIC_UNSUPPORTED_AGENT_MESSAGE
+        ):
+            return (
+                "I could not map that to a supported workflow yet. Ask "
+                "`what can you do?` for examples."
+            )
         plan = response.get("plan") if isinstance(response.get("plan"), dict) else {}
         lines: list[str] = [f"Agent status: {status}"]
         if plan:
@@ -876,7 +894,6 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                 lines.append("")
                 lines.append("Planned actions:")
                 lines.append(summary)
-        message = str(response.get("message") or "").strip()
         if message:
             lines.append("")
             lines.append(message)

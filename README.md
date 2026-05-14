@@ -152,15 +152,17 @@ Coolify should use `/compose.yaml` as the base Compose file. A small
 `docker-compose.yml` compatibility wrapper includes it for tools still configured
 to read the older filename. The base file intentionally
 does not publish Redis, Postgres, MinIO, or API host ports; Coolify should expose
-only the services/domains it manages. The app services also attach to the external
-infra network named by `INFRA_DOCKER_NETWORK` so they can reach Portainer-managed
-Bifrost and Langfuse by Docker DNS.
+only the services/domains it manages. The app services also attach to the
+shared infra network named by `INFRA_DOCKER_NETWORK` so they can reach
+Portainer-managed Bifrost and Langfuse by Docker DNS. Compose creates this
+network if it does not already exist; pre-create the same named network only
+when another stack needs to join it first.
 
 ```bash
 docker network create 508-infra
 ```
 
-Set `INFRA_DOCKER_NETWORK` if the shared external network has a different name.
+Set `INFRA_DOCKER_NETWORK` if the shared network has a different name.
 With Portainer services attached to the same network using aliases like `bifrost`
 and `langfuse`, configure:
 

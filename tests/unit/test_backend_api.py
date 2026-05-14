@@ -795,6 +795,37 @@ def test_pending_agent_plan_lock_is_created_per_running_loop(
 
 
 @pytest.mark.asyncio
+async def test_agent_audit_scheduler_keeps_strong_task_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = asyncio.Event()
+    context = AgentIdentityContext(discord_user_id="123")
+
+    async def wait_for_gate(**kwargs: object) -> None:
+        await gate.wait()
+
+    monkeypatch.setattr(api, "_write_agent_audit_event", wait_for_gate)
+    monkeypatch.setattr(api, "_AGENT_AUDIT_TASKS", set())
+
+    api._schedule_agent_audit_event(
+        context=context,
+        action="agent.request",
+        result=api.AuditResult.SUCCESS,
+        plan=None,
+    )
+
+    assert len(api._AGENT_AUDIT_TASKS) == 1
+    task = next(iter(api._AGENT_AUDIT_TASKS))
+    assert not task.done()
+
+    gate.set()
+    await task
+    await asyncio.sleep(0)
+
+    assert api._AGENT_AUDIT_TASKS == set()
+
+
+@pytest.mark.asyncio
 async def test_agent_confirmation_claim_pops_before_expired_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -199,6 +199,7 @@ _AGENT_REQUEST_RATE_LIMIT_WINDOW_SECONDS = 60.0
 _AGENT_REQUEST_RATE_LIMIT_MAX_REQUESTS = 10
 _AGENT_REQUEST_TIMESTAMPS: dict[str, list[float]] = {}
 _AGENT_REQUEST_RATE_LIMIT_LOCK = threading.RLock()
+_AGENT_AUDIT_TASKS: set[asyncio.Task[None]] = set()
 
 
 def _get_agent_orchestrator() -> AgentOrchestrator:
@@ -2489,6 +2490,28 @@ async def _write_agent_audit_event(
         )
 
 
+def _schedule_agent_audit_event(
+    *,
+    context: AgentIdentityContext,
+    action: str,
+    result: AuditResult,
+    plan: AgentPlan | None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Schedule a best-effort agent audit write and keep it alive until done."""
+    task = asyncio.create_task(
+        _write_agent_audit_event(
+            context=context,
+            action=action,
+            result=result,
+            plan=plan,
+            metadata=metadata,
+        )
+    )
+    _AGENT_AUDIT_TASKS.add(task)
+    task.add_done_callback(_AGENT_AUDIT_TASKS.discard)
+
+
 def _is_agent_plan_expired(plan: AgentPlan, *, now: datetime | None = None) -> bool:
     if plan.expires_at is None:
         return False
@@ -2627,18 +2650,16 @@ async def agent_request_handler(request: Request) -> JSONResponse:
             {"error": "invalid_payload", "detail": str(exc)}, status_code=400
         )
     if _agent_request_rate_limited(payload.context.discord_user_id):
-        asyncio.create_task(
-            _write_agent_audit_event(
-                context=payload.context,
-                action="agent.request",
-                result=AuditResult.DENIED,
-                plan=None,
-                metadata={
-                    "status": "denied",
-                    "reason": "rate_limited",
-                    "message": payload.message[:256],
-                },
-            )
+        _schedule_agent_audit_event(
+            context=payload.context,
+            action="agent.request",
+            result=AuditResult.DENIED,
+            plan=None,
+            metadata={
+                "status": "denied",
+                "reason": "rate_limited",
+                "message": payload.message[:256],
+            },
         )
         return JSONResponse(
             {
@@ -2669,18 +2690,16 @@ async def agent_request_handler(request: Request) -> JSONResponse:
     if response.plan is not None and response.status == "requires_confirmation":
         stored = await _store_pending_agent_plan(response.plan, payload.context)
         if not stored:
-            asyncio.create_task(
-                _write_agent_audit_event(
-                    context=payload.context,
-                    action="agent.request",
-                    result=AuditResult.ERROR,
-                    plan=response.plan,
-                    metadata={
-                        "status": "failed",
-                        "reason": "pending_plan_capacity_exceeded",
-                        "message": payload.message[:256],
-                    },
-                )
+            _schedule_agent_audit_event(
+                context=payload.context,
+                action="agent.request",
+                result=AuditResult.ERROR,
+                plan=response.plan,
+                metadata={
+                    "status": "failed",
+                    "reason": "pending_plan_capacity_exceeded",
+                    "message": payload.message[:256],
+                },
             )
             response = AgentResponse(
                 status="failed",
@@ -2696,22 +2715,20 @@ async def agent_request_handler(request: Request) -> JSONResponse:
         audit_result = AuditResult.DENIED
     elif response.status == "failed":
         audit_result = AuditResult.ERROR
-    asyncio.create_task(
-        _write_agent_audit_event(
-            context=payload.context,
-            action="agent.request",
-            result=audit_result,
-            plan=response.plan,
-            metadata={
-                "status": response.status,
-                "message": payload.message[:256],
-                "intent": response.plan.intent if response.plan else None,
-                "planner": response.plan.planner if response.plan else None,
-                "requires_confirmation": (
-                    response.plan.requires_confirmation if response.plan else False
-                ),
-            },
-        )
+    _schedule_agent_audit_event(
+        context=payload.context,
+        action="agent.request",
+        result=audit_result,
+        plan=response.plan,
+        metadata={
+            "status": response.status,
+            "message": payload.message[:256],
+            "intent": response.plan.intent if response.plan else None,
+            "planner": response.plan.planner if response.plan else None,
+            "requires_confirmation": (
+                response.plan.requires_confirmation if response.plan else False
+            ),
+        },
     )
 
     status_code = {
@@ -2768,50 +2785,42 @@ async def agent_confirmation_handler(
         discord_user_id=payload.context.discord_user_id,
     )
     if pending is None:
-        asyncio.create_task(
-            _write_agent_audit_event(
-                context=payload.context,
-                action="agent.confirmation",
-                result=AuditResult.DENIED,
-                plan=None,
-                metadata={"reason": "plan_not_found", "plan_id": plan_id},
-            )
+        _schedule_agent_audit_event(
+            context=payload.context,
+            action="agent.confirmation",
+            result=AuditResult.DENIED,
+            plan=None,
+            metadata={"reason": "plan_not_found", "plan_id": plan_id},
         )
         return JSONResponse({"error": "plan_not_found"}, status_code=404)
 
     plan, original_context = pending
     if claim_status == "actor_mismatch":
-        asyncio.create_task(
-            _write_agent_audit_event(
-                context=payload.context,
-                action="agent.confirmation",
-                result=AuditResult.DENIED,
-                plan=plan,
-                metadata={"reason": "actor_mismatch"},
-            )
+        _schedule_agent_audit_event(
+            context=payload.context,
+            action="agent.confirmation",
+            result=AuditResult.DENIED,
+            plan=plan,
+            metadata={"reason": "actor_mismatch"},
         )
         return JSONResponse({"error": "actor_mismatch"}, status_code=403)
     if claim_status == "expired":
-        asyncio.create_task(
-            _write_agent_audit_event(
-                context=original_context,
-                action="agent.confirmation",
-                result=AuditResult.DENIED,
-                plan=plan,
-                metadata={"reason": "plan_expired"},
-            )
+        _schedule_agent_audit_event(
+            context=original_context,
+            action="agent.confirmation",
+            result=AuditResult.DENIED,
+            plan=plan,
+            metadata={"reason": "plan_expired"},
         )
         return JSONResponse({"error": "plan_expired"}, status_code=410)
 
     if not payload.confirm:
-        asyncio.create_task(
-            _write_agent_audit_event(
-                context=original_context,
-                action="agent.confirmation",
-                result=AuditResult.SUCCESS,
-                plan=plan,
-                metadata={"status": "canceled"},
-            )
+        _schedule_agent_audit_event(
+            context=original_context,
+            action="agent.confirmation",
+            result=AuditResult.SUCCESS,
+            plan=plan,
+            metadata={"status": "canceled"},
         )
         response = AgentResponse(
             status="canceled",
@@ -2867,17 +2876,15 @@ async def agent_confirmation_handler(
         "denied": AuditResult.DENIED,
         "failed": AuditResult.ERROR,
     }[status]
-    asyncio.create_task(
-        _write_agent_audit_event(
-            context=execution_context,
-            action="agent.confirmation",
-            result=audit_result,
-            plan=plan,
-            metadata={
-                "status": response.status,
-                "results": [result.model_dump(mode="json") for result in results],
-            },
-        )
+    _schedule_agent_audit_event(
+        context=execution_context,
+        action="agent.confirmation",
+        result=audit_result,
+        plan=plan,
+        metadata={
+            "status": response.status,
+            "results": [result.model_dump(mode="json") for result in results],
+        },
     )
     return JSONResponse(
         response.model_dump(mode="json"),

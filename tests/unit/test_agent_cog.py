@@ -60,6 +60,22 @@ def test_format_agent_response_renders_tool_error() -> None:
     assert "- task_write.update_task: failed (Task TASK-999 was not found)" in message
 
 
+def test_format_agent_response_renders_generic_clarification_as_guidance() -> None:
+    cog = AgentCog.__new__(AgentCog)
+
+    message = cog._format_agent_response(
+        {
+            "status": "needs_clarification",
+            "message": "I could not turn that into a supported task action.",
+        }
+    )
+
+    assert message == (
+        "I could not map that to a supported workflow yet. Ask "
+        "`what can you do?` for examples."
+    )
+
+
 def test_format_agent_response_renders_github_issue_results() -> None:
     cog = AgentCog.__new__(AgentCog)
 
@@ -596,7 +612,10 @@ async def test_agent_mention_posts_clarification_in_thread() -> None:
     author.send.assert_not_awaited()
     message.create_thread.assert_awaited_once()
     thread.send.assert_awaited_once()
-    assert "Agent status: needs_clarification" in thread.send.await_args.args[0]
+    assert (
+        "I could not map that to a supported workflow yet"
+        in thread.send.await_args.args[0]
+    )
     message.reply.assert_not_awaited()
     cog._audit_message_safe.assert_not_called()
 
@@ -670,8 +689,11 @@ async def test_agent_mention_answers_help_without_backend() -> None:
 
     cog._post_agent_request.assert_not_awaited()
     thread.send.assert_awaited_once()
-    assert "I can help with:" in thread.send.await_args.args[0]
-    assert "/unlinked-discord-users" in thread.send.await_args.args[0]
+    response = thread.send.await_args.args[0]
+    assert "I can help with:" in response
+    assert "`/agent`" in response
+    assert "/unlinked-discord-users" not in response
+    assert "/view-onboarding-queue" not in response
     cog._audit_message_safe.assert_not_called()
 
 
@@ -685,6 +707,32 @@ async def test_agent_mention_answers_presence_check_without_backend() -> None:
     message = SimpleNamespace(
         id=555,
         content="<@999> do you see this",
+        author=SimpleNamespace(id=123, bot=False, roles=[]),
+        mentions=[SimpleNamespace(id=999)],
+        guild=SimpleNamespace(id=456),
+        channel=SimpleNamespace(id=789, typing=Mock(return_value=_AsyncTyping())),
+        create_thread=AsyncMock(return_value=thread),
+        reply=AsyncMock(),
+    )
+
+    await cog.agent_mention(message)
+
+    cog._post_agent_request.assert_not_awaited()
+    thread.send.assert_awaited_once()
+    assert "I can see this" in thread.send.await_args.args[0]
+    cog._audit_message_safe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_agent_mention_answers_greeting_without_backend() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))
+    cog._post_agent_request = AsyncMock()
+    cog._audit_message_safe = Mock()
+    thread = SimpleNamespace(send=AsyncMock())
+    message = SimpleNamespace(
+        id=555,
+        content="<@999> hello",
         author=SimpleNamespace(id=123, bot=False, roles=[]),
         mentions=[SimpleNamespace(id=999)],
         guild=SimpleNamespace(id=456),

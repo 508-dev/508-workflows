@@ -163,4 +163,3 @@ volumes:
 networks:
   infra:
     name: ${INFRA_DOCKER_NETWORK:-508-infra}
-    external: true

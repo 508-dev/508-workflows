@@ -19,6 +19,7 @@ from five08.agent.models import (
 from five08.agent.model_routing import AgentModelConfig
 from five08.agent.policy import PolicyEngine
 from five08.agent.tools import ToolRegistry
+from five08.clients.migadu import normalize_migadu_mailbox_domain
 
 _TASK_ID_RE = re.compile(r"\bTASK-\d+\b", re.IGNORECASE)
 _DATE_ISO_RE = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
@@ -682,19 +683,36 @@ class AgentOrchestrator:
         )
 
     def _parse_mailbox_create(self, text: str) -> AgentToolAction | None:
-        local_match = re.search(
-            r"\bmailbox\s+(?:for\s+)?([A-Za-z0-9._%+-]+)(?:@|\s)",
+        mailbox_match = re.search(
+            r"\bmailbox\s+(?:for\s+)?([A-Za-z0-9._%+-]+)"
+            r"(?:@([A-Za-z0-9.-]+\.[A-Za-z]{2,}))?(?=\s|$)",
             text,
             re.IGNORECASE,
         )
+        if mailbox_match is None:
+            return None
+
+        supplied_domain = mailbox_match.group(2)
+        configured_domain = normalize_migadu_mailbox_domain(
+            self.registry.runtime_config.migadu_mailbox_domain
+        ).casefold()
+        if supplied_domain and supplied_domain.casefold() != configured_domain:
+            return None
+
+        local_part = mailbox_match.group(1).strip().lower()
         name_match = re.search(
             r"\b(?:named|name)\s+([A-Za-z][A-Za-z .'-]{0,80})",
             text,
             re.IGNORECASE,
         )
-        if local_match is None or name_match is None:
+        if name_match is None:
+            name_match = re.search(
+                r"\bfor\s+([A-Za-z][A-Za-z .'-]{0,80})",
+                text[mailbox_match.end() :],
+                re.IGNORECASE,
+            )
+        if name_match is None:
             return None
-        local_part = local_match.group(1).strip().lower()
         name = _clean_text(
             re.split(
                 r"\s+\b(?:with\s+)?(?:backup|recovery|forward(?:ing)?|forward)\b",
