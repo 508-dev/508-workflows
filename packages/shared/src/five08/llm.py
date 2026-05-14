@@ -63,7 +63,7 @@ class ProviderModel:
         profile = get_model_profile(resolved_model)
         provider_model_name = (
             resolved_model
-            if profile is None or _has_provider_prefix(resolved_model)
+            if _has_provider_prefix(resolved_model)
             else profile.provider_model_name
         )
         return cls(
@@ -91,7 +91,6 @@ class ProviderModel:
         response_format: Any | None = None,
         reasoning_effort: str | None = None,
         verbosity: str | None = None,
-        **extra: Any,
     ) -> dict[str, Any]:
         """Build strict-provider-safe kwargs for chat.completions calls."""
         kwargs: dict[str, Any] = {
@@ -108,7 +107,6 @@ class ProviderModel:
             kwargs["reasoning_effort"] = reasoning_effort
         if verbosity is not None and self.supports("verbosity"):
             kwargs["verbosity"] = verbosity
-        kwargs.update(extra)
         return kwargs
 
     def supports(self, option: str) -> bool:
@@ -125,7 +123,7 @@ class ProviderModel:
         return True
 
 
-def get_model_profile(model: str) -> ModelProfile | None:
+def get_model_profile(model: str) -> ModelProfile:
     """Look up a model profile, handling provider-prefixed OpenAI names."""
     profiles = _load_model_profiles()
     normalized = _profile_lookup_key(model)

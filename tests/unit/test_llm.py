@@ -1,5 +1,7 @@
 """Unit tests for provider/model request profiles."""
 
+import pytest
+
 from five08.llm import ProviderModel, get_model_profile
 
 
@@ -64,5 +66,15 @@ def test_unknown_non_reasoning_model_preserves_temperature() -> None:
         temperature=0.0,
     )
 
-    assert profile is not None
+    assert profile.name == "fake-model"
     assert kwargs["temperature"] == 0.0
+
+
+def test_chat_completion_kwargs_rejects_unprofiled_extra_options() -> None:
+    provider_model = ProviderModel.openai_compatible(model="gpt-5-mini")
+
+    with pytest.raises(TypeError):
+        provider_model.chat_completion_kwargs(
+            messages=[{"role": "user", "content": "Return JSON."}],
+            seed=1,  # type: ignore[call-arg]
+        )
