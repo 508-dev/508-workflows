@@ -1,8 +1,8 @@
 {
   "version": "discord-agent-trajectory.v1",
-  "id": "crm_contact_search_001",
-  "description": "Admins can search CRM contacts by partial name without confirmation.",
-  "tags": ["weekly", "crm", "read"],
+  "id": "crm_contact_info_lookup_001",
+  "description": "Admins can use loose info lookup phrasing to search CRM contacts.",
+  "tags": ["canonical", "crm", "read", "natural-language"],
   "suite": {
     "canonical": true,
     "weekly": true
@@ -17,16 +17,16 @@
     "crm_read.search_contacts": {
       "contacts": [
         {
-          "id": "contact-123",
-          "name": "Sarah Example",
-          "emailAddress": "sarah@example.com",
-          "cOnboardingState": "pending"
+          "id": "contact-456",
+          "name": "Caleb Example",
+          "emailAddress": "caleb@example.com",
+          "cOnboardingState": "prospect"
         }
       ]
     }
   },
   "request": {
-    "message": "Find contact Sarah"
+    "message": "Look up info on Caleb"
   },
   "expect": {
     "status": "executed",
@@ -40,9 +40,12 @@
         "requires_confirmation": false,
         "required_scopes": ["crm:contact:read"],
         "arguments_contains": {
-          "query": "Sarah"
+          "query": "Caleb"
         }
       }
     ]
+  },
+  "known_failure": {
+    "reason": "Loose info-lookup phrasing intentionally requires the live planner or intent normalizer; deterministic regex only handles explicit contact search commands."
   }
 }

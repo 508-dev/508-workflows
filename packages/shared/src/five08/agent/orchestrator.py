@@ -90,6 +90,14 @@ class AgentOrchestrator:
         planner: LiteralPlanner = "deterministic_regex"
         planning_text = text
         action = self._parse_action(text)
+        if action is None:
+            resolved_member_agreement = self._plan_member_agreement_from_crm(
+                text,
+                context,
+                planner=planner,
+            )
+            if resolved_member_agreement is not None:
+                return resolved_member_agreement
         if action is None and not re.search(
             r"\bcreate\s+(?:a\s+)?task\b", text, re.IGNORECASE
         ):
@@ -100,6 +108,14 @@ class AgentOrchestrator:
                     action = normalized_action
                     planning_text = normalized_text
                     planner = "live_model"
+        if action is None and planner == "live_model":
+            resolved_member_agreement = self._plan_member_agreement_from_crm(
+                planning_text,
+                context,
+                planner=planner,
+            )
+            if resolved_member_agreement is not None:
+                return resolved_member_agreement
         if action is None:
             if re.search(r"\bcreate\s+(?:a\s+)?task\b", text, re.IGNORECASE):
                 return AgentResponse(
@@ -122,6 +138,23 @@ class AgentOrchestrator:
                 message="Task search requires a project filter.",
                 clarification_question="Which project should I search?",
             )
+
+        return self._response_for_action(
+            action=action,
+            context=context,
+            planning_text=planning_text,
+            planner=planner,
+        )
+
+    def _response_for_action(
+        self,
+        *,
+        action: AgentToolAction,
+        context: AgentIdentityContext,
+        planning_text: str,
+        planner: LiteralPlanner,
+    ) -> AgentResponse:
+        """Authorize, freeze, and optionally execute a single planned action."""
 
         manifest = self.registry.get(action.tool_name)
         if manifest is not None:
@@ -181,6 +214,133 @@ class AgentOrchestrator:
             results=results,
             message=self._execution_message(results),
         )
+
+    def _plan_member_agreement_from_crm(
+        self,
+        text: str,
+        context: AgentIdentityContext,
+        *,
+        planner: LiteralPlanner,
+    ) -> AgentResponse | None:
+        """Resolve a named member agreement recipient through CRM before writing."""
+        recipient_name = self._extract_member_agreement_recipient(text)
+        if recipient_name is None:
+            return None
+
+        search_action = AgentToolAction(
+            tool_name="crm_read.search_contacts",
+            arguments={"query": recipient_name, "limit": 5},
+            summary=f"Search CRM contacts matching: {recipient_name}",
+        )
+        manifest = self.registry.get(search_action.tool_name)
+        decision = self.policy.authorize(
+            context=context,
+            manifest=manifest,
+            action=search_action,
+        )
+        if not decision.allowed:
+            return AgentResponse(status="denied", message=decision.reason)
+
+        try:
+            payload = self.registry.execute(
+                search_action.tool_name,
+                search_action.arguments,
+                organization_id=context.organization_id,
+                actor_id=context.discord_user_id,
+                actor_scopes=self.policy.scopes_for_context(context),
+            )
+        except Exception:
+            question = "What email address should I use for the member agreement?"
+            return AgentResponse(
+                status="needs_clarification",
+                message=question,
+                clarification_question=question,
+            )
+
+        contacts = payload.get("contacts") if isinstance(payload, dict) else None
+        if not isinstance(contacts, list) or not contacts:
+            question = (
+                f"I could not find a CRM contact for {recipient_name}. "
+                "What email address should I use for the member agreement?"
+            )
+            return AgentResponse(
+                status="needs_clarification",
+                message=question,
+                clarification_question=question,
+            )
+
+        usable_contacts = [
+            contact
+            for contact in contacts
+            if isinstance(contact, dict)
+            and isinstance(contact.get("emailAddress"), str)
+            and contact["emailAddress"].strip()
+        ]
+        if len(usable_contacts) > 1:
+            candidate_list = _format_contact_candidates(usable_contacts)
+            question = (
+                f"I found multiple CRM contacts for {recipient_name}: "
+                f"{candidate_list}. Which one should I use?"
+            )
+            return AgentResponse(
+                status="needs_clarification",
+                message=question,
+                clarification_question=question,
+            )
+        if len(usable_contacts) != 1:
+            question = (
+                f"I found CRM contacts for {recipient_name}, but none had a usable "
+                "email address. What email address should I use for the member agreement?"
+            )
+            return AgentResponse(
+                status="needs_clarification",
+                message=question,
+                clarification_question=question,
+            )
+
+        contact = usable_contacts[0]
+        submitter_email = str(contact["emailAddress"]).strip()
+        submitter_name = _clean_text(str(contact.get("name") or recipient_name))
+        action = AgentToolAction(
+            tool_name="docuseal_write.create_member_agreement_submission",
+            arguments={
+                "submitter_email": submitter_email,
+                "submitter_name": submitter_name,
+                "send_email": True,
+            },
+            summary=f"Create DocuSeal member agreement submission for {submitter_name}",
+        )
+        return self._response_for_action(
+            action=action,
+            context=context,
+            planning_text=text,
+            planner=planner,
+        )
+
+    @staticmethod
+    def _extract_member_agreement_recipient(text: str) -> str | None:
+        lowered = text.casefold()
+        if "member agreement" not in lowered or not re.search(
+            r"\b(?:send|create)\b",
+            text,
+            re.IGNORECASE,
+        ):
+            return None
+        if re.search(
+            r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+            text,
+            re.IGNORECASE,
+        ):
+            return None
+        match = re.search(
+            r"\b(?:to|for)\s+([A-Za-z][A-Za-z .'-]{0,80})\s*$",
+            text,
+            re.IGNORECASE,
+        )
+        if match is None:
+            return None
+        recipient = _clean_text(match.group(1))
+        return recipient or None
 
     def execute_plan(
         self,
@@ -963,3 +1123,18 @@ def _clean_text(value: str) -> str | None:
     cleaned = value.strip(" .,:;\"'")
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned or None
+
+
+def _format_contact_candidates(contacts: list[dict[str, object]]) -> str:
+    labels: list[str] = []
+    for contact in contacts[:5]:
+        name = _clean_text(str(contact.get("name") or "Unknown")) or "Unknown"
+        email = _clean_text(str(contact.get("emailAddress") or "")) or ""
+        contact_id = _clean_text(str(contact.get("id") or "")) or ""
+        label = name
+        if email:
+            label = f"{label} <{email}>"
+        if contact_id:
+            label = f"{label} ({contact_id})"
+        labels.append(label)
+    return "; ".join(labels)

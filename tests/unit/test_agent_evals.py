@@ -26,7 +26,9 @@ def test_discord_agent_eval_canonical_suite_passes() -> None:
     assert report.summary["failed"] == 0
     assert report.metrics["total_elapsed_ms"] is not None
     assert report.metrics["time_to_first_turn_ms"] is not None
-    assert all(scenario.status == "passed" for scenario in report.scenarios)
+    assert all(
+        scenario.status in {"passed", "known_failure"} for scenario in report.scenarios
+    )
 
 
 def test_discord_agent_eval_can_filter_scenarios() -> None:

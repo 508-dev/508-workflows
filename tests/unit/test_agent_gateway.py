@@ -820,6 +820,116 @@ def test_member_agreement_strips_email_introducer_from_name() -> None:
     assert response.plan.actions[0].arguments["submitter_name"] == "Jane Doe"
 
 
+def test_member_agreement_resolves_single_crm_contact_by_name() -> None:
+    captured: dict[str, object] = {}
+
+    class FakeRegistry(ToolRegistry):
+        def execute(
+            self,
+            tool_name: str,
+            arguments: dict[str, object],
+            *,
+            organization_id: str | None,
+            actor_id: str | None,
+            actor_scopes: set[str] | None = None,
+        ) -> dict[str, object]:
+            assert tool_name == "crm_read.search_contacts"
+            captured.update(arguments)
+            return {
+                "contacts": [
+                    {
+                        "id": "contact-1",
+                        "name": "Caleb Example",
+                        "emailAddress": "caleb@example.com",
+                    }
+                ]
+            }
+
+    orchestrator = AgentOrchestrator(registry=FakeRegistry())
+
+    response = orchestrator.plan(
+        "Send member agreement to Caleb",
+        _context(roles=["Admin"]),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert captured == {"query": "Caleb", "limit": 5}
+    assert response.plan is not None
+    action = response.plan.actions[0]
+    assert action.tool_name == "docuseal_write.create_member_agreement_submission"
+    assert action.arguments == {
+        "submitter_email": "caleb@example.com",
+        "submitter_name": "Caleb Example",
+        "send_email": True,
+    }
+
+
+def test_member_agreement_clarifies_multiple_crm_candidates() -> None:
+    class FakeRegistry(ToolRegistry):
+        def execute(
+            self,
+            tool_name: str,
+            arguments: dict[str, object],
+            *,
+            organization_id: str | None,
+            actor_id: str | None,
+            actor_scopes: set[str] | None = None,
+        ) -> dict[str, object]:
+            assert tool_name == "crm_read.search_contacts"
+            return {
+                "contacts": [
+                    {
+                        "id": "contact-1",
+                        "name": "Caleb Smith",
+                        "emailAddress": "caleb.smith@example.com",
+                    },
+                    {
+                        "id": "contact-2",
+                        "name": "Caleb Jones",
+                        "emailAddress": "caleb.jones@example.com",
+                    },
+                ]
+            }
+
+    orchestrator = AgentOrchestrator(registry=FakeRegistry())
+
+    response = orchestrator.plan(
+        "Send member agreement to Caleb",
+        _context(roles=["Admin"]),
+    )
+
+    assert response.status == "needs_clarification"
+    assert response.plan is None
+    assert "Caleb Smith <caleb.smith@example.com>" in response.message
+    assert "Caleb Jones <caleb.jones@example.com>" in response.message
+
+
+def test_member_agreement_clarifies_when_crm_contact_has_no_email() -> None:
+    class FakeRegistry(ToolRegistry):
+        def execute(
+            self,
+            tool_name: str,
+            arguments: dict[str, object],
+            *,
+            organization_id: str | None,
+            actor_id: str | None,
+            actor_scopes: set[str] | None = None,
+        ) -> dict[str, object]:
+            assert tool_name == "crm_read.search_contacts"
+            return {"contacts": [{"id": "contact-1", "name": "Caleb Example"}]}
+
+    orchestrator = AgentOrchestrator(registry=FakeRegistry())
+
+    response = orchestrator.plan(
+        "Send member agreement to Caleb",
+        _context(roles=["Admin"]),
+    )
+
+    assert response.status == "needs_clarification"
+    assert response.plan is None
+    assert "email address" in response.message
+
+
 def test_admin_can_search_crm_contacts() -> None:
     captured: dict[str, object] = {}
 

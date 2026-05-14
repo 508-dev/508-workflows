@@ -1,8 +1,8 @@
 {
   "version": "discord-agent-trajectory.v1",
-  "id": "member_agreement_confirmation_001",
-  "description": "Admins can draft member agreement submissions behind confirmation.",
-  "tags": ["weekly", "docuseal", "write", "confirmation"],
+  "id": "member_agreement_crm_resolve_001",
+  "description": "The agent resolves a named member agreement recipient through a single viable CRM contact.",
+  "tags": ["canonical", "docuseal", "crm", "write", "confirmation"],
   "suite": {
     "canonical": true,
     "weekly": true
@@ -13,8 +13,20 @@
     "guild_id": "org-1",
     "roles": ["Admin"]
   },
+  "stub_results": {
+    "crm_read.search_contacts": {
+      "contacts": [
+        {
+          "id": "contact-456",
+          "name": "Caleb Example",
+          "emailAddress": "caleb@example.com",
+          "cOnboardingState": "member"
+        }
+      ]
+    }
+  },
   "request": {
-    "message": "Send member agreement to Sarah Example sarah@example.com"
+    "message": "Send member agreement to Caleb"
   },
   "expect": {
     "status": "requires_confirmation",
@@ -27,8 +39,8 @@
         "requires_confirmation": true,
         "required_scopes": ["docuseal:submission:create"],
         "arguments": {
-          "submitter_email": "sarah@example.com",
-          "submitter_name": "Sarah Example",
+          "submitter_email": "caleb@example.com",
+          "submitter_name": "Caleb Example",
           "send_email": true
         }
       }

@@ -45,6 +45,9 @@ Return only valid JSON. Do not include markdown.
 
 Draft tool calls only. Do not authorize, execute, or decide permissions.
 The backend will run deterministic policy checks and require confirmation for writes.
+If required arguments are missing, return needs_clarification instead of drafting
+an incomplete write action. Do not invent emails, contact IDs, repositories, or
+task IDs.
 
 Output schema:
 {
@@ -70,9 +73,15 @@ Available tools and arguments:
 
 If a task search lacks a project, return needs_clarification with "Which project should I search?"
 For a task search like "Show tasks for project Atlas matching onboarding", call task_read.search_tasks with {"project":"Atlas","query":"onboarding"}.
+For a task update with an explicit task id like TASK-001, do not ask for the project. Call task_write.update_task with the task_id and requested updates.
+For "Mark TASK-001 as done", call task_write.update_task with {"task_id":"TASK-001","status":"done"}.
+For GitHub issue search, use context.runtime_config.github_default_repo when the user does not name a repository. Do not ask for a repository if a default repo is configured.
 For a GitHub issue create request, do not ask for optional body text. Use the phrase after "to" or after "titled" as the issue title and omit body when absent.
 For "Create a GitHub issue to improve search UI in repo 508-dev/508-workflows", call github_issue.create_issue with {"repository":"508-dev/508-workflows","title":"improve search UI"}.
 For "Create GitHub issue in repo 508-dev/508-workflows titled Fix onboarding sync", call github_issue.create_issue with {"repository":"508-dev/508-workflows","title":"Fix onboarding sync"}.
+For "Kimai hours for project Atlas in 2026-05", call kimai_read.project_hours with {"project":"Atlas","begin":"2026-05-01","end":"2026-05-31T23:59:59"}.
+For "Send member agreement to Sarah Example sarah@example.com", call docuseal_write.create_member_agreement_submission with {"submitter_name":"Sarah Example","submitter_email":"sarah@example.com","send_email":true}.
+For "Send member agreement to Jane Doe at jane@example.com", call docuseal_write.create_member_agreement_submission with {"submitter_name":"Jane Doe","submitter_email":"jane@example.com","send_email":true}.
 For writes, still return the intended write action; confirmation is handled by policy.
 For permission-sensitive requests, still return the intended action; policy handles denial.
 """
@@ -960,6 +969,7 @@ def _live_planner_user_prompt(fixture: AgentEvalFixture, message: str) -> str:
             "message": message,
             "thread": [item.model_dump() for item in fixture.request.thread],
             "context": fixture.context.model_dump(),
+            "runtime_config": fixture.runtime_config,
         },
         indent=2,
         sort_keys=True,
@@ -1001,6 +1011,13 @@ def _response_from_live_draft(
             status="failed",
             message=f"Live planner failed: {parse_error or 'unknown error'}",
         )
+    resolved_member_agreement = orchestrator._plan_member_agreement_from_crm(
+        message,
+        context,
+        planner="live_model",
+    )
+    if resolved_member_agreement is not None:
+        return resolved_member_agreement
     if draft.status == "needs_clarification" or not draft.actions:
         question = draft.clarification_question or "What should I do next?"
         return AgentResponse(
@@ -1027,6 +1044,13 @@ def _response_from_live_draft(
             manifest=manifest,
             action=action,
         )
+        clarification = _live_action_clarification(orchestrator, action)
+        if clarification is not None:
+            return AgentResponse(
+                status="needs_clarification",
+                message=clarification,
+                clarification_question=clarification,
+            )
 
     model_tier = orchestrator._choose_model_tier(message, actions)
     model_selection = _live_model_selection(profile=profile, tier=model_tier)
@@ -1084,6 +1108,83 @@ def _response_from_live_draft(
         results=results,
         message=orchestrator._execution_message(results),
     )
+
+
+def _live_action_clarification(
+    orchestrator: AgentOrchestrator,
+    action: AgentToolAction,
+) -> str | None:
+    """Return a clarification question for malformed live-drafted actions."""
+    args = action.arguments
+    tool_name = action.tool_name
+    if tool_name == "task_read.search_tasks":
+        if not _non_empty_arg(args, "project"):
+            return "Which project should I search?"
+        return None
+    if tool_name == "task_write.create_task":
+        if not _non_empty_arg(args, "title"):
+            return "What should the task be?"
+        return None
+    if tool_name == "task_write.update_task":
+        if not _non_empty_arg(args, "task_id"):
+            return "Which task should I update?"
+        if not any(
+            _non_empty_arg(args, key)
+            for key in ("title", "project", "assignee", "due_date", "status")
+        ):
+            return "What should I change on that task?"
+        return None
+    if tool_name == "github_issue.search_issues":
+        if not _non_empty_arg(args, "query"):
+            return "What GitHub issues should I search for?"
+        if not _non_empty_arg(args, "repository") and not _non_empty_text(
+            orchestrator.registry.runtime_config.github_default_repo
+        ):
+            return "Which GitHub repository should I search?"
+        return None
+    if tool_name == "github_issue.create_issue":
+        if not _non_empty_arg(args, "title"):
+            return "What should be the title of the GitHub issue?"
+        if not _non_empty_arg(args, "repository") and not _non_empty_text(
+            orchestrator.registry.runtime_config.github_default_repo
+        ):
+            return "Which GitHub repository should I create the issue in?"
+        return None
+    if tool_name == "crm_read.search_contacts":
+        if not _non_empty_arg(args, "query"):
+            return "Who should I look up?"
+        return None
+    if tool_name == "crm_write.update_contact":
+        if not _non_empty_arg(args, "contact_id"):
+            return "Which CRM contact should I update?"
+        updates = args.get("updates")
+        if not isinstance(updates, dict) or not updates:
+            return "What should I update on that CRM contact?"
+        return None
+    if tool_name == "docuseal_write.create_member_agreement_submission":
+        if not _non_empty_arg(args, "submitter_email"):
+            return "What email address should I use for the member agreement?"
+        return None
+    if tool_name == "kimai_read.project_hours":
+        if not _non_empty_arg(args, "project"):
+            return "Which Kimai project should I read?"
+        return None
+    if tool_name == "mail_write.create_mailbox":
+        if not _non_empty_arg(args, "local_part"):
+            return "What mailbox should I create?"
+        if not _non_empty_arg(args, "backup_email"):
+            return "What backup email should I use?"
+        if not _non_empty_arg(args, "name"):
+            return "What display name should I use?"
+    return None
+
+
+def _non_empty_arg(args: dict[str, Any], key: str) -> bool:
+    return _non_empty_text(args.get(key))
+
+
+def _non_empty_text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
 
 
 def _live_model_selection(

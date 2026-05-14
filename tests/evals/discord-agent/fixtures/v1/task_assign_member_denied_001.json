@@ -4,7 +4,7 @@
   "description": "Members cannot reassign tasks because assignment requires task:assign in addition to task:update_own.",
   "tags": ["weekly", "task", "policy", "denied"],
   "suite": {
-    "canonical": false,
+    "canonical": true,
     "weekly": true
   },
   "context": {

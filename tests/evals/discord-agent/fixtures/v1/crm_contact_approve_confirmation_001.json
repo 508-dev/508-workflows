@@ -1,8 +1,8 @@
 {
   "version": "discord-agent-trajectory.v1",
-  "id": "crm_contact_update_confirmation_001",
-  "description": "Admins can draft CRM contact onboarding updates behind confirmation.",
-  "tags": ["weekly", "crm", "write", "confirmation"],
+  "id": "crm_contact_approve_confirmation_001",
+  "description": "Admins can approve a CRM contact with a high-level verb and still get a confirmation plan.",
+  "tags": ["canonical", "crm", "write", "confirmation"],
   "suite": {
     "canonical": true,
     "weekly": true
@@ -14,7 +14,7 @@
     "roles": ["Admin"]
   },
   "request": {
-    "message": "Update CRM contact contact-123 onboarding state to approved"
+    "message": "Approve CRM contact contact-123"
   },
   "expect": {
     "status": "requires_confirmation",

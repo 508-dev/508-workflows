@@ -4,7 +4,7 @@
   "description": "Admins can read Kimai project hours for a bounded month window.",
   "tags": ["weekly", "kimai", "read"],
   "suite": {
-    "canonical": false,
+    "canonical": true,
     "weekly": true
   },
   "context": {

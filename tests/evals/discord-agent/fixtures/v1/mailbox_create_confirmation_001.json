@@ -4,7 +4,7 @@
   "description": "Admins can draft mailbox creation with explicit backup email behind confirmation.",
   "tags": ["weekly", "mailbox", "write", "confirmation"],
   "suite": {
-    "canonical": false,
+    "canonical": true,
     "weekly": true
   },
   "context": {

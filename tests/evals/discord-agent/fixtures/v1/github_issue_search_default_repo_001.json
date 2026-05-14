@@ -1,8 +1,8 @@
 {
   "version": "discord-agent-trajectory.v1",
-  "id": "github_issue_search_001",
-  "description": "Engineers can search GitHub issues in an allowed repository without confirmation.",
-  "tags": ["weekly", "github", "read"],
+  "id": "github_issue_search_default_repo_001",
+  "description": "Engineers can search GitHub issues without restating the default repository.",
+  "tags": ["canonical", "github", "read", "default-repo"],
   "suite": {
     "canonical": true,
     "weekly": true
@@ -20,16 +20,16 @@
     "github_issue.search_issues": {
       "issues": [
         {
-          "number": 42,
-          "title": "Improve onboarding search",
-          "html_url": "https://github.example/issues/42",
+          "number": 108,
+          "title": "Onboarding queue filters",
+          "html_url": "https://github.example/issues/108",
           "state": "open"
         }
       ]
     }
   },
   "request": {
-    "message": "Search GitHub issues matching onboarding in repo 508-dev/508-workflows"
+    "message": "Search GitHub issues matching onboarding"
   },
   "expect": {
     "status": "executed",
@@ -42,9 +42,8 @@
         "tool_name": "github_issue.search_issues",
         "requires_confirmation": false,
         "required_scopes": ["github:issue:read"],
-        "arguments": {
+        "arguments_contains": {
           "query": "onboarding",
-          "repository": "508-dev/508-workflows",
           "state": "open"
         }
       }

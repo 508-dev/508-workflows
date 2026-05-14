@@ -1,0 +1,53 @@
+{
+  "version": "discord-agent-trajectory.v1",
+  "id": "task_project_prefixed_search_001",
+  "description": "Project-prefixed search terms are preserved before an explicit project filter.",
+  "tags": ["canonical", "task", "read", "edge-case"],
+  "suite": {
+    "canonical": true,
+    "weekly": true
+  },
+  "context": {
+    "discord_user_id": "123",
+    "organization_id": "org-1",
+    "guild_id": "org-1",
+    "roles": ["Member"]
+  },
+  "seed": {
+    "tasks": [
+      {
+        "title": "Project plan kickoff",
+        "project": "Atlas",
+        "assignee": "Sarah",
+        "due_date": "2026-05-20"
+      },
+      {
+        "title": "Update onboarding docs",
+        "project": "Atlas",
+        "assignee": "Sarah",
+        "due_date": "2026-05-15"
+      }
+    ]
+  },
+  "request": {
+    "message": "Show tasks about project plan in project Atlas"
+  },
+  "expect": {
+    "status": "executed",
+    "intent": "search_tasks",
+    "model_tier": "fast",
+    "requires_confirmation": false,
+    "result_statuses": ["succeeded"],
+    "actions": [
+      {
+        "tool_name": "task_read.search_tasks",
+        "requires_confirmation": false,
+        "required_scopes": ["project:read"],
+        "arguments": {
+          "query": "project plan",
+          "project": "Atlas"
+        }
+      }
+    ]
+  }
+}
