@@ -1628,6 +1628,28 @@ def test_contact_lookup_does_not_treat_long_name_as_contact_id() -> None:
     assert client.get_contact_calls == 0
 
 
+def test_contact_search_filters_expand_short_508_domain() -> None:
+    registry = ToolRegistry(runtime_config=_account_runtime_config())
+
+    filters = registry._contact_search_filters("jane@508")  # noqa: SLF001
+
+    assert filters == [
+        {"type": "equals", "attribute": "emailAddress", "value": "jane@508.dev"},
+        {"type": "equals", "attribute": "c508Email", "value": "jane@508.dev"},
+    ]
+
+
+def test_contact_search_filters_do_not_expand_missing_email_domain() -> None:
+    registry = ToolRegistry(runtime_config=_account_runtime_config())
+
+    filters = registry._contact_search_filters("jane@")  # noqa: SLF001
+
+    assert filters == [
+        {"type": "equals", "attribute": "emailAddress", "value": "jane@"},
+        {"type": "equals", "attribute": "c508Email", "value": "jane@"},
+    ]
+
+
 def test_sso_user_tool_executes_and_links_crm(monkeypatch: pytest.MonkeyPatch) -> None:
     fakes = _install_account_tool_fakes(
         monkeypatch,

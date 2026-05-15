@@ -688,7 +688,7 @@ class ToolRegistry:
             configured_domain = normalize_migadu_mailbox_domain(
                 self.runtime_config.migadu_mailbox_domain
             )
-            domain_aliases = {"", configured_domain}
+            domain_aliases = {configured_domain}
             if "." in configured_domain:
                 domain_aliases.add(configured_domain.split(".", 1)[0])
             email = (
