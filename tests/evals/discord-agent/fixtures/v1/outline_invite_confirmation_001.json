@@ -25,7 +25,7 @@
       {
         "tool_name": "outline_write.invite_user",
         "requires_confirmation": true,
-        "required_scopes": ["integration:manage"],
+        "required_scopes": ["integration:manage", "crm:contact:read"],
         "arguments": {
           "email": "jane@508.dev"
         }

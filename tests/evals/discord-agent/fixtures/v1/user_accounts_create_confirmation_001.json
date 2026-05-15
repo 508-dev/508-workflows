@@ -28,7 +28,9 @@
         "required_scopes": [
           "mailbox:create",
           "user:manage",
-          "integration:manage"
+          "integration:manage",
+          "crm:contact:read",
+          "crm:contact:update"
         ],
         "arguments": {
           "contact_query": "Jane Doe",

@@ -350,7 +350,11 @@ class ToolRegistry:
             "sso_write.create_user": ToolManifest(
                 name="sso_write.create_user",
                 risk="high",
-                required_scopes=("user:manage",),
+                required_scopes=(
+                    "user:manage",
+                    "crm:contact:read",
+                    "crm:contact:update",
+                ),
                 requires_confirmation=True,
                 tenant_scoped=True,
                 idempotent=False,
@@ -359,7 +363,7 @@ class ToolRegistry:
             "outline_write.invite_user": ToolManifest(
                 name="outline_write.invite_user",
                 risk="high",
-                required_scopes=("integration:manage",),
+                required_scopes=("integration:manage", "crm:contact:read"),
                 requires_confirmation=True,
                 tenant_scoped=True,
                 idempotent=False,
@@ -368,7 +372,13 @@ class ToolRegistry:
             "account_write.create_user_accounts": ToolManifest(
                 name="account_write.create_user_accounts",
                 risk="high",
-                required_scopes=("mailbox:create", "user:manage", "integration:manage"),
+                required_scopes=(
+                    "mailbox:create",
+                    "user:manage",
+                    "integration:manage",
+                    "crm:contact:read",
+                    "crm:contact:update",
+                ),
                 requires_confirmation=True,
                 tenant_scoped=True,
                 idempotent=False,
@@ -500,9 +510,12 @@ class ToolRegistry:
         return normalized_repository
 
     def _crm_repository(self) -> EspoContactRepository:
+        return EspoContactRepository(self._espo_client())
+
+    def _espo_client(self) -> EspoClient:
         base_url = _required_config(self.runtime_config.espo_base_url, "ESPO_BASE_URL")
         api_key = _required_config(self.runtime_config.espo_api_key, "ESPO_API_KEY")
-        return EspoContactRepository(EspoClient(base_url, api_key))
+        return EspoClient(base_url, api_key)
 
     def _search_crm_contacts(self, arguments: dict[str, Any]) -> dict[str, Any]:
         query = str(arguments.get("query") or "").strip()
@@ -591,12 +604,6 @@ class ToolRegistry:
             ),
         )
 
-    def _espo_client(self) -> EspoClient:
-        return EspoClient(
-            _required_config(self.runtime_config.espo_base_url, "ESPO_BASE_URL"),
-            _required_config(self.runtime_config.espo_api_key, "ESPO_API_KEY"),
-        )
-
     def _resolve_account_contact(
         self,
         arguments: dict[str, Any],
@@ -639,7 +646,7 @@ class ToolRegistry:
         normalized = search_term.strip()
         if not normalized:
             return []
-        if re.fullmatch(r"[A-Za-z0-9_-]{8,}", normalized):
+        if _looks_like_crm_contact_id(normalized):
             try:
                 contact = client.get_contact(normalized)
             except EspoAPIError:
@@ -805,11 +812,38 @@ class ToolRegistry:
                         raise
                     user = reconciled_matches[0]
                     recovered_existing_after_create_error = True
-                user_id = self._validate_authentik_user_for_contact(
-                    user,
-                    expected_username=username,
-                    expected_email=email,
-                )
+                try:
+                    user_id = self._validate_authentik_user_for_contact(
+                        user,
+                        expected_username=username,
+                        expected_email=email,
+                    )
+                except ValueError as exc:
+                    if created or recovered_existing_after_create_error:
+                        result = self._sso_result(
+                            contact_id=contact_id,
+                            contact_name=contact_name,
+                            username=username,
+                            email=email,
+                            user_id=_maybe_authentik_user_pk(user),
+                            created=created,
+                            crm_updated=False,
+                            recovery_email_error=None,
+                            recovered_existing_after_create_error=(
+                                recovered_existing_after_create_error
+                            ),
+                            partial_success=(
+                                "sso_created_validation_failed"
+                                if created
+                                else "sso_reconciled_validation_failed"
+                            ),
+                            error=_short_error(exc),
+                        )
+                        raise ToolPartialSuccessError(
+                            "SSO user is ready, but validation failed.",
+                            result,
+                        ) from exc
+                    raise
                 if created:
                     try:
                         client.send_recovery_email(
@@ -864,7 +898,7 @@ class ToolRegistry:
         contact_name: str,
         username: str,
         email: str,
-        user_id: int,
+        user_id: int | None,
         created: bool,
         crm_updated: bool,
         recovery_email_error: str | None,
@@ -914,13 +948,17 @@ class ToolRegistry:
         return None
 
     def _normalize_508_email(self, value: Any) -> str | None:
-        text = str(value or "").strip().lower()
         configured_domain = normalize_migadu_mailbox_domain(
             self.runtime_config.migadu_mailbox_domain
         )
-        if not text or not text.endswith(f"@{configured_domain}"):
+        try:
+            email = _normalize_full_email(value, field_label="508 email")
+        except ValueError:
             return None
-        return text
+        _local_part, _sep, domain = email.partition("@")
+        if domain != configured_domain:
+            return None
+        return email
 
     def _crm_sso_id(self, contact: dict[str, Any]) -> int | None:
         raw_value = _optional_str(contact.get(SSO_ID_FIELD))
@@ -1141,7 +1179,10 @@ class ToolRegistry:
 
     def _create_migadu_mailbox(self, arguments: dict[str, Any]) -> dict[str, Any]:
         local_part = str(arguments.get("local_part") or "").strip().lower()
-        backup_email = str(arguments.get("backup_email") or "").strip()
+        backup_email = _normalize_full_email(
+            arguments.get("backup_email"),
+            field_label="Mailbox backup_email",
+        )
         name = str(arguments.get("name") or "").strip()
         if not local_part or not backup_email or not name:
             raise ValueError("Mailbox local_part, backup_email, and name are required")
@@ -1270,6 +1311,8 @@ class ToolRegistry:
                 )
         if not local_part:
             raise ValueError("Mailbox username is missing a local part.")
+        if not _is_valid_email_local_part(local_part):
+            raise ValueError("Mailbox username contains invalid characters.")
         return f"{local_part}@{configured_domain}", local_part
 
 
@@ -1291,9 +1334,27 @@ def _normalize_full_email(value: Any, *, field_label: str) -> str:
     normalized = str(value or "").strip().lower()
     if not normalized:
         raise ValueError(f"{field_label} is required.")
-    if " " in normalized or normalized.count("@") != 1:
+    if re.search(r"\s", normalized):
+        raise ValueError(f"{field_label} must be a full email address.")
+    local_part, sep, domain = normalized.partition("@")
+    if sep != "@" or not local_part or not domain or "@" in domain:
+        raise ValueError(f"{field_label} must be a full email address.")
+    if not _is_valid_email_local_part(local_part):
+        raise ValueError(f"{field_label} must be a full email address.")
+    if not re.fullmatch(r"[A-Za-z0-9.-]+\.[A-Za-z]{2,}", domain):
         raise ValueError(f"{field_label} must be a full email address.")
     return normalized
+
+
+def _is_valid_email_local_part(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9._%+-]+", value))
+
+
+def _maybe_authentik_user_pk(user: dict[str, Any]) -> int | None:
+    try:
+        return _authentik_user_pk(user)
+    except ValueError:
+        return None
 
 
 def _authentik_user_pk(user: dict[str, Any]) -> int:
@@ -1321,7 +1382,25 @@ def _is_mailbox_result(value: dict[str, Any]) -> bool:
 
 
 def _is_sso_result(value: dict[str, Any]) -> bool:
-    return value.get("user_id") is not None and "crm_updated" in value
+    return (
+        _optional_str(value.get("username")) is not None
+        and _optional_str(value.get("email")) is not None
+        and "crm_updated" in value
+    )
+
+
+def _looks_like_crm_contact_id(value: str) -> bool:
+    if re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+        value,
+        re.IGNORECASE,
+    ):
+        return True
+    if value.casefold().startswith("contact-"):
+        return True
+    return bool(
+        re.fullmatch(r"[A-Za-z0-9_-]{8,}", value) and any(ch.isdigit() for ch in value)
+    )
 
 
 def _optional_date(value: Any) -> str | None:

@@ -25,7 +25,11 @@
       {
         "tool_name": "sso_write.create_user",
         "requires_confirmation": true,
-        "required_scopes": ["user:manage"],
+        "required_scopes": [
+          "user:manage",
+          "crm:contact:read",
+          "crm:contact:update"
+        ],
         "arguments": {
           "contact_id": "abc123"
         }
