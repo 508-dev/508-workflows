@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock, Mock, patch
 
+import discord
 import pytest
 
 from five08.discord_bot.cogs.admin_login import AdminLoginCog, settings
@@ -112,3 +113,51 @@ async def test_dashboard_login_command_defers_admin_check_to_backend(
     mock_create.assert_awaited_once_with(discord_user_id="123456789")
     sent_message = mock_interaction.followup.send.call_args.args[0]
     assert "https://dash.508.dev/auth/discord/link/token" in sent_message
+
+
+@pytest.mark.asyncio
+async def test_dashboard_login_command_ignores_expired_interaction(
+    cog: AdminLoginCog, mock_interaction: AsyncMock
+) -> None:
+    response = Mock()
+    response.status = 404
+    response.reason = "Not Found"
+    mock_interaction.response.defer.side_effect = discord.NotFound(
+        response,
+        {"code": 10062, "message": "Unknown interaction"},
+    )
+
+    with (
+        patch.object(cog, "_create_login_link", new=AsyncMock()) as mock_create,
+        patch.object(cog, "_audit") as mock_audit,
+    ):
+        await cog.dashboard_login.callback(cog, mock_interaction)
+
+    mock_create.assert_not_awaited()
+    mock_audit.assert_not_called()
+    mock_interaction.followup.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_dashboard_login_command_reraises_unexpected_not_found(
+    cog: AdminLoginCog, mock_interaction: AsyncMock
+) -> None:
+    response = Mock()
+    response.status = 404
+    response.reason = "Not Found"
+    error = discord.NotFound(
+        response,
+        {"code": 10_001, "message": "Unknown account"},
+    )
+    mock_interaction.response.defer.side_effect = error
+
+    with (
+        patch.object(cog, "_create_login_link", new=AsyncMock()) as mock_create,
+        patch.object(cog, "_audit") as mock_audit,
+        pytest.raises(discord.NotFound),
+    ):
+        await cog.dashboard_login.callback(cog, mock_interaction)
+
+    mock_create.assert_not_awaited()
+    mock_audit.assert_not_called()
+    mock_interaction.followup.send.assert_not_awaited()

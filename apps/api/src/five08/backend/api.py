@@ -23,6 +23,7 @@ import httpx
 import uvicorn
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 from psycopg import Connection
 from psycopg.rows import dict_row
@@ -85,7 +86,12 @@ from five08.backend.auth import (
     make_pkce_pair,
     normalize_next_path,
 )
-from five08.backend.dashboard import dashboard_html, login_required_html
+from five08.backend.dashboard import (
+    dashboard_assets_dir,
+    dashboard_html,
+    login_required_html,
+    oidc_not_configured_html,
+)
 from five08.worker.config import settings
 from five08.worker.db_migrations import run_job_migrations
 from five08.worker.dispatcher import build_queue_client
@@ -535,6 +541,50 @@ def _dashboard_dev_sensitive_access_enabled() -> bool:
         "development",
         "test",
     }
+
+
+def _request_prefers_json(request: Request) -> bool:
+    accept = request.headers.get("accept", "")
+    if not accept.strip():
+        return False
+    return _accept_quality(accept, "application/json") > _accept_quality(
+        accept, "text/html"
+    )
+
+
+def _accept_quality(accept: str, media_type: str) -> float:
+    media_main, media_sub = media_type.casefold().split("/", 1)
+    best = 0.0
+    for item in accept.split(","):
+        parts = [part.strip() for part in item.split(";")]
+        if not parts or not parts[0]:
+            continue
+        accepted = parts[0].casefold()
+        try:
+            accepted_main, accepted_sub = accepted.split("/", 1)
+        except ValueError:
+            continue
+        if accepted_main not in {"*", media_main}:
+            continue
+        if accepted_sub not in {"*", media_sub}:
+            continue
+
+        quality = 1.0
+        for parameter in parts[1:]:
+            name, separator, value = parameter.partition("=")
+            if separator and name.strip().casefold() == "q":
+                with contextlib.suppress(ValueError):
+                    quality = float(value.strip())
+                break
+        best = max(best, min(max(quality, 0.0), 1.0))
+    return best
+
+
+class _OptionalDirectoryStaticFiles(StaticFiles):
+    """StaticFiles variant for generated assets that may appear after startup."""
+
+    async def check_config(self) -> None:
+        return None
 
 
 def _dashboard_permissions_for_identity(
@@ -1432,6 +1482,7 @@ def _assign_dashboard_onboarder_in_crm(
         "onboarder": onboarder_username,
         "previous_state": normalized_state or None,
         "onboarding_state": resulting_state or None,
+        "onboarding_status_label": _onboarding_status_label(resulting_state),
         "state_updated": state_updated,
     }
 
@@ -3088,7 +3139,7 @@ async def auth_login_handler(
     request: Request,
     next_path: str | None = Query(default=None, alias="next"),
     discord_link_token: str | None = Query(default=None),
-) -> JSONResponse | RedirectResponse:
+) -> JSONResponse | RedirectResponse | HTMLResponse:
     """Start OIDC auth-code flow with PKCE and server-side state."""
     store = _auth_store_from_app(request.app)
     if store is None:
@@ -3096,6 +3147,8 @@ async def auth_login_handler(
 
     oidc = _oidc_client_from_app(request.app)
     if not oidc.configured:
+        if not _request_prefers_json(request):
+            return HTMLResponse(oidc_not_configured_html(), status_code=503)
         return JSONResponse({"error": "oidc_not_configured"}, status_code=503)
 
     normalized_next_path = normalize_next_path(
@@ -3780,6 +3833,12 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
         dashboard_handler,
         methods=["GET"],
         response_model=None,
+    )
+    assets_dir = dashboard_assets_dir()
+    app.mount(
+        "/dashboard/assets",
+        _OptionalDirectoryStaticFiles(directory=assets_dir, check_dir=False),
+        name="dashboard-assets",
     )
     app.add_api_route(
         "/dashboard/{view}",
