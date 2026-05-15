@@ -131,6 +131,57 @@ def test_live_planner_eval_uses_provider_response(
     assert (tmp_path / "observed.live_planner.canonical.openai-direct.json").exists()
 
 
+def test_live_planner_eval_falls_back_for_parseable_clarification(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 20,
+                    "total_tokens": 120,
+                },
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"status":"needs_clarification",'
+                                '"intent":"search_project_tasks",'
+                                '"clarification_question":"Which project should I search?",'
+                                '"actions":[]}'
+                            )
+                        }
+                    }
+                ],
+            }
+
+    def fake_post(*args: object, **kwargs: object) -> FakeResponse:
+        return FakeResponse()
+
+    monkeypatch.setenv("OPENAI_API_KEY_DIRECT", "direct-key")
+    monkeypatch.setattr("five08.agent.evals.requests.post", fake_post)
+
+    report = run_live_planner_eval_suite(
+        suite="canonical",
+        model="openai-direct",
+        ids=["search_project_tasks_001"],
+        timeout_seconds=1,
+    )
+
+    assert report.summary["passed"] == 1
+    assert report.summary["failed"] == 0
+    scenario = report.scenarios[0]
+    assert scenario.status == "passed"
+    assert scenario.observed.actions[0].arguments == {
+        "project": "Atlas",
+        "query": "onboarding",
+    }
+
+
 def test_live_planner_eval_retries_one_bad_plan(monkeypatch) -> None:
     class FakeResponse:
         status_code = 200

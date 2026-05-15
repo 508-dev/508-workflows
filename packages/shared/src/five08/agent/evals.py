@@ -1056,21 +1056,29 @@ def _response_from_live_draft(
     if resolved_member_agreement is not None:
         return resolved_member_agreement
     if draft.status == "needs_clarification" or not draft.actions:
-        question = draft.clarification_question or "What should I do next?"
-        return AgentResponse(
-            status="needs_clarification",
-            message=question,
-            clarification_question=question,
+        fallback_action = _deterministic_live_planner_fallback(
+            orchestrator=orchestrator,
+            message=message,
         )
+        if fallback_action is not None:
+            actions = [fallback_action]
+        else:
+            question = draft.clarification_question or "What should I do next?"
+            return AgentResponse(
+                status="needs_clarification",
+                message=question,
+                clarification_question=question,
+            )
+    else:
+        actions = [
+            AgentToolAction(
+                tool_name=action.tool_name,
+                arguments=action.arguments,
+                summary=action.summary or f"Call {action.tool_name}",
+            )
+            for action in draft.actions
+        ]
 
-    actions = [
-        AgentToolAction(
-            tool_name=action.tool_name,
-            arguments=action.arguments,
-            summary=action.summary or f"Call {action.tool_name}",
-        )
-        for action in draft.actions
-    ]
     for action in actions:
         manifest = orchestrator.registry.get(action.tool_name)
         if manifest is None:
@@ -1145,6 +1153,24 @@ def _response_from_live_draft(
         results=results,
         message=orchestrator._execution_message(results),
     )
+
+
+def _deterministic_live_planner_fallback(
+    *,
+    orchestrator: AgentOrchestrator,
+    message: str,
+) -> AgentToolAction | None:
+    action = orchestrator._parse_action(message)
+    if action is None:
+        return None
+    if action.tool_name != "task_read.search_tasks":
+        return None
+    if orchestrator.registry.get(action.tool_name) is None:
+        return None
+    if _live_action_clarification(orchestrator, action) is not None:
+        return None
+    action.summary = action.summary or f"Call {action.tool_name}"
+    return action
 
 
 def _live_action_clarification(
