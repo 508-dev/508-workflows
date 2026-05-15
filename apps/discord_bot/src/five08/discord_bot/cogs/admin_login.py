@@ -94,7 +94,15 @@ class AdminLoginCog(DiscordAuditCogMixin, commands.Cog):
     )
     async def dashboard_login(self, interaction: discord.Interaction) -> None:
         """Create and return a one-time dashboard login URL."""
-        await interaction.response.defer(ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound as exc:
+            logger.warning(
+                "Ignoring expired dashboard-login interaction for user_id=%s: %s",
+                interaction.user.id,
+                exc,
+            )
+            return
 
         try:
             link_url, expires_in_seconds = await self._create_login_link(
