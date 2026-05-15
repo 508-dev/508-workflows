@@ -505,12 +505,12 @@ class AgentOrchestrator:
             keyword in lowered for keyword in ["send", "create", "submit"]
         ):
             return self._parse_member_agreement(text)
-        if self._is_user_accounts_create_request(lowered):
-            return self._parse_user_accounts_create(text)
         if "sso" in lowered and any(
             keyword in lowered for keyword in ["create", "link", "provision"]
         ):
             return self._parse_sso_user_create(text)
+        if self._is_user_accounts_create_request(lowered):
+            return self._parse_user_accounts_create(text)
         if "outline" in lowered and any(
             keyword in lowered for keyword in ["invite", "add"]
         ):
@@ -828,7 +828,7 @@ class AgentOrchestrator:
             return {"contact_id": contact_id_match.group(1)}
 
         invite_match = re.search(
-            r"\binvite\s+(.+?)\s+to\s+outline\b",
+            r"\b(?:invite|add)\s+(.+?)\s+to\s+outline\b",
             text,
             re.IGNORECASE,
         )

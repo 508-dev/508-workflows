@@ -1285,6 +1285,22 @@ def test_sso_user_create_treats_named_contact_as_lookup_query() -> None:
     assert action.arguments == {"contact_query": "Jane Doe"}
 
 
+def test_sso_user_account_create_plans_sso_tool() -> None:
+    orchestrator = AgentOrchestrator()
+
+    response = orchestrator.plan(
+        "Create SSO user account for CRM contact abc123",
+        _context(roles=["Admin"]),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    assert response.plan.intent == "create_sso_user"
+    action = response.plan.actions[0]
+    assert action.tool_name == "sso_write.create_user"
+    assert action.arguments == {"contact_id": "abc123"}
+
+
 def test_outline_invite_plans_direct_email_tool() -> None:
     orchestrator = AgentOrchestrator()
 
@@ -1300,6 +1316,22 @@ def test_outline_invite_plans_direct_email_tool() -> None:
     assert action.tool_name == "outline_write.invite_user"
     assert action.required_scopes == ["integration:manage", "crm:contact:read"]
     assert action.arguments == {"email": "jane@508.dev"}
+
+
+def test_outline_invite_plans_add_named_contact() -> None:
+    orchestrator = AgentOrchestrator()
+
+    response = orchestrator.plan(
+        "Add Jane Doe to Outline",
+        _context(roles=["Admin"]),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    assert response.plan.intent == "invite_outline_user"
+    action = response.plan.actions[0]
+    assert action.tool_name == "outline_write.invite_user"
+    assert action.arguments == {"contact_query": "Jane Doe"}
 
 
 def test_user_accounts_create_plans_combined_account_tool() -> None:
