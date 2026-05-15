@@ -23,6 +23,7 @@ import httpx
 import uvicorn
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 from psycopg import Connection
 from psycopg.rows import dict_row
@@ -85,7 +86,11 @@ from five08.backend.auth import (
     make_pkce_pair,
     normalize_next_path,
 )
-from five08.backend.dashboard import dashboard_html, login_required_html
+from five08.backend.dashboard import (
+    dashboard_assets_dir,
+    dashboard_html,
+    login_required_html,
+)
 from five08.worker.config import settings
 from five08.worker.db_migrations import run_job_migrations
 from five08.worker.dispatcher import build_queue_client
@@ -3781,6 +3786,13 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
         methods=["GET"],
         response_model=None,
     )
+    assets_dir = dashboard_assets_dir()
+    if assets_dir.exists():
+        app.mount(
+            "/dashboard/assets",
+            StaticFiles(directory=assets_dir),
+            name="dashboard-assets",
+        )
     app.add_api_route(
         "/dashboard/{view}",
         dashboard_handler,

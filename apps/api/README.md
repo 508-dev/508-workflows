@@ -14,6 +14,16 @@
 
 - Non-dashboard protected routes (including webhooks) use `X-API-Secret` with `API_SHARED_SECRET`.
 - Dashboard browser routes (`/dashboard` and `/dashboard/api/*`) are session-authenticated dashboard routes and are intentionally exempt from `X-API-Secret`.
+- The dashboard UI is a Bun-built React/Tailwind/shadcn bundle committed under the API package and served by this same FastAPI app at `/dashboard` and `/dashboard/assets/*`; there is no separate web service, port, or DNS entry.
+
+Build dashboard assets after frontend changes:
+
+```bash
+cd apps/admin_dashboard
+bun install
+bun run check
+bun run build
+```
 
 Example:
 
