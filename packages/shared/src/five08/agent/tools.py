@@ -744,6 +744,7 @@ class ToolRegistry:
         user_id: int
         created = False
         crm_updated = False
+        recovered_existing_after_create_error = False
         recovery_email_error: str | None = None
         linked_sso_id = self._crm_sso_id(contact)
 
@@ -782,24 +783,41 @@ class ToolRegistry:
                         or "default-recovery-email"
                     ),
                 )
-                user = client.create_user(
-                    username=username,
-                    name=contact_name,
-                    email=email,
-                )
-                created = True
+                try:
+                    user = client.create_user(
+                        username=username,
+                        name=contact_name,
+                        email=email,
+                    )
+                    created = True
+                except AuthentikAPIError as exc:
+                    reconciled_matches = client.find_users_by_username_or_email(
+                        username=username,
+                        email=email,
+                    )
+                    if len(reconciled_matches) > 1:
+                        raise ValueError(
+                            "Multiple Authentik users matched this CRM contact after "
+                            "the create attempt. Resolve the duplicate manually "
+                            "before linking."
+                        ) from exc
+                    if not reconciled_matches:
+                        raise
+                    user = reconciled_matches[0]
+                    recovered_existing_after_create_error = True
                 user_id = self._validate_authentik_user_for_contact(
                     user,
                     expected_username=username,
                     expected_email=email,
                 )
-                try:
-                    client.send_recovery_email(
-                        user_id=user_id,
-                        email_stage=recovery_email_stage_id,
-                    )
-                except AuthentikAPIError as exc:
-                    recovery_email_error = _short_error(exc)
+                if created:
+                    try:
+                        client.send_recovery_email(
+                            user_id=user_id,
+                            email_stage=recovery_email_stage_id,
+                        )
+                    except AuthentikAPIError as exc:
+                        recovery_email_error = _short_error(exc)
 
             try:
                 self._espo_client().update_contact(
@@ -815,6 +833,9 @@ class ToolRegistry:
                     created=created,
                     crm_updated=False,
                     recovery_email_error=recovery_email_error,
+                    recovered_existing_after_create_error=(
+                        recovered_existing_after_create_error
+                    ),
                     partial_success="sso_user_ready_crm_update_failed",
                     error=_short_error(exc),
                 )
@@ -833,6 +854,7 @@ class ToolRegistry:
             created=created,
             crm_updated=crm_updated,
             recovery_email_error=recovery_email_error,
+            recovered_existing_after_create_error=recovered_existing_after_create_error,
         )
 
     @staticmethod
@@ -846,6 +868,7 @@ class ToolRegistry:
         created: bool,
         crm_updated: bool,
         recovery_email_error: str | None,
+        recovered_existing_after_create_error: bool = False,
         partial_success: str | None = None,
         error: str | None = None,
     ) -> dict[str, Any]:
@@ -857,6 +880,7 @@ class ToolRegistry:
             "user_id": user_id,
             "created": created,
             "crm_updated": crm_updated,
+            "recovered_existing_after_create_error": recovered_existing_after_create_error,
             "recovery_email_error": recovery_email_error,
         }
         if partial_success is not None:
@@ -1166,10 +1190,19 @@ class ToolRegistry:
         )
         created_address = str(mailbox.get("address") or target_email).strip().lower()
         if created_address != target_email:
-            raise ValueError(
+            message = (
                 "Migadu created a mailbox but returned a different address "
                 f"{created_address} than requested {target_email}."
             )
+            result = self._mailbox_result(
+                email=created_address,
+                created=True,
+                crm_updated=False,
+                backup_email=backup_email,
+                partial_success="mailbox_created_address_mismatch",
+                error=message,
+            )
+            raise ToolPartialSuccessError(message, result)
 
         try:
             self._espo_client().update_contact(contact_id, {"c508Email": target_email})

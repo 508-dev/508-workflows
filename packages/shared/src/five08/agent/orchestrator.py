@@ -23,6 +23,11 @@ from five08.clients.migadu import normalize_migadu_mailbox_domain
 
 _TASK_ID_RE = re.compile(r"\bTASK-\d+\b", re.IGNORECASE)
 _DATE_ISO_RE = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
+_CONTACT_ID_REFERENCE_RE = re.compile(
+    r"\b(?:crm\s+)?contact\s+([A-Za-z0-9_-]*\d[A-Za-z0-9_-]*)\b",
+    re.IGNORECASE,
+)
+_CONTACT_QUERY_PREFIX_RE = re.compile(r"^(?:crm\s+)?contact\s+", re.IGNORECASE)
 _MONTH_DATE_RE = re.compile(
     r"\b(january|february|march|april|may|june|july|august|september|october|november|december)"
     r"\s+(\d{1,2})(?:,\s*|\s+)(20\d{2})\b",
@@ -797,11 +802,7 @@ class AgentOrchestrator:
 
     @staticmethod
     def _extract_contact_reference(text: str) -> dict[str, str] | None:
-        contact_id_match = re.search(
-            r"\b(?:crm\s+)?contact\s+([A-Za-z0-9_-]{2,})\b",
-            text,
-            re.IGNORECASE,
-        )
+        contact_id_match = _CONTACT_ID_REFERENCE_RE.search(text)
         if contact_id_match is not None:
             return {"contact_id": contact_id_match.group(1)}
 
@@ -813,18 +814,16 @@ class AgentOrchestrator:
         )
         if query_match is None:
             return None
-        query = _clean_text(query_match.group(1))
+        query = _clean_text(
+            _CONTACT_QUERY_PREFIX_RE.sub("", query_match.group(1), count=1)
+        )
         if not query:
             return None
         return {"contact_query": query}
 
     @classmethod
     def _extract_outline_contact_reference(cls, text: str) -> dict[str, str] | None:
-        contact_id_match = re.search(
-            r"\b(?:crm\s+)?contact\s+([A-Za-z0-9_-]{2,})\b",
-            text,
-            re.IGNORECASE,
-        )
+        contact_id_match = _CONTACT_ID_REFERENCE_RE.search(text)
         if contact_id_match is not None:
             return {"contact_id": contact_id_match.group(1)}
 
@@ -834,7 +833,9 @@ class AgentOrchestrator:
             re.IGNORECASE,
         )
         if invite_match is not None:
-            query = _clean_text(invite_match.group(1))
+            query = _clean_text(
+                _CONTACT_QUERY_PREFIX_RE.sub("", invite_match.group(1), count=1)
+            )
             if query:
                 return {"contact_query": query}
         return cls._extract_contact_reference(text)

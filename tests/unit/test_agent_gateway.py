@@ -21,6 +21,7 @@ from five08.agent import (
 )
 from five08.agent.intent_normalizer import OpenAICompatibleIntentNormalizer
 from five08.agent.tools import ToolRegistry
+from five08.clients.authentik import AuthentikAPIError
 from five08.clients.espo import EspoAPIError
 from five08.clients.outline import OutlineAPIError
 
@@ -1265,6 +1266,21 @@ def test_sso_user_create_plans_sso_user_tool() -> None:
     assert action.arguments == {"contact_id": "abc123"}
 
 
+def test_sso_user_create_treats_named_contact_as_lookup_query() -> None:
+    orchestrator = AgentOrchestrator()
+
+    response = orchestrator.plan(
+        "Create SSO user for contact Jane Doe",
+        _context(roles=["Admin"]),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    action = response.plan.actions[0]
+    assert action.tool_name == "sso_write.create_user"
+    assert action.arguments == {"contact_query": "Jane Doe"}
+
+
 def test_outline_invite_plans_direct_email_tool() -> None:
     orchestrator = AgentOrchestrator()
 
@@ -1300,6 +1316,24 @@ def test_user_accounts_create_plans_combined_account_tool() -> None:
         "user:manage",
         "integration:manage",
     ]
+    assert action.arguments == {
+        "contact_query": "Jane Doe",
+        "mailbox_username": "jane@508.dev",
+    }
+
+
+def test_user_accounts_create_treats_named_contact_as_lookup_query() -> None:
+    orchestrator = AgentOrchestrator()
+
+    response = orchestrator.plan(
+        "Create 508 accounts for contact Jane Doe with mailbox jane@508.dev",
+        _context(roles=["Admin"]),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    action = response.plan.actions[0]
+    assert action.tool_name == "account_write.create_user_accounts"
     assert action.arguments == {
         "contact_query": "Jane Doe",
         "mailbox_username": "jane@508.dev",
@@ -1343,6 +1377,9 @@ def _install_account_tool_fakes(
     contact: dict[str, Any] | None = None,
     fail_crm_update_fields: set[str] | None = None,
     fail_outline_invite: bool = False,
+    authentik_create_error: bool = False,
+    authentik_reconcile_after_create_error: bool = False,
+    migadu_address: str | None = None,
 ) -> SimpleNamespace:
     initial_contact = contact or {
         "id": "contact-1",
@@ -1389,6 +1426,7 @@ def _install_account_tool_fakes(
     class FakeAuthentikClient:
         created_users: list[dict[str, Any]] = []
         recovery_emails: list[tuple[int | str, str]] = []
+        create_attempted = False
 
         def __init__(
             self,
@@ -1407,6 +1445,19 @@ def _install_account_tool_fakes(
             email: str,
             page_size: int = 20,
         ) -> list[dict[str, Any]]:
+            if (
+                authentik_create_error
+                and authentik_reconcile_after_create_error
+                and self.create_attempted
+            ):
+                return [
+                    {
+                        "pk": 42,
+                        "username": username,
+                        "email": email,
+                        "is_superuser": False,
+                    }
+                ]
             return []
 
         def resolve_email_stage_id(
@@ -1431,6 +1482,9 @@ def _install_account_tool_fakes(
             roles: list[str] | None = None,
             attributes: dict[str, Any] | None = None,
         ) -> dict[str, Any]:
+            self.create_attempted = True
+            if authentik_create_error:
+                raise AuthentikAPIError("Authentik create timed out")
             user = {
                 "pk": 42,
                 "username": username,
@@ -1468,7 +1522,7 @@ def _install_account_tool_fakes(
 
         def create_mailbox(self, request: object) -> dict[str, Any]:
             local_part = str(getattr(request, "local_part"))
-            mailbox = {"address": f"{local_part}@{self.domain}"}
+            mailbox = {"address": migadu_address or f"{local_part}@{self.domain}"}
             self.created_mailboxes.append(mailbox)
             return mailbox
 
@@ -1566,6 +1620,39 @@ def test_sso_user_tool_partial_result_preserves_user_id(
     assert results[0].result["partial_success"] == "sso_user_ready_crm_update_failed"
 
 
+def test_sso_user_tool_reconciles_after_authentik_create_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fakes = _install_account_tool_fakes(
+        monkeypatch,
+        contact={
+            "id": "contact-1",
+            "name": "Jane Doe",
+            "emailAddress": "jane@example.com",
+            "c508Email": "jane@508.dev",
+            "cSsoID": None,
+        },
+        authentik_create_error=True,
+        authentik_reconcile_after_create_error=True,
+    )
+    registry = ToolRegistry(runtime_config=_account_runtime_config())
+
+    result = registry.execute(
+        "sso_write.create_user",
+        {"contact_id": "contact-1"},
+        organization_id="org-1",
+        actor_id="123",
+        actor_scopes={"user:manage"},
+    )
+
+    assert result["user_id"] == 42
+    assert result["crm_updated"] is True
+    assert result["created"] is False
+    assert result["recovered_existing_after_create_error"] is True
+    assert fakes.authentik.recovery_emails == []
+    assert ("contact-1", {"cSsoID": "42"}) in fakes.espo.updates
+
+
 def test_outline_invite_tool_executes_direct_email(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1654,6 +1741,30 @@ def test_user_accounts_tool_partial_result_preserves_created_mailbox(
     assert result["mailbox"]["email"] == "jane@508.dev"
     assert result["mailbox"]["crm_updated"] is False
     assert result["mailbox"]["partial_success"] == "mailbox_created_crm_update_failed"
+    assert result["sso"] is None
+    assert result["outline"] is None
+
+
+def test_user_accounts_tool_partial_result_preserves_address_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_account_tool_fakes(monkeypatch, migadu_address="jane-other@508.dev")
+    registry = ToolRegistry(runtime_config=_account_runtime_config())
+
+    with pytest.raises(ToolPartialSuccessError) as exc_info:
+        registry.execute(
+            "account_write.create_user_accounts",
+            {"contact_id": "contact-1", "mailbox_username": "jane@508.dev"},
+            organization_id="org-1",
+            actor_id="123",
+            actor_scopes={"mailbox:create", "user:manage", "integration:manage"},
+        )
+
+    result = exc_info.value.result
+    assert result["partial_success"] == "user_accounts_partial"
+    assert result["mailbox"]["email"] == "jane-other@508.dev"
+    assert result["mailbox"]["crm_updated"] is False
+    assert result["mailbox"]["partial_success"] == "mailbox_created_address_mismatch"
     assert result["sso"] is None
     assert result["outline"] is None
 
