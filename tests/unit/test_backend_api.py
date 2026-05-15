@@ -29,7 +29,7 @@ class _FailingRedis:
         raise RuntimeError("redis unavailable")
 
 
-class _FakeAuthStore:
+class _FakeAuthStore(api.RedisAuthStore):
     def __init__(self) -> None:
         self.saved_links: dict[str, object] = {}
 
@@ -1391,6 +1391,31 @@ def test_auth_login_returns_503_when_store_not_ready(client: TestClient) -> None
     response = client.get("/auth/login")
     assert response.status_code == 503
     assert response.json()["error"] == "auth_not_ready"
+
+
+def test_auth_login_shows_recovery_page_when_oidc_not_configured(
+    app: api.FastAPI,
+) -> None:
+    app.state.auth_store = _FakeAuthStore()
+    client = TestClient(app)
+
+    response = client.get("/auth/login", headers={"Accept": "text/html"})
+
+    assert response.status_code == 503
+    assert "SSO is not configured" in response.text
+    assert "DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=false" in response.text
+
+
+def test_auth_login_returns_json_when_oidc_not_configured_for_json_client(
+    app: api.FastAPI,
+) -> None:
+    app.state.auth_store = _FakeAuthStore()
+    client = TestClient(app)
+
+    response = client.get("/auth/login", headers={"Accept": "application/json"})
+
+    assert response.status_code == 503
+    assert response.json()["error"] == "oidc_not_configured"
 
 
 def test_auth_me_requires_session(client: TestClient) -> None:

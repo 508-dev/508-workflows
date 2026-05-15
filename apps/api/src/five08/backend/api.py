@@ -90,6 +90,7 @@ from five08.backend.dashboard import (
     dashboard_assets_dir,
     dashboard_html,
     login_required_html,
+    oidc_not_configured_html,
 )
 from five08.worker.config import settings
 from five08.worker.db_migrations import run_job_migrations
@@ -540,6 +541,11 @@ def _dashboard_dev_sensitive_access_enabled() -> bool:
         "development",
         "test",
     }
+
+
+def _request_prefers_json(request: Request) -> bool:
+    accept = request.headers.get("accept", "").casefold()
+    return "application/json" in accept and "text/html" not in accept
 
 
 def _dashboard_permissions_for_identity(
@@ -3101,6 +3107,8 @@ async def auth_login_handler(
 
     oidc = _oidc_client_from_app(request.app)
     if not oidc.configured:
+        if not _request_prefers_json(request):
+            return HTMLResponse(oidc_not_configured_html(), status_code=503)
         return JSONResponse({"error": "oidc_not_configured"}, status_code=503)
 
     normalized_next_path = normalize_next_path(
