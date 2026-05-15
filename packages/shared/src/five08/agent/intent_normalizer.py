@@ -32,6 +32,9 @@ Rewrite the user's request into one supported command pattern when confident:
 - Create GitHub issue titled <title> [in repo owner/name]
 - Send member agreement to <name> at <email>
 - Create mailbox <mailbox> for <name> with backup email <email>
+- Create SSO user for <CRM contact ID or contact name>
+- Invite <email or CRM contact name> to Outline
+- Create 508 accounts for <CRM contact ID or contact name> with mailbox <mailbox>
 
 Do not invent IDs, emails, project names, repositories, or contact names.
 Use null when the request is small talk, help, a sensitive report/list request,

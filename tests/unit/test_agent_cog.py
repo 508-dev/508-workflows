@@ -157,6 +157,55 @@ def test_format_agent_response_renders_contact_results() -> None:
     assert "Sarah Example sarah@example.com contact-1" in message
 
 
+def test_format_agent_response_surfaces_sso_recovery_email_warning() -> None:
+    cog = AgentCog.__new__(AgentCog)
+
+    message = cog._format_agent_response(
+        {
+            "status": "executed",
+            "results": [
+                {
+                    "tool_name": "sso_write.create_user",
+                    "status": "succeeded",
+                    "result": {
+                        "user_id": 42,
+                        "recovery_email_error": "stage unavailable",
+                    },
+                }
+            ],
+        }
+    )
+
+    assert "- sso_write.create_user: succeeded" in message
+    assert "Recovery email failed: stage unavailable" in message
+
+
+def test_format_agent_response_surfaces_nested_sso_recovery_email_warning() -> None:
+    cog = AgentCog.__new__(AgentCog)
+
+    message = cog._format_agent_response(
+        {
+            "status": "executed",
+            "results": [
+                {
+                    "tool_name": "account_write.create_user_accounts",
+                    "status": "succeeded",
+                    "result": {
+                        "email": "jane@508.dev",
+                        "sso": {
+                            "user_id": 42,
+                            "recovery_email_error": "stage unavailable",
+                        },
+                    },
+                }
+            ],
+        }
+    )
+
+    assert "- account_write.create_user_accounts: succeeded" in message
+    assert "Recovery email failed: stage unavailable" in message
+
+
 def test_audit_result_treats_error_payload_as_error() -> None:
     assert (
         AgentCog._audit_result_for_agent_response(
@@ -440,7 +489,9 @@ async def test_agent_command_answers_help_without_backend() -> None:
     assert "I can help with:" in response
     assert "GitHub issues:" in response
     assert "CRM:" in response
-    assert "create 508 mailboxes" in response
+    assert "create 508 accounts" in response
+    assert "Authentik SSO users" in response
+    assert "Outline invites" in response
     assert "`/agent`" not in response
     cog._post_agent_request.assert_not_awaited()
     cog._audit_command_safe.assert_not_called()
@@ -848,7 +899,9 @@ async def test_agent_mention_answers_help_without_backend() -> None:
     assert "I can help with:" in response
     assert "GitHub issues:" in response
     assert "CRM:" in response
-    assert "create 508 mailboxes" in response
+    assert "create 508 accounts" in response
+    assert "Authentik SSO users" in response
+    assert "Outline invites" in response
     assert "Tasks:" not in response
     assert "Kimai" not in response
     assert "`/agent`" in response

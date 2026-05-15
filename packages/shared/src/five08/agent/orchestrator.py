@@ -18,11 +18,16 @@ from five08.agent.models import (
 )
 from five08.agent.model_routing import AgentModelConfig
 from five08.agent.policy import PolicyEngine
-from five08.agent.tools import ToolRegistry
+from five08.agent.tools import ToolPartialSuccessError, ToolRegistry
 from five08.clients.migadu import normalize_migadu_mailbox_domain
 
 _TASK_ID_RE = re.compile(r"\bTASK-\d+\b", re.IGNORECASE)
 _DATE_ISO_RE = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
+_CONTACT_ID_REFERENCE_RE = re.compile(
+    r"\b(?:crm\s+)?contact\s+([A-Za-z0-9_-]*\d[A-Za-z0-9_-]*)\b",
+    re.IGNORECASE,
+)
+_CONTACT_QUERY_PREFIX_RE = re.compile(r"^(?:crm\s+)?contact\s+", re.IGNORECASE)
 _MONTH_DATE_RE = re.compile(
     r"\b(january|february|march|april|may|june|july|august|september|october|november|december)"
     r"\s+(\d{1,2})(?:,\s*|\s+)(20\d{2})\b",
@@ -406,6 +411,15 @@ class AgentOrchestrator:
                         error=str(exc.args[0]) if exc.args else str(exc),
                     )
                 )
+            except ToolPartialSuccessError as exc:
+                results.append(
+                    AgentExecutionResult(
+                        tool_name=action.tool_name,
+                        status="failed",
+                        result=exc.result,
+                        error=str(exc),
+                    )
+                )
             except Exception as exc:
                 results.append(
                     AgentExecutionResult(
@@ -491,6 +505,16 @@ class AgentOrchestrator:
             keyword in lowered for keyword in ["send", "create", "submit"]
         ):
             return self._parse_member_agreement(text)
+        if "sso" in lowered and any(
+            keyword in lowered for keyword in ["create", "link", "provision"]
+        ):
+            return self._parse_sso_user_create(text)
+        if self._is_user_accounts_create_request(lowered):
+            return self._parse_user_accounts_create(text)
+        if "outline" in lowered and any(
+            keyword in lowered for keyword in ["invite", "add"]
+        ):
+            return self._parse_outline_invite(text)
         if "mailbox" in lowered and any(
             keyword in lowered for keyword in ["create", "provision"]
         ):
@@ -692,6 +716,129 @@ class AgentOrchestrator:
             },
             summary=f"Create mailbox {local_part} for {name}",
         )
+
+    @staticmethod
+    def _is_user_accounts_create_request(lowered: str) -> bool:
+        has_create = any(keyword in lowered for keyword in ["create", "provision"])
+        has_account_target = any(
+            keyword in lowered
+            for keyword in [
+                "508 account",
+                "508 accounts",
+                "user account",
+                "user accounts",
+                "account bundle",
+            ]
+        )
+        return has_create and has_account_target
+
+    def _parse_user_accounts_create(self, text: str) -> AgentToolAction | None:
+        mailbox_username = self._extract_mailbox_username(text)
+        contact_arguments = self._extract_contact_reference(text)
+        if mailbox_username is None or contact_arguments is None:
+            return None
+        arguments = dict(contact_arguments)
+        arguments["mailbox_username"] = mailbox_username
+        contact_label = contact_arguments.get("contact_id") or contact_arguments.get(
+            "contact_query"
+        )
+        return AgentToolAction(
+            tool_name="account_write.create_user_accounts",
+            arguments=arguments,
+            summary=f"Create 508 accounts for {contact_label}",
+        )
+
+    def _parse_sso_user_create(self, text: str) -> AgentToolAction | None:
+        contact_arguments = self._extract_contact_reference(text)
+        if contact_arguments is None:
+            return None
+        contact_label = contact_arguments.get("contact_id") or contact_arguments.get(
+            "contact_query"
+        )
+        return AgentToolAction(
+            tool_name="sso_write.create_user",
+            arguments=contact_arguments,
+            summary=f"Create or link SSO user for {contact_label}",
+        )
+
+    def _parse_outline_invite(self, text: str) -> AgentToolAction | None:
+        email_match = re.search(
+            r"\b([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})\b",
+            text,
+            re.IGNORECASE,
+        )
+        if email_match is not None:
+            email = email_match.group(1)
+            return AgentToolAction(
+                tool_name="outline_write.invite_user",
+                arguments={"email": email},
+                summary=f"Invite {email} to Outline",
+            )
+
+        contact_arguments = self._extract_outline_contact_reference(text)
+        if contact_arguments is None:
+            return None
+        contact_label = contact_arguments.get("contact_id") or contact_arguments.get(
+            "contact_query"
+        )
+        return AgentToolAction(
+            tool_name="outline_write.invite_user",
+            arguments=contact_arguments,
+            summary=f"Invite {contact_label} to Outline",
+        )
+
+    @staticmethod
+    def _extract_mailbox_username(text: str) -> str | None:
+        match = re.search(
+            r"\b(?:mailbox\s+username|mailbox|508\s+(?:email|address)|email|username)"
+            r"\s+(?:for\s+)?([A-Za-z0-9._%+-]+"
+            r"(?:@[A-Za-z0-9.-]+\.[A-Za-z]{2,})?)\b",
+            text,
+            re.IGNORECASE,
+        )
+        if match is None:
+            return None
+        return match.group(1).strip()
+
+    @staticmethod
+    def _extract_contact_reference(text: str) -> dict[str, str] | None:
+        contact_id_match = _CONTACT_ID_REFERENCE_RE.search(text)
+        if contact_id_match is not None:
+            return {"contact_id": contact_id_match.group(1)}
+
+        query_match = re.search(
+            r"\bfor\s+(.+?)(?=\s+(?:with|using|and)\s+"
+            r"(?:mailbox|508\s+(?:email|address)|email|username)\b|$)",
+            text,
+            re.IGNORECASE,
+        )
+        if query_match is None:
+            return None
+        query = _clean_text(
+            _CONTACT_QUERY_PREFIX_RE.sub("", query_match.group(1), count=1)
+        )
+        if not query:
+            return None
+        return {"contact_query": query}
+
+    @classmethod
+    def _extract_outline_contact_reference(cls, text: str) -> dict[str, str] | None:
+        contact_id_match = _CONTACT_ID_REFERENCE_RE.search(text)
+        if contact_id_match is not None:
+            return {"contact_id": contact_id_match.group(1)}
+
+        invite_match = re.search(
+            r"\b(?:invite|add)\s+(.+?)\s+to\s+outline\b",
+            text,
+            re.IGNORECASE,
+        )
+        if invite_match is not None:
+            query = _clean_text(
+                _CONTACT_QUERY_PREFIX_RE.sub("", invite_match.group(1), count=1)
+            )
+            if query:
+                return {"contact_query": query}
+        return cls._extract_contact_reference(text)
 
     @staticmethod
     def _extract_mailbox_backup_email(text: str) -> str | None:
@@ -1120,6 +1267,9 @@ class AgentOrchestrator:
             "crm_write.update_contact": "update_crm_contact",
             "docuseal_write.create_member_agreement_submission": "send_member_agreement",
             "mail_write.create_mailbox": "create_mailbox",
+            "sso_write.create_user": "create_sso_user",
+            "outline_write.invite_user": "invite_outline_user",
+            "account_write.create_user_accounts": "create_user_accounts",
         }.get(tool_name, "unknown")
 
     @staticmethod

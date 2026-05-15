@@ -1,0 +1,35 @@
+{
+  "version": "discord-agent-trajectory.v1",
+  "id": "outline_invite_confirmation_001",
+  "description": "Admins can draft an Outline invite behind confirmation.",
+  "tags": ["weekly", "outline", "write", "confirmation"],
+  "suite": {
+    "canonical": true,
+    "weekly": true
+  },
+  "context": {
+    "discord_user_id": "789",
+    "organization_id": "org-1",
+    "guild_id": "org-1",
+    "roles": ["Admin"]
+  },
+  "request": {
+    "message": "Invite jane@508.dev to Outline"
+  },
+  "expect": {
+    "status": "requires_confirmation",
+    "intent": "invite_outline_user",
+    "model_tier": "strong",
+    "requires_confirmation": true,
+    "actions": [
+      {
+        "tool_name": "outline_write.invite_user",
+        "requires_confirmation": true,
+        "required_scopes": ["integration:manage", "crm:contact:read"],
+        "arguments": {
+          "email": "jane@508.dev"
+        }
+      }
+    ]
+  }
+}

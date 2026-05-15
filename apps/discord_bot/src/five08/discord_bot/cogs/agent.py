@@ -562,7 +562,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             capabilities.extend(
                 [
                     "- CRM: search contacts, approve/reject onboarding, and submit member agreements.",
-                    "- Ops: create 508 mailboxes.",
+                    "- Ops: create 508 accounts, Authentik SSO users, Outline invites, and mailboxes.",
                 ]
             )
         if not capabilities:
@@ -1000,8 +1000,27 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                         lines.append(f"- {tool_name}: {result_status} ({result_error})")
                     else:
                         lines.append(f"- {tool_name}: {result_status}")
+                    recovery_email_error = self._result_recovery_email_error(
+                        result_payload
+                    )
+                    if recovery_email_error:
+                        lines.append(f"  Recovery email failed: {recovery_email_error}")
 
         return "\n".join(lines)[:1900]
+
+    @staticmethod
+    def _result_recovery_email_error(payload: object) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        direct_error = str(payload.get("recovery_email_error") or "").strip()
+        if direct_error:
+            return direct_error
+        sso_payload = payload.get("sso")
+        if isinstance(sso_payload, dict):
+            nested_error = str(sso_payload.get("recovery_email_error") or "").strip()
+            if nested_error:
+                return nested_error
+        return None
 
     @staticmethod
     def _format_issue_result_lines(

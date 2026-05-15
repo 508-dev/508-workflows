@@ -1,0 +1,42 @@
+{
+  "version": "discord-agent-trajectory.v1",
+  "id": "user_accounts_create_confirmation_001",
+  "description": "Admins can draft full 508 account provisioning behind confirmation.",
+  "tags": ["weekly", "accounts", "write", "confirmation"],
+  "suite": {
+    "canonical": true,
+    "weekly": true
+  },
+  "context": {
+    "discord_user_id": "789",
+    "organization_id": "org-1",
+    "guild_id": "org-1",
+    "roles": ["Admin"]
+  },
+  "request": {
+    "message": "Create 508 accounts for Jane Doe with mailbox jane@508.dev"
+  },
+  "expect": {
+    "status": "requires_confirmation",
+    "intent": "create_user_accounts",
+    "model_tier": "strong",
+    "requires_confirmation": true,
+    "actions": [
+      {
+        "tool_name": "account_write.create_user_accounts",
+        "requires_confirmation": true,
+        "required_scopes": [
+          "mailbox:create",
+          "user:manage",
+          "integration:manage",
+          "crm:contact:read",
+          "crm:contact:update"
+        ],
+        "arguments": {
+          "contact_query": "Jane Doe",
+          "mailbox_username": "jane@508.dev"
+        }
+      }
+    ]
+  }
+}
