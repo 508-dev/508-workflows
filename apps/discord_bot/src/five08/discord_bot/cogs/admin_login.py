@@ -97,6 +97,8 @@ class AdminLoginCog(DiscordAuditCogMixin, commands.Cog):
         try:
             await interaction.response.defer(ephemeral=True)
         except discord.NotFound as exc:
+            if getattr(exc, "code", None) != 10062:
+                raise
             logger.warning(
                 "Ignoring expired dashboard-login interaction for user_id=%s: %s",
                 interaction.user.id,

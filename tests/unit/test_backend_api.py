@@ -1418,6 +1418,21 @@ def test_auth_login_returns_json_when_oidc_not_configured_for_json_client(
     assert response.json()["error"] == "oidc_not_configured"
 
 
+def test_auth_login_honors_accept_quality_when_oidc_not_configured(
+    app: api.FastAPI,
+) -> None:
+    app.state.auth_store = _FakeAuthStore()
+    client = TestClient(app)
+
+    response = client.get(
+        "/auth/login",
+        headers={"Accept": "application/json, text/html;q=0.1"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"] == "oidc_not_configured"
+
+
 def test_auth_me_requires_session(client: TestClient) -> None:
     response = client.get("/auth/me")
     assert response.status_code == 401

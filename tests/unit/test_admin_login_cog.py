@@ -136,3 +136,28 @@ async def test_dashboard_login_command_ignores_expired_interaction(
     mock_create.assert_not_awaited()
     mock_audit.assert_not_called()
     mock_interaction.followup.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_dashboard_login_command_reraises_unexpected_not_found(
+    cog: AdminLoginCog, mock_interaction: AsyncMock
+) -> None:
+    response = Mock()
+    response.status = 404
+    response.reason = "Not Found"
+    error = discord.NotFound(
+        response,
+        {"code": 10_001, "message": "Unknown account"},
+    )
+    mock_interaction.response.defer.side_effect = error
+
+    with (
+        patch.object(cog, "_create_login_link", new=AsyncMock()) as mock_create,
+        patch.object(cog, "_audit") as mock_audit,
+        pytest.raises(discord.NotFound),
+    ):
+        await cog.dashboard_login.callback(cog, mock_interaction)
+
+    mock_create.assert_not_awaited()
+    mock_audit.assert_not_called()
+    mock_interaction.followup.send.assert_not_awaited()

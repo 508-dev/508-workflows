@@ -544,8 +544,47 @@ def _dashboard_dev_sensitive_access_enabled() -> bool:
 
 
 def _request_prefers_json(request: Request) -> bool:
-    accept = request.headers.get("accept", "").casefold()
-    return "application/json" in accept and "text/html" not in accept
+    accept = request.headers.get("accept", "")
+    if not accept.strip():
+        return False
+    return _accept_quality(accept, "application/json") > _accept_quality(
+        accept, "text/html"
+    )
+
+
+def _accept_quality(accept: str, media_type: str) -> float:
+    media_main, media_sub = media_type.casefold().split("/", 1)
+    best = 0.0
+    for item in accept.split(","):
+        parts = [part.strip() for part in item.split(";")]
+        if not parts or not parts[0]:
+            continue
+        accepted = parts[0].casefold()
+        try:
+            accepted_main, accepted_sub = accepted.split("/", 1)
+        except ValueError:
+            continue
+        if accepted_main not in {"*", media_main}:
+            continue
+        if accepted_sub not in {"*", media_sub}:
+            continue
+
+        quality = 1.0
+        for parameter in parts[1:]:
+            name, separator, value = parameter.partition("=")
+            if separator and name.strip().casefold() == "q":
+                with contextlib.suppress(ValueError):
+                    quality = float(value.strip())
+                break
+        best = max(best, min(max(quality, 0.0), 1.0))
+    return best
+
+
+class _OptionalDirectoryStaticFiles(StaticFiles):
+    """StaticFiles variant for generated assets that may appear after startup."""
+
+    async def check_config(self) -> None:
+        return None
 
 
 def _dashboard_permissions_for_identity(
@@ -3100,7 +3139,7 @@ async def auth_login_handler(
     request: Request,
     next_path: str | None = Query(default=None, alias="next"),
     discord_link_token: str | None = Query(default=None),
-) -> JSONResponse | RedirectResponse:
+) -> JSONResponse | RedirectResponse | HTMLResponse:
     """Start OIDC auth-code flow with PKCE and server-side state."""
     store = _auth_store_from_app(request.app)
     if store is None:
@@ -3796,12 +3835,11 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
         response_model=None,
     )
     assets_dir = dashboard_assets_dir()
-    if assets_dir.exists():
-        app.mount(
-            "/dashboard/assets",
-            StaticFiles(directory=assets_dir),
-            name="dashboard-assets",
-        )
+    app.mount(
+        "/dashboard/assets",
+        _OptionalDirectoryStaticFiles(directory=assets_dir, check_dir=False),
+        name="dashboard-assets",
+    )
     app.add_api_route(
         "/dashboard/{view}",
         dashboard_handler,
