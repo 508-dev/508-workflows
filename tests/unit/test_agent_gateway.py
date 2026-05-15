@@ -1378,6 +1378,24 @@ def test_user_accounts_create_treats_named_contact_as_lookup_query() -> None:
     }
 
 
+def test_user_accounts_create_accepts_mailbox_username_label() -> None:
+    orchestrator = AgentOrchestrator()
+
+    response = orchestrator.plan(
+        "Create 508 accounts for Jane Doe with mailbox username jane",
+        _context(roles=["Admin"]),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    action = response.plan.actions[0]
+    assert action.tool_name == "account_write.create_user_accounts"
+    assert action.arguments == {
+        "contact_query": "Jane Doe",
+        "mailbox_username": "jane",
+    }
+
+
 def test_user_accounts_create_is_admin_only() -> None:
     orchestrator = AgentOrchestrator()
 
@@ -1418,8 +1436,10 @@ def _install_account_tool_fakes(
     authentik_create_error: bool = False,
     authentik_reconcile_after_create_error: bool = False,
     authentik_created_user: dict[str, Any] | None = None,
+    fail_recovery_stage_resolution: bool = False,
     migadu_address: str | None = None,
 ) -> SimpleNamespace:
+    events: list[str] = []
     initial_contact = contact or {
         "id": "contact-1",
         "name": "Jane Doe",
@@ -1506,6 +1526,9 @@ def _install_account_tool_fakes(
             stage_id: str | None = None,
             page_size: int = 20,
         ) -> str:
+            events.append("resolve_recovery_stage")
+            if fail_recovery_stage_resolution:
+                raise AuthentikAPIError("Recovery stage not found")
             return stage_id or "stage-1"
 
         def create_user(
@@ -1521,6 +1544,7 @@ def _install_account_tool_fakes(
             roles: list[str] | None = None,
             attributes: dict[str, Any] | None = None,
         ) -> dict[str, Any]:
+            events.append("create_sso_user")
             self.create_attempted = True
             if authentik_create_error:
                 raise AuthentikAPIError("Authentik create timed out")
@@ -1560,6 +1584,7 @@ def _install_account_tool_fakes(
             self.domain = domain
 
         def create_mailbox(self, request: object) -> dict[str, Any]:
+            events.append("create_mailbox")
             local_part = str(getattr(request, "local_part"))
             mailbox = {"address": migadu_address or f"{local_part}@{self.domain}"}
             self.created_mailboxes.append(mailbox)
@@ -1600,6 +1625,7 @@ def _install_account_tool_fakes(
         authentik=FakeAuthentikClient,
         migadu=FakeMigaduClient,
         outline=FakeOutlineClient,
+        events=events,
     )
 
 
@@ -1632,6 +1658,17 @@ def test_contact_search_filters_expand_short_508_domain() -> None:
     registry = ToolRegistry(runtime_config=_account_runtime_config())
 
     filters = registry._contact_search_filters("jane@508")  # noqa: SLF001
+
+    assert filters == [
+        {"type": "equals", "attribute": "emailAddress", "value": "jane@508.dev"},
+        {"type": "equals", "attribute": "c508Email", "value": "jane@508.dev"},
+    ]
+
+
+def test_contact_search_filters_lowercase_email_queries() -> None:
+    registry = ToolRegistry(runtime_config=_account_runtime_config())
+
+    filters = registry._contact_search_filters("Jane@508")  # noqa: SLF001
 
     assert filters == [
         {"type": "equals", "attribute": "emailAddress", "value": "jane@508.dev"},
@@ -1837,6 +1874,38 @@ def test_sso_user_tool_reconciles_after_authentik_create_error(
     assert ("contact-1", {"cSsoID": "42"}) in fakes.espo.updates
 
 
+def test_sso_user_tool_continues_when_recovery_stage_resolution_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fakes = _install_account_tool_fakes(
+        monkeypatch,
+        contact={
+            "id": "contact-1",
+            "name": "Jane Doe",
+            "emailAddress": "jane@example.com",
+            "c508Email": "jane@508.dev",
+            "cSsoID": None,
+        },
+        fail_recovery_stage_resolution=True,
+    )
+    registry = ToolRegistry(runtime_config=_account_runtime_config())
+
+    result = registry.execute(
+        "sso_write.create_user",
+        {"contact_id": "contact-1"},
+        organization_id="org-1",
+        actor_id="123",
+        actor_scopes={"user:manage", "crm:contact:read", "crm:contact:update"},
+    )
+
+    assert result["user_id"] == 42
+    assert result["created"] is True
+    assert result["crm_updated"] is True
+    assert result["recovery_email_error"] == "Recovery stage not found"
+    assert fakes.authentik.recovery_emails == []
+    assert ("contact-1", {"cSsoID": "42"}) in fakes.espo.updates
+
+
 def test_outline_invite_tool_executes_direct_email(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1955,6 +2024,36 @@ def test_user_accounts_tool_preflights_before_mailbox_creation(
 
     assert fakes.migadu.created_mailboxes == []
     assert fakes.espo.updates == []
+
+
+def test_user_accounts_tool_preflights_recovery_stage_before_mailbox_creation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fakes = _install_account_tool_fakes(
+        monkeypatch,
+        fail_recovery_stage_resolution=True,
+    )
+    registry = ToolRegistry(runtime_config=_account_runtime_config())
+
+    result = registry.execute(
+        "account_write.create_user_accounts",
+        {"contact_id": "contact-1", "mailbox_username": "jane@508.dev"},
+        organization_id="org-1",
+        actor_id="123",
+        actor_scopes={
+            "mailbox:create",
+            "user:manage",
+            "integration:manage",
+            "crm:contact:read",
+            "crm:contact:update",
+        },
+    )
+
+    assert result["mailbox"]["email"] == "jane@508.dev"
+    assert result["sso"]["recovery_email_error"] == "Recovery stage not found"
+    assert fakes.events.index("resolve_recovery_stage") < fakes.events.index(
+        "create_mailbox"
+    )
 
 
 def test_user_accounts_tool_partial_result_preserves_created_mailbox(

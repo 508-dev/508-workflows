@@ -684,7 +684,8 @@ class ToolRegistry:
         if not normalized:
             return []
         if "@" in normalized:
-            local_part, _, domain = normalized.partition("@")
+            email_query = normalized.lower()
+            local_part, _, domain = email_query.partition("@")
             configured_domain = normalize_migadu_mailbox_domain(
                 self.runtime_config.migadu_mailbox_domain
             )
@@ -694,7 +695,7 @@ class ToolRegistry:
             email = (
                 f"{local_part}@{configured_domain}"
                 if local_part and domain.casefold() in domain_aliases
-                else normalized
+                else email_query
             )
             return [
                 {"type": "equals", "attribute": "emailAddress", "value": email},
@@ -779,17 +780,10 @@ class ToolRegistry:
                     expected_email=email,
                 )
             else:
-                recovery_email_stage_id = client.resolve_email_stage_id(
-                    stage_id=_optional_str(
-                        self.runtime_config.authentik_recovery_email_stage_id
-                    ),
-                    stage_name=(
-                        _optional_str(
-                            self.runtime_config.authentik_recovery_email_stage_name
-                        )
-                        or "default-recovery-email"
-                    ),
-                )
+                (
+                    recovery_email_stage_id,
+                    recovery_email_error,
+                ) = self._resolve_recovery_email_stage_id(client)
                 try:
                     user = client.create_user(
                         username=username,
@@ -844,7 +838,7 @@ class ToolRegistry:
                             result,
                         ) from exc
                     raise
-                if created:
+                if created and recovery_email_stage_id is not None:
                     try:
                         client.send_recovery_email(
                             user_id=user_id,
@@ -993,6 +987,25 @@ class ToolRegistry:
             )
         return _authentik_user_pk(user)
 
+    def _resolve_recovery_email_stage_id(
+        self, client: AuthentikClient
+    ) -> tuple[str | None, str | None]:
+        try:
+            stage_id = client.resolve_email_stage_id(
+                stage_id=_optional_str(
+                    self.runtime_config.authentik_recovery_email_stage_id
+                ),
+                stage_name=(
+                    _optional_str(
+                        self.runtime_config.authentik_recovery_email_stage_name
+                    )
+                    or "default-recovery-email"
+                ),
+            )
+        except AuthentikAPIError as exc:
+            return None, _short_error(exc)
+        return stage_id, None
+
     def _invite_outline_user(self, arguments: dict[str, Any]) -> dict[str, Any]:
         direct_email = _optional_str(arguments.get("email"))
         if direct_email is not None:
@@ -1111,8 +1124,10 @@ class ToolRegistry:
         contact: dict[str, Any],
         mailbox_username: str,
     ) -> None:
-        self._authentik_client()
+        authentik_client = self._authentik_client()
         self._outline_client()
+        if self._crm_sso_id(contact) is None:
+            self._resolve_recovery_email_stage_id(authentik_client)
         target_email, _local_part = self._normalize_mailbox_username(mailbox_username)
         existing_email = self._normalize_508_email(contact.get("c508Email"))
         if existing_email is None:

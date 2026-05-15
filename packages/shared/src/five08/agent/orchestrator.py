@@ -790,7 +790,7 @@ class AgentOrchestrator:
     @staticmethod
     def _extract_mailbox_username(text: str) -> str | None:
         match = re.search(
-            r"\b(?:mailbox|508\s+(?:email|address)|email|username)"
+            r"\b(?:mailbox\s+username|mailbox|508\s+(?:email|address)|email|username)"
             r"\s+(?:for\s+)?([A-Za-z0-9._%+-]+"
             r"(?:@[A-Za-z0-9.-]+\.[A-Za-z]{2,})?)\b",
             text,
