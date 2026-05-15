@@ -27,7 +27,9 @@ describe("dashboard utility helpers", () => {
   it("builds only trusted profile URLs", () => {
     expect(linkedinUrl("linkedin.com/in/bea-prospect")).toBe("https://linkedin.com/in/bea-prospect")
     expect(linkedinUrl("https://example.com/in/bea-prospect")).toBe("")
+    expect(linkedinUrl("/in/jane-doe")).toBe("https://www.linkedin.com/in/jane-doe")
     expect(githubUrl("@beaprospect")).toBe("https://github.com/beaprospect")
+    expect(githubUrl("/octocat/")).toBe("https://github.com/octocat")
     expect(githubUrl("https://github.com/508-dev")).toBe("https://github.com/508-dev")
   })
 

@@ -12,6 +12,7 @@ export type OnboardingStateCarrier = {
   onboarding_state?: string
   onboardingState?: string
   cOnboardingState?: string
+  onboarding_status_label?: string
 }
 
 const onboardingStateLabels: Record<string, string> = {
@@ -95,14 +96,25 @@ function hostMatches(hostname: string, domain: string) {
   return normalized === domain || normalized.endsWith(`.${domain}`)
 }
 
+function encodePathFragment(value: string) {
+  return value
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => encodeURIComponent(segment))
+    .join("/")
+}
+
 export function linkedinUrl(value?: string) {
   const raw = String(value || "").trim()
   if (!raw) return ""
   const url = parsedExternalUrl(raw)
   if (url && hostMatches(url.hostname, "linkedin.com")) return url.href
   if (/^https?:\/\//i.test(raw)) return ""
-  const profile = raw.replace(/^@/, "").replace(/^\/+/, "")
-  return profile ? `https://www.linkedin.com/in/${encodeURIComponent(profile)}` : ""
+  const profile = raw
+    .replace(/^@/, "")
+    .replace(/^\/+|\/+$/g, "")
+    .replace(/^in\//i, "")
+  return profile ? `https://www.linkedin.com/in/${encodePathFragment(profile)}` : ""
 }
 
 export function githubUrl(value?: string) {
@@ -113,5 +125,6 @@ export function githubUrl(value?: string) {
   const url = parsedExternalUrl(raw)
   if (url && hostMatches(url.hostname, "github.com")) return url.href
   if (/^https?:\/\//i.test(raw)) return ""
-  return `https://github.com/${encodeURIComponent(raw.replace(/^\/+/, ""))}`
+  const profile = raw.replace(/^\/+|\/+$/g, "")
+  return profile ? `https://github.com/${encodePathFragment(profile)}` : ""
 }

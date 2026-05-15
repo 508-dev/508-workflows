@@ -1443,6 +1443,7 @@ def _assign_dashboard_onboarder_in_crm(
         "onboarder": onboarder_username,
         "previous_state": normalized_state or None,
         "onboarding_state": resulting_state or None,
+        "onboarding_status_label": _onboarding_status_label(resulting_state),
         "state_updated": state_updated,
     }
 

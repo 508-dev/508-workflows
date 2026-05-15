@@ -2190,6 +2190,7 @@ def test_dashboard_assign_onboarder_updates_crm_and_audits(
     assert payload["onboarder"] == "jane"
     assert payload["previous_state"] == "pending"
     assert payload["onboarding_state"] == "selected"
+    assert payload["onboarding_status_label"] == "Assigned to onboarder"
     assert payload["state_updated"] is True
     assert payload["sync_job_id"] == "sync-job-1"
     assert espo_client.request.call_args_list[0].args == (

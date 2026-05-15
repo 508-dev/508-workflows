@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
 from pathlib import Path
 
 
@@ -198,9 +197,8 @@ def oidc_not_configured_html() -> str:
 """
 
 
-@lru_cache(maxsize=1)
 def dashboard_html() -> str:
-    """Return the self-contained dashboard document."""
+    """Return the built dashboard HTML shell, or a temporary build-missing fallback."""
     index_path = DASHBOARD_STATIC_DIR / "index.html"
     if index_path.exists():
         html = index_path.read_text(encoding="utf-8")

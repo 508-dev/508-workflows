@@ -17,6 +17,8 @@ eggs/
 .eggs/
 lib/
 lib64/
+!apps/admin_dashboard/src/lib/
+!apps/admin_dashboard/src/lib/**
 parts/
 sdist/
 var/

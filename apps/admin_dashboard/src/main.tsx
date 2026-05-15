@@ -8,7 +8,7 @@ import {
   ShieldCheck,
   Users,
 } from "lucide-react"
-import { StrictMode, useEffect, useMemo, useState } from "react"
+import { StrictMode, useEffect, useMemo, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
 
 import { Badge } from "@/components/ui/badge"
@@ -76,6 +76,7 @@ type Person = {
   onboarding_state?: string
   onboardingState?: string
   cOnboardingState?: string
+  onboarding_status_label?: string
   onboarder?: string
   onboarding_updated_at?: string
   sync_status?: string
@@ -199,8 +200,8 @@ async function requestJson<T>(url: string, options: RequestInit = {}): Promise<T
     headers,
   })
   if (response.status === 401) {
-    const next = `${window.location.pathname}${window.location.search}`
-    window.location.assign(next || "/dashboard")
+    const next = `${window.location.pathname}${window.location.search}` || "/dashboard"
+    window.location.assign(`/auth/login?next=${encodeURIComponent(next)}`)
     throw new Error("Session expired")
   }
   if (!response.ok) {
@@ -295,11 +296,35 @@ function SortButton({
       type="button"
       data-sort-scope={scope}
       data-sort-key={sortKey}
-      className="text-left font-inherit text-inherit hover:text-foreground"
+      className="text-left font-[inherit] text-inherit hover:text-foreground"
       onClick={() => onSort(scope, sortKey)}
     >
       {active ? `${label} ${arrow}` : label}
     </button>
+  )
+}
+
+function SortableTableHead({
+  className,
+  label,
+  scope,
+  sort,
+  sortKey,
+  onSort,
+}: {
+  className?: string
+  label: string
+  scope: View
+  sort: { key: string; direction: SortDirection }
+  sortKey: string
+  onSort: (scope: View, key: string) => void
+}) {
+  const ariaSort =
+    sort.key === sortKey ? (sort.direction === "asc" ? "ascending" : "descending") : "none"
+  return (
+    <TableHead className={className} aria-sort={ariaSort}>
+      <SortButton label={label} scope={scope} sort={sort} sortKey={sortKey} onSort={onSort} />
+    </TableHead>
   )
 }
 
@@ -356,6 +381,7 @@ function App() {
   const [onboardingFilters, setOnboardingFilters] = useState<FilterState>({})
   const [onboardingFilterKind, setOnboardingFilterKind] = useState<PeopleFilterKey>("discord")
   const [onboardingFilterValue, setOnboardingFilterValue] = useState("linked")
+  const navigateRef = useRef<(nextView: View, push?: boolean) => void>(() => undefined)
 
   function can(permission: string) {
     return permissions.includes(permission)
@@ -393,6 +419,7 @@ function App() {
       window.history.replaceState({ view: normalized }, "", routes[normalized])
     }
   }
+  navigateRef.current = navigate
 
   function ssoLoginUrl(nextView: View) {
     return `/auth/login?next=${encodeURIComponent(routes[nextView])}`
@@ -584,6 +611,7 @@ function App() {
         contact_id: string
         onboarder: string
         onboarding_state?: string
+        onboarding_status_label?: string
         state_updated?: boolean
       }>(`/dashboard/api/onboarding/${encodeURIComponent(normalizedContactId)}/onboarder`, {
         method: "POST",
@@ -600,6 +628,9 @@ function App() {
                   payload.state_updated && payload.onboarding_state
                     ? payload.onboarding_state
                     : person.onboarding_state,
+                onboarding_status_label:
+                  payload.onboarding_status_label ||
+                  (payload.state_updated ? undefined : person.onboarding_status_label),
               }
             : person,
         ),
@@ -625,12 +656,17 @@ function App() {
     }
   }
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: dashboard bootstrap should run once; popstate uses a ref for live navigation state.
   useEffect(() => {
     loadUser()
       .then((nextPermissions) => {
         const currentView = viewFromPath()
         const allowed = nextPermissions.includes(routePermissions[currentView])
-        const nextView = allowed ? currentView : firstAllowedView()
+        const nextView = allowed
+          ? currentView
+          : (Object.keys(routes) as View[]).find((candidate) =>
+              nextPermissions.includes(routePermissions[candidate]),
+            ) || "people"
         setViewState(nextView)
         if (!Object.hasOwn(routes, rawViewFromPath()) || nextView !== currentView) {
           window.history.replaceState({ view: nextView }, "", routes[nextView])
@@ -639,23 +675,25 @@ function App() {
       .catch((error: unknown) => {
         showToast(error instanceof Error ? error.message : "Dashboard failed to load", "error")
       })
-
-    const onPopState = () => navigate(viewFromPath(), false)
-    window.addEventListener("popstate", onPopState)
-    return () => window.removeEventListener("popstate", onPopState)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
+    const onPopState = () => navigateRef.current(viewFromPath(), false)
+    window.addEventListener("popstate", onPopState)
+    return () => window.removeEventListener("popstate", onPopState)
+  }, [])
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: each loader reads the latest filter state for the active view.
+  useEffect(() => {
     if (permissions.length === 0) return
     if (view === "people") void loadPeople()
     if (view === "onboarding") void loadOnboarding()
     if (view === "jobs") void loadJobs()
     if (view === "agent") void loadAgentReport()
     if (view === "audit") void loadAuditEvents()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view])
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: permission loading is the first authorized data fetch for the current view.
   useEffect(() => {
     if (permissions.length === 0) return
     if (view === "people") void loadPeople()
@@ -663,32 +701,31 @@ function App() {
     if (view === "jobs") void loadJobs()
     if (view === "agent") void loadAgentReport()
     if (view === "audit") void loadAuditEvents()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [permissions])
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: jobs reload intentionally follows filter changes only while jobs is active.
   useEffect(() => {
     if (view === "jobs" && permissions.length > 0) void loadJobs()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [minutes, status])
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: people reload intentionally follows membership filter changes only while people is active.
   useEffect(() => {
     if (view === "people" && permissions.length > 0) void loadPeople()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [peopleMember])
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: people reload intentionally follows chip filter changes only while people is active.
   useEffect(() => {
     if (view === "people" && permissions.length > 0) void loadPeople()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [peopleFilters])
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: onboarding reload intentionally follows state filter changes only while onboarding is active.
   useEffect(() => {
     if (view === "onboarding" && permissions.length > 0) void loadOnboarding()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [onboardingState])
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: onboarding reload intentionally follows chip filter changes only while onboarding is active.
   useEffect(() => {
     if (view === "onboarding" && permissions.length > 0) void loadOnboarding()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [onboardingFilters])
 
   const sortedJobs = useMemo(() => sortItems("jobs", jobs, sort.jobs), [jobs, sort.jobs])
@@ -819,7 +856,7 @@ function App() {
                 className={cn(
                   "flex min-h-10 items-center gap-2 rounded-md border border-transparent px-3 text-sm font-extrabold text-muted-foreground hover:border-border hover:bg-secondary hover:text-foreground",
                   view === key && "border-primary bg-accent text-accent-foreground",
-                  !allowed && "opacity-55",
+                  !allowed && "opacity-60",
                 )}
                 data-view-link={key}
                 data-permission={routePermissions[key]}
@@ -1140,42 +1177,38 @@ function PeopleView(props: {
         >
           <TableHeader>
             <TableRow>
-              <TableHead className="w-[27%]">
-                <SortButton
-                  label="Name"
-                  scope="people"
-                  sort={props.sort}
-                  sortKey="name"
-                  onSort={(_, key) => props.onSort(key)}
-                />
-              </TableHead>
-              <TableHead className="w-[28%]">
-                <SortButton
-                  label="Status"
-                  scope="people"
-                  sort={props.sort}
-                  sortKey="status"
-                  onSort={(_, key) => props.onSort(key)}
-                />
-              </TableHead>
-              <TableHead className="w-[20%]">
-                <SortButton
-                  label="Discord"
-                  scope="people"
-                  sort={props.sort}
-                  sortKey="discord"
-                  onSort={(_, key) => props.onSort(key)}
-                />
-              </TableHead>
-              <TableHead className="w-[25%]">
-                <SortButton
-                  label="Resume / skills"
-                  scope="people"
-                  sort={props.sort}
-                  sortKey="resume"
-                  onSort={(_, key) => props.onSort(key)}
-                />
-              </TableHead>
+              <SortableTableHead
+                className="w-[27%]"
+                label="Name"
+                scope="people"
+                sort={props.sort}
+                sortKey="name"
+                onSort={(_, key) => props.onSort(key)}
+              />
+              <SortableTableHead
+                className="w-[28%]"
+                label="Status"
+                scope="people"
+                sort={props.sort}
+                sortKey="status"
+                onSort={(_, key) => props.onSort(key)}
+              />
+              <SortableTableHead
+                className="w-[20%]"
+                label="Discord"
+                scope="people"
+                sort={props.sort}
+                sortKey="discord"
+                onSort={(_, key) => props.onSort(key)}
+              />
+              <SortableTableHead
+                className="w-[25%]"
+                label="Resume / skills"
+                scope="people"
+                sort={props.sort}
+                sortKey="resume"
+                onSort={(_, key) => props.onSort(key)}
+              />
             </TableRow>
           </TableHeader>
           <TableBody id="peopleBody">
@@ -1400,52 +1433,47 @@ function OnboardingView(props: {
         >
           <TableHeader>
             <TableRow>
-              <TableHead className="w-[20%]">
-                <SortButton
-                  label="Name"
-                  scope="onboarding"
-                  sort={props.sort}
-                  sortKey="name"
-                  onSort={(_, key) => props.onSort(key)}
-                />
-              </TableHead>
-              <TableHead className="w-[13%]">
-                <SortButton
-                  label="Status"
-                  scope="onboarding"
-                  sort={props.sort}
-                  sortKey="onboarding_state"
-                  onSort={(_, key) => props.onSort(key)}
-                />
-              </TableHead>
-              <TableHead className="w-[22%]">
-                <SortButton
-                  label="Onboarder"
-                  scope="onboarding"
-                  sort={props.sort}
-                  sortKey="onboarder"
-                  onSort={(_, key) => props.onSort(key)}
-                />
-              </TableHead>
-              <TableHead className="w-[13%]">
-                <SortButton
-                  label="Updated"
-                  scope="onboarding"
-                  sort={props.sort}
-                  sortKey="updated"
-                  onSort={(_, key) => props.onSort(key)}
-                />
-              </TableHead>
+              <SortableTableHead
+                className="w-[20%]"
+                label="Name"
+                scope="onboarding"
+                sort={props.sort}
+                sortKey="name"
+                onSort={(_, key) => props.onSort(key)}
+              />
+              <SortableTableHead
+                className="w-[13%]"
+                label="Status"
+                scope="onboarding"
+                sort={props.sort}
+                sortKey="onboarding_state"
+                onSort={(_, key) => props.onSort(key)}
+              />
+              <SortableTableHead
+                className="w-[22%]"
+                label="Onboarder"
+                scope="onboarding"
+                sort={props.sort}
+                sortKey="onboarder"
+                onSort={(_, key) => props.onSort(key)}
+              />
+              <SortableTableHead
+                className="w-[13%]"
+                label="Updated"
+                scope="onboarding"
+                sort={props.sort}
+                sortKey="updated"
+                onSort={(_, key) => props.onSort(key)}
+              />
               <TableHead className="w-[15%]">Links</TableHead>
-              <TableHead className="w-[17%]">
-                <SortButton
-                  label="Needs"
-                  scope="onboarding"
-                  sort={props.sort}
-                  sortKey="profile_gaps"
-                  onSort={(_, key) => props.onSort(key)}
-                />
-              </TableHead>
+              <SortableTableHead
+                className="w-[17%]"
+                label="Needs"
+                scope="onboarding"
+                sort={props.sort}
+                sortKey="profile_gaps"
+                onSort={(_, key) => props.onSort(key)}
+              />
             </TableRow>
           </TableHeader>
           <TableBody id="onboardingBody">
@@ -1512,7 +1540,7 @@ function OnboardingRow({
       </TableCell>
       <TableCell>
         <Badge variant={toneForOnboardingState(onboardingStateValue(person))}>
-          {labelForOnboardingState(onboardingStateValue(person))}
+          {person.onboarding_status_label || labelForOnboardingState(onboardingStateValue(person))}
         </Badge>
       </TableCell>
       <TableCell>
@@ -1690,51 +1718,46 @@ function JobsView(props: {
           >
             <TableHeader>
               <TableRow>
-                <TableHead className="w-[22%]">
-                  <SortButton
-                    label="Job id"
-                    scope="jobs"
-                    sort={props.sort}
-                    sortKey="job_id"
-                    onSort={(_, key) => props.onSort(key)}
-                  />
-                </TableHead>
-                <TableHead className="w-[24%]">
-                  <SortButton
-                    label="Type"
-                    scope="jobs"
-                    sort={props.sort}
-                    sortKey="type"
-                    onSort={(_, key) => props.onSort(key)}
-                  />
-                </TableHead>
-                <TableHead className="w-[12%]">
-                  <SortButton
-                    label="Status"
-                    scope="jobs"
-                    sort={props.sort}
-                    sortKey="status"
-                    onSort={(_, key) => props.onSort(key)}
-                  />
-                </TableHead>
-                <TableHead className="w-[12%]">
-                  <SortButton
-                    label="Attempts"
-                    scope="jobs"
-                    sort={props.sort}
-                    sortKey="attempts"
-                    onSort={(_, key) => props.onSort(key)}
-                  />
-                </TableHead>
-                <TableHead className="w-[18%]">
-                  <SortButton
-                    label="Updated"
-                    scope="jobs"
-                    sort={props.sort}
-                    sortKey="updated_at"
-                    onSort={(_, key) => props.onSort(key)}
-                  />
-                </TableHead>
+                <SortableTableHead
+                  className="w-[22%]"
+                  label="Job id"
+                  scope="jobs"
+                  sort={props.sort}
+                  sortKey="job_id"
+                  onSort={(_, key) => props.onSort(key)}
+                />
+                <SortableTableHead
+                  className="w-[24%]"
+                  label="Type"
+                  scope="jobs"
+                  sort={props.sort}
+                  sortKey="type"
+                  onSort={(_, key) => props.onSort(key)}
+                />
+                <SortableTableHead
+                  className="w-[12%]"
+                  label="Status"
+                  scope="jobs"
+                  sort={props.sort}
+                  sortKey="status"
+                  onSort={(_, key) => props.onSort(key)}
+                />
+                <SortableTableHead
+                  className="w-[12%]"
+                  label="Attempts"
+                  scope="jobs"
+                  sort={props.sort}
+                  sortKey="attempts"
+                  onSort={(_, key) => props.onSort(key)}
+                />
+                <SortableTableHead
+                  className="w-[18%]"
+                  label="Updated"
+                  scope="jobs"
+                  sort={props.sort}
+                  sortKey="updated_at"
+                  onSort={(_, key) => props.onSort(key)}
+                />
                 <TableHead>Actions</TableHead>
               </TableRow>
             </TableHeader>
@@ -1858,42 +1881,38 @@ function AuditView(props: {
         >
           <TableHeader>
             <TableRow>
-              <TableHead className="w-[24%]">
-                <SortButton
-                  label="Time"
-                  scope="audit"
-                  sort={props.sort}
-                  sortKey="occurred_at"
-                  onSort={(_, key) => props.onSort(key)}
-                />
-              </TableHead>
-              <TableHead className="w-[28%]">
-                <SortButton
-                  label="Actor"
-                  scope="audit"
-                  sort={props.sort}
-                  sortKey="actor"
-                  onSort={(_, key) => props.onSort(key)}
-                />
-              </TableHead>
-              <TableHead className="w-[28%]">
-                <SortButton
-                  label="Action"
-                  scope="audit"
-                  sort={props.sort}
-                  sortKey="action"
-                  onSort={(_, key) => props.onSort(key)}
-                />
-              </TableHead>
-              <TableHead className="w-[20%]">
-                <SortButton
-                  label="Result"
-                  scope="audit"
-                  sort={props.sort}
-                  sortKey="result"
-                  onSort={(_, key) => props.onSort(key)}
-                />
-              </TableHead>
+              <SortableTableHead
+                className="w-[24%]"
+                label="Time"
+                scope="audit"
+                sort={props.sort}
+                sortKey="occurred_at"
+                onSort={(_, key) => props.onSort(key)}
+              />
+              <SortableTableHead
+                className="w-[28%]"
+                label="Actor"
+                scope="audit"
+                sort={props.sort}
+                sortKey="actor"
+                onSort={(_, key) => props.onSort(key)}
+              />
+              <SortableTableHead
+                className="w-[28%]"
+                label="Action"
+                scope="audit"
+                sort={props.sort}
+                sortKey="action"
+                onSort={(_, key) => props.onSort(key)}
+              />
+              <SortableTableHead
+                className="w-[20%]"
+                label="Result"
+                scope="audit"
+                sort={props.sort}
+                sortKey="result"
+                onSort={(_, key) => props.onSort(key)}
+              />
             </TableRow>
           </TableHeader>
           <TableBody id="auditBody">
