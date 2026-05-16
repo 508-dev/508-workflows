@@ -113,6 +113,8 @@ class DiscordLinkGrant:
 
     discord_user_id: str
     next_path: str
+    discord_roles: list[str] = field(default_factory=list)
+    discord_display_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -221,6 +223,10 @@ class RedisAuthStore:
             return DiscordLinkGrant(
                 discord_user_id=str(value["discord_user_id"]),
                 next_path=str(value["next_path"]),
+                discord_roles=_to_string_list(value.get("discord_roles")),
+                discord_display_name=_to_optional_str(
+                    value.get("discord_display_name")
+                ),
             )
         except Exception:
             logger.warning("Invalid discord-link payload in Redis")

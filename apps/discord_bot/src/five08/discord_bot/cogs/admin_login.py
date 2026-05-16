@@ -34,8 +34,18 @@ class AdminLoginCog(DiscordAuditCogMixin, commands.Cog):
             "Content-Type": "application/json",
         }
 
-    async def _create_login_link(self, *, discord_user_id: str) -> tuple[str, int]:
-        payload = {"discord_user_id": discord_user_id}
+    async def _create_login_link(
+        self,
+        *,
+        discord_user_id: str,
+        discord_display_name: str | None = None,
+        discord_roles: list[str] | None = None,
+    ) -> tuple[str, int]:
+        payload = {
+            "discord_user_id": discord_user_id,
+            "discord_display_name": discord_display_name,
+            "discord_roles": discord_roles or [],
+        }
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 self._backend_url("/auth/discord/links"),
@@ -107,8 +117,20 @@ class AdminLoginCog(DiscordAuditCogMixin, commands.Cog):
             return
 
         try:
+            raw_roles = getattr(interaction.user, "roles", [])
+            discord_roles = [
+                str(getattr(role, "name", "")).strip()
+                for role in raw_roles
+                if str(getattr(role, "name", "")).strip()
+            ]
+            raw_display_name = getattr(interaction.user, "display_name", None)
+            discord_display_name = (
+                str(raw_display_name).strip() if raw_display_name is not None else None
+            )
             link_url, expires_in_seconds = await self._create_login_link(
                 discord_user_id=str(interaction.user.id),
+                discord_display_name=discord_display_name or None,
+                discord_roles=discord_roles,
             )
         except ValueError as exc:
             self._audit(

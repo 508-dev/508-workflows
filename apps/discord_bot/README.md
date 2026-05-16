@@ -134,7 +134,9 @@ Relevant configuration:
   - Required role: validated by the backend against active CRM-linked Discord roles. Steering Committee+ can access CRM/onboarding dashboard views; Admin/Owner roles can receive admin permissions, with sensitive job/audit/sync views requiring SSO validation.
   - Behavior:
     - Calls backend `POST /auth/discord/links` using `API_SHARED_SECRET`.
+    - Sends the invoking member's Discord role names so local/dev/test backends can authorize links when the local people cache is empty.
     - Returns an ephemeral one-time URL with expiry.
+    - Opening the URL loads a short browser page that automatically continues with a POST. The link is not consumed by the initial GET, so normal Discord link previews and security scanners do not burn the token.
 
 - `/create-mailbox`
   - Description: Create a Migadu mailbox for a 508 user, optionally link it to a CRM contact, and sync `c508Email`.

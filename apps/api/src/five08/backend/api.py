@@ -24,7 +24,7 @@ import uvicorn
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 from psycopg import Connection
 from psycopg.rows import dict_row
 
@@ -75,6 +75,7 @@ from five08.backend.auth import (
     DASHBOARD_PERMISSION_PEOPLE_SYNC,
     DASHBOARD_SENSITIVE_PERMISSIONS,
     DiscordAdminVerifier,
+    DiscordAdminIdentity,
     DiscordLinkGrant,
     OIDCProviderClient,
     PendingOIDCState,
@@ -91,6 +92,8 @@ from five08.backend.auth import (
 from five08.backend.dashboard import (
     dashboard_assets_dir,
     dashboard_html,
+    discord_link_continue_html,
+    discord_link_unavailable_html,
     login_required_html,
     oidc_not_configured_html,
 )
@@ -145,6 +148,8 @@ class DiscordLinkCreateRequest(BaseModel):
 
     discord_user_id: str
     next_path: str | None = None
+    discord_display_name: str | None = None
+    discord_roles: list[str] = Field(default_factory=list)
 
 
 class AgentConfirmationRequest(BaseModel):
@@ -625,6 +630,31 @@ def _dashboard_dev_sensitive_access_enabled() -> bool:
         "development",
         "test",
     }
+
+
+def _dev_discord_link_identity_from_roles(
+    *,
+    discord_user_id: str,
+    discord_roles: list[str],
+    discord_display_name: str | None,
+    required_role: str = "Member",
+) -> DiscordAdminIdentity | None:
+    """Allow trusted bot role context as a local/dev fallback without CRM sync."""
+    if not _dashboard_dev_sensitive_access_enabled():
+        return None
+    if not has_dashboard_discord_role(
+        discord_roles,
+        required_role,
+        admin_role_names=settings.discord_admin_role_names,
+    ):
+        return None
+    return DiscordAdminIdentity(
+        discord_user_id=discord_user_id,
+        crm_contact_id="",
+        email=None,
+        display_name=discord_display_name,
+        discord_roles=discord_roles,
+    )
 
 
 def _request_prefers_json(request: Request) -> bool:
@@ -3607,8 +3637,14 @@ async def auth_callback_handler(
             )
             return JSONResponse({"error": "link_not_found"}, status_code=404)
 
+        dev_role_identity = _dev_discord_link_identity_from_roles(
+            discord_user_id=grant.discord_user_id,
+            discord_roles=grant.discord_roles,
+            discord_display_name=grant.discord_display_name,
+        )
+        identity: DiscordAdminIdentity | None
         if enforce_discord_link_identity_checks:
-            if not email:
+            if not email and dev_role_identity is None:
                 await _write_auth_audit_event(
                     action="auth.login",
                     result=AuditResult.DENIED,
@@ -3623,34 +3659,42 @@ async def auth_callback_handler(
                 )
 
             verifier = _discord_admin_verifier_from_app(request.app)
-            linked = await verifier.is_dashboard_email_for_discord_user(
-                email=email,
-                discord_user_id=grant.discord_user_id,
-                http_client=http_client,
-            )
+            linked = False
+            if email:
+                linked = await verifier.is_dashboard_email_for_discord_user(
+                    email=email,
+                    discord_user_id=grant.discord_user_id,
+                    http_client=http_client,
+                )
             if not linked:
-                await _write_auth_audit_event(
-                    action="auth.login",
-                    result=AuditResult.DENIED,
-                    actor_subject=audit_actor_subject,
-                    actor_display_name=display_name,
-                    metadata={
-                        "reason": "oidc_user_not_linked_to_dashboard_user",
-                        "discord_user_id": grant.discord_user_id,
-                    },
-                    correlation_id=state,
+                if dev_role_identity is not None:
+                    identity = dev_role_identity
+                else:
+                    await _write_auth_audit_event(
+                        action="auth.login",
+                        result=AuditResult.DENIED,
+                        actor_subject=audit_actor_subject,
+                        actor_display_name=display_name,
+                        metadata={
+                            "reason": "oidc_user_not_linked_to_dashboard_user",
+                            "discord_user_id": grant.discord_user_id,
+                        },
+                        correlation_id=state,
+                    )
+                    return JSONResponse(
+                        {
+                            "error": "forbidden",
+                            "detail": "oidc_user_not_linked_to_discord_dashboard_user",
+                        },
+                        status_code=403,
+                    )
+            else:
+                identity = await verifier.resolve_dashboard_identity(
+                    discord_user_id=grant.discord_user_id,
+                    http_client=http_client,
                 )
-                return JSONResponse(
-                    {
-                        "error": "forbidden",
-                        "detail": "oidc_user_not_linked_to_discord_dashboard_user",
-                    },
-                    status_code=403,
-                )
-            identity = await verifier.resolve_dashboard_identity(
-                discord_user_id=grant.discord_user_id,
-                http_client=http_client,
-            )
+                if identity is None:
+                    identity = dev_role_identity
             if identity is None:
                 await _write_auth_audit_event(
                     action="auth.login",
@@ -3689,6 +3733,8 @@ async def auth_callback_handler(
                 discord_user_id=grant.discord_user_id,
                 http_client=http_client,
             )
+            if identity is None:
+                identity = dev_role_identity
             if identity is None:
                 await _write_auth_audit_event(
                     action="auth.login",
@@ -3877,6 +3923,14 @@ async def auth_discord_link_create_handler(request: Request) -> JSONResponse:
         discord_user_id=payload.discord_user_id,
         http_client=http_client,
     )
+    dev_role_identity = None
+    if not is_dashboard_user:
+        dev_role_identity = _dev_discord_link_identity_from_roles(
+            discord_user_id=payload.discord_user_id,
+            discord_roles=payload.discord_roles,
+            discord_display_name=payload.discord_display_name,
+        )
+        is_dashboard_user = dev_role_identity is not None
     if not is_dashboard_user:
         return JSONResponse(
             {"error": "forbidden", "detail": "discord_user_not_allowed"},
@@ -3893,6 +3947,10 @@ async def auth_discord_link_create_handler(request: Request) -> JSONResponse:
         payload=DiscordLinkGrant(
             discord_user_id=payload.discord_user_id,
             next_path=next_path,
+            discord_roles=payload.discord_roles if dev_role_identity else [],
+            discord_display_name=(
+                payload.discord_display_name if dev_role_identity else None
+            ),
         ),
         ttl_seconds=settings.discord_link_ttl_seconds,
     )
@@ -3914,15 +3972,47 @@ async def auth_discord_link_create_handler(request: Request) -> JSONResponse:
 async def auth_discord_link_redirect_handler(
     request: Request,
     token: str,
-) -> JSONResponse | RedirectResponse:
-    """Handle one-time Discord deep link and create or resume an admin session."""
+) -> JSONResponse | HTMLResponse:
+    """Render a non-consuming interstitial for one-time Discord deep links."""
     store = _auth_store_from_app(request.app)
     if store is None:
         return JSONResponse({"error": "auth_not_ready"}, status_code=503)
 
     grant = await store.get_discord_link(token)
     if grant is None:
-        return JSONResponse({"error": "link_not_found"}, status_code=404)
+        if _request_prefers_json(request):
+            return JSONResponse({"error": "link_not_found"}, status_code=404)
+        response = HTMLResponse(discord_link_unavailable_html(), status_code=404)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
+
+    response = HTMLResponse(
+        discord_link_continue_html(token=token),
+        status_code=200,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
+async def auth_discord_link_consume_handler(
+    request: Request,
+    token: str,
+) -> JSONResponse | HTMLResponse | RedirectResponse:
+    """Consume one-time Discord deep link and create or resume a dashboard session."""
+    store = _auth_store_from_app(request.app)
+    if store is None:
+        return JSONResponse({"error": "auth_not_ready"}, status_code=503)
+
+    grant = await store.get_discord_link(token)
+    if grant is None:
+        if _request_prefers_json(request):
+            return JSONResponse({"error": "link_not_found"}, status_code=404)
+        response = HTMLResponse(discord_link_unavailable_html(), status_code=404)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
 
     session_id, session = await _current_session(request)
     if not settings.discord_link_require_oidc_identity_checks:
@@ -3932,6 +4022,12 @@ async def auth_discord_link_redirect_handler(
             discord_user_id=grant.discord_user_id,
             http_client=http_client,
         )
+        if identity is None:
+            identity = _dev_discord_link_identity_from_roles(
+                discord_user_id=grant.discord_user_id,
+                discord_roles=grant.discord_roles,
+                discord_display_name=grant.discord_display_name,
+            )
         if identity is None:
             return JSONResponse(
                 {"error": "forbidden", "detail": "discord_user_not_allowed"},
@@ -3968,8 +4064,8 @@ async def auth_discord_link_redirect_handler(
         )
         await store.delete_discord_link(token)
 
-        response = RedirectResponse(url=grant.next_path, status_code=302)
-        _set_session_cookie(response, session_id)
+        redirect_response = RedirectResponse(url=grant.next_path, status_code=302)
+        _set_session_cookie(redirect_response, session_id)
         await _write_auth_audit_event(
             action="auth.login",
             result=AuditResult.SUCCESS,
@@ -3991,10 +4087,15 @@ async def auth_discord_link_redirect_handler(
             resource_id=session_id,
             correlation_id=token,
         )
-        return response
+        return redirect_response
 
     if session is not None:
-        if not session.email:
+        dev_role_identity = _dev_discord_link_identity_from_roles(
+            discord_user_id=grant.discord_user_id,
+            discord_roles=grant.discord_roles,
+            discord_display_name=grant.discord_display_name,
+        )
+        if not session.email and dev_role_identity is None:
             return JSONResponse(
                 {"error": "forbidden", "detail": "email_claim_required"},
                 status_code=403,
@@ -4002,24 +4103,31 @@ async def auth_discord_link_redirect_handler(
 
         verifier = _discord_admin_verifier_from_app(request.app)
         http_client = _http_client_from_app(request.app)
-        linked = await verifier.is_dashboard_email_for_discord_user(
-            email=session.email,
-            discord_user_id=grant.discord_user_id,
-            http_client=http_client,
-        )
-        if not linked:
-            return JSONResponse(
-                {
-                    "error": "forbidden",
-                    "detail": "oidc_user_not_linked_to_discord_dashboard_user",
-                },
-                status_code=403,
+        linked = False
+        if session.email:
+            linked = await verifier.is_dashboard_email_for_discord_user(
+                email=session.email,
+                discord_user_id=grant.discord_user_id,
+                http_client=http_client,
             )
-
-        identity = await verifier.resolve_dashboard_identity(
-            discord_user_id=grant.discord_user_id,
-            http_client=http_client,
-        )
+        if not linked:
+            if dev_role_identity is not None:
+                identity = dev_role_identity
+            else:
+                return JSONResponse(
+                    {
+                        "error": "forbidden",
+                        "detail": "oidc_user_not_linked_to_discord_dashboard_user",
+                    },
+                    status_code=403,
+                )
+        else:
+            identity = await verifier.resolve_dashboard_identity(
+                discord_user_id=grant.discord_user_id,
+                http_client=http_client,
+            )
+            if identity is None:
+                identity = dev_role_identity
         if identity is None:
             return JSONResponse(
                 {"error": "forbidden", "detail": "discord_user_not_allowed"},
@@ -4282,6 +4390,12 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
         "/auth/discord/link/{token}",
         auth_discord_link_redirect_handler,
         methods=["GET"],
+        response_model=None,
+    )
+    app.add_api_route(
+        "/auth/discord/link/{token}/consume",
+        auth_discord_link_consume_handler,
+        methods=["POST"],
         response_model=None,
     )
 
