@@ -840,6 +840,12 @@ def _agent_request_audit_metadata(
         "status": response.status,
         "intent": response.plan.intent if response.plan else None,
         "planner": response.plan.planner if response.plan else None,
+        "operation_id": response.plan.operation_id if response.plan else None,
+        "context_sources": (
+            [source.model_dump(mode="json") for source in response.plan.context_sources]
+            if response.plan
+            else []
+        ),
         "requires_confirmation": (
             response.plan.requires_confirmation if response.plan else False
         ),
@@ -2952,7 +2958,9 @@ async def _write_agent_audit_event(
                 actor_subject=context.discord_user_id,
                 resource_type="agent_plan" if plan is not None else "agent_request",
                 resource_id=plan.plan_id if plan is not None else None,
-                correlation_id=context.interaction_id or context.message_id,
+                correlation_id=(
+                    context.operation_id or context.interaction_id or context.message_id
+                ),
                 metadata=metadata or {},
             ),
         )
@@ -3030,6 +3038,11 @@ def _confirmation_execution_context(
         project_id=original_context.project_id,
         guild_id=original_context.guild_id,
         channel_id=original_context.channel_id,
+        thread_id=original_context.thread_id,
+        parent_message_id=original_context.parent_message_id,
+        response_destination_visibility=(
+            original_context.response_destination_visibility
+        ),
         roles=roles,
         scopes=[],
         impersonation=(
@@ -3039,6 +3052,8 @@ def _confirmation_execution_context(
             confirmation_context.interaction_id or original_context.interaction_id
         ),
         message_id=confirmation_context.message_id or original_context.message_id,
+        operation_id=original_context.operation_id,
+        context_snippets=original_context.context_snippets,
     )
 
 

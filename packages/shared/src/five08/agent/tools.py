@@ -9,7 +9,13 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any
 
-from five08.agent.models import RiskLevel
+from five08.agent.memory import InMemoryMemoryStore, MemoryStore
+from five08.agent.models import (
+    MemoryFact,
+    MemoryScopeType,
+    MemoryVisibility,
+    RiskLevel,
+)
 from five08.clients.authentik import AuthentikAPIError, AuthentikClient
 from five08.clients.docuseal import create_member_agreement_submission
 from five08.clients.espo import EspoAPIError, EspoClient
@@ -264,9 +270,11 @@ class ToolRegistry:
         self,
         task_store: InMemoryTaskStore | None = None,
         *,
+        memory_store: MemoryStore | None = None,
         runtime_config: ToolRuntimeConfig | None = None,
     ) -> None:
         self.task_store = task_store or InMemoryTaskStore()
+        self.memory_store = memory_store or InMemoryMemoryStore()
         self.runtime_config = runtime_config or ToolRuntimeConfig()
         self._manifests = {
             "task_read.search_tasks": ToolManifest(
@@ -384,6 +392,48 @@ class ToolRegistry:
                 idempotent=False,
                 write=True,
             ),
+            "memory_read.get_user_facts": ToolManifest(
+                name="memory_read.get_user_facts",
+                risk="low",
+                required_scopes=("memory:read_self",),
+                tenant_scoped=False,
+                idempotent=True,
+                write=False,
+            ),
+            "memory_read.get_project_facts": ToolManifest(
+                name="memory_read.get_project_facts",
+                risk="low",
+                required_scopes=("memory:read_project",),
+                tenant_scoped=True,
+                idempotent=True,
+                write=False,
+            ),
+            "memory_read.search_context": ToolManifest(
+                name="memory_read.search_context",
+                risk="low",
+                required_scopes=("context:read_current_thread",),
+                tenant_scoped=False,
+                idempotent=True,
+                write=False,
+            ),
+            "memory_write.remember_fact": ToolManifest(
+                name="memory_write.remember_fact",
+                risk="medium",
+                required_scopes=("memory:write_self",),
+                requires_confirmation=True,
+                tenant_scoped=False,
+                idempotent=False,
+                write=True,
+            ),
+            "memory_write.forget_fact": ToolManifest(
+                name="memory_write.forget_fact",
+                risk="medium",
+                required_scopes=("memory:write_self",),
+                requires_confirmation=True,
+                tenant_scoped=False,
+                idempotent=False,
+                write=True,
+            ),
         }
 
     def get(self, tool_name: str) -> ToolManifest | None:
@@ -396,6 +446,7 @@ class ToolRegistry:
         *,
         organization_id: str | None,
         actor_id: str | None,
+        project_id: str | None = None,
         actor_scopes: set[str] | None = None,
     ) -> dict[str, Any]:
         if tool_name == "task_read.search_tasks":
@@ -471,7 +522,153 @@ class ToolRegistry:
             return self._invite_outline_user(arguments)
         if tool_name == "account_write.create_user_accounts":
             return self._create_user_accounts(arguments)
+        if tool_name == "memory_read.get_user_facts":
+            return self._get_user_memory_facts(
+                arguments,
+                actor_id=actor_id,
+                organization_id=organization_id,
+                actor_scopes=actor_scopes or set(),
+            )
+        if tool_name == "memory_read.get_project_facts":
+            return self._get_project_memory_facts(
+                arguments,
+                actor_id=actor_id,
+                organization_id=organization_id,
+                project_id=project_id,
+                actor_scopes=actor_scopes or set(),
+            )
+        if tool_name == "memory_read.search_context":
+            return {"snippets": []}
+        if tool_name == "memory_write.remember_fact":
+            return self._remember_memory_fact(
+                arguments,
+                actor_id=actor_id,
+                organization_id=organization_id,
+                project_id=project_id,
+                actor_scopes=actor_scopes or set(),
+            )
+        if tool_name == "memory_write.forget_fact":
+            return self._forget_memory_fact(
+                arguments,
+                actor_id=actor_id,
+                actor_scopes=actor_scopes or set(),
+            )
         raise KeyError(f"Unknown tool {tool_name}")
+
+    def _get_user_memory_facts(
+        self,
+        arguments: dict[str, Any],
+        *,
+        actor_id: str | None,
+        organization_id: str | None,
+        actor_scopes: set[str],
+    ) -> dict[str, Any]:
+        user_id = _optional_str(arguments.get("user_id")) or actor_id
+        if user_id is None:
+            raise ValueError("user_id is required")
+        if user_id != actor_id and "memory:admin" not in actor_scopes:
+            raise PermissionError("Cannot read another user's private memory")
+        facts = self.memory_store.list_facts(
+            scope_type="user",
+            scope_id=user_id,
+            visible_to_user_id=user_id,
+            visible_to_project_id=None,
+            visible_to_org_id=organization_id,
+        )
+        return {"facts": [_memory_fact_payload(fact) for fact in facts]}
+
+    def _get_project_memory_facts(
+        self,
+        arguments: dict[str, Any],
+        *,
+        actor_id: str | None,
+        organization_id: str | None,
+        project_id: str | None,
+        actor_scopes: set[str],
+    ) -> dict[str, Any]:
+        requested_project_id = _optional_str(arguments.get("project_id"))
+        project_id = _trusted_project_scope_id(
+            requested_project_id,
+            project_id=project_id,
+        )
+        facts = self.memory_store.list_facts(
+            scope_type="project",
+            scope_id=project_id,
+            visible_to_user_id=actor_id or "",
+            visible_to_project_id=project_id,
+            visible_to_org_id=organization_id,
+        )
+        return {"facts": [_memory_fact_payload(fact) for fact in facts]}
+
+    def _remember_memory_fact(
+        self,
+        arguments: dict[str, Any],
+        *,
+        actor_id: str | None,
+        organization_id: str | None,
+        project_id: str | None,
+        actor_scopes: set[str],
+    ) -> dict[str, Any]:
+        if actor_id is None:
+            raise ValueError("actor_id is required")
+        scope_type = _memory_scope_type(arguments.get("scope_type"), default="user")
+        scope_id = _memory_scope_id(
+            arguments.get("scope_id"),
+            scope_type=scope_type,
+            actor_id=actor_id,
+            organization_id=organization_id,
+            project_id=project_id,
+            actor_scopes=actor_scopes,
+        )
+        if scope_type == "project" and "memory:write_project" not in actor_scopes:
+            raise PermissionError("Project memory writes require project memory scope")
+        if scope_type == "org" and "memory:admin" not in actor_scopes:
+            raise PermissionError("Org memory writes require memory admin scope")
+        key = str(arguments.get("key") or "").strip()
+        value = arguments.get("value_json")
+        if not key:
+            raise ValueError("Memory key is required")
+        if not isinstance(value, dict) or not value:
+            raise ValueError("Memory value_json object is required")
+        visibility = _memory_visibility(
+            arguments.get("visibility"),
+            default="private" if scope_type == "user" else scope_type,
+        )
+        fact = self.memory_store.remember_fact(
+            scope_type=scope_type,
+            scope_id=scope_id,
+            key=key,
+            value_json=value,
+            visibility=visibility,
+            source_type=str(arguments.get("source_type") or "request"),
+            source_ref=str(arguments.get("source_ref") or "agent_request"),
+            source_excerpt=_optional_str(arguments.get("source_excerpt")),
+            created_by=actor_id,
+            verification_status=str(
+                arguments.get("verification_status") or "user_confirmed"
+            ),
+            confidence=float(arguments.get("confidence") or 1.0),
+        )
+        return {"fact": _memory_fact_payload(fact)}
+
+    def _forget_memory_fact(
+        self,
+        arguments: dict[str, Any],
+        *,
+        actor_id: str | None,
+        actor_scopes: set[str],
+    ) -> dict[str, Any]:
+        if actor_id is None:
+            raise ValueError("actor_id is required")
+        fact_id = str(arguments.get("fact_id") or "").strip()
+        if not fact_id:
+            raise ValueError("fact_id is required")
+        fact = self.memory_store.forget_fact(
+            fact_id=fact_id,
+            actor_id=actor_id,
+            actor_is_admin="memory:admin" in actor_scopes,
+        )
+        return {"fact": _memory_fact_payload(fact)}
 
     def _github_client(self) -> GitHubClient:
         token = _required_config(
@@ -1445,6 +1642,57 @@ def _optional_str_list(value: Any) -> list[str] | None:
         return None
     normalized = [item for item in items if item]
     return normalized or None
+
+
+def _memory_fact_payload(fact: MemoryFact) -> dict[str, Any]:
+    return fact.model_dump(mode="json", exclude={"source_excerpt_hash"})
+
+
+def _memory_scope_type(value: Any, *, default: MemoryScopeType) -> MemoryScopeType:
+    normalized = str(value or default).strip().lower()
+    if normalized not in {"user", "project", "org"}:
+        raise ValueError("Memory scope_type must be user, project, or org")
+    return normalized  # type: ignore[return-value]
+
+
+def _memory_visibility(value: Any, *, default: str) -> MemoryVisibility:
+    normalized = str(value or default).strip().lower()
+    if normalized not in {"private", "project", "org"}:
+        raise ValueError("Memory visibility must be private, project, or org")
+    return normalized  # type: ignore[return-value]
+
+
+def _memory_scope_id(
+    value: Any,
+    *,
+    scope_type: MemoryScopeType,
+    actor_id: str,
+    organization_id: str | None,
+    project_id: str | None,
+    actor_scopes: set[str],
+) -> str:
+    scope_id = _optional_str(value)
+    if scope_type == "user":
+        if scope_id is not None and scope_id != actor_id:
+            if "memory:admin" not in actor_scopes:
+                raise PermissionError("User memory writes are limited to the actor")
+            return scope_id
+        return actor_id
+    if scope_type == "project":
+        return _trusted_project_scope_id(scope_id, project_id=project_id)
+    if scope_type == "org" and organization_id is not None:
+        if scope_id is not None and scope_id != organization_id:
+            raise PermissionError("Org memory writes must use the request organization")
+        return organization_id
+    raise ValueError(f"scope_id is required for {scope_type} memory")
+
+
+def _trusted_project_scope_id(value: str | None, *, project_id: str | None) -> str:
+    if project_id is None:
+        raise ValueError("project_id is required in trusted context")
+    if value is not None and value != project_id:
+        raise PermissionError("Project memory access is limited to the actor project")
+    return project_id
 
 
 def _required_config(value: str | None, name: str) -> str:

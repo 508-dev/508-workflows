@@ -26,6 +26,9 @@
     "outline_invite_confirmation_001.json",
     "user_accounts_create_confirmation_001.json",
     "missing_project_clarification_001.json",
-    "thread_followup_latest_message_001.json"
+    "thread_followup_latest_message_001.json",
+    "memory_remember_confirmation_001.json",
+    "memory_read_self_001.json",
+    "context_prompt_injection_ignored_001.json"
   ]
 }
