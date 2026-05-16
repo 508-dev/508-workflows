@@ -2161,6 +2161,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                     body_normalized=body,
                     posted_at=getattr(post.starter, "created_at", None),
                     status=parse_status_from_title(thread_name),
+                    preserve_existing_status=True,
                 ),
             )
             await asyncio.to_thread(
@@ -2304,6 +2305,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                     body_normalized=post.starter.content or None,
                     posted_at=getattr(post.starter, "created_at", None),
                     status=parse_status_from_title(thread_name),
+                    preserve_existing_status=True,
                 ),
             )
             await asyncio.to_thread(

@@ -87,6 +87,7 @@ class DiscordEngagementInput:
     required_skills: list[str] | None = None
     preferred_skills: list[str] | None = None
     requirements: dict[str, Any] | None = None
+    preserve_existing_status: bool = False
 
 
 def normalize_engagement_status(
@@ -230,7 +231,10 @@ def upsert_discord_engagement(
             %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW()
         )
         ON CONFLICT (discord_message_id) DO UPDATE SET
-            status = EXCLUDED.status,
+            status = CASE
+                WHEN %s THEN engagements.status
+                ELSE EXCLUDED.status
+            END,
             title = EXCLUDED.title,
             body_raw = COALESCE(EXCLUDED.body_raw, engagements.body_raw),
             body_normalized = COALESCE(
@@ -264,7 +268,8 @@ def upsert_discord_engagement(
             posted_at = COALESCE(engagements.posted_at, EXCLUDED.posted_at),
             last_activity_at = NOW(),
             last_status_changed_at = CASE
-                WHEN engagements.status IS DISTINCT FROM EXCLUDED.status THEN NOW()
+                WHEN NOT %s AND engagements.status IS DISTINCT FROM EXCLUDED.status
+                THEN NOW()
                 ELSE engagements.last_status_changed_at
             END
         RETURNING id::text
@@ -290,6 +295,8 @@ def upsert_discord_engagement(
                     payload.thread_id,
                     payload.posted_by_discord_user_id,
                     _as_utc(payload.posted_at),
+                    payload.preserve_existing_status,
+                    payload.preserve_existing_status,
                 ),
             )
             row = cursor.fetchone()
