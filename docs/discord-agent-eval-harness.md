@@ -77,6 +77,11 @@ small single-purpose scenarios with explicit expected action names and argument
 subsets. Use `stub_results` for external read tools so the PR gate stays
 deterministic.
 
+Keep the `canonical` suite limited to cases that should gate both deterministic
+and live-planner PR runs. When adding a new tool family, first cover it with
+unit tests and deterministic `weekly` fixtures; promote those fixtures to
+`canonical` only after the live planner prompt/tool schema reliably routes them.
+
 For Discord thread behavior, set `request.thread` and put the latest user
 message last. The harness treats that message as the current turn.
 
