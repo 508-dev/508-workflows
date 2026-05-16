@@ -1,0 +1,55 @@
+{
+  "version": "discord-agent-trajectory.v1",
+  "id": "memory_read_self_001",
+  "description": "Member asks what private facts the agent remembers and should route to self memory lookup.",
+  "tags": ["memory", "read"],
+  "suite": {
+    "canonical": false,
+    "weekly": true
+  },
+  "context": {
+    "discord_user_id": "123",
+    "organization_id": "org-1",
+    "guild_id": "org-1",
+    "roles": ["Member"],
+    "response_destination_visibility": "private"
+  },
+  "stub_results": {
+    "memory_read.get_user_facts": {
+      "facts": [
+        {
+          "id": "fact-1",
+          "scope_type": "user",
+          "scope_id": "123",
+          "key": "timezone",
+          "value_json": {
+            "text": "my timezone is Asia/Taipei"
+          },
+          "visibility": "private",
+          "source_type": "request",
+          "source_ref": "agent_request",
+          "created_by": "123",
+          "verification_status": "user_confirmed"
+        }
+      ]
+    }
+  },
+  "request": {
+    "message": "What do you remember about me?"
+  },
+  "expect": {
+    "status": "executed",
+    "intent": "read_user_memory",
+    "model_tier": "fast",
+    "requires_confirmation": false,
+    "result_statuses": ["succeeded"],
+    "actions": [
+      {
+        "tool_name": "memory_read.get_user_facts",
+        "requires_confirmation": false,
+        "required_scopes": ["memory:read_self"],
+        "arguments": {}
+      }
+    ]
+  }
+}

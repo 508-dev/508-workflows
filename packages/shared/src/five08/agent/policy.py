@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from five08.agent.models import AgentIdentityContext, AgentToolAction
+from five08.agent.models import AgentIdentityContext, AgentToolAction, MemoryVisibility
 from five08.agent.tools import ToolManifest
 
 
@@ -18,7 +18,16 @@ class PolicyDecision:
 
 
 _ROLE_SCOPES: dict[str, frozenset[str]] = {
-    "member": frozenset({"project:read", "task:create", "task:update_own"}),
+    "member": frozenset(
+        {
+            "project:read",
+            "task:create",
+            "task:update_own",
+            "context:read_current_thread",
+            "memory:read_self",
+            "memory:write_self",
+        }
+    ),
     "project_manager": frozenset(
         {
             "project:read",
@@ -27,6 +36,12 @@ _ROLE_SCOPES: dict[str, frozenset[str]] = {
             "task:update",
             "task:update_own",
             "task:assign",
+            "context:read_current_thread",
+            "context:read_channel_recent",
+            "memory:read_self",
+            "memory:read_project",
+            "memory:write_self",
+            "memory:write_project",
         }
     ),
     "engineer": frozenset(
@@ -36,6 +51,9 @@ _ROLE_SCOPES: dict[str, frozenset[str]] = {
             "github:issue:create",
             "github:pr:create",
             "worker:job:rerun_dev",
+            "context:read_current_thread",
+            "memory:read_self",
+            "memory:write_self",
         }
     ),
     "admin": frozenset(
@@ -57,6 +75,15 @@ _ROLE_SCOPES: dict[str, frozenset[str]] = {
             "deploy:request",
             "user:manage",
             "integration:manage",
+            "context:read_current_thread",
+            "context:read_channel_recent",
+            "context:read_user_recent_self",
+            "context:read_user_recent_any",
+            "memory:read_self",
+            "memory:read_project",
+            "memory:write_self",
+            "memory:write_project",
+            "memory:admin",
         }
     ),
 }
@@ -152,4 +179,51 @@ class PolicyEngine:
             "assignee"
         ):
             required_scopes.append("task:assign")
+        if action.tool_name == "memory_write.remember_fact":
+            scope_type = str(action.arguments.get("scope_type") or "user")
+            if scope_type == "project":
+                required_scopes.append("memory:write_project")
+            elif scope_type == "org":
+                required_scopes.append("memory:admin")
+        if action.tool_name == "memory_write.forget_fact" and action.arguments.get(
+            "admin"
+        ):
+            required_scopes.append("memory:admin")
         return required_scopes
+
+    def authorize_context_read(
+        self,
+        *,
+        context: AgentIdentityContext,
+        source_visibility: str,
+        required_scope: str = "context:read_current_thread",
+    ) -> PolicyDecision:
+        """Authorize retrieval of already source-visible context."""
+
+        if context.impersonation:
+            return PolicyDecision(
+                False, "Impersonated Discord requests cannot load context"
+            )
+        effective_scopes = self.scopes_for_context(context)
+        if required_scope not in effective_scopes:
+            return PolicyDecision(False, f"Missing required scopes: {required_scope}")
+        if (
+            source_visibility in {"private", "restricted"}
+            and "memory:admin" not in effective_scopes
+        ):
+            return PolicyDecision(False, "Context source is private or restricted")
+        return PolicyDecision(True, "allowed")
+
+    @staticmethod
+    def can_echo_memory_to_destination(
+        *,
+        context: AgentIdentityContext,
+        visibility: MemoryVisibility,
+    ) -> bool:
+        """Return whether memory of this visibility can be rendered here."""
+
+        if visibility == "private":
+            return context.response_destination_visibility == "private"
+        if visibility == "project":
+            return context.response_destination_visibility in {"private", "restricted"}
+        return True

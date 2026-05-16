@@ -8,6 +8,7 @@ import logging
 import re
 import time
 from typing import Any, Literal
+from uuid import uuid4
 
 import discord
 import requests
@@ -207,6 +208,9 @@ class AgentConfirmationView(discord.ui.View):
         original_message_id = self.context.get("message_id")
         if original_message_id:
             context["message_id"] = original_message_id
+        original_operation_id = self.context.get("operation_id")
+        if original_operation_id:
+            context["operation_id"] = original_operation_id
         return context
 
     def _original_roles(self) -> list[str]:
@@ -755,6 +759,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
 
         return {
             "discord_user_id": str(interaction.user.id),
+            "operation_id": str(uuid4()),
             "internal_user_id": None,
             "organization_id": str(interaction.guild_id)
             if interaction.guild_id
@@ -765,6 +770,13 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                 if interaction.channel_id is not None
                 else None
             ),
+            "thread_id": self._thread_id_from_channel(
+                getattr(interaction, "channel", None)
+            ),
+            "parent_message_id": self._parent_message_id_from_channel(
+                getattr(interaction, "channel", None)
+            ),
+            "response_destination_visibility": "private",
             "roles": role_names,
             "scopes": [],
             "impersonation": False,
@@ -780,16 +792,44 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         channel_id = getattr(message.channel, "id", None)
         return {
             "discord_user_id": str(message.author.id),
+            "operation_id": str(uuid4()),
             "internal_user_id": None,
             "organization_id": str(guild_id) if guild_id else None,
             "guild_id": str(guild_id) if guild_id else None,
             "channel_id": str(channel_id) if channel_id is not None else None,
+            "thread_id": self._thread_id_from_channel(message.channel),
+            "parent_message_id": self._parent_message_id_from_channel(message.channel),
+            "response_destination_visibility": (
+                self._response_destination_visibility_from_message(message)
+            ),
             "roles": self._role_names_from_user(message.author),
             "scopes": [],
             "impersonation": False,
             "interaction_id": None,
             "message_id": str(message.id),
         }
+
+    @staticmethod
+    def _thread_id_from_channel(channel: object) -> str | None:
+        if isinstance(channel, discord.Thread):
+            return str(channel.id)
+        return None
+
+    @staticmethod
+    def _response_destination_visibility_from_message(
+        _message: discord.Message,
+    ) -> str:
+        # Gateway-backed mention responses are sent by DM unless they are
+        # fixed public-safe clarifications with no result payload.
+        return "private"
+
+    @staticmethod
+    def _parent_message_id_from_channel(channel: object) -> str | None:
+        if isinstance(channel, discord.Thread):
+            return str(channel.id)
+        reference = getattr(channel, "reference", None)
+        reference_message_id = getattr(reference, "message_id", None)
+        return str(reference_message_id) if reference_message_id is not None else None
 
     @staticmethod
     def _role_names_from_user(user: discord.abc.User) -> list[str]:
@@ -994,6 +1034,10 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                     lines.extend(
                         self._format_contact_result_lines(tool_name, result_payload)
                     )
+                elif isinstance(result_payload, dict) and "facts" in result_payload:
+                    lines.extend(
+                        self._format_memory_fact_result_lines(tool_name, result_payload)
+                    )
                 else:
                     result_error = str(result.get("error") or "").strip()
                     if result_error:
@@ -1007,6 +1051,41 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                         lines.append(f"  Recovery email failed: {recovery_email_error}")
 
         return "\n".join(lines)[:1900]
+
+    @staticmethod
+    def _format_memory_fact_result_lines(
+        tool_name: object,
+        payload: dict[str, Any],
+    ) -> list[str]:
+        facts = payload.get("facts")
+        if not isinstance(facts, list) or not facts:
+            return [f"- {tool_name}: no visible remembered facts"]
+        lines = [f"- {tool_name}: {len(facts)} remembered facts"]
+        for fact in facts[:5]:
+            if not isinstance(fact, dict):
+                continue
+            key = str(fact.get("key") or "memory").strip()
+            value = AgentCog._format_memory_fact_value(fact.get("value_json"))
+            if value:
+                lines.append(f"  - {key}: {value}")
+            else:
+                lines.append(f"  - {key}")
+        return lines
+
+    @staticmethod
+    def _format_memory_fact_value(value: object) -> str:
+        if isinstance(value, dict):
+            text = str(value.get("text") or "").strip()
+            if text:
+                return text
+            return ", ".join(
+                f"{key}: {item}"
+                for key, item in value.items()
+                if isinstance(key, str) and isinstance(item, str) and item.strip()
+            )
+        if isinstance(value, str):
+            return value.strip()
+        return ""
 
     @staticmethod
     def _result_recovery_email_error(payload: object) -> str | None:

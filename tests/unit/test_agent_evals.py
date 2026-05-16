@@ -46,6 +46,20 @@ def test_discord_agent_eval_can_filter_scenarios() -> None:
     assert report.scenarios[0].fixture_id == "missing_project_clarification_001"
 
 
+def test_discord_agent_eval_memory_weekly_fixtures_pass() -> None:
+    report = run_eval_suite(
+        suite="weekly",
+        ids=["memory_remember_confirmation_001", "memory_read_self_001"],
+    )
+
+    assert report.summary == {
+        "scenarios": 2,
+        "passed": 2,
+        "failed": 0,
+        "known_failures": 0,
+    }
+
+
 def test_discord_agent_eval_writes_reports(tmp_path: Path) -> None:
     report = run_eval_suite(
         suite="canonical",

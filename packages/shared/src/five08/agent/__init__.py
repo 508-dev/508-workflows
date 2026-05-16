@@ -1,6 +1,8 @@
 """Shared agent gateway primitives."""
 
 from five08.agent.models import (
+    AgentContextSnippet,
+    AgentContextSource,
     AgentExecutionResult,
     AgentIdentityContext,
     AgentModelSelection,
@@ -8,8 +10,22 @@ from five08.agent.models import (
     AgentRequest,
     AgentResponse,
     AgentToolAction,
+    MemoryFact,
     ModelTier,
     RiskLevel,
+)
+from five08.agent.context import (
+    AgentContextLoader,
+    ContextLoadBounds,
+    RequestContextLoader,
+    bound_context_snippets,
+    context_sources_for_snippets,
+    render_untrusted_context,
+)
+from five08.agent.memory import (
+    DEFAULT_MEMORY_RETENTION_DAYS,
+    InMemoryMemoryStore,
+    MemoryStore,
 )
 from five08.agent.model_routing import (
     AgentModelConfig,
@@ -29,6 +45,9 @@ from five08.agent.tools import (
 
 __all__ = [
     "AgentExecutionResult",
+    "AgentContextLoader",
+    "AgentContextSnippet",
+    "AgentContextSource",
     "AgentIdentityContext",
     "AgentModelConfig",
     "AgentModelSelection",
@@ -38,15 +57,24 @@ __all__ = [
     "AgentTierModelConfig",
     "AgentResponse",
     "AgentToolAction",
+    "ContextLoadBounds",
     "DEFAULT_AGENT_MODEL",
+    "DEFAULT_MEMORY_RETENTION_DAYS",
+    "MemoryFact",
+    "MemoryStore",
+    "InMemoryMemoryStore",
     "InMemoryTaskStore",
     "ModelTier",
     "OpenAICompatibleIntentNormalizer",
     "PolicyDecision",
     "PolicyEngine",
+    "RequestContextLoader",
     "RiskLevel",
     "ToolManifest",
     "ToolPartialSuccessError",
     "ToolRegistry",
     "ToolRuntimeConfig",
+    "bound_context_snippets",
+    "context_sources_for_snippets",
+    "render_untrusted_context",
 ]
