@@ -2684,6 +2684,8 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         if not self._is_jobs_channel_registered(guild.id, parent.id):
             return
 
+        await self._persist_thread_engagement_index(thread, source="thread_create")
+
         if parent.permissions_for(guild.default_role).view_channel:
             logger.info(
                 "Skipping auto-match for publicly visible forum channel %s (%s) in guild %s",

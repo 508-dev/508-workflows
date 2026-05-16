@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import five08.discord_bot.cogs.jobs as jobs_module
 from five08.discord_bot.cogs.jobs import JobsCog
 from five08.job_match import CandidateRerankResult, JobRequirements
 
@@ -406,3 +407,31 @@ def test_rerank_candidates_preserves_llm_order_for_tied_scores() -> None:
         )
 
     assert [candidate.crm_name for candidate in reranked[:2]] == ["Beta", "Alpha"]
+
+
+def test_on_thread_create_indexes_public_registered_forum_post(monkeypatch) -> None:
+    class FakeForumChannel:
+        id = 123
+        name = "gigs"
+
+        def permissions_for(self, _role: object) -> SimpleNamespace:
+            return SimpleNamespace(view_channel=True)
+
+    monkeypatch.setattr(jobs_module.discord, "ForumChannel", FakeForumChannel)
+
+    cog = JobsCog(Mock())
+    cog._refresh_jobs_channel_cache_if_missing = AsyncMock(return_value=True)
+    cog._is_jobs_channel_registered = Mock(return_value=True)
+    cog._persist_thread_engagement_index = AsyncMock(return_value=True)
+    cog._run_auto_match_candidates_for_thread = AsyncMock()
+
+    guild = SimpleNamespace(id=456, name="508", default_role=object())
+    thread = SimpleNamespace(id=789, guild=guild, parent=FakeForumChannel())
+
+    asyncio.run(cog.on_thread_create(thread))
+
+    cog._persist_thread_engagement_index.assert_awaited_once_with(
+        thread,
+        source="thread_create",
+    )
+    cog._run_auto_match_candidates_for_thread.assert_not_awaited()
