@@ -40,6 +40,10 @@ curl -X GET "http://localhost:8090/jobs/<job_id>" \
 - `GET /dashboard/api/jobs`: Session-authenticated recent jobs list for the dashboard.
 - `GET /dashboard/api/jobs/{job_id}`: Session-authenticated dashboard job detail with sensitive payload keys redacted.
 - `POST /dashboard/api/jobs/{job_id}/rerun`: Session-authenticated dashboard job rerun.
+- `GET /dashboard/api/gigs`: Session-authenticated Discord gig list with candidate/application summaries.
+- `GET /dashboard/api/notifications`: Session-authenticated dashboard notifications, including stale recruiting gigs.
+- `POST /dashboard/api/gigs/{engagement_id}/status`: Session-authenticated gig status update for visible pending gigs.
+- `POST /dashboard/api/gigs/{engagement_id}/applications/{application_id}/status`: Session-authenticated gig candidate/application status update.
 - `GET /dashboard/api/people`: Session-authenticated CRM people-cache lookup with profile/onboarding signals.
 - `GET /dashboard/api/onboarding`: Session-authenticated prospect onboarding queue from the CRM people cache.
 - `POST /dashboard/api/onboarding/{contact_id}/onboarder`: Session-authenticated CRM onboarder assignment for one prospect.

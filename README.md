@@ -52,6 +52,8 @@ Migrations:
 
 See the API service docs: [`apps/api/README.md#backend-api-endpoints`](./apps/api/README.md#backend-api-endpoints).
 CLI request examples are documented at [`apps/worker/README.md#cli-usage`](./apps/worker/README.md#cli-usage).
+Discord gig tracking and dashboard behavior are documented at
+[`docs/discord-gig-dashboard.md`](./docs/discord-gig-dashboard.md).
 
 The operations dashboard is served at `/dashboard`. It is available only to
 active dashboard sessions created through the existing OIDC or Discord dashboard
