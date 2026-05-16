@@ -293,37 +293,37 @@ def downgrade() -> None:
     op.execute("DROP FUNCTION IF EXISTS engagement_applications_set_updated_at_fn()")
     op.execute("DROP TRIGGER IF EXISTS engagements_set_updated_at_tr ON engagements")
     op.execute("DROP FUNCTION IF EXISTS engagements_set_updated_at_fn()")
-    op.drop_index("idx_engagement_events_engagement_id", table_name="engagement_events")
-    op.drop_table("engagement_events")
-    op.drop_constraint(
-        "uq_engagement_applications_engagement_discord_user",
-        "engagement_applications",
-        type_="unique",
+    op.execute("DROP INDEX IF EXISTS idx_engagement_events_engagement_id")
+    op.execute("DROP TABLE IF EXISTS engagement_events")
+    op.execute(
+        """
+        ALTER TABLE IF EXISTS engagement_applications
+        DROP CONSTRAINT IF EXISTS uq_engagement_applications_engagement_discord_user
+        """
     )
-    op.drop_constraint(
-        "uq_engagement_applications_engagement_crm_contact",
-        "engagement_applications",
-        type_="unique",
+    op.execute(
+        """
+        ALTER TABLE IF EXISTS engagement_applications
+        DROP CONSTRAINT IF EXISTS uq_engagement_applications_engagement_crm_contact
+        """
     )
-    op.drop_index(
-        "idx_engagement_applications_status", table_name="engagement_applications"
+    op.execute("DROP INDEX IF EXISTS idx_engagement_applications_status")
+    op.execute("DROP INDEX IF EXISTS idx_engagement_applications_crm_contact_id")
+    op.execute("DROP INDEX IF EXISTS idx_engagement_applications_engagement_id")
+    op.execute("DROP TABLE IF EXISTS engagement_applications")
+    op.execute("DROP INDEX IF EXISTS idx_engagements_discord_thread_id")
+    op.execute("DROP INDEX IF EXISTS idx_engagements_posted_by_discord_user_id")
+    op.execute("DROP INDEX IF EXISTS idx_engagements_status")
+    op.execute("DROP TABLE IF EXISTS engagements")
+    op.execute(
+        """
+        ALTER TABLE IF EXISTS job_post_channels
+        DROP CONSTRAINT IF EXISTS ck_job_post_channels_posting_type
+        """
     )
-    op.drop_index(
-        "idx_engagement_applications_crm_contact_id",
-        table_name="engagement_applications",
+    op.execute(
+        """
+        ALTER TABLE IF EXISTS job_post_channels
+        DROP COLUMN IF EXISTS posting_type
+        """
     )
-    op.drop_index(
-        "idx_engagement_applications_engagement_id",
-        table_name="engagement_applications",
-    )
-    op.drop_table("engagement_applications")
-    op.drop_index("idx_engagements_discord_thread_id", table_name="engagements")
-    op.drop_index("idx_engagements_posted_by_discord_user_id", table_name="engagements")
-    op.drop_index("idx_engagements_status", table_name="engagements")
-    op.drop_table("engagements")
-    op.drop_constraint(
-        "ck_job_post_channels_posting_type",
-        "job_post_channels",
-        type_="check",
-    )
-    op.drop_column("job_post_channels", "posting_type")
