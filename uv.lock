@@ -760,7 +760,7 @@ requires-dist = [
 dev = [
     { name = "coverage", specifier = "~=7.6" },
     { name = "freezegun", specifier = ">=1.5.5" },
-    { name = "mypy", specifier = "~=1.14" },
+    { name = "mypy", specifier = ">=1.14,<3.0" },
     { name = "playwright", specifier = ">=1.58.0" },
     { name = "pre-commit", specifier = ">=3.7" },
     { name = "pre-commit-uv" },

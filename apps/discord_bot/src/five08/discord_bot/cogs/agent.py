@@ -8,6 +8,7 @@ import logging
 import re
 import time
 from typing import Any, Literal
+from uuid import uuid4
 
 import discord
 import requests
@@ -207,6 +208,9 @@ class AgentConfirmationView(discord.ui.View):
         original_message_id = self.context.get("message_id")
         if original_message_id:
             context["message_id"] = original_message_id
+        original_operation_id = self.context.get("operation_id")
+        if original_operation_id:
+            context["operation_id"] = original_operation_id
         return context
 
     def _original_roles(self) -> list[str]:
@@ -755,6 +759,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
 
         return {
             "discord_user_id": str(interaction.user.id),
+            "operation_id": str(uuid4()),
             "internal_user_id": None,
             "organization_id": str(interaction.guild_id)
             if interaction.guild_id
@@ -765,6 +770,11 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                 if interaction.channel_id is not None
                 else None
             ),
+            "thread_id": self._thread_id_from_channel(
+                getattr(interaction, "channel", None)
+            ),
+            "parent_message_id": None,
+            "response_destination_visibility": "private",
             "roles": role_names,
             "scopes": [],
             "impersonation": False,
@@ -780,16 +790,33 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         channel_id = getattr(message.channel, "id", None)
         return {
             "discord_user_id": str(message.author.id),
+            "operation_id": str(uuid4()),
             "internal_user_id": None,
             "organization_id": str(guild_id) if guild_id else None,
             "guild_id": str(guild_id) if guild_id else None,
             "channel_id": str(channel_id) if channel_id is not None else None,
+            "thread_id": self._thread_id_from_channel(message.channel),
+            "parent_message_id": self._parent_message_id_from_channel(message.channel),
+            "response_destination_visibility": "private",
             "roles": self._role_names_from_user(message.author),
             "scopes": [],
             "impersonation": False,
             "interaction_id": None,
             "message_id": str(message.id),
         }
+
+    @staticmethod
+    def _thread_id_from_channel(channel: object) -> str | None:
+        if isinstance(channel, discord.Thread):
+            return str(channel.id)
+        return None
+
+    @staticmethod
+    def _parent_message_id_from_channel(channel: object) -> str | None:
+        if not isinstance(channel, discord.Thread):
+            return None
+        parent_message_id = getattr(channel, "parent_id", None)
+        return str(parent_message_id) if parent_message_id is not None else None
 
     @staticmethod
     def _role_names_from_user(user: discord.abc.User) -> list[str]:

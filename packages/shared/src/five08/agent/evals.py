@@ -18,6 +18,7 @@ import requests
 from pydantic import BaseModel, Field, ValidationError
 
 from five08.agent.models import (
+    AgentContextSnippet,
     AgentIdentityContext,
     AgentModelSelection,
     AgentPlan,
@@ -112,11 +113,18 @@ class AgentEvalContext(BaseModel):
     project_id: str | None = None
     guild_id: str | None = "org-1"
     channel_id: str | None = "agent-eval"
+    operation_id: str | None = "agent-eval-operation"
+    thread_id: str | None = None
+    parent_message_id: str | None = None
+    response_destination_visibility: Literal["private", "public", "restricted"] = (
+        "private"
+    )
     roles: list[str] = Field(default_factory=lambda: ["Member"])
     scopes: list[str] = Field(default_factory=list)
     impersonation: bool = False
     interaction_id: str | None = "agent-eval-interaction"
     message_id: str | None = "agent-eval-message"
+    context_snippets: list[AgentContextSnippet] = Field(default_factory=list)
 
     def to_identity_context(self) -> AgentIdentityContext:
         """Convert fixture context into the production request context model."""

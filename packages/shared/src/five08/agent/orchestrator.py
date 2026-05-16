@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime, timedelta, timezone
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 from uuid import uuid4
 
 from five08.agent.models import (
@@ -14,7 +14,14 @@ from five08.agent.models import (
     AgentPlan,
     AgentResponse,
     AgentToolAction,
+    MemoryVisibility,
     ModelTier,
+)
+from five08.agent.context import (
+    AgentContextLoader,
+    ContextLoadBounds,
+    RequestContextLoader,
+    context_sources_for_snippets,
 )
 from five08.agent.model_routing import AgentModelConfig
 from five08.agent.policy import PolicyEngine
@@ -76,16 +83,25 @@ class AgentOrchestrator:
         policy: PolicyEngine | None = None,
         model_config: AgentModelConfig | None = None,
         intent_normalizer: AgentIntentNormalizer | None = None,
+        context_loader: AgentContextLoader | None = None,
+        context_bounds: ContextLoadBounds | None = None,
         today: date | None = None,
     ) -> None:
         self.registry = registry or ToolRegistry()
         self.policy = policy or PolicyEngine()
         self.model_config = model_config or AgentModelConfig()
         self.intent_normalizer = intent_normalizer
+        self.context_loader = context_loader or RequestContextLoader()
+        self.context_bounds = context_bounds or ContextLoadBounds()
         self.today = today
 
     def plan(self, message: str, context: AgentIdentityContext) -> AgentResponse:
         text = message.strip()
+        loaded_context = self.context_loader.load(
+            context=context,
+            bounds=self.context_bounds,
+        )
+        context = context.model_copy(update={"context_snippets": loaded_context})
         if not text:
             return AgentResponse(
                 status="needs_clarification",
@@ -179,6 +195,7 @@ class AgentOrchestrator:
         if not decision.allowed:
             action.requires_confirmation = False
             plan = self._build_plan(
+                context=context,
                 intent=self._intent_for_tool(action.tool_name),
                 actions=[action],
                 model_tier=self._choose_model_tier(planning_text, [action]),
@@ -193,6 +210,7 @@ class AgentOrchestrator:
 
         action.requires_confirmation = decision.requires_confirmation
         plan = self._build_plan(
+            context=context,
             intent=self._intent_for_tool(action.tool_name),
             actions=[action],
             model_tier=self._choose_model_tier(planning_text, [action]),
@@ -429,6 +447,11 @@ class AgentOrchestrator:
                     )
                 )
             else:
+                if action.tool_name.startswith("memory_read."):
+                    payload = self._filter_memory_payload_for_destination(
+                        payload,
+                        context,
+                    )
                 results.append(
                     AgentExecutionResult(
                         tool_name=action.tool_name,
@@ -437,6 +460,28 @@ class AgentOrchestrator:
                     )
                 )
         return results
+
+    def _filter_memory_payload_for_destination(
+        self,
+        payload: dict[str, object],
+        context: AgentIdentityContext,
+    ) -> dict[str, object]:
+        facts = payload.get("facts")
+        if not isinstance(facts, list):
+            return payload
+        visible_facts = [
+            fact
+            for fact in facts
+            if isinstance(fact, dict)
+            and self.policy.can_echo_memory_to_destination(
+                context=context,
+                visibility=cast(
+                    MemoryVisibility,
+                    str(fact.get("visibility") or "private"),
+                ),
+            )
+        ]
+        return {**payload, "facts": visible_facts}
 
     def _normalize_intent(self, text: str) -> str | None:
         if self.intent_normalizer is None:
@@ -453,6 +498,7 @@ class AgentOrchestrator:
     def _build_plan(
         self,
         *,
+        context: AgentIdentityContext,
         intent: str,
         actions: list[AgentToolAction],
         model_tier: ModelTier,
@@ -461,6 +507,7 @@ class AgentOrchestrator:
     ) -> AgentPlan:
         return AgentPlan(
             plan_id=str(uuid4()),
+            operation_id=context.operation_id,
             intent=intent,
             planner=planner,
             model_tier=model_tier,
@@ -469,6 +516,10 @@ class AgentOrchestrator:
             human_summary=self._human_summary(actions),
             requires_confirmation=requires_confirmation,
             expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+            context_sources=context_sources_for_snippets(
+                context=context,
+                snippets=context.context_snippets,
+            ),
         )
 
     def _resolve_model(self, model_tier: ModelTier) -> AgentModelSelection:
@@ -487,6 +538,9 @@ class AgentOrchestrator:
             for keyword in ["find task", "search task", "list task", "show task"]
         ):
             return self._parse_search_task(text)
+        memory_action = self._parse_memory_action(text)
+        if memory_action is not None:
+            return memory_action
         if self._is_crm_contact_update_request(lowered):
             action = self._parse_crm_contact_update(text)
             if action is not None:
@@ -532,6 +586,60 @@ class AgentOrchestrator:
         ):
             return self._parse_update_task(text)
         return None
+
+    def _parse_memory_action(self, text: str) -> AgentToolAction | None:
+        lowered = text.casefold()
+        if re.search(r"\bwhat\s+do\s+you\s+remember\s+about\s+me\b", lowered):
+            return AgentToolAction(
+                tool_name="memory_read.get_user_facts",
+                arguments={},
+                summary="List durable facts remembered about the requester",
+            )
+        forget_match = re.search(
+            r"\bforget\s+(?:memory\s+)?(?:fact\s+)?([A-Za-z0-9_-]{8,})\b",
+            text,
+            re.IGNORECASE,
+        )
+        if forget_match is not None:
+            return AgentToolAction(
+                tool_name="memory_write.forget_fact",
+                arguments={"fact_id": forget_match.group(1)},
+                summary=f"Forget memory fact {forget_match.group(1)}",
+            )
+        remember_match = re.search(
+            r"\bremember\s+(?:that\s+)?(.+?)(?:\s+for\s+me)?$",
+            text,
+            re.IGNORECASE,
+        )
+        if remember_match is not None:
+            fact_text = _clean_text(remember_match.group(1))
+            if fact_text:
+                key = self._memory_key_from_fact_text(fact_text)
+                return AgentToolAction(
+                    tool_name="memory_write.remember_fact",
+                    arguments={
+                        "scope_type": "user",
+                        "key": key,
+                        "value_json": {"text": fact_text},
+                        "visibility": "private",
+                        "source_type": "request",
+                        "source_ref": "agent_request",
+                        "source_excerpt": fact_text,
+                    },
+                    summary=f"Remember private user fact: {key}",
+                )
+        return None
+
+    @staticmethod
+    def _memory_key_from_fact_text(text: str) -> str:
+        match = re.search(
+            r"\b(?:my\s+)?([A-Za-z][A-Za-z0-9 _-]{1,40})\s+is\s+",
+            text,
+        )
+        if match is None:
+            return "note"
+        key = re.sub(r"\s+", "_", match.group(1).strip().lower())
+        return key[:64] or "note"
 
     def _parse_search_task(self, text: str) -> AgentToolAction:
         project = self._extract_project(text)
@@ -1270,6 +1378,11 @@ class AgentOrchestrator:
             "sso_write.create_user": "create_sso_user",
             "outline_write.invite_user": "invite_outline_user",
             "account_write.create_user_accounts": "create_user_accounts",
+            "memory_read.get_user_facts": "read_user_memory",
+            "memory_read.get_project_facts": "read_project_memory",
+            "memory_read.search_context": "search_context",
+            "memory_write.remember_fact": "remember_fact",
+            "memory_write.forget_fact": "forget_fact",
         }.get(tool_name, "unknown")
 
     @staticmethod
