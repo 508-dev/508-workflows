@@ -62,7 +62,23 @@ def _service_commands(env: dict[str, str]) -> list[tuple[str, list[str]]]:
                 "packages/shared/src",
             ],
         ),
-        ("discord-bot", ["uv", "run", "--package", "discord_bot", "discord-bot"]),
+        (
+            "discord-bot",
+            [
+                "uv",
+                "run",
+                "watchfiles",
+                "--filter",
+                "python",
+                "--sigint-timeout",
+                "5",
+                "--sigkill-timeout",
+                "10",
+                "uv run --package discord_bot discord-bot",
+                "apps/discord_bot/src",
+                "packages/shared/src",
+            ],
+        ),
     ]
 
 
