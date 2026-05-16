@@ -568,7 +568,7 @@ class ToolRegistry:
         facts = self.memory_store.list_facts(
             scope_type="user",
             scope_id=user_id,
-            visible_to_user_id=actor_id or "",
+            visible_to_user_id=user_id,
             visible_to_project_id=None,
             visible_to_org_id=organization_id,
         )

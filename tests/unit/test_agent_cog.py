@@ -445,7 +445,23 @@ def test_build_agent_context_from_message_uses_thread_message_context() -> None:
     assert context["guild_id"] == "456"
     assert context["channel_id"] == "789"
     assert context["message_id"] == "555"
+    assert context["response_destination_visibility"] == "public"
     assert context["roles"] == ["@everyone", "Member"]
+
+
+def test_build_agent_context_from_dm_uses_private_response_visibility() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    message = SimpleNamespace(
+        id=555,
+        author=SimpleNamespace(id=123, roles=[]),
+        guild=None,
+        channel=SimpleNamespace(id=789),
+    )
+
+    context = cog._build_agent_context_from_message(message)
+
+    assert context["guild_id"] is None
+    assert context["response_destination_visibility"] == "private"
 
 
 @pytest.mark.asyncio

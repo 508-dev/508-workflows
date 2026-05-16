@@ -797,7 +797,9 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             "channel_id": str(channel_id) if channel_id is not None else None,
             "thread_id": self._thread_id_from_channel(message.channel),
             "parent_message_id": self._parent_message_id_from_channel(message.channel),
-            "response_destination_visibility": "private",
+            "response_destination_visibility": (
+                self._response_destination_visibility_from_message(message)
+            ),
             "roles": self._role_names_from_user(message.author),
             "scopes": [],
             "impersonation": False,
@@ -810,6 +812,14 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         if isinstance(channel, discord.Thread):
             return str(channel.id)
         return None
+
+    @staticmethod
+    def _response_destination_visibility_from_message(
+        message: discord.Message,
+    ) -> str:
+        if message.guild is None:
+            return "private"
+        return "public"
 
     @staticmethod
     def _parent_message_id_from_channel(channel: object) -> str | None:

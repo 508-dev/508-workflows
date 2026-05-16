@@ -138,6 +138,14 @@ def test_context_loader_drops_expired_and_over_token_snippets() -> None:
             token_count=50,
             created_at=datetime.now(timezone.utc),
         ),
+        AgentContextSnippet(
+            source_type="discord_message",
+            source_ref="later-small",
+            label="later-small",
+            text="Later small context.",
+            token_count=5,
+            created_at=datetime.now(timezone.utc),
+        ),
     ]
     orchestrator = AgentOrchestrator(
         context_bounds=ContextLoadBounds(
@@ -150,7 +158,10 @@ def test_context_loader_drops_expired_and_over_token_snippets() -> None:
     response = orchestrator.plan("Show tasks for project Atlas", context)
 
     assert response.plan is not None
-    assert [source.source_ref for source in response.plan.context_sources] == ["fresh"]
+    assert [source.source_ref for source in response.plan.context_sources] == [
+        "fresh",
+        "later-small",
+    ]
 
 
 def test_confirmed_plan_executes_inline_against_registry() -> None:
@@ -250,6 +261,35 @@ def test_memory_read_denies_cross_user_without_admin_scope() -> None:
             actor_id="123",
             actor_scopes={"memory:read_self"},
         )
+
+
+def test_memory_read_admin_can_read_another_users_private_facts() -> None:
+    memory_store = InMemoryMemoryStore(
+        [
+            MemoryFact(
+                scope_type="user",
+                scope_id="456",
+                key="timezone",
+                value_json={"text": "my timezone is UTC"},
+                visibility="private",
+                source_type="request",
+                source_ref="agent_request",
+                created_by="456",
+                verification_status="user_confirmed",
+            )
+        ]
+    )
+    registry = ToolRegistry(memory_store=memory_store)
+
+    result = registry.execute(
+        "memory_read.get_user_facts",
+        {"user_id": "456"},
+        organization_id="org-1",
+        actor_id="123",
+        actor_scopes={"memory:admin"},
+    )
+
+    assert result["facts"][0]["key"] == "timezone"
 
 
 def test_project_memory_visibility_requires_matching_project_scope() -> None:

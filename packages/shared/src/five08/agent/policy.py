@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from five08.agent.models import AgentIdentityContext, MemoryVisibility, AgentToolAction
+from five08.agent.models import AgentIdentityContext, AgentToolAction, MemoryVisibility
 from five08.agent.tools import ToolManifest
 
 

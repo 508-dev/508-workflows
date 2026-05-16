@@ -1242,7 +1242,10 @@ def test_agent_confirmation_preserves_operation_envelope(
                 )
             ]
 
-    with patch("five08.backend.api.insert_audit_event") as mock_insert:
+    with patch(
+        "five08.backend.api._write_agent_audit_event",
+        new_callable=AsyncMock,
+    ) as mock_write_audit:
         plan_response = client.post(
             "/agent/requests",
             json={
@@ -1302,8 +1305,9 @@ def test_agent_confirmation_preserves_operation_envelope(
     plan = captured["plan"]
     assert isinstance(plan, api.AgentPlan)
     assert plan.context_sources[0].source_ref == "channels/channel-1/messages/1"
-    confirmation_audit = mock_insert.call_args_list[-1].args[1]
-    assert confirmation_audit.correlation_id == "op-confirm-1"
+    confirmation_audit_call = mock_write_audit.call_args_list[-1].kwargs
+    assert confirmation_audit_call["action"] == "agent.confirmation"
+    assert confirmation_audit_call["context"].operation_id == "op-confirm-1"
 
 
 def test_agent_confirmation_executes_with_confirm_time_member_role(

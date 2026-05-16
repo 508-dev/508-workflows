@@ -2,9 +2,9 @@
   "version": "discord-agent-trajectory.v1",
   "id": "memory_read_self_001",
   "description": "Member asks what private facts the agent remembers and should route to self memory lookup.",
-  "tags": ["canonical", "memory", "read"],
+  "tags": ["memory", "read"],
   "suite": {
-    "canonical": true,
+    "canonical": false,
     "weekly": true
   },
   "context": {

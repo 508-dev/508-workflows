@@ -75,7 +75,7 @@ def bound_context_snippets(
         if token_count <= 0:
             continue
         if token_count > remaining_tokens:
-            break
+            continue
         loaded.append(
             snippet.model_copy(
                 update={
