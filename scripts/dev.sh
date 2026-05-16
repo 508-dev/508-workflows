@@ -32,6 +32,10 @@ start_infra() {
   "$script_dir/docker-compose.sh" up minio-init
 }
 
+run_migrations() {
+  uv run --package worker python3 -c 'from five08.worker.db_migrations import run_job_migrations; run_job_migrations()'
+}
+
 command=${1:-infra}
 case "$command" in
   infra)
@@ -57,7 +61,12 @@ EOF
     ;;
   all)
     start_infra
+    run_migrations
     exec python3 "$script_dir/dev_mux.py"
+    ;;
+  migrate|migrations)
+    start_infra
+    run_migrations
     ;;
   down)
     "$script_dir/docker-compose.sh" down
@@ -93,6 +102,7 @@ EOF
     printf '%s\n' "$POSTGRES_URL"
     ;;
   web|api)
+    run_migrations
     exec uv run --package api uvicorn five08.backend.api:create_app \
       --factory \
       --host "${WEB_HOST:-${WEBHOOK_INGEST_HOST:-0.0.0.0}}" \
@@ -103,6 +113,7 @@ EOF
       --reload-dir packages/shared/src
     ;;
   worker)
+    run_migrations
     exec uv run watchfiles \
       --filter python \
       --sigint-timeout 5 \
@@ -112,10 +123,11 @@ EOF
       packages/shared/src
     ;;
   discord-bot|bot)
+    run_migrations
     exec uv run --package discord_bot discord-bot
     ;;
   *)
-    echo "Usage: ./scripts/dev.sh [infra|all|down|ports|env|web|api|worker|discord-bot]" >&2
+    echo "Usage: ./scripts/dev.sh [infra|all|migrate|down|ports|env|web|api|worker|discord-bot]" >&2
     exit 1
     ;;
 esac

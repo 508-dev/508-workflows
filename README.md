@@ -98,7 +98,15 @@ processes on the host:
 ```
 
 `infra` brings up only the Docker infra. Use the host-service subcommands to run
-the app processes with per-worktree ports and derived localhost URLs.
+the app processes with per-worktree ports and derived localhost URLs. The
+DB-using host-service subcommands run Alembic migrations before starting the
+service so the bot and worker do not race the API startup schema migration.
+
+Run migrations without starting app services:
+
+```bash
+./scripts/dev.sh migrate
+```
 
 To launch infra plus all host-run services together with prefixed logs:
 
