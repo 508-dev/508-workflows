@@ -35,7 +35,7 @@ curl -X GET "http://localhost:8090/jobs/<job_id>" \
 ## Backend API Endpoints
 
 - `GET /health`: Redis/Postgres/worker health check.
-- `GET /dashboard`: Session-authenticated operations dashboard for OIDC admins and Discord Steering Committee+ users.
+- `GET /dashboard`: Session-authenticated operations dashboard. OIDC admins and Discord Steering Committee+ users get the full dashboard; active Members may use the gig-only view for gigs they originally posted.
 - `GET /dashboard/api/me`: Dashboard session identity, including linked CRM contact id when available.
 - `GET /dashboard/api/jobs`: Session-authenticated recent jobs list for the dashboard.
 - `GET /dashboard/api/jobs/{job_id}`: Session-authenticated dashboard job detail with sensitive payload keys redacted.
@@ -70,7 +70,7 @@ curl -X GET "http://localhost:8090/jobs/<job_id>" \
 
 Discord deep-link identity policy:
 
-- Discord deep links are available to active CRM-linked Discord users with Steering Committee role or higher.
+- Discord deep links are available to active CRM-linked Discord users. Members receive gig-only permissions for their own posted gigs; Steering Committee+ users receive broader dashboard permissions.
 - `DISCORD_ADMIN_ROLES` controls which Discord roles can receive admin dashboard permissions (`Admin,Owner` recommended).
 - `OIDC_ADMIN_GROUPS` controls normal OIDC dashboard admin membership (`authentik Admins` recommended).
 - `AUTH_SESSION_TTL_SECONDS` controls dashboard session lifetime after login (`86400`, one day, by default).

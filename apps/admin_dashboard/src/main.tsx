@@ -139,6 +139,7 @@ type Gig = {
   posted_at?: string
   last_status_changed_at?: string
   last_activity_at?: string
+  created_at?: string
   updated_at?: string
   application_count?: number
   interested_count?: number
@@ -285,7 +286,7 @@ function sortValue(scope: View, item: Job | Person | Gig | AuditEvent, key: stri
     if (key === "title") return gig.title || ""
     if (key === "status") return gig.status || ""
     if (key === "applications") return Number(gig.application_count || 0)
-    if (key === "activity") return gig.last_activity_at || gig.updated_at || ""
+    if (key === "activity") return gigActivityTimestamp(gig)
   }
   if (scope === "onboarding") {
     const person = item as Person
@@ -444,6 +445,8 @@ function App() {
   const [status, setStatus] = useState("")
   const [jobType, setJobType] = useState("")
   const [gigStatus, setGigStatus] = useState("")
+  const [gigLimit, setGigLimit] = useState(100)
+  const [staleRecruitingDays, setStaleRecruitingDays] = useState(7)
   const [peopleQuery, setPeopleQuery] = useState("")
   const [peopleMember, setPeopleMember] = useState("")
   const [peopleFilters, setPeopleFilters] = useState<FilterState>({})
@@ -535,7 +538,7 @@ function App() {
   }
 
   function gigsUrl() {
-    const params = new URLSearchParams({ limit: "50" })
+    const params = new URLSearchParams({ limit: String(gigLimit) })
     if (gigStatus) params.set("status", gigStatus)
     return `/dashboard/api/gigs?${params.toString()}`
   }
@@ -575,6 +578,7 @@ function App() {
       const payload = await requestJson<DashboardNotificationsResponse>(
         "/dashboard/api/notifications?limit=20",
       )
+      setStaleRecruitingDays(payload.stale_days || 7)
       setNotifications(payload.notifications || [])
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Unable to load notifications", "error")
@@ -602,7 +606,6 @@ function App() {
         titleSyncStatus === "error" ? "error" : "ok",
       )
       await loadGigs()
-      await loadNotifications()
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Unable to update gig", "error")
     } finally {
@@ -629,7 +632,6 @@ function App() {
       )
       showToast("Updated candidate status", "ok")
       await loadGigs()
-      await loadNotifications()
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Unable to update candidate", "error")
     } finally {
@@ -863,6 +865,7 @@ function App() {
   // biome-ignore lint/correctness/useExhaustiveDependencies: permission loading is the first authorized data fetch for the current view.
   useEffect(() => {
     if (permissions.length === 0) return
+    if (can("gigs:read")) void loadNotifications()
     if (view === "people") void loadPeople()
     if (view === "gigs") void loadGigs()
     if (view === "onboarding") void loadOnboarding()
@@ -879,7 +882,7 @@ function App() {
   // biome-ignore lint/correctness/useExhaustiveDependencies: gigs reload intentionally follows status filter changes only while gigs is active.
   useEffect(() => {
     if (view === "gigs" && permissions.length > 0) void loadGigs()
-  }, [gigStatus])
+  }, [gigStatus, gigLimit])
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: people reload intentionally follows membership filter changes only while people is active.
   useEffect(() => {
@@ -1121,10 +1124,13 @@ function App() {
               sort={sort.gigs}
               loading={loading}
               status={gigStatus}
+              limit={gigLimit}
+              staleDays={staleRecruitingDays}
               canWrite={can("gigs:write")}
               crmContactUrl={crmContactUrl}
               crmAttachmentUrl={crmAttachmentUrl}
               setStatus={setGigStatus}
+              setLimit={setGigLimit}
               onRefresh={loadGigs}
               onSort={(key) => handleSort("gigs", key)}
               onUpdateStatus={updateGigStatus}
@@ -1227,7 +1233,12 @@ function NotificationDrawer({
 }) {
   if (!open) return null
   return (
-    <div className="fixed inset-0 z-40" aria-modal="true" role="dialog">
+    <div
+      className="fixed inset-0 z-40"
+      aria-labelledby="notificationsTitle"
+      aria-modal="true"
+      role="dialog"
+    >
       <button
         type="button"
         className="absolute inset-0 cursor-default bg-black/45"
@@ -1237,7 +1248,9 @@ function NotificationDrawer({
       <aside className="absolute right-0 top-0 grid h-full w-full max-w-md grid-rows-[auto_minmax(0,1fr)] border-l bg-background shadow-2xl">
         <div className="flex items-center justify-between gap-3 border-b p-4">
           <div className="grid gap-0.5">
-            <strong className="text-base">Notifications</strong>
+            <strong id="notificationsTitle" className="text-base">
+              Notifications
+            </strong>
             <span className="text-sm text-muted-foreground">
               {notifications.length === 0
                 ? "No active notifications"
@@ -1337,7 +1350,6 @@ function FilterChips({
 }
 
 const gigStatuses = ["recruiting", "filled", "unknown", "lost", "outdated"] as const
-const staleRecruitingDays = 7
 const applicationStatuses = [
   "suggested",
   "interested",
@@ -1356,15 +1368,23 @@ function titleCase(value?: string) {
     .replace(/\b\w/g, (character) => character.toUpperCase())
 }
 
-function staleRecruitingAge(gig: Gig) {
-  if (gig.status !== "recruiting") return null
-  const activityTimes = [gig.last_activity_at, gig.last_status_changed_at, gig.posted_at]
+function gigActivityTimestamp(gig: Gig) {
+  const activityTimes = [
+    gig.last_activity_at,
+    gig.last_status_changed_at,
+    gig.posted_at,
+    gig.created_at,
+  ]
     .map((value) => (value ? new Date(value).getTime() : Number.NaN))
     .filter((value) => !Number.isNaN(value))
-  const latestActivity =
-    activityTimes.length > 0 ? new Date(Math.max(...activityTimes)).toISOString() : undefined
+  return activityTimes.length > 0 ? new Date(Math.max(...activityTimes)).toISOString() : ""
+}
+
+function staleRecruitingAge(gig: Gig, staleDays: number) {
+  if (gig.status !== "recruiting") return null
+  const latestActivity = gigActivityTimestamp(gig)
   const age = daysSince(latestActivity)
-  if (age === null || age < staleRecruitingDays) return null
+  if (age === null || age < staleDays) return null
   return age
 }
 
@@ -1373,10 +1393,13 @@ function GigsView(props: {
   sort: { key: string; direction: SortDirection }
   loading: Record<string, boolean>
   status: string
+  limit: number
+  staleDays: number
   canWrite: boolean
   crmContactUrl: (contactId?: string) => string
   crmAttachmentUrl: (attachmentId?: string) => string
   setStatus: (value: string) => void
+  setLimit: (value: number) => void
   onRefresh: () => void
   onSort: (key: string) => void
   onUpdateStatus: (gigId: string, status: string) => void
@@ -1387,7 +1410,7 @@ function GigsView(props: {
       acc.total += 1
       acc.applications += Number(gig.application_count || 0)
       acc.interested += Number(gig.interested_count || 0)
-      if (staleRecruitingAge(gig) !== null) acc.stale += 1
+      if (staleRecruitingAge(gig, props.staleDays) !== null) acc.stale += 1
       return acc
     },
     { total: 0, applications: 0, interested: 0, stale: 0 },
@@ -1419,6 +1442,16 @@ function GigsView(props: {
           <RefreshCw />
           Refresh gigs
         </Button>
+        {props.gigs.length >= props.limit ? (
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => props.setLimit(Math.min(props.limit + 100, 500))}
+            disabled={props.loading.gigs || props.limit >= 500}
+          >
+            Load more
+          </Button>
+        ) : null}
       </Card>
 
       <section className="grid gap-3 md:grid-cols-4" aria-label="Gig summary">
@@ -1490,6 +1523,7 @@ function GigsView(props: {
                   crmAttachmentUrl={props.crmAttachmentUrl}
                   onUpdateStatus={props.onUpdateStatus}
                   onUpdateApplicationStatus={props.onUpdateApplicationStatus}
+                  staleDays={props.staleDays}
                 />
               ))}
             </TableBody>
@@ -1508,6 +1542,7 @@ function GigRow({
   crmAttachmentUrl,
   onUpdateStatus,
   onUpdateApplicationStatus,
+  staleDays,
 }: {
   gig: Gig
   loading: Record<string, boolean>
@@ -1516,6 +1551,7 @@ function GigRow({
   crmAttachmentUrl: (attachmentId?: string) => string
   onUpdateStatus: (gigId: string, status: string) => void
   onUpdateApplicationStatus: (gigId: string, applicationId: string, status: string) => void
+  staleDays: number
 }) {
   const applications = Array.isArray(gig.applications) ? gig.applications : []
   const threadUrl =
@@ -1524,7 +1560,7 @@ function GigRow({
           gig.discord_guild_id,
         )}/${encodeURIComponent(gig.discord_thread_id)}`
       : ""
-  const staleAge = staleRecruitingAge(gig)
+  const staleAge = staleRecruitingAge(gig, staleDays)
   return (
     <TableRow>
       <TableCell>
@@ -1614,7 +1650,7 @@ function GigRow({
         </div>
       </TableCell>
       <TableCell>
-        <div>{formatDate(gig.last_activity_at || gig.updated_at)}</div>
+        <div>{formatDate(gigActivityTimestamp(gig))}</div>
         <div className="text-xs text-muted-foreground">
           Posted {formatDate(gig.posted_at) || "unknown"}
         </div>
@@ -1627,7 +1663,7 @@ function GigRow({
       </TableCell>
       <TableCell>
         <div className="grid gap-2">
-          {applications.slice(0, 5).map((application) => (
+          {applications.map((application) => (
             <GigApplicationRow
               key={application.id}
               gigId={gig.id}
@@ -1668,7 +1704,13 @@ function GigApplicationRow({
   onUpdateApplicationStatus: (gigId: string, applicationId: string, status: string) => void
 }) {
   const displayName =
-    application.name || application.email_508 || application.discord_username || "Candidate"
+    application.name ||
+    application.email_508 ||
+    application.discord_username ||
+    (typeof application.evaluation?.discord_username === "string"
+      ? application.evaluation.discord_username
+      : "") ||
+    "Candidate"
   const contactUrl = crmContactUrl(application.crm_contact_id)
   const resumeUrl = crmAttachmentUrl(application.latest_resume_id)
   const fitScore =

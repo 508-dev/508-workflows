@@ -150,7 +150,7 @@ def test_build_candidate_search_plan_relaxes_hard_requirements() -> None:
     assert plan[0][2] is None
     assert plan[1][0].hard_required_skills == ["webflow"]
     assert plan[1][0].soft_required_skills == ["figma", "hubspot"]
-    assert "anchor hard need `webflow`" in (plan[1][2] or "")
+    assert "anchor hard skill `webflow` stayed mandatory" in (plan[1][2] or "")
     assert plan[2][0].hard_required_skills == []
     assert plan[2][0].soft_required_skills == ["webflow", "figma", "hubspot"]
     assert plan[2][1] == 0.0
@@ -171,9 +171,9 @@ def test_build_candidate_search_plan_keeps_language_requirements_hard() -> None:
     for planned_requirements, *_ in plan:
         assert "japanese" in planned_requirements.hard_required_skills
     assert plan[0][0].hard_required_skills == ["japanese", "next engine"]
-    assert plan[1][0].hard_required_skills == ["japanese"]
-    assert plan[1][0].soft_required_skills == ["next engine", "shopify", "wms"]
-    assert "language gates mandatory" in (plan[1][2] or "")
+    assert plan[1][0].hard_required_skills == ["japanese", "next engine"]
+    assert plan[1][0].soft_required_skills == ["shopify", "wms"]
+    assert "required language gates" in (plan[1][2] or "")
 
 
 def test_build_candidate_search_plan_keeps_llm_required_languages_hard() -> None:
@@ -185,9 +185,8 @@ def test_build_candidate_search_plan_keeps_llm_required_languages_hard() -> None
 
     plan = JobsCog._build_candidate_search_plan(requirements, min_match_score=8.0)
 
-    assert plan[-1][0].hard_required_skills == ["spanish"]
+    assert plan[-1][0].hard_required_skills == ["spanish", "salesforce"]
     assert plan[-1][0].soft_required_skills == [
-        "salesforce",
         "customer relationship management",
     ]
 
@@ -260,7 +259,7 @@ def test_search_and_rerank_candidates_retries_with_relaxed_requirements() -> Non
     rerank_mock.assert_awaited_once()
     assert outcome.candidates == [candidate]
     assert outcome.effective_requirements.hard_required_skills == ["webflow"]
-    assert "anchor hard need `webflow`" in (outcome.search_note or "")
+    assert "anchor hard skill `webflow` stayed mandatory" in (outcome.search_note or "")
 
 
 def test_build_match_candidate_lines_keeps_name_discord_and_linkedin_on_first_line() -> (

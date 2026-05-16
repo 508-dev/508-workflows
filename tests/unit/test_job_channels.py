@@ -98,6 +98,13 @@ def test_infer_job_posting_type_from_labels_detects_hybrid() -> None:
     )
 
 
+def test_normalize_job_posting_type_accepts_mixed_separators() -> None:
+    assert (
+        job_channels.normalize_job_posting_type("part-time or full-time")
+        is job_channels.JobPostingType.PART_TIME_OR_FULL_TIME
+    )
+
+
 def test_register_job_post_channel_returns_true_on_insert(monkeypatch) -> None:
     cursor = _CursorStub(row={"channel_id": "123"})
     _install_connection_stub(monkeypatch, cursor)
@@ -119,7 +126,25 @@ def test_register_job_post_channel_returns_false_on_noop(monkeypatch) -> None:
     )
 
     assert created is False
-    assert cursor.executed[1][1] == ("part_time", "guild-1", "123")
+    assert len(cursor.executed) == 1
+
+
+def test_register_job_post_channel_can_update_existing_when_requested(
+    monkeypatch,
+) -> None:
+    cursor = _CursorStub(row=None)
+    _install_connection_stub(monkeypatch, cursor)
+
+    created = job_channels.register_job_post_channel(
+        job_channels.SharedSettings(),
+        guild_id="guild-1",
+        channel_id="123",
+        posting_type=job_channels.JobPostingType.FULL_TIME,
+        update_existing=True,
+    )
+
+    assert created is False
+    assert cursor.executed[1][1] == ("full_time", "guild-1", "123")
 
 
 def test_unregister_job_post_channel_returns_true_on_delete(monkeypatch) -> None:

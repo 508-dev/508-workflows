@@ -2420,7 +2420,93 @@ def test_dashboard_gigs_allows_steering_to_see_all_gigs(client: TestClient) -> N
         viewer_discord_user_id="steering-1",
         include_all=True,
         status=None,
-        limit=50,
+        limit=100,
+    )
+
+
+def test_dashboard_notifications_filters_member_to_own_gigs(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="member@508.dev",
+        display_name="Member User",
+        groups=["Member"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+        crm_contact_id="contact-member-1",
+    )
+    notifications = [
+        {
+            "id": "stale-recruiting:gig-1",
+            "type": "stale_recruiting_gig",
+            "title": "Recruiting gig needs an update",
+            "message": "Webflow build has had no updates for 9 day(s).",
+        }
+    ]
+    monkeypatch.setattr(api.settings, "gig_recruiting_stale_days", 9)
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.list_dashboard_notifications",
+            return_value=notifications,
+        ) as mock_notifications,
+    ):
+        response = client.get("/dashboard/api/notifications?limit=10")
+
+    assert response.status_code == 200
+    assert response.json() == {"stale_days": 9, "notifications": notifications}
+    mock_notifications.assert_called_once_with(
+        api.settings,
+        viewer_discord_user_id="123456789",
+        include_all=False,
+        stale_days=9,
+        limit=10,
+    )
+
+
+def test_dashboard_notifications_allows_steering_to_see_all_gigs(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.list_dashboard_notifications",
+            return_value=[],
+        ) as mock_notifications,
+    ):
+        response = client.get("/dashboard/api/notifications")
+
+    assert response.status_code == 200
+    mock_notifications.assert_called_once_with(
+        api.settings,
+        viewer_discord_user_id="steering-1",
+        include_all=True,
+        stale_days=api.settings.gig_recruiting_stale_days,
+        limit=20,
     )
 
 
@@ -2447,7 +2533,7 @@ def test_dashboard_update_gig_status_requires_owner_or_steering(
         patch("five08.backend.api.viewer_can_update_engagement", return_value=False),
     ):
         response = client.post(
-            "/dashboard/api/gigs/gig-1/status",
+            "/dashboard/api/gigs/11111111-1111-4111-8111-111111111111/status",
             json={"status": "filled"},
         )
 
@@ -2481,14 +2567,14 @@ def test_dashboard_update_gig_status_omits_discord_actor_for_admin_sso(
         ) as update_status,
     ):
         response = client.post(
-            "/dashboard/api/gigs/gig-1/status",
+            "/dashboard/api/gigs/11111111-1111-4111-8111-111111111111/status",
             json={"status": "filled"},
         )
 
     assert response.status_code == 200
     update_status.assert_called_once_with(
         api.settings,
-        engagement_id="gig-1",
+        engagement_id="11111111-1111-4111-8111-111111111111",
         status=api.EngagementStatus.FILLED,
         actor_discord_user_id=None,
     )
@@ -2521,18 +2607,47 @@ def test_dashboard_update_gig_application_status_omits_discord_actor_for_admin_s
         ) as update_application_status,
     ):
         response = client.post(
-            "/dashboard/api/gigs/gig-1/applications/application-1/status",
+            "/dashboard/api/gigs/11111111-1111-4111-8111-111111111111"
+            "/applications/22222222-2222-4222-8222-222222222222/status",
             json={"status": "contacted"},
         )
 
     assert response.status_code == 200
     update_application_status.assert_called_once_with(
         api.settings,
-        engagement_id="gig-1",
-        application_id="application-1",
+        engagement_id="11111111-1111-4111-8111-111111111111",
+        application_id="22222222-2222-4222-8222-222222222222",
         status=api.EngagementApplicationStatus.CONTACTED,
         actor_discord_user_id=None,
     )
+
+
+def test_dashboard_update_gig_status_rejects_malformed_id(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="member@508.dev",
+        display_name="Member User",
+        groups=["Member"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.post(
+            "/dashboard/api/gigs/not-a-uuid/status",
+            json={"status": "filled"},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_engagement_id"
 
 
 def test_dashboard_assign_onboarder_updates_crm_and_audits(

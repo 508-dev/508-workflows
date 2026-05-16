@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, cast
 from urllib.parse import urlencode, urlparse
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import uvicorn
@@ -536,6 +536,13 @@ def _http_client_from_app(app: FastAPI) -> httpx.AsyncClient:
     if isinstance(client, httpx.AsyncClient):
         return client
     raise RuntimeError("HTTP client not configured")
+
+
+def _valid_uuid_or_none(value: str) -> str | None:
+    try:
+        return str(UUID(str(value)))
+    except (TypeError, ValueError, AttributeError):
+        return None
 
 
 async def _sync_discord_gig_thread_status(
@@ -2291,7 +2298,7 @@ async def dashboard_people_handler(
 async def dashboard_gigs_handler(
     request: Request,
     status: str | None = Query(default=None),
-    limit: int = Query(default=50, ge=1, le=100),
+    limit: int = Query(default=100, ge=1, le=500),
 ) -> JSONResponse:
     """Return dashboard-visible Discord gigs and candidate fit snapshots."""
     session, error_response = await _dashboard_session_or_error(
@@ -2373,6 +2380,10 @@ async def dashboard_update_gig_status_handler(
     if csrf_error is not None:
         return csrf_error
 
+    normalized_engagement_id = _valid_uuid_or_none(engagement_id)
+    if normalized_engagement_id is None:
+        return JSONResponse({"error": "invalid_engagement_id"}, status_code=400)
+
     try:
         body = await request.json()
         payload = DashboardGigStatusRequest.model_validate(body)
@@ -2393,7 +2404,7 @@ async def dashboard_update_gig_status_handler(
     can_update = await asyncio.to_thread(
         viewer_can_update_engagement,
         settings,
-        engagement_id=engagement_id,
+        engagement_id=normalized_engagement_id,
         viewer_discord_user_id=session.subject,
         include_all=include_all,
     )
@@ -2403,7 +2414,7 @@ async def dashboard_update_gig_status_handler(
     result = await asyncio.to_thread(
         update_engagement_status,
         settings,
-        engagement_id=engagement_id,
+        engagement_id=normalized_engagement_id,
         status=normalized_status,
         actor_discord_user_id=_session_discord_actor_id(session),
     )
@@ -2435,6 +2446,13 @@ async def dashboard_update_gig_application_status_handler(
     if csrf_error is not None:
         return csrf_error
 
+    normalized_engagement_id = _valid_uuid_or_none(engagement_id)
+    normalized_application_id = _valid_uuid_or_none(application_id)
+    if normalized_engagement_id is None:
+        return JSONResponse({"error": "invalid_engagement_id"}, status_code=400)
+    if normalized_application_id is None:
+        return JSONResponse({"error": "invalid_application_id"}, status_code=400)
+
     try:
         body = await request.json()
         payload = DashboardGigApplicationStatusRequest.model_validate(body)
@@ -2448,7 +2466,7 @@ async def dashboard_update_gig_application_status_handler(
     can_update = await asyncio.to_thread(
         viewer_can_update_engagement,
         settings,
-        engagement_id=engagement_id,
+        engagement_id=normalized_engagement_id,
         viewer_discord_user_id=session.subject,
         include_all=include_all,
     )
@@ -2458,8 +2476,8 @@ async def dashboard_update_gig_application_status_handler(
     result = await asyncio.to_thread(
         update_engagement_application_status,
         settings,
-        engagement_id=engagement_id,
-        application_id=application_id,
+        engagement_id=normalized_engagement_id,
+        application_id=normalized_application_id,
         status=normalized_status,
         actor_discord_user_id=_session_discord_actor_id(session),
     )

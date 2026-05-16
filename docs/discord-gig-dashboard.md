@@ -81,6 +81,16 @@ the poster asking for a status update. Sent reminders update
 `last_recruiting_reminder_at` but do not advance `last_activity_at`, so passive
 reminders do not make stale gigs look active.
 
+Ordinary registered gig thread replies count as activity. This makes the stale
+recruiting reminder instruction to "leave a thread reply if it is still active"
+match the dashboard stale timer.
+
+Dashboard status updates enqueue Discord title sync in the bot instead of
+waiting for Discord thread rename calls inline. Discord can apply long
+per-route/resource rate limits to thread edits, so the bot debounces repeated
+status changes for the same thread and performs the latest title update in the
+background.
+
 ## Matching Guardrails
 
 The matching flow should not broaden hard requirements into soft hints.

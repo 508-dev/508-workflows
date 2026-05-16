@@ -30,6 +30,11 @@ def test_parse_status_from_bracketed_gig_title() -> None:
 
 def test_parse_status_defaults_unknown_for_unmarked_titles() -> None:
     assert parse_status_from_title("Need a backend person") is EngagementStatus.UNKNOWN
+    assert parse_status_from_title("[REMOTE] Backend role") is EngagementStatus.UNKNOWN
+    assert (
+        parse_status_from_title("RECRUITING Senior Webflow Build")
+        is EngagementStatus.RECRUITING
+    )
     assert normalize_engagement_status("cancelled") is EngagementStatus.LOST
 
 
@@ -39,6 +44,7 @@ def test_strip_status_from_title_removes_visible_marker() -> None:
         == "Senior Webflow Build"
     )
     assert strip_status_from_title("Need a backend person") == "Need a backend person"
+    assert strip_status_from_title("[URGENT] Webflow build") == "[URGENT] Webflow build"
 
 
 def test_upsert_discord_engagement_can_preserve_existing_status(monkeypatch) -> None:
@@ -95,14 +101,14 @@ def test_upsert_discord_engagement_can_preserve_existing_status(monkeypatch) -> 
     assert engagement_id == "engagement-1"
     query, params = executed[0]
     assert "COALESCE(%s, NOW()), COALESCE(%s, NOW())" in query
-    assert "WHEN %s OR EXCLUDED.status = 'unknown' THEN engagements.status" in query
+    assert "WHEN EXCLUDED.status = 'unknown' THEN engagements.status" in query
     assert "WHEN %s THEN NOW()" in query
     assert (
-        "AND EXCLUDED.status <> 'unknown'\n"
+        "EXCLUDED.status <> 'unknown'\n"
         "                    AND engagements.status IS DISTINCT FROM EXCLUDED.status"
         in query
     )
-    assert params[-3:] == (True, False, True)
+    assert params[-1:] == (False,)
 
 
 def test_upsert_suggested_applications_merges_existing_discord_row(
@@ -112,6 +118,7 @@ def test_upsert_suggested_applications_merges_existing_discord_row(
     fetches = iter(
         [
             {"id": "person-1"},
+            {"id": "application-1"},
             {"id": "application-1"},
         ]
     )
@@ -163,11 +170,12 @@ def test_upsert_suggested_applications_merges_existing_discord_row(
     )
 
     assert count == 1
-    update_query, update_params = executed[1]
+    update_query = executed[2][0]
+    update_params = executed[2][1]
     assert "UPDATE engagement_applications" in update_query
-    assert "OR (%s::text IS NOT NULL AND discord_user_id = %s)" in update_query
-    assert update_params[-2:] == ("discord-1", "discord-1")
-    assert len(executed) == 2
+    assert "WHERE id = %s" in update_query
+    assert update_params[-1:] == ("application-1",)
+    assert len(executed) == 3
 
 
 def test_upsert_suggested_applications_persists_discord_only_candidate(
@@ -176,6 +184,7 @@ def test_upsert_suggested_applications_persists_discord_only_candidate(
     executed: list[tuple[str, tuple]] = []
     fetches = iter(
         [
+            None,
             None,
             None,
             {"id": "application-1"},
@@ -229,6 +238,6 @@ def test_upsert_suggested_applications_persists_discord_only_candidate(
     )
 
     assert count == 1
-    insert_query, insert_params = executed[2]
+    insert_query, insert_params = executed[3]
     assert "ON CONFLICT (engagement_id, discord_user_id)" in insert_query
     assert insert_params[3:5] == (None, "discord-1")

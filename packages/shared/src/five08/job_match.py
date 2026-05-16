@@ -434,6 +434,8 @@ _LANGUAGE_NEGATION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
             r"\b(?:no|not)\s+japanese\s+(?:required|needed|necessary)"
             r"|\bjapanese(?:\s+language)?\s+(?:is\s+)?not\s+"
             r"(?:required|needed|necessary)\b"
+            r"|\bjapanese\s+(?:speaker|fluency|fluent|language)\s+"
+            r"(?:is\s+)?not\s+(?:required|needed|necessary)\b"
             r"|\bjapanese\s+(?:optional|nice\s+to\s+have)\b",
             re.IGNORECASE,
         ),

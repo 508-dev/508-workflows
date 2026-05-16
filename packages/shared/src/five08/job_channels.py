@@ -56,7 +56,7 @@ def normalize_job_posting_type(
     """Normalize user input into a supported job posting type."""
     if isinstance(value, JobPostingType):
         return value
-    normalized = str(value or "").strip().casefold().replace(" ", "_")
+    normalized = str(value or "").strip().casefold().replace("-", "_").replace(" ", "_")
     return _POSTING_TYPE_ALIASES.get(normalized, JobPostingType.UNKNOWN)
 
 
@@ -130,6 +130,7 @@ def register_job_post_channel(
     guild_id: str,
     channel_id: str,
     posting_type: str | JobPostingType | None = JobPostingType.PART_TIME,
+    update_existing: bool = False,
 ) -> bool:
     """Register one channel for automatic job matching.
 
@@ -146,7 +147,7 @@ def register_job_post_channel(
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(query, (guild_id, channel_id, normalized_type.value))
             row = cursor.fetchone()
-            if row is None:
+            if row is None and update_existing:
                 cursor.execute(
                     """
                     UPDATE job_post_channels
