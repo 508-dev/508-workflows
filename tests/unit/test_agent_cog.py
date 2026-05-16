@@ -494,7 +494,7 @@ def test_build_agent_context_from_message_uses_thread_message_context() -> None:
     assert context["guild_id"] == "456"
     assert context["channel_id"] == "789"
     assert context["message_id"] == "555"
-    assert context["response_destination_visibility"] == "public"
+    assert context["response_destination_visibility"] == "private"
     assert context["roles"] == ["@everyone", "Member"]
 
 
@@ -840,6 +840,12 @@ async def test_agent_mention_sends_agent_response_by_dm() -> None:
     cog._post_agent_request.assert_awaited_once()
     assert cog._post_agent_request.await_args.kwargs["message"] == (
         "show tasks for project Atlas"
+    )
+    assert (
+        cog._post_agent_request.await_args.kwargs["context"][
+            "response_destination_visibility"
+        ]
+        == "private"
     )
     author.send.assert_awaited_once_with("Agent status: executed")
     message.reply.assert_awaited_once_with(

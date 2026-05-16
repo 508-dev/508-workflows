@@ -817,11 +817,11 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
 
     @staticmethod
     def _response_destination_visibility_from_message(
-        message: discord.Message,
+        _message: discord.Message,
     ) -> str:
-        if message.guild is None:
-            return "private"
-        return "public"
+        # Gateway-backed mention responses are sent by DM unless they are
+        # fixed public-safe clarifications with no result payload.
+        return "private"
 
     @staticmethod
     def _parent_message_id_from_channel(channel: object) -> str | None:
