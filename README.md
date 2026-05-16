@@ -52,6 +52,8 @@ Migrations:
 
 See the API service docs: [`apps/api/README.md#backend-api-endpoints`](./apps/api/README.md#backend-api-endpoints).
 CLI request examples are documented at [`apps/worker/README.md#cli-usage`](./apps/worker/README.md#cli-usage).
+Discord gig tracking and dashboard behavior are documented at
+[`docs/discord-gig-dashboard.md`](./docs/discord-gig-dashboard.md).
 
 The operations dashboard is served at `/dashboard`. It is available only to
 active dashboard sessions created through the existing OIDC or Discord dashboard
@@ -96,7 +98,15 @@ processes on the host:
 ```
 
 `infra` brings up only the Docker infra. Use the host-service subcommands to run
-the app processes with per-worktree ports and derived localhost URLs.
+the app processes with per-worktree ports and derived localhost URLs. The
+DB-using host-service subcommands run Alembic migrations before starting the
+service so the bot and worker do not race the API startup schema migration.
+
+Run migrations without starting app services:
+
+```bash
+./scripts/dev.sh migrate
+```
 
 To launch infra plus all host-run services together with prefixed logs:
 
@@ -216,6 +226,7 @@ Use `.env.example` as the source of truth for defaults.
 - `Optional`: `JOB_MAX_ATTEMPTS` (default: `8`)
 - `Optional`: `JOB_RETRY_BASE_SECONDS` (default: `5`)
 - `Optional`: `JOB_RETRY_MAX_SECONDS` (default: `300`)
+- `Optional`: `GIG_RECRUITING_STALE_DAYS` (default: `7`; dashboard warnings and Discord reminders for recruiting gigs with no updates)
 
 ### Postgres + Compose Exposure
 

@@ -265,9 +265,9 @@ def search_candidates(
     10. Seniority score (applied in Python after the query).
 
     Candidates must match every hard-required skill when hard requirements exist.
-    When there are no hard requirements, candidates are included if they match any
-    soft-required skill or any discord role type. Discord role types remain a ranking
-    signal even when hard/soft skill requirements are present.
+    When there are no hard requirements but soft skills exist, candidates are included
+    only if they match at least one soft-required skill. Discord role types remain a
+    ranking signal, but they do not substitute for concrete skill requirements.
     A minimum final match score can be requested via min_match_score.
     When guild_id is provided, discord member snapshots are scoped to that guild.
     When requirements.location_type == "us_only", a hard US-only filter is applied
@@ -457,16 +457,7 @@ def search_candidates(
                   AND (
                     (
                       cardinality((SELECT skills FROM req_soft)) > 0
-                      AND (
-                        COALESCE(p.skills, '{}'::text[]) && (SELECT skills FROM req_soft)
-                        OR EXISTS (
-                          SELECT 1
-                          FROM jsonb_array_elements_text(
-                              COALESCE(dm.roles, p.discord_roles, '[]'::jsonb)
-                          ) r
-                          WHERE r = ANY(rtypes.types)
-                        )
-                      )
+                      AND COALESCE(p.skills, '{}'::text[]) && (SELECT skills FROM req_soft)
                     )
                     OR (
                       cardinality((SELECT skills FROM req_soft)) = 0

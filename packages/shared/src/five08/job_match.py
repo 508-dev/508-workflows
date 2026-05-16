@@ -415,6 +415,38 @@ _SENIORITY_RE = re.compile(
 
 SENIORITY_ORDER = ["junior", "midlevel", "senior", "staff"]
 
+_LANGUAGE_REQUIREMENT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(
+            r"\b(?:japanese\s+(?:native|speaker|required|fluency|fluent|language)"
+            r"|native\s+japanese|fluent\s+(?:in\s+)?japanese"
+            r"|must\s+(?:speak|know|be\s+fluent\s+in)\s+japanese"
+            r"|business\s+japanese)\b",
+            re.IGNORECASE,
+        ),
+        "japanese",
+    ),
+)
+
+_LANGUAGE_NEGATION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(
+            r"\b(?:no|not)\s+japanese\s+(?:required|needed|necessary)"
+            r"|\bjapanese(?:\s+language)?\s+(?:is\s+)?not\s+"
+            r"(?:required|needed|necessary)\b"
+            r"|\bjapanese\s+(?:speaker|fluency|fluent|language)\s+"
+            r"(?:is\s+)?not\s+(?:required|needed|necessary)\b"
+            r"|\bjapanese\s+(?:optional|nice\s+to\s+have)\b",
+            re.IGNORECASE,
+        ),
+        "japanese",
+    ),
+)
+
+_LANGUAGE_SKILLS: frozenset[str] = frozenset(
+    language for _pattern, language in _LANGUAGE_REQUIREMENT_PATTERNS
+)
+
 
 def _normalize_job_skill_list(values: list[str]) -> list[str]:
     """Normalize job-post skills toward short, searchable CRM terms."""
@@ -435,6 +467,11 @@ def _normalize_job_skill_list(values: list[str]) -> list[str]:
     return normalized
 
 
+def is_language_requirement_skill(value: str) -> bool:
+    """Return whether a normalized skill is a hard language gate."""
+    return normalize_skill(value).casefold() in _LANGUAGE_SKILLS
+
+
 @dataclass(frozen=True)
 class JobRequirements:
     """Normalized requirements extracted from a job posting."""
@@ -444,6 +481,7 @@ class JobRequirements:
     soft_required_skills: list[str] = field(default_factory=list)
     preferred_skills: list[str] = field(default_factory=list)
     required_evidence: list[str] = field(default_factory=list)
+    required_languages: list[str] = field(default_factory=list)
     # Subset of DISCORD_SKILL_ROLE_NAMES that apply to this role.
     # Used to match candidates via their discord_roles column.
     discord_role_types: list[str] = field(default_factory=list)
@@ -454,13 +492,16 @@ class JobRequirements:
     title: str | None = None
 
     def __post_init__(self) -> None:
+        required_languages = _normalize_job_skill_list(list(self.required_languages))
         hard_required_skills = _normalize_job_skill_list(
-            list(self.hard_required_skills)
+            required_languages + list(self.hard_required_skills)
         )
         soft_required_skills = _normalize_job_skill_list(
             list(self.soft_required_skills)
         )
-        legacy_required_skills = _normalize_job_skill_list(list(self.required_skills))
+        legacy_required_skills = _normalize_job_skill_list(
+            required_languages + list(self.required_skills)
+        )
 
         if (
             not hard_required_skills
@@ -515,6 +556,11 @@ class JobRequirements:
             "required_evidence",
             _normalize_evidence_list(self.required_evidence),
         )
+        object.__setattr__(
+            self,
+            "required_languages",
+            required_languages,
+        )
 
 
 @dataclass(frozen=True)
@@ -558,6 +604,22 @@ def _regex_hints(text: str) -> dict[str, Any]:
         raw = seniority_match.group(1).lower().replace("-", "").replace(" ", "")
         hints["seniority_hint"] = _SENIORITY_KEYWORDS.get(raw)
 
+    required_languages: list[str] = []
+    negated_languages = {
+        language
+        for pattern, language in _LANGUAGE_NEGATION_PATTERNS
+        if pattern.search(text)
+    }
+    for pattern, language in _LANGUAGE_REQUIREMENT_PATTERNS:
+        if (
+            language not in negated_languages
+            and pattern.search(text)
+            and language not in required_languages
+        ):
+            required_languages.append(language)
+    if required_languages:
+        hints["required_languages"] = required_languages
+
     return hints
 
 
@@ -570,6 +632,12 @@ def _build_prompt(posting_text: str, hints: dict[str, Any]) -> str:
     if hints.get("seniority_hint"):
         hint_lines.append(
             f"Note: regex detected seniority keyword suggesting '{hints['seniority_hint']}'."
+        )
+    if hints.get("required_languages"):
+        languages = ", ".join(str(item) for item in hints["required_languages"])
+        hint_lines.append(
+            "Note: regex detected required language ability. Treat as a hard "
+            f"candidate gate: {languages}."
         )
 
     hint_block = ("\n".join(hint_lines) + "\n\n") if hint_lines else ""
@@ -597,6 +665,10 @@ def _build_prompt(posting_text: str, hints: dict[str, Any]) -> str:
         '- "required_evidence": array of strings — non-skill proof items the hiring team '
         'explicitly asks for, like "live webflow projects", "portfolio", or '
         '"hubspot integration examples".\n'
+        '- "required_languages": array of strings — spoken/written languages that are '
+        'explicit hard gates, e.g. "japanese" for "Japanese native". Also include '
+        "each required language in hard_required_skills so deterministic search can "
+        "enforce it.\n"
         '- "required_skills": array of strings — legacy compatibility field. Return the '
         "combined hard + soft technical requirements in priority order.\n"
         "EXCLUDE soft skills, work styles, or behavioral traits such as "
@@ -653,6 +725,7 @@ def _build_rerank_prompt(
         "location_type": requirements.location_type,
         "preferred_timezones": requirements.preferred_timezones,
         "raw_location_text": requirements.raw_location_text,
+        "required_languages": requirements.required_languages,
     }
     return (
         "You are reranking a shortlist of candidates after deterministic filtering.\n"
@@ -861,6 +934,22 @@ def extract_job_requirements(
     required_evidence = _normalize_evidence_list(
         _coerce_str_list(data.get("required_evidence"))
     )
+    required_languages = normalize_skill_list(
+        _coerce_str_list(data.get("required_languages"))
+    )
+    for language in _coerce_str_list(hints.get("required_languages")):
+        normalized_language = normalize_skill(language)
+        if normalized_language and normalized_language not in required_languages:
+            required_languages.append(normalized_language)
+    for language in required_languages:
+        normalized_language = normalize_skill(language)
+        if normalized_language and normalized_language not in hard_required_skills:
+            hard_required_skills.insert(0, normalized_language)
+        if normalized_language and normalized_language not in required_skills:
+            required_skills.insert(0, normalized_language)
+        evidence = f"{normalized_language} language ability"
+        if evidence not in required_evidence:
+            required_evidence.append(evidence)
 
     # Let JobRequirements.__post_init__ apply canonicalization + dedupe consistently.
     discord_role_types = _coerce_str_list(data.get("discord_role_types"))
@@ -899,6 +988,7 @@ def extract_job_requirements(
         soft_required_skills=soft_required_skills,
         preferred_skills=preferred_skills,
         required_evidence=required_evidence,
+        required_languages=required_languages,
         discord_role_types=discord_role_types,
         seniority=seniority,
         location_type=location_type,

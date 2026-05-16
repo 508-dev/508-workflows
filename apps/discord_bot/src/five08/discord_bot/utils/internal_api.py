@@ -1,5 +1,6 @@
 """Authenticated internal HTTP routes for the Discord bot."""
 
+import asyncio
 import logging
 import secrets
 from typing import Any
@@ -10,6 +11,7 @@ from discord.ext import commands
 from pydantic import BaseModel, ValidationError
 
 from five08.discord_bot.config import settings
+from five08.engagements import normalize_engagement_status, strip_status_from_title
 
 logger = logging.getLogger(__name__)
 
@@ -24,17 +26,30 @@ class MemberAgreementRoleRequest(BaseModel):
     completed_at: str | None = None
 
 
+class GigThreadStatusRequest(BaseModel):
+    """Internal payload for mirroring dashboard gig status to Discord."""
+
+    thread_id: str
+    status: str
+
+
 class InternalAPIRoutes:
     """Authenticated bot-internal automation routes."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+        self._pending_gig_thread_statuses: dict[int, GigThreadStatusRequest] = {}
+        self._gig_thread_status_tasks: dict[int, asyncio.Task[None]] = {}
 
     def register(self, app: web.Application) -> None:
         """Register internal routes on the shared aiohttp app."""
         app.router.add_post(
             "/internal/member-agreements/member-role",
             self.member_agreement_role_handler,
+        )
+        app.router.add_post(
+            "/internal/jobs/thread-status",
+            self.gig_thread_status_handler,
         )
 
     @staticmethod
@@ -195,4 +210,183 @@ class InternalAPIRoutes:
             )
 
         result, status_code = await self._grant_member_role(payload)
+        return web.json_response(result, status=status_code)
+
+    async def _enqueue_gig_thread_status(
+        self,
+        payload: GigThreadStatusRequest,
+    ) -> tuple[dict[str, Any], int]:
+        try:
+            thread_id = int(payload.thread_id)
+        except ValueError:
+            return {"error": "invalid_thread_id"}, 400
+
+        normalized_status = normalize_engagement_status(payload.status)
+        self._pending_gig_thread_statuses[thread_id] = GigThreadStatusRequest(
+            thread_id=str(thread_id),
+            status=normalized_status.value,
+        )
+
+        existing_task = self._gig_thread_status_tasks.get(thread_id)
+        if existing_task is None or existing_task.done():
+            self._gig_thread_status_tasks[thread_id] = asyncio.create_task(
+                self._run_gig_thread_status_sync(thread_id)
+            )
+
+        return {
+            "status": "queued",
+            "thread_id": str(thread_id),
+            "target_status": normalized_status.value,
+        }, 202
+
+    async def _run_gig_thread_status_sync(self, thread_id: int) -> None:
+        """Coalesce dashboard status changes and sync the latest one to Discord."""
+        current_task = asyncio.current_task()
+        try:
+            while True:
+                await asyncio.sleep(2)
+                payload = self._pending_gig_thread_statuses.pop(thread_id, None)
+                if payload is None:
+                    return
+
+                await self._apply_gig_thread_status_with_retries(payload)
+                if thread_id not in self._pending_gig_thread_statuses:
+                    return
+        finally:
+            if self._gig_thread_status_tasks.get(thread_id) is current_task:
+                self._gig_thread_status_tasks.pop(thread_id, None)
+                if thread_id in self._pending_gig_thread_statuses:
+                    self._gig_thread_status_tasks[thread_id] = asyncio.create_task(
+                        self._run_gig_thread_status_sync(thread_id)
+                    )
+
+    async def _apply_gig_thread_status_with_retries(
+        self,
+        payload: GigThreadStatusRequest,
+    ) -> None:
+        retry_delays = (5, 30, 120)
+        for attempt, retry_delay in enumerate((*retry_delays, None), start=1):
+            result, status_code = await self._update_gig_thread_status(payload)
+            if status_code < 500:
+                if status_code >= 400:
+                    logger.warning(
+                        "Discord gig thread status sync rejected thread_id=%s "
+                        "status=%s result=%s",
+                        payload.thread_id,
+                        status_code,
+                        result,
+                    )
+                return
+
+            logger.warning(
+                "Discord gig thread status sync failed thread_id=%s attempt=%s "
+                "status=%s result=%s",
+                payload.thread_id,
+                attempt,
+                status_code,
+                result,
+            )
+            if retry_delay is None:
+                return
+            await asyncio.sleep(retry_delay)
+
+    async def _update_gig_thread_status(
+        self,
+        payload: GigThreadStatusRequest,
+    ) -> tuple[dict[str, Any], int]:
+        try:
+            thread_id = int(payload.thread_id)
+        except ValueError:
+            return {"error": "invalid_thread_id"}, 400
+
+        normalized_status = normalize_engagement_status(payload.status)
+        status_marker = normalized_status.value.upper()
+
+        channel = self.bot.get_channel(thread_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(thread_id)
+            except discord.NotFound:
+                return {"error": "thread_not_found"}, 404
+            except discord.Forbidden:
+                return {"error": "thread_lookup_forbidden"}, 403
+            except discord.HTTPException as exc:
+                logger.warning("Failed fetching gig thread %s: %s", thread_id, exc)
+                return {"error": "thread_lookup_failed"}, 502
+
+        if not isinstance(channel, discord.Thread):
+            return {"error": "channel_is_not_thread"}, 400
+
+        bot_member = channel.guild.me if channel.guild is not None else None
+        if bot_member is None:
+            return {"error": "bot_member_unresolved"}, 503
+
+        permissions = channel.permissions_for(bot_member)
+        permission_payload = {
+            "manage_threads": permissions.manage_threads,
+            "view_channel": permissions.view_channel,
+            "send_messages_in_threads": permissions.send_messages_in_threads,
+            "archived": channel.archived,
+            "locked": channel.locked,
+        }
+        if not permissions.manage_threads:
+            return {
+                "error": "missing_manage_threads_permission",
+                **permission_payload,
+            }, 403
+
+        base_title = strip_status_from_title(channel.name) or channel.name
+        base_title = base_title.strip() or f"Discord gig {thread_id}"
+        next_name = f"[{status_marker}] {base_title}"[:100]
+        if channel.name == next_name:
+            return {
+                "status": "unchanged",
+                "thread_id": str(thread_id),
+                "title": next_name,
+            }, 200
+
+        try:
+            if channel.archived:
+                await channel.edit(
+                    archived=False,
+                    reason="Dashboard gig status update",
+                )
+            await channel.edit(
+                name=next_name,
+                reason="Dashboard gig status update",
+            )
+        except discord.Forbidden:
+            return {"error": "thread_rename_forbidden"}, 403
+        except discord.HTTPException as exc:
+            logger.warning("Failed renaming gig thread %s: %s", thread_id, exc)
+            return {"error": "thread_rename_failed"}, 502
+
+        return {
+            "status": "updated",
+            "thread_id": str(thread_id),
+            "title": next_name,
+        }, 200
+
+    async def gig_thread_status_handler(self, request: web.Request) -> web.Response:
+        """Mirror a dashboard gig status update to the Discord thread title."""
+        if not self._is_authorized(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+
+        try:
+            payload_data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid_json"}, status=400)
+
+        if not isinstance(payload_data, dict):
+            return web.json_response({"error": "payload_must_be_object"}, status=400)
+
+        try:
+            payload = GigThreadStatusRequest.model_validate(payload_data)
+        except (ValidationError, TypeError) as exc:
+            return web.json_response(
+                {"error": "invalid_payload", "detail": str(exc)},
+                status=400,
+            )
+
+        result, status_code = await self._enqueue_gig_thread_status(payload)
         return web.json_response(result, status=status_code)

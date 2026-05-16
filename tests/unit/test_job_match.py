@@ -65,6 +65,16 @@ def test_regex_hints_no_seniority() -> None:
     assert hints.get("seniority_hint") is None
 
 
+def test_regex_hints_detects_required_japanese_language() -> None:
+    hints = _regex_hints("Japanese native, no English required. Remote is fine.")
+    assert hints.get("required_languages") == ["japanese"]
+
+
+def test_regex_hints_ignores_negated_japanese_requirement() -> None:
+    hints = _regex_hints("No Japanese required. English is enough.")
+    assert "required_languages" not in hints
+
+
 # ---------------------------------------------------------------------------
 # _parse_llm_response
 # ---------------------------------------------------------------------------
@@ -179,6 +189,37 @@ def test_extract_normalizes_required_skills() -> None:
     assert create_kwargs["model"] == "gpt-5-mini"
     assert create_kwargs["response_format"] == {"type": "json_object"}
     assert "temperature" not in create_kwargs
+
+
+def test_extract_adds_regex_language_gate_to_hard_requirements() -> None:
+    payload = {
+        "hard_required_skills": ["Next Engine"],
+        "soft_required_skills": ["Shopify", "WMS"],
+        "preferred_skills": [],
+        "required_evidence": [],
+        "required_skills": ["Next Engine", "Shopify", "WMS"],
+        "seniority": "midlevel",
+        "location_type": "remote_any",
+        "preferred_timezones": [],
+        "raw_location_text": "Japanese native, no English required.",
+        "title": "E-commerce Integrations Freelancer",
+    }
+    with patch("openai.OpenAI") as mock_openai_cls:
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value = _make_openai_response(
+            payload
+        )
+
+        result = extract_job_requirements(
+            "Japanese native, no English required. Need Next Engine and Shopify.",
+            api_key="test-key",
+        )
+
+    assert result.required_languages == ["japanese"]
+    assert result.hard_required_skills == ["japanese", "next engine"]
+    assert result.soft_required_skills == ["shopify", "wms"]
+    assert result.required_skills == ["japanese", "next engine", "shopify", "wms"]
 
 
 def test_extract_backfills_hard_and_soft_from_legacy_required_skills() -> None:

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import five08.discord_bot.cogs.jobs as jobs_module
 from five08.discord_bot.cogs.jobs import JobsCog
 from five08.job_match import CandidateRerankResult, JobRequirements
 
@@ -149,10 +150,54 @@ def test_build_candidate_search_plan_relaxes_hard_requirements() -> None:
     assert plan[0][2] is None
     assert plan[1][0].hard_required_skills == ["webflow"]
     assert plan[1][0].soft_required_skills == ["figma", "hubspot"]
-    assert "anchor hard need `webflow`" in (plan[1][2] or "")
+    assert "anchor hard skill `webflow` stayed mandatory" in (plan[1][2] or "")
     assert plan[2][0].hard_required_skills == []
     assert plan[2][0].soft_required_skills == ["webflow", "figma", "hubspot"]
     assert plan[2][1] == 0.0
+    assert "any relevant required skill" in (plan[2][2] or "")
+
+
+def test_build_candidate_search_plan_keeps_language_requirements_hard() -> None:
+    requirements = JobRequirements(
+        hard_required_skills=["japanese", "next engine"],
+        soft_required_skills=["shopify", "wms"],
+        required_languages=["japanese"],
+        discord_role_types=["Backend"],
+    )
+
+    plan = JobsCog._build_candidate_search_plan(requirements, min_match_score=8.0)
+
+    assert len(plan) == 2
+    for planned_requirements, *_ in plan:
+        assert "japanese" in planned_requirements.hard_required_skills
+    assert plan[0][0].hard_required_skills == ["japanese", "next engine"]
+    assert plan[1][0].hard_required_skills == ["japanese", "next engine"]
+    assert plan[1][0].soft_required_skills == ["shopify", "wms"]
+    assert "required language gates" in (plan[1][2] or "")
+
+
+def test_build_candidate_search_plan_keeps_llm_required_languages_hard() -> None:
+    requirements = JobRequirements(
+        hard_required_skills=["spanish", "salesforce"],
+        soft_required_skills=["crm"],
+        required_languages=["spanish"],
+    )
+
+    plan = JobsCog._build_candidate_search_plan(requirements, min_match_score=8.0)
+
+    assert plan[-1][0].hard_required_skills == ["spanish", "salesforce"]
+    assert plan[-1][0].soft_required_skills == [
+        "customer relationship management",
+    ]
+
+
+def test_message_expresses_gig_interest_is_conservative() -> None:
+    assert JobsCog._message_expresses_gig_interest("I'm interested in this")
+    assert JobsCog._message_expresses_gig_interest("I can help with this one")
+    assert JobsCog._message_expresses_gig_interest("available for a quick chat")
+    assert not JobsCog._message_expresses_gig_interest("@someone ?")
+    assert not JobsCog._message_expresses_gig_interest("looks interesting")
+    assert not JobsCog._message_expresses_gig_interest("not available for this")
 
 
 def test_build_job_match_header_uses_single_skills_line_when_hard_is_empty() -> None:
@@ -214,7 +259,7 @@ def test_search_and_rerank_candidates_retries_with_relaxed_requirements() -> Non
     rerank_mock.assert_awaited_once()
     assert outcome.candidates == [candidate]
     assert outcome.effective_requirements.hard_required_skills == ["webflow"]
-    assert "anchor hard need `webflow`" in (outcome.search_note or "")
+    assert "anchor hard skill `webflow` stayed mandatory" in (outcome.search_note or "")
 
 
 def test_build_match_candidate_lines_keeps_name_discord_and_linkedin_on_first_line() -> (
@@ -361,3 +406,31 @@ def test_rerank_candidates_preserves_llm_order_for_tied_scores() -> None:
         )
 
     assert [candidate.crm_name for candidate in reranked[:2]] == ["Beta", "Alpha"]
+
+
+def test_on_thread_create_indexes_public_registered_forum_post(monkeypatch) -> None:
+    class FakeForumChannel:
+        id = 123
+        name = "gigs"
+
+        def permissions_for(self, _role: object) -> SimpleNamespace:
+            return SimpleNamespace(view_channel=True)
+
+    monkeypatch.setattr(jobs_module.discord, "ForumChannel", FakeForumChannel)
+
+    cog = JobsCog(Mock())
+    cog._refresh_jobs_channel_cache_if_missing = AsyncMock(return_value=True)
+    cog._is_jobs_channel_registered = Mock(return_value=True)
+    cog._persist_thread_engagement_index = AsyncMock(return_value=True)
+    cog._run_auto_match_candidates_for_thread = AsyncMock()
+
+    guild = SimpleNamespace(id=456, name="508", default_role=object())
+    thread = SimpleNamespace(id=789, guild=guild, parent=FakeForumChannel())
+
+    asyncio.run(cog.on_thread_create(thread))
+
+    cog._persist_thread_engagement_index.assert_awaited_once_with(
+        thread,
+        source="thread_create",
+    )
+    cog._run_auto_match_candidates_for_thread.assert_not_awaited()

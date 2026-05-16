@@ -2364,8 +2364,14 @@ class TestCRMCog:
             jobs_module.settings,
             guild_id="123",
             channel_id="456",
+            posting_type=jobs_module.JobPostingType.PART_TIME,
+            update_existing=False,
         )
         assert jobs_cog._jobs_channels_by_guild[guild.id] == {456}
+        assert (
+            jobs_cog._jobs_channel_types_by_guild[guild.id][456]
+            is jobs_module.JobPostingType.PART_TIME
+        )
 
     @pytest.mark.asyncio
     async def test_unregister_jobs_channel_updates_cache(

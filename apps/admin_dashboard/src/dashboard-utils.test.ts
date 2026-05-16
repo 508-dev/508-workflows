@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  daysSince,
   displayOnboarder,
   githubUrl,
   labelForOnboardingState,
@@ -36,5 +37,12 @@ describe("dashboard utility helpers", () => {
   it("hides empty and none onboarder values", () => {
     expect(displayOnboarder(" none ")).toBe("")
     expect(displayOnboarder("jane")).toBe("jane")
+  })
+
+  it("calculates whole elapsed days from an ISO timestamp", () => {
+    const now = new Date("2026-05-16T12:00:00Z")
+    expect(daysSince("2026-05-06T11:59:00Z", now)).toBe(10)
+    expect(daysSince("2026-05-17T00:00:00Z", now)).toBe(0)
+    expect(daysSince("not a date", now)).toBeNull()
   })
 })

@@ -1,5 +1,6 @@
 """Unit tests for bot internal automation routes."""
 
+import asyncio
 from types import SimpleNamespace
 import json
 from unittest.mock import AsyncMock, Mock
@@ -8,6 +9,7 @@ import discord
 import pytest
 
 from five08.discord_bot.utils.internal_api import (
+    GigThreadStatusRequest,
     InternalAPIRoutes,
     MemberAgreementRoleRequest,
 )
@@ -117,6 +119,125 @@ class TestInternalAPIRoutes:
 
         assert response.status == 401
         assert json.loads(response.body.decode("utf-8")) == {"error": "unauthorized"}
+
+    @pytest.mark.asyncio
+    async def test_update_gig_thread_status_rewrites_title_marker(
+        self, internal_api_routes, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Dashboard gig status changes should update the Discord thread title."""
+
+        class FakeThread:
+            id = 123
+            name = "[RECRUITING] Old gig"
+            archived = False
+            locked = False
+            guild = SimpleNamespace(me=object())
+
+            def __init__(self) -> None:
+                self.edit = AsyncMock()
+
+            def permissions_for(self, _member: object) -> SimpleNamespace:
+                return SimpleNamespace(
+                    manage_threads=True,
+                    view_channel=True,
+                    send_messages_in_threads=True,
+                )
+
+        thread = FakeThread()
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.discord.Thread",
+            FakeThread,
+        )
+        internal_api_routes.bot.get_channel.return_value = thread
+
+        result, status_code = await internal_api_routes._update_gig_thread_status(
+            GigThreadStatusRequest(thread_id="123", status="outdated")
+        )
+
+        assert status_code == 200
+        assert result["status"] == "updated"
+        assert result["title"] == "[OUTDATED] Old gig"
+        thread.edit.assert_awaited_once_with(
+            name="[OUTDATED] Old gig",
+            reason="Dashboard gig status update",
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_gig_thread_status_reports_missing_manage_threads(
+        self, internal_api_routes, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Thread title sync should explain missing Discord permissions."""
+
+        class FakeThread:
+            id = 123
+            name = "[RECRUITING] Old gig"
+            archived = False
+            locked = False
+            guild = SimpleNamespace(me=object())
+
+            def permissions_for(self, _member: object) -> SimpleNamespace:
+                return SimpleNamespace(
+                    manage_threads=False,
+                    view_channel=True,
+                    send_messages_in_threads=True,
+                )
+
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.discord.Thread",
+            FakeThread,
+        )
+        internal_api_routes.bot.get_channel.return_value = FakeThread()
+
+        result, status_code = await internal_api_routes._update_gig_thread_status(
+            GigThreadStatusRequest(thread_id="123", status="outdated")
+        )
+
+        assert status_code == 403
+        assert result["error"] == "missing_manage_threads_permission"
+        assert result["manage_threads"] is False
+
+    @pytest.mark.asyncio
+    async def test_enqueue_gig_thread_status_coalesces_latest_status(
+        self, internal_api_routes, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Dashboard thread title sync should run async and keep the latest status."""
+
+        async def immediate_sleep(_seconds: float) -> None:
+            return None
+
+        apply_status = AsyncMock()
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.asyncio.sleep",
+            immediate_sleep,
+        )
+        monkeypatch.setattr(
+            internal_api_routes,
+            "_apply_gig_thread_status_with_retries",
+            apply_status,
+        )
+
+        result, status_code = await internal_api_routes._enqueue_gig_thread_status(
+            GigThreadStatusRequest(thread_id="123", status="recruiting")
+        )
+        (
+            second_result,
+            second_status_code,
+        ) = await internal_api_routes._enqueue_gig_thread_status(
+            GigThreadStatusRequest(thread_id="123", status="outdated")
+        )
+
+        assert status_code == 202
+        assert result["status"] == "queued"
+        assert second_status_code == 202
+        assert second_result["target_status"] == "outdated"
+
+        task = internal_api_routes._gig_thread_status_tasks[123]
+        await asyncio.wait_for(task, timeout=1)
+
+        apply_status.assert_awaited_once()
+        applied_payload = apply_status.await_args.args[0]
+        assert applied_payload.status == "outdated"
+        assert 123 not in internal_api_routes._gig_thread_status_tasks
 
     @pytest.mark.asyncio
     async def test_grant_member_role_returns_forbidden_when_fetch_forbidden(

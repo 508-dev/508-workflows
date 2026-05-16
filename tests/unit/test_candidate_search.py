@@ -202,6 +202,29 @@ def test_search_candidates_binds_anchor_required_skill() -> None:
     assert execute_params[1] == ["figma", "hubspot"]
 
 
+def test_search_candidates_does_not_admit_role_only_when_soft_skills_exist() -> None:
+    row = _make_row(skills=["figma"], discord_roles=["Frontend"])
+    conn = _patch_db([row])
+    reqs = _make_requirements(
+        hard_required_skills=[],
+        soft_required_skills=["webflow", "figma"],
+        discord_role_types=["Frontend"],
+    )
+    settings = MagicMock()
+
+    with patch("five08.candidate_search.get_postgres_connection", return_value=conn):
+        search_candidates(settings, reqs)
+
+    executed_query = conn.cursor.return_value.execute.call_args[0][0]
+    soft_gate = (
+        "cardinality((SELECT skills FROM req_soft)) > 0\n"
+        "                      AND COALESCE(p.skills, '{}'::text[]) && "
+        "(SELECT skills FROM req_soft)"
+    )
+    assert soft_gate in executed_query
+    assert "OR EXISTS (\n                          SELECT 1" not in executed_query
+
+
 def test_search_candidates_guards_non_numeric_skill_attr_casts() -> None:
     row = _make_row(skills=["webflow", "figma"], skill_attrs={"webflow": "expert"})
     conn = _patch_db([row])

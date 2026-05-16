@@ -1,4 +1,5 @@
 import {
+  Bell,
   BriefcaseBusiness,
   ClipboardList,
   FileClock,
@@ -7,6 +8,7 @@ import {
   Search,
   ShieldCheck,
   Users,
+  X,
 } from "lucide-react"
 import { StrictMode, useEffect, useMemo, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
@@ -26,6 +28,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import {
+  daysSince,
   displayOnboarder,
   formatDate,
   githubUrl,
@@ -39,7 +42,7 @@ import {
 import { cn } from "@/lib/utils"
 import "./index.css"
 
-type View = "people" | "onboarding" | "jobs" | "agent" | "audit"
+type View = "people" | "gigs" | "onboarding" | "jobs" | "agent" | "audit"
 type SortDirection = "asc" | "desc"
 
 type User = {
@@ -101,6 +104,64 @@ type JobDetail = Job & {
   result?: unknown
 }
 
+type GigApplication = {
+  id: string
+  status?: string
+  source?: string
+  match_score?: number | null
+  fit_score?: number | null
+  evaluation?: Record<string, unknown>
+  crm_contact_id?: string
+  discord_user_id?: string
+  name?: string
+  email_508?: string
+  discord_username?: string
+  latest_resume_id?: string
+  latest_resume_name?: string
+  skills_count?: number
+  is_member?: boolean
+}
+
+type Gig = {
+  id: string
+  status: string
+  status_label?: string
+  title?: string
+  body_raw?: string
+  required_skills?: string[]
+  preferred_skills?: string[]
+  discord_guild_id?: string
+  discord_channel_id?: string
+  discord_channel_name?: string
+  posting_type?: string
+  discord_thread_id?: string
+  posted_by_discord_user_id?: string
+  posted_at?: string
+  last_status_changed_at?: string
+  last_activity_at?: string
+  created_at?: string
+  updated_at?: string
+  application_count?: number
+  interested_count?: number
+  applications?: GigApplication[]
+}
+
+type DashboardNotification = {
+  id: string
+  type: string
+  severity?: "info" | "warning" | "error"
+  title: string
+  message: string
+  engagement_id?: string
+  gig_title?: string
+  age_days?: number
+}
+
+type DashboardNotificationsResponse = {
+  stale_days: number
+  notifications: DashboardNotification[]
+}
+
 type AuditEvent = {
   id?: string
   occurred_at?: string
@@ -126,6 +187,7 @@ type AgentReport = {
 
 const routes: Record<View, string> = {
   people: "/dashboard/people",
+  gigs: "/dashboard/gigs",
   onboarding: "/dashboard/onboarding",
   jobs: "/dashboard/jobs",
   agent: "/dashboard/agent",
@@ -134,6 +196,7 @@ const routes: Record<View, string> = {
 
 const routePermissions: Record<View, string> = {
   people: "people:read",
+  gigs: "gigs:read",
   onboarding: "onboarding:read",
   jobs: "jobs:read",
   agent: "audit:read",
@@ -217,7 +280,14 @@ async function requestJson<T>(url: string, options: RequestInit = {}): Promise<T
   return response.json() as Promise<T>
 }
 
-function sortValue(scope: View, item: Job | Person | AuditEvent, key: string) {
+function sortValue(scope: View, item: Job | Person | Gig | AuditEvent, key: string) {
+  if (scope === "gigs") {
+    const gig = item as Gig
+    if (key === "title") return gig.title || ""
+    if (key === "status") return gig.status || ""
+    if (key === "applications") return Number(gig.application_count || 0)
+    if (key === "activity") return gigActivityTimestamp(gig)
+  }
   if (scope === "onboarding") {
     const person = item as Person
     const status = person.profile_status || {}
@@ -260,7 +330,7 @@ function sortValue(scope: View, item: Job | Person | AuditEvent, key: string) {
   return (item as Record<string, unknown>)[key] ?? ""
 }
 
-function sortItems<T extends Job | Person | AuditEvent>(
+function sortItems<T extends Job | Person | Gig | AuditEvent>(
   scope: View,
   items: T[],
   sort: { key: string; direction: SortDirection },
@@ -353,6 +423,9 @@ function App() {
   const [permissions, setPermissions] = useState<string[]>([])
   const [crmBaseUrl, setCrmBaseUrl] = useState("")
   const [jobs, setJobs] = useState<Job[]>([])
+  const [gigs, setGigs] = useState<Gig[]>([])
+  const [notifications, setNotifications] = useState<DashboardNotification[]>([])
+  const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [people, setPeople] = useState<Person[]>([])
   const [onboarding, setOnboarding] = useState<Person[]>([])
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([])
@@ -361,6 +434,7 @@ function App() {
   const [loading, setLoading] = useState<Record<string, boolean>>({})
   const [sort, setSortState] = useState<Record<View, { key: string; direction: SortDirection }>>({
     onboarding: { key: "onboarding_state", direction: "asc" },
+    gigs: { key: "activity", direction: "desc" },
     jobs: { key: "updated_at", direction: "desc" },
     people: { key: "name", direction: "asc" },
     agent: { key: "occurred_at", direction: "desc" },
@@ -370,6 +444,9 @@ function App() {
   const [minutes, setMinutes] = useState("60")
   const [status, setStatus] = useState("")
   const [jobType, setJobType] = useState("")
+  const [gigStatus, setGigStatus] = useState("")
+  const [gigLimit, setGigLimit] = useState(100)
+  const [staleRecruitingDays, setStaleRecruitingDays] = useState(7)
   const [peopleQuery, setPeopleQuery] = useState("")
   const [peopleMember, setPeopleMember] = useState("")
   const [peopleFilters, setPeopleFilters] = useState<FilterState>({})
@@ -421,10 +498,6 @@ function App() {
   }
   navigateRef.current = navigate
 
-  function ssoLoginUrl(nextView: View) {
-    return `/auth/login?next=${encodeURIComponent(routes[nextView])}`
-  }
-
   function crmContactUrl(contactId?: string) {
     if (!crmBaseUrl || !contactId) return ""
     return `${crmBaseUrl}/#Contact/view/${encodeURIComponent(contactId)}`
@@ -464,6 +537,12 @@ function App() {
     return `/dashboard/api/jobs?${params.toString()}`
   }
 
+  function gigsUrl() {
+    const params = new URLSearchParams({ limit: String(gigLimit) })
+    if (gigStatus) params.set("status", gigStatus)
+    return `/dashboard/api/gigs?${params.toString()}`
+  }
+
   async function loadJobs() {
     setBusy("jobs", true)
     showToast("Loading jobs")
@@ -475,6 +554,88 @@ function App() {
       showToast(error instanceof Error ? error.message : "Unable to load jobs", "error")
     } finally {
       setBusy("jobs", false)
+    }
+  }
+
+  async function loadGigs() {
+    setBusy("gigs", true)
+    try {
+      const payload = await requestJson<Gig[]>(gigsUrl())
+      setGigs(payload)
+      showToast(`Loaded ${payload.length} gig${payload.length === 1 ? "" : "s"}`, "ok")
+      void loadNotifications()
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Unable to load gigs", "error")
+    } finally {
+      setBusy("gigs", false)
+    }
+  }
+
+  async function loadNotifications() {
+    if (!can("gigs:read")) return
+    setBusy("notifications", true)
+    try {
+      const payload = await requestJson<DashboardNotificationsResponse>(
+        "/dashboard/api/notifications?limit=20",
+      )
+      setStaleRecruitingDays(payload.stale_days || 7)
+      setNotifications(payload.notifications || [])
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Unable to load notifications", "error")
+    } finally {
+      setBusy("notifications", false)
+    }
+  }
+
+  async function updateGigStatus(gigId: string, nextStatus: string) {
+    setBusy(`gig:${gigId}:status`, true)
+    try {
+      const payload = await requestJson<{
+        status: string
+        discord_title_sync?: { status?: string; reason?: string }
+      }>(`/dashboard/api/gigs/${encodeURIComponent(gigId)}/status`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: nextStatus }),
+      })
+      const titleSyncStatus = payload.discord_title_sync?.status
+      showToast(
+        titleSyncStatus === "error"
+          ? "Updated gig status; Discord title sync failed"
+          : "Updated gig status",
+        titleSyncStatus === "error" ? "error" : "ok",
+      )
+      await loadGigs()
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Unable to update gig", "error")
+    } finally {
+      setBusy(`gig:${gigId}:status`, false)
+    }
+  }
+
+  async function updateGigApplicationStatus(
+    gigId: string,
+    applicationId: string,
+    nextStatus: string,
+  ) {
+    setBusy(`application:${applicationId}:status`, true)
+    try {
+      await requestJson<{ status: string }>(
+        `/dashboard/api/gigs/${encodeURIComponent(gigId)}/applications/${encodeURIComponent(
+          applicationId,
+        )}/status`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: nextStatus }),
+        },
+      )
+      showToast("Updated candidate status", "ok")
+      await loadGigs()
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Unable to update candidate", "error")
+    } finally {
+      setBusy(`application:${applicationId}:status`, false)
     }
   }
 
@@ -683,10 +844,18 @@ function App() {
     return () => window.removeEventListener("popstate", onPopState)
   }, [])
 
+  useEffect(() => {
+    if (!toast.message) return undefined
+    const timeout = window.setTimeout(() => setToast({ message: "" }), 4500)
+    return () => window.clearTimeout(timeout)
+  }, [toast.message])
+
   // biome-ignore lint/correctness/useExhaustiveDependencies: each loader reads the latest filter state for the active view.
   useEffect(() => {
     if (permissions.length === 0) return
+    if (can("gigs:read")) void loadNotifications()
     if (view === "people") void loadPeople()
+    if (view === "gigs") void loadGigs()
     if (view === "onboarding") void loadOnboarding()
     if (view === "jobs") void loadJobs()
     if (view === "agent") void loadAgentReport()
@@ -696,7 +865,9 @@ function App() {
   // biome-ignore lint/correctness/useExhaustiveDependencies: permission loading is the first authorized data fetch for the current view.
   useEffect(() => {
     if (permissions.length === 0) return
+    if (can("gigs:read")) void loadNotifications()
     if (view === "people") void loadPeople()
+    if (view === "gigs") void loadGigs()
     if (view === "onboarding") void loadOnboarding()
     if (view === "jobs") void loadJobs()
     if (view === "agent") void loadAgentReport()
@@ -707,6 +878,11 @@ function App() {
   useEffect(() => {
     if (view === "jobs" && permissions.length > 0) void loadJobs()
   }, [minutes, status])
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: gigs reload intentionally follows status filter changes only while gigs is active.
+  useEffect(() => {
+    if (view === "gigs" && permissions.length > 0) void loadGigs()
+  }, [gigStatus, gigLimit])
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: people reload intentionally follows membership filter changes only while people is active.
   useEffect(() => {
@@ -737,6 +913,7 @@ function App() {
     () => sortItems("onboarding", onboarding, sort.onboarding),
     [onboarding, sort.onboarding],
   )
+  const sortedGigs = useMemo(() => sortItems("gigs", gigs, sort.gigs), [gigs, sort.gigs])
   const sortedAudit = useMemo(
     () => sortItems("audit", auditEvents, sort.audit),
     [auditEvents, sort.audit],
@@ -756,6 +933,14 @@ function App() {
   const onboardingFilterKeys = (Object.keys(peopleFilterDefinitions) as PeopleFilterKey[]).filter(
     (key) => key !== "sync_status" && key !== "email_508" && !onboardingFilters[key],
   )
+
+  function openNotification(notification: DashboardNotification) {
+    if (notification.type === "stale_recruiting_gig") {
+      setGigStatus("recruiting")
+      navigate("gigs", true)
+    }
+    setNotificationsOpen(false)
+  }
 
   useEffect(() => {
     if (!peopleFilterKeys.includes(peopleFilterKind) && peopleFilterKeys[0]) {
@@ -802,6 +987,26 @@ function App() {
             </p>
           </div>
           <div className="flex min-w-0 items-center gap-3">
+            {can("gigs:read") ? (
+              <div className="relative">
+                <Button
+                  id="notifications"
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  aria-label="Notifications"
+                  aria-expanded={notificationsOpen}
+                  onClick={() => setNotificationsOpen((current) => !current)}
+                >
+                  <Bell />
+                  {notifications.length > 0 ? (
+                    <span className="absolute -right-1 -top-1 grid min-h-5 min-w-5 place-items-center rounded-full bg-red-500 px-1 text-[11px] font-bold text-white">
+                      {notifications.length}
+                    </span>
+                  ) : null}
+                </Button>
+              </div>
+            ) : null}
             <div className="grid min-w-0 gap-0.5 text-right text-sm text-muted-foreground">
               <strong id="userName" className="truncate text-foreground">
                 {user?.display_name || user?.email || user?.subject || "Loading user"}
@@ -810,17 +1015,6 @@ function App() {
                 {userMeta || "Checking session"}
               </span>
             </div>
-            <span
-              id="toast"
-              role="status"
-              className={cn(
-                "max-w-64 truncate text-sm text-muted-foreground",
-                toast.tone === "ok" && "text-emerald-300",
-                toast.tone === "error" && "text-red-300",
-              )}
-            >
-              {toast.message}
-            </span>
             <Button
               id="logout"
               type="button"
@@ -835,6 +1029,16 @@ function App() {
         </div>
       </header>
 
+      <NotificationDrawer
+        open={notificationsOpen}
+        notifications={notifications}
+        loading={loading.notifications}
+        onClose={() => setNotificationsOpen(false)}
+        onRefresh={loadNotifications}
+        onOpenNotification={openNotification}
+      />
+      <DashboardToast toast={toast} />
+
       <main className="mx-auto grid max-w-7xl grid-cols-1 gap-5 px-5 py-5 md:grid-cols-[190px_minmax(0,1fr)]">
         <nav
           className="grid content-start gap-1 md:sticky md:top-24"
@@ -843,43 +1047,36 @@ function App() {
           {(
             [
               ["people", "People", Users],
+              ["gigs", "Gigs", BriefcaseBusiness],
               ["onboarding", "Onboarding", ClipboardList],
               ["jobs", "Jobs", BriefcaseBusiness],
               ["agent", "Agent", ShieldCheck],
               ["audit", "Audit", FileClock],
             ] as const
-          ).map(([key, label, Icon]) => {
-            const allowed = canView(key)
-            return (
-              <a
-                key={key}
-                className={cn(
-                  "flex min-h-10 items-center gap-2 rounded-md border border-transparent px-3 text-sm font-extrabold text-muted-foreground hover:border-border hover:bg-secondary hover:text-foreground",
-                  view === key && "border-primary bg-accent text-accent-foreground",
-                  !allowed && "opacity-60",
-                )}
-                data-view-link={key}
-                data-permission={routePermissions[key]}
-                href={routes[key]}
-                aria-current={view === key ? "page" : undefined}
-                aria-disabled={allowed ? "false" : "true"}
-                title={allowed ? "" : "Requires SSO validation. Click to continue with SSO."}
-                onClick={(event) => {
-                  event.preventDefault()
-                  if (!allowed) {
-                    showToast(`Continuing to SSO for ${label}`, "ok")
-                    window.location.assign(ssoLoginUrl(key))
-                    return
-                  }
-                  navigate(key, true)
-                }}
-              >
-                <Icon className="size-4" />
-                {label}
-                {!allowed ? <span className="ml-auto text-[10px]">SSO</span> : null}
-              </a>
-            )
-          })}
+          )
+            .filter(([key]) => canView(key))
+            .map(([key, label, Icon]) => {
+              return (
+                <a
+                  key={key}
+                  className={cn(
+                    "flex min-h-10 items-center gap-2 rounded-md border border-transparent px-3 text-sm font-extrabold text-muted-foreground hover:border-border hover:bg-secondary hover:text-foreground",
+                    view === key && "border-primary bg-accent text-accent-foreground",
+                  )}
+                  data-view-link={key}
+                  data-permission={routePermissions[key]}
+                  href={routes[key]}
+                  aria-current={view === key ? "page" : undefined}
+                  onClick={(event) => {
+                    event.preventDefault()
+                    navigate(key, true)
+                  }}
+                >
+                  <Icon className="size-4" />
+                  {label}
+                </a>
+              )
+            })}
         </nav>
 
         <div className="grid min-w-0 gap-5">
@@ -918,6 +1115,26 @@ function App() {
               }}
               crmContactUrl={crmContactUrl}
               crmAttachmentUrl={crmAttachmentUrl}
+            />
+          ) : null}
+
+          {view === "gigs" ? (
+            <GigsView
+              gigs={sortedGigs}
+              sort={sort.gigs}
+              loading={loading}
+              status={gigStatus}
+              limit={gigLimit}
+              staleDays={staleRecruitingDays}
+              canWrite={can("gigs:write")}
+              crmContactUrl={crmContactUrl}
+              crmAttachmentUrl={crmAttachmentUrl}
+              setStatus={setGigStatus}
+              setLimit={setGigLimit}
+              onRefresh={loadGigs}
+              onSort={(key) => handleSort("gigs", key)}
+              onUpdateStatus={updateGigStatus}
+              onUpdateApplicationStatus={updateGigApplicationStatus}
             />
           ) : null}
 
@@ -999,6 +1216,106 @@ function App() {
   )
 }
 
+function NotificationDrawer({
+  open,
+  notifications,
+  loading,
+  onClose,
+  onRefresh,
+  onOpenNotification,
+}: {
+  open: boolean
+  notifications: DashboardNotification[]
+  loading?: boolean
+  onClose: () => void
+  onRefresh: () => void
+  onOpenNotification: (notification: DashboardNotification) => void
+}) {
+  if (!open) return null
+  return (
+    <div
+      className="fixed inset-0 z-40"
+      aria-labelledby="notificationsTitle"
+      aria-modal="true"
+      role="dialog"
+    >
+      <button
+        type="button"
+        className="absolute inset-0 cursor-default bg-black/45"
+        aria-label="Close notifications"
+        onClick={onClose}
+      />
+      <aside className="absolute right-0 top-0 grid h-full w-full max-w-md grid-rows-[auto_minmax(0,1fr)] border-l bg-background shadow-2xl">
+        <div className="flex items-center justify-between gap-3 border-b p-4">
+          <div className="grid gap-0.5">
+            <strong id="notificationsTitle" className="text-base">
+              Notifications
+            </strong>
+            <span className="text-sm text-muted-foreground">
+              {notifications.length === 0
+                ? "No active notifications"
+                : `${notifications.length} active`}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={onRefresh}
+              disabled={loading}
+            >
+              <RefreshCw />
+              Refresh
+            </Button>
+            <Button type="button" variant="ghost" size="icon" aria-label="Close" onClick={onClose}>
+              <X />
+            </Button>
+          </div>
+        </div>
+        <div className="min-h-0 overflow-auto p-4">
+          {notifications.length === 0 ? (
+            <div className="rounded-md border border-dashed p-6 text-sm text-muted-foreground">
+              No active notifications.
+            </div>
+          ) : (
+            <div className="grid gap-3">
+              {notifications.map((notification) => (
+                <button
+                  key={notification.id}
+                  type="button"
+                  className="grid gap-2 rounded-md border p-3 text-left hover:bg-secondary"
+                  onClick={() => onOpenNotification(notification)}
+                >
+                  <span className="text-sm font-bold">{notification.title}</span>
+                  <span className="text-sm text-muted-foreground">{notification.message}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </aside>
+    </div>
+  )
+}
+
+function DashboardToast({ toast }: { toast: { message: string; tone?: "ok" | "error" } }) {
+  if (!toast.message) return null
+  return (
+    <div
+      id="toast"
+      role="status"
+      className={cn(
+        "fixed bottom-5 right-5 z-50 max-w-sm rounded-md border bg-background px-4 py-3 text-sm font-semibold shadow-lg",
+        toast.tone === "ok" && "border-emerald-500/40 text-emerald-300",
+        toast.tone === "error" && "border-red-500/40 text-red-300",
+      )}
+    >
+      {toast.message}
+    </div>
+  )
+}
+
 function FilterChips({
   filters,
   onRemove,
@@ -1029,6 +1346,432 @@ function FilterChips({
         )
       })}
     </fieldset>
+  )
+}
+
+const gigStatuses = ["recruiting", "filled", "unknown", "lost", "outdated"] as const
+const applicationStatuses = [
+  "suggested",
+  "interested",
+  "reviewing",
+  "contacted",
+  "accepted",
+  "rejected",
+  "withdrawn",
+] as const
+
+function titleCase(value?: string) {
+  return String(value || "")
+    .replace(/[-_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (character) => character.toUpperCase())
+}
+
+function gigActivityTimestamp(gig: Gig) {
+  const activityTimes = [
+    gig.last_activity_at,
+    gig.last_status_changed_at,
+    gig.posted_at,
+    gig.created_at,
+  ]
+    .map((value) => (value ? new Date(value).getTime() : Number.NaN))
+    .filter((value) => !Number.isNaN(value))
+  return activityTimes.length > 0 ? new Date(Math.max(...activityTimes)).toISOString() : ""
+}
+
+function staleRecruitingAge(gig: Gig, staleDays: number) {
+  if (gig.status !== "recruiting") return null
+  const latestActivity = gigActivityTimestamp(gig)
+  const age = daysSince(latestActivity)
+  if (age === null || age < staleDays) return null
+  return age
+}
+
+function GigsView(props: {
+  gigs: Gig[]
+  sort: { key: string; direction: SortDirection }
+  loading: Record<string, boolean>
+  status: string
+  limit: number
+  staleDays: number
+  canWrite: boolean
+  crmContactUrl: (contactId?: string) => string
+  crmAttachmentUrl: (attachmentId?: string) => string
+  setStatus: (value: string) => void
+  setLimit: (value: number) => void
+  onRefresh: () => void
+  onSort: (key: string) => void
+  onUpdateStatus: (gigId: string, status: string) => void
+  onUpdateApplicationStatus: (gigId: string, applicationId: string, status: string) => void
+}) {
+  const counts = props.gigs.reduce(
+    (acc, gig) => {
+      acc.total += 1
+      acc.applications += Number(gig.application_count || 0)
+      acc.interested += Number(gig.interested_count || 0)
+      if (staleRecruitingAge(gig, props.staleDays) !== null) acc.stale += 1
+      return acc
+    },
+    { total: 0, applications: 0, interested: 0, stale: 0 },
+  )
+  return (
+    <>
+      <Card className="grid gap-3 p-4 md:grid-cols-[minmax(160px,1fr)_auto] md:items-end">
+        <Label>
+          Status
+          <Select
+            id="gigStatus"
+            value={props.status}
+            onChange={(event) => props.setStatus(event.target.value)}
+          >
+            <option value="">Any status</option>
+            {gigStatuses.map((status) => (
+              <option key={status} value={status}>
+                {titleCase(status)}
+              </option>
+            ))}
+          </Select>
+        </Label>
+        <Button
+          id="refreshGigs"
+          type="button"
+          onClick={props.onRefresh}
+          disabled={props.loading.gigs}
+        >
+          <RefreshCw />
+          Refresh gigs
+        </Button>
+        {props.gigs.length >= props.limit ? (
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => props.setLimit(Math.min(props.limit + 100, 500))}
+            disabled={props.loading.gigs || props.limit >= 500}
+          >
+            Load more
+          </Button>
+        ) : null}
+      </Card>
+
+      <section className="grid gap-3 md:grid-cols-4" aria-label="Gig summary">
+        <Metric id="gigMetricTotal" label="Gigs" value={counts.total} />
+        <Metric id="gigMetricCandidates" label="Candidates" value={counts.applications} />
+        <Metric id="gigMetricInterested" label="Interested" value={counts.interested} />
+        <Metric id="gigMetricStale" label="Stale recruiting" value={counts.stale} />
+      </section>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Discord gigs</CardTitle>
+          <span id="gigsStatus" className="text-sm text-muted-foreground">
+            {props.loading.gigs ? "Loading" : `${props.gigs.length} shown`}
+          </span>
+        </CardHeader>
+        <Empty hidden={props.gigs.length !== 0}>No gigs match this view.</Empty>
+        <div className="overflow-x-auto">
+          <Table
+            id="gigsTable"
+            className={cn("min-w-[1180px]", props.gigs.length === 0 && "hidden")}
+            aria-label="Discord gigs"
+          >
+            <TableHeader>
+              <TableRow>
+                <SortableTableHead
+                  className="w-[28%]"
+                  label="Gig"
+                  scope="gigs"
+                  sort={props.sort}
+                  sortKey="title"
+                  onSort={(_, key) => props.onSort(key)}
+                />
+                <SortableTableHead
+                  className="w-[13%]"
+                  label="Status"
+                  scope="gigs"
+                  sort={props.sort}
+                  sortKey="status"
+                  onSort={(_, key) => props.onSort(key)}
+                />
+                <SortableTableHead
+                  className="w-[13%]"
+                  label="Activity"
+                  scope="gigs"
+                  sort={props.sort}
+                  sortKey="activity"
+                  onSort={(_, key) => props.onSort(key)}
+                />
+                <SortableTableHead
+                  className="w-[10%]"
+                  label="People"
+                  scope="gigs"
+                  sort={props.sort}
+                  sortKey="applications"
+                  onSort={(_, key) => props.onSort(key)}
+                />
+                <TableHead className="w-[36%]">Candidate fit</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody id="gigsBody">
+              {props.gigs.map((gig) => (
+                <GigRow
+                  key={gig.id}
+                  gig={gig}
+                  loading={props.loading}
+                  canWrite={props.canWrite}
+                  crmContactUrl={props.crmContactUrl}
+                  crmAttachmentUrl={props.crmAttachmentUrl}
+                  onUpdateStatus={props.onUpdateStatus}
+                  onUpdateApplicationStatus={props.onUpdateApplicationStatus}
+                  staleDays={props.staleDays}
+                />
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      </Card>
+    </>
+  )
+}
+
+function GigRow({
+  gig,
+  loading,
+  canWrite,
+  crmContactUrl,
+  crmAttachmentUrl,
+  onUpdateStatus,
+  onUpdateApplicationStatus,
+  staleDays,
+}: {
+  gig: Gig
+  loading: Record<string, boolean>
+  canWrite: boolean
+  crmContactUrl: (contactId?: string) => string
+  crmAttachmentUrl: (attachmentId?: string) => string
+  onUpdateStatus: (gigId: string, status: string) => void
+  onUpdateApplicationStatus: (gigId: string, applicationId: string, status: string) => void
+  staleDays: number
+}) {
+  const applications = Array.isArray(gig.applications) ? gig.applications : []
+  const threadUrl =
+    gig.discord_guild_id && gig.discord_thread_id
+      ? `https://discord.com/channels/${encodeURIComponent(
+          gig.discord_guild_id,
+        )}/${encodeURIComponent(gig.discord_thread_id)}`
+      : ""
+  const staleAge = staleRecruitingAge(gig, staleDays)
+  return (
+    <TableRow>
+      <TableCell>
+        <strong>{gig.title || "Untitled gig"}</strong>
+        <div className="mt-1 flex flex-wrap gap-1.5">
+          {gig.posting_type ? <Badge variant="neutral">{titleCase(gig.posting_type)}</Badge> : null}
+          {gig.discord_channel_name ? (
+            <Badge variant="neutral">#{gig.discord_channel_name}</Badge>
+          ) : null}
+          {(gig.required_skills || []).slice(0, 4).map((skill) => (
+            <Badge key={skill} variant="queued">
+              {skill}
+            </Badge>
+          ))}
+          {(gig.preferred_skills || []).slice(0, 3).map((skill) => (
+            <Badge key={skill} variant="neutral">
+              {skill}
+            </Badge>
+          ))}
+        </div>
+        <div className="mt-1 text-xs text-muted-foreground">
+          {threadUrl ? (
+            <a
+              className="font-extrabold text-primary"
+              href={threadUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Open Discord thread
+            </a>
+          ) : (
+            "Discord thread unavailable"
+          )}
+        </div>
+        {staleAge !== null ? (
+          <div className="mt-3 grid gap-2 rounded-md border border-amber-400/35 bg-amber-500/10 p-2 text-xs text-amber-200">
+            <strong>Recruiting for {staleAge} days.</strong>
+            <span>Check whether this should move to Outdated or Unknown.</span>
+            {canWrite ? (
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => onUpdateStatus(gig.id, "outdated")}
+                  disabled={loading[`gig:${gig.id}:status`]}
+                >
+                  Mark outdated
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => onUpdateStatus(gig.id, "unknown")}
+                  disabled={loading[`gig:${gig.id}:status`]}
+                >
+                  Mark unknown
+                </Button>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </TableCell>
+      <TableCell>
+        <div className="grid gap-2">
+          <Badge
+            variant={
+              gig.status === "filled" ? "succeeded" : gig.status === "lost" ? "failed" : "queued"
+            }
+          >
+            {gig.status_label || titleCase(gig.status)}
+          </Badge>
+          {canWrite ? (
+            <Select
+              aria-label={`Status for ${gig.title || "gig"}`}
+              value={gig.status}
+              disabled={loading[`gig:${gig.id}:status`]}
+              onChange={(event) => onUpdateStatus(gig.id, event.target.value)}
+            >
+              {gigStatuses.map((status) => (
+                <option key={status} value={status}>
+                  {titleCase(status)}
+                </option>
+              ))}
+            </Select>
+          ) : null}
+        </div>
+      </TableCell>
+      <TableCell>
+        <div>{formatDate(gigActivityTimestamp(gig))}</div>
+        <div className="text-xs text-muted-foreground">
+          Posted {formatDate(gig.posted_at) || "unknown"}
+        </div>
+      </TableCell>
+      <TableCell>
+        <strong>{gig.application_count || applications.length}</strong>
+        <div className="text-xs text-muted-foreground">
+          {Number(gig.interested_count || 0)} interested
+        </div>
+      </TableCell>
+      <TableCell>
+        <div className="grid gap-2">
+          {applications.map((application) => (
+            <GigApplicationRow
+              key={application.id}
+              gigId={gig.id}
+              application={application}
+              loading={loading}
+              canWrite={canWrite}
+              crmContactUrl={crmContactUrl}
+              crmAttachmentUrl={crmAttachmentUrl}
+              onUpdateApplicationStatus={onUpdateApplicationStatus}
+            />
+          ))}
+          {applications.length === 0 ? (
+            <span className="text-sm text-muted-foreground">
+              No suggested or interested people yet.
+            </span>
+          ) : null}
+        </div>
+      </TableCell>
+    </TableRow>
+  )
+}
+
+function GigApplicationRow({
+  gigId,
+  application,
+  loading,
+  canWrite,
+  crmContactUrl,
+  crmAttachmentUrl,
+  onUpdateApplicationStatus,
+}: {
+  gigId: string
+  application: GigApplication
+  loading: Record<string, boolean>
+  canWrite: boolean
+  crmContactUrl: (contactId?: string) => string
+  crmAttachmentUrl: (attachmentId?: string) => string
+  onUpdateApplicationStatus: (gigId: string, applicationId: string, status: string) => void
+}) {
+  const displayName =
+    application.name ||
+    application.email_508 ||
+    application.discord_username ||
+    (typeof application.evaluation?.discord_username === "string"
+      ? application.evaluation.discord_username
+      : "") ||
+    "Candidate"
+  const contactUrl = crmContactUrl(application.crm_contact_id)
+  const resumeUrl = crmAttachmentUrl(application.latest_resume_id)
+  const fitScore =
+    typeof application.fit_score === "number"
+      ? `${Math.round(application.fit_score)}/100`
+      : typeof application.match_score === "number"
+        ? application.match_score.toFixed(1)
+        : ""
+  const summary =
+    typeof application.evaluation?.llm_summary === "string"
+      ? application.evaluation.llm_summary
+      : ""
+  return (
+    <div className="grid gap-2 rounded-md border bg-background p-2">
+      <div className="flex flex-wrap items-center gap-2">
+        {contactUrl ? (
+          <a
+            className="font-extrabold text-primary"
+            href={contactUrl}
+            target="_blank"
+            rel="noreferrer"
+          >
+            {displayName}
+          </a>
+        ) : (
+          <strong>{displayName}</strong>
+        )}
+        <Badge variant={application.status === "interested" ? "succeeded" : "neutral"}>
+          {titleCase(application.status)}
+        </Badge>
+        <Badge variant="neutral">{titleCase(application.source || "manual_add")}</Badge>
+        {fitScore ? (
+          <span className="text-xs font-bold text-muted-foreground">Fit {fitScore}</span>
+        ) : null}
+        {resumeUrl ? (
+          <a
+            className="text-xs font-extrabold text-primary"
+            href={resumeUrl}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Resume
+          </a>
+        ) : null}
+      </div>
+      {summary ? <div className="text-xs text-muted-foreground">{summary}</div> : null}
+      {canWrite ? (
+        <Select
+          aria-label={`Candidate status for ${displayName}`}
+          value={application.status || "suggested"}
+          disabled={loading[`application:${application.id}:status`]}
+          onChange={(event) => onUpdateApplicationStatus(gigId, application.id, event.target.value)}
+        >
+          {applicationStatuses.map((status) => (
+            <option key={status} value={status}>
+              {titleCase(status)}
+            </option>
+          ))}
+        </Select>
+      ) : null}
+    </div>
   )
 }
 
