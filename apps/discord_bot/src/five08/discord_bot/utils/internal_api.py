@@ -10,6 +10,7 @@ from discord.ext import commands
 from pydantic import BaseModel, ValidationError
 
 from five08.discord_bot.config import settings
+from five08.engagements import normalize_engagement_status, strip_status_from_title
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,13 @@ class MemberAgreementRoleRequest(BaseModel):
     completed_at: str | None = None
 
 
+class GigThreadStatusRequest(BaseModel):
+    """Internal payload for mirroring dashboard gig status to Discord."""
+
+    thread_id: str
+    status: str
+
+
 class InternalAPIRoutes:
     """Authenticated bot-internal automation routes."""
 
@@ -35,6 +43,10 @@ class InternalAPIRoutes:
         app.router.add_post(
             "/internal/member-agreements/member-role",
             self.member_agreement_role_handler,
+        )
+        app.router.add_post(
+            "/internal/jobs/thread-status",
+            self.gig_thread_status_handler,
         )
 
     @staticmethod
@@ -195,4 +207,82 @@ class InternalAPIRoutes:
             )
 
         result, status_code = await self._grant_member_role(payload)
+        return web.json_response(result, status=status_code)
+
+    async def _update_gig_thread_status(
+        self,
+        payload: GigThreadStatusRequest,
+    ) -> tuple[dict[str, Any], int]:
+        try:
+            thread_id = int(payload.thread_id)
+        except ValueError:
+            return {"error": "invalid_thread_id"}, 400
+
+        normalized_status = normalize_engagement_status(payload.status)
+        status_marker = normalized_status.value.upper()
+
+        channel = self.bot.get_channel(thread_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(thread_id)
+            except discord.NotFound:
+                return {"error": "thread_not_found"}, 404
+            except discord.Forbidden:
+                return {"error": "thread_lookup_forbidden"}, 403
+            except discord.HTTPException as exc:
+                logger.warning("Failed fetching gig thread %s: %s", thread_id, exc)
+                return {"error": "thread_lookup_failed"}, 502
+
+        if not isinstance(channel, discord.Thread):
+            return {"error": "channel_is_not_thread"}, 400
+
+        base_title = strip_status_from_title(channel.name) or channel.name
+        base_title = base_title.strip() or f"Discord gig {thread_id}"
+        next_name = f"[{status_marker}] {base_title}"[:100]
+        if channel.name == next_name:
+            return {
+                "status": "unchanged",
+                "thread_id": str(thread_id),
+                "title": next_name,
+            }, 200
+
+        try:
+            await channel.edit(
+                name=next_name,
+                reason="Dashboard gig status update",
+            )
+        except discord.Forbidden:
+            return {"error": "thread_rename_forbidden"}, 403
+        except discord.HTTPException as exc:
+            logger.warning("Failed renaming gig thread %s: %s", thread_id, exc)
+            return {"error": "thread_rename_failed"}, 502
+
+        return {
+            "status": "updated",
+            "thread_id": str(thread_id),
+            "title": next_name,
+        }, 200
+
+    async def gig_thread_status_handler(self, request: web.Request) -> web.Response:
+        """Mirror a dashboard gig status update to the Discord thread title."""
+        if not self._is_authorized(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+
+        try:
+            payload_data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid_json"}, status=400)
+
+        if not isinstance(payload_data, dict):
+            return web.json_response({"error": "payload_must_be_object"}, status=400)
+
+        try:
+            payload = GigThreadStatusRequest.model_validate(payload_data)
+        except (ValidationError, TypeError) as exc:
+            return web.json_response(
+                {"error": "invalid_payload", "detail": str(exc)},
+                status=400,
+            )
+
+        result, status_code = await self._update_gig_thread_status(payload)
         return web.json_response(result, status=status_code)

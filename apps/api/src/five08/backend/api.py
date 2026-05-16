@@ -538,6 +538,59 @@ def _http_client_from_app(app: FastAPI) -> httpx.AsyncClient:
     raise RuntimeError("HTTP client not configured")
 
 
+async def _sync_discord_gig_thread_status(
+    request: Request,
+    *,
+    thread_id: str | None,
+    status: EngagementStatus,
+) -> dict[str, Any]:
+    """Best-effort mirror of dashboard gig status to Discord thread title."""
+    normalized_thread_id = str(thread_id or "").strip()
+    if not normalized_thread_id:
+        return {"status": "skipped", "reason": "missing_thread_id"}
+
+    base_url = settings.discord_bot_internal_base_url.strip()
+    if not base_url:
+        return {"status": "skipped", "reason": "bot_endpoint_not_configured"}
+
+    api_secret = str(settings.api_shared_secret or "").strip()
+    if not api_secret:
+        return {"status": "skipped", "reason": "api_secret_not_configured"}
+
+    try:
+        response = await _http_client_from_app(request.app).post(
+            f"{base_url.rstrip('/')}/internal/jobs/thread-status",
+            headers={"X-API-Secret": api_secret},
+            json={"thread_id": normalized_thread_id, "status": status.value},
+            timeout=8.0,
+        )
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "Failed syncing Discord gig thread status thread_id=%s: %s",
+            normalized_thread_id,
+            exc,
+        )
+        return {"status": "error", "reason": "bot_request_failed"}
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+    if response.status_code >= 400:
+        logger.warning(
+            "Discord gig thread status sync failed thread_id=%s status=%s payload=%s",
+            normalized_thread_id,
+            response.status_code,
+            payload,
+        )
+        return {
+            "status": "error",
+            "reason": "bot_rejected_request",
+            "status_code": response.status_code,
+        }
+    return cast(dict[str, Any], payload)
+
+
 async def _current_session(request: Request) -> tuple[str | None, AuthSession | None]:
     store = _auth_store_from_app(request.app)
     if store is None:
@@ -2356,6 +2409,11 @@ async def dashboard_update_gig_status_handler(
     )
     if result is None:
         return JSONResponse({"error": "gig_not_found"}, status_code=404)
+    result["discord_title_sync"] = await _sync_discord_gig_thread_status(
+        request,
+        thread_id=cast(str | None, result.get("discord_thread_id")),
+        status=normalized_status,
+    )
     return JSONResponse(result)
 
 

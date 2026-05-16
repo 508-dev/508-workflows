@@ -1014,7 +1014,7 @@ def update_engagement_status(
                     END,
                     last_activity_at = NOW()
                 WHERE id = %s AND lifecycle_stage = 'pending_gig'
-                RETURNING id::text, status, title, updated_at
+                RETURNING id::text, status, title, discord_thread_id, updated_at
                 """,
                 (status.value, status.value, engagement_id),
             )

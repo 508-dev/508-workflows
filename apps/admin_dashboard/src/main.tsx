@@ -8,6 +8,7 @@ import {
   Search,
   ShieldCheck,
   Users,
+  X,
 } from "lucide-react"
 import { StrictMode, useEffect, useMemo, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
@@ -558,6 +559,7 @@ function App() {
     try {
       const payload = await requestJson<Gig[]>(gigsUrl())
       setGigs(payload)
+      showToast(`Loaded ${payload.length} gig${payload.length === 1 ? "" : "s"}`, "ok")
       void loadNotifications()
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Unable to load gigs", "error")
@@ -584,15 +586,21 @@ function App() {
   async function updateGigStatus(gigId: string, nextStatus: string) {
     setBusy(`gig:${gigId}:status`, true)
     try {
-      await requestJson<{ status: string }>(
-        `/dashboard/api/gigs/${encodeURIComponent(gigId)}/status`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ status: nextStatus }),
-        },
+      const payload = await requestJson<{
+        status: string
+        discord_title_sync?: { status?: string; reason?: string }
+      }>(`/dashboard/api/gigs/${encodeURIComponent(gigId)}/status`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: nextStatus }),
+      })
+      const titleSyncStatus = payload.discord_title_sync?.status
+      showToast(
+        titleSyncStatus === "error"
+          ? "Updated gig status; Discord title sync failed"
+          : "Updated gig status",
+        titleSyncStatus === "error" ? "error" : "ok",
       )
-      showToast("Updated gig status", "ok")
       await loadGigs()
       await loadNotifications()
     } catch (error) {
@@ -834,6 +842,12 @@ function App() {
     return () => window.removeEventListener("popstate", onPopState)
   }, [])
 
+  useEffect(() => {
+    if (!toast.message) return undefined
+    const timeout = window.setTimeout(() => setToast({ message: "" }), 4500)
+    return () => window.clearTimeout(timeout)
+  }, [toast.message])
+
   // biome-ignore lint/correctness/useExhaustiveDependencies: each loader reads the latest filter state for the active view.
   useEffect(() => {
     if (permissions.length === 0) return
@@ -988,42 +1002,6 @@ function App() {
                     </span>
                   ) : null}
                 </Button>
-                {notificationsOpen ? (
-                  <div className="absolute right-0 top-12 z-30 grid w-80 gap-2 rounded-md border bg-background p-3 shadow-lg">
-                    <div className="flex items-center justify-between gap-3">
-                      <strong className="text-sm">Notifications</strong>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        onClick={loadNotifications}
-                        disabled={loading.notifications}
-                      >
-                        <RefreshCw />
-                        Refresh
-                      </Button>
-                    </div>
-                    {notifications.length === 0 ? (
-                      <p className="py-4 text-sm text-muted-foreground">No active notifications</p>
-                    ) : (
-                      <div className="grid max-h-80 gap-2 overflow-auto">
-                        {notifications.map((notification) => (
-                          <button
-                            key={notification.id}
-                            type="button"
-                            className="grid gap-1 rounded-md border p-3 text-left hover:bg-secondary"
-                            onClick={() => openNotification(notification)}
-                          >
-                            <span className="text-sm font-bold">{notification.title}</span>
-                            <span className="text-sm text-muted-foreground">
-                              {notification.message}
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ) : null}
               </div>
             ) : null}
             <div className="grid min-w-0 gap-0.5 text-right text-sm text-muted-foreground">
@@ -1034,17 +1012,6 @@ function App() {
                 {userMeta || "Checking session"}
               </span>
             </div>
-            <span
-              id="toast"
-              role="status"
-              className={cn(
-                "max-w-64 truncate text-sm text-muted-foreground",
-                toast.tone === "ok" && "text-emerald-300",
-                toast.tone === "error" && "text-red-300",
-              )}
-            >
-              {toast.message}
-            </span>
             <Button
               id="logout"
               type="button"
@@ -1058,6 +1025,16 @@ function App() {
           </div>
         </div>
       </header>
+
+      <NotificationDrawer
+        open={notificationsOpen}
+        notifications={notifications}
+        loading={loading.notifications}
+        onClose={() => setNotificationsOpen(false)}
+        onRefresh={loadNotifications}
+        onOpenNotification={openNotification}
+      />
+      <DashboardToast toast={toast} />
 
       <main className="mx-auto grid max-w-7xl grid-cols-1 gap-5 px-5 py-5 md:grid-cols-[190px_minmax(0,1fr)]">
         <nav
@@ -1230,6 +1207,99 @@ function App() {
         </div>
       </main>
     </>
+  )
+}
+
+function NotificationDrawer({
+  open,
+  notifications,
+  loading,
+  onClose,
+  onRefresh,
+  onOpenNotification,
+}: {
+  open: boolean
+  notifications: DashboardNotification[]
+  loading?: boolean
+  onClose: () => void
+  onRefresh: () => void
+  onOpenNotification: (notification: DashboardNotification) => void
+}) {
+  if (!open) return null
+  return (
+    <div className="fixed inset-0 z-40" aria-modal="true" role="dialog">
+      <button
+        type="button"
+        className="absolute inset-0 cursor-default bg-black/45"
+        aria-label="Close notifications"
+        onClick={onClose}
+      />
+      <aside className="absolute right-0 top-0 grid h-full w-full max-w-md grid-rows-[auto_minmax(0,1fr)] border-l bg-background shadow-2xl">
+        <div className="flex items-center justify-between gap-3 border-b p-4">
+          <div className="grid gap-0.5">
+            <strong className="text-base">Notifications</strong>
+            <span className="text-sm text-muted-foreground">
+              {notifications.length === 0
+                ? "No active notifications"
+                : `${notifications.length} active`}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={onRefresh}
+              disabled={loading}
+            >
+              <RefreshCw />
+              Refresh
+            </Button>
+            <Button type="button" variant="ghost" size="icon" aria-label="Close" onClick={onClose}>
+              <X />
+            </Button>
+          </div>
+        </div>
+        <div className="min-h-0 overflow-auto p-4">
+          {notifications.length === 0 ? (
+            <div className="rounded-md border border-dashed p-6 text-sm text-muted-foreground">
+              No active notifications.
+            </div>
+          ) : (
+            <div className="grid gap-3">
+              {notifications.map((notification) => (
+                <button
+                  key={notification.id}
+                  type="button"
+                  className="grid gap-2 rounded-md border p-3 text-left hover:bg-secondary"
+                  onClick={() => onOpenNotification(notification)}
+                >
+                  <span className="text-sm font-bold">{notification.title}</span>
+                  <span className="text-sm text-muted-foreground">{notification.message}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </aside>
+    </div>
+  )
+}
+
+function DashboardToast({ toast }: { toast: { message: string; tone?: "ok" | "error" } }) {
+  if (!toast.message) return null
+  return (
+    <div
+      id="toast"
+      role="status"
+      className={cn(
+        "fixed bottom-5 right-5 z-50 max-w-sm rounded-md border bg-background px-4 py-3 text-sm font-semibold shadow-lg",
+        toast.tone === "ok" && "border-emerald-500/40 text-emerald-300",
+        toast.tone === "error" && "border-red-500/40 text-red-300",
+      )}
+    >
+      {toast.message}
+    </div>
   )
 }
 
