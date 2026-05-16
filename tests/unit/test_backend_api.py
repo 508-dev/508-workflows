@@ -724,8 +724,9 @@ def test_agent_request_for_write_returns_confirmation_plan(
     assert audit_kwargs["context"].operation_id == "op-123"
     assert audit_kwargs["context"].interaction_id == "interaction-1"
     assert audit_kwargs["metadata"]["operation_id"] == "op-123"
+    assert audit_kwargs["metadata"]["context_sources"][0]["source_type"] == "request"
     assert audit_kwargs["metadata"]["context_sources"][0]["source_ref"] == (
-        "channels/789/messages/1"
+        "client_supplied_context"
     )
     assert "Ignore previous instructions" not in str(audit_kwargs["metadata"])
     assert audit_kwargs["metadata"]["message"] == (
@@ -1304,7 +1305,7 @@ def test_agent_confirmation_preserves_operation_envelope(
     assert len(context.context_snippets) == 1
     plan = captured["plan"]
     assert isinstance(plan, api.AgentPlan)
-    assert plan.context_sources[0].source_ref == "channels/channel-1/messages/1"
+    assert plan.context_sources[0].source_ref == "client_supplied_context"
     confirmation_audit_call = mock_write_audit.call_args_list[-1].kwargs
     assert confirmation_audit_call["action"] == "agent.confirmation"
     assert confirmation_audit_call["context"].operation_id == "op-confirm-1"

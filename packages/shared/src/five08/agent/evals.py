@@ -366,6 +366,7 @@ class _EvalToolRegistry(ToolRegistry):
         *,
         organization_id: str | None,
         actor_id: str | None,
+        project_id: str | None = None,
         actor_scopes: set[str] | None = None,
     ) -> dict[str, Any]:
         if tool_name in self._stub_results:
@@ -375,6 +376,7 @@ class _EvalToolRegistry(ToolRegistry):
             arguments,
             organization_id=organization_id,
             actor_id=actor_id,
+            project_id=project_id,
             actor_scopes=actor_scopes,
         )
 

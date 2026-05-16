@@ -446,6 +446,7 @@ class ToolRegistry:
         *,
         organization_id: str | None,
         actor_id: str | None,
+        project_id: str | None = None,
         actor_scopes: set[str] | None = None,
     ) -> dict[str, Any]:
         if tool_name == "task_read.search_tasks":
@@ -533,6 +534,7 @@ class ToolRegistry:
                 arguments,
                 actor_id=actor_id,
                 organization_id=organization_id,
+                project_id=project_id,
                 actor_scopes=actor_scopes or set(),
             )
         if tool_name == "memory_read.search_context":
@@ -542,6 +544,7 @@ class ToolRegistry:
                 arguments,
                 actor_id=actor_id,
                 organization_id=organization_id,
+                project_id=project_id,
                 actor_scopes=actor_scopes or set(),
             )
         if tool_name == "memory_write.forget_fact":
@@ -580,11 +583,14 @@ class ToolRegistry:
         *,
         actor_id: str | None,
         organization_id: str | None,
+        project_id: str | None,
         actor_scopes: set[str],
     ) -> dict[str, Any]:
-        project_id = _optional_str(arguments.get("project_id"))
-        if project_id is None:
-            raise ValueError("project_id is required")
+        requested_project_id = _optional_str(arguments.get("project_id"))
+        project_id = _trusted_project_scope_id(
+            requested_project_id,
+            project_id=project_id,
+        )
         facts = self.memory_store.list_facts(
             scope_type="project",
             scope_id=project_id,
@@ -600,6 +606,7 @@ class ToolRegistry:
         *,
         actor_id: str | None,
         organization_id: str | None,
+        project_id: str | None,
         actor_scopes: set[str],
     ) -> dict[str, Any]:
         if actor_id is None:
@@ -610,6 +617,8 @@ class ToolRegistry:
             scope_type=scope_type,
             actor_id=actor_id,
             organization_id=organization_id,
+            project_id=project_id,
+            actor_scopes=actor_scopes,
         )
         if scope_type == "project" and "memory:write_project" not in actor_scopes:
             raise PermissionError("Project memory writes require project memory scope")
@@ -1659,15 +1668,31 @@ def _memory_scope_id(
     scope_type: MemoryScopeType,
     actor_id: str,
     organization_id: str | None,
+    project_id: str | None,
+    actor_scopes: set[str],
 ) -> str:
     scope_id = _optional_str(value)
-    if scope_id is not None:
-        return scope_id
     if scope_type == "user":
+        if scope_id is not None and scope_id != actor_id:
+            if "memory:admin" not in actor_scopes:
+                raise PermissionError("User memory writes are limited to the actor")
+            return scope_id
         return actor_id
+    if scope_type == "project":
+        return _trusted_project_scope_id(scope_id, project_id=project_id)
     if scope_type == "org" and organization_id is not None:
+        if scope_id is not None and scope_id != organization_id:
+            raise PermissionError("Org memory writes must use the request organization")
         return organization_id
     raise ValueError(f"scope_id is required for {scope_type} memory")
+
+
+def _trusted_project_scope_id(value: str | None, *, project_id: str | None) -> str:
+    if project_id is None:
+        raise ValueError("project_id is required in trusted context")
+    if value is not None and value != project_id:
+        raise PermissionError("Project memory access is limited to the actor project")
+    return project_id
 
 
 def _required_config(value: str | None, name: str) -> str:

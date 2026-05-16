@@ -96,21 +96,35 @@ def context_sources_for_snippets(
 ) -> list[AgentContextSource]:
     """Return audit-safe source metadata without raw message bodies."""
 
-    return [
-        AgentContextSource(
-            source_id=snippet.source_id,
-            operation_id=context.operation_id or "unknown-operation",
-            source_type=snippet.source_type,
-            source_ref=snippet.source_ref,
-            scope_type="discord"
-            if snippet.source_type.startswith("discord_")
-            else None,
-            scope_id=snippet.thread_id or snippet.channel_id or context.guild_id,
-            loaded_by=context.discord_user_id,
-            token_count=snippet.token_count,
+    sources: list[AgentContextSource] = []
+    for index, snippet in enumerate(snippets):
+        if not snippet.trusted:
+            sources.append(
+                AgentContextSource(
+                    source_id=f"request-context-{index}",
+                    operation_id=context.operation_id or "unknown-operation",
+                    source_type="request",
+                    source_ref="client_supplied_context",
+                    loaded_by=context.discord_user_id,
+                    token_count=snippet.token_count,
+                )
+            )
+            continue
+        sources.append(
+            AgentContextSource(
+                source_id=snippet.source_id,
+                operation_id=context.operation_id or "unknown-operation",
+                source_type=snippet.source_type,
+                source_ref=snippet.source_ref,
+                scope_type="discord"
+                if snippet.source_type.startswith("discord_")
+                else None,
+                scope_id=snippet.thread_id or snippet.channel_id or context.guild_id,
+                loaded_by=context.discord_user_id,
+                token_count=snippet.token_count,
+            )
         )
-        for snippet in snippets
-    ]
+    return sources
 
 
 def render_untrusted_context(snippets: Iterable[AgentContextSnippet]) -> str:

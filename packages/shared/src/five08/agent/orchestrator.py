@@ -411,6 +411,7 @@ class AgentOrchestrator:
                     action.arguments,
                     organization_id=organization_id,
                     actor_id=actor_id,
+                    project_id=context.project_id,
                     actor_scopes=actor_scopes,
                 )
             except PermissionError as exc:

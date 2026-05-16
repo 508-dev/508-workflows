@@ -22,6 +22,7 @@ from five08.agent import (
     ToolManifest,
     ToolPartialSuccessError,
     ToolRuntimeConfig,
+    context_sources_for_snippets,
 )
 from five08.agent.intent_normalizer import OpenAICompatibleIntentNormalizer
 from five08.agent.tools import ToolRegistry
@@ -107,7 +108,10 @@ def test_agent_plan_carries_operation_id_and_bounded_context_sources() -> None:
     assert len(response.plan.context_sources) == 1
     source = response.plan.context_sources[0]
     assert source.operation_id == "op-123"
-    assert source.source_ref == "channels/789/messages/1"
+    assert source.source_id == "request-context-0"
+    assert source.source_type == "request"
+    assert source.source_ref == "client_supplied_context"
+    assert source.scope_id is None
 
 
 def test_context_loader_drops_expired_and_over_token_snippets() -> None:
@@ -158,10 +162,35 @@ def test_context_loader_drops_expired_and_over_token_snippets() -> None:
     response = orchestrator.plan("Show tasks for project Atlas", context)
 
     assert response.plan is not None
-    assert [source.source_ref for source in response.plan.context_sources] == [
-        "fresh",
-        "later-small",
-    ]
+    assert len(response.plan.context_sources) == 2
+    assert {source.source_ref for source in response.plan.context_sources} == {
+        "client_supplied_context"
+    }
+
+
+def test_context_sources_preserve_trusted_backend_provenance() -> None:
+    context = _context()
+    context.operation_id = "op-123"
+    source = context_sources_for_snippets(
+        context=context,
+        snippets=[
+            AgentContextSnippet(
+                source_type="discord_message",
+                source_ref="channels/789/messages/1",
+                label="trusted",
+                text="Trusted backend-loaded context.",
+                token_count=5,
+                channel_id="789",
+                message_id="1",
+                trusted=True,
+            )
+        ],
+    )[0]
+
+    assert source.source_type == "discord_message"
+    assert source.source_ref == "channels/789/messages/1"
+    assert source.scope_type == "discord"
+    assert source.scope_id == "789"
 
 
 def test_confirmed_plan_executes_inline_against_registry() -> None:
@@ -235,6 +264,24 @@ def test_memory_write_without_confirmation_is_denied() -> None:
     )
 
 
+def test_memory_write_user_scope_rejects_other_user_without_admin() -> None:
+    registry = ToolRegistry(memory_store=InMemoryMemoryStore())
+
+    with pytest.raises(PermissionError, match="limited to the actor"):
+        registry.execute(
+            "memory_write.remember_fact",
+            {
+                "scope_type": "user",
+                "scope_id": "456",
+                "key": "timezone",
+                "value_json": {"text": "my timezone is UTC"},
+            },
+            organization_id="org-1",
+            actor_id="123",
+            actor_scopes={"memory:write_self"},
+        )
+
+
 def test_memory_read_denies_cross_user_without_admin_scope() -> None:
     memory_store = InMemoryMemoryStore(
         [
@@ -290,6 +337,74 @@ def test_memory_read_admin_can_read_another_users_private_facts() -> None:
     )
 
     assert result["facts"][0]["key"] == "timezone"
+
+
+def test_project_memory_read_requires_trusted_project_context() -> None:
+    memory_store = InMemoryMemoryStore(
+        [
+            MemoryFact(
+                scope_type="project",
+                scope_id="project-2",
+                key="preference",
+                value_json={"text": "Use Linear"},
+                visibility="project",
+                source_type="request",
+                source_ref="agent_request",
+                created_by="123",
+                verification_status="user_confirmed",
+            )
+        ]
+    )
+    registry = ToolRegistry(memory_store=memory_store)
+
+    with pytest.raises(PermissionError, match="actor project"):
+        registry.execute(
+            "memory_read.get_project_facts",
+            {"project_id": "project-2"},
+            organization_id="org-1",
+            actor_id="123",
+            project_id="project-1",
+            actor_scopes={"memory:read_project"},
+        )
+
+
+def test_project_memory_write_uses_trusted_project_context() -> None:
+    memory_store = InMemoryMemoryStore()
+    registry = ToolRegistry(memory_store=memory_store)
+
+    result = registry.execute(
+        "memory_write.remember_fact",
+        {
+            "scope_type": "project",
+            "scope_id": "project-1",
+            "key": "preference",
+            "value_json": {"text": "Use GitHub issues"},
+        },
+        organization_id="org-1",
+        actor_id="123",
+        project_id="project-1",
+        actor_scopes={"memory:write_self", "memory:write_project"},
+    )
+
+    assert result["fact"]["scope_id"] == "project-1"
+
+
+def test_org_memory_write_rejects_argument_scope_mismatch() -> None:
+    registry = ToolRegistry(memory_store=InMemoryMemoryStore())
+
+    with pytest.raises(PermissionError, match="request organization"):
+        registry.execute(
+            "memory_write.remember_fact",
+            {
+                "scope_type": "org",
+                "scope_id": "org-2",
+                "key": "policy",
+                "value_json": {"text": "Use private confirmations"},
+            },
+            organization_id="org-1",
+            actor_id="123",
+            actor_scopes={"memory:write_self", "memory:admin"},
+        )
 
 
 def test_project_memory_visibility_requires_matching_project_scope() -> None:

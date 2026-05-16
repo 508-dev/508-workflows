@@ -157,6 +157,35 @@ def test_format_agent_response_renders_contact_results() -> None:
     assert "Sarah Example sarah@example.com contact-1" in message
 
 
+def test_format_agent_response_renders_memory_facts() -> None:
+    cog = AgentCog.__new__(AgentCog)
+
+    message = cog._format_agent_response(
+        {
+            "status": "executed",
+            "results": [
+                {
+                    "tool_name": "memory_read.get_user_facts",
+                    "status": "succeeded",
+                    "result": {
+                        "facts": [
+                            {
+                                "key": "timezone",
+                                "value_json": {
+                                    "text": "my timezone is Asia/Taipei",
+                                },
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+    )
+
+    assert "- memory_read.get_user_facts: 1 remembered facts" in message
+    assert "  - timezone: my timezone is Asia/Taipei" in message
+
+
 def test_format_agent_response_surfaces_sso_recovery_email_warning() -> None:
     cog = AgentCog.__new__(AgentCog)
 
@@ -417,6 +446,26 @@ def test_build_agent_context_separates_interaction_and_message_ids() -> None:
     assert context["message_id"] == "321"
 
 
+def test_build_agent_context_uses_thread_id_as_parent_message_id() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    thread = object.__new__(discord.Thread)
+    thread.id = 888
+    thread.parent_id = 789
+    interaction = SimpleNamespace(
+        id=999,
+        user=SimpleNamespace(id=123),
+        guild_id=456,
+        channel_id=789,
+        channel=thread,
+        message=SimpleNamespace(id=321),
+    )
+
+    context = cog._build_agent_context(interaction)
+
+    assert context["thread_id"] == "888"
+    assert context["parent_message_id"] == "888"
+
+
 def test_extract_mention_request_strips_bot_mentions() -> None:
     assert (
         AgentCog._extract_mention_request(
@@ -447,6 +496,26 @@ def test_build_agent_context_from_message_uses_thread_message_context() -> None:
     assert context["message_id"] == "555"
     assert context["response_destination_visibility"] == "public"
     assert context["roles"] == ["@everyone", "Member"]
+
+
+def test_build_agent_context_from_thread_message_uses_thread_id_as_parent_message_id() -> (
+    None
+):
+    cog = AgentCog.__new__(AgentCog)
+    thread = object.__new__(discord.Thread)
+    thread.id = 888
+    thread.parent_id = 789
+    message = SimpleNamespace(
+        id=555,
+        author=SimpleNamespace(id=123, roles=[]),
+        guild=SimpleNamespace(id=456),
+        channel=thread,
+    )
+
+    context = cog._build_agent_context_from_message(message)
+
+    assert context["thread_id"] == "888"
+    assert context["parent_message_id"] == "888"
 
 
 def test_build_agent_context_from_dm_uses_private_response_visibility() -> None:

@@ -773,7 +773,9 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             "thread_id": self._thread_id_from_channel(
                 getattr(interaction, "channel", None)
             ),
-            "parent_message_id": None,
+            "parent_message_id": self._parent_message_id_from_channel(
+                getattr(interaction, "channel", None)
+            ),
             "response_destination_visibility": "private",
             "roles": role_names,
             "scopes": [],
@@ -823,10 +825,11 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
 
     @staticmethod
     def _parent_message_id_from_channel(channel: object) -> str | None:
-        if not isinstance(channel, discord.Thread):
-            return None
-        parent_message_id = getattr(channel, "parent_id", None)
-        return str(parent_message_id) if parent_message_id is not None else None
+        if isinstance(channel, discord.Thread):
+            return str(channel.id)
+        reference = getattr(channel, "reference", None)
+        reference_message_id = getattr(reference, "message_id", None)
+        return str(reference_message_id) if reference_message_id is not None else None
 
     @staticmethod
     def _role_names_from_user(user: discord.abc.User) -> list[str]:
@@ -1031,6 +1034,10 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                     lines.extend(
                         self._format_contact_result_lines(tool_name, result_payload)
                     )
+                elif isinstance(result_payload, dict) and "facts" in result_payload:
+                    lines.extend(
+                        self._format_memory_fact_result_lines(tool_name, result_payload)
+                    )
                 else:
                     result_error = str(result.get("error") or "").strip()
                     if result_error:
@@ -1044,6 +1051,41 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                         lines.append(f"  Recovery email failed: {recovery_email_error}")
 
         return "\n".join(lines)[:1900]
+
+    @staticmethod
+    def _format_memory_fact_result_lines(
+        tool_name: object,
+        payload: dict[str, Any],
+    ) -> list[str]:
+        facts = payload.get("facts")
+        if not isinstance(facts, list) or not facts:
+            return [f"- {tool_name}: no visible remembered facts"]
+        lines = [f"- {tool_name}: {len(facts)} remembered facts"]
+        for fact in facts[:5]:
+            if not isinstance(fact, dict):
+                continue
+            key = str(fact.get("key") or "memory").strip()
+            value = AgentCog._format_memory_fact_value(fact.get("value_json"))
+            if value:
+                lines.append(f"  - {key}: {value}")
+            else:
+                lines.append(f"  - {key}")
+        return lines
+
+    @staticmethod
+    def _format_memory_fact_value(value: object) -> str:
+        if isinstance(value, dict):
+            text = str(value.get("text") or "").strip()
+            if text:
+                return text
+            return ", ".join(
+                f"{key}: {item}"
+                for key, item in value.items()
+                if isinstance(key, str) and isinstance(item, str) and item.strip()
+            )
+        if isinstance(value, str):
+            return value.strip()
+        return ""
 
     @staticmethod
     def _result_recovery_email_error(payload: object) -> str | None:
