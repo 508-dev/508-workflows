@@ -236,6 +236,24 @@ class InternalAPIRoutes:
         if not isinstance(channel, discord.Thread):
             return {"error": "channel_is_not_thread"}, 400
 
+        bot_member = channel.guild.me if channel.guild is not None else None
+        if bot_member is None:
+            return {"error": "bot_member_unresolved"}, 503
+
+        permissions = channel.permissions_for(bot_member)
+        permission_payload = {
+            "manage_threads": permissions.manage_threads,
+            "view_channel": permissions.view_channel,
+            "send_messages_in_threads": permissions.send_messages_in_threads,
+            "archived": channel.archived,
+            "locked": channel.locked,
+        }
+        if not permissions.manage_threads:
+            return {
+                "error": "missing_manage_threads_permission",
+                **permission_payload,
+            }, 403
+
         base_title = strip_status_from_title(channel.name) or channel.name
         base_title = base_title.strip() or f"Discord gig {thread_id}"
         next_name = f"[{status_marker}] {base_title}"[:100]
@@ -247,6 +265,11 @@ class InternalAPIRoutes:
             }, 200
 
         try:
+            if channel.archived:
+                await channel.edit(
+                    archived=False,
+                    reason="Dashboard gig status update",
+                )
             await channel.edit(
                 name=next_name,
                 reason="Dashboard gig status update",

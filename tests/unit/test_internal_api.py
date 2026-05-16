@@ -128,9 +128,19 @@ class TestInternalAPIRoutes:
         class FakeThread:
             id = 123
             name = "[RECRUITING] Old gig"
+            archived = False
+            locked = False
+            guild = SimpleNamespace(me=object())
 
             def __init__(self) -> None:
                 self.edit = AsyncMock()
+
+            def permissions_for(self, _member: object) -> SimpleNamespace:
+                return SimpleNamespace(
+                    manage_threads=True,
+                    view_channel=True,
+                    send_messages_in_threads=True,
+                )
 
         thread = FakeThread()
         monkeypatch.setattr(
@@ -150,6 +160,40 @@ class TestInternalAPIRoutes:
             name="[OUTDATED] Old gig",
             reason="Dashboard gig status update",
         )
+
+    @pytest.mark.asyncio
+    async def test_update_gig_thread_status_reports_missing_manage_threads(
+        self, internal_api_routes, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Thread title sync should explain missing Discord permissions."""
+
+        class FakeThread:
+            id = 123
+            name = "[RECRUITING] Old gig"
+            archived = False
+            locked = False
+            guild = SimpleNamespace(me=object())
+
+            def permissions_for(self, _member: object) -> SimpleNamespace:
+                return SimpleNamespace(
+                    manage_threads=False,
+                    view_channel=True,
+                    send_messages_in_threads=True,
+                )
+
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.discord.Thread",
+            FakeThread,
+        )
+        internal_api_routes.bot.get_channel.return_value = FakeThread()
+
+        result, status_code = await internal_api_routes._update_gig_thread_status(
+            GigThreadStatusRequest(thread_id="123", status="outdated")
+        )
+
+        assert status_code == 403
+        assert result["error"] == "missing_manage_threads_permission"
+        assert result["manage_threads"] is False
 
     @pytest.mark.asyncio
     async def test_grant_member_role_returns_forbidden_when_fetch_forbidden(
