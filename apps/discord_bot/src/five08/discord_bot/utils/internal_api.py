@@ -1,5 +1,6 @@
 """Authenticated internal HTTP routes for the Discord bot."""
 
+import asyncio
 import logging
 import secrets
 from typing import Any
@@ -37,6 +38,8 @@ class InternalAPIRoutes:
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+        self._pending_gig_thread_statuses: dict[int, GigThreadStatusRequest] = {}
+        self._gig_thread_status_tasks: dict[int, asyncio.Task[None]] = {}
 
     def register(self, app: web.Application) -> None:
         """Register internal routes on the shared aiohttp app."""
@@ -209,6 +212,84 @@ class InternalAPIRoutes:
         result, status_code = await self._grant_member_role(payload)
         return web.json_response(result, status=status_code)
 
+    async def _enqueue_gig_thread_status(
+        self,
+        payload: GigThreadStatusRequest,
+    ) -> tuple[dict[str, Any], int]:
+        try:
+            thread_id = int(payload.thread_id)
+        except ValueError:
+            return {"error": "invalid_thread_id"}, 400
+
+        normalized_status = normalize_engagement_status(payload.status)
+        self._pending_gig_thread_statuses[thread_id] = GigThreadStatusRequest(
+            thread_id=str(thread_id),
+            status=normalized_status.value,
+        )
+
+        existing_task = self._gig_thread_status_tasks.get(thread_id)
+        if existing_task is None or existing_task.done():
+            self._gig_thread_status_tasks[thread_id] = asyncio.create_task(
+                self._run_gig_thread_status_sync(thread_id)
+            )
+
+        return {
+            "status": "queued",
+            "thread_id": str(thread_id),
+            "target_status": normalized_status.value,
+        }, 202
+
+    async def _run_gig_thread_status_sync(self, thread_id: int) -> None:
+        """Coalesce dashboard status changes and sync the latest one to Discord."""
+        current_task = asyncio.current_task()
+        try:
+            while True:
+                await asyncio.sleep(2)
+                payload = self._pending_gig_thread_statuses.pop(thread_id, None)
+                if payload is None:
+                    return
+
+                await self._apply_gig_thread_status_with_retries(payload)
+                if thread_id not in self._pending_gig_thread_statuses:
+                    return
+        finally:
+            if self._gig_thread_status_tasks.get(thread_id) is current_task:
+                self._gig_thread_status_tasks.pop(thread_id, None)
+                if thread_id in self._pending_gig_thread_statuses:
+                    self._gig_thread_status_tasks[thread_id] = asyncio.create_task(
+                        self._run_gig_thread_status_sync(thread_id)
+                    )
+
+    async def _apply_gig_thread_status_with_retries(
+        self,
+        payload: GigThreadStatusRequest,
+    ) -> None:
+        retry_delays = (5, 30, 120)
+        for attempt, retry_delay in enumerate((*retry_delays, None), start=1):
+            result, status_code = await self._update_gig_thread_status(payload)
+            if status_code < 500:
+                if status_code >= 400:
+                    logger.warning(
+                        "Discord gig thread status sync rejected thread_id=%s "
+                        "status=%s result=%s",
+                        payload.thread_id,
+                        status_code,
+                        result,
+                    )
+                return
+
+            logger.warning(
+                "Discord gig thread status sync failed thread_id=%s attempt=%s "
+                "status=%s result=%s",
+                payload.thread_id,
+                attempt,
+                status_code,
+                result,
+            )
+            if retry_delay is None:
+                return
+            await asyncio.sleep(retry_delay)
+
     async def _update_gig_thread_status(
         self,
         payload: GigThreadStatusRequest,
@@ -307,5 +388,5 @@ class InternalAPIRoutes:
                 status=400,
             )
 
-        result, status_code = await self._update_gig_thread_status(payload)
+        result, status_code = await self._enqueue_gig_thread_status(payload)
         return web.json_response(result, status=status_code)
