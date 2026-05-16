@@ -150,6 +150,11 @@ GIG_INTEREST_PATTERNS = (
     re.compile(r"\bavailable\s+(?:for|to)\b", re.IGNORECASE),
     re.compile(r"\b(?:happy|open)\s+to\s+(?:help|chat|talk|take)\b", re.IGNORECASE),
 )
+GIG_INTEREST_NEGATION_RE = re.compile(
+    r"\b(?:not|n't|no\s+longer|unavailable)\s+(?:currently\s+)?(?:available|interested)"
+    r"|\bavailable\s+(?:for|to)\b.{0,40}\b(?:not|n't)\b",
+    re.IGNORECASE,
+)
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 JobWatchChannel = discord.ForumChannel
 
@@ -1061,11 +1066,21 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
 
         add_plan_step(requirements, min_match_score, None)
 
+        required_language_keys = {
+            skill.casefold() for skill in requirements.required_languages
+        }
         language_hard_skills = [
             skill
             for skill in requirements.hard_required_skills
-            if is_language_requirement_skill(skill)
+            if skill.casefold() in required_language_keys
+            or is_language_requirement_skill(skill)
         ]
+        seen_language_keys = {skill.casefold() for skill in language_hard_skills}
+        language_hard_skills.extend(
+            skill
+            for skill in requirements.required_languages
+            if skill.casefold() not in seen_language_keys
+        )
         language_hard_keys = {skill.casefold() for skill in language_hard_skills}
         non_language_hard_skills = [
             skill
@@ -2100,6 +2115,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                     required_skills=requirements.required_skills,
                     preferred_skills=requirements.preferred_skills,
                     requirements=requirements_to_payload(requirements),
+                    preserve_existing_status=True,
                 ),
             )
             saved = await asyncio.to_thread(
@@ -2162,6 +2178,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                     posted_at=getattr(post.starter, "created_at", None),
                     status=parse_status_from_title(thread_name),
                     preserve_existing_status=True,
+                    refresh_activity=False,
                 ),
             )
             await asyncio.to_thread(
@@ -2263,6 +2280,8 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         """Detect conservative direct-interest replies in gig threads."""
         text = str(content or "").strip()
         if len(text) < 3:
+            return False
+        if GIG_INTEREST_NEGATION_RE.search(text):
             return False
         return any(pattern.search(text) for pattern in GIG_INTEREST_PATTERNS)
 

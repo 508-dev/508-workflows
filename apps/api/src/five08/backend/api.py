@@ -685,6 +685,13 @@ def _session_has_steering_access(session: AuthSession) -> bool:
     return session.is_admin
 
 
+def _session_discord_actor_id(session: AuthSession) -> str | None:
+    """Return a Discord user ID only for Discord-backed dashboard sessions."""
+    if _session_actor_provider(session) != ActorProvider.DISCORD:
+        return None
+    return session.subject
+
+
 async def _dashboard_session_or_error(
     request: Request,
     *,
@@ -2308,7 +2315,7 @@ async def dashboard_update_gig_status_handler(
         settings,
         engagement_id=engagement_id,
         status=normalized_status,
-        actor_discord_user_id=session.subject,
+        actor_discord_user_id=_session_discord_actor_id(session),
     )
     if result is None:
         return JSONResponse({"error": "gig_not_found"}, status_code=404)
@@ -2359,7 +2366,7 @@ async def dashboard_update_gig_application_status_handler(
         engagement_id=engagement_id,
         application_id=application_id,
         status=normalized_status,
-        actor_discord_user_id=session.subject,
+        actor_discord_user_id=_session_discord_actor_id(session),
     )
     if result is None:
         return JSONResponse({"error": "application_not_found"}, status_code=404)

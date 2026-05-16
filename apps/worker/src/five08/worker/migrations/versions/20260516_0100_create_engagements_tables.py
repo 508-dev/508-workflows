@@ -146,7 +146,7 @@ def upgrade() -> None:
             "source",
             sa.Text(),
             nullable=False,
-            server_default=sa.text("'auto_match'"),
+            server_default=sa.text("'match_candidates'"),
         ),
         sa.Column("match_score", sa.Float(), nullable=True),
         sa.Column("fit_score", sa.Float(), nullable=True),

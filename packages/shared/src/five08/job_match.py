@@ -428,6 +428,19 @@ _LANGUAGE_REQUIREMENT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
 )
 
+_LANGUAGE_NEGATION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(
+            r"\b(?:no|not)\s+japanese\s+(?:required|needed|necessary)"
+            r"|\bjapanese(?:\s+language)?\s+(?:is\s+)?not\s+"
+            r"(?:required|needed|necessary)\b"
+            r"|\bjapanese\s+(?:optional|nice\s+to\s+have)\b",
+            re.IGNORECASE,
+        ),
+        "japanese",
+    ),
+)
+
 _LANGUAGE_SKILLS: frozenset[str] = frozenset(
     language for _pattern, language in _LANGUAGE_REQUIREMENT_PATTERNS
 )
@@ -590,8 +603,17 @@ def _regex_hints(text: str) -> dict[str, Any]:
         hints["seniority_hint"] = _SENIORITY_KEYWORDS.get(raw)
 
     required_languages: list[str] = []
+    negated_languages = {
+        language
+        for pattern, language in _LANGUAGE_NEGATION_PATTERNS
+        if pattern.search(text)
+    }
     for pattern, language in _LANGUAGE_REQUIREMENT_PATTERNS:
-        if pattern.search(text) and language not in required_languages:
+        if (
+            language not in negated_languages
+            and pattern.search(text)
+            and language not in required_languages
+        ):
             required_languages.append(language)
     if required_languages:
         hints["required_languages"] = required_languages

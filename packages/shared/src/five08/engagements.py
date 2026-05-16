@@ -88,6 +88,7 @@ class DiscordEngagementInput:
     preferred_skills: list[str] | None = None
     requirements: dict[str, Any] | None = None
     preserve_existing_status: bool = False
+    refresh_activity: bool = True
 
 
 def normalize_engagement_status(
@@ -205,6 +206,7 @@ def upsert_discord_engagement(
     required_skills = payload.required_skills or []
     preferred_skills = payload.preferred_skills or []
     requirements = payload.requirements or {}
+    posted_at = _as_utc(payload.posted_at)
     query = """
         INSERT INTO engagements (
             id,
@@ -228,11 +230,12 @@ def upsert_discord_engagement(
             last_activity_at
         ) VALUES (
             %s, 'pending_gig', %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW()
+            %s, %s, %s, %s, %s, %s, %s, %s,
+            COALESCE(%s, NOW()), COALESCE(%s, NOW())
         )
         ON CONFLICT (discord_message_id) DO UPDATE SET
             status = CASE
-                WHEN %s THEN engagements.status
+                WHEN %s OR EXCLUDED.status = 'unknown' THEN engagements.status
                 ELSE EXCLUDED.status
             END,
             title = EXCLUDED.title,
@@ -266,9 +269,15 @@ def upsert_discord_engagement(
                 EXCLUDED.posted_by_discord_user_id
             ),
             posted_at = COALESCE(engagements.posted_at, EXCLUDED.posted_at),
-            last_activity_at = NOW(),
+            last_activity_at = CASE
+                WHEN %s THEN NOW()
+                ELSE COALESCE(engagements.last_activity_at, EXCLUDED.last_activity_at)
+            END,
             last_status_changed_at = CASE
-                WHEN NOT %s AND engagements.status IS DISTINCT FROM EXCLUDED.status
+                WHEN
+                    NOT %s
+                    AND EXCLUDED.status <> 'unknown'
+                    AND engagements.status IS DISTINCT FROM EXCLUDED.status
                 THEN NOW()
                 ELSE engagements.last_status_changed_at
             END
@@ -294,8 +303,11 @@ def upsert_discord_engagement(
                     payload.message_id,
                     payload.thread_id,
                     payload.posted_by_discord_user_id,
-                    _as_utc(payload.posted_at),
+                    posted_at,
+                    posted_at,
+                    posted_at,
                     payload.preserve_existing_status,
+                    payload.refresh_activity,
                     payload.preserve_existing_status,
                 ),
             )
@@ -371,8 +383,59 @@ def upsert_suggested_applications(
                 )
                 person = cursor.fetchone()
                 person_id = person["id"] if person is not None else None
+                normalized_discord_user_id = (
+                    str(discord_user_id) if discord_user_id else None
+                )
                 match_score = getattr(candidate, "match_score", None)
                 fit_score = getattr(candidate, "llm_fit_score", None)
+                match_score_value = (
+                    float(match_score)
+                    if isinstance(match_score, (int, float))
+                    else None
+                )
+                fit_score_value = (
+                    float(fit_score) if isinstance(fit_score, (int, float)) else None
+                )
+                evaluation = Jsonb(candidate_evaluation_payload(candidate))
+                cursor.execute(
+                    """
+                    UPDATE engagement_applications
+                    SET
+                        person_id = COALESCE(person_id, %s),
+                        crm_contact_id = COALESCE(crm_contact_id, %s),
+                        discord_user_id = COALESCE(discord_user_id, %s),
+                        source = CASE
+                            WHEN source = 'direct_interest' THEN source
+                            ELSE %s
+                        END,
+                        match_score = %s,
+                        fit_score = %s,
+                        evaluation = evaluation || %s
+                    WHERE engagement_id = %s
+                      AND (
+                        (%s::text IS NOT NULL AND crm_contact_id = %s)
+                        OR (%s::text IS NOT NULL AND discord_user_id = %s)
+                      )
+                    RETURNING id
+                    """,
+                    (
+                        person_id,
+                        crm_contact_id,
+                        normalized_discord_user_id,
+                        source,
+                        match_score_value,
+                        fit_score_value,
+                        evaluation,
+                        engagement_id,
+                        crm_contact_id,
+                        crm_contact_id,
+                        normalized_discord_user_id,
+                        normalized_discord_user_id,
+                    ),
+                )
+                if cursor.fetchone() is not None:
+                    count += 1
+                    continue
                 cursor.execute(
                     """
                     INSERT INTO engagement_applications (
@@ -407,15 +470,11 @@ def upsert_suggested_applications(
                         engagement_id,
                         person_id,
                         crm_contact_id,
-                        str(discord_user_id) if discord_user_id else None,
+                        normalized_discord_user_id,
                         source,
-                        float(match_score)
-                        if isinstance(match_score, (int, float))
-                        else None,
-                        float(fit_score)
-                        if isinstance(fit_score, (int, float))
-                        else None,
-                        Jsonb(candidate_evaluation_payload(candidate)),
+                        match_score_value,
+                        fit_score_value,
+                        evaluation,
                     ),
                 )
                 if cursor.fetchone() is not None:
@@ -697,9 +756,7 @@ def viewer_can_update_engagement(
     include_all: bool,
 ) -> bool:
     """Return whether a viewer may mutate one engagement."""
-    if include_all:
-        return True
-    if not viewer_discord_user_id:
+    if not include_all and not viewer_discord_user_id:
         return False
     with get_postgres_connection(settings) as conn:
         with conn.cursor() as cursor:
@@ -707,10 +764,15 @@ def viewer_can_update_engagement(
                 """
                 SELECT 1
                 FROM engagements
-                WHERE id = %s AND posted_by_discord_user_id = %s
+                WHERE id = %s
+                  AND lifecycle_stage = 'pending_gig'
+                  AND (
+                    %s
+                    OR posted_by_discord_user_id = %s
+                  )
                 LIMIT 1
                 """,
-                (engagement_id, viewer_discord_user_id),
+                (engagement_id, include_all, viewer_discord_user_id),
             )
             return cursor.fetchone() is not None
 
@@ -735,7 +797,7 @@ def update_engagement_status(
                         ELSE last_status_changed_at
                     END,
                     last_activity_at = NOW()
-                WHERE id = %s
+                WHERE id = %s AND lifecycle_stage = 'pending_gig'
                 RETURNING id::text, status, title, updated_at
                 """,
                 (status.value, status.value, engagement_id),
@@ -786,6 +848,12 @@ def update_engagement_application_status(
                 UPDATE engagement_applications
                 SET status = %s
                 WHERE id = %s AND engagement_id = %s
+                  AND EXISTS (
+                    SELECT 1
+                    FROM engagements
+                    WHERE engagements.id = engagement_applications.engagement_id
+                      AND engagements.lifecycle_stage = 'pending_gig'
+                  )
                 RETURNING id::text, engagement_id::text, status, updated_at
                 """,
                 (status.value, application_id, engagement_id),

@@ -2331,6 +2331,87 @@ def test_dashboard_update_gig_status_requires_owner_or_steering(
     assert response.status_code == 403
 
 
+def test_dashboard_update_gig_status_omits_discord_actor_for_admin_sso(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="oidc-subject-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["admins"],
+        is_admin=True,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.ADMIN_SSO.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.viewer_can_update_engagement", return_value=True),
+        patch(
+            "five08.backend.api.update_engagement_status",
+            return_value={"id": "gig-1", "status": "filled"},
+        ) as update_status,
+    ):
+        response = client.post(
+            "/dashboard/api/gigs/gig-1/status",
+            json={"status": "filled"},
+        )
+
+    assert response.status_code == 200
+    update_status.assert_called_once_with(
+        api.settings,
+        engagement_id="gig-1",
+        status=api.EngagementStatus.FILLED,
+        actor_discord_user_id=None,
+    )
+
+
+def test_dashboard_update_gig_application_status_omits_discord_actor_for_admin_sso(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="oidc-subject-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["admins"],
+        is_admin=True,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.ADMIN_SSO.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.viewer_can_update_engagement", return_value=True),
+        patch(
+            "five08.backend.api.update_engagement_application_status",
+            return_value={"id": "application-1", "status": "contacted"},
+        ) as update_application_status,
+    ):
+        response = client.post(
+            "/dashboard/api/gigs/gig-1/applications/application-1/status",
+            json={"status": "contacted"},
+        )
+
+    assert response.status_code == 200
+    update_application_status.assert_called_once_with(
+        api.settings,
+        engagement_id="gig-1",
+        application_id="application-1",
+        status=api.EngagementApplicationStatus.CONTACTED,
+        actor_discord_user_id=None,
+    )
+
+
 def test_dashboard_assign_onboarder_updates_crm_and_audits(
     client: TestClient,
 ) -> None:

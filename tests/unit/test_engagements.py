@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from types import SimpleNamespace
 
 import five08.engagements as engagements
 from five08.engagements import (
@@ -11,6 +12,7 @@ from five08.engagements import (
     normalize_engagement_status,
     parse_status_from_title,
     strip_status_from_title,
+    upsert_suggested_applications,
     upsert_discord_engagement,
 )
 from five08.settings import SharedSettings
@@ -86,13 +88,83 @@ def test_upsert_discord_engagement_can_preserve_existing_status(monkeypatch) -> 
             title="Untitled",
             status=EngagementStatus.UNKNOWN,
             preserve_existing_status=True,
+            refresh_activity=False,
         ),
     )
 
     assert engagement_id == "engagement-1"
     query, params = executed[0]
-    assert "WHEN %s THEN engagements.status" in query
+    assert "COALESCE(%s, NOW()), COALESCE(%s, NOW())" in query
+    assert "WHEN %s OR EXCLUDED.status = 'unknown' THEN engagements.status" in query
+    assert "WHEN %s THEN NOW()" in query
     assert (
-        "WHEN NOT %s AND engagements.status IS DISTINCT FROM EXCLUDED.status" in query
+        "AND EXCLUDED.status <> 'unknown'\n"
+        "                    AND engagements.status IS DISTINCT FROM EXCLUDED.status"
+        in query
     )
-    assert params[-2:] == (True, True)
+    assert params[-3:] == (True, False, True)
+
+
+def test_upsert_suggested_applications_merges_existing_discord_row(
+    monkeypatch,
+) -> None:
+    executed: list[tuple[str, tuple]] = []
+    fetches = iter(
+        [
+            {"id": "person-1"},
+            {"id": "application-1"},
+        ]
+    )
+
+    class CursorStub:
+        def __enter__(self) -> "CursorStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+        def execute(self, query: str, params: tuple) -> None:
+            executed.append((query, params))
+
+        def fetchone(self) -> dict[str, str] | None:
+            return next(fetches, None)
+
+    class ConnectionStub:
+        def cursor(self, row_factory=None) -> CursorStub:  # noqa: ARG002
+            return CursorStub()
+
+        def __enter__(self) -> "ConnectionStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+    @contextmanager
+    def connection_stub():
+        yield ConnectionStub()
+
+    monkeypatch.setattr(
+        engagements,
+        "get_postgres_connection",
+        lambda _settings: connection_stub(),
+    )
+
+    count = upsert_suggested_applications(
+        SharedSettings(),
+        engagement_id="engagement-1",
+        candidates=[
+            SimpleNamespace(
+                crm_contact_id="crm-1",
+                discord_user_id="discord-1",
+                match_score=42.0,
+                llm_fit_score=88.0,
+            )
+        ],
+    )
+
+    assert count == 1
+    update_query, update_params = executed[1]
+    assert "UPDATE engagement_applications" in update_query
+    assert "OR (%s::text IS NOT NULL AND discord_user_id = %s)" in update_query
+    assert update_params[-2:] == ("discord-1", "discord-1")
+    assert len(executed) == 2

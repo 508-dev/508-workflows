@@ -175,12 +175,29 @@ def test_build_candidate_search_plan_keeps_language_requirements_hard() -> None:
     assert "language gates mandatory" in (plan[1][2] or "")
 
 
+def test_build_candidate_search_plan_keeps_llm_required_languages_hard() -> None:
+    requirements = JobRequirements(
+        hard_required_skills=["spanish", "salesforce"],
+        soft_required_skills=["crm"],
+        required_languages=["spanish"],
+    )
+
+    plan = JobsCog._build_candidate_search_plan(requirements, min_match_score=8.0)
+
+    assert plan[-1][0].hard_required_skills == ["spanish"]
+    assert plan[-1][0].soft_required_skills == [
+        "salesforce",
+        "customer relationship management",
+    ]
+
+
 def test_message_expresses_gig_interest_is_conservative() -> None:
     assert JobsCog._message_expresses_gig_interest("I'm interested in this")
     assert JobsCog._message_expresses_gig_interest("I can help with this one")
     assert JobsCog._message_expresses_gig_interest("available for a quick chat")
     assert not JobsCog._message_expresses_gig_interest("@someone ?")
     assert not JobsCog._message_expresses_gig_interest("looks interesting")
+    assert not JobsCog._message_expresses_gig_interest("not available for this")
 
 
 def test_build_job_match_header_uses_single_skills_line_when_hard_is_empty() -> None:

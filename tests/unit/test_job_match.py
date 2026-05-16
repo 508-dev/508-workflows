@@ -70,6 +70,11 @@ def test_regex_hints_detects_required_japanese_language() -> None:
     assert hints.get("required_languages") == ["japanese"]
 
 
+def test_regex_hints_ignores_negated_japanese_requirement() -> None:
+    hints = _regex_hints("No Japanese required. English is enough.")
+    assert "required_languages" not in hints
+
+
 # ---------------------------------------------------------------------------
 # _parse_llm_response
 # ---------------------------------------------------------------------------
