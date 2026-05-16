@@ -168,3 +168,67 @@ def test_upsert_suggested_applications_merges_existing_discord_row(
     assert "OR (%s::text IS NOT NULL AND discord_user_id = %s)" in update_query
     assert update_params[-2:] == ("discord-1", "discord-1")
     assert len(executed) == 2
+
+
+def test_upsert_suggested_applications_persists_discord_only_candidate(
+    monkeypatch,
+) -> None:
+    executed: list[tuple[str, tuple]] = []
+    fetches = iter(
+        [
+            None,
+            None,
+            {"id": "application-1"},
+        ]
+    )
+
+    class CursorStub:
+        def __enter__(self) -> "CursorStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+        def execute(self, query: str, params: tuple) -> None:
+            executed.append((query, params))
+
+        def fetchone(self) -> dict[str, str] | None:
+            return next(fetches, None)
+
+    class ConnectionStub:
+        def cursor(self, row_factory=None) -> CursorStub:  # noqa: ARG002
+            return CursorStub()
+
+        def __enter__(self) -> "ConnectionStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+    @contextmanager
+    def connection_stub():
+        yield ConnectionStub()
+
+    monkeypatch.setattr(
+        engagements,
+        "get_postgres_connection",
+        lambda _settings: connection_stub(),
+    )
+
+    count = upsert_suggested_applications(
+        SharedSettings(),
+        engagement_id="engagement-1",
+        candidates=[
+            SimpleNamespace(
+                crm_contact_id=None,
+                discord_user_id="discord-1",
+                match_score=12.0,
+                llm_fit_score=None,
+            )
+        ],
+    )
+
+    assert count == 1
+    insert_query, insert_params = executed[2]
+    assert "ON CONFLICT (engagement_id, discord_user_id)" in insert_query
+    assert insert_params[3:5] == (None, "discord-1")

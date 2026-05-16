@@ -82,6 +82,9 @@ def upgrade() -> None:
         sa.Column("posted_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_status_changed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_activity_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column(
+            "last_recruiting_reminder_at", sa.DateTime(timezone=True), nullable=True
+        ),
         sa.Column("crm_account_id", sa.Text(), nullable=True),
         sa.Column("erpnext_project_id", sa.Text(), nullable=True),
         sa.Column("kimai_project_id", sa.Text(), nullable=True),

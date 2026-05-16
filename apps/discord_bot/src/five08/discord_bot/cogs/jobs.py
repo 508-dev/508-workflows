@@ -36,6 +36,8 @@ from five08.engagements import (
     DiscordEngagementInput,
     EngagementApplicationSource,
     add_engagement_event,
+    list_due_recruiting_reminders,
+    mark_recruiting_reminder_sent,
     parse_status_from_title,
     requirements_to_payload,
     upsert_discord_interest_application,
@@ -139,6 +141,7 @@ MATCH_CANDIDATES_PRIVATE_TRUTHY = frozenset({"true", "1", "yes", "y", "on"})
 # Exclude known-bad resume artifact from auto-match rendering.
 AUTO_MATCH_EXCLUDED_RESUME_NAMES = frozenset({"Vladyslav_Stryzhak.pdf"})
 GIG_FORUM_BACKFILL_ARCHIVED_LIMIT = 200
+GIG_RECRUITING_REMINDER_CHECK_SECONDS = 6 * 60 * 60
 GIG_INTEREST_PATTERNS = (
     re.compile(r"\b(?:i'?m|i am)\s+interested\b", re.IGNORECASE),
     re.compile(r"\binterested\s+(?:in|for)\s+(?:this|the)\b", re.IGNORECASE),
@@ -323,6 +326,12 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         self._auto_matched_thread_lock = asyncio.Lock()
         self._startup_sync_done = False
         self._startup_sync_lock = asyncio.Lock()
+        self._recruiting_reminder_task: asyncio.Task[None] | None = None
+
+    async def cog_unload(self) -> None:
+        """Stop background reminder checks when the cog unloads."""
+        if self._recruiting_reminder_task is not None:
+            self._recruiting_reminder_task.cancel()
 
     @staticmethod
     def _resolve_jobs_channel_target(
@@ -2275,6 +2284,68 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             failed += channel_failed
         return indexed, failed
 
+    async def _recruiting_reminder_loop(self) -> None:
+        """Periodically ask stale recruiting gig posters for status updates."""
+        await self.bot.wait_until_ready()
+        while not self.bot.is_closed():
+            await self._send_due_recruiting_reminders()
+            await asyncio.sleep(GIG_RECRUITING_REMINDER_CHECK_SECONDS)
+
+    async def _send_due_recruiting_reminders(self) -> None:
+        """Send Discord reminders for recruiting gigs without recent updates."""
+        try:
+            due_rows = await asyncio.to_thread(
+                list_due_recruiting_reminders,
+                settings,
+                stale_days=settings.gig_recruiting_stale_days,
+            )
+        except Exception as exc:
+            logger.warning("Failed loading due recruiting reminders: %s", exc)
+            return
+
+        for row in due_rows:
+            thread_id = row.get("discord_thread_id")
+            poster_id = row.get("posted_by_discord_user_id")
+            engagement_id = row.get("id")
+            if not thread_id or not poster_id or not engagement_id:
+                continue
+            try:
+                thread = self.bot.get_channel(int(thread_id))
+                if thread is None:
+                    thread = await self.bot.fetch_channel(int(thread_id))
+                if not isinstance(thread, discord.Thread):
+                    continue
+                age_days = int(
+                    row.get("age_days") or settings.gig_recruiting_stale_days
+                )
+                title = str(row.get("title") or "this gig")
+                message = await thread.send(
+                    (
+                        f"<@{poster_id}> any update on `{title}`? "
+                        f"It has been recruiting with no updates for {age_days} day(s). "
+                        "Please update the dashboard status to FILLED, OUTDATED, "
+                        "UNKNOWN, or leave a thread reply if it is still active."
+                    ),
+                    allowed_mentions=discord.AllowedMentions(
+                        users=True,
+                        roles=False,
+                        everyone=False,
+                    ),
+                )
+                await asyncio.to_thread(
+                    mark_recruiting_reminder_sent,
+                    settings,
+                    engagement_id=str(engagement_id),
+                    message_id=str(message.id),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed sending recruiting reminder engagement=%s thread=%s: %s",
+                    engagement_id,
+                    thread_id,
+                    exc,
+                )
+
     @staticmethod
     def _message_expresses_gig_interest(content: str | None) -> bool:
         """Detect conservative direct-interest replies in gig threads."""
@@ -2595,6 +2666,10 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                     )
 
             self._startup_sync_done = True
+            if self._recruiting_reminder_task is None:
+                self._recruiting_reminder_task = asyncio.create_task(
+                    self._recruiting_reminder_loop()
+                )
 
     @commands.Cog.listener()
     async def on_thread_create(self, thread: discord.Thread) -> None:

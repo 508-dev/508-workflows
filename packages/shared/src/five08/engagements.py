@@ -362,7 +362,10 @@ def upsert_suggested_applications(
             for candidate in candidates:
                 crm_contact_id = getattr(candidate, "crm_contact_id", None)
                 discord_user_id = getattr(candidate, "discord_user_id", None)
-                if not crm_contact_id:
+                normalized_discord_user_id = (
+                    str(discord_user_id) if discord_user_id else None
+                )
+                if not crm_contact_id and not normalized_discord_user_id:
                     continue
                 cursor.execute(
                     """
@@ -383,9 +386,6 @@ def upsert_suggested_applications(
                 )
                 person = cursor.fetchone()
                 person_id = person["id"] if person is not None else None
-                normalized_discord_user_id = (
-                    str(discord_user_id) if discord_user_id else None
-                )
                 match_score = getattr(candidate, "match_score", None)
                 fit_score = getattr(candidate, "llm_fit_score", None)
                 match_score_value = (
@@ -436,20 +436,8 @@ def upsert_suggested_applications(
                 if cursor.fetchone() is not None:
                     count += 1
                     continue
-                cursor.execute(
-                    """
-                    INSERT INTO engagement_applications (
-                        id,
-                        engagement_id,
-                        person_id,
-                        crm_contact_id,
-                        discord_user_id,
-                        status,
-                        source,
-                        match_score,
-                        fit_score,
-                        evaluation
-                    ) VALUES (%s, %s, %s, %s, %s, 'suggested', %s, %s, %s, %s)
+                if crm_contact_id:
+                    conflict_clause = """
                     ON CONFLICT (engagement_id, crm_contact_id) DO UPDATE SET
                         person_id = COALESCE(
                             engagement_applications.person_id,
@@ -463,6 +451,38 @@ def upsert_suggested_applications(
                         match_score = EXCLUDED.match_score,
                         fit_score = EXCLUDED.fit_score,
                         evaluation = EXCLUDED.evaluation
+                    """
+                else:
+                    conflict_clause = """
+                    ON CONFLICT (engagement_id, discord_user_id) DO UPDATE SET
+                        person_id = COALESCE(
+                            engagement_applications.person_id,
+                            EXCLUDED.person_id
+                        ),
+                        crm_contact_id = COALESCE(
+                            engagement_applications.crm_contact_id,
+                            EXCLUDED.crm_contact_id
+                        ),
+                        source = EXCLUDED.source,
+                        match_score = EXCLUDED.match_score,
+                        fit_score = EXCLUDED.fit_score,
+                        evaluation = EXCLUDED.evaluation
+                    """
+                cursor.execute(
+                    f"""
+                    INSERT INTO engagement_applications (
+                        id,
+                        engagement_id,
+                        person_id,
+                        crm_contact_id,
+                        discord_user_id,
+                        status,
+                        source,
+                        match_score,
+                        fit_score,
+                        evaluation
+                    ) VALUES (%s, %s, %s, %s, %s, 'suggested', %s, %s, %s, %s)
+                    {conflict_clause}
                     RETURNING id
                     """,
                     (
@@ -732,12 +752,170 @@ def list_dashboard_engagements(
     return [_shape_engagement_row(row) for row in rows]
 
 
+def list_dashboard_notifications(
+    settings: SharedSettings,
+    *,
+    viewer_discord_user_id: str | None,
+    include_all: bool,
+    stale_days: int,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Return dashboard notification items visible to one viewer."""
+    days = max(1, stale_days)
+    params: list[Any] = [days]
+    conditions = [
+        "e.lifecycle_stage = 'pending_gig'",
+        "e.status = 'recruiting'",
+        """
+        GREATEST(
+            COALESCE(e.last_activity_at, '-infinity'::timestamptz),
+            COALESCE(e.last_status_changed_at, '-infinity'::timestamptz),
+            COALESCE(e.posted_at, '-infinity'::timestamptz),
+            e.created_at
+        ) <= NOW() - make_interval(days => %s)
+        """,
+    ]
+    if not include_all:
+        conditions.append("e.posted_by_discord_user_id = %s")
+        params.append(viewer_discord_user_id or "")
+    params.append(max(1, min(limit, 50)))
+    sql = f"""
+        SELECT
+            e.id::text,
+            e.title,
+            e.status,
+            e.discord_thread_id,
+            e.posted_by_discord_user_id,
+            e.posted_at,
+            e.last_status_changed_at,
+            e.last_activity_at,
+            e.last_recruiting_reminder_at,
+            FLOOR(
+                EXTRACT(
+                    EPOCH FROM (
+                        NOW() - GREATEST(
+                            COALESCE(e.last_activity_at, '-infinity'::timestamptz),
+                            COALESCE(
+                                e.last_status_changed_at,
+                                '-infinity'::timestamptz
+                            ),
+                            COALESCE(e.posted_at, '-infinity'::timestamptz),
+                            e.created_at
+                        )
+                    )
+                ) / 86400
+            )::int AS age_days
+        FROM engagements e
+        WHERE {" AND ".join(conditions)}
+        ORDER BY age_days DESC, e.created_at ASC
+        LIMIT %s
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(sql, params)
+            rows = cursor.fetchall()
+    return [_shape_stale_recruiting_notification(row, days) for row in rows]
+
+
+def list_due_recruiting_reminders(
+    settings: SharedSettings,
+    *,
+    stale_days: int,
+    limit: int = 25,
+) -> list[dict[str, Any]]:
+    """Return recruiting gig threads that need a Discord status reminder."""
+    days = max(1, stale_days)
+    sql = """
+        SELECT
+            e.id::text,
+            e.title,
+            e.discord_guild_id,
+            e.discord_channel_id,
+            e.discord_thread_id,
+            e.posted_by_discord_user_id,
+            e.last_recruiting_reminder_at,
+            FLOOR(
+                EXTRACT(
+                    EPOCH FROM (
+                        NOW() - GREATEST(
+                            COALESCE(e.last_activity_at, '-infinity'::timestamptz),
+                            COALESCE(
+                                e.last_status_changed_at,
+                                '-infinity'::timestamptz
+                            ),
+                            COALESCE(e.posted_at, '-infinity'::timestamptz),
+                            e.created_at
+                        )
+                    )
+                ) / 86400
+            )::int AS age_days
+        FROM engagements e
+        WHERE e.lifecycle_stage = 'pending_gig'
+          AND e.status = 'recruiting'
+          AND e.discord_thread_id IS NOT NULL
+          AND e.posted_by_discord_user_id IS NOT NULL
+          AND GREATEST(
+                COALESCE(e.last_activity_at, '-infinity'::timestamptz),
+                COALESCE(e.last_status_changed_at, '-infinity'::timestamptz),
+                COALESCE(e.posted_at, '-infinity'::timestamptz),
+                e.created_at
+              ) <= NOW() - make_interval(days => %s)
+          AND (
+                e.last_recruiting_reminder_at IS NULL
+                OR e.last_recruiting_reminder_at <= NOW() - make_interval(days => %s)
+              )
+        ORDER BY e.last_recruiting_reminder_at ASC NULLS FIRST, e.created_at ASC
+        LIMIT %s
+    """
+    params = (days, days, max(1, min(limit, 100)))
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(sql, params)
+            rows = cursor.fetchall()
+    return [_shape_reminder_row(row) for row in rows]
+
+
+def mark_recruiting_reminder_sent(
+    settings: SharedSettings,
+    *,
+    engagement_id: str,
+    message_id: str,
+) -> None:
+    """Record that the bot sent a recruiting status reminder."""
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE engagements
+                SET last_recruiting_reminder_at = NOW()
+                WHERE id = %s AND lifecycle_stage = 'pending_gig'
+                """,
+                (engagement_id,),
+            )
+            cursor.execute(
+                """
+                INSERT INTO engagement_events (
+                    id,
+                    engagement_id,
+                    event_type,
+                    payload
+                ) VALUES (%s, %s, 'recruiting_reminder_sent', %s)
+                """,
+                (
+                    str(uuid4()),
+                    engagement_id,
+                    Jsonb({"message_id": message_id}),
+                ),
+            )
+
+
 def _shape_engagement_row(row: dict[str, Any]) -> dict[str, Any]:
     shaped = dict(row)
     for key in (
         "posted_at",
         "last_status_changed_at",
         "last_activity_at",
+        "last_recruiting_reminder_at",
         "created_at",
         "updated_at",
     ):
@@ -745,6 +923,44 @@ def _shape_engagement_row(row: dict[str, Any]) -> dict[str, Any]:
         shaped[key] = value.isoformat() if isinstance(value, datetime) else None
     shaped["status_label"] = status_label(row.get("status"))
     shaped["applications"] = row.get("applications") or []
+    return shaped
+
+
+def _shape_stale_recruiting_notification(
+    row: dict[str, Any],
+    stale_days: int,
+) -> dict[str, Any]:
+    title = str(row.get("title") or "Untitled gig")
+    age_days = int(row.get("age_days") or stale_days)
+    shaped = _shape_reminder_row(row)
+    return {
+        "id": f"stale-recruiting:{row.get('id')}",
+        "type": "stale_recruiting_gig",
+        "severity": "warning",
+        "title": "Recruiting gig needs an update",
+        "message": f"{title} has had no updates for {age_days} day(s).",
+        "engagement_id": row.get("id"),
+        "gig_title": title,
+        "age_days": age_days,
+        "discord_thread_id": row.get("discord_thread_id"),
+        "posted_by_discord_user_id": row.get("posted_by_discord_user_id"),
+        "posted_at": shaped.get("posted_at"),
+        "last_status_changed_at": shaped.get("last_status_changed_at"),
+        "last_activity_at": shaped.get("last_activity_at"),
+        "last_recruiting_reminder_at": shaped.get("last_recruiting_reminder_at"),
+    }
+
+
+def _shape_reminder_row(row: dict[str, Any]) -> dict[str, Any]:
+    shaped = dict(row)
+    for key in (
+        "posted_at",
+        "last_status_changed_at",
+        "last_activity_at",
+        "last_recruiting_reminder_at",
+    ):
+        value = row.get(key)
+        shaped[key] = value.isoformat() if isinstance(value, datetime) else None
     return shaped
 
 

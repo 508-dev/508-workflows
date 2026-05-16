@@ -1,4 +1,5 @@
 import {
+  Bell,
   BriefcaseBusiness,
   ClipboardList,
   FileClock,
@@ -141,6 +142,22 @@ type Gig = {
   application_count?: number
   interested_count?: number
   applications?: GigApplication[]
+}
+
+type DashboardNotification = {
+  id: string
+  type: string
+  severity?: "info" | "warning" | "error"
+  title: string
+  message: string
+  engagement_id?: string
+  gig_title?: string
+  age_days?: number
+}
+
+type DashboardNotificationsResponse = {
+  stale_days: number
+  notifications: DashboardNotification[]
 }
 
 type AuditEvent = {
@@ -405,6 +422,8 @@ function App() {
   const [crmBaseUrl, setCrmBaseUrl] = useState("")
   const [jobs, setJobs] = useState<Job[]>([])
   const [gigs, setGigs] = useState<Gig[]>([])
+  const [notifications, setNotifications] = useState<DashboardNotification[]>([])
+  const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [people, setPeople] = useState<Person[]>([])
   const [onboarding, setOnboarding] = useState<Person[]>([])
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([])
@@ -539,10 +558,26 @@ function App() {
     try {
       const payload = await requestJson<Gig[]>(gigsUrl())
       setGigs(payload)
+      void loadNotifications()
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Unable to load gigs", "error")
     } finally {
       setBusy("gigs", false)
+    }
+  }
+
+  async function loadNotifications() {
+    if (!can("gigs:read")) return
+    setBusy("notifications", true)
+    try {
+      const payload = await requestJson<DashboardNotificationsResponse>(
+        "/dashboard/api/notifications?limit=20",
+      )
+      setNotifications(payload.notifications || [])
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Unable to load notifications", "error")
+    } finally {
+      setBusy("notifications", false)
     }
   }
 
@@ -559,6 +594,7 @@ function App() {
       )
       showToast("Updated gig status", "ok")
       await loadGigs()
+      await loadNotifications()
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Unable to update gig", "error")
     } finally {
@@ -585,6 +621,7 @@ function App() {
       )
       showToast("Updated candidate status", "ok")
       await loadGigs()
+      await loadNotifications()
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Unable to update candidate", "error")
     } finally {
@@ -800,6 +837,7 @@ function App() {
   // biome-ignore lint/correctness/useExhaustiveDependencies: each loader reads the latest filter state for the active view.
   useEffect(() => {
     if (permissions.length === 0) return
+    if (can("gigs:read")) void loadNotifications()
     if (view === "people") void loadPeople()
     if (view === "gigs") void loadGigs()
     if (view === "onboarding") void loadOnboarding()
@@ -879,6 +917,14 @@ function App() {
     (key) => key !== "sync_status" && key !== "email_508" && !onboardingFilters[key],
   )
 
+  function openNotification(notification: DashboardNotification) {
+    if (notification.type === "stale_recruiting_gig") {
+      setGigStatus("recruiting")
+      navigate("gigs", true)
+    }
+    setNotificationsOpen(false)
+  }
+
   useEffect(() => {
     if (!peopleFilterKeys.includes(peopleFilterKind) && peopleFilterKeys[0]) {
       setPeopleFilterKind(peopleFilterKeys[0])
@@ -924,6 +970,62 @@ function App() {
             </p>
           </div>
           <div className="flex min-w-0 items-center gap-3">
+            {can("gigs:read") ? (
+              <div className="relative">
+                <Button
+                  id="notifications"
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  aria-label="Notifications"
+                  aria-expanded={notificationsOpen}
+                  onClick={() => setNotificationsOpen((current) => !current)}
+                >
+                  <Bell />
+                  {notifications.length > 0 ? (
+                    <span className="absolute -right-1 -top-1 grid min-h-5 min-w-5 place-items-center rounded-full bg-red-500 px-1 text-[11px] font-bold text-white">
+                      {notifications.length}
+                    </span>
+                  ) : null}
+                </Button>
+                {notificationsOpen ? (
+                  <div className="absolute right-0 top-12 z-30 grid w-80 gap-2 rounded-md border bg-background p-3 shadow-lg">
+                    <div className="flex items-center justify-between gap-3">
+                      <strong className="text-sm">Notifications</strong>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={loadNotifications}
+                        disabled={loading.notifications}
+                      >
+                        <RefreshCw />
+                        Refresh
+                      </Button>
+                    </div>
+                    {notifications.length === 0 ? (
+                      <p className="py-4 text-sm text-muted-foreground">No active notifications</p>
+                    ) : (
+                      <div className="grid max-h-80 gap-2 overflow-auto">
+                        {notifications.map((notification) => (
+                          <button
+                            key={notification.id}
+                            type="button"
+                            className="grid gap-1 rounded-md border p-3 text-left hover:bg-secondary"
+                            onClick={() => openNotification(notification)}
+                          >
+                            <span className="text-sm font-bold">{notification.title}</span>
+                            <span className="text-sm text-muted-foreground">
+                              {notification.message}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
             <div className="grid min-w-0 gap-0.5 text-right text-sm text-muted-foreground">
               <strong id="userName" className="truncate text-foreground">
                 {user?.display_name || user?.email || user?.subject || "Loading user"}
@@ -1165,7 +1267,7 @@ function FilterChips({
 }
 
 const gigStatuses = ["recruiting", "filled", "unknown", "lost", "outdated"] as const
-const staleRecruitingDays = 14
+const staleRecruitingDays = 7
 const applicationStatuses = [
   "suggested",
   "interested",
@@ -1186,7 +1288,12 @@ function titleCase(value?: string) {
 
 function staleRecruitingAge(gig: Gig) {
   if (gig.status !== "recruiting") return null
-  const age = daysSince(gig.last_status_changed_at || gig.last_activity_at || gig.posted_at)
+  const activityTimes = [gig.last_activity_at, gig.last_status_changed_at, gig.posted_at]
+    .map((value) => (value ? new Date(value).getTime() : Number.NaN))
+    .filter((value) => !Number.isNaN(value))
+  const latestActivity =
+    activityTimes.length > 0 ? new Date(Math.max(...activityTimes)).toISOString() : undefined
+  const age = daysSince(latestActivity)
   if (age === null || age < staleRecruitingDays) return null
   return age
 }

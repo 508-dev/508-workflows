@@ -98,6 +98,7 @@ from five08.engagements import (
     EngagementApplicationStatus,
     EngagementStatus,
     list_dashboard_engagements,
+    list_dashboard_notifications,
     normalize_engagement_status,
     update_engagement_application_status,
     update_engagement_status,
@@ -2266,6 +2267,36 @@ async def dashboard_gigs_handler(
     return JSONResponse(gigs)
 
 
+async def dashboard_notifications_handler(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=50),
+) -> JSONResponse:
+    """Return dashboard notifications for the current operator."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_GIGS_READ,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    include_all = _session_has_steering_access(session)
+    notifications = await asyncio.to_thread(
+        list_dashboard_notifications,
+        settings,
+        viewer_discord_user_id=session.subject,
+        include_all=include_all,
+        stale_days=settings.gig_recruiting_stale_days,
+        limit=limit,
+    )
+    return JSONResponse(
+        {
+            "stale_days": settings.gig_recruiting_stale_days,
+            "notifications": notifications,
+        }
+    )
+
+
 async def dashboard_update_gig_status_handler(
     request: Request,
     engagement_id: str,
@@ -4062,6 +4093,11 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
     app.add_api_route(
         "/dashboard/api/gigs",
         dashboard_gigs_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/notifications",
+        dashboard_notifications_handler,
         methods=["GET"],
     )
     app.add_api_route(

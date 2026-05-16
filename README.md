@@ -216,6 +216,7 @@ Use `.env.example` as the source of truth for defaults.
 - `Optional`: `JOB_MAX_ATTEMPTS` (default: `8`)
 - `Optional`: `JOB_RETRY_BASE_SECONDS` (default: `5`)
 - `Optional`: `JOB_RETRY_MAX_SECONDS` (default: `300`)
+- `Optional`: `GIG_RECRUITING_STALE_DAYS` (default: `7`; dashboard warnings and Discord reminders for recruiting gigs with no updates)
 
 ### Postgres + Compose Exposure
 
