@@ -117,7 +117,8 @@ PY
 - `GET /auth/me`: Return active session identity.
 - `POST /auth/logout`: Clear active session cookie + server session.
 - `POST /auth/discord/links`: Create one-time dashboard deep link from Discord command context.
-- `GET /auth/discord/link/{token}`: Resolve Discord deep link into authenticated dashboard redirect.
+- `GET /auth/discord/link/{token}`: Show a no-store confirmation page for a Discord dashboard deep link without consuming the token.
+- `POST /auth/discord/link/{token}/consume`: Consume the one-time Discord dashboard deep link and redirect to the authenticated dashboard session.
 - Auth flows emit best-effort human audit events (`auth.login`, `auth.logout`) under source `admin_dashboard`.
 
 Discord deep-link identity policy:
@@ -126,8 +127,10 @@ Discord deep-link identity policy:
 - `DISCORD_ADMIN_ROLES` controls which Discord roles can receive admin dashboard permissions (`Admin,Owner` recommended).
 - `OIDC_ADMIN_GROUPS` controls normal OIDC dashboard admin membership (`authentik Admins` recommended).
 - `AUTH_SESSION_TTL_SECONDS` controls dashboard session lifetime after login (`86400`, one day, by default).
+- `DASHBOARD_PUBLIC_BASE_URL` should be set to the public dashboard origin in production, for example `https://workflows.508.dev`, so Discord-created links use the browser-accessible host.
 - `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=true` (default): Discord deep links also require OIDC email identity checks against the linked CRM/Discord dashboard user.
 - `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=false`: Discord deep links create a Discord-backed session directly after re-validating active CRM membership + Discord Steering Committee+ role, without forcing an OIDC roundtrip.
+- In local/dev/test only, the trusted Discord bot role context can create and consume a dashboard link when the local `people` cache has no matching CRM-linked row. Production still requires the normal CRM/people identity.
 - Jobs, reruns, people sync, and audit are sensitive admin permissions and require an SSO-validated dashboard session even when the user entered through a Discord link. Local/dev/test environments allow these permissions for development.
 
 ### Current API/Worker behavior

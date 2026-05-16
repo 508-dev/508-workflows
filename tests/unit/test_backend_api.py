@@ -3206,6 +3206,41 @@ def test_auth_discord_link_create_returns_url_for_admin(
     assert payload["link_url"].startswith("https://dash.508.dev/auth/discord/link/")
 
 
+def test_auth_discord_link_create_allows_local_role_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    monkeypatch.setattr(api.settings, "environment", "local")
+    fake_store = _FakeAuthStore()
+    fake_verifier = Mock()
+    fake_verifier.is_dashboard_discord_user = AsyncMock(return_value=False)
+
+    with (
+        patch("five08.backend.api._auth_store_from_app", return_value=fake_store),
+        patch(
+            "five08.backend.api._discord_admin_verifier_from_app",
+            return_value=fake_verifier,
+        ),
+        patch("five08.backend.api._http_client_from_app", return_value=Mock()),
+    ):
+        response = client.post(
+            "/auth/discord/links",
+            json={
+                "discord_user_id": "123456",
+                "discord_display_name": "Local Admin",
+                "discord_roles": ["Admin"],
+            },
+            headers=auth_headers,
+        )
+
+    assert response.status_code == 201
+    saved_link = next(iter(fake_store.saved_links.values()))
+    assert isinstance(saved_link, api.DiscordLinkGrant)
+    assert saved_link.discord_roles == ["Admin"]
+    assert saved_link.discord_display_name == "Local Admin"
+
+
 def test_auth_callback_success_writes_login_audit(client: TestClient) -> None:
     store = Mock()
     store.pop_oidc_state = AsyncMock(
@@ -3389,6 +3424,76 @@ def test_auth_callback_discord_link_uses_discord_session_after_oidc_checks(
     assert audit_payload.metadata["discord_link_identity_checks_enforced"] is True
 
 
+def test_auth_callback_discord_link_allows_local_role_fallback_with_oidc_checks(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    monkeypatch.setattr(api.settings, "environment", "local")
+    monkeypatch.setattr(api.settings, "discord_link_require_oidc_identity_checks", True)
+    store = Mock()
+    store.pop_oidc_state = AsyncMock(
+        return_value=api.PendingOIDCState(
+            nonce="nonce-1",
+            code_verifier="verifier-1",
+            next_path="/dashboard",
+            discord_link_token="link-1",
+        )
+    )
+    store.get_discord_link = AsyncMock(
+        return_value=api.DiscordLinkGrant(
+            discord_user_id="123456789",
+            next_path="/dashboard",
+            discord_roles=["Admin"],
+            discord_display_name="Local Admin",
+        )
+    )
+    store.delete_discord_link = AsyncMock()
+    store.save_session = AsyncMock()
+    verifier = Mock()
+    verifier.is_dashboard_email_for_discord_user = AsyncMock(return_value=False)
+    verifier.resolve_dashboard_identity = AsyncMock(return_value=None)
+
+    oidc = Mock()
+    oidc.configured = True
+    oidc.exchange_code = AsyncMock(return_value={"id_token": "id-token-1"})
+    oidc.validate_id_token = AsyncMock(
+        return_value={
+            "sub": "authentik-user-local",
+            "email": "local@508.dev",
+            "name": "Local OIDC User",
+            "groups": ["Member"],
+            "exp": 4_102_444_800,
+        }
+    )
+
+    with (
+        patch("five08.backend.api._auth_store_from_app", return_value=store),
+        patch("five08.backend.api._oidc_client_from_app", return_value=oidc),
+        patch("five08.backend.api._http_client_from_app", return_value=Mock()),
+        patch(
+            "five08.backend.api._discord_admin_verifier_from_app",
+            return_value=verifier,
+        ),
+        patch("five08.backend.api.insert_audit_event"),
+    ):
+        response = client.get(
+            "/auth/callback?code=code-1&state=state-1",
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "/dashboard"
+    saved_session = store.save_session.call_args.kwargs["payload"]
+    assert saved_session.subject == "123456789"
+    assert saved_session.actor_provider == api.ActorProvider.DISCORD.value
+    assert saved_session.crm_contact_id == ""
+    assert saved_session.email == "local@508.dev"
+    assert saved_session.display_name == "Local Admin"
+    assert saved_session.groups == ["Admin"]
+    assert saved_session.is_admin is True
+    store.delete_discord_link.assert_awaited_once_with("link-1")
+
+
 def test_auth_callback_discord_link_can_skip_oidc_identity_checks(
     monkeypatch: pytest.MonkeyPatch,
     client: TestClient,
@@ -3501,10 +3606,14 @@ def test_auth_discord_link_redirect_creates_discord_session_when_disabled(
         patch("five08.backend.api._http_client_from_app", return_value=Mock()),
         patch("five08.backend.api.insert_audit_event") as mock_insert,
     ):
-        response = client.get("/auth/discord/link/link-1", follow_redirects=False)
+        response = client.post(
+            "/auth/discord/link/link-1/consume",
+            follow_redirects=False,
+        )
 
     assert response.status_code == 302
     assert response.headers["location"] == "/dashboard"
+    assert f"{api.settings.auth_session_cookie_name}=" in response.headers["set-cookie"]
     store.delete_discord_link.assert_awaited_once_with("link-1")
     saved_session = store.save_session.call_args.kwargs["payload"]
     assert saved_session.subject == "123456789"
@@ -3520,6 +3629,127 @@ def test_auth_discord_link_redirect_creates_discord_session_when_disabled(
     assert audit_payload.actor_subject == "123456789"
     assert audit_payload.metadata is not None
     assert audit_payload.metadata["discord_link_identity_checks_enforced"] is False
+
+
+def test_auth_discord_link_consume_allows_local_role_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    monkeypatch.setattr(api.settings, "environment", "local")
+    monkeypatch.setattr(
+        api.settings, "discord_link_require_oidc_identity_checks", False
+    )
+    store = Mock()
+    store.get_discord_link = AsyncMock(
+        return_value=api.DiscordLinkGrant(
+            discord_user_id="123456789",
+            next_path="/dashboard",
+            discord_roles=["Admin"],
+            discord_display_name="Local Admin",
+        )
+    )
+    store.save_session = AsyncMock()
+    store.delete_discord_link = AsyncMock()
+    verifier = Mock()
+    verifier.resolve_dashboard_identity = AsyncMock(return_value=None)
+
+    with (
+        patch("five08.backend.api._auth_store_from_app", return_value=store),
+        patch(
+            "five08.backend.api._discord_admin_verifier_from_app",
+            return_value=verifier,
+        ),
+        patch("five08.backend.api._http_client_from_app", return_value=Mock()),
+        patch("five08.backend.api.insert_audit_event"),
+    ):
+        response = client.post(
+            "/auth/discord/link/link-1/consume",
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "/dashboard"
+    saved_session = store.save_session.call_args.kwargs["payload"]
+    assert saved_session.subject == "123456789"
+    assert saved_session.display_name == "Local Admin"
+    assert saved_session.groups == ["Admin"]
+    assert saved_session.crm_contact_id == ""
+    assert saved_session.is_admin is True
+    assert "jobs:write" in saved_session.permissions
+
+
+def test_auth_discord_link_get_does_not_consume_token(
+    client: TestClient,
+) -> None:
+    store = Mock()
+    store.get_discord_link = AsyncMock(
+        return_value=api.DiscordLinkGrant(
+            discord_user_id="123456789",
+            next_path="/dashboard",
+        )
+    )
+    store.save_session = AsyncMock()
+    store.delete_discord_link = AsyncMock()
+
+    with patch("five08.backend.api._auth_store_from_app", return_value=store):
+        response = client.get("/auth/discord/link/link-1", follow_redirects=False)
+
+    assert response.status_code == 200
+    assert "/auth/discord/link/link-1/consume" in response.text
+    assert "Opening the operations dashboard" in response.text
+    assert "requestSubmit()" in response.text
+    assert response.headers["cache-control"] == "no-store"
+    store.save_session.assert_not_awaited()
+    store.delete_discord_link.assert_not_awaited()
+
+
+def test_auth_discord_link_missing_token_returns_friendly_html(
+    client: TestClient,
+) -> None:
+    store = Mock()
+    store.get_discord_link = AsyncMock(return_value=None)
+
+    with patch("five08.backend.api._auth_store_from_app", return_value=store):
+        response = client.get("/auth/discord/link/missing-link", follow_redirects=False)
+
+    assert response.status_code == 404
+    assert "This dashboard link is no longer available" in response.text
+    assert "/dashboard-login" in response.text
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_auth_discord_link_missing_token_can_return_json(
+    client: TestClient,
+) -> None:
+    store = Mock()
+    store.get_discord_link = AsyncMock(return_value=None)
+
+    with patch("five08.backend.api._auth_store_from_app", return_value=store):
+        response = client.get(
+            "/auth/discord/link/missing-link",
+            headers={"Accept": "application/json"},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "link_not_found"
+
+
+def test_auth_discord_link_consume_missing_token_returns_friendly_html(
+    client: TestClient,
+) -> None:
+    store = Mock()
+    store.get_discord_link = AsyncMock(return_value=None)
+
+    with patch("five08.backend.api._auth_store_from_app", return_value=store):
+        response = client.post(
+            "/auth/discord/link/missing-link/consume",
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 404
+    assert "This dashboard link is no longer available" in response.text
+    assert "/dashboard-login" in response.text
 
 
 def test_auth_discord_link_redirect_upgrades_existing_oidc_session(
@@ -3569,7 +3799,10 @@ def test_auth_discord_link_redirect_upgrades_existing_oidc_session(
         patch("five08.backend.api._http_client_from_app", return_value=Mock()),
         patch("five08.backend.api.insert_audit_event") as mock_insert,
     ):
-        response = client.get("/auth/discord/link/link-1", follow_redirects=False)
+        response = client.post(
+            "/auth/discord/link/link-1/consume",
+            follow_redirects=False,
+        )
 
     assert response.status_code == 302
     assert response.headers["location"] == "/dashboard"
@@ -3589,6 +3822,69 @@ def test_auth_discord_link_redirect_upgrades_existing_oidc_session(
     assert audit_payload.actor_subject == "123456789"
     assert audit_payload.metadata is not None
     assert audit_payload.metadata["upgraded_existing_session"] is True
+
+
+def test_auth_discord_link_existing_session_allows_local_role_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    monkeypatch.setattr(api.settings, "environment", "local")
+    monkeypatch.setattr(api.settings, "discord_link_require_oidc_identity_checks", True)
+    store = Mock()
+    store.get_discord_link = AsyncMock(
+        return_value=api.DiscordLinkGrant(
+            discord_user_id="123456789",
+            next_path="/dashboard",
+            discord_roles=["Admin"],
+            discord_display_name="Local Admin",
+        )
+    )
+    store.save_session = AsyncMock()
+    store.delete_discord_link = AsyncMock()
+    session = api.AuthSession(
+        subject="authentik-user-1",
+        email="local@508.dev",
+        display_name="Local OIDC",
+        groups=["Member"],
+        is_admin=False,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+    verifier = Mock()
+    verifier.is_dashboard_email_for_discord_user = AsyncMock(return_value=False)
+    verifier.resolve_dashboard_identity = AsyncMock(return_value=None)
+
+    with (
+        patch("five08.backend.api._auth_store_from_app", return_value=store),
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._discord_admin_verifier_from_app",
+            return_value=verifier,
+        ),
+        patch("five08.backend.api._http_client_from_app", return_value=Mock()),
+        patch("five08.backend.api.insert_audit_event"),
+    ):
+        response = client.post(
+            "/auth/discord/link/link-1/consume",
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "/dashboard"
+    saved_session = store.save_session.call_args.kwargs["payload"]
+    assert store.save_session.call_args.kwargs["session_id"] == "session-1"
+    assert saved_session.subject == "123456789"
+    assert saved_session.email is None
+    assert saved_session.display_name == "Local Admin"
+    assert saved_session.groups == ["Admin"]
+    assert saved_session.crm_contact_id == ""
+    assert saved_session.is_admin is True
+    assert "jobs:write" in saved_session.permissions
+    store.delete_discord_link.assert_awaited_once_with("link-1")
 
 
 def test_auth_logout_writes_logout_audit(client: TestClient) -> None:

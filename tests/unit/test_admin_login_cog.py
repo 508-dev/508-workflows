@@ -18,6 +18,7 @@ def mock_interaction() -> AsyncMock:
     interaction.followup.send = AsyncMock()
     interaction.user = Mock()
     interaction.user.id = 123456789
+    interaction.user.display_name = "Admin User"
     role = Mock()
     role.name = "Admin"
     interaction.user.roles = [role]
@@ -110,7 +111,11 @@ async def test_dashboard_login_command_defers_admin_check_to_backend(
         await cog.dashboard_login.callback(cog, mock_interaction)
 
     mock_interaction.response.defer.assert_awaited_once_with(ephemeral=True)
-    mock_create.assert_awaited_once_with(discord_user_id="123456789")
+    mock_create.assert_awaited_once_with(
+        discord_user_id="123456789",
+        discord_display_name="Admin User",
+        discord_roles=["Admin"],
+    )
     sent_message = mock_interaction.followup.send.call_args.args[0]
     assert "https://dash.508.dev/auth/discord/link/token" in sent_message
 

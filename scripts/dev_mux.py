@@ -249,9 +249,9 @@ def main() -> int:
     env.setdefault("PYTHONUNBUFFERED", "1")
 
     print("Launching host-run services with shared worktree env:")
-    print(f"  Web:      {env.get('BACKEND_API_BASE_URL', '')}")
-    print(f"  Worker:   {env.get('WORKER_API_BASE_URL', '')}")
-    print(f"  Bot:      {env.get('DISCORD_BOT_INTERNAL_BASE_URL', '')}")
+    print(f"  Web/API listener:     {env.get('BACKEND_API_BASE_URL', '')}")
+    print(f"  Bot health listener:  {env.get('DISCORD_BOT_INTERNAL_BASE_URL', '')}")
+    print("  Worker listener:      none (queue consumer)")
     print()
 
     ports_ok, port_error = _ensure_ports_available(env)
