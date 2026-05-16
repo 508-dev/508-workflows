@@ -12,6 +12,7 @@ _DASHBOARD_ROUTE_HINTS = """
 <!-- Dashboard client route hints:
 /dashboard/api/me
 /dashboard/people
+/dashboard/gigs
 /dashboard/onboarding
 /dashboard/jobs
 /dashboard/agent

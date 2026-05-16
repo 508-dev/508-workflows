@@ -1508,6 +1508,57 @@ def test_dashboard_renders_for_steering_committee_session(client: TestClient) ->
     assert "508 Operations Dashboard" in response.text
 
 
+def test_dashboard_renders_for_member_session_with_gig_access(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="member-1",
+        email="member@508.dev",
+        display_name="Member User",
+        groups=["Member"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/gigs")
+
+    assert response.status_code == 200
+    assert "508 Operations Dashboard" in response.text
+
+
+def test_dashboard_me_member_session_only_gets_gig_permissions(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="member-1",
+        email="member@508.dev",
+        display_name="Member User",
+        groups=["Member"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+        crm_contact_id="contact-member-1",
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/api/me")
+
+    assert response.status_code == 200
+    assert response.json()["permissions"] == ["gigs:read", "gigs:write"]
+
+
 def test_dashboard_renders_for_admin_session(client: TestClient) -> None:
     session = api.AuthSession(
         subject="123456789",
@@ -2098,6 +2149,28 @@ def test_dashboard_people_returns_lookup_payload(client: TestClient) -> None:
     )
 
 
+def test_dashboard_people_forbids_member_gig_session(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="member-1",
+        email="member@508.dev",
+        display_name="Member User",
+        groups=["Member"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/api/people")
+
+    assert response.status_code == 403
+
+
 def test_dashboard_onboarding_returns_filtered_queue(client: TestClient) -> None:
     session = api.AuthSession(
         subject="admin-1",
@@ -2148,6 +2221,114 @@ def test_dashboard_onboarding_returns_filtered_queue(client: TestClient) -> None
         resume=None,
         skills="missing",
     )
+
+
+def test_dashboard_gigs_filters_member_to_own_gigs(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="member@508.dev",
+        display_name="Member User",
+        groups=["Member"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+        crm_contact_id="contact-member-1",
+    )
+    gigs = [
+        {
+            "id": "gig-1",
+            "status": "recruiting",
+            "title": "Webflow build",
+            "applications": [],
+        }
+    ]
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.list_dashboard_engagements", return_value=gigs
+        ) as mock_gigs,
+    ):
+        response = client.get("/dashboard/api/gigs?status=recruiting&limit=10")
+
+    assert response.status_code == 200
+    assert response.json() == gigs
+    mock_gigs.assert_called_once_with(
+        api.settings,
+        viewer_discord_user_id="123456789",
+        include_all=False,
+        status=api.EngagementStatus.RECRUITING,
+        limit=10,
+    )
+
+
+def test_dashboard_gigs_allows_steering_to_see_all_gigs(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.list_dashboard_engagements", return_value=[]
+        ) as mock_gigs,
+    ):
+        response = client.get("/dashboard/api/gigs")
+
+    assert response.status_code == 200
+    mock_gigs.assert_called_once_with(
+        api.settings,
+        viewer_discord_user_id="steering-1",
+        include_all=True,
+        status=None,
+        limit=50,
+    )
+
+
+def test_dashboard_update_gig_status_requires_owner_or_steering(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="member@508.dev",
+        display_name="Member User",
+        groups=["Member"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.viewer_can_update_engagement", return_value=False),
+    ):
+        response = client.post(
+            "/dashboard/api/gigs/gig-1/status",
+            json={"status": "filled"},
+        )
+
+    assert response.status_code == 403
 
 
 def test_dashboard_assign_onboarder_updates_crm_and_audits(

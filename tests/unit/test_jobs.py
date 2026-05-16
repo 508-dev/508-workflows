@@ -153,6 +153,34 @@ def test_build_candidate_search_plan_relaxes_hard_requirements() -> None:
     assert plan[2][0].hard_required_skills == []
     assert plan[2][0].soft_required_skills == ["webflow", "figma", "hubspot"]
     assert plan[2][1] == 0.0
+    assert "any relevant required skill" in (plan[2][2] or "")
+
+
+def test_build_candidate_search_plan_keeps_language_requirements_hard() -> None:
+    requirements = JobRequirements(
+        hard_required_skills=["japanese", "next engine"],
+        soft_required_skills=["shopify", "wms"],
+        required_languages=["japanese"],
+        discord_role_types=["Backend"],
+    )
+
+    plan = JobsCog._build_candidate_search_plan(requirements, min_match_score=8.0)
+
+    assert len(plan) == 2
+    for planned_requirements, *_ in plan:
+        assert "japanese" in planned_requirements.hard_required_skills
+    assert plan[0][0].hard_required_skills == ["japanese", "next engine"]
+    assert plan[1][0].hard_required_skills == ["japanese"]
+    assert plan[1][0].soft_required_skills == ["next engine", "shopify", "wms"]
+    assert "language gates mandatory" in (plan[1][2] or "")
+
+
+def test_message_expresses_gig_interest_is_conservative() -> None:
+    assert JobsCog._message_expresses_gig_interest("I'm interested in this")
+    assert JobsCog._message_expresses_gig_interest("I can help with this one")
+    assert JobsCog._message_expresses_gig_interest("available for a quick chat")
+    assert not JobsCog._message_expresses_gig_interest("@someone ?")
+    assert not JobsCog._message_expresses_gig_interest("looks interesting")
 
 
 def test_build_job_match_header_uses_single_skills_line_when_hard_is_empty() -> None:

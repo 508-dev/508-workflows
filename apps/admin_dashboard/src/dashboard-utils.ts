@@ -37,6 +37,15 @@ export function formatDate(value?: string | null) {
   })
 }
 
+export function daysSince(value?: string | null, now: Date = new Date()) {
+  if (!value) return null
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return null
+  const diffMs = now.getTime() - date.getTime()
+  if (diffMs < 0) return 0
+  return Math.floor(diffMs / 86_400_000)
+}
+
 export function jsonPreview(value: unknown) {
   if (value === null || value === undefined) return ""
   return JSON.stringify(value, null, 2)

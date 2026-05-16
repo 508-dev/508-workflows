@@ -32,8 +32,22 @@ from five08.discord_bot.utils.role_decorators import (
     check_user_roles_with_hierarchy,
     require_role,
 )
+from five08.engagements import (
+    DiscordEngagementInput,
+    EngagementApplicationSource,
+    add_engagement_event,
+    parse_status_from_title,
+    requirements_to_payload,
+    upsert_discord_interest_application,
+    strip_status_from_title,
+    upsert_discord_engagement,
+    upsert_suggested_applications,
+)
 from five08.job_channels import (
-    list_registered_job_post_channels,
+    JobPostingType,
+    infer_job_posting_type_from_labels,
+    list_registered_job_post_channel_configs,
+    normalize_job_posting_type,
     register_job_post_channel,
     unregister_job_post_channel,
 )
@@ -41,6 +55,7 @@ from five08.job_match import (
     DISCORD_ROLES_EXCLUDE_FROM_SYNC,
     JobRequirements,
     extract_job_requirements,
+    is_language_requirement_skill,
     rerank_shortlisted_candidates,
 )
 
@@ -123,6 +138,18 @@ AUTO_MATCH_DEDUPE_MAX = 10_000
 MATCH_CANDIDATES_PRIVATE_TRUTHY = frozenset({"true", "1", "yes", "y", "on"})
 # Exclude known-bad resume artifact from auto-match rendering.
 AUTO_MATCH_EXCLUDED_RESUME_NAMES = frozenset({"Vladyslav_Stryzhak.pdf"})
+GIG_FORUM_BACKFILL_ARCHIVED_LIMIT = 200
+GIG_INTEREST_PATTERNS = (
+    re.compile(r"\b(?:i'?m|i am)\s+interested\b", re.IGNORECASE),
+    re.compile(r"\binterested\s+(?:in|for)\s+(?:this|the)\b", re.IGNORECASE),
+    re.compile(r"\b(?:i|we)\s+can\s+help\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:i|we)\s+(?:could|can)\s+(?:do|take|handle)\s+this\b", re.IGNORECASE
+    ),
+    re.compile(r"\bcount\s+me\s+in\b", re.IGNORECASE),
+    re.compile(r"\bavailable\s+(?:for|to)\b", re.IGNORECASE),
+    re.compile(r"\b(?:happy|open)\s+to\s+(?:help|chat|talk|take)\b", re.IGNORECASE),
+)
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 JobWatchChannel = discord.ForumChannel
 
@@ -286,6 +313,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         self.bot = bot
         self._init_audit_logger()
         self._jobs_channels_by_guild: dict[int, set[int]] = {}
+        self._jobs_channel_types_by_guild: dict[int, dict[int, JobPostingType]] = {}
         self._auto_matched_thread_ids: OrderedDict[int, None] = OrderedDict()
         self._auto_matched_thread_lock = asyncio.Lock()
         self._startup_sync_done = False
@@ -313,27 +341,46 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
 
     async def _refresh_jobs_channel_cache(self, guild_id: int) -> set[int]:
         """Load registered job-post channels for one guild from Postgres."""
-        raw_ids = await asyncio.to_thread(
-            list_registered_job_post_channels,
+        configs = await asyncio.to_thread(
+            list_registered_job_post_channel_configs,
             settings,
             guild_id=str(guild_id),
         )
         parsed_ids: set[int] = set()
-        for raw_id in raw_ids:
+        channel_types: dict[int, JobPostingType] = {}
+        for config in configs:
             try:
-                parsed_ids.add(int(raw_id))
+                channel_id = int(config.channel_id)
             except ValueError:
                 logger.warning(
                     "Skipping invalid job_post_channels row guild_id=%s channel_id=%s",
                     guild_id,
-                    raw_id,
+                    config.channel_id,
                 )
+                continue
+            parsed_ids.add(channel_id)
+            channel_types[channel_id] = config.posting_type
         self._jobs_channels_by_guild[guild_id] = parsed_ids
+        self._jobs_channel_types_by_guild[guild_id] = channel_types
         return parsed_ids
 
     def _is_jobs_channel_registered(self, guild_id: int, channel_id: int) -> bool:
         """Return whether a channel is registered for automatic job matching."""
         return channel_id in self._jobs_channels_by_guild.get(guild_id, set())
+
+    def _job_posting_type_for_thread(self, thread: discord.Thread) -> JobPostingType:
+        """Resolve posting type from thread tags, falling back to registered channel type."""
+        guild_id = thread.guild.id if thread.guild else None
+        channel_id = thread.parent.id if thread.parent else None
+        default = JobPostingType.PART_TIME
+        if guild_id is not None and channel_id is not None:
+            default = self._jobs_channel_types_by_guild.get(guild_id, {}).get(
+                channel_id,
+                default,
+            )
+        applied_tags = getattr(thread, "applied_tags", None) or []
+        tag_names = [tag.name for tag in applied_tags]
+        return infer_job_posting_type_from_labels(tag_names, default=default)
 
     async def _refresh_jobs_channel_cache_if_missing(self, guild_id: int) -> bool:
         """Ensure guild cache is loaded, retrying after startup-load failures."""
@@ -1014,13 +1061,36 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
 
         add_plan_step(requirements, min_match_score, None)
 
+        language_hard_skills = [
+            skill
+            for skill in requirements.hard_required_skills
+            if is_language_requirement_skill(skill)
+        ]
+        language_hard_keys = {skill.casefold() for skill in language_hard_skills}
+        non_language_hard_skills = [
+            skill
+            for skill in requirements.hard_required_skills
+            if skill.casefold() not in language_hard_keys
+        ]
+
         if len(requirements.hard_required_skills) > 1:
-            anchor_skill = requirements.hard_required_skills[0]
+            anchor_hard_skills = language_hard_skills[:]
+            if non_language_hard_skills:
+                anchor_hard_skills.append(non_language_hard_skills[0])
+            if not anchor_hard_skills:
+                anchor_hard_skills = requirements.hard_required_skills[:1]
+            anchor_skill = anchor_hard_skills[-1]
+            demoted_hard_skills = [
+                skill
+                for skill in requirements.hard_required_skills
+                if skill.casefold()
+                not in {item.casefold() for item in anchor_hard_skills}
+            ]
             add_plan_step(
                 replace(
                     requirements,
-                    hard_required_skills=requirements.hard_required_skills[:1],
-                    soft_required_skills=requirements.hard_required_skills[1:]
+                    hard_required_skills=anchor_hard_skills,
+                    soft_required_skills=demoted_hard_skills
                     + requirements.soft_required_skills,
                 ),
                 min_match_score,
@@ -1029,15 +1099,28 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             )
 
         if requirements.required_skills:
+            fallback_hard_skills = language_hard_skills
+            fallback_hard_keys = {skill.casefold() for skill in fallback_hard_skills}
+            fallback_soft_skills = [
+                skill
+                for skill in requirements.required_skills
+                if skill.casefold() not in fallback_hard_keys
+            ]
+            fallback_note = (
+                "Search note: still no strict matches, so matching was broadened to "
+                "any relevant skill while keeping required language gates mandatory."
+                if fallback_hard_skills
+                else "Search note: still no strict matches, so matching was broadened "
+                "to any relevant required skill."
+            )
             add_plan_step(
                 replace(
                     requirements,
-                    hard_required_skills=[],
-                    soft_required_skills=requirements.required_skills,
+                    hard_required_skills=fallback_hard_skills,
+                    soft_required_skills=fallback_soft_skills,
                 ),
                 0.0,
-                "Search note: still no strict matches, so matching was broadened to "
-                "any relevant skill or role signal.",
+                fallback_note,
             )
         elif requirements.discord_role_types and min_match_score > 0:
             add_plan_step(
@@ -1973,6 +2056,274 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 view=MatchResumeSelectView(resume_options),
             )
 
+    async def _persist_thread_engagement_match(
+        self,
+        *,
+        thread: discord.Thread,
+        starter: discord.Message,
+        posting: str,
+        requirements: JobRequirements,
+        candidates: list[Any],
+        actor_discord_user_id: str | None,
+        source: str,
+    ) -> None:
+        """Best-effort persistence for dashboard gig/candidate visibility."""
+        try:
+            thread_name = str(getattr(thread, "name", "") or "")
+            starter_id = getattr(starter, "id", None) or thread.id
+            status = parse_status_from_title(thread_name)
+            title = (
+                requirements.title
+                or strip_status_from_title(thread_name)
+                or thread_name
+            )
+            if not title:
+                title = f"Discord gig {thread.id}"
+            engagement_id = await asyncio.to_thread(
+                upsert_discord_engagement,
+                settings,
+                DiscordEngagementInput(
+                    guild_id=str(thread.guild.id) if thread.guild else None,
+                    channel_id=str(thread.parent.id) if thread.parent else None,
+                    channel_name=getattr(thread.parent, "name", None),
+                    posting_type=self._job_posting_type_for_thread(thread).value,
+                    message_id=str(starter_id),
+                    thread_id=str(thread.id),
+                    posted_by_discord_user_id=(
+                        str(thread.owner_id) if thread.owner_id else None
+                    ),
+                    title=title,
+                    body_raw=starter.content or None,
+                    body_normalized=posting,
+                    posted_at=getattr(starter, "created_at", None),
+                    status=status,
+                    required_skills=requirements.required_skills,
+                    preferred_skills=requirements.preferred_skills,
+                    requirements=requirements_to_payload(requirements),
+                ),
+            )
+            saved = await asyncio.to_thread(
+                upsert_suggested_applications,
+                settings,
+                engagement_id=engagement_id,
+                candidates=candidates,
+                source=EngagementApplicationSource.MATCH_CANDIDATES.value,
+            )
+            await asyncio.to_thread(
+                add_engagement_event,
+                settings,
+                engagement_id=engagement_id,
+                event_type="candidate_match_saved",
+                actor_discord_user_id=actor_discord_user_id,
+                payload={"source": source, "candidates_saved": saved},
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed persisting engagement match thread_id=%s source=%s: %s",
+                thread.id,
+                source,
+                exc,
+            )
+
+    async def _persist_thread_engagement_index(
+        self,
+        thread: discord.Thread,
+        *,
+        source: str,
+    ) -> bool:
+        """Persist basic dashboard gig metadata for an existing forum thread."""
+        try:
+            post = await self._read_thread_post(thread)
+            if post is None:
+                return False
+
+            thread_name = str(getattr(thread, "name", "") or "")
+            starter_id = getattr(post.starter, "id", None) or thread.id
+            body = post.starter.content or None
+            title = strip_status_from_title(thread_name) or thread_name
+            if not title:
+                title = f"Discord gig {thread.id}"
+            engagement_id = await asyncio.to_thread(
+                upsert_discord_engagement,
+                settings,
+                DiscordEngagementInput(
+                    guild_id=str(thread.guild.id) if thread.guild else None,
+                    channel_id=str(thread.parent.id) if thread.parent else None,
+                    channel_name=getattr(thread.parent, "name", None),
+                    posting_type=self._job_posting_type_for_thread(thread).value,
+                    message_id=str(starter_id),
+                    thread_id=str(thread.id),
+                    posted_by_discord_user_id=(
+                        str(thread.owner_id) if thread.owner_id else None
+                    ),
+                    title=title,
+                    body_raw=body,
+                    body_normalized=body,
+                    posted_at=getattr(post.starter, "created_at", None),
+                    status=parse_status_from_title(thread_name),
+                ),
+            )
+            await asyncio.to_thread(
+                add_engagement_event,
+                settings,
+                engagement_id=engagement_id,
+                event_type="gig_thread_indexed",
+                payload={"source": source},
+            )
+            return True
+        except Exception as exc:
+            logger.warning(
+                "Failed indexing gig thread channel=%s thread=%s source=%s: %s",
+                getattr(getattr(thread, "parent", None), "id", "unknown"),
+                getattr(thread, "id", "unknown"),
+                source,
+                exc,
+            )
+            return False
+
+    async def _sync_job_forum_channel(
+        self,
+        channel: discord.ForumChannel,
+        *,
+        source: str,
+    ) -> tuple[int, int]:
+        """Backfill dashboard gig rows from active and recently archived forum posts."""
+        seen_thread_ids: set[int] = set()
+        indexed = 0
+        failed = 0
+
+        async def handle_thread(thread: discord.Thread) -> None:
+            nonlocal indexed, failed
+            if thread.id in seen_thread_ids:
+                return
+            seen_thread_ids.add(thread.id)
+            if await self._persist_thread_engagement_index(thread, source=source):
+                indexed += 1
+            else:
+                failed += 1
+
+        for thread in getattr(channel, "threads", []) or []:
+            await handle_thread(thread)
+
+        try:
+            async for thread in channel.archived_threads(
+                limit=GIG_FORUM_BACKFILL_ARCHIVED_LIMIT
+            ):
+                await handle_thread(thread)
+        except Exception as exc:
+            logger.warning(
+                "Failed reading archived job forum threads channel=%s: %s",
+                channel.id,
+                exc,
+            )
+
+        return indexed, failed
+
+    async def _sync_registered_job_forum_channels(
+        self,
+        guild: discord.Guild,
+        channel_ids: set[int],
+        *,
+        source: str,
+    ) -> tuple[int, int]:
+        """Backfill all registered job forums for one guild."""
+        indexed = 0
+        failed = 0
+        for channel_id in channel_ids:
+            channel_obj: object = guild.get_channel(channel_id)
+            if channel_obj is None:
+                try:
+                    channel_obj = await self.bot.fetch_channel(channel_id)
+                except Exception as exc:
+                    logger.warning(
+                        "Failed fetching registered jobs channel guild=%s channel=%s: %s",
+                        guild.id,
+                        channel_id,
+                        exc,
+                    )
+                    continue
+            if not isinstance(channel_obj, discord.ForumChannel):
+                logger.warning(
+                    "Skipping registered jobs channel that is not a forum guild=%s channel=%s",
+                    guild.id,
+                    channel_id,
+                )
+                continue
+            channel_indexed, channel_failed = await self._sync_job_forum_channel(
+                channel_obj,
+                source=source,
+            )
+            indexed += channel_indexed
+            failed += channel_failed
+        return indexed, failed
+
+    @staticmethod
+    def _message_expresses_gig_interest(content: str | None) -> bool:
+        """Detect conservative direct-interest replies in gig threads."""
+        text = str(content or "").strip()
+        if len(text) < 3:
+            return False
+        return any(pattern.search(text) for pattern in GIG_INTEREST_PATTERNS)
+
+    async def _persist_thread_direct_interest(self, message: discord.Message) -> None:
+        """Best-effort persistence for direct interest expressed in a gig thread."""
+        thread = message.channel
+        if not isinstance(thread, discord.Thread):
+            return
+        if not self._message_expresses_gig_interest(message.content):
+            return
+        if getattr(message.author, "bot", False):
+            return
+        if thread.owner_id and message.author.id == thread.owner_id:
+            return
+
+        post = await self._read_thread_post(thread)
+        if post is None:
+            return
+
+        try:
+            thread_name = str(getattr(thread, "name", "") or "")
+            starter_id = getattr(post.starter, "id", None) or thread.id
+            engagement_id = await asyncio.to_thread(
+                upsert_discord_engagement,
+                settings,
+                DiscordEngagementInput(
+                    guild_id=str(thread.guild.id) if thread.guild else None,
+                    channel_id=str(thread.parent.id) if thread.parent else None,
+                    channel_name=getattr(thread.parent, "name", None),
+                    posting_type=self._job_posting_type_for_thread(thread).value,
+                    message_id=str(starter_id),
+                    thread_id=str(thread.id),
+                    posted_by_discord_user_id=(
+                        str(thread.owner_id) if thread.owner_id else None
+                    ),
+                    title=strip_status_from_title(thread_name)
+                    or thread_name
+                    or f"Discord gig {thread.id}",
+                    body_raw=post.starter.content or None,
+                    body_normalized=post.starter.content or None,
+                    posted_at=getattr(post.starter, "created_at", None),
+                    status=parse_status_from_title(thread_name),
+                ),
+            )
+            await asyncio.to_thread(
+                upsert_discord_interest_application,
+                settings,
+                engagement_id=engagement_id,
+                discord_user_id=str(message.author.id),
+                discord_username=getattr(message.author, "name", None),
+                source=EngagementApplicationSource.DIRECT_INTEREST.value,
+                message_id=str(message.id),
+                message_content=message.content,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed persisting direct gig interest thread_id=%s message_id=%s: %s",
+                thread.id,
+                message.id,
+                exc,
+            )
+
     async def _run_auto_match_candidates_for_thread(
         self,
         *,
@@ -2065,6 +2416,16 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 "Run `/match-candidates` manually in this thread."
             )
             return
+
+        await self._persist_thread_engagement_match(
+            thread=thread,
+            starter=post.starter,
+            posting=posting,
+            requirements=search_outcome.effective_requirements,
+            candidates=search_outcome.candidates,
+            actor_discord_user_id=None,
+            source=f"auto_{trigger}",
+        )
 
         await self._publish_match_results(
             send=thread.send,
@@ -2178,9 +2539,20 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                         len(channel_ids),
                         guild.name,
                     )
+                    indexed, failed = await self._sync_registered_job_forum_channels(
+                        guild,
+                        channel_ids,
+                        source="startup",
+                    )
+                    logger.info(
+                        "Startup job forum index: guild=%s indexed=%d failed=%d",
+                        guild.name,
+                        indexed,
+                        failed,
+                    )
                 except Exception as exc:
                     logger.warning(
-                        "Failed loading jobs channel registrations for guild %s: %s",
+                        "Failed loading/indexing jobs channel registrations for guild %s: %s",
                         guild.name,
                         exc,
                     )
@@ -2236,18 +2608,48 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             trigger="thread_create",
         )
 
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        """Track direct interest replies in registered gig forum threads."""
+        if getattr(message.author, "bot", False):
+            return
+        thread = message.channel
+        if not isinstance(thread, discord.Thread):
+            return
+        guild = thread.guild
+        parent = thread.parent
+        if guild is None or not isinstance(parent, discord.ForumChannel):
+            return
+        if not await self._refresh_jobs_channel_cache_if_missing(guild.id):
+            return
+        if not self._is_jobs_channel_registered(guild.id, parent.id):
+            return
+        await self._persist_thread_direct_interest(message)
+
     @app_commands.command(
         name="register-jobs-channel",
         description="Register a forum channel for automatic job-post matching.",
     )
     @app_commands.describe(
-        channel="Forum channel to watch. Defaults to the current forum or its post thread."
+        channel="Forum channel to watch. Defaults to the current forum or its post thread.",
+        posting_type="Default posting type for posts in this forum.",
+    )
+    @app_commands.choices(
+        posting_type=[
+            app_commands.Choice(name="Part-time / contract", value="part_time"),
+            app_commands.Choice(name="Full-time", value="full_time"),
+            app_commands.Choice(
+                name="Part-time or full-time", value="part_time_or_full_time"
+            ),
+            app_commands.Choice(name="Unknown", value="unknown"),
+        ]
     )
     @require_role("Steering Committee")
     async def register_jobs_channel(
         self,
         interaction: discord.Interaction,
         channel: discord.ForumChannel | None = None,
+        posting_type: str = "part_time",
     ) -> None:
         """Register a forum channel that triggers automatic candidate matching."""
         guild = interaction.guild
@@ -2267,15 +2669,24 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             return
 
         await interaction.response.defer(ephemeral=True)
+        normalized_posting_type = normalize_job_posting_type(posting_type)
         try:
             created = await asyncio.to_thread(
                 register_job_post_channel,
                 settings,
                 guild_id=str(guild.id),
                 channel_id=str(target_channel.id),
+                posting_type=normalized_posting_type,
             )
             self._jobs_channels_by_guild.setdefault(guild.id, set()).add(
                 target_channel.id
+            )
+            self._jobs_channel_types_by_guild.setdefault(guild.id, {})[
+                target_channel.id
+            ] = normalized_posting_type
+            indexed, failed = await self._sync_job_forum_channel(
+                target_channel,
+                source="register_jobs_channel",
             )
         except Exception as exc:
             logger.warning(
@@ -2299,6 +2710,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                     "guild_id": str(guild.id),
                     "channel_id": str(target_channel.id),
                     "channel_name": target_channel.name,
+                    "posting_type": normalized_posting_type.value,
                     "created": created,
                 },
             )
@@ -2307,12 +2719,16 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
 
         if created:
             await interaction.followup.send(
-                f"✅ Registered <#{target_channel.id}> for automatic job matching.",
+                f"✅ Registered <#{target_channel.id}> for automatic job matching "
+                f"as `{normalized_posting_type.value}`. Backfilled {indexed} post(s)"
+                f"{f' ({failed} failed)' if failed else ''}.",
                 ephemeral=True,
             )
         else:
             await interaction.followup.send(
-                f"ℹ️ <#{target_channel.id}> is already registered.",
+                f"ℹ️ <#{target_channel.id}> is already registered as "
+                f"`{normalized_posting_type.value}`. Backfilled {indexed} post(s)"
+                f"{f' ({failed} failed)' if failed else ''}.",
                 ephemeral=True,
             )
 
@@ -2553,6 +2969,16 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 ephemeral=True,
             )
             return
+
+        await self._persist_thread_engagement_match(
+            thread=thread,
+            starter=starter,
+            posting=posting,
+            requirements=search_outcome.effective_requirements,
+            candidates=search_outcome.candidates,
+            actor_discord_user_id=str(interaction.user.id),
+            source="manual_match_candidates",
+        )
 
         async def _send_match_result(message: str, **kwargs: Any) -> None:
             if is_private:

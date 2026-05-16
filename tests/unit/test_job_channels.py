@@ -64,6 +64,40 @@ def test_list_registered_job_post_channels(monkeypatch) -> None:
     assert cursor.executed[0][1] == ("guild-1",)
 
 
+def test_list_registered_job_post_channel_configs(monkeypatch) -> None:
+    cursor = _CursorStub(
+        rows=[
+            {"channel_id": "123", "posting_type": "part_time"},
+            {"channel_id": "456", "posting_type": "full_time"},
+        ]
+    )
+    _install_connection_stub(monkeypatch, cursor)
+
+    result = job_channels.list_registered_job_post_channel_configs(
+        job_channels.SharedSettings(), guild_id="guild-1"
+    )
+
+    assert result == [
+        job_channels.RegisteredJobPostChannel(
+            channel_id="123",
+            posting_type=job_channels.JobPostingType.PART_TIME,
+        ),
+        job_channels.RegisteredJobPostChannel(
+            channel_id="456",
+            posting_type=job_channels.JobPostingType.FULL_TIME,
+        ),
+    ]
+
+
+def test_infer_job_posting_type_from_labels_detects_hybrid() -> None:
+    assert (
+        job_channels.infer_job_posting_type_from_labels(
+            ["Contract", "Open to full-time"]
+        )
+        is job_channels.JobPostingType.PART_TIME_OR_FULL_TIME
+    )
+
+
 def test_register_job_post_channel_returns_true_on_insert(monkeypatch) -> None:
     cursor = _CursorStub(row={"channel_id": "123"})
     _install_connection_stub(monkeypatch, cursor)
@@ -73,7 +107,7 @@ def test_register_job_post_channel_returns_true_on_insert(monkeypatch) -> None:
     )
 
     assert created is True
-    assert cursor.executed[0][1] == ("guild-1", "123")
+    assert cursor.executed[0][1] == ("guild-1", "123", "part_time")
 
 
 def test_register_job_post_channel_returns_false_on_noop(monkeypatch) -> None:
@@ -85,6 +119,7 @@ def test_register_job_post_channel_returns_false_on_noop(monkeypatch) -> None:
     )
 
     assert created is False
+    assert cursor.executed[1][1] == ("part_time", "guild-1", "123")
 
 
 def test_unregister_job_post_channel_returns_true_on_delete(monkeypatch) -> None:

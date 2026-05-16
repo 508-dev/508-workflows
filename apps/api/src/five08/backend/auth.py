@@ -34,9 +34,18 @@ DASHBOARD_PERMISSION_JOBS_READ = "jobs:read"
 DASHBOARD_PERMISSION_JOBS_WRITE = "jobs:write"
 DASHBOARD_PERMISSION_AUDIT_READ = "audit:read"
 DASHBOARD_PERMISSION_PEOPLE_SYNC = "people:sync"
+DASHBOARD_PERMISSION_GIGS_READ = "gigs:read"
+DASHBOARD_PERMISSION_GIGS_WRITE = "gigs:write"
 
+DASHBOARD_MEMBER_PERMISSIONS = frozenset(
+    {
+        DASHBOARD_PERMISSION_GIGS_READ,
+        DASHBOARD_PERMISSION_GIGS_WRITE,
+    }
+)
 DASHBOARD_STEERING_PERMISSIONS = frozenset(
     {
+        *DASHBOARD_MEMBER_PERMISSIONS,
         DASHBOARD_PERMISSION_PEOPLE_READ,
         DASHBOARD_PERMISSION_ONBOARDING_READ,
         DASHBOARD_PERMISSION_ONBOARDING_WRITE,
@@ -563,6 +572,8 @@ def dashboard_permissions_for_roles(
         return sorted(DASHBOARD_ADMIN_PERMISSIONS)
     if has_role_with_hierarchy(raw_roles, "Steering Committee"):
         return sorted(DASHBOARD_STEERING_PERMISSIONS)
+    if has_role_with_hierarchy(raw_roles, "Member"):
+        return sorted(DASHBOARD_MEMBER_PERMISSIONS)
     return []
 
 
@@ -614,7 +625,7 @@ class DiscordAdminVerifier:
         *,
         discord_user_id: str,
         http_client: httpx.AsyncClient,
-        required_role: str = "Steering Committee",
+        required_role: str = "Member",
     ) -> DiscordAdminIdentity | None:
         """Return CRM-backed identity details when user can access the dashboard."""
         person = await asyncio.to_thread(
@@ -692,7 +703,7 @@ class DiscordAdminVerifier:
         email: str,
         discord_user_id: str,
         http_client: httpx.AsyncClient | None = None,
-        required_role: str = "Steering Committee",
+        required_role: str = "Member",
     ) -> bool:
         """Check if OIDC email maps to an active dashboard-capable Discord user."""
         normalized_email = email.strip().lower()

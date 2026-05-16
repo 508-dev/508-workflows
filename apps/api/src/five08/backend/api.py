@@ -65,6 +65,8 @@ from five08.backend.auth import (
     AuthSession,
     DASHBOARD_ADMIN_PERMISSIONS,
     DASHBOARD_PERMISSION_AUDIT_READ,
+    DASHBOARD_PERMISSION_GIGS_READ,
+    DASHBOARD_PERMISSION_GIGS_WRITE,
     DASHBOARD_PERMISSION_JOBS_READ,
     DASHBOARD_PERMISSION_JOBS_WRITE,
     DASHBOARD_PERMISSION_ONBOARDING_READ,
@@ -91,6 +93,15 @@ from five08.backend.dashboard import (
     dashboard_html,
     login_required_html,
     oidc_not_configured_html,
+)
+from five08.engagements import (
+    EngagementApplicationStatus,
+    EngagementStatus,
+    list_dashboard_engagements,
+    normalize_engagement_status,
+    update_engagement_application_status,
+    update_engagement_status,
+    viewer_can_update_engagement,
 )
 from five08.worker.config import settings
 from five08.worker.db_migrations import run_job_migrations
@@ -146,6 +157,18 @@ class DashboardAssignOnboarderRequest(BaseModel):
     """Payload for assigning an onboarder from the dashboard."""
 
     onboarder: str
+
+
+class DashboardGigStatusRequest(BaseModel):
+    """Payload for updating one dashboard gig status."""
+
+    status: str
+
+
+class DashboardGigApplicationStatusRequest(BaseModel):
+    """Payload for updating one dashboard gig candidate/application status."""
+
+    status: str
 
 
 @dataclass(frozen=True)
@@ -647,10 +670,25 @@ def _session_has_dashboard_permission(
     return required_permission in _session_dashboard_permissions(session)
 
 
+def _session_has_any_dashboard_permission(session: AuthSession) -> bool:
+    return bool(_session_dashboard_permissions(session))
+
+
+def _session_has_steering_access(session: AuthSession) -> bool:
+    actor_provider = _session_actor_provider(session)
+    if actor_provider == ActorProvider.DISCORD:
+        return has_dashboard_discord_role(
+            session.groups,
+            "Steering Committee",
+            admin_role_names=settings.discord_admin_role_names,
+        )
+    return session.is_admin
+
+
 async def _dashboard_session_or_error(
     request: Request,
     *,
-    required_permission: str = DASHBOARD_PERMISSION_PEOPLE_READ,
+    required_permission: str | None = DASHBOARD_PERMISSION_PEOPLE_READ,
 ) -> tuple[AuthSession | None, JSONResponse | None]:
     session_id, session = await _current_session(request)
     if session is None:
@@ -658,7 +696,10 @@ async def _dashboard_session_or_error(
         if session_id is not None:
             _clear_session_cookie(response)
         return None, response
-    if not _session_has_dashboard_permission(session, required_permission):
+    if required_permission is None:
+        if not _session_has_any_dashboard_permission(session):
+            return None, JSONResponse({"error": "forbidden"}, status_code=403)
+    elif not _session_has_dashboard_permission(session, required_permission):
         return None, JSONResponse({"error": "forbidden"}, status_code=403)
     return session, None
 
@@ -2046,14 +2087,17 @@ async def dashboard_handler(
         if session_id is not None:
             _clear_session_cookie(response)
         return response
-    if not _session_has_dashboard_permission(session, DASHBOARD_PERMISSION_PEOPLE_READ):
+    if not _session_has_any_dashboard_permission(session):
         return HTMLResponse("Forbidden", status_code=403)
     return HTMLResponse(dashboard_html(), status_code=200)
 
 
 async def dashboard_me_handler(request: Request) -> JSONResponse:
     """Return the dashboard session identity."""
-    session, error_response = await _dashboard_session_or_error(request)
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=None,
+    )
     if error_response is not None:
         return error_response
     assert session is not None
@@ -2175,6 +2219,151 @@ async def dashboard_people_handler(
         skills=skills,
     )
     return JSONResponse(people)
+
+
+async def dashboard_gigs_handler(
+    request: Request,
+    status: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=100),
+) -> JSONResponse:
+    """Return dashboard-visible Discord gigs and candidate fit snapshots."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_GIGS_READ,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    normalized_status: EngagementStatus | None = None
+    if status:
+        normalized_status = normalize_engagement_status(status)
+        if (
+            normalized_status is EngagementStatus.UNKNOWN
+            and status.strip().casefold()
+            not in {
+                "unknown",
+            }
+        ):
+            return JSONResponse({"error": "invalid_status"}, status_code=400)
+
+    include_all = _session_has_steering_access(session)
+    gigs = await asyncio.to_thread(
+        list_dashboard_engagements,
+        settings,
+        viewer_discord_user_id=session.subject,
+        include_all=include_all,
+        status=normalized_status,
+        limit=limit,
+    )
+    return JSONResponse(gigs)
+
+
+async def dashboard_update_gig_status_handler(
+    request: Request,
+    engagement_id: str,
+) -> JSONResponse:
+    """Update one gig status from the dashboard."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_GIGS_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    try:
+        body = await request.json()
+        payload = DashboardGigStatusRequest.model_validate(body)
+    except Exception:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    normalized_status = normalize_engagement_status(payload.status)
+    if (
+        normalized_status is EngagementStatus.UNKNOWN
+        and payload.status.strip().casefold()
+        not in {
+            "unknown",
+        }
+    ):
+        return JSONResponse({"error": "invalid_status"}, status_code=400)
+
+    include_all = _session_has_steering_access(session)
+    can_update = await asyncio.to_thread(
+        viewer_can_update_engagement,
+        settings,
+        engagement_id=engagement_id,
+        viewer_discord_user_id=session.subject,
+        include_all=include_all,
+    )
+    if not can_update:
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+
+    result = await asyncio.to_thread(
+        update_engagement_status,
+        settings,
+        engagement_id=engagement_id,
+        status=normalized_status,
+        actor_discord_user_id=session.subject,
+    )
+    if result is None:
+        return JSONResponse({"error": "gig_not_found"}, status_code=404)
+    return JSONResponse(result)
+
+
+async def dashboard_update_gig_application_status_handler(
+    request: Request,
+    engagement_id: str,
+    application_id: str,
+) -> JSONResponse:
+    """Update one gig candidate/application status from the dashboard."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_GIGS_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    try:
+        body = await request.json()
+        payload = DashboardGigApplicationStatusRequest.model_validate(body)
+        normalized_status = EngagementApplicationStatus(payload.status)
+    except ValueError:
+        return JSONResponse({"error": "invalid_application_status"}, status_code=400)
+    except Exception:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    include_all = _session_has_steering_access(session)
+    can_update = await asyncio.to_thread(
+        viewer_can_update_engagement,
+        settings,
+        engagement_id=engagement_id,
+        viewer_discord_user_id=session.subject,
+        include_all=include_all,
+    )
+    if not can_update:
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+
+    result = await asyncio.to_thread(
+        update_engagement_application_status,
+        settings,
+        engagement_id=engagement_id,
+        application_id=application_id,
+        status=normalized_status,
+        actor_discord_user_id=session.subject,
+    )
+    if result is None:
+        return JSONResponse({"error": "application_not_found"}, status_code=404)
+    return JSONResponse(result)
 
 
 async def dashboard_onboarding_handler(
@@ -3862,6 +4051,21 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
         "/dashboard/api/people",
         dashboard_people_handler,
         methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/gigs",
+        dashboard_gigs_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/gigs/{engagement_id}/status",
+        dashboard_update_gig_status_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/dashboard/api/gigs/{engagement_id}/applications/{application_id}/status",
+        dashboard_update_gig_application_status_handler,
+        methods=["POST"],
     )
     app.add_api_route(
         "/dashboard/api/onboarding",
