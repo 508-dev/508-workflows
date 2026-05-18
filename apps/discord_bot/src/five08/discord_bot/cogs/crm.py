@@ -6974,6 +6974,11 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 existing_discord_user_id == discord_user_id
                 and existing_discord_username == discord_display
             ):
+                self._sync_local_people_discord_link(
+                    contact=contact,
+                    user=user,
+                    discord_display=discord_display,
+                )
                 self._audit_command_safe(
                     interaction=interaction,
                     action="crm.link_discord_user.execute",

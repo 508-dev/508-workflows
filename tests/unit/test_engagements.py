@@ -11,12 +11,14 @@ from five08.engagements import (
     DiscordEngagementInput,
     EngagementStatus,
     engagement_event_exists,
+    get_gig_thread_interest_backfill_marker,
     normalize_engagement_status,
     parse_status_from_title,
     strip_status_from_title,
     upsert_discord_interest_application,
     upsert_suggested_applications,
     upsert_discord_engagement,
+    upsert_gig_thread_interest_backfill_marker,
 )
 from five08.settings import SharedSettings
 
@@ -158,6 +160,103 @@ def test_engagement_event_exists_checks_event_marker(monkeypatch) -> None:
     query, params = executed[0]
     assert "FROM engagement_events" in query
     assert params == ("engagement-1", "gig_thread_interest_backfilled")
+
+
+def test_get_gig_thread_interest_backfill_marker_returns_payload(monkeypatch) -> None:
+    executed: list[tuple[str, tuple]] = []
+
+    class CursorStub:
+        def __enter__(self) -> "CursorStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+        def execute(self, query: str, params: tuple) -> None:
+            executed.append((query, params))
+
+        def fetchone(self) -> dict[str, dict[str, str]]:
+            return {"payload": {"last_scanned_message_created_at": "2026-05-10"}}
+
+    class ConnectionStub:
+        def cursor(self, row_factory=None) -> CursorStub:  # noqa: ARG002
+            return CursorStub()
+
+        def __enter__(self) -> "ConnectionStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+    @contextmanager
+    def connection_stub():
+        yield ConnectionStub()
+
+    monkeypatch.setattr(
+        engagements,
+        "get_postgres_connection",
+        lambda _settings: connection_stub(),
+    )
+
+    assert get_gig_thread_interest_backfill_marker(
+        SharedSettings(),
+        engagement_id="engagement-1",
+    ) == {"last_scanned_message_created_at": "2026-05-10"}
+    query, params = executed[0]
+    assert "ORDER BY created_at DESC" in query
+    assert params == ("engagement-1", "gig_thread_interest_backfilled")
+
+
+def test_upsert_gig_thread_interest_backfill_marker_uses_conflict_update(
+    monkeypatch,
+) -> None:
+    executed: list[tuple[str, tuple]] = []
+
+    class CursorStub:
+        def __enter__(self) -> "CursorStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+        def execute(self, query: str, params: tuple) -> None:
+            executed.append((query, params))
+
+    class ConnectionStub:
+        def cursor(self) -> CursorStub:
+            return CursorStub()
+
+        def __enter__(self) -> "ConnectionStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+    @contextmanager
+    def connection_stub():
+        yield ConnectionStub()
+
+    monkeypatch.setattr(
+        engagements,
+        "get_postgres_connection",
+        lambda _settings: connection_stub(),
+    )
+
+    upsert_gig_thread_interest_backfill_marker(
+        SharedSettings(),
+        engagement_id="engagement-1",
+        actor_discord_user_id="actor-1",
+        payload={"scanned_count": 1},
+    )
+
+    query, params = executed[0]
+    assert "ON CONFLICT (engagement_id, event_type)" in query
+    assert "gig_thread_interest_backfilled" in query
+    assert params[1:4] == (
+        "engagement-1",
+        "gig_thread_interest_backfilled",
+        "actor-1",
+    )
 
 
 def test_upsert_discord_interest_application_uses_historical_activity_timestamp(

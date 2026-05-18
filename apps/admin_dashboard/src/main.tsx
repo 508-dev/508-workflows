@@ -1970,7 +1970,7 @@ function GigApplicationRow({
             className="font-extrabold text-primary"
             href={contactUrl}
             target="_blank"
-            rel="noreferrer"
+            rel="noopener noreferrer"
           >
             {displayName}
           </a>
@@ -1989,7 +1989,7 @@ function GigApplicationRow({
             className="text-xs font-extrabold text-primary"
             href={contactUrl}
             target="_blank"
-            rel="noreferrer"
+            rel="noopener noreferrer"
             aria-label={`Open ${displayName} CRM profile`}
           >
             CRM profile
@@ -2000,7 +2000,7 @@ function GigApplicationRow({
             className="text-xs font-extrabold text-primary"
             href={resumeUrl}
             target="_blank"
-            rel="noreferrer"
+            rel="noopener noreferrer"
           >
             Resume
           </a>

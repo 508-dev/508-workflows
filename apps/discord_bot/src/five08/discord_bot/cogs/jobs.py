@@ -9,6 +9,7 @@ import json
 import logging
 import re
 import socket
+import weakref
 from collections.abc import Iterable
 from collections import OrderedDict
 from dataclasses import dataclass, is_dataclass, replace
@@ -38,7 +39,7 @@ from five08.engagements import (
     DiscordEngagementInput,
     EngagementApplicationSource,
     add_engagement_event,
-    engagement_event_exists,
+    get_gig_thread_interest_backfill_marker,
     list_due_recruiting_reminders,
     mark_recruiting_reminder_failed,
     mark_recruiting_reminder_sent,
@@ -48,6 +49,7 @@ from five08.engagements import (
     strip_status_from_title,
     upsert_discord_engagement,
     upsert_discord_interest_application,
+    upsert_gig_thread_interest_backfill_marker,
     upsert_suggested_applications,
 )
 from five08.job_channels import (
@@ -147,7 +149,6 @@ MATCH_CANDIDATES_PRIVATE_TRUTHY = frozenset({"true", "1", "yes", "y", "on"})
 AUTO_MATCH_EXCLUDED_RESUME_NAMES = frozenset({"Vladyslav_Stryzhak.pdf"})
 GIG_FORUM_BACKFILL_ARCHIVED_LIMIT = 200
 GIG_INTEREST_BACKFILL_MAX_AGE_DAYS = 14
-GIG_INTEREST_BACKFILL_EVENT_TYPE = "gig_thread_interest_backfilled"
 GIG_RECRUITING_REMINDER_CHECK_SECONDS = 6 * 60 * 60
 GIG_INTEREST_PATTERNS = (
     re.compile(r"\b(?:i'?m|i am)\s+interested\b", re.IGNORECASE),
@@ -346,7 +347,9 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         self._startup_sync_lock = asyncio.Lock()
         self._recruiting_reminder_task: asyncio.Task[None] | None = None
         self._forum_backfill_tasks: set[asyncio.Task[None]] = set()
-        self._gig_interest_backfill_locks: dict[int, asyncio.Lock] = {}
+        self._gig_interest_backfill_locks: weakref.WeakValueDictionary[
+            int, asyncio.Lock
+        ] = weakref.WeakValueDictionary()
 
     async def cog_unload(self) -> None:
         """Stop background reminder checks when the cog unloads."""
@@ -2355,6 +2358,16 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
 
     @staticmethod
     def _coerce_utc_datetime(value: object) -> datetime | None:
+        if isinstance(value, str):
+            normalized = value.strip()
+            if not normalized:
+                return None
+            if normalized.endswith("Z"):
+                normalized = f"{normalized[:-1]}+00:00"
+            try:
+                value = datetime.fromisoformat(normalized)
+            except ValueError:
+                return None
         if not isinstance(value, datetime):
             return None
         if value.tzinfo is None:
@@ -2448,28 +2461,29 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         created_at: datetime | None,
     ) -> GigInterestBackfillResult:
         """Run a serialized reply-interest backfill after the engagement exists."""
-        try:
-            already_backfilled = await asyncio.to_thread(
-                engagement_event_exists,
-                settings,
-                engagement_id=engagement_id,
-                event_type=GIG_INTEREST_BACKFILL_EVENT_TYPE,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed checking gig interest backfill marker thread_id=%s: %s",
-                getattr(thread, "id", "unknown"),
-                exc,
-            )
-            return GigInterestBackfillResult(
-                status="failed",
-                reason="marker_lookup_failed",
-            )
-        if already_backfilled and not force:
-            return GigInterestBackfillResult(
-                status="skipped",
-                reason="already_backfilled",
-            )
+        marker_payload: dict[str, Any] | None = None
+        if not force:
+            try:
+                marker_payload = await asyncio.to_thread(
+                    get_gig_thread_interest_backfill_marker,
+                    settings,
+                    engagement_id=engagement_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed checking gig interest backfill marker thread_id=%s: %s",
+                    getattr(thread, "id", "unknown"),
+                    exc,
+                )
+                return GigInterestBackfillResult(
+                    status="failed",
+                    reason="marker_lookup_failed",
+                )
+        last_scanned_at = self._coerce_utc_datetime(
+            marker_payload.get("last_scanned_message_created_at")
+            if marker_payload
+            else None
+        )
 
         poster_id = self._thread_poster_id(thread, post.starter)
         starter_id = getattr(post.starter, "id", None) or thread.id
@@ -2477,12 +2491,27 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         interested_count = 0
         interested_application_ids: set[str] = set()
         failed_count = 0
+        latest_seen_message_at = last_scanned_at
 
         try:
             async for message in thread.history(limit=None, oldest_first=True):
                 message_id = getattr(message, "id", None)
                 if message_id is not None and str(message_id) == str(starter_id):
                     continue
+                message_created_at = self._coerce_utc_datetime(
+                    getattr(message, "created_at", None)
+                )
+                if message_created_at is not None and (
+                    latest_seen_message_at is None
+                    or message_created_at > latest_seen_message_at
+                ):
+                    latest_seen_message_at = message_created_at
+                if last_scanned_at is not None:
+                    if (
+                        message_created_at is None
+                        or message_created_at <= last_scanned_at
+                    ):
+                        continue
                 author = getattr(message, "author", None)
                 if author is None or getattr(author, "bot", False):
                     continue
@@ -2498,9 +2527,6 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 ):
                     continue
 
-                message_created_at = self._coerce_utc_datetime(
-                    getattr(message, "created_at", None)
-                )
                 try:
                     application_id = await asyncio.to_thread(
                         upsert_discord_interest_application,
@@ -2543,6 +2569,17 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 failed_count=failed_count,
             )
 
+        if (
+            marker_payload is not None
+            and not force
+            and scanned_count == 0
+            and latest_seen_message_at == last_scanned_at
+        ):
+            return GigInterestBackfillResult(
+                status="skipped",
+                reason="no_new_replies",
+            )
+
         if failed_count:
             return GigInterestBackfillResult(
                 status="failed",
@@ -2554,10 +2591,9 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
 
         try:
             await asyncio.to_thread(
-                add_engagement_event,
+                upsert_gig_thread_interest_backfill_marker,
                 settings,
                 engagement_id=engagement_id,
-                event_type=GIG_INTEREST_BACKFILL_EVENT_TYPE,
                 actor_discord_user_id=actor_discord_user_id,
                 payload={
                     "source": source,
@@ -2567,6 +2603,11 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                     "scanned_count": scanned_count,
                     "interested_count": interested_count,
                     "created_at": created_at.isoformat() if created_at else None,
+                    "last_scanned_message_created_at": (
+                        latest_seen_message_at.isoformat()
+                        if latest_seen_message_at
+                        else None
+                    ),
                 },
             )
         except Exception as exc:
