@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import five08.engagements as engagements
@@ -13,6 +14,7 @@ from five08.engagements import (
     normalize_engagement_status,
     parse_status_from_title,
     strip_status_from_title,
+    upsert_discord_interest_application,
     upsert_suggested_applications,
     upsert_discord_engagement,
 )
@@ -156,6 +158,117 @@ def test_engagement_event_exists_checks_event_marker(monkeypatch) -> None:
     query, params = executed[0]
     assert "FROM engagement_events" in query
     assert params == ("engagement-1", "gig_thread_interest_backfilled")
+
+
+def test_upsert_discord_interest_application_uses_historical_activity_timestamp(
+    monkeypatch,
+) -> None:
+    executed: list[tuple[str, tuple]] = []
+    fetches = iter([None, {"id": "application-1"}])
+    occurred_at = datetime(2026, 5, 10, 12, 30, tzinfo=timezone.utc)
+
+    class CursorStub:
+        def __enter__(self) -> "CursorStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+        def execute(self, query: str, params: tuple) -> None:
+            executed.append((query, params))
+
+        def fetchone(self) -> dict[str, str] | None:
+            return next(fetches, None)
+
+    class ConnectionStub:
+        def cursor(self, row_factory=None) -> CursorStub:  # noqa: ARG002
+            return CursorStub()
+
+        def __enter__(self) -> "ConnectionStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+    @contextmanager
+    def connection_stub():
+        yield ConnectionStub()
+
+    monkeypatch.setattr(
+        engagements,
+        "get_postgres_connection",
+        lambda _settings: connection_stub(),
+    )
+
+    application_id = upsert_discord_interest_application(
+        SharedSettings(),
+        engagement_id="engagement-1",
+        discord_user_id="discord-1",
+        discord_username="jamie",
+        message_id="message-1",
+        message_content="I'm interested",
+        activity_at=occurred_at,
+        event_created_at=occurred_at,
+    )
+
+    assert application_id == "application-1"
+    activity_query, activity_params = executed[2]
+    assert "GREATEST" in activity_query
+    assert activity_params == (occurred_at, "engagement-1")
+    event_query, event_params = executed[3]
+    assert "created_at" in event_query
+    assert event_params[-1] == occurred_at
+
+
+def test_upsert_discord_interest_application_can_skip_activity_refresh(
+    monkeypatch,
+) -> None:
+    executed: list[tuple[str, tuple]] = []
+    fetches = iter([None, {"id": "application-1"}])
+
+    class CursorStub:
+        def __enter__(self) -> "CursorStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+        def execute(self, query: str, params: tuple) -> None:
+            executed.append((query, params))
+
+        def fetchone(self) -> dict[str, str] | None:
+            return next(fetches, None)
+
+    class ConnectionStub:
+        def cursor(self, row_factory=None) -> CursorStub:  # noqa: ARG002
+            return CursorStub()
+
+        def __enter__(self) -> "ConnectionStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+    @contextmanager
+    def connection_stub():
+        yield ConnectionStub()
+
+    monkeypatch.setattr(
+        engagements,
+        "get_postgres_connection",
+        lambda _settings: connection_stub(),
+    )
+
+    application_id = upsert_discord_interest_application(
+        SharedSettings(),
+        engagement_id="engagement-1",
+        discord_user_id="discord-1",
+        discord_username="jamie",
+        refresh_activity=False,
+    )
+
+    assert application_id == "application-1"
+    assert all("UPDATE engagements" not in query for query, _ in executed)
 
 
 def test_upsert_suggested_applications_merges_existing_discord_row(

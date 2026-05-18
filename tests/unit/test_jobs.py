@@ -470,21 +470,37 @@ def test_backfill_thread_reply_interest_records_interest_and_marks(
     monkeypatch,
 ) -> None:
     now = datetime.now(timezone.utc)
+    message_at = now - timedelta(days=1)
     messages = [
         SimpleNamespace(
             id=101,
             content="I'm interested in this",
+            created_at=message_at,
             author=SimpleNamespace(id=20, bot=False, name="jamie"),
         ),
         SimpleNamespace(
             id=102,
             content="following",
+            created_at=message_at,
             author=SimpleNamespace(id=21, bot=False, name="casey"),
+        ),
+        SimpleNamespace(
+            id=104,
+            content="I can help with this one",
+            created_at=message_at,
+            author=SimpleNamespace(id=20, bot=False, name="jamie"),
         ),
         SimpleNamespace(
             id=103,
             content="I'm interested",
+            created_at=message_at,
             author=SimpleNamespace(id=22, bot=True, name="bot"),
+        ),
+        SimpleNamespace(
+            id=105,
+            content="I'm interested",
+            created_at=message_at,
+            author=SimpleNamespace(id=10, bot=False, name="poster"),
         ),
     ]
     thread = _fake_thread_with_history(created_at=now, messages=messages)
@@ -526,10 +542,14 @@ def test_backfill_thread_reply_interest_records_interest_and_marks(
     )
 
     assert result.status == "backfilled"
-    assert result.scanned_count == 2
+    assert result.scanned_count == 3
     assert result.interested_count == 1
+    assert len(applications) == 2
     assert applications[0]["discord_user_id"] == "20"
     assert applications[0]["message_id"] == "101"
+    assert applications[0]["refresh_activity"] is True
+    assert applications[0]["activity_at"] == message_at
+    assert applications[0]["event_created_at"] == message_at
     assert events == [
         (
             jobs_module.GIG_INTEREST_BACKFILL_EVENT_TYPE,
@@ -538,7 +558,7 @@ def test_backfill_thread_reply_interest_records_interest_and_marks(
                 "thread_id": "200",
                 "max_age_days": 14,
                 "force": False,
-                "scanned_count": 2,
+                "scanned_count": 3,
                 "interested_count": 1,
                 "created_at": now.isoformat(),
             },
@@ -656,3 +676,30 @@ def test_backfill_thread_reply_interest_force_rescans_already_marked_thread(
 
     assert result.status == "backfilled"
     application.assert_called_once()
+
+
+def test_sync_job_forum_channel_keeps_index_failures_separate_from_backfill_failures() -> (
+    None
+):
+    async def archived_threads(**_kwargs: object):
+        if False:
+            yield None
+
+    cog = JobsCog(Mock())
+    cog._persist_thread_engagement_index = AsyncMock(return_value=True)
+    cog._backfill_thread_reply_interest = AsyncMock(
+        return_value=jobs_module.GigInterestBackfillResult(
+            status="failed",
+            reason="marker_write_failed",
+        )
+    )
+    channel = SimpleNamespace(
+        id=400,
+        threads=[SimpleNamespace(id=200)],
+        archived_threads=archived_threads,
+    )
+
+    indexed, failed = asyncio.run(cog._sync_job_forum_channel(channel, source="test"))
+
+    assert indexed == 1
+    assert failed == 0

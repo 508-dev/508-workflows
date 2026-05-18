@@ -587,12 +587,17 @@ def upsert_discord_interest_application(
     source: str = EngagementApplicationSource.DIRECT_INTEREST.value,
     message_id: str | None = None,
     message_content: str | None = None,
+    refresh_activity: bool = True,
+    activity_at: datetime | None = None,
+    event_created_at: datetime | None = None,
 ) -> str | None:
     """Record a Discord user as interested in a gig."""
     normalized_user_id = str(discord_user_id or "").strip()
     if not normalized_user_id:
         return None
 
+    activity_timestamp = _as_utc(activity_at)
+    event_timestamp = _as_utc(event_created_at)
     application_id = str(uuid4())
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
@@ -698,14 +703,28 @@ def upsert_discord_interest_application(
                 row = cursor.fetchone()
                 if row is None:
                     return None
-            cursor.execute(
-                """
-                UPDATE engagements
-                SET last_activity_at = NOW()
-                WHERE id = %s
-                """,
-                (engagement_id,),
-            )
+            if refresh_activity:
+                if activity_timestamp is None:
+                    cursor.execute(
+                        """
+                        UPDATE engagements
+                        SET last_activity_at = NOW()
+                        WHERE id = %s
+                        """,
+                        (engagement_id,),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        UPDATE engagements
+                        SET last_activity_at = GREATEST(
+                            COALESCE(last_activity_at, '-infinity'::timestamptz),
+                            %s
+                        )
+                        WHERE id = %s
+                        """,
+                        (activity_timestamp, engagement_id),
+                    )
             cursor.execute(
                 """
                 INSERT INTO engagement_events (
@@ -713,8 +732,16 @@ def upsert_discord_interest_application(
                     engagement_id,
                     event_type,
                     actor_discord_user_id,
-                    payload
-                ) VALUES (%s, %s, 'direct_interest_detected', %s, %s)
+                    payload,
+                    created_at
+                ) VALUES (
+                    %s,
+                    %s,
+                    'direct_interest_detected',
+                    %s,
+                    %s,
+                    COALESCE(%s, NOW())
+                )
                 """,
                 (
                     str(uuid4()),
@@ -727,6 +754,7 @@ def upsert_discord_interest_application(
                             "message_id": message_id,
                         }
                     ),
+                    event_timestamp,
                 ),
             )
     return str(row["id"])

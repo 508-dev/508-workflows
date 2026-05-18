@@ -346,6 +346,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         self._startup_sync_lock = asyncio.Lock()
         self._recruiting_reminder_task: asyncio.Task[None] | None = None
         self._forum_backfill_tasks: set[asyncio.Task[None]] = set()
+        self._gig_interest_backfill_locks: dict[int, asyncio.Lock] = {}
 
     async def cog_unload(self) -> None:
         """Stop background reminder checks when the cog unloads."""
@@ -545,6 +546,14 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         """Allow retry when a thread was marked but processing could not start."""
         async with self._auto_matched_thread_lock:
             self._auto_matched_thread_ids.pop(thread_id, None)
+
+    def _gig_interest_backfill_lock(self, thread_id: int) -> asyncio.Lock:
+        """Return the in-process lock for one gig interest backfill thread."""
+        lock = self._gig_interest_backfill_locks.get(thread_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._gig_interest_backfill_locks[thread_id] = lock
+        return lock
 
     @staticmethod
     async def _read_thread_post(thread: discord.Thread) -> ThreadPost | None:
@@ -2414,6 +2423,31 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 reason="engagement_upsert_failed",
             )
 
+        async with self._gig_interest_backfill_lock(thread.id):
+            return await self._backfill_thread_reply_interest_locked(
+                thread,
+                post=post,
+                engagement_id=engagement_id,
+                source=source,
+                max_age_days=max_age_days,
+                force=force,
+                actor_discord_user_id=actor_discord_user_id,
+                created_at=created_at,
+            )
+
+    async def _backfill_thread_reply_interest_locked(
+        self,
+        thread: discord.Thread,
+        *,
+        post: ThreadPost,
+        engagement_id: str,
+        source: str,
+        max_age_days: int | None,
+        force: bool,
+        actor_discord_user_id: str | None,
+        created_at: datetime | None,
+    ) -> GigInterestBackfillResult:
+        """Run a serialized reply-interest backfill after the engagement exists."""
         try:
             already_backfilled = await asyncio.to_thread(
                 engagement_event_exists,
@@ -2441,6 +2475,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         starter_id = getattr(post.starter, "id", None) or thread.id
         scanned_count = 0
         interested_count = 0
+        interested_application_ids: set[str] = set()
         failed_count = 0
 
         try:
@@ -2463,6 +2498,9 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 ):
                     continue
 
+                message_created_at = self._coerce_utc_datetime(
+                    getattr(message, "created_at", None)
+                )
                 try:
                     application_id = await asyncio.to_thread(
                         upsert_discord_interest_application,
@@ -2473,8 +2511,15 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                         source=EngagementApplicationSource.DIRECT_INTEREST.value,
                         message_id=str(message_id) if message_id is not None else None,
                         message_content=getattr(message, "content", None),
+                        refresh_activity=message_created_at is not None,
+                        activity_at=message_created_at,
+                        event_created_at=message_created_at,
                     )
-                    if application_id is not None:
+                    if (
+                        application_id is not None
+                        and application_id not in interested_application_ids
+                    ):
+                        interested_application_ids.add(application_id)
                         interested_count += 1
                 except Exception as exc:
                     failed_count += 1
@@ -2552,9 +2597,10 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         seen_thread_ids: set[int] = set()
         indexed = 0
         failed = 0
+        backfill_failed = 0
 
         async def handle_thread(thread: discord.Thread) -> None:
-            nonlocal indexed, failed
+            nonlocal indexed, failed, backfill_failed
             if thread.id in seen_thread_ids:
                 return
             seen_thread_ids.add(thread.id)
@@ -2566,7 +2612,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                     max_age_days=GIG_INTEREST_BACKFILL_MAX_AGE_DAYS,
                 )
                 if backfill.status == "failed":
-                    failed += 1
+                    backfill_failed += 1
             else:
                 failed += 1
 
@@ -2583,6 +2629,14 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 "Failed reading archived job forum threads channel=%s: %s",
                 channel.id,
                 exc,
+            )
+
+        if backfill_failed:
+            logger.warning(
+                "Gig interest backfill failed for %d indexed thread(s) channel=%s source=%s",
+                backfill_failed,
+                channel.id,
+                source,
             )
 
         return indexed, failed
