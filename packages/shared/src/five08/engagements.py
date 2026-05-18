@@ -16,6 +16,8 @@ from five08.job_channels import normalize_job_posting_type
 from five08.queue import get_postgres_connection
 from five08.settings import SharedSettings
 
+_GIG_THREAD_INTEREST_BACKFILLED_EVENT_TYPE = "gig_thread_interest_backfilled"
+
 
 class EngagementStatus(StrEnum):
     """Supported visible gig status states."""
@@ -352,6 +354,91 @@ def add_engagement_event(
             )
 
 
+def engagement_event_exists(
+    settings: SharedSettings,
+    *,
+    engagement_id: str,
+    event_type: str,
+) -> bool:
+    """Return whether an engagement already has a given event marker."""
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                SELECT 1
+                FROM engagement_events
+                WHERE engagement_id = %s
+                  AND event_type = %s
+                LIMIT 1
+                """,
+                (engagement_id, event_type),
+            )
+            return cursor.fetchone() is not None
+
+
+def get_gig_thread_interest_backfill_marker(
+    settings: SharedSettings,
+    *,
+    engagement_id: str,
+) -> dict[str, Any] | None:
+    """Return the current gig interest backfill marker payload, if present."""
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                SELECT payload
+                FROM engagement_events
+                WHERE engagement_id = %s
+                  AND event_type = %s
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (engagement_id, _GIG_THREAD_INTEREST_BACKFILLED_EVENT_TYPE),
+            )
+            row = cursor.fetchone()
+    if row is None:
+        return None
+    payload = row.get("payload")
+    return payload if isinstance(payload, dict) else {}
+
+
+def upsert_gig_thread_interest_backfill_marker(
+    settings: SharedSettings,
+    *,
+    engagement_id: str,
+    actor_discord_user_id: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    """Insert or update the single watermarked gig interest backfill marker."""
+    marker_event_type = _GIG_THREAD_INTEREST_BACKFILLED_EVENT_TYPE
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO engagement_events (
+                    id,
+                    engagement_id,
+                    event_type,
+                    actor_discord_user_id,
+                    payload
+                ) VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (engagement_id, event_type)
+                WHERE event_type = 'gig_thread_interest_backfilled'
+                DO UPDATE SET
+                    actor_discord_user_id = EXCLUDED.actor_discord_user_id,
+                    payload = EXCLUDED.payload,
+                    created_at = NOW()
+                """,
+                (
+                    str(uuid4()),
+                    engagement_id,
+                    marker_event_type,
+                    actor_discord_user_id,
+                    Jsonb(payload or {}),
+                ),
+            )
+
+
 def upsert_suggested_applications(
     settings: SharedSettings,
     *,
@@ -565,12 +652,17 @@ def upsert_discord_interest_application(
     source: str = EngagementApplicationSource.DIRECT_INTEREST.value,
     message_id: str | None = None,
     message_content: str | None = None,
+    refresh_activity: bool = True,
+    activity_at: datetime | None = None,
+    event_created_at: datetime | None = None,
 ) -> str | None:
     """Record a Discord user as interested in a gig."""
     normalized_user_id = str(discord_user_id or "").strip()
     if not normalized_user_id:
         return None
 
+    activity_timestamp = _as_utc(activity_at)
+    event_timestamp = _as_utc(event_created_at)
     application_id = str(uuid4())
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
@@ -676,14 +768,28 @@ def upsert_discord_interest_application(
                 row = cursor.fetchone()
                 if row is None:
                     return None
-            cursor.execute(
-                """
-                UPDATE engagements
-                SET last_activity_at = NOW()
-                WHERE id = %s
-                """,
-                (engagement_id,),
-            )
+            if refresh_activity:
+                if activity_timestamp is None:
+                    cursor.execute(
+                        """
+                        UPDATE engagements
+                        SET last_activity_at = NOW()
+                        WHERE id = %s
+                        """,
+                        (engagement_id,),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        UPDATE engagements
+                        SET last_activity_at = GREATEST(
+                            COALESCE(last_activity_at, '-infinity'::timestamptz),
+                            %s
+                        )
+                        WHERE id = %s
+                        """,
+                        (activity_timestamp, engagement_id),
+                    )
             cursor.execute(
                 """
                 INSERT INTO engagement_events (
@@ -691,8 +797,16 @@ def upsert_discord_interest_application(
                     engagement_id,
                     event_type,
                     actor_discord_user_id,
-                    payload
-                ) VALUES (%s, %s, 'direct_interest_detected', %s, %s)
+                    payload,
+                    created_at
+                ) VALUES (
+                    %s,
+                    %s,
+                    'direct_interest_detected',
+                    %s,
+                    %s,
+                    COALESCE(%s, NOW())
+                )
                 """,
                 (
                     str(uuid4()),
@@ -705,6 +819,7 @@ def upsert_discord_interest_application(
                             "message_id": message_id,
                         }
                     ),
+                    event_timestamp,
                 ),
             )
     return str(row["id"])

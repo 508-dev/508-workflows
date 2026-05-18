@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, Mock
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -434,3 +435,365 @@ def test_on_thread_create_indexes_public_registered_forum_post(monkeypatch) -> N
         source="thread_create",
     )
     cog._run_auto_match_candidates_for_thread.assert_not_awaited()
+
+
+def _fake_thread_with_history(
+    *,
+    created_at: datetime,
+    messages: list[SimpleNamespace],
+) -> SimpleNamespace:
+    history_calls: list[dict[str, object]] = []
+    starter = SimpleNamespace(
+        id=100,
+        content="Need help with a build",
+        created_at=created_at,
+        author=SimpleNamespace(id=10, bot=False, name="poster"),
+    )
+
+    async def history(**_kwargs: object):
+        history_calls.append(_kwargs)
+        for message in messages:
+            yield message
+
+    return SimpleNamespace(
+        id=200,
+        name="[RECRUITING] Need help",
+        guild=SimpleNamespace(id=300),
+        parent=SimpleNamespace(id=400, name="gigs"),
+        owner_id=10,
+        starter_message=starter,
+        applied_tags=[],
+        created_at=created_at,
+        history=history,
+        history_calls=history_calls,
+    )
+
+
+def test_backfill_thread_reply_interest_records_interest_and_marks(
+    monkeypatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    message_at = now - timedelta(days=1)
+    messages = [
+        SimpleNamespace(
+            id=101,
+            content="I'm interested in this",
+            created_at=message_at,
+            author=SimpleNamespace(id=20, bot=False, name="jamie"),
+        ),
+        SimpleNamespace(
+            id=102,
+            content="following",
+            created_at=message_at,
+            author=SimpleNamespace(id=21, bot=False, name="casey"),
+        ),
+        SimpleNamespace(
+            id=104,
+            content="I can help with this one",
+            created_at=message_at,
+            author=SimpleNamespace(id=20, bot=False, name="jamie"),
+        ),
+        SimpleNamespace(
+            id=103,
+            content="I'm interested",
+            created_at=message_at,
+            author=SimpleNamespace(id=22, bot=True, name="bot"),
+        ),
+        SimpleNamespace(
+            id=105,
+            content="I'm interested",
+            created_at=message_at,
+            author=SimpleNamespace(id=10, bot=False, name="poster"),
+        ),
+    ]
+    thread = _fake_thread_with_history(created_at=now, messages=messages)
+    markers: list[dict[str, object] | None] = []
+    applications: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        jobs_module,
+        "upsert_discord_engagement",
+        lambda *_args, **_kwargs: "engagement-1",
+    )
+    monkeypatch.setattr(
+        jobs_module,
+        "get_gig_thread_interest_backfill_marker",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def upsert_application(*_args: object, **kwargs: object) -> str:
+        applications.append(kwargs)
+        return "application-1"
+
+    monkeypatch.setattr(
+        jobs_module,
+        "upsert_discord_interest_application",
+        upsert_application,
+    )
+
+    def upsert_marker(*_args: object, **kwargs: object) -> None:
+        markers.append(kwargs.get("payload"))
+
+    monkeypatch.setattr(
+        jobs_module, "upsert_gig_thread_interest_backfill_marker", upsert_marker
+    )
+
+    result = asyncio.run(
+        JobsCog(Mock())._backfill_thread_reply_interest(
+            thread,
+            source="test",
+            max_age_days=14,
+        )
+    )
+
+    assert result.status == "backfilled"
+    assert result.scanned_count == 3
+    assert result.interested_count == 1
+    assert len(applications) == 2
+    assert applications[0]["discord_user_id"] == "20"
+    assert applications[0]["message_id"] == "101"
+    assert applications[0]["refresh_activity"] is True
+    assert applications[0]["activity_at"] == message_at
+    assert applications[0]["event_created_at"] == message_at
+    assert markers == [
+        {
+            "source": "test",
+            "thread_id": "200",
+            "max_age_days": 14,
+            "force": False,
+            "scanned_count": 3,
+            "interested_count": 1,
+            "created_at": now.isoformat(),
+            "last_scanned_message_created_at": message_at.isoformat(),
+        }
+    ]
+
+
+def test_backfill_thread_reply_interest_skips_old_automatic_thread(
+    monkeypatch,
+) -> None:
+    old = datetime.now(timezone.utc) - timedelta(days=15)
+    thread = _fake_thread_with_history(created_at=old, messages=[])
+    upsert_engagement = Mock(return_value="engagement-1")
+    monkeypatch.setattr(jobs_module, "upsert_discord_engagement", upsert_engagement)
+
+    result = asyncio.run(
+        JobsCog(Mock())._backfill_thread_reply_interest(
+            thread,
+            source="test",
+            max_age_days=14,
+        )
+    )
+
+    assert result.status == "skipped"
+    assert result.reason == "older_than_backfill_window"
+    upsert_engagement.assert_not_called()
+
+
+def test_backfill_thread_reply_interest_skips_when_no_new_marked_replies(
+    monkeypatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    message_at = now - timedelta(minutes=5)
+    thread = _fake_thread_with_history(
+        created_at=now,
+        messages=[
+            SimpleNamespace(
+                id=101,
+                content="I'm interested",
+                created_at=message_at,
+                author=SimpleNamespace(id=20, bot=False, name="jamie"),
+            )
+        ],
+    )
+    application = Mock(return_value="application-1")
+    monkeypatch.setattr(
+        jobs_module,
+        "upsert_discord_engagement",
+        lambda *_args, **_kwargs: "engagement-1",
+    )
+    monkeypatch.setattr(
+        jobs_module,
+        "get_gig_thread_interest_backfill_marker",
+        lambda *_args, **_kwargs: {"last_scanned_message_created_at": now.isoformat()},
+    )
+    monkeypatch.setattr(
+        jobs_module,
+        "upsert_discord_interest_application",
+        application,
+    )
+
+    result = asyncio.run(
+        JobsCog(Mock())._backfill_thread_reply_interest(
+            thread,
+            source="test",
+            max_age_days=14,
+        )
+    )
+
+    assert result.status == "skipped"
+    assert result.reason == "no_new_replies"
+    application.assert_not_called()
+
+
+def test_backfill_thread_reply_interest_scans_replies_after_marker(
+    monkeypatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    marker_at = now - timedelta(minutes=5)
+    message_at = now - timedelta(minutes=1)
+    thread = _fake_thread_with_history(
+        created_at=now,
+        messages=[
+            SimpleNamespace(
+                id=101,
+                content="old interest",
+                created_at=marker_at - timedelta(seconds=1),
+                author=SimpleNamespace(id=20, bot=False, name="jamie"),
+            ),
+            SimpleNamespace(
+                id=102,
+                content="I'm interested",
+                created_at=message_at,
+                author=SimpleNamespace(id=21, bot=False, name="casey"),
+            ),
+        ],
+    )
+    application = Mock(return_value="application-2")
+    marker = Mock()
+    monkeypatch.setattr(
+        jobs_module,
+        "upsert_discord_engagement",
+        lambda *_args, **_kwargs: "engagement-1",
+    )
+    monkeypatch.setattr(
+        jobs_module,
+        "get_gig_thread_interest_backfill_marker",
+        lambda *_args, **_kwargs: {
+            "last_scanned_message_created_at": marker_at.isoformat()
+        },
+    )
+    monkeypatch.setattr(
+        jobs_module,
+        "upsert_discord_interest_application",
+        application,
+    )
+    monkeypatch.setattr(
+        jobs_module, "upsert_gig_thread_interest_backfill_marker", marker
+    )
+
+    result = asyncio.run(
+        JobsCog(Mock())._backfill_thread_reply_interest(
+            thread,
+            source="test",
+            max_age_days=14,
+        )
+    )
+
+    assert result.status == "backfilled"
+    assert result.scanned_count == 1
+    assert thread.history_calls == [
+        {"limit": None, "oldest_first": True, "after": marker_at}
+    ]
+    application.assert_called_once()
+    assert application.call_args.kwargs["discord_user_id"] == "21"
+    assert marker.call_args.kwargs["payload"]["last_scanned_message_created_at"] == (
+        message_at.isoformat()
+    )
+
+
+def test_backfill_thread_reply_interest_force_rescans_already_marked_thread(
+    monkeypatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    thread = _fake_thread_with_history(
+        created_at=now,
+        messages=[
+            SimpleNamespace(
+                id=101,
+                content="I'm interested",
+                created_at=now,
+                author=SimpleNamespace(id=20, bot=False, name="jamie"),
+            )
+        ],
+    )
+    application = Mock(return_value="application-1")
+    monkeypatch.setattr(
+        jobs_module,
+        "upsert_discord_engagement",
+        lambda *_args, **_kwargs: "engagement-1",
+    )
+    monkeypatch.setattr(
+        jobs_module,
+        "get_gig_thread_interest_backfill_marker",
+        lambda *_args, **_kwargs: {"last_scanned_message_created_at": now.isoformat()},
+    )
+    monkeypatch.setattr(
+        jobs_module,
+        "upsert_discord_interest_application",
+        application,
+    )
+    monkeypatch.setattr(
+        jobs_module,
+        "upsert_gig_thread_interest_backfill_marker",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = asyncio.run(
+        JobsCog(Mock())._backfill_thread_reply_interest(
+            thread,
+            source="manual",
+            max_age_days=None,
+            force=True,
+        )
+    )
+
+    assert result.status == "backfilled"
+    application.assert_called_once()
+
+
+def test_sync_job_forum_channel_keeps_index_failures_separate_from_backfill_failures() -> (
+    None
+):
+    async def archived_threads(**_kwargs: object):
+        if False:
+            yield None
+
+    cog = JobsCog(Mock())
+    cog._persist_thread_engagement_index = AsyncMock(return_value=True)
+    cog._backfill_thread_reply_interest = AsyncMock(
+        return_value=jobs_module.GigInterestBackfillResult(
+            status="failed",
+            reason="marker_write_failed",
+        )
+    )
+    channel = SimpleNamespace(
+        id=400,
+        threads=[SimpleNamespace(id=200)],
+        archived_threads=archived_threads,
+    )
+
+    indexed, failed = asyncio.run(cog._sync_job_forum_channel(channel, source="test"))
+
+    assert indexed == 1
+    assert failed == 0
+
+
+def test_sync_job_forum_channel_isolates_backfill_crashes() -> None:
+    async def archived_threads(**_kwargs: object):
+        if False:
+            yield None
+
+    cog = JobsCog(Mock())
+    cog._persist_thread_engagement_index = AsyncMock(return_value=True)
+    cog._backfill_thread_reply_interest = AsyncMock(side_effect=RuntimeError("boom"))
+    channel = SimpleNamespace(
+        id=400,
+        threads=[SimpleNamespace(id=200)],
+        archived_threads=archived_threads,
+    )
+
+    indexed, failed = asyncio.run(cog._sync_job_forum_channel(channel, source="test"))
+
+    assert indexed == 1
+    assert failed == 0

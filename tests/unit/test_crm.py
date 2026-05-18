@@ -4,7 +4,7 @@ Unit tests for CRM cog functionality.
 
 import ipaddress
 import json
-from unittest.mock import AsyncMock, Mock, call as mock_call, patch
+from unittest.mock import ANY, AsyncMock, Mock, call as mock_call, patch
 
 import discord
 import pytest
@@ -4015,9 +4015,13 @@ class TestCRMCog:
         crm_cog.espo_api.request.side_effect = [contact_response, update_response]
 
         # Call the command
-        await crm_cog.link_discord_user.callback(
-            crm_cog, mock_interaction, mock_discord_user, "john"
-        )
+        with patch(
+            "five08.discord_bot.cogs.crm.upsert_person_discord_link",
+            return_value="person-1",
+        ) as mock_cache_link:
+            await crm_cog.link_discord_user.callback(
+                crm_cog, mock_interaction, mock_discord_user, "john"
+            )
 
         # Verify API calls
         assert crm_cog.espo_api.request.call_count == 2
@@ -4036,6 +4040,15 @@ class TestCRMCog:
         assert update_call[0][2]["cDiscordUsername"] == "johndoe#1234"
         assert "cDiscordUserID" in update_call[0][2]
         assert update_call[0][2]["cDiscordUserID"] == "123456789"
+        mock_cache_link.assert_called_once_with(
+            ANY,
+            crm_contact_id="contact123",
+            discord_user_id="123456789",
+            discord_username="johndoe#1234",
+            name="John Doe",
+            email="john@example.com",
+            email_508="john@508.dev",
+        )
 
         # Verify success response
         mock_interaction.followup.send.assert_called_once()
@@ -4067,11 +4080,24 @@ class TestCRMCog:
             ]
         }
 
-        await crm_cog.link_discord_user.callback(
-            crm_cog, mock_interaction, mock_discord_user, "john"
-        )
+        with patch(
+            "five08.discord_bot.cogs.crm.upsert_person_discord_link",
+            return_value="person-1",
+        ) as mock_cache_link:
+            await crm_cog.link_discord_user.callback(
+                crm_cog, mock_interaction, mock_discord_user, "john"
+            )
 
         assert crm_cog.espo_api.request.call_count == 1
+        mock_cache_link.assert_called_once_with(
+            ANY,
+            crm_contact_id="contact123",
+            discord_user_id="123456789",
+            discord_username="johndoe#1234",
+            name="John Doe",
+            email="john@example.com",
+            email_508=None,
+        )
         mock_interaction.followup.send.assert_called_once()
         message = mock_interaction.followup.send.call_args[0][0]
         assert "Nothing changed" in message

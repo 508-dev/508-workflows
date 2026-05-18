@@ -511,7 +511,14 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             )
             page.get_by_role("heading", name="People").wait_for()
             page.get_by_text("Casey Candidate").wait_for()
-            expect(page.get_by_role("link", name="Casey Candidate")).to_have_attribute(
+            expect(
+                page.get_by_role("link", name="Casey Candidate", exact=True)
+            ).to_have_attribute(
+                "href", f"{crm_base_url}/#Contact/view/contact-candidate-1"
+            )
+            expect(
+                page.get_by_role("link", name="Open Casey Candidate CRM profile")
+            ).to_have_attribute(
                 "href",
                 f"{crm_base_url}/#Contact/view/contact-candidate-1",
             )

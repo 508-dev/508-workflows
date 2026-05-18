@@ -244,6 +244,13 @@ def upgrade() -> None:
         "engagement_events",
         ["engagement_id", "created_at"],
     )
+    op.create_index(
+        "uq_engagement_events_gig_interest_backfill_marker",
+        "engagement_events",
+        ["engagement_id", "event_type"],
+        unique=True,
+        postgresql_where=sa.text("event_type = 'gig_thread_interest_backfilled'"),
+    )
 
     op.execute(
         """
@@ -294,6 +301,7 @@ def downgrade() -> None:
     op.execute("DROP TRIGGER IF EXISTS engagements_set_updated_at_tr ON engagements")
     op.execute("DROP FUNCTION IF EXISTS engagements_set_updated_at_fn()")
     op.execute("DROP INDEX IF EXISTS idx_engagement_events_engagement_id")
+    op.execute("DROP INDEX IF EXISTS uq_engagement_events_gig_interest_backfill_marker")
     op.execute("DROP TABLE IF EXISTS engagement_events")
     op.execute(
         """

@@ -260,6 +260,76 @@ def update_person_discord_roles(
     return row is not None
 
 
+def upsert_person_discord_link(
+    settings: SharedSettings,
+    *,
+    crm_contact_id: str,
+    discord_user_id: str,
+    discord_username: str | None,
+    name: str | None = None,
+    email: str | None = None,
+    email_508: str | None = None,
+) -> str | None:
+    """Update the local people cache after linking a CRM contact to Discord."""
+    normalized_contact_id = _normalize_text(crm_contact_id)
+    normalized_user_id = _normalize_text(discord_user_id)
+    if normalized_contact_id is None or normalized_user_id is None:
+        return None
+
+    person_id = str(uuid4())
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                UPDATE people
+                SET discord_user_id = NULL,
+                    discord_username = NULL
+                WHERE discord_user_id = %s
+                  AND crm_contact_id <> %s
+                """,
+                (normalized_user_id, normalized_contact_id),
+            )
+            cursor.execute(
+                """
+                INSERT INTO people (
+                    id,
+                    crm_contact_id,
+                    name,
+                    email,
+                    email_508,
+                    discord_user_id,
+                    discord_username,
+                    discord_roles,
+                    sync_status
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'active')
+                ON CONFLICT (crm_contact_id) DO UPDATE
+                SET
+                    name = COALESCE(EXCLUDED.name, people.name),
+                    email = COALESCE(EXCLUDED.email, people.email),
+                    email_508 = COALESCE(EXCLUDED.email_508, people.email_508),
+                    discord_user_id = EXCLUDED.discord_user_id,
+                    discord_username = EXCLUDED.discord_username,
+                    sync_status = 'active'
+                RETURNING id::text;
+                """,
+                (
+                    person_id,
+                    normalized_contact_id,
+                    _normalize_text(name),
+                    _normalize_email(email),
+                    _normalize_email(email_508),
+                    normalized_user_id,
+                    _normalize_text(discord_username),
+                    Jsonb([]),
+                ),
+            )
+            row = cursor.fetchone()
+
+    if row is None:
+        return None
+    return str(row["id"])
+
+
 def upsert_discord_member(
     settings: SharedSettings,
     *,
