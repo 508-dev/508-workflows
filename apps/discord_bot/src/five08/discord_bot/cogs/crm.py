@@ -64,6 +64,7 @@ from five08.job_match import (
 )
 from five08.audit import (
     get_discord_user_id_for_contact,
+    upsert_person_discord_link,
 )
 
 logger = logging.getLogger(__name__)
@@ -6718,6 +6719,39 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             "cDiscordUserID": str(user.id),
         }
 
+    def _sync_local_people_discord_link(
+        self,
+        *,
+        contact: dict[str, Any],
+        user: discord.Member,
+        discord_display: str,
+    ) -> bool:
+        """Best-effort local people-cache update after a CRM Discord link."""
+        contact_id = str(contact.get("id") or "").strip()
+        if not contact_id:
+            return False
+        try:
+            return (
+                upsert_person_discord_link(
+                    settings,
+                    crm_contact_id=contact_id,
+                    discord_user_id=str(user.id),
+                    discord_username=discord_display,
+                    name=str(contact.get("name") or "").strip() or None,
+                    email=str(contact.get("emailAddress") or "").strip() or None,
+                    email_508=str(contact.get("c508Email") or "").strip() or None,
+                )
+                is not None
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed updating local people Discord link cache contact_id=%s user_id=%s: %s",
+                contact_id,
+                user.id,
+                exc,
+            )
+            return False
+
     def _contact_discord_user_id(self, contact: dict[str, Any]) -> str | None:
         """Return the stored Discord user ID when present.
 
@@ -7001,6 +7035,12 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
 
             if update_response:
+                self._sync_local_people_discord_link(
+                    contact=contact,
+                    user=user,
+                    discord_display=discord_display,
+                )
+
                 # Create success embed
                 embed = discord.Embed(
                     title="✅ Discord User Linked",
