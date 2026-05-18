@@ -12,6 +12,7 @@ import socket
 from collections.abc import Iterable
 from collections import OrderedDict
 from dataclasses import dataclass, is_dataclass, replace
+from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Literal, cast
 from urllib.parse import urljoin, urlsplit
 
@@ -37,6 +38,7 @@ from five08.engagements import (
     DiscordEngagementInput,
     EngagementApplicationSource,
     add_engagement_event,
+    engagement_event_exists,
     list_due_recruiting_reminders,
     mark_recruiting_reminder_failed,
     mark_recruiting_reminder_sent,
@@ -144,6 +146,8 @@ MATCH_CANDIDATES_PRIVATE_TRUTHY = frozenset({"true", "1", "yes", "y", "on"})
 # Exclude known-bad resume artifact from auto-match rendering.
 AUTO_MATCH_EXCLUDED_RESUME_NAMES = frozenset({"Vladyslav_Stryzhak.pdf"})
 GIG_FORUM_BACKFILL_ARCHIVED_LIMIT = 200
+GIG_INTEREST_BACKFILL_MAX_AGE_DAYS = 14
+GIG_INTEREST_BACKFILL_EVENT_TYPE = "gig_thread_interest_backfilled"
 GIG_RECRUITING_REMINDER_CHECK_SECONDS = 6 * 60 * 60
 GIG_INTEREST_PATTERNS = (
     re.compile(r"\b(?:i'?m|i am)\s+interested\b", re.IGNORECASE),
@@ -301,6 +305,17 @@ class CandidateSearchOutcome:
     candidates: list[Any]
     effective_requirements: JobRequirements
     search_note: str | None = None
+
+
+@dataclass(frozen=True)
+class GigInterestBackfillResult:
+    """Summary of one gig thread reply-interest backfill attempt."""
+
+    status: Literal["backfilled", "skipped", "failed"]
+    reason: str | None = None
+    scanned_count: int = 0
+    interested_count: int = 0
+    failed_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -2255,6 +2270,44 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 exc,
             )
 
+    async def _upsert_thread_engagement(
+        self,
+        thread: discord.Thread,
+        post: ThreadPost,
+        *,
+        refresh_activity: bool,
+    ) -> str:
+        """Create/update the dashboard gig row for one Discord forum thread."""
+        thread_name = str(getattr(thread, "name", "") or "")
+        starter_id = getattr(post.starter, "id", None) or thread.id
+        body = post.starter.content or None
+        title = strip_status_from_title(thread_name) or thread_name
+        if not title:
+            title = f"Discord gig {thread.id}"
+        return await asyncio.to_thread(
+            upsert_discord_engagement,
+            settings,
+            DiscordEngagementInput(
+                guild_id=str(thread.guild.id) if thread.guild else None,
+                channel_id=str(thread.parent.id) if thread.parent else None,
+                channel_name=getattr(thread.parent, "name", None),
+                posting_type=self._job_posting_type_for_thread(thread).value,
+                message_id=str(starter_id),
+                thread_id=str(thread.id),
+                posted_by_discord_user_id=self._thread_poster_id(
+                    thread,
+                    post.starter,
+                ),
+                title=title,
+                body_raw=body,
+                body_normalized=body,
+                posted_at=getattr(post.starter, "created_at", None),
+                status=parse_status_from_title(thread_name),
+                preserve_existing_status=True,
+                refresh_activity=refresh_activity,
+            ),
+        )
+
     async def _persist_thread_engagement_index(
         self,
         thread: discord.Thread,
@@ -2267,34 +2320,10 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             if post is None:
                 return False
 
-            thread_name = str(getattr(thread, "name", "") or "")
-            starter_id = getattr(post.starter, "id", None) or thread.id
-            body = post.starter.content or None
-            title = strip_status_from_title(thread_name) or thread_name
-            if not title:
-                title = f"Discord gig {thread.id}"
-            engagement_id = await asyncio.to_thread(
-                upsert_discord_engagement,
-                settings,
-                DiscordEngagementInput(
-                    guild_id=str(thread.guild.id) if thread.guild else None,
-                    channel_id=str(thread.parent.id) if thread.parent else None,
-                    channel_name=getattr(thread.parent, "name", None),
-                    posting_type=self._job_posting_type_for_thread(thread).value,
-                    message_id=str(starter_id),
-                    thread_id=str(thread.id),
-                    posted_by_discord_user_id=self._thread_poster_id(
-                        thread,
-                        post.starter,
-                    ),
-                    title=title,
-                    body_raw=body,
-                    body_normalized=body,
-                    posted_at=getattr(post.starter, "created_at", None),
-                    status=parse_status_from_title(thread_name),
-                    preserve_existing_status=True,
-                    refresh_activity=False,
-                ),
+            engagement_id = await self._upsert_thread_engagement(
+                thread,
+                post,
+                refresh_activity=False,
             )
             if source == "thread_create":
                 await asyncio.to_thread(
@@ -2315,6 +2344,204 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             )
             return False
 
+    @staticmethod
+    def _coerce_utc_datetime(value: object) -> datetime | None:
+        if not isinstance(value, datetime):
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    @classmethod
+    def _thread_created_at(
+        cls,
+        thread: discord.Thread,
+        post: ThreadPost,
+    ) -> datetime | None:
+        """Return the best available thread creation time for backfill gating."""
+        return cls._coerce_utc_datetime(
+            getattr(thread, "created_at", None)
+        ) or cls._coerce_utc_datetime(
+            getattr(post.starter, "created_at", None),
+        )
+
+    async def _backfill_thread_reply_interest(
+        self,
+        thread: discord.Thread,
+        *,
+        source: str,
+        max_age_days: int | None,
+        force: bool = False,
+        actor_discord_user_id: str | None = None,
+    ) -> GigInterestBackfillResult:
+        """Scan a gig thread's existing replies for direct interest signals."""
+        post = await self._read_thread_post(thread)
+        if post is None:
+            return GigInterestBackfillResult(
+                status="failed",
+                reason="starter_message_unavailable",
+            )
+
+        created_at = self._thread_created_at(thread, post)
+        if max_age_days is not None:
+            if created_at is None:
+                return GigInterestBackfillResult(
+                    status="skipped",
+                    reason="created_at_unavailable",
+                )
+            cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+            if created_at < cutoff:
+                return GigInterestBackfillResult(
+                    status="skipped",
+                    reason="older_than_backfill_window",
+                )
+
+        try:
+            engagement_id = await self._upsert_thread_engagement(
+                thread,
+                post,
+                refresh_activity=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed preparing gig interest backfill thread_id=%s source=%s: %s",
+                getattr(thread, "id", "unknown"),
+                source,
+                exc,
+            )
+            return GigInterestBackfillResult(
+                status="failed",
+                reason="engagement_upsert_failed",
+            )
+
+        try:
+            already_backfilled = await asyncio.to_thread(
+                engagement_event_exists,
+                settings,
+                engagement_id=engagement_id,
+                event_type=GIG_INTEREST_BACKFILL_EVENT_TYPE,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed checking gig interest backfill marker thread_id=%s: %s",
+                getattr(thread, "id", "unknown"),
+                exc,
+            )
+            return GigInterestBackfillResult(
+                status="failed",
+                reason="marker_lookup_failed",
+            )
+        if already_backfilled and not force:
+            return GigInterestBackfillResult(
+                status="skipped",
+                reason="already_backfilled",
+            )
+
+        poster_id = self._thread_poster_id(thread, post.starter)
+        starter_id = getattr(post.starter, "id", None) or thread.id
+        scanned_count = 0
+        interested_count = 0
+        failed_count = 0
+
+        try:
+            async for message in thread.history(limit=None, oldest_first=True):
+                message_id = getattr(message, "id", None)
+                if message_id is not None and str(message_id) == str(starter_id):
+                    continue
+                author = getattr(message, "author", None)
+                if author is None or getattr(author, "bot", False):
+                    continue
+                author_id = getattr(author, "id", None)
+                if author_id is None:
+                    continue
+                if poster_id and str(author_id) == poster_id:
+                    continue
+
+                scanned_count += 1
+                if not self._message_expresses_gig_interest(
+                    getattr(message, "content", None)
+                ):
+                    continue
+
+                try:
+                    application_id = await asyncio.to_thread(
+                        upsert_discord_interest_application,
+                        settings,
+                        engagement_id=engagement_id,
+                        discord_user_id=str(author_id),
+                        discord_username=getattr(author, "name", None),
+                        source=EngagementApplicationSource.DIRECT_INTEREST.value,
+                        message_id=str(message_id) if message_id is not None else None,
+                        message_content=getattr(message, "content", None),
+                    )
+                    if application_id is not None:
+                        interested_count += 1
+                except Exception as exc:
+                    failed_count += 1
+                    logger.warning(
+                        "Failed backfilling direct gig interest thread_id=%s message_id=%s: %s",
+                        getattr(thread, "id", "unknown"),
+                        message_id,
+                        exc,
+                    )
+        except Exception as exc:
+            logger.warning(
+                "Failed reading gig thread history for interest backfill thread_id=%s: %s",
+                getattr(thread, "id", "unknown"),
+                exc,
+            )
+            return GigInterestBackfillResult(
+                status="failed",
+                reason="thread_history_unavailable",
+                scanned_count=scanned_count,
+                interested_count=interested_count,
+                failed_count=failed_count,
+            )
+
+        if failed_count:
+            return GigInterestBackfillResult(
+                status="failed",
+                reason="interest_persistence_failed",
+                scanned_count=scanned_count,
+                interested_count=interested_count,
+                failed_count=failed_count,
+            )
+
+        try:
+            await asyncio.to_thread(
+                add_engagement_event,
+                settings,
+                engagement_id=engagement_id,
+                event_type=GIG_INTEREST_BACKFILL_EVENT_TYPE,
+                actor_discord_user_id=actor_discord_user_id,
+                payload={
+                    "source": source,
+                    "thread_id": str(thread.id),
+                    "max_age_days": max_age_days,
+                    "force": force,
+                    "scanned_count": scanned_count,
+                    "interested_count": interested_count,
+                    "created_at": created_at.isoformat() if created_at else None,
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed writing gig interest backfill marker thread_id=%s: %s",
+                getattr(thread, "id", "unknown"),
+                exc,
+            )
+            return GigInterestBackfillResult(
+                status="failed",
+                reason="marker_write_failed",
+                scanned_count=scanned_count,
+                interested_count=interested_count,
+            )
+        return GigInterestBackfillResult(
+            status="backfilled",
+            scanned_count=scanned_count,
+            interested_count=interested_count,
+        )
+
     async def _sync_job_forum_channel(
         self,
         channel: discord.ForumChannel,
@@ -2333,6 +2560,13 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             seen_thread_ids.add(thread.id)
             if await self._persist_thread_engagement_index(thread, source=source):
                 indexed += 1
+                backfill = await self._backfill_thread_reply_interest(
+                    thread,
+                    source=source,
+                    max_age_days=GIG_INTEREST_BACKFILL_MAX_AGE_DAYS,
+                )
+                if backfill.status == "failed":
+                    failed += 1
             else:
                 failed += 1
 
@@ -3054,6 +3288,98 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 f"`{normalized_posting_type.value}`. Backfill started.",
                 ephemeral=True,
             )
+
+    @app_commands.command(
+        name="backfill-gig-interest",
+        description="Backfill interested applicants from this gig thread's replies.",
+    )
+    @app_commands.describe(
+        force="Run even if this thread was already backfilled.",
+    )
+    @require_role("Steering Committee")
+    async def backfill_gig_thread_interest(
+        self,
+        interaction: discord.Interaction,
+        force: bool = False,
+    ) -> None:
+        """Manually scan the current gig thread for direct-interest replies."""
+        thread = interaction.channel
+        if not isinstance(thread, discord.Thread) or not isinstance(
+            thread.parent,
+            discord.ForumChannel,
+        ):
+            await interaction.response.send_message(
+                "⚠️ Run this inside a registered gig forum post thread.",
+                ephemeral=True,
+            )
+            return
+
+        guild = thread.guild
+        if guild is None:
+            await interaction.response.send_message(
+                "⚠️ This command must be used inside a server.",
+                ephemeral=True,
+            )
+            return
+        if not await self._refresh_jobs_channel_cache_if_missing(guild.id):
+            await interaction.response.send_message(
+                "❌ Could not load registered jobs channels. Please try again.",
+                ephemeral=True,
+            )
+            return
+        if not self._is_jobs_channel_registered(guild.id, thread.parent.id):
+            await interaction.response.send_message(
+                "⚠️ This thread's forum is not registered as a jobs channel.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        result = await self._backfill_thread_reply_interest(
+            thread,
+            source="manual_backfill_gig_thread_interest",
+            max_age_days=None,
+            force=force,
+            actor_discord_user_id=str(interaction.user.id),
+        )
+
+        self._audit_command_safe(
+            interaction=interaction,
+            action="crm.backfill_gig_thread_interest",
+            result="success" if result.status != "failed" else "error",
+            metadata={
+                "thread_id": str(thread.id),
+                "status": result.status,
+                "reason": result.reason,
+                "scanned_count": result.scanned_count,
+                "interested_count": result.interested_count,
+                "failed_count": result.failed_count,
+                "force": force,
+            },
+        )
+
+        if result.status == "backfilled":
+            await interaction.followup.send(
+                "✅ Backfill complete: scanned "
+                f"{result.scanned_count} reply/replies and recorded "
+                f"{result.interested_count} interested applicant(s).",
+                ephemeral=True,
+            )
+            return
+
+        if result.reason == "already_backfilled":
+            await interaction.followup.send(
+                "ℹ️ This thread has already been backfilled. "
+                "Run again with `force:true` to rescan it.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            "❌ Could not backfill this thread"
+            + (f": `{result.reason}`." if result.reason else "."),
+            ephemeral=True,
+        )
 
     @app_commands.command(
         name="unregister-jobs-channel",

@@ -9,6 +9,7 @@ import five08.engagements as engagements
 from five08.engagements import (
     DiscordEngagementInput,
     EngagementStatus,
+    engagement_event_exists,
     normalize_engagement_status,
     parse_status_from_title,
     strip_status_from_title,
@@ -109,6 +110,52 @@ def test_upsert_discord_engagement_can_preserve_existing_status(monkeypatch) -> 
         in query
     )
     assert params[-1:] == (False,)
+
+
+def test_engagement_event_exists_checks_event_marker(monkeypatch) -> None:
+    executed: list[tuple[str, tuple]] = []
+
+    class CursorStub:
+        def __enter__(self) -> "CursorStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+        def execute(self, query: str, params: tuple) -> None:
+            executed.append((query, params))
+
+        def fetchone(self) -> dict[str, int]:
+            return {"exists": 1}
+
+    class ConnectionStub:
+        def cursor(self, row_factory=None) -> CursorStub:  # noqa: ARG002
+            return CursorStub()
+
+        def __enter__(self) -> "ConnectionStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+    @contextmanager
+    def connection_stub():
+        yield ConnectionStub()
+
+    monkeypatch.setattr(
+        engagements,
+        "get_postgres_connection",
+        lambda _settings: connection_stub(),
+    )
+
+    assert engagement_event_exists(
+        SharedSettings(),
+        engagement_id="engagement-1",
+        event_type="gig_thread_interest_backfilled",
+    )
+    query, params = executed[0]
+    assert "FROM engagement_events" in query
+    assert params == ("engagement-1", "gig_thread_interest_backfilled")
 
 
 def test_upsert_suggested_applications_merges_existing_discord_row(

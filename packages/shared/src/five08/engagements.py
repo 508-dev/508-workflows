@@ -352,6 +352,28 @@ def add_engagement_event(
             )
 
 
+def engagement_event_exists(
+    settings: SharedSettings,
+    *,
+    engagement_id: str,
+    event_type: str,
+) -> bool:
+    """Return whether an engagement already has a given event marker."""
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                SELECT 1
+                FROM engagement_events
+                WHERE engagement_id = %s
+                  AND event_type = %s
+                LIMIT 1
+                """,
+                (engagement_id, event_type),
+            )
+            return cursor.fetchone() is not None
+
+
 def upsert_suggested_applications(
     settings: SharedSettings,
     *,
