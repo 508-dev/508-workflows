@@ -2648,13 +2648,23 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             seen_thread_ids.add(thread.id)
             if await self._persist_thread_engagement_index(thread, source=source):
                 indexed += 1
-                backfill = await self._backfill_thread_reply_interest(
-                    thread,
-                    source=source,
-                    max_age_days=GIG_INTEREST_BACKFILL_MAX_AGE_DAYS,
-                )
-                if backfill.status == "failed":
+                try:
+                    backfill = await self._backfill_thread_reply_interest(
+                        thread,
+                        source=source,
+                        max_age_days=GIG_INTEREST_BACKFILL_MAX_AGE_DAYS,
+                    )
+                except Exception as exc:
                     backfill_failed += 1
+                    logger.warning(
+                        "Gig interest backfill crashed thread=%s source=%s: %s",
+                        thread.id,
+                        source,
+                        exc,
+                    )
+                else:
+                    if backfill.status == "failed":
+                        backfill_failed += 1
             else:
                 failed += 1
 
@@ -3404,6 +3414,15 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             thread.parent,
             discord.ForumChannel,
         ):
+            self._audit_command_safe(
+                interaction=interaction,
+                action="crm.backfill_gig_thread_interest",
+                result="error",
+                metadata={
+                    "stage": "not_thread",
+                    "force": force,
+                },
+            )
             await interaction.response.send_message(
                 "⚠️ Run this inside a registered gig forum post thread.",
                 ephemeral=True,
@@ -3412,18 +3431,52 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
 
         guild = thread.guild
         if guild is None:
+            self._audit_command_safe(
+                interaction=interaction,
+                action="crm.backfill_gig_thread_interest",
+                result="error",
+                metadata={
+                    "stage": "guild_unavailable",
+                    "force": force,
+                    "thread_id": str(thread.id),
+                },
+            )
             await interaction.response.send_message(
                 "⚠️ This command must be used inside a server.",
                 ephemeral=True,
             )
             return
         if not await self._refresh_jobs_channel_cache_if_missing(guild.id):
+            self._audit_command_safe(
+                interaction=interaction,
+                action="crm.backfill_gig_thread_interest",
+                result="error",
+                metadata={
+                    "stage": "jobs_cache_unavailable",
+                    "force": force,
+                    "guild_id": str(guild.id),
+                    "thread_id": str(thread.id),
+                    "channel_id": str(thread.parent.id),
+                },
+            )
             await interaction.response.send_message(
                 "❌ Could not load registered jobs channels. Please try again.",
                 ephemeral=True,
             )
             return
         if not self._is_jobs_channel_registered(guild.id, thread.parent.id):
+            self._audit_command_safe(
+                interaction=interaction,
+                action="crm.backfill_gig_thread_interest",
+                result="error",
+                metadata={
+                    "stage": "forum_not_registered",
+                    "force": force,
+                    "guild_id": str(guild.id),
+                    "thread_id": str(thread.id),
+                    "channel_id": str(thread.parent.id),
+                },
+            )
             await interaction.response.send_message(
                 "⚠️ This thread's forum is not registered as a jobs channel.",
                 ephemeral=True,

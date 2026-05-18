@@ -777,3 +777,23 @@ def test_sync_job_forum_channel_keeps_index_failures_separate_from_backfill_fail
 
     assert indexed == 1
     assert failed == 0
+
+
+def test_sync_job_forum_channel_isolates_backfill_crashes() -> None:
+    async def archived_threads(**_kwargs: object):
+        if False:
+            yield None
+
+    cog = JobsCog(Mock())
+    cog._persist_thread_engagement_index = AsyncMock(return_value=True)
+    cog._backfill_thread_reply_interest = AsyncMock(side_effect=RuntimeError("boom"))
+    channel = SimpleNamespace(
+        id=400,
+        threads=[SimpleNamespace(id=200)],
+        archived_threads=archived_threads,
+    )
+
+    indexed, failed = asyncio.run(cog._sync_job_forum_channel(channel, source="test"))
+
+    assert indexed == 1
+    assert failed == 0
