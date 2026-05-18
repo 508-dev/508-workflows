@@ -1984,6 +1984,17 @@ function GigApplicationRow({
         {fitScore ? (
           <span className="text-xs font-bold text-muted-foreground">Fit {fitScore}</span>
         ) : null}
+        {contactUrl ? (
+          <a
+            className="text-xs font-extrabold text-primary"
+            href={contactUrl}
+            target="_blank"
+            rel="noreferrer"
+            aria-label={`Open ${displayName} CRM profile`}
+          >
+            CRM profile
+          </a>
+        ) : null}
         {resumeUrl ? (
           <a
             className="text-xs font-extrabold text-primary"
