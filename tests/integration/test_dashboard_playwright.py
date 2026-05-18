@@ -204,6 +204,40 @@ def _audit_payload() -> list[dict[str, object]]:
     ]
 
 
+def _gigs_payload() -> list[dict[str, object]]:
+    return [
+        {
+            "id": "11111111-1111-4111-8111-111111111111",
+            "status": "recruiting",
+            "status_label": "Recruiting",
+            "title": "Webflow build",
+            "required_skills": ["Webflow", "Design"],
+            "preferred_skills": ["React"],
+            "discord_guild_id": "guild-1",
+            "discord_channel_id": "channel-1",
+            "discord_channel_name": "gigs",
+            "discord_thread_id": "thread-1",
+            "posted_at": "2026-05-08T10:00:00+00:00",
+            "last_activity_at": "2026-05-08T12:00:00+00:00",
+            "application_count": 1,
+            "interested_count": 0,
+            "applications": [
+                {
+                    "id": "22222222-2222-4222-8222-222222222222",
+                    "status": "suggested",
+                    "source": "match_candidates",
+                    "match_score": 41.2,
+                    "crm_contact_id": "contact-candidate-1",
+                    "name": "Casey Candidate",
+                    "latest_resume_id": "resume-file-789",
+                    "latest_resume_name": "casey-resume.pdf",
+                    "evaluation": {"llm_summary": "Strong Webflow background."},
+                }
+            ],
+        }
+    ]
+
+
 @pytest.mark.playwright
 def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
     playwright_api = pytest.importorskip("playwright.sync_api")
@@ -239,6 +273,9 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
         sync_requested = threading.Event()
         assign_onboarder_requested = threading.Event()
         detail_requested = threading.Event()
+        gig_application_requested = threading.Event()
+        gig_detail_requests: list[str] = []
+        gigs_list_payload = _gigs_payload()
 
         def jobs_route(route: Any) -> None:
             request = route.request
@@ -320,6 +357,41 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
                 body=json.dumps(_audit_payload()),
             )
 
+        def gigs_route(route: Any) -> None:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(gigs_list_payload),
+            )
+
+        def gig_detail_route(route: Any) -> None:
+            gig_detail_requests.append(route.request.url)
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(_gigs_payload()[0]),
+            )
+
+        def notifications_route(route: Any) -> None:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"stale_days": 7, "notifications": []}),
+            )
+
+        def gig_application_status_route(route: Any) -> None:
+            gig_application_requested.set()
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "id": "22222222-2222-4222-8222-222222222222",
+                        "status": "contacted",
+                    }
+                ),
+            )
+
         def sync_route(route: Any) -> None:
             sync_requested.set()
             route.fulfill(
@@ -345,6 +417,17 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
         page.route("**/dashboard/api/onboarding?*", onboarding_route)
         page.route("**/dashboard/api/people?*", people_route)
         page.route("**/dashboard/api/audit-events?*", audit_route)
+        page.route("**/dashboard/api/notifications?*", notifications_route)
+        page.route(
+            "**/dashboard/api/gigs/11111111-1111-4111-8111-111111111111",
+            gig_detail_route,
+        )
+        page.route(
+            "**/dashboard/api/gigs/11111111-1111-4111-8111-111111111111"
+            "/applications/22222222-2222-4222-8222-222222222222/status",
+            gig_application_status_route,
+        )
+        page.route("**/dashboard/api/gigs?*", gigs_route)
         page.route("**/dashboard/api/sync/people", sync_route)
 
         try:
@@ -418,6 +501,30 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
                 "button", name="Remove Skills: Not parsed onboarding filter"
             ).wait_for()
             assert any("skills=missing" in url for url in onboarding_requests)
+
+            page.get_by_role("link", name="Gigs").click()
+            expect(page).to_have_url(f"{dashboard_server}/dashboard/gigs")
+            page.get_by_text("Webflow build").wait_for()
+            page.get_by_role("button", name="Manage people").click()
+            expect(page).to_have_url(
+                f"{dashboard_server}/dashboard/gigs/11111111-1111-4111-8111-111111111111"
+            )
+            page.get_by_role("heading", name="People").wait_for()
+            page.get_by_text("Casey Candidate").wait_for()
+            expect(page.get_by_role("link", name="Casey Candidate")).to_have_attribute(
+                "href",
+                f"{crm_base_url}/#Contact/view/contact-candidate-1",
+            )
+            page.get_by_label("Candidate status for Casey Candidate").select_option(
+                "contacted"
+            )
+            assert gig_application_requested.wait(timeout=5)
+            assert gig_detail_requests
+
+            gigs_list_payload = []
+            page.goto("/dashboard/gigs/11111111-1111-4111-8111-111111111111")
+            page.get_by_role("heading", name="People").wait_for()
+            page.get_by_text("Casey Candidate").wait_for()
 
             page.get_by_role("link", name="Jobs").click()
             expect(page).to_have_url(f"{dashboard_server}/dashboard/jobs")

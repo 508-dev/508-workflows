@@ -1656,6 +1656,53 @@ def test_dashboard_renders_for_member_session_with_gig_access(
     assert "508 Operations Dashboard" in response.text
 
 
+def test_dashboard_renders_gig_detail_shell_for_member_session(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="member-1",
+        email="member@508.dev",
+        display_name="Member User",
+        groups=["Member"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/gigs/11111111-1111-4111-8111-111111111111")
+
+    assert response.status_code == 200
+    assert "508 Operations Dashboard" in response.text
+
+
+def test_dashboard_unknown_api_route_returns_not_found(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/api/not-a-route")
+
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("application/json")
+
+
 def test_dashboard_me_member_session_only_gets_gig_permissions(
     client: TestClient,
 ) -> None:
@@ -1762,7 +1809,7 @@ def test_dashboard_me_normalizes_crm_api_base_url(
     assert response.json()["crm_base_url"] == "https://crm.example"
 
 
-def test_dashboard_me_limits_sensitive_permissions_without_sso(
+def test_dashboard_me_allows_discord_admin_sensitive_permissions_without_sso(
     monkeypatch: pytest.MonkeyPatch,
     client: TestClient,
 ) -> None:
@@ -1788,6 +1835,37 @@ def test_dashboard_me_limits_sensitive_permissions_without_sso(
     assert response.status_code == 200
     assert "people:read" in response.json()["permissions"]
     assert "onboarding:write" in response.json()["permissions"]
+    assert "audit:read" in response.json()["permissions"]
+    assert "jobs:read" in response.json()["permissions"]
+    assert "jobs:write" in response.json()["permissions"]
+    assert "people:sync" in response.json()["permissions"]
+
+
+def test_dashboard_me_keeps_sensitive_permissions_for_admin_sso_without_token(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    monkeypatch.setattr(api.settings, "environment", "production")
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admins"],
+        is_admin=True,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.ADMIN_SSO.value,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/api/me")
+
+    assert response.status_code == 200
+    assert "audit:read" not in response.json()["permissions"]
     assert "jobs:write" not in response.json()["permissions"]
 
 
@@ -1969,7 +2047,7 @@ def test_dashboard_jobs_forbids_steering_committee_session(
     assert response.json()["error"] == "forbidden"
 
 
-def test_dashboard_jobs_forbids_discord_admin_without_sso(
+def test_dashboard_jobs_allows_discord_admin_without_sso(
     monkeypatch: pytest.MonkeyPatch,
     client: TestClient,
 ) -> None:
@@ -1985,15 +2063,18 @@ def test_dashboard_jobs_forbids_discord_admin_without_sso(
         actor_provider=api.ActorProvider.DISCORD.value,
     )
 
-    with patch(
-        "five08.backend.api._current_session",
-        new_callable=AsyncMock,
-        return_value=("session-1", session),
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.list_jobs", return_value=[]),
     ):
         response = client.get("/dashboard/api/jobs")
 
-    assert response.status_code == 403
-    assert response.json()["error"] == "forbidden"
+    assert response.status_code == 200
+    assert response.json() == []
 
 
 def test_dashboard_jobs_returns_filtered_job_payload(client: TestClient) -> None:
@@ -2424,6 +2505,80 @@ def test_dashboard_gigs_allows_steering_to_see_all_gigs(client: TestClient) -> N
     )
 
 
+def test_dashboard_gig_detail_returns_visible_gig_by_id(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="member@508.dev",
+        display_name="Member User",
+        groups=["Member"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+        crm_contact_id="contact-member-1",
+    )
+    gig = {
+        "id": "11111111-1111-4111-8111-111111111111",
+        "status": "recruiting",
+        "title": "Webflow build",
+        "applications": [],
+    }
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.list_dashboard_engagements", return_value=[gig]
+        ) as mock_gigs,
+    ):
+        response = client.get(
+            "/dashboard/api/gigs/11111111-1111-4111-8111-111111111111"
+        )
+
+    assert response.status_code == 200
+    assert response.json() == gig
+    mock_gigs.assert_called_once_with(
+        api.settings,
+        viewer_discord_user_id="123456789",
+        include_all=False,
+        engagement_id="11111111-1111-4111-8111-111111111111",
+        limit=1,
+    )
+
+
+def test_dashboard_gig_detail_returns_404_for_hidden_or_missing_gig(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="member@508.dev",
+        display_name="Member User",
+        groups=["Member"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.list_dashboard_engagements", return_value=[]),
+    ):
+        response = client.get(
+            "/dashboard/api/gigs/11111111-1111-4111-8111-111111111111"
+        )
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "gig_not_found"}
+
+
 def test_dashboard_notifications_filters_member_to_own_gigs(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -2851,6 +3006,38 @@ def test_dashboard_audit_events_returns_recent_events(client: TestClient) -> Non
 
     assert response.status_code == 200
     assert response.json() == events
+    mock_events.assert_called_once_with(10)
+
+
+def test_dashboard_audit_events_allows_discord_admin_without_sso(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="admin@508.dev",
+        display_name="Discord Admin",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._list_dashboard_audit_events",
+            return_value=[],
+        ) as mock_events,
+    ):
+        response = client.get("/dashboard/api/audit-events?limit=10")
+
+    assert response.status_code == 200
+    assert response.json() == []
     mock_events.assert_called_once_with(10)
 
 
@@ -3623,7 +3810,10 @@ def test_auth_discord_link_redirect_creates_discord_session_when_disabled(
     assert saved_session.is_admin is True
     assert "people:read" in saved_session.permissions
     assert "onboarding:write" in saved_session.permissions
-    assert "jobs:write" not in saved_session.permissions
+    assert "jobs:read" in saved_session.permissions
+    assert "jobs:write" in saved_session.permissions
+    assert "audit:read" in saved_session.permissions
+    assert "people:sync" in saved_session.permissions
     audit_payload = mock_insert.call_args.args[1]
     assert audit_payload.actor_provider == api.ActorProvider.DISCORD
     assert audit_payload.actor_subject == "123456789"

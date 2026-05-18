@@ -9,6 +9,7 @@ import json
 import logging
 import re
 import socket
+from collections.abc import Iterable
 from collections import OrderedDict
 from dataclasses import dataclass, is_dataclass, replace
 from typing import Any, Awaitable, Callable, Literal, cast
@@ -406,6 +407,37 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         return infer_job_posting_type_from_labels(tag_names, default=default)
 
     @staticmethod
+    def _normalized_channel_name(channel: object) -> str:
+        raw_name = channel if isinstance(channel, str) else getattr(channel, "name", "")
+        name = str(raw_name or "").strip().casefold()
+        return re.sub(r"[-_]+", " ", name)
+
+    @classmethod
+    def _default_job_forum_channel_configs(cls) -> dict[str, JobPostingType]:
+        """Configured startup forum names and their default posting types."""
+        configs: dict[str, JobPostingType] = {}
+        for raw_item in settings.discord_default_job_forum_channels.split(","):
+            item = raw_item.strip()
+            if not item:
+                continue
+            raw_name, separator, raw_type = item.partition(":")
+            normalized_name = cls._normalized_channel_name(raw_name)
+            if not normalized_name:
+                continue
+            configs[normalized_name] = normalize_job_posting_type(
+                raw_type if separator else JobPostingType.PART_TIME
+            )
+        return configs
+
+    def _default_job_forum_posting_type(self, channel: object) -> JobPostingType | None:
+        """Return configured posting type when an existing forum should be auto-registered."""
+        if not isinstance(channel, discord.ForumChannel):
+            return None
+        return self._default_job_forum_channel_configs().get(
+            self._normalized_channel_name(channel)
+        )
+
+    @staticmethod
     def _thread_poster_id(
         thread: discord.Thread,
         starter: discord.Message | None,
@@ -431,6 +463,57 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 exc,
             )
             return False
+
+    async def _register_default_job_forum_channels(
+        self, guild: discord.Guild
+    ) -> set[int]:
+        """Register obvious existing gigs/jobs forums so startup backfill has input."""
+        discovered_ids: set[int] = set()
+        existing_ids = self._jobs_channels_by_guild.setdefault(guild.id, set())
+        channel_types = self._jobs_channel_types_by_guild.setdefault(guild.id, {})
+
+        guild_channels = getattr(guild, "channels", None)
+        if not isinstance(guild_channels, Iterable) or isinstance(
+            guild_channels, str | bytes
+        ):
+            return discovered_ids
+
+        for channel in guild_channels:
+            posting_type = self._default_job_forum_posting_type(channel)
+            if posting_type is None:
+                continue
+            channel_id = int(channel.id)
+            if channel_id in existing_ids:
+                continue
+
+            try:
+                await asyncio.to_thread(
+                    register_job_post_channel,
+                    settings,
+                    guild_id=str(guild.id),
+                    channel_id=str(channel_id),
+                    posting_type=posting_type,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed auto-registering default jobs channel guild=%s channel=%s: %s",
+                    guild.id,
+                    channel_id,
+                    exc,
+                )
+                continue
+
+            existing_ids.add(channel_id)
+            channel_types[channel_id] = posting_type
+            discovered_ids.add(channel_id)
+            logger.info(
+                "Auto-registered default jobs channel guild=%s channel=%s name=%s",
+                guild.id,
+                channel_id,
+                getattr(channel, "name", ""),
+            )
+
+        return discovered_ids
 
     async def _mark_thread_auto_matched(self, thread_id: int) -> bool:
         """Deduplicate automatic matching when multiple events race."""
@@ -2760,6 +2843,10 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 self._refresh_role_id_cache(guild)
                 try:
                     channel_ids = await self._refresh_jobs_channel_cache(guild.id)
+                    discovered_ids = await self._register_default_job_forum_channels(
+                        guild
+                    )
+                    channel_ids = channel_ids | discovered_ids
                     logger.info(
                         "Loaded %d registered jobs channel(s) for guild=%s",
                         len(channel_ids),

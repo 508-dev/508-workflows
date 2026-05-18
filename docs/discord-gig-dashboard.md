@@ -26,7 +26,11 @@ status transition. This avoids silently reverting dashboard-only updates.
 
 Use `/register-jobs-channel` in a Discord forum channel to make the bot index
 new and existing posts as gigs. Registered channels are stored in
-`job_post_channels`.
+`job_post_channels`. On bot startup, configured existing forum channels are
+auto-registered and backfilled so existing server gigs appear in the dashboard
+after launch. `DISCORD_DEFAULT_JOB_FORUM_CHANNELS` defaults to
+`gigs:part_time,fulltime-roles:full_time`; use a comma-separated
+`channel-name:posting_type` list to override it.
 
 Each registered channel has a posting type:
 

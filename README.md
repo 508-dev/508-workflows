@@ -328,6 +328,7 @@ Use `.env.example` as the source of truth for defaults.
 - `Required`: `DISCORD_BOT_TOKEN`
 - `Optional`: `BACKEND_API_BASE_URL` (default: `http://127.0.0.1:8090`; `./scripts/dev.sh` overrides it to the worktree web/API port, Compose injects `http://web:8090`)
 - `Optional`: `HEALTHCHECK_PORT` (host-run `./scripts/dev.sh` ignores `.env` for this key and defaults to a deterministic per-worktree value near `30000 + WORKTREE_ENV_SLOT`; export it in your shell only when you intentionally want a fixed port, and avoid browser-unsafe ports such as `5060`)
+- `Optional`: `DISCORD_DEFAULT_JOB_FORUM_CHANNELS` (default: `gigs:part_time,fulltime-roles:full_time`; comma-separated `forum-name:posting_type` list auto-registered and backfilled on bot startup)
 - Note: bot message chunking uses Discord's 2000 character limit in code.
 
 ### Discord Agent Gateway
