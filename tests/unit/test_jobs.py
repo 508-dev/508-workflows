@@ -442,6 +442,7 @@ def _fake_thread_with_history(
     created_at: datetime,
     messages: list[SimpleNamespace],
 ) -> SimpleNamespace:
+    history_calls: list[dict[str, object]] = []
     starter = SimpleNamespace(
         id=100,
         content="Need help with a build",
@@ -450,6 +451,7 @@ def _fake_thread_with_history(
     )
 
     async def history(**_kwargs: object):
+        history_calls.append(_kwargs)
         for message in messages:
             yield message
 
@@ -463,6 +465,7 @@ def _fake_thread_with_history(
         applied_tags=[],
         created_at=created_at,
         history=history,
+        history_calls=history_calls,
     )
 
 
@@ -689,6 +692,9 @@ def test_backfill_thread_reply_interest_scans_replies_after_marker(
 
     assert result.status == "backfilled"
     assert result.scanned_count == 1
+    assert thread.history_calls == [
+        {"limit": None, "oldest_first": True, "after": marker_at}
+    ]
     application.assert_called_once()
     assert application.call_args.kwargs["discord_user_id"] == "21"
     assert marker.call_args.kwargs["payload"]["last_scanned_message_created_at"] == (

@@ -410,10 +410,12 @@ def upsert_gig_thread_interest_backfill_marker(
     payload: dict[str, Any] | None = None,
 ) -> None:
     """Insert or update the single watermarked gig interest backfill marker."""
+    marker_event_type = _GIG_THREAD_INTEREST_BACKFILLED_EVENT_TYPE
+    marker_event_type_literal = marker_event_type.replace("'", "''")
     with get_postgres_connection(settings) as conn:
         with conn.cursor() as cursor:
             cursor.execute(
-                """
+                f"""
                 INSERT INTO engagement_events (
                     id,
                     engagement_id,
@@ -422,7 +424,7 @@ def upsert_gig_thread_interest_backfill_marker(
                     payload
                 ) VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT (engagement_id, event_type)
-                WHERE event_type = 'gig_thread_interest_backfilled'
+                WHERE event_type = '{marker_event_type_literal}'
                 DO UPDATE SET
                     actor_discord_user_id = EXCLUDED.actor_discord_user_id,
                     payload = EXCLUDED.payload,
@@ -431,7 +433,7 @@ def upsert_gig_thread_interest_backfill_marker(
                 (
                     str(uuid4()),
                     engagement_id,
-                    _GIG_THREAD_INTEREST_BACKFILLED_EVENT_TYPE,
+                    marker_event_type,
                     actor_discord_user_id,
                     Jsonb(payload or {}),
                 ),

@@ -2494,7 +2494,10 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         latest_seen_message_at = last_scanned_at
 
         try:
-            async for message in thread.history(limit=None, oldest_first=True):
+            history_kwargs: dict[str, Any] = {"limit": None, "oldest_first": True}
+            if last_scanned_at is not None:
+                history_kwargs["after"] = last_scanned_at
+            async for message in thread.history(**history_kwargs):
                 message_id = getattr(message, "id", None)
                 if message_id is not None and str(message_id) == str(starter_id):
                     continue
@@ -2506,12 +2509,10 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                     or message_created_at > latest_seen_message_at
                 ):
                     latest_seen_message_at = message_created_at
-                if last_scanned_at is not None:
-                    if (
-                        message_created_at is None
-                        or message_created_at <= last_scanned_at
-                    ):
-                        continue
+                if last_scanned_at is not None and (
+                    message_created_at is None or message_created_at <= last_scanned_at
+                ):
+                    continue
                 author = getattr(message, "author", None)
                 if author is None or getattr(author, "bot", False):
                     continue
@@ -3462,10 +3463,10 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
-        if result.reason == "already_backfilled":
+        if result.reason == "no_new_replies":
             await interaction.followup.send(
-                "ℹ️ This thread has already been backfilled. "
-                "Run again with `force:true` to rescan it.",
+                "ℹ️ No new replies to backfill since the last scan. "
+                "Run again with `force:true` to rescan the full thread.",
                 ephemeral=True,
             )
             return
