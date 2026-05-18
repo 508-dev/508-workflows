@@ -720,7 +720,28 @@ def _dashboard_permissions_for_identity(
         permissions = set(DASHBOARD_ADMIN_PERMISSIONS if is_admin else ())
     if not id_token.strip() and not _dashboard_dev_sensitive_access_enabled():
         permissions -= DASHBOARD_SENSITIVE_PERMISSIONS
+        if _discord_admin_can_use_sensitive_dashboard(
+            raw_roles,
+            is_admin=is_admin,
+            actor_provider=actor_provider,
+        ):
+            permissions |= DASHBOARD_SENSITIVE_PERMISSIONS
     return sorted(permissions)
+
+
+def _discord_admin_can_use_sensitive_dashboard(
+    raw_roles: object,
+    *,
+    is_admin: bool,
+    actor_provider: ActorProvider,
+) -> bool:
+    if actor_provider != ActorProvider.DISCORD:
+        return False
+    return is_admin or has_dashboard_discord_role(
+        raw_roles,
+        "Admin",
+        admin_role_names=settings.discord_admin_role_names,
+    )
 
 
 def _session_dashboard_permissions(session: AuthSession) -> set[str]:
@@ -740,6 +761,12 @@ def _session_dashboard_permissions(session: AuthSession) -> set[str]:
         )
     if not _has_sso_validated_session(session):
         permissions -= DASHBOARD_SENSITIVE_PERMISSIONS
+        if _discord_admin_can_use_sensitive_dashboard(
+            session.groups,
+            is_admin=session.is_admin,
+            actor_provider=actor_provider,
+        ):
+            permissions |= DASHBOARD_SENSITIVE_PERMISSIONS
     return permissions
 
 
@@ -2361,6 +2388,37 @@ async def dashboard_gigs_handler(
         limit=limit,
     )
     return JSONResponse(gigs)
+
+
+async def dashboard_gig_detail_handler(
+    request: Request,
+    engagement_id: str,
+) -> JSONResponse:
+    """Return one dashboard-visible Discord gig by id."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_GIGS_READ,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    normalized_engagement_id = _valid_uuid_or_none(engagement_id)
+    if normalized_engagement_id is None:
+        return JSONResponse({"error": "invalid_engagement_id"}, status_code=400)
+
+    include_all = _session_has_steering_access(session)
+    gigs = await asyncio.to_thread(
+        list_dashboard_engagements,
+        settings,
+        viewer_discord_user_id=session.subject,
+        include_all=include_all,
+        engagement_id=normalized_engagement_id,
+        limit=1,
+    )
+    if not gigs:
+        return JSONResponse({"error": "gig_not_found"}, status_code=404)
+    return JSONResponse(gigs[0])
 
 
 async def dashboard_notifications_handler(
@@ -4295,6 +4353,11 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
         methods=["GET"],
     )
     app.add_api_route(
+        "/dashboard/api/gigs/{engagement_id}",
+        dashboard_gig_detail_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
         "/dashboard/api/notifications",
         dashboard_notifications_handler,
         methods=["GET"],
@@ -4333,6 +4396,12 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
         "/dashboard/api/sync/people",
         dashboard_sync_people_handler,
         methods=["POST"],
+    )
+    app.add_api_route(
+        "/dashboard/gigs/{item_id}",
+        dashboard_handler,
+        methods=["GET"],
+        response_model=None,
     )
 
     app.add_api_route("/jobs", jobs_handler, methods=["GET"])

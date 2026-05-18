@@ -4,7 +4,7 @@ Unit tests for CRM cog functionality.
 
 import ipaddress
 import json
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call as mock_call, patch
 
 import discord
 import pytest
@@ -2630,7 +2630,10 @@ class TestCRMCog:
         guild = Mock()
         guild.id = 123
         guild.name = "508"
+        guild.channels = []
         mock_bot.guilds = [guild]
+        mock_bot.wait_until_ready = AsyncMock()
+        mock_bot.is_closed = Mock(return_value=True)
 
         jobs_cog._refresh_role_id_cache = Mock()
         jobs_cog._refresh_jobs_channel_cache = AsyncMock(return_value={456})
@@ -2642,6 +2645,72 @@ class TestCRMCog:
         jobs_cog._refresh_role_id_cache.assert_called_once_with(guild)
         jobs_cog._refresh_jobs_channel_cache.assert_awaited_once_with(guild.id)
         jobs_cog._bulk_sync_guild_roles.assert_awaited_once_with(guild)
+
+    @pytest.mark.asyncio
+    async def test_on_ready_auto_registers_configured_default_job_forums(
+        self, jobs_cog, mock_bot
+    ):
+        class DummyForumChannel:
+            def __init__(self, channel_id: int, name: str) -> None:
+                self.id = channel_id
+                self.name = name
+
+        class GuildChannelsProxy:
+            def __init__(self, channels: list[DummyForumChannel]) -> None:
+                self._channels = channels
+
+            def __iter__(self):
+                return iter(self._channels)
+
+        guild = Mock()
+        guild.id = 123
+        guild.name = "508"
+        guild.channels = GuildChannelsProxy(
+            [
+                DummyForumChannel(456, "gigs"),
+                DummyForumChannel(789, "fulltime-roles"),
+                DummyForumChannel(999, "jobs"),
+            ]
+        )
+        mock_bot.guilds = [guild]
+        mock_bot.wait_until_ready = AsyncMock()
+        mock_bot.is_closed = Mock(return_value=True)
+
+        jobs_cog._refresh_role_id_cache = Mock()
+        jobs_cog._refresh_jobs_channel_cache = AsyncMock(return_value=set())
+        jobs_cog._bulk_sync_guild_roles = AsyncMock(return_value=(1, 2, 3))
+        jobs_cog._start_forum_backfill_task = Mock()
+
+        with (
+            patch(
+                "five08.discord_bot.cogs.jobs.discord.ForumChannel", DummyForumChannel
+            ),
+            patch(
+                "five08.discord_bot.cogs.jobs.register_job_post_channel",
+                return_value=True,
+            ) as register,
+        ):
+            await jobs_cog.on_ready()
+
+        assert register.call_args_list == [
+            mock_call(
+                jobs_module.settings,
+                guild_id="123",
+                channel_id="456",
+                posting_type=jobs_module.JobPostingType.PART_TIME,
+            ),
+            mock_call(
+                jobs_module.settings,
+                guild_id="123",
+                channel_id="789",
+                posting_type=jobs_module.JobPostingType.FULL_TIME,
+            ),
+        ]
+        jobs_cog._start_forum_backfill_task.assert_called_once_with(
+            guild=guild,
+            channel_ids={456, 789},
+            source="startup",
+        )
 
     @pytest.mark.asyncio
     async def test_validate_match_candidates_url_rejects_non_https(self, jobs_cog):

@@ -716,11 +716,15 @@ def list_dashboard_engagements(
     viewer_discord_user_id: str | None,
     include_all: bool,
     status: EngagementStatus | None = None,
+    engagement_id: str | None = None,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
     """Return dashboard-visible gigs with nested application summaries."""
     params: list[Any] = []
     conditions = ["e.lifecycle_stage = 'pending_gig'"]
+    if engagement_id is not None:
+        conditions.append("e.id = %s")
+        params.append(engagement_id)
     if not include_all:
         conditions.append("e.posted_by_discord_user_id = %s")
         params.append(viewer_discord_user_id or "")
