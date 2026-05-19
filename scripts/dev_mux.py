@@ -282,6 +282,20 @@ def _is_under_path(path: str, root: str) -> bool:
     return path == root or path.startswith(root + os.sep)
 
 
+def _command_mentions_path(command: str, path: str) -> bool:
+    if not path:
+        return False
+    start = 0
+    while True:
+        index = command.find(path, start)
+        if index < 0:
+            return False
+        end = index + len(path)
+        if end == len(command) or command[end] == os.sep:
+            return True
+        start = index + 1
+
+
 def _command_service(command: str) -> str | None:
     if "five08.backend.api:create_app" in command or "backend-api" in command:
         return "web"
@@ -299,13 +313,17 @@ def _process_in_scope(
     cwd: str = "",
 ) -> bool:
     if worktree_root and (
-        worktree_root in process.command or _is_under_path(cwd, worktree_root)
+        _command_mentions_path(process.command, worktree_root)
+        or _is_under_path(cwd, worktree_root)
     ):
         return True
     return bool(
         conductor_group
         and _command_service(process.command) == service_name
-        and (conductor_group in process.command or _is_under_path(cwd, conductor_group))
+        and (
+            _command_mentions_path(process.command, conductor_group)
+            or _is_under_path(cwd, conductor_group)
+        )
     )
 
 

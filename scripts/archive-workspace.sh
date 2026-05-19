@@ -72,7 +72,7 @@ pid_file=$(mktemp)
 trap 'rm -f "$pid_file"' EXIT
 
 discover_pids() {
-  WORKSPACE=$workspace ARCHIVE_SCRIPT_PID=$$ python3 <<'PY'
+  WORKSPACE="$workspace" ARCHIVE_SCRIPT_PID=$$ python3 <<'PY'
 from __future__ import annotations
 
 import os
@@ -170,12 +170,28 @@ def is_under_workspace(path: str | None) -> bool:
     return path == WORKSPACE or path.startswith(WORKSPACE + os.sep)
 
 
+def command_mentions_path(command: str, path: str) -> bool:
+    if not path:
+        return False
+    start = 0
+    while True:
+        index = command.find(path, start)
+        if index < 0:
+            return False
+        end = index + len(path)
+        if end == len(command) or command[end] == os.sep:
+            return True
+        start = index + 1
+
+
 def command_mentions_workspace(command: str) -> bool:
-    return WORKSPACE in command
+    return command_mentions_path(command, WORKSPACE)
 
 
 def command_mentions_other_conductor_workspace(command: str) -> bool:
-    return "/conductor/workspaces/" in command and WORKSPACE not in command
+    return "/conductor/workspaces/" in command and not command_mentions_workspace(
+        command
+    )
 
 
 def child_index(processes: dict[int, Proc]) -> dict[int, list[int]]:
