@@ -192,6 +192,39 @@ def test_worktree_env_load_uses_conductor_port_range_for_defaults() -> None:
     ]
 
 
+def test_worktree_env_load_normalizes_leading_zero_conductor_port() -> None:
+    env = _base_env()
+    env["CONDUCTOR_PORT"] = "045000"
+
+    result = _run_shell(
+        f"""
+        set -eu
+        . {SCRIPT_PATH}
+        worktree_env_load {REPO_ROOT / "scripts"} host
+        printf '%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n' \\
+          "$REDIS_HOST_PORT" \\
+          "$POSTGRES_HOST_PORT" \\
+          "$WEB_HOST_PORT" \\
+          "$MINIO_API_HOST_PORT" \\
+          "$MINIO_CONSOLE_HOST_PORT" \\
+          "$WEB_PORT" \\
+          "$HEALTHCHECK_PORT"
+        """,
+        env=env,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.splitlines() == [
+        "45000",
+        "45001",
+        "45002",
+        "45003",
+        "45004",
+        "45005",
+        "45006",
+    ]
+
+
 def test_worktree_env_load_keeps_explicit_port_overrides_with_conductor_port() -> None:
     env = _base_env()
     env["CONDUCTOR_PORT"] = "45000"

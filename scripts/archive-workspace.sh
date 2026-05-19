@@ -17,6 +17,15 @@ EOF
 dry_run=0
 skip_docker=0
 
+normalize_decimal() {
+  local value
+  value=$(printf '%s' "$1" | sed 's/^0*//')
+  if [ -z "$value" ]; then
+    value=0
+  fi
+  printf '%s' "$value"
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -n|--dry-run)
@@ -309,7 +318,8 @@ signal_processes() {
 
 echo "Archiving workspace: $workspace"
 if [[ "${CONDUCTOR_PORT:-}" =~ ^[0-9]+$ ]]; then
-  echo "Conductor port range: ${CONDUCTOR_PORT}..$((CONDUCTOR_PORT + 9))"
+  conductor_port_base=$(normalize_decimal "$CONDUCTOR_PORT")
+  echo "Conductor port range: ${conductor_port_base}..$((conductor_port_base + 9))"
 fi
 
 discover_pids >"$pid_file"

@@ -87,17 +87,26 @@ worktree_env_resolve_shell_or_default() {
   printf '%s' "$default_value"
 }
 
+worktree_env_decimal_value() {
+  decimal_value=$(printf '%s' "$1" | sed 's/^0*//')
+  if [ -z "$decimal_value" ]; then
+    decimal_value=0
+  fi
+  printf '%s' "$decimal_value"
+}
+
 worktree_env_resolve_conductor_port_base() {
   [ -n "${CONDUCTOR_PORT-}" ] || return 1
 
   worktree_env_validate_port_number "$CONDUCTOR_PORT" "CONDUCTOR_PORT" || return 2
+  conductor_port_base=$(worktree_env_decimal_value "$CONDUCTOR_PORT")
 
-  if [ "$CONDUCTOR_PORT" -gt 65526 ]; then
+  if [ "$conductor_port_base" -gt 65526 ]; then
     echo "CONDUCTOR_PORT must leave room for a 10-port range, got '$CONDUCTOR_PORT'." >&2
     return 2
   fi
 
-  printf '%s' "$CONDUCTOR_PORT"
+  printf '%s' "$conductor_port_base"
 }
 
 worktree_env_validate_port_number() {
@@ -111,7 +120,8 @@ worktree_env_validate_port_number() {
       ;;
   esac
 
-  if [ "$port_value" -lt 1 ] || [ "$port_value" -gt 65535 ]; then
+  port_number=$(worktree_env_decimal_value "$port_value")
+  if [ "$port_number" -lt 1 ] || [ "$port_number" -gt 65535 ]; then
     echo "$port_label must be between 1 and 65535, got '$port_value'." >&2
     return 1
   fi
