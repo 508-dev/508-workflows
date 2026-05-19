@@ -1,35 +1,4 @@
 services:
-  redis:
-    image: redis:7-alpine
-    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
-    restart: unless-stopped
-    volumes:
-      - redis-data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-
-  postgres:
-    image: postgres:17-alpine
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-workflows}
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-    restart: unless-stopped
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-workflows}",
-        ]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-
   minio:
     image: cgr.dev/chainguard/minio
     command: ["server", "/data", "--console-address", ":9001"]
@@ -64,9 +33,10 @@ services:
       context: .
       dockerfile: apps/discord_bot/Dockerfile
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
       REDIS_QUEUE_NAME: ${REDIS_QUEUE_NAME:-jobs.default}
       BACKEND_API_BASE_URL: http://web:8090
       AUDIT_API_BASE_URL: ""
@@ -74,9 +44,6 @@ services:
     networks:
       - default
       - infra
-    depends_on:
-      redis:
-        condition: service_healthy
 
   web:
     build:
@@ -84,14 +51,12 @@ services:
       dockerfile: apps/api/Dockerfile
     command: ["uv", "run", "--package", "api", "backend-api"]
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
       REDIS_QUEUE_NAME: ${REDIS_QUEUE_NAME:-jobs.default}
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-workflows}
-      POSTGRES_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-workflows}
+      POSTGRES_URL: ${POSTGRES_URL:?POSTGRES_URL is required}
       JOB_MAX_ATTEMPTS: ${JOB_MAX_ATTEMPTS:-8}
       JOB_RETRY_BASE_SECONDS: ${JOB_RETRY_BASE_SECONDS:-5}
       JOB_RETRY_MAX_SECONDS: ${JOB_RETRY_MAX_SECONDS:-300}
@@ -110,10 +75,6 @@ services:
       - default
       - infra
     depends_on:
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
       minio-init:
         condition: service_completed_successfully
 
@@ -128,16 +89,14 @@ services:
       --threads ${WORKER_THREADS:-8}
       -Q ${WORKER_QUEUE_NAMES:-jobs.default}
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
       REDIS_QUEUE_NAME: ${REDIS_QUEUE_NAME:-jobs.default}
       WORKER_API_BASE_URL: http://web:8090
       WORKER_QUEUE_NAMES: ${WORKER_QUEUE_NAMES:-jobs.default}
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-workflows}
-      POSTGRES_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-workflows}
+      POSTGRES_URL: ${POSTGRES_URL:?POSTGRES_URL is required}
       JOB_MAX_ATTEMPTS: ${JOB_MAX_ATTEMPTS:-8}
       JOB_RETRY_BASE_SECONDS: ${JOB_RETRY_BASE_SECONDS:-5}
       JOB_RETRY_MAX_SECONDS: ${JOB_RETRY_MAX_SECONDS:-300}
@@ -153,16 +112,10 @@ services:
     depends_on:
       web:
         condition: service_started
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
       minio-init:
         condition: service_completed_successfully
 
 volumes:
-  redis-data:
-  postgres-data:
   minio-data:
 
 networks:

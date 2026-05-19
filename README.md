@@ -18,8 +18,8 @@ This repository follows a service-oriented monorepo layout:
 ├── packages/
 │   └── shared/
 │       └── src/five08/      # Shared settings, queue helpers, shared clients
-├── compose.yaml            # canonical Coolify/base container stack
-├── compose.local.yaml      # local infra host port publishing override
+├── compose.yaml            # canonical Coolify/base app stack
+├── compose.local.yaml      # local Redis/Postgres and host port overlay
 ├── docker-compose.yml      # compatibility wrapper including compose.yaml
 ├── tests/                  # Unit and integration tests
 └── pyproject.toml          # uv workspace root
@@ -30,8 +30,8 @@ This repository follows a service-oriented monorepo layout:
 - `discord_bot`: Discord gateway process.
 - `web`: FastAPI dashboard + ingest service that validates and enqueues jobs.
 - `worker`: Dramatiq worker that executes jobs from Redis queue.
-- `redis`: queue transport between API and worker.
-- `postgres`: job state persistence, retries, idempotency.
+- `redis`: queue transport between API and worker; managed by Coolify in production and provided by the local overlay for development.
+- `postgres`: job state persistence, retries, idempotency; managed by Coolify in production and provided by the local overlay for development.
 - `minio`: internal S3-compatible storage transport.
 
 Migrations:
@@ -150,7 +150,7 @@ uv run --package five08 crmctl batch-update --where timezone__is_null=true --whe
 
 `./scripts/dev.sh` exports deterministic per-worktree localhost ports and
 service URLs so the apps can run on the host without manual overrides. Use
-the lower-level Compose wrapper when you want full containerized parity.
+the lower-level Compose wrapper when you want a full local container stack.
 
 For local full-container runs, including deterministic localhost ports:
 
@@ -158,14 +158,15 @@ For local full-container runs, including deterministic localhost ports:
 ./scripts/docker-compose.sh up --build
 ```
 
-Coolify should use `/compose.yaml` as the base Compose file. A small
-`docker-compose.yml` compatibility wrapper includes it for tools still configured
-to read the older filename. The `web` service publishes container port `8090`
-to `${WEB_HOST_BIND:-127.0.0.1}:${WEB_HOST_PORT:-8090}`
-so a host-side Cloudflare Tunnel can target the dashboard/API at localhost.
-The base file does not publish Redis, Postgres, or MinIO host ports. The app
-services also attach to the shared infra network named by `INFRA_DOCKER_NETWORK`
-so they can reach
+Coolify should use `/compose.yaml` as the base Compose file and provide managed
+`REDIS_URL` and `POSTGRES_URL` runtime variables. A small `docker-compose.yml`
+compatibility wrapper includes it for tools still configured to read the older
+filename. Local full-container runs should use `./scripts/docker-compose.sh`,
+which loads `compose.yaml` plus `compose.local.yaml` for Redis/Postgres and host
+port publishing.
+The base file does not define local Redis/Postgres containers or publish MinIO
+host ports. The app services also attach to the shared infra network named by
+`INFRA_DOCKER_NETWORK` so they can reach
 Portainer-managed Bifrost and Langfuse by Docker DNS. The network is declared
 as external, so pre-create it before running Compose if it does not already
 exist.
@@ -216,7 +217,7 @@ Use `.env.example` as the source of truth for defaults.
 
 ### Queue + Job Runtime
 
-- `Optional`: `REDIS_URL` (default: `redis://127.0.0.1:6379/0`; `./scripts/dev.sh` overrides it to a deterministic per-worktree localhost port, Compose injects `redis://redis:6379/0`)
+- `Optional`: `REDIS_URL` (default: `redis://127.0.0.1:6379/0`; `./scripts/dev.sh` overrides it to a deterministic per-worktree localhost port, the local Compose wrapper injects `redis://redis:6379/0`, and Coolify should provide the managed Redis URL)
 - `Optional`: `REDIS_QUEUE_NAME` (default: `jobs.default`)
 - `Optional`: `REDIS_KEY_PREFIX` (default: `jobs`)
 - `Optional`: `REDIS_HOST_BIND` (default: `127.0.0.1`)
@@ -230,7 +231,7 @@ Use `.env.example` as the source of truth for defaults.
 
 ### Postgres + Compose Exposure
 
-- `Optional`: `POSTGRES_URL` (default: `postgresql://postgres:postgres@127.0.0.1:5432/workflows`; `./scripts/dev.sh` overrides it to a deterministic per-worktree localhost port, Compose injects a Docker-network URL)
+- `Optional`: `POSTGRES_URL` (default: `postgresql://postgres:postgres@127.0.0.1:5432/workflows`; `./scripts/dev.sh` overrides it to a deterministic per-worktree localhost port, the local Compose wrapper injects a Docker-network URL, and Coolify should provide the managed Postgres URL)
 - `Optional` (Compose DB container): `POSTGRES_DB` (default: `workflows`)
 - `Optional` (Compose DB container): `POSTGRES_USER` (default: `postgres`)
 - `Optional` (Compose DB container): `POSTGRES_PASSWORD` (default: `postgres`)

@@ -83,9 +83,9 @@ uv run --package five08 crmctl repl
 For day-to-day development, prefer `./scripts/dev.sh` plus host-run app
 services. That entrypoint exports deterministic per-worktree localhost ports
 and service URLs so the apps work without manual overrides. Use the Compose
-wrapper when you need full container parity, including Coolify-style runs.
+wrapper when you need a full local container stack.
 
-Start full stack (discord_bot + api + worker + redis + postgres + minio):
+Start the full local stack (discord_bot + web + worker + redis + postgres + minio):
 
 ```bash
 ./scripts/docker-compose.sh up --build
@@ -108,6 +108,9 @@ Show the deterministic host ports assigned to the current worktree:
 
 Set `*_HOST_PORT` or `COMPOSE_PROJECT_NAME` in `.env` or the invoking shell if you
 need fixed values; otherwise the wrapper computes deterministic per-worktree ones.
+The wrapper loads `compose.yaml` plus `compose.local.yaml`. Coolify should deploy
+`compose.yaml` by itself and provide managed `REDIS_URL` and `POSTGRES_URL`
+runtime variables.
 
 ## Testing and Quality
 
@@ -192,7 +195,7 @@ contact.save()
 
 Use `.env.example` as source of truth. Key categories:
 
-- Shared queue/runtime: `REDIS_URL`, `REDIS_QUEUE_NAME`, `POSTGRES_URL`, `JOB_MAX_ATTEMPTS`, `JOB_RETRY_BASE_SECONDS`, `JOB_RETRY_MAX_SECONDS`, `LOG_LEVEL`, webhook settings. Local defaults target host-run services; `docker-compose.yml` injects Docker-network URLs for containerized runs.
+- Shared queue/runtime: `REDIS_URL`, `REDIS_QUEUE_NAME`, `POSTGRES_URL`, `JOB_MAX_ATTEMPTS`, `JOB_RETRY_BASE_SECONDS`, `JOB_RETRY_MAX_SECONDS`, `LOG_LEVEL`, webhook settings. Local defaults target host-run services; `compose.local.yaml` injects Docker-network Redis/Postgres URLs for local containerized runs.
 - Bot credentials/integrations: Discord, email, Espo, Kimai
 - Discord CRM audit writer: `AUDIT_API_BASE_URL`, `AUDIT_API_TIMEOUT_SECONDS` (plus shared `API_SHARED_SECRET`)
 - Worker controls: `WORKER_NAME`, `WORKER_QUEUE_NAMES`, `WORKER_BURST`
