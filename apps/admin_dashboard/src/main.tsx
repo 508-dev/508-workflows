@@ -5,6 +5,7 @@ import {
   ClipboardList,
   ExternalLink,
   FileClock,
+  FolderKanban,
   LogOut,
   RefreshCw,
   Search,
@@ -44,7 +45,7 @@ import {
 import { cn } from "@/lib/utils"
 import "./index.css"
 
-type View = "people" | "gigs" | "onboarding" | "jobs" | "agent" | "audit"
+type View = "people" | "gigs" | "projects" | "onboarding" | "jobs" | "agent" | "audit"
 type SortDirection = "asc" | "desc"
 
 type User = {
@@ -164,6 +165,91 @@ type DashboardNotificationsResponse = {
   notifications: DashboardNotification[]
 }
 
+type ProjectRosterMember = {
+  source?: string
+  source_user_id?: string
+  email?: string
+  full_name?: string
+  roster_kind?: string
+  crm_contact_id?: string
+  erpnext_user_url?: string
+  supplier_erpnext_url?: string
+  last_seen_at?: string
+}
+
+type HistoricalPersonCandidate = {
+  candidate_id: string
+  label?: string
+  full_name?: string
+  email?: string
+  crm_contact_id?: string
+  erpnext_user_id?: string
+  supplier_erpnext_id?: string
+  supplier_name?: string
+  sources?: string[]
+}
+
+type Project = {
+  id: string
+  erpnext_project_id?: string
+  erpnext_project_url?: string
+  display_name: string
+  customer?: string
+  customer_erpnext_url?: string
+  source_status?: string
+  project_type?: string
+  priority?: string
+  percent_complete?: number | null
+  expected_start_date?: string
+  expected_end_date?: string
+  actual_start_date?: string
+  actual_end_date?: string
+  source_modified_at?: string
+  last_synced_at?: string
+  linked_engagement_count?: number
+  roster_count?: number
+  roster_members?: ProjectRosterMember[]
+}
+
+type ProjectsResponse = {
+  projects: Project[]
+  summary: {
+    project_count?: number
+    open_project_count?: number
+    projects_with_roster?: number
+    roster_member_count?: number
+    last_synced_at?: string
+  }
+}
+
+type WikiMatchPreview = {
+  document?: {
+    title?: string
+    updatedAt?: string
+    urlId?: string
+  }
+  wiki_rows?: Array<Record<string, string>>
+  matches?: Array<{
+    project?: Project
+    best_match?: {
+      score?: number
+      confidence?: string
+      row?: Record<string, string> | null
+    } | null
+    fuzzy_match?: {
+      score?: number
+      confidence?: string
+      row?: Record<string, string> | null
+    } | null
+    manual_match?: {
+      match_status?: string
+      wiki_row_key?: string
+      wiki_row_label?: string
+      wiki_row_section?: string
+    } | null
+  }>
+}
+
 type AuditEvent = {
   id?: string
   occurred_at?: string
@@ -190,6 +276,7 @@ type AgentReport = {
 const routes: Record<View, string> = {
   people: "/dashboard/people",
   gigs: "/dashboard/gigs",
+  projects: "/dashboard/projects",
   onboarding: "/dashboard/onboarding",
   jobs: "/dashboard/jobs",
   agent: "/dashboard/agent",
@@ -199,6 +286,7 @@ const routes: Record<View, string> = {
 const routePermissions: Record<View, string> = {
   people: "people:read",
   gigs: "gigs:read",
+  projects: "projects:read",
   onboarding: "onboarding:read",
   jobs: "jobs:read",
   agent: "audit:read",
@@ -247,6 +335,18 @@ const peopleFilterDefinitions = {
 type PeopleFilterKey = keyof typeof peopleFilterDefinitions
 type FilterState = Partial<Record<PeopleFilterKey, string>>
 
+class ApiRequestError extends Error {
+  status: number
+  payload: unknown
+
+  constructor(message: string, status: number, payload: unknown) {
+    super(message)
+    this.name = "ApiRequestError"
+    this.status = status
+    this.payload = payload
+  }
+}
+
 function rawViewFromPath() {
   return window.location.pathname.split("/").filter(Boolean)[1] || ""
 }
@@ -256,9 +356,9 @@ function viewFromPath(): View {
   return Object.hasOwn(routes, view) ? (view as View) : "people"
 }
 
-function detailIdFromPath() {
+function detailIdFromPath(expectedView: "gigs" | "projects" = "gigs") {
   const [, view, detailId] = window.location.pathname.split("/").filter(Boolean)
-  if (view !== "gigs" || !detailId) return ""
+  if (view !== expectedView || !detailId) return ""
   try {
     return decodeURIComponent(detailId)
   } catch {
@@ -281,24 +381,40 @@ async function requestJson<T>(url: string, options: RequestInit = {}): Promise<T
   }
   if (!response.ok) {
     let detail: unknown = response.statusText
+    let payload: unknown = null
     try {
-      const payload = await response.json()
-      detail = payload.detail || payload.error || detail
+      payload = await response.json()
+      if (payload && typeof payload === "object") {
+        const record = payload as Record<string, unknown>
+        detail = record.detail || record.error || detail
+      }
     } catch {
       detail = response.statusText
     }
-    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail))
+    throw new ApiRequestError(
+      typeof detail === "string" ? detail : JSON.stringify(detail),
+      response.status,
+      payload,
+    )
   }
   return response.json() as Promise<T>
 }
 
-function sortValue(scope: View, item: Job | Person | Gig | AuditEvent, key: string) {
+function sortValue(scope: View, item: Job | Person | Gig | Project | AuditEvent, key: string) {
   if (scope === "gigs") {
     const gig = item as Gig
     if (key === "title") return gig.title || ""
     if (key === "status") return gig.status || ""
     if (key === "applications") return Number(gig.application_count || 0)
     if (key === "activity") return gigActivityTimestamp(gig)
+  }
+  if (scope === "projects") {
+    const project = item as Project
+    if (key === "display_name") return project.display_name || ""
+    if (key === "customer") return project.customer || ""
+    if (key === "status") return project.source_status || ""
+    if (key === "roster_count") return Number(project.roster_count || 0)
+    if (key === "modified") return project.source_modified_at || project.last_synced_at || ""
   }
   if (scope === "onboarding") {
     const person = item as Person
@@ -342,7 +458,7 @@ function sortValue(scope: View, item: Job | Person | Gig | AuditEvent, key: stri
   return (item as Record<string, unknown>)[key] ?? ""
 }
 
-function sortItems<T extends Job | Person | Gig | AuditEvent>(
+function sortItems<T extends Job | Person | Gig | Project | AuditEvent>(
   scope: View,
   items: T[],
   sort: { key: string; direction: SortDirection },
@@ -427,6 +543,7 @@ function Empty({ children, hidden }: { children: string; hidden: boolean }) {
 }
 
 function App() {
+  const initialProjectDetailId = detailIdFromPath("projects")
   const [user, setUser] = useState<User | null>(null)
   const [view, setViewState] = useState<View>(viewFromPath())
   const [toast, setToast] = useState<{ message: string; tone?: "ok" | "error" }>({
@@ -436,8 +553,12 @@ function App() {
   const [crmBaseUrl, setCrmBaseUrl] = useState("")
   const [jobs, setJobs] = useState<Job[]>([])
   const [gigs, setGigs] = useState<Gig[]>([])
+  const [projects, setProjects] = useState<Project[]>([])
+  const [projectsSummary, setProjectsSummary] = useState<ProjectsResponse["summary"]>({})
+  const [wikiMatches, setWikiMatches] = useState<WikiMatchPreview | null>(null)
   const [gigDetail, setGigDetail] = useState<Gig | null>(null)
   const [selectedGigId, setSelectedGigId] = useState(detailIdFromPath())
+  const [selectedProjectId, setSelectedProjectId] = useState(initialProjectDetailId)
   const [notifications, setNotifications] = useState<DashboardNotification[]>([])
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [people, setPeople] = useState<Person[]>([])
@@ -446,9 +567,15 @@ function App() {
   const [agentReport, setAgentReport] = useState<AgentReport | null>(null)
   const [jobDetail, setJobDetail] = useState<JobDetail | null>(null)
   const [loading, setLoading] = useState<Record<string, boolean>>({})
+  const [historicalPersonChoice, setHistoricalPersonChoice] = useState<{
+    projectId: string
+    person: string
+    candidates: HistoricalPersonCandidate[]
+  } | null>(null)
   const [sort, setSortState] = useState<Record<View, { key: string; direction: SortDirection }>>({
     onboarding: { key: "onboarding_state", direction: "asc" },
     gigs: { key: "activity", direction: "desc" },
+    projects: { key: "display_name", direction: "asc" },
     jobs: { key: "updated_at", direction: "desc" },
     people: { key: "name", direction: "asc" },
     agent: { key: "occurred_at", direction: "desc" },
@@ -460,6 +587,8 @@ function App() {
   const [jobType, setJobType] = useState("")
   const [gigStatus, setGigStatus] = useState("")
   const [gigLimit, setGigLimit] = useState(100)
+  const [projectQuery, setProjectQuery] = useState("")
+  const [projectStatus, setProjectStatus] = useState(initialProjectDetailId ? "" : "Open")
   const [staleRecruitingDays, setStaleRecruitingDays] = useState(7)
   const [peopleQuery, setPeopleQuery] = useState("")
   const [peopleMember, setPeopleMember] = useState("")
@@ -504,7 +633,9 @@ function App() {
       normalized = firstAllowedView()
     }
     if (normalized !== "gigs") setSelectedGigId("")
+    if (normalized !== "projects") setSelectedProjectId("")
     if (normalized === "gigs" && push) setSelectedGigId("")
+    if (normalized === "projects" && push) setSelectedProjectId("")
     setViewState(normalized)
     if (push) {
       window.history.pushState({ view: normalized }, "", routes[normalized])
@@ -554,6 +685,21 @@ function App() {
     window.history.replaceState({ view: "gigs" }, "", routes.gigs)
   }
 
+  function openProjectDetail(projectId: string) {
+    setSelectedProjectId(projectId)
+    setViewState("projects")
+    window.history.pushState(
+      { view: "projects", projectId },
+      "",
+      `/dashboard/projects/${encodeURIComponent(projectId)}`,
+    )
+  }
+
+  function closeProjectDetail() {
+    setSelectedProjectId("")
+    window.history.replaceState({ view: "projects" }, "", routes.projects)
+  }
+
   async function loadUser() {
     const payload = await requestJson<User>("/dashboard/api/me")
     setUser(payload)
@@ -574,6 +720,12 @@ function App() {
     const params = new URLSearchParams({ limit: String(gigLimit) })
     if (gigStatus) params.set("status", gigStatus)
     return `/dashboard/api/gigs?${params.toString()}`
+  }
+
+  function projectsUrl() {
+    const params = new URLSearchParams({ limit: "100", status: projectStatus })
+    if (projectQuery.trim()) params.set("query", projectQuery.trim())
+    return `/dashboard/api/projects?${params.toString()}`
   }
 
   async function loadJobs() {
@@ -601,6 +753,194 @@ function App() {
       showToast(error instanceof Error ? error.message : "Unable to load gigs", "error")
     } finally {
       setBusy("gigs", false)
+    }
+  }
+
+  async function loadProjects() {
+    setBusy("projects", true)
+    try {
+      const payload = await requestJson<ProjectsResponse>(projectsUrl())
+      setProjects(payload.projects || [])
+      setProjectsSummary(payload.summary || {})
+      showToast(
+        `Loaded ${(payload.projects || []).length} project${(payload.projects || []).length === 1 ? "" : "s"}`,
+        "ok",
+      )
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Unable to load projects", "error")
+    } finally {
+      setBusy("projects", false)
+    }
+  }
+
+  async function syncProjects() {
+    setBusy("syncProjects", true)
+    showToast("Queueing project sync")
+    try {
+      const payload = await requestJson<{ job_id: string }>("/dashboard/api/sync/projects", {
+        method: "POST",
+      })
+      showToast(`Queued project sync ${payload.job_id}`, "ok")
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Unable to queue project sync", "error")
+    } finally {
+      setBusy("syncProjects", false)
+    }
+  }
+
+  async function updateProjectStatus(projectId: string, nextStatus: string) {
+    setBusy(`project:${projectId}:status`, true)
+    try {
+      const payload = await requestJson<{ project: Project }>(
+        `/dashboard/api/projects/${encodeURIComponent(projectId)}/status`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: nextStatus }),
+        },
+      )
+      setProjects((current) =>
+        current.map((project) => (project.id === projectId ? payload.project : project)),
+      )
+      showToast("Updated project status", "ok")
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Unable to update project", "error")
+    } finally {
+      setBusy(`project:${projectId}:status`, false)
+    }
+  }
+
+  async function bulkUpdateProjects(
+    projectIds: string[],
+    updates: { status?: string; project_type?: string },
+  ) {
+    if (projectIds.length === 0) return false
+    setBusy("projectsBulkUpdate", true)
+    try {
+      const payload = await requestJson<{
+        projects: Project[]
+        failures: Array<{ error?: string }>
+      }>("/dashboard/api/projects/bulk", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ project_ids: projectIds, ...updates }),
+      })
+      const updatedProjects = payload.projects || []
+      setProjects((current) =>
+        current.map((project) => updatedProjects.find((item) => item.id === project.id) || project),
+      )
+      const failures = payload.failures || []
+      showToast(
+        failures.length
+          ? `Updated ${updatedProjects.length}; ${failures.length} failed`
+          : `Updated ${updatedProjects.length} project${updatedProjects.length === 1 ? "" : "s"}`,
+        failures.length ? "error" : "ok",
+      )
+      return failures.length === 0
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Unable to bulk update projects", "error")
+      return false
+    } finally {
+      setBusy("projectsBulkUpdate", false)
+    }
+  }
+
+  async function addProjectUser(projectId: string, userName: string) {
+    const normalizedUser = userName.trim()
+    if (!normalizedUser) return false
+    setBusy(`project:${projectId}:user`, true)
+    try {
+      const payload = await requestJson<{ project: Project }>(
+        `/dashboard/api/projects/${encodeURIComponent(projectId)}/users`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ user: normalizedUser }),
+        },
+      )
+      setProjects((current) =>
+        current.map((project) => (project.id === projectId ? payload.project : project)),
+      )
+      showToast("Added project user", "ok")
+      return true
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Unable to add project user", "error")
+      return false
+    } finally {
+      setBusy(`project:${projectId}:user`, false)
+    }
+  }
+
+  async function addHistoricalProjectMember(
+    projectId: string,
+    person: string,
+    candidateId?: string,
+  ) {
+    const normalizedPerson = person.trim()
+    if (!normalizedPerson) return false
+    setBusy(`project:${projectId}:historical`, true)
+    try {
+      const payload = await requestJson<{ project: Project }>(
+        `/dashboard/api/projects/${encodeURIComponent(projectId)}/historical-members`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ person: normalizedPerson, candidate_id: candidateId }),
+        },
+      )
+      setProjects((current) =>
+        current.map((project) => (project.id === projectId ? payload.project : project)),
+      )
+      setHistoricalPersonChoice(null)
+      showToast("Added historical project member", "ok")
+      return true
+    } catch (error) {
+      if (error instanceof ApiRequestError && error.status === 409) {
+        const payload = error.payload as { candidates?: HistoricalPersonCandidate[] } | null
+        const candidates = payload?.candidates || []
+        if (candidates.length > 0) {
+          setHistoricalPersonChoice({ projectId, person: normalizedPerson, candidates })
+          showToast("Choose the matching person record", "error")
+          return false
+        }
+      }
+      showToast(error instanceof Error ? error.message : "Unable to add historical member", "error")
+      return false
+    } finally {
+      setBusy(`project:${projectId}:historical`, false)
+    }
+  }
+
+  async function updateProjectWikiMatch(projectId: string, status: string, rowKey?: string) {
+    setBusy(`project:${projectId}:wiki`, true)
+    try {
+      await requestJson<{ manual_match: object }>(
+        `/dashboard/api/projects/${encodeURIComponent(projectId)}/wiki-match`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status, row_key: rowKey }),
+        },
+      )
+      showToast(status === "no_row" ? "Marked as no wiki row" : "Confirmed wiki match", "ok")
+      await loadWikiMatches()
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Unable to save wiki match", "error")
+    } finally {
+      setBusy(`project:${projectId}:wiki`, false)
+    }
+  }
+
+  async function loadWikiMatches() {
+    setBusy("wikiMatches", true)
+    try {
+      const payload = await requestJson<WikiMatchPreview>("/dashboard/api/projects/wiki-matches")
+      setWikiMatches(payload)
+      showToast("Loaded wiki match preview", "ok")
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Unable to load wiki matches", "error")
+    } finally {
+      setBusy("wikiMatches", false)
     }
   }
 
@@ -882,6 +1222,7 @@ function App() {
               nextPermissions.includes(routePermissions[candidate]),
             ) || "people"
         setSelectedGigId(nextView === "gigs" ? detailIdFromPath() : "")
+        setSelectedProjectId(nextView === "projects" ? detailIdFromPath("projects") : "")
         setViewState(nextView)
         if (!Object.hasOwn(routes, rawViewFromPath()) || nextView !== currentView) {
           window.history.replaceState({ view: nextView }, "", routes[nextView])
@@ -895,6 +1236,7 @@ function App() {
   useEffect(() => {
     const onPopState = () => {
       setSelectedGigId(detailIdFromPath())
+      setSelectedProjectId(detailIdFromPath("projects"))
       navigateRef.current(viewFromPath(), false)
     }
     window.addEventListener("popstate", onPopState)
@@ -913,6 +1255,7 @@ function App() {
     if (can("gigs:read")) void loadNotifications()
     if (view === "people") void loadPeople()
     if (view === "gigs") void loadGigs()
+    if (view === "projects") void loadProjects()
     if (view === "onboarding") void loadOnboarding()
     if (view === "jobs") void loadJobs()
     if (view === "agent") void loadAgentReport()
@@ -925,6 +1268,7 @@ function App() {
     if (can("gigs:read")) void loadNotifications()
     if (view === "people") void loadPeople()
     if (view === "gigs") void loadGigs()
+    if (view === "projects") void loadProjects()
     if (view === "onboarding") void loadOnboarding()
     if (view === "jobs") void loadJobs()
     if (view === "agent") void loadAgentReport()
@@ -940,6 +1284,11 @@ function App() {
   useEffect(() => {
     if (view === "gigs" && permissions.length > 0) void loadGigs()
   }, [gigStatus, gigLimit])
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: projects reload intentionally follows status changes only while projects is active.
+  useEffect(() => {
+    if (view === "projects" && permissions.length > 0) void loadProjects()
+  }, [projectStatus])
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: detail reload intentionally follows the route-selected gig id.
   useEffect(() => {
@@ -978,10 +1327,18 @@ function App() {
     [onboarding, sort.onboarding],
   )
   const sortedGigs = useMemo(() => sortItems("gigs", gigs, sort.gigs), [gigs, sort.gigs])
+  const sortedProjects = useMemo(
+    () => sortItems("projects", projects, sort.projects),
+    [projects, sort.projects],
+  )
   const selectedGig = useMemo(() => {
     if (gigDetail?.id === selectedGigId) return gigDetail
     return sortedGigs.find((gig) => gig.id === selectedGigId) || null
   }, [gigDetail, selectedGigId, sortedGigs])
+  const selectedProject = useMemo(
+    () => sortedProjects.find((project) => project.id === selectedProjectId) || null,
+    [selectedProjectId, sortedProjects],
+  )
   const sortedAudit = useMemo(
     () => sortItems("audit", auditEvents, sort.audit),
     [auditEvents, sort.audit],
@@ -1106,6 +1463,23 @@ function App() {
         onOpenNotification={openNotification}
       />
       <DashboardToast toast={toast} />
+      <HistoricalPersonChoiceModal
+        choice={historicalPersonChoice}
+        loading={Boolean(
+          historicalPersonChoice &&
+            loading[`project:${historicalPersonChoice.projectId}:historical`],
+        )}
+        crmContactUrl={crmContactUrl}
+        onClose={() => setHistoricalPersonChoice(null)}
+        onChoose={(candidateId) => {
+          if (!historicalPersonChoice) return
+          void addHistoricalProjectMember(
+            historicalPersonChoice.projectId,
+            historicalPersonChoice.person,
+            candidateId,
+          )
+        }}
+      />
 
       <main className="mx-auto grid max-w-7xl grid-cols-1 gap-5 px-5 py-5 md:grid-cols-[190px_minmax(0,1fr)]">
         <nav
@@ -1116,6 +1490,7 @@ function App() {
             [
               ["people", "People", Users],
               ["gigs", "Gigs", BriefcaseBusiness],
+              ["projects", "Projects", FolderKanban],
               ["onboarding", "Onboarding", ClipboardList],
               ["jobs", "Jobs", BriefcaseBusiness],
               ["agent", "Agent", ShieldCheck],
@@ -1207,6 +1582,36 @@ function App() {
               onCloseGig={closeGigDetail}
               onUpdateStatus={updateGigStatus}
               onUpdateApplicationStatus={updateGigApplicationStatus}
+            />
+          ) : null}
+
+          {view === "projects" ? (
+            <ProjectsView
+              projects={sortedProjects}
+              selectedProject={selectedProject}
+              selectedProjectId={selectedProjectId}
+              summary={projectsSummary}
+              wikiMatches={wikiMatches}
+              sort={sort.projects}
+              loading={loading}
+              query={projectQuery}
+              status={projectStatus}
+              canSync={can("projects:sync")}
+              canWrite={can("projects:write")}
+              crmContactUrl={crmContactUrl}
+              setQuery={setProjectQuery}
+              setStatus={setProjectStatus}
+              onSearch={loadProjects}
+              onSync={syncProjects}
+              onUpdateStatus={updateProjectStatus}
+              onBulkUpdate={bulkUpdateProjects}
+              onAddUser={addProjectUser}
+              onAddHistoricalMember={addHistoricalProjectMember}
+              onUpdateWikiMatch={updateProjectWikiMatch}
+              onWikiMatches={loadWikiMatches}
+              onOpenProject={openProjectDetail}
+              onCloseProject={closeProjectDetail}
+              onSort={(key) => handleSort("projects", key)}
             />
           ) : null}
 
@@ -1371,6 +1776,99 @@ function NotificationDrawer({
   )
 }
 
+function HistoricalPersonChoiceModal({
+  choice,
+  loading,
+  crmContactUrl,
+  onClose,
+  onChoose,
+}: {
+  choice: {
+    projectId: string
+    person: string
+    candidates: HistoricalPersonCandidate[]
+  } | null
+  loading: boolean
+  crmContactUrl: (contactId?: string) => string
+  onClose: () => void
+  onChoose: (candidateId: string) => void
+}) {
+  if (!choice) return null
+  return (
+    <div
+      className="fixed inset-0 z-50 grid place-items-center p-4"
+      aria-labelledby="historicalPersonChoiceTitle"
+      aria-modal="true"
+      role="dialog"
+    >
+      <button
+        type="button"
+        className="absolute inset-0 cursor-default bg-black/45"
+        aria-label="Close person selection"
+        onClick={onClose}
+      />
+      <div className="relative grid w-full max-w-2xl gap-4 rounded-md border bg-background p-5 shadow-2xl">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <strong id="historicalPersonChoiceTitle" className="block text-base">
+              Choose person record
+            </strong>
+            <span className="text-sm text-muted-foreground">{choice.person}</span>
+          </div>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label="Close person selection"
+            onClick={onClose}
+          >
+            <X />
+          </Button>
+        </div>
+        <div className="grid gap-2">
+          {choice.candidates.map((candidate) => (
+            <div
+              key={candidate.candidate_id}
+              className="grid gap-3 rounded-md border p-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-center"
+            >
+              <div className="min-w-0">
+                <strong className="block truncate">
+                  {candidate.label || candidate.full_name || candidate.email || "Person"}
+                </strong>
+                <div className="flex flex-wrap gap-x-3 gap-y-1 text-sm text-muted-foreground">
+                  {candidate.email ? <span>{candidate.email}</span> : null}
+                  {candidate.sources?.length ? <span>{candidate.sources.join(", ")}</span> : null}
+                  {candidate.erpnext_user_id ? <span>ERP {candidate.erpnext_user_id}</span> : null}
+                  {candidate.supplier_erpnext_id ? (
+                    <span>Supplier {candidate.supplier_erpnext_id}</span>
+                  ) : null}
+                  {candidate.crm_contact_id && crmContactUrl(candidate.crm_contact_id) ? (
+                    <a
+                      className="font-semibold text-primary underline-offset-4 hover:underline"
+                      href={crmContactUrl(candidate.crm_contact_id)}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      CRM
+                    </a>
+                  ) : null}
+                </div>
+              </div>
+              <Button
+                type="button"
+                disabled={loading}
+                onClick={() => onChoose(candidate.candidate_id)}
+              >
+                Select
+              </Button>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function DashboardToast({ toast }: { toast: { message: string; tone?: "ok" | "error" } }) {
   if (!toast.message) return null
   return (
@@ -1458,6 +1956,870 @@ function staleRecruitingAge(gig: Gig, staleDays: number) {
   const age = daysSince(latestActivity)
   if (age === null || age < staleDays) return null
   return age
+}
+
+function projectStatusTone(status?: string): Tone {
+  const normalized = String(status || "").toLowerCase()
+  if (normalized === "open") return "queued"
+  if (["completed", "closed"].includes(normalized)) return "succeeded"
+  if (["cancelled", "canceled"].includes(normalized)) return "failed"
+  return "neutral"
+}
+
+function formatProjectDate(value?: string | null) {
+  const text = String(value || "").trim()
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text)
+  if (!match) return formatDate(value)
+  const [, year, month, day] = match
+  return new Date(Number(year), Number(month) - 1, Number(day)).toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  })
+}
+
+function memberLabel(member: ProjectRosterMember) {
+  return member.full_name || member.email || member.source_user_id || "Unknown"
+}
+
+function ProjectsView(props: {
+  projects: Project[]
+  selectedProject: Project | null
+  selectedProjectId: string
+  summary: ProjectsResponse["summary"]
+  wikiMatches: WikiMatchPreview | null
+  sort: { key: string; direction: SortDirection }
+  loading: Record<string, boolean>
+  query: string
+  status: string
+  canSync: boolean
+  canWrite: boolean
+  crmContactUrl: (contactId?: string) => string
+  setQuery: (value: string) => void
+  setStatus: (value: string) => void
+  onSearch: () => void
+  onSync: () => void
+  onUpdateStatus: (projectId: string, status: string) => void
+  onBulkUpdate: (
+    projectIds: string[],
+    updates: { status?: string; project_type?: string },
+  ) => Promise<boolean>
+  onAddUser: (projectId: string, user: string) => Promise<boolean>
+  onAddHistoricalMember: (
+    projectId: string,
+    person: string,
+    candidateId?: string,
+  ) => Promise<boolean>
+  onUpdateWikiMatch: (projectId: string, status: string, rowKey?: string) => Promise<void>
+  onWikiMatches: () => void
+  onOpenProject: (projectId: string) => void
+  onCloseProject: () => void
+  onSort: (key: string) => void
+}) {
+  const matchRows = props.wikiMatches?.matches || []
+  const [selectedProjectIds, setSelectedProjectIds] = useState<string[]>([])
+  const [bulkStatus, setBulkStatus] = useState("")
+  const [bulkProjectType, setBulkProjectType] = useState("")
+  const [bulkModalOpen, setBulkModalOpen] = useState(false)
+  const visibleProjectIds = useMemo(
+    () => props.projects.map((project) => project.id),
+    [props.projects],
+  )
+  const visibleProjectIdSet = useMemo(() => new Set(visibleProjectIds), [visibleProjectIds])
+  const selectedVisibleProjectIds = selectedProjectIds.filter((projectId) =>
+    visibleProjectIdSet.has(projectId),
+  )
+  const allVisibleSelected =
+    props.projects.length > 0 && selectedVisibleProjectIds.length === props.projects.length
+
+  useEffect(() => {
+    setSelectedProjectIds((current) =>
+      current.filter((projectId) => visibleProjectIdSet.has(projectId)),
+    )
+  }, [visibleProjectIdSet])
+
+  function toggleProjectSelection(projectId: string, selected: boolean) {
+    setSelectedProjectIds((current) =>
+      selected
+        ? Array.from(new Set([...current, projectId]))
+        : current.filter((candidate) => candidate !== projectId),
+    )
+  }
+
+  async function applyBulkUpdate() {
+    const updates: { status?: string; project_type?: string } = {}
+    if (bulkStatus) updates.status = bulkStatus
+    if (bulkProjectType) updates.project_type = bulkProjectType
+    const success = await props.onBulkUpdate(selectedVisibleProjectIds, updates)
+    if (success) {
+      setSelectedProjectIds([])
+      setBulkStatus("")
+      setBulkProjectType("")
+      setBulkModalOpen(false)
+    }
+  }
+
+  const filterBar = (
+    <Card className="grid gap-3 p-4 md:grid-cols-[minmax(0,1fr)_180px_auto_auto_auto] md:items-end">
+      <Label>
+        Search projects
+        <Input
+          id="projectQuery"
+          value={props.query}
+          autoComplete="off"
+          placeholder="Project, customer, ERP id"
+          onChange={(event) => props.setQuery(event.target.value)}
+          onKeyDown={(event) => event.key === "Enter" && props.onSearch()}
+        />
+      </Label>
+      <Label>
+        Status
+        <Select
+          id="projectStatus"
+          value={props.status}
+          onChange={(event) => props.setStatus(event.target.value)}
+        >
+          <option value="Open">Open</option>
+          <option value="">Any status</option>
+        </Select>
+      </Label>
+      <Button
+        id="refreshProjects"
+        type="button"
+        onClick={props.onSearch}
+        disabled={props.loading.projects}
+      >
+        <RefreshCw />
+        Refresh
+      </Button>
+      {props.canSync ? (
+        <Button
+          id="syncProjects"
+          type="button"
+          variant="outline"
+          onClick={props.onSync}
+          disabled={props.loading.syncProjects}
+        >
+          <RefreshCw />
+          Sync ERP
+        </Button>
+      ) : null}
+      <Button
+        id="wikiProjectMatches"
+        type="button"
+        variant="outline"
+        onClick={props.onWikiMatches}
+        disabled={props.loading.wikiMatches}
+      >
+        <Search />
+        Wiki match
+      </Button>
+    </Card>
+  )
+
+  if (props.selectedProjectId && !props.selectedProject && props.loading.projects) {
+    return (
+      <>
+        {filterBar}
+        <Card>
+          <CardHeader>
+            <CardTitle>Project detail</CardTitle>
+          </CardHeader>
+          <CardContent className="text-sm text-muted-foreground">Loading project.</CardContent>
+        </Card>
+      </>
+    )
+  }
+
+  if (props.selectedProjectId && !props.selectedProject) {
+    return (
+      <>
+        {filterBar}
+        <Card>
+          <CardHeader>
+            <CardTitle>Project detail</CardTitle>
+          </CardHeader>
+          <CardContent className="grid gap-3">
+            <p className="text-sm text-muted-foreground">
+              This project is not in the current result set. Clear filters or refresh the project
+              list.
+            </p>
+            <Button type="button" variant="outline" onClick={props.onCloseProject}>
+              <ArrowLeft />
+              Back to projects
+            </Button>
+          </CardContent>
+        </Card>
+      </>
+    )
+  }
+
+  if (props.selectedProject) {
+    return (
+      <>
+        {filterBar}
+        <ProjectDetailPage
+          project={props.selectedProject}
+          loading={props.loading}
+          canWrite={props.canWrite}
+          crmContactUrl={props.crmContactUrl}
+          onBack={props.onCloseProject}
+          onUpdateStatus={props.onUpdateStatus}
+          onAddUser={props.onAddUser}
+          onAddHistoricalMember={props.onAddHistoricalMember}
+        />
+      </>
+    )
+  }
+
+  return (
+    <>
+      {filterBar}
+
+      <section className="grid gap-3 md:grid-cols-2" aria-label="Project summary">
+        <Metric id="projectMetricOpen" label="Open" value={props.summary.open_project_count || 0} />
+        <Metric id="projectMetricTotal" label="Projects" value={props.summary.project_count || 0} />
+      </section>
+
+      {props.canWrite ? (
+        <Card className="flex flex-wrap items-center justify-between gap-3 p-4">
+          <div>
+            <span className="text-xs font-bold text-muted-foreground">Selected</span>
+            <strong className="block">{selectedVisibleProjectIds.length} project(s)</strong>
+          </div>
+          <Button
+            type="button"
+            disabled={selectedVisibleProjectIds.length === 0}
+            onClick={() => setBulkModalOpen(true)}
+          >
+            Bulk edit
+          </Button>
+        </Card>
+      ) : null}
+
+      {bulkModalOpen ? (
+        <div
+          className="fixed inset-0 z-50 grid place-items-center p-4"
+          aria-labelledby="bulkProjectEditTitle"
+          aria-modal="true"
+          role="dialog"
+        >
+          <button
+            type="button"
+            className="absolute inset-0 cursor-default bg-black/45"
+            aria-label="Close bulk project edit"
+            onClick={() => setBulkModalOpen(false)}
+          />
+          <div className="relative grid w-full max-w-lg gap-4 rounded-md border bg-background p-5 shadow-2xl">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <strong id="bulkProjectEditTitle" className="block text-base">
+                  Bulk edit projects
+                </strong>
+                <span className="text-sm text-muted-foreground">
+                  {selectedVisibleProjectIds.length} selected
+                </span>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label="Close bulk project edit"
+                onClick={() => setBulkModalOpen(false)}
+              >
+                <X />
+              </Button>
+            </div>
+            <div className="grid gap-3">
+              <strong className="text-sm">Changes</strong>
+              <Label>
+                Status
+                <Select value={bulkStatus} onChange={(event) => setBulkStatus(event.target.value)}>
+                  <option value="">No change</option>
+                  <option value="Open">Open</option>
+                  <option value="Completed">Completed</option>
+                  <option value="Cancelled">Cancelled</option>
+                </Select>
+              </Label>
+              <Label>
+                ERP Type
+                <Select
+                  value={bulkProjectType}
+                  onChange={(event) => setBulkProjectType(event.target.value)}
+                >
+                  <option value="">No change</option>
+                  <option value="Internal">Internal</option>
+                  <option value="External">External</option>
+                </Select>
+              </Label>
+            </div>
+            <div className="flex flex-wrap justify-end gap-2">
+              <Button type="button" variant="outline" onClick={() => setBulkModalOpen(false)}>
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                disabled={
+                  props.loading.projectsBulkUpdate ||
+                  selectedVisibleProjectIds.length === 0 ||
+                  (!bulkStatus && !bulkProjectType)
+                }
+                onClick={() => void applyBulkUpdate()}
+              >
+                Apply changes
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>ERP projects</CardTitle>
+          <span id="projectsStatus" className="text-sm text-muted-foreground">
+            {props.loading.projects
+              ? "Loading"
+              : `${props.projects.length} shown | synced ${formatDate(
+                  props.summary.last_synced_at,
+                )}`}
+          </span>
+        </CardHeader>
+        <Empty hidden={props.projects.length !== 0}>
+          No projects match this view. Sync ERP projects if the cache is empty.
+        </Empty>
+        <div className="overflow-x-auto">
+          <Table
+            id="projectsTable"
+            className={cn("min-w-[1100px]", props.projects.length === 0 && "hidden")}
+            aria-label="ERP projects"
+          >
+            <TableHeader>
+              <TableRow>
+                {props.canWrite ? (
+                  <TableHead className="w-[48px]">
+                    <input
+                      type="checkbox"
+                      aria-label="Select all visible projects"
+                      checked={allVisibleSelected}
+                      onChange={(event) => {
+                        setSelectedProjectIds(event.target.checked ? visibleProjectIds : [])
+                      }}
+                    />
+                  </TableHead>
+                ) : null}
+                <SortableTableHead
+                  className="w-[24%]"
+                  label="Project"
+                  scope="projects"
+                  sort={props.sort}
+                  sortKey="display_name"
+                  onSort={(_scope, key) => props.onSort(key)}
+                />
+                <SortableTableHead
+                  className="w-[16%]"
+                  label="Customer"
+                  scope="projects"
+                  sort={props.sort}
+                  sortKey="customer"
+                  onSort={(_scope, key) => props.onSort(key)}
+                />
+                <SortableTableHead
+                  className="w-[10%]"
+                  label="Status"
+                  scope="projects"
+                  sort={props.sort}
+                  sortKey="status"
+                  onSort={(_scope, key) => props.onSort(key)}
+                />
+                <TableHead className="w-[16%]">Timeline</TableHead>
+                <SortableTableHead
+                  className="w-[10%]"
+                  label="Roster"
+                  scope="projects"
+                  sort={props.sort}
+                  sortKey="roster_count"
+                  onSort={(_scope, key) => props.onSort(key)}
+                />
+                <SortableTableHead
+                  className="w-[14%]"
+                  label="Modified"
+                  scope="projects"
+                  sort={props.sort}
+                  sortKey="modified"
+                  onSort={(_scope, key) => props.onSort(key)}
+                />
+                <TableHead>ERP</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody id="projectsBody">
+              {props.projects.map((project) => {
+                const members = project.roster_members || []
+                return (
+                  <TableRow key={project.id}>
+                    {props.canWrite ? (
+                      <TableCell>
+                        <input
+                          type="checkbox"
+                          aria-label={`Select ${project.display_name}`}
+                          checked={selectedVisibleProjectIds.includes(project.id)}
+                          onChange={(event) =>
+                            toggleProjectSelection(project.id, event.target.checked)
+                          }
+                        />
+                      </TableCell>
+                    ) : null}
+                    <TableCell>
+                      <button
+                        type="button"
+                        className="text-left font-bold text-primary underline-offset-4 hover:underline"
+                        onClick={() => props.onOpenProject(project.id)}
+                      >
+                        {project.display_name}
+                      </button>
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                        {project.project_type ? (
+                          <Badge variant="neutral">{project.project_type}</Badge>
+                        ) : null}
+                        {project.linked_engagement_count ? (
+                          <span className="text-sm text-muted-foreground">
+                            {project.linked_engagement_count} linked gig
+                          </span>
+                        ) : null}
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      {project.customer_erpnext_url ? (
+                        <a
+                          className="inline-flex items-center gap-1 font-semibold text-primary underline-offset-4 hover:underline"
+                          href={project.customer_erpnext_url}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          {project.customer}
+                          <ExternalLink className="size-3.5" />
+                        </a>
+                      ) : (
+                        project.customer || "None"
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant={projectStatusTone(project.source_status)}>
+                        {project.source_status || "Unknown"}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>
+                      {[project.actual_start_date, project.actual_end_date]
+                        .filter(Boolean)
+                        .map((value) => formatProjectDate(value))
+                        .join(" to ") || "Not set"}
+                    </TableCell>
+                    <TableCell>
+                      <div className="grid gap-1">
+                        <strong>{members.length}</strong>
+                        <span className="text-sm text-muted-foreground">
+                          {members.map(memberLabel).slice(0, 4).join(", ") || "No ERP roster"}
+                          {members.length > 4 ? ` +${members.length - 4}` : ""}
+                        </span>
+                      </div>
+                    </TableCell>
+                    <TableCell>{formatDate(project.source_modified_at)}</TableCell>
+                    <TableCell className="text-xs">
+                      {project.erpnext_project_url ? (
+                        <a
+                          className="inline-flex items-center gap-1 font-mono font-semibold text-primary underline-offset-4 hover:underline"
+                          href={project.erpnext_project_url}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          {project.erpnext_project_id}
+                          <ExternalLink className="size-3.5" />
+                        </a>
+                      ) : (
+                        <span className="font-mono">Unlinked</span>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                )
+              })}
+            </TableBody>
+          </Table>
+        </div>
+      </Card>
+
+      {props.wikiMatches ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Wiki match preview</CardTitle>
+            <span className="text-sm text-muted-foreground">
+              {props.wikiMatches.document?.title || "Client & Project Info"} |{" "}
+              {formatDate(props.wikiMatches.document?.updatedAt)}
+            </span>
+          </CardHeader>
+          <div className="overflow-x-auto">
+            <Table id="wikiMatchesTable" className="min-w-[920px]" aria-label="Wiki matches">
+              <TableHeader>
+                <TableRow>
+                  <TableHead>ERP project</TableHead>
+                  <TableHead>Best wiki row</TableHead>
+                  <TableHead>Confidence</TableHead>
+                  <TableHead>Section</TableHead>
+                  <TableHead>Decision</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {matchRows.map((match, index) => {
+                  const project = match.project
+                  const row = match.best_match?.row || {}
+                  const manualStatus = match.manual_match?.match_status || ""
+                  const rowKey =
+                    project?.id ||
+                    row.row_key ||
+                    [row.section, row.Client].filter(Boolean).join(":") ||
+                    `wiki-match-${index}`
+                  return (
+                    <TableRow key={rowKey}>
+                      <TableCell>{project?.display_name || "Unknown"}</TableCell>
+                      <TableCell>
+                        <strong>{row.Client || "No match"}</strong>
+                        <div className="text-sm text-muted-foreground">
+                          {[row.DRI, row.Members].filter(Boolean).join(" | ")}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <Badge
+                          variant={
+                            match.best_match?.confidence === "high"
+                              ? "succeeded"
+                              : match.best_match?.confidence === "medium"
+                                ? "running"
+                                : "neutral"
+                          }
+                        >
+                          {match.best_match
+                            ? `${match.best_match.confidence} ${match.best_match.score}`
+                            : "none"}
+                        </Badge>
+                      </TableCell>
+                      <TableCell>{row.section || ""}</TableCell>
+                      <TableCell>
+                        <div className="flex flex-wrap items-center gap-2">
+                          {manualStatus ? (
+                            <Badge variant={manualStatus === "confirmed" ? "succeeded" : "neutral"}>
+                              {manualStatus === "no_row" ? "No wiki row" : "Confirmed"}
+                            </Badge>
+                          ) : null}
+                          {props.canWrite && project?.id ? (
+                            <>
+                              {row.row_key ? (
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  disabled={props.loading[`project:${project.id}:wiki`]}
+                                  onClick={() =>
+                                    void props.onUpdateWikiMatch(
+                                      project.id,
+                                      "confirmed",
+                                      row.row_key,
+                                    )
+                                  }
+                                >
+                                  Confirm
+                                </Button>
+                              ) : null}
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                disabled={props.loading[`project:${project.id}:wiki`]}
+                                onClick={() => void props.onUpdateWikiMatch(project.id, "no_row")}
+                              >
+                                No row
+                              </Button>
+                            </>
+                          ) : null}
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  )
+                })}
+              </TableBody>
+            </Table>
+          </div>
+        </Card>
+      ) : null}
+    </>
+  )
+}
+
+function ProjectDetailPage(props: {
+  project: Project
+  loading: Record<string, boolean>
+  canWrite: boolean
+  crmContactUrl: (contactId?: string) => string
+  onBack: () => void
+  onUpdateStatus: (projectId: string, status: string) => void
+  onAddUser: (projectId: string, user: string) => Promise<boolean>
+  onAddHistoricalMember: (
+    projectId: string,
+    person: string,
+    candidateId?: string,
+  ) => Promise<boolean>
+}) {
+  const project = props.project
+  const members = project.roster_members || []
+  const [newUser, setNewUser] = useState("")
+  const timeline =
+    [
+      project.actual_start_date || project.expected_start_date,
+      project.actual_end_date || project.expected_end_date,
+    ]
+      .filter(Boolean)
+      .map((value) => formatProjectDate(value))
+      .join(" to ") || "Not set"
+  const progress =
+    typeof project.percent_complete === "number"
+      ? `${Math.round(project.percent_complete)}%`
+      : "Not set"
+
+  return (
+    <>
+      <Card>
+        <CardHeader>
+          <div className="grid gap-3 md:grid-cols-[auto_minmax(0,1fr)_auto] md:items-start">
+            <Button type="button" variant="outline" onClick={props.onBack}>
+              <ArrowLeft />
+              Projects
+            </Button>
+            <div className="min-w-0">
+              <CardTitle>{project.display_name}</CardTitle>
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+                <Badge variant={projectStatusTone(project.source_status)}>
+                  {project.source_status || "Unknown"}
+                </Badge>
+                {project.erpnext_project_id ? (
+                  <span className="font-mono">{project.erpnext_project_id}</span>
+                ) : null}
+                {project.last_synced_at ? (
+                  <span>Synced {formatDate(project.last_synced_at)}</span>
+                ) : null}
+              </div>
+            </div>
+            <div className="flex flex-wrap justify-start gap-2 md:justify-end">
+              {props.canWrite ? (
+                <Select
+                  className="w-[160px]"
+                  aria-label={`Status for ${project.display_name}`}
+                  value={project.source_status || ""}
+                  disabled={props.loading[`project:${project.id}:status`]}
+                  onChange={(event) => props.onUpdateStatus(project.id, event.target.value)}
+                >
+                  <option value="Open">Open</option>
+                  <option value="Completed">Completed</option>
+                  <option value="Cancelled">Cancelled</option>
+                </Select>
+              ) : null}
+              {project.erpnext_project_url ? (
+                <a
+                  className="inline-flex min-h-9 items-center justify-center gap-2 rounded-md border bg-secondary px-3 text-sm font-semibold"
+                  href={project.erpnext_project_url}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <ExternalLink className="size-4" />
+                  ERP project
+                </a>
+              ) : null}
+              {project.customer_erpnext_url ? (
+                <a
+                  className="inline-flex min-h-9 items-center justify-center gap-2 rounded-md border bg-secondary px-3 text-sm font-semibold"
+                  href={project.customer_erpnext_url}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <ExternalLink className="size-4" />
+                  ERP customer
+                </a>
+              ) : null}
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+          <div>
+            <span className="text-xs font-bold text-muted-foreground">Customer</span>
+            <strong className="block">{project.customer || "None"}</strong>
+          </div>
+          <div>
+            <span className="text-xs font-bold text-muted-foreground">Timeline</span>
+            <strong className="block">{timeline}</strong>
+          </div>
+          <div>
+            <span className="text-xs font-bold text-muted-foreground">Progress</span>
+            <strong className="block">{progress}</strong>
+          </div>
+          <div>
+            <span className="text-xs font-bold text-muted-foreground">Linked Gigs</span>
+            <strong className="block">{project.linked_engagement_count || 0}</strong>
+          </div>
+          <div>
+            <span className="text-xs font-bold text-muted-foreground">ERP Type</span>
+            <div className="mt-1">
+              {project.project_type ? (
+                <Badge variant="neutral">{project.project_type}</Badge>
+              ) : (
+                <strong className="block">Not set</strong>
+              )}
+            </div>
+          </div>
+          <div>
+            <span className="text-xs font-bold text-muted-foreground">ERP Modified</span>
+            <strong className="block">{formatDate(project.source_modified_at)}</strong>
+          </div>
+          <div>
+            <span className="text-xs font-bold text-muted-foreground">Cache ID</span>
+            <strong className="block break-all font-mono text-xs">{project.id}</strong>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Project roster</CardTitle>
+          <span className="text-sm text-muted-foreground">
+            {members.length
+              ? `${members.length} synced ERP user${members.length === 1 ? "" : "s"}`
+              : "No ERP roster"}
+          </span>
+        </CardHeader>
+        {props.canWrite ? (
+          <CardContent className="grid gap-3 border-b md:grid-cols-[minmax(0,1fr)_auto_auto] md:items-end">
+            <Label>
+              Roster person
+              <Input
+                value={newUser}
+                autoComplete="off"
+                placeholder="name@508.dev or full name"
+                onChange={(event) => setNewUser(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault()
+                    void props
+                      .onAddUser(project.id, newUser)
+                      .then((updated) => updated && setNewUser(""))
+                  }
+                }}
+              />
+            </Label>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={props.loading[`project:${project.id}:user`] || !newUser.trim()}
+              onClick={() =>
+                void props.onAddUser(project.id, newUser).then((updated) => {
+                  if (updated) setNewUser("")
+                })
+              }
+            >
+              <Users />
+              Add ERP user
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={props.loading[`project:${project.id}:historical`] || !newUser.trim()}
+              onClick={() =>
+                void props.onAddHistoricalMember(project.id, newUser).then((updated) => {
+                  if (updated) setNewUser("")
+                })
+              }
+            >
+              <Users />
+              Add historical
+            </Button>
+          </CardContent>
+        ) : null}
+        <div className="overflow-x-auto">
+          <Table className="min-w-[760px]" aria-label="Project roster">
+            <TableHeader>
+              <TableRow>
+                <TableHead>Name</TableHead>
+                <TableHead>Email</TableHead>
+                <TableHead>ERP user</TableHead>
+                <TableHead>Links</TableHead>
+                <TableHead>Source</TableHead>
+                <TableHead>Last seen</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {members.length ? (
+                members.map((member) => (
+                  <TableRow key={`${member.source || ""}:${member.source_user_id || member.email}`}>
+                    <TableCell>
+                      <strong>{member.full_name || member.email || member.source_user_id}</strong>
+                    </TableCell>
+                    <TableCell>{member.email || "None"}</TableCell>
+                    <TableCell className="font-mono text-xs">
+                      {member.erpnext_user_url ? (
+                        <a
+                          className="inline-flex items-center gap-1 font-semibold text-primary underline-offset-4 hover:underline"
+                          href={member.erpnext_user_url}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          {member.source_user_id || "ERP user"}
+                          <ExternalLink className="size-3.5" />
+                        </a>
+                      ) : (
+                        member.source_user_id || "Unknown"
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex flex-wrap gap-2">
+                        {member.supplier_erpnext_url ? (
+                          <a
+                            className="inline-flex items-center gap-1 font-semibold text-primary underline-offset-4 hover:underline"
+                            href={member.supplier_erpnext_url}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            Supplier
+                            <ExternalLink className="size-3.5" />
+                          </a>
+                        ) : null}
+                        {member.crm_contact_id && props.crmContactUrl(member.crm_contact_id) ? (
+                          <a
+                            className="inline-flex items-center gap-1 font-semibold text-primary underline-offset-4 hover:underline"
+                            href={props.crmContactUrl(member.crm_contact_id)}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            CRM
+                            <ExternalLink className="size-3.5" />
+                          </a>
+                        ) : null}
+                        {!member.supplier_erpnext_url &&
+                        !(member.crm_contact_id && props.crmContactUrl(member.crm_contact_id)) ? (
+                          <span className="text-muted-foreground">None</span>
+                        ) : null}
+                      </div>
+                    </TableCell>
+                    <TableCell>{member.roster_kind || member.source || "ERP"}</TableCell>
+                    <TableCell>{formatDate(member.last_seen_at)}</TableCell>
+                  </TableRow>
+                ))
+              ) : (
+                <TableRow>
+                  <TableCell colSpan={6} className="text-sm text-muted-foreground">
+                    No roster rows have been synced for this project.
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </div>
+      </Card>
+    </>
+  )
 }
 
 function GigsView(props: {

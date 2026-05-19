@@ -144,6 +144,36 @@ async def test_dashboard_login_command_ignores_expired_interaction(
 
 
 @pytest.mark.asyncio
+async def test_dashboard_login_command_continues_after_already_acknowledged_interaction(
+    cog: AdminLoginCog, mock_interaction: AsyncMock
+) -> None:
+    response = Mock()
+    response.status = 400
+    response.reason = "Bad Request"
+    mock_interaction.response.defer.side_effect = discord.HTTPException(
+        response,
+        {"code": 40060, "message": "Interaction has already been acknowledged."},
+    )
+
+    with (
+        patch.object(
+            cog,
+            "_create_login_link",
+            new=AsyncMock(
+                return_value=("https://dash.508.dev/auth/discord/link/token", 600)
+            ),
+        ) as mock_create,
+        patch.object(cog, "_audit"),
+    ):
+        await cog.dashboard_login.callback(cog, mock_interaction)
+
+    mock_create.assert_awaited_once()
+    mock_interaction.followup.send.assert_awaited_once()
+    sent_message = mock_interaction.followup.send.call_args.args[0]
+    assert "https://dash.508.dev/auth/discord/link/token" in sent_message
+
+
+@pytest.mark.asyncio
 async def test_dashboard_login_command_reraises_unexpected_not_found(
     cog: AdminLoginCog, mock_interaction: AsyncMock
 ) -> None:

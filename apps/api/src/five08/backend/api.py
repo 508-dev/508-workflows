@@ -73,6 +73,9 @@ from five08.backend.auth import (
     DASHBOARD_PERMISSION_ONBOARDING_WRITE,
     DASHBOARD_PERMISSION_PEOPLE_READ,
     DASHBOARD_PERMISSION_PEOPLE_SYNC,
+    DASHBOARD_PERMISSION_PROJECTS_READ,
+    DASHBOARD_PERMISSION_PROJECTS_SYNC,
+    DASHBOARD_PERMISSION_PROJECTS_WRITE,
     DASHBOARD_SENSITIVE_PERMISSIONS,
     DiscordAdminVerifier,
     DiscordAdminIdentity,
@@ -89,6 +92,7 @@ from five08.backend.auth import (
     make_pkce_pair,
     normalize_next_path,
 )
+from five08.clients.erpnext import ERPNextAPIError, ERPNextClient
 from five08.backend.dashboard import (
     dashboard_assets_dir,
     dashboard_html,
@@ -106,6 +110,21 @@ from five08.engagements import (
     update_engagement_application_status,
     update_engagement_status,
     viewer_can_update_engagement,
+)
+from five08.projects import (
+    DEFAULT_WIKI_PROJECT_DOC_ID,
+    PROJECT_WIKI_MATCH_CONFIRMED,
+    PROJECT_WIKI_MATCH_NO_ROW,
+    add_project_roster_member,
+    erpnext_project_to_input,
+    fetch_outline_document,
+    list_dashboard_projects,
+    parse_project_wiki_tables,
+    project_cache_summary,
+    set_project_wiki_match,
+    upsert_project,
+    wiki_project_match_preview,
+    wiki_row_by_key,
 )
 from five08.worker.config import settings
 from five08.worker.db_migrations import run_job_migrations
@@ -171,6 +190,40 @@ class DashboardGigStatusRequest(BaseModel):
     status: str
 
 
+class DashboardProjectStatusRequest(BaseModel):
+    """Payload for updating one ERPNext Project status."""
+
+    status: str
+
+
+class DashboardBulkProjectUpdateRequest(BaseModel):
+    """Payload for bulk ERPNext Project field updates."""
+
+    project_ids: list[str]
+    status: str | None = None
+    project_type: str | None = None
+
+
+class DashboardProjectUserRequest(BaseModel):
+    """Payload for adding one ERPNext User to a Project roster."""
+
+    user: str
+
+
+class DashboardProjectHistoricalMemberRequest(BaseModel):
+    """Payload for adding one local historical Project roster member."""
+
+    person: str
+    candidate_id: str | None = None
+
+
+class DashboardProjectWikiMatchRequest(BaseModel):
+    """Payload for saving a manual project-to-wiki match decision."""
+
+    status: str
+    row_key: str | None = None
+
+
 class DashboardGigApplicationStatusRequest(BaseModel):
     """Payload for updating one dashboard gig candidate/application status."""
 
@@ -222,6 +275,7 @@ process_intake_form_job = JOB_FUNCTIONS["process_intake_form_job"]
 process_mailbox_message_job = JOB_FUNCTIONS["process_mailbox_message_job"]
 sync_people_from_crm_job = JOB_FUNCTIONS["sync_people_from_crm_job"]
 sync_person_from_crm_job = JOB_FUNCTIONS["sync_person_from_crm_job"]
+sync_projects_from_erpnext_job = JOB_FUNCTIONS["sync_projects_from_erpnext_job"]
 process_docuseal_agreement_job = JOB_FUNCTIONS["process_docuseal_agreement_job"]
 # Process-local MVP agent tools stay synchronous for Discord button UX. Both the
 # task store and pending plans are non-durable; production task workflows should
@@ -399,6 +453,29 @@ async def _enqueue_full_crm_sync_job(queue: QueueClient, *, reason: str) -> Enqu
     )
     logger.info(
         "Enqueued CRM people full-sync job id=%s created=%s reason=%s",
+        job.id,
+        job.created,
+        reason,
+    )
+    return job
+
+
+async def _enqueue_erpnext_project_sync_job(
+    queue: QueueClient,
+    *,
+    reason: str,
+) -> EnqueuedJob:
+    now = datetime.now(tz=timezone.utc)
+    job: EnqueuedJob = await asyncio.to_thread(
+        enqueue_job,
+        queue=queue,
+        fn=JOB_FUNCTIONS["sync_projects_from_erpnext_job"],
+        args=(),
+        settings=settings,
+        idempotency_key=f"erpnext-project-sync:{now.strftime('%Y%m%d%H%M')}",
+    )
+    logger.info(
+        "Enqueued ERPNext project sync job id=%s created=%s reason=%s",
         job.id,
         job.created,
         reason,
@@ -744,7 +821,7 @@ def _discord_admin_can_use_sensitive_dashboard(
     )
 
 
-def _session_dashboard_permissions(session: AuthSession) -> set[str]:
+def _base_session_dashboard_permissions(session: AuthSession) -> set[str]:
     actor_provider = _session_actor_provider(session)
     if session.permissions:
         permissions = set(session.permissions)
@@ -770,6 +847,29 @@ def _session_dashboard_permissions(session: AuthSession) -> set[str]:
     return permissions
 
 
+def _session_dashboard_permissions(session: AuthSession) -> set[str]:
+    permissions = _base_session_dashboard_permissions(session)
+    if (
+        DASHBOARD_PERMISSION_PROJECTS_READ not in permissions
+        and _session_can_view_any_project(session)
+    ):
+        permissions.add(DASHBOARD_PERMISSION_PROJECTS_READ)
+    return permissions
+
+
+async def _session_dashboard_permissions_async(session: AuthSession) -> set[str]:
+    permissions = _base_session_dashboard_permissions(session)
+    if (
+        DASHBOARD_PERMISSION_PROJECTS_READ not in permissions
+        and await asyncio.to_thread(
+            _session_can_view_any_project,
+            session,
+        )
+    ):
+        permissions.add(DASHBOARD_PERMISSION_PROJECTS_READ)
+    return permissions
+
+
 def _crm_web_base_url(value: str) -> str:
     normalized = value.strip().rstrip("/")
     if normalized.lower().endswith("/api/v1"):
@@ -781,15 +881,23 @@ def _crm_base_url() -> str:
     return _crm_web_base_url(settings.espo_base_url)
 
 
-def _session_has_dashboard_permission(
+async def _session_has_dashboard_permission(
     session: AuthSession,
     required_permission: str,
 ) -> bool:
-    return required_permission in _session_dashboard_permissions(session)
+    permissions = _base_session_dashboard_permissions(session)
+    if required_permission in permissions:
+        return True
+    if required_permission != DASHBOARD_PERMISSION_PROJECTS_READ:
+        return False
+    return await asyncio.to_thread(_session_can_view_any_project, session)
 
 
-def _session_has_any_dashboard_permission(session: AuthSession) -> bool:
-    return bool(_session_dashboard_permissions(session))
+async def _session_has_any_dashboard_permission(session: AuthSession) -> bool:
+    permissions = _base_session_dashboard_permissions(session)
+    if permissions:
+        return True
+    return await asyncio.to_thread(_session_can_view_any_project, session)
 
 
 def _session_has_steering_access(session: AuthSession) -> bool:
@@ -801,6 +909,121 @@ def _session_has_steering_access(session: AuthSession) -> bool:
             admin_role_names=settings.discord_admin_role_names,
         )
     return session.is_admin
+
+
+def _dashboard_project_viewer_emails(session: AuthSession) -> list[str]:
+    """Return normalized emails that can prove project roster membership."""
+    candidates: set[str] = set()
+    if session.email:
+        candidates.add(session.email.strip().casefold())
+
+    conditions: list[str] = []
+    params: list[Any] = []
+    if session.crm_contact_id:
+        conditions.append("crm_contact_id = %s")
+        params.append(session.crm_contact_id)
+    if _session_actor_provider(session) == ActorProvider.DISCORD and session.subject:
+        conditions.append("discord_user_id = %s")
+        params.append(session.subject)
+    if session.email:
+        conditions.append("(LOWER(email) = %s OR LOWER(email_508) = %s)")
+        normalized_email = session.email.strip().casefold()
+        params.extend([normalized_email, normalized_email])
+    if not conditions:
+        return sorted(email for email in candidates if email)
+
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                f"""
+                SELECT email, email_508
+                FROM people
+                WHERE sync_status = 'active'
+                  AND ({" OR ".join(conditions)})
+                LIMIT 5
+                """,
+                params,
+            )
+            for row in cursor.fetchall():
+                for key in ("email", "email_508"):
+                    value = row.get(key)
+                    if isinstance(value, str) and value.strip():
+                        candidates.add(value.strip().casefold())
+    return sorted(email for email in candidates if email)
+
+
+def _session_can_view_any_project(session: AuthSession) -> bool:
+    """Return whether this non-Steering user is on any cached ERP project roster."""
+    if _session_has_steering_access(session):
+        return True
+    try:
+        viewer_emails = _dashboard_project_viewer_emails(session)
+    except Exception:
+        logger.warning("Failed resolving project viewer emails", exc_info=True)
+        return False
+    if not viewer_emails:
+        return False
+    try:
+        with get_postgres_connection(settings) as conn:
+            with conn.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(
+                    """
+                    SELECT 1
+                    FROM project_roster_members
+                    WHERE source = 'erpnext'
+                      AND roster_kind = 'erp_users'
+                      AND (
+                        LOWER(email) = ANY(%s)
+                        OR LOWER(source_user_id) = ANY(%s)
+                      )
+                    LIMIT 1
+                    """,
+                    (viewer_emails, viewer_emails),
+                )
+                return cursor.fetchone() is not None
+    except Exception:
+        logger.warning("Failed checking project roster visibility", exc_info=True)
+        return False
+
+
+def _project_summary_for_visible_rows(projects: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return non-leaky project metrics for a roster-limited viewer."""
+    last_synced_values = [
+        parsed
+        for project in projects
+        if (parsed := _parse_dashboard_timestamp(project.get("last_synced_at")))
+        is not None
+    ]
+    return {
+        "project_count": len(projects),
+        "open_project_count": sum(
+            1
+            for project in projects
+            if str(project.get("source_status") or "").casefold() == "open"
+        ),
+        "projects_with_roster": sum(
+            1 for project in projects if int(project.get("roster_count") or 0) > 0
+        ),
+        "roster_member_count": sum(
+            int(project.get("roster_count") or 0) for project in projects
+        ),
+        "last_synced_at": (
+            max(last_synced_values).isoformat() if last_synced_values else None
+        ),
+    }
+
+
+def _parse_dashboard_timestamp(value: Any) -> datetime | None:
+    text = str(value).strip() if value is not None else ""
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _session_discord_actor_id(session: AuthSession) -> str | None:
@@ -822,9 +1045,9 @@ async def _dashboard_session_or_error(
             _clear_session_cookie(response)
         return None, response
     if required_permission is None:
-        if not _session_has_any_dashboard_permission(session):
+        if not await _session_has_any_dashboard_permission(session):
             return None, JSONResponse({"error": "forbidden"}, status_code=403)
-    elif not _session_has_dashboard_permission(session, required_permission):
+    elif not await _session_has_dashboard_permission(session, required_permission):
         return None, JSONResponse({"error": "forbidden"}, status_code=403)
     return session, None
 
@@ -857,14 +1080,14 @@ def _dashboard_same_origin_post_or_error(request: Request) -> JSONResponse | Non
     return None
 
 
-def _session_payload(session: AuthSession) -> dict[str, Any]:
+async def _session_payload(session: AuthSession) -> dict[str, Any]:
     return {
         "subject": session.subject,
         "email": session.email,
         "display_name": session.display_name,
         "groups": session.groups,
         "is_admin": session.is_admin,
-        "permissions": sorted(_session_dashboard_permissions(session)),
+        "permissions": sorted(await _session_dashboard_permissions_async(session)),
         "expires_at": session.expires_at,
         "actor_provider": session.actor_provider,
         "crm_contact_id": session.crm_contact_id,
@@ -2218,7 +2441,7 @@ async def dashboard_handler(
         if session_id is not None:
             _clear_session_cookie(response)
         return response
-    if not _session_has_any_dashboard_permission(session):
+    if not await _session_has_any_dashboard_permission(session):
         return HTMLResponse("Forbidden", status_code=403)
     return HTMLResponse(dashboard_html(), status_code=200)
 
@@ -2232,7 +2455,7 @@ async def dashboard_me_handler(request: Request) -> JSONResponse:
     if error_response is not None:
         return error_response
     assert session is not None
-    return JSONResponse(_session_payload(session))
+    return JSONResponse(await _session_payload(session))
 
 
 async def dashboard_jobs_handler(
@@ -2448,6 +2671,983 @@ async def dashboard_notifications_handler(
             "stale_days": settings.gig_recruiting_stale_days,
             "notifications": notifications,
         }
+    )
+
+
+async def dashboard_projects_handler(
+    request: Request,
+    query: str | None = Query(default=None),
+    status: str | None = Query(default="Open"),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> JSONResponse:
+    """Return locally cached ERP project rows for the dashboard."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_PROJECTS_READ,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    include_all = _session_has_steering_access(session)
+    viewer_emails = (
+        []
+        if include_all
+        else await asyncio.to_thread(_dashboard_project_viewer_emails, session)
+    )
+
+    projects = await asyncio.to_thread(
+        list_dashboard_projects,
+        settings,
+        query=query,
+        status=status,
+        viewer_emails=viewer_emails,
+        include_all=include_all,
+        limit=limit,
+    )
+    summary = _project_summary_for_visible_rows(projects)
+    if include_all:
+        summary = await asyncio.to_thread(project_cache_summary, settings)
+    return JSONResponse({"projects": projects, "summary": summary})
+
+
+def _erpnext_client() -> ERPNextClient:
+    base_url = (settings.erpnext_base_url or "").strip()
+    api_key = (settings.erpnext_api_key or "").strip()
+    if not base_url or not api_key:
+        raise ERPNextAPIError("ERPNEXT_BASE_URL and ERPNEXT_API_KEY must be configured")
+    return ERPNextClient(
+        base_url,
+        api_key,
+        timeout_seconds=settings.erpnext_api_timeout_seconds,
+    )
+
+
+class HistoricalProjectMemberResolutionError(ValueError):
+    """Raised when a historical roster entry cannot resolve to one person."""
+
+    def __init__(
+        self,
+        code: str,
+        *,
+        candidates: list[dict[str, Any]] | None = None,
+        detail: str | None = None,
+    ) -> None:
+        super().__init__(code)
+        self.code = code
+        self.candidates = candidates or []
+        self.detail = detail
+
+
+def _text_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _historical_candidate_key(candidate: dict[str, Any]) -> str:
+    email = _text_or_none(candidate.get("email"))
+    if email:
+        return f"email:{email.casefold()}"
+    for key in ("crm_contact_id", "erpnext_user_id", "supplier_erpnext_id"):
+        value = _text_or_none(candidate.get(key))
+        if value:
+            return f"{key}:{value.casefold()}"
+    label = _text_or_none(candidate.get("label")) or _generate_ulid()
+    return f"label:{label.casefold()}"
+
+
+def _merge_historical_candidate(
+    candidates: dict[str, dict[str, Any]],
+    candidate: dict[str, Any],
+) -> None:
+    key = _historical_candidate_key(candidate)
+    existing = candidates.setdefault(
+        key,
+        {
+            "candidate_id": key,
+            "label": candidate.get("label"),
+            "full_name": candidate.get("full_name"),
+            "email": candidate.get("email"),
+            "crm_contact_id": None,
+            "erpnext_user_id": None,
+            "supplier_erpnext_id": None,
+            "supplier_name": None,
+            "sources": [],
+        },
+    )
+    for field in (
+        "label",
+        "full_name",
+        "email",
+        "crm_contact_id",
+        "erpnext_user_id",
+        "supplier_erpnext_id",
+        "supplier_name",
+    ):
+        value = _text_or_none(candidate.get(field))
+        if value and not existing.get(field):
+            existing[field] = value
+    for source in candidate.get("sources") or []:
+        if source not in existing["sources"]:
+            existing["sources"].append(source)
+    if not existing.get("label"):
+        existing["label"] = (
+            existing.get("full_name")
+            or existing.get("email")
+            or existing.get("erpnext_user_id")
+            or existing.get("supplier_erpnext_id")
+        )
+
+
+def _dashboard_people_candidates_for_project_member(query: str) -> list[dict[str, Any]]:
+    normalized_query = query.strip()
+    if not normalized_query:
+        return []
+    params: list[Any]
+    if "@" in normalized_query:
+        where_clause = """
+            sync_status = 'active'
+            AND (
+                LOWER(COALESCE(email, '')) = LOWER(%s)
+                OR LOWER(COALESCE(email_508, '')) = LOWER(%s)
+            )
+        """
+        params = [normalized_query, normalized_query]
+    else:
+        where_clause = (
+            f"sync_status = 'active' AND {_DASHBOARD_PEOPLE_SEARCH_SQL} ILIKE %s"
+        )
+        params = [f"%{normalized_query}%"]
+    params.append(10)
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                f"""
+                SELECT crm_contact_id, name, email, email_508
+                FROM people
+                WHERE {where_clause}
+                ORDER BY updated_at DESC
+                LIMIT %s
+                """,
+                params,
+            )
+            rows = [dict(row) for row in cursor.fetchall()]
+
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        email = _text_or_none(row.get("email_508")) or _text_or_none(row.get("email"))
+        full_name = _text_or_none(row.get("name"))
+        candidates.append(
+            {
+                "label": full_name or email or row.get("crm_contact_id"),
+                "full_name": full_name,
+                "email": email,
+                "crm_contact_id": _text_or_none(row.get("crm_contact_id")),
+                "sources": ["CRM"],
+            }
+        )
+    return candidates
+
+
+def _erpnext_candidates_for_project_member(query: str) -> list[dict[str, Any]]:
+    if not (settings.erpnext_base_url and settings.erpnext_api_key):
+        return []
+    client = _erpnext_client()
+    try:
+        users = client.search_users(query, limit=10)
+        supplier_rows_by_id: dict[str, dict[str, Any]] = {}
+        for supplier in client.search_suppliers(query, limit=10):
+            supplier_id = _text_or_none(supplier.get("name"))
+            if supplier_id:
+                supplier_rows_by_id[supplier_id] = supplier
+        for user in users:
+            email = _text_or_none(user.get("email")) or _text_or_none(user.get("name"))
+            if not email:
+                continue
+            for supplier in client.search_suppliers(email, limit=10):
+                supplier_id = _text_or_none(supplier.get("name"))
+                if supplier_id:
+                    supplier_rows_by_id[supplier_id] = supplier
+    finally:
+        client.close()
+
+    candidates: list[dict[str, Any]] = []
+    for user in users:
+        email = _text_or_none(user.get("email")) or _text_or_none(user.get("name"))
+        full_name = _text_or_none(user.get("full_name"))
+        candidates.append(
+            {
+                "label": full_name or email or user.get("name"),
+                "full_name": full_name,
+                "email": email,
+                "erpnext_user_id": _text_or_none(user.get("name")) or email,
+                "sources": ["ERP User"],
+            }
+        )
+    for supplier in supplier_rows_by_id.values():
+        email = _text_or_none(supplier.get("email_id"))
+        supplier_id = _text_or_none(supplier.get("name"))
+        supplier_name = _text_or_none(supplier.get("supplier_name")) or supplier_id
+        candidates.append(
+            {
+                "label": supplier_name or email or supplier_id,
+                "full_name": supplier_name,
+                "email": email,
+                "supplier_erpnext_id": supplier_id,
+                "supplier_name": supplier_name,
+                "sources": ["ERP Supplier"],
+            }
+        )
+    return candidates
+
+
+def _historical_project_member_candidates(query: str) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    crm_candidates = _dashboard_people_candidates_for_project_member(query)
+    for candidate in crm_candidates:
+        _merge_historical_candidate(merged, candidate)
+    erp_queries = [query]
+    for candidate in crm_candidates:
+        email = _text_or_none(candidate.get("email"))
+        if email and email.casefold() not in {item.casefold() for item in erp_queries}:
+            erp_queries.append(email)
+    try:
+        erpnext_candidates = [
+            candidate
+            for erp_query in erp_queries
+            for candidate in _erpnext_candidates_for_project_member(erp_query)
+        ]
+    except ERPNextAPIError:
+        logger.warning("Failed resolving historical project member in ERPNext")
+        erpnext_candidates = []
+    for candidate in erpnext_candidates:
+        _merge_historical_candidate(merged, candidate)
+    return sorted(
+        merged.values(),
+        key=lambda item: (
+            str(item.get("label") or "").casefold(),
+            str(item.get("email") or "").casefold(),
+        ),
+    )
+
+
+def _resolve_historical_project_member(
+    *,
+    person: str,
+    candidate_id: str | None = None,
+) -> dict[str, Any]:
+    candidates = _historical_project_member_candidates(person)
+    if not candidates:
+        raise HistoricalProjectMemberResolutionError("person_not_found")
+    normalized_candidate_id = _text_or_none(candidate_id)
+    if normalized_candidate_id:
+        for candidate in candidates:
+            if candidate.get("candidate_id") == normalized_candidate_id:
+                return candidate
+        raise HistoricalProjectMemberResolutionError(
+            "candidate_not_found",
+            candidates=candidates,
+        )
+    normalized_person = person.strip().casefold()
+    exact_matches = [
+        candidate
+        for candidate in candidates
+        if normalized_person
+        in {
+            str(candidate.get("email") or "").strip().casefold(),
+            str(candidate.get("erpnext_user_id") or "").strip().casefold(),
+            str(candidate.get("supplier_erpnext_id") or "").strip().casefold(),
+            str(candidate.get("crm_contact_id") or "").strip().casefold(),
+        }
+    ]
+    if len(exact_matches) == 1:
+        return exact_matches[0]
+    if len(candidates) == 1:
+        return candidates[0]
+    raise HistoricalProjectMemberResolutionError(
+        "ambiguous_person",
+        candidates=candidates,
+    )
+
+
+def _cached_dashboard_project_by_id(project_id: str) -> dict[str, Any] | None:
+    projects = list_dashboard_projects(
+        settings,
+        project_id=project_id,
+        include_all=True,
+        limit=1,
+    )
+    return projects[0] if projects else None
+
+
+def _cached_erpnext_project_refs_by_id(project_ids: list[str]) -> dict[str, str | None]:
+    """Return local project id to ERPNext Project id without dashboard enrichment."""
+    if not project_ids:
+        return {}
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    p.id::text AS id,
+                    pei.external_id AS erpnext_project_id
+                FROM projects p
+                LEFT JOIN project_external_ids pei
+                  ON pei.project_id = p.id
+                 AND pei.source = 'erpnext'
+                 AND pei.active = TRUE
+                WHERE p.id = ANY(%s::uuid[])
+                """,
+                (project_ids,),
+            )
+            return {
+                str(row["id"]): (
+                    str(row["erpnext_project_id"])
+                    if row.get("erpnext_project_id") is not None
+                    else None
+                )
+                for row in cursor.fetchall()
+            }
+
+
+def _refresh_cached_erpnext_project(project_id: str) -> dict[str, Any]:
+    client = _erpnext_client()
+    try:
+        return _refresh_cached_erpnext_project_with_client(client, project_id)
+    finally:
+        client.close()
+
+
+def _refresh_cached_erpnext_project_with_client(
+    client: ERPNextClient,
+    project_id: str,
+    detail: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    project_detail = detail or client.get_project(project_id)
+    payload = erpnext_project_to_input(project_detail)
+    if payload is None:
+        raise ERPNextAPIError("ERPNext Project response is missing an id or name")
+    local_project_id = upsert_project(settings, payload)
+    project = _cached_dashboard_project_by_id(local_project_id)
+    if project is None:
+        raise ERPNextAPIError("Updated project was not found in the local cache")
+    return project
+
+
+def _update_erpnext_project_status(
+    *,
+    external_project_id: str,
+    status: str,
+) -> dict[str, Any]:
+    client = _erpnext_client()
+    try:
+        client.set_project_status(external_project_id, status)
+    finally:
+        client.close()
+    return _refresh_cached_erpnext_project(external_project_id)
+
+
+def _update_erpnext_project_type(
+    *,
+    external_project_id: str,
+    project_type: str,
+) -> dict[str, Any]:
+    client = _erpnext_client()
+    try:
+        client.set_project_type(external_project_id, project_type)
+    finally:
+        client.close()
+    return _refresh_cached_erpnext_project(external_project_id)
+
+
+def _bulk_update_erpnext_projects(
+    *,
+    project_ids: list[str],
+    fields: dict[str, str],
+) -> dict[str, Any]:
+    updated_projects: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
+    project_refs = _cached_erpnext_project_refs_by_id(project_ids)
+    linked_project_refs: dict[str, str] = {}
+    for project_id in project_ids:
+        if project_id not in project_refs:
+            failures.append({"project_id": project_id, "error": "project_not_found"})
+            continue
+        external_project_id = (project_refs[project_id] or "").strip()
+        if not external_project_id:
+            failures.append(
+                {"project_id": project_id, "error": "project_not_linked_to_erpnext"}
+            )
+            continue
+        linked_project_refs[project_id] = external_project_id
+    if not linked_project_refs:
+        return {"projects": updated_projects, "failures": failures}
+
+    client: ERPNextClient | None = None
+    try:
+        client = _erpnext_client()
+        for project_id, external_project_id in linked_project_refs.items():
+            try:
+                detail = client.update_project(external_project_id, fields)
+                updated_projects.append(
+                    _refresh_cached_erpnext_project_with_client(
+                        client,
+                        external_project_id,
+                        detail=detail,
+                    )
+                )
+            except ERPNextAPIError as exc:
+                failures.append({"project_id": project_id, "error": str(exc)})
+    except ERPNextAPIError as exc:
+        failures.extend(
+            {"project_id": project_id, "error": str(exc)}
+            for project_id in linked_project_refs
+        )
+    finally:
+        if client is not None:
+            client.close()
+    return {"projects": updated_projects, "failures": failures}
+
+
+def _add_erpnext_project_user(
+    *,
+    external_project_id: str,
+    user: str,
+) -> dict[str, Any]:
+    client = _erpnext_client()
+    try:
+        client.add_project_user(external_project_id, user)
+    finally:
+        client.close()
+    return _refresh_cached_erpnext_project(external_project_id)
+
+
+async def _dashboard_cached_project_or_error(
+    project_id: str,
+) -> tuple[dict[str, Any] | None, JSONResponse | None]:
+    normalized_project_id = _valid_uuid_or_none(project_id)
+    if normalized_project_id is None:
+        return None, JSONResponse({"error": "invalid_project_id"}, status_code=400)
+    project = await asyncio.to_thread(
+        _cached_dashboard_project_by_id,
+        normalized_project_id,
+    )
+    if project is None:
+        return None, JSONResponse({"error": "project_not_found"}, status_code=404)
+    return project, None
+
+
+async def _dashboard_erpnext_project_or_error(
+    project_id: str,
+) -> tuple[dict[str, Any] | None, JSONResponse | None]:
+    project, error_response = await _dashboard_cached_project_or_error(project_id)
+    if error_response is not None:
+        return None, error_response
+    assert project is not None
+    if not project.get("erpnext_project_id"):
+        return None, JSONResponse(
+            {"error": "project_not_linked_to_erpnext"}, status_code=400
+        )
+    return project, None
+
+
+def _add_historical_project_member(
+    *,
+    project_id: str,
+    person: str,
+    candidate_id: str | None,
+    actor_subject: str | None,
+) -> dict[str, Any]:
+    normalized_person = person.strip()
+    candidate = _resolve_historical_project_member(
+        person=normalized_person,
+        candidate_id=candidate_id,
+    )
+    email = _text_or_none(candidate.get("email"))
+    full_name = _text_or_none(candidate.get("full_name")) or _text_or_none(
+        candidate.get("label")
+    )
+    source_user_id = (
+        email
+        or _text_or_none(candidate.get("erpnext_user_id"))
+        or _text_or_none(candidate.get("crm_contact_id"))
+        or _text_or_none(candidate.get("supplier_erpnext_id"))
+        or normalized_person
+    )
+    add_project_roster_member(
+        settings,
+        project_id=project_id,
+        source_user_id=source_user_id,
+        email=email,
+        full_name=full_name,
+        source_payload={
+            "added_by": actor_subject,
+            "entry": normalized_person,
+            "candidate": candidate,
+            "crm_contact_id": candidate.get("crm_contact_id"),
+            "erpnext_user_id": candidate.get("erpnext_user_id"),
+            "supplier_erpnext_id": candidate.get("supplier_erpnext_id"),
+            "supplier_name": candidate.get("supplier_name"),
+            "sources": candidate.get("sources") or [],
+        },
+    )
+    project = _cached_dashboard_project_by_id(project_id)
+    if project is None:
+        raise ValueError("project_not_found")
+    return project
+
+
+async def dashboard_project_wiki_matches_handler(
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> JSONResponse:
+    """Return read-only fuzzy matches between cached projects and the wiki table."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_PROJECTS_READ,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    include_all = _session_has_steering_access(session)
+    viewer_emails = (
+        []
+        if include_all
+        else await asyncio.to_thread(_dashboard_project_viewer_emails, session)
+    )
+
+    try:
+        preview = await asyncio.to_thread(
+            wiki_project_match_preview,
+            settings,
+            document_id=DEFAULT_WIKI_PROJECT_DOC_ID,
+            viewer_emails=viewer_emails,
+            include_all=include_all,
+            limit=limit,
+        )
+    except ValueError as exc:
+        return JSONResponse(
+            {"error": "wiki_match_preview_failed", "detail": str(exc)},
+            status_code=502,
+        )
+    if not include_all:
+        preview["wiki_rows"] = []
+        for item in preview.get("matches", []):
+            if not isinstance(item, dict):
+                continue
+            for match_key in ("best_match", "fuzzy_match"):
+                match_value = item.get(match_key)
+                if isinstance(match_value, dict):
+                    match_value["row"] = None
+            manual_match = item.get("manual_match")
+            if isinstance(manual_match, dict):
+                manual_match.pop("source_payload", None)
+                manual_match.pop("wiki_row_label", None)
+                manual_match.pop("wiki_row_section", None)
+    return JSONResponse(preview)
+
+
+async def dashboard_update_project_status_handler(
+    request: Request,
+    project_id: str,
+) -> JSONResponse:
+    """Update one ERPNext Project status from the dashboard."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_PROJECTS_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    project, error_response = await _dashboard_erpnext_project_or_error(project_id)
+    if error_response is not None:
+        return error_response
+    assert project is not None
+
+    try:
+        body = await request.json()
+        payload = DashboardProjectStatusRequest.model_validate(body)
+    except Exception:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    normalized_status = payload.status.strip()
+    if normalized_status not in {"Open", "Completed", "Cancelled"}:
+        return JSONResponse({"error": "invalid_status"}, status_code=400)
+
+    external_project_id = str(project["erpnext_project_id"])
+    try:
+        updated_project = await asyncio.to_thread(
+            _update_erpnext_project_status,
+            external_project_id=external_project_id,
+            status=normalized_status,
+        )
+    except ERPNextAPIError as exc:
+        return JSONResponse(
+            {"error": "erpnext_project_update_failed", "detail": str(exc)},
+            status_code=502,
+        )
+
+    actor_provider, actor_subject = _session_audit_actor(session)
+    await _write_auth_audit_event(
+        action="erpnext.project_status_update",
+        result=AuditResult.SUCCESS,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="erpnext_project",
+        resource_id=external_project_id,
+        metadata={
+            "source": "dashboard",
+            "status": normalized_status,
+            "local_project_id": project_id,
+        },
+    )
+    return JSONResponse({"project": updated_project})
+
+
+async def dashboard_bulk_update_projects_handler(request: Request) -> JSONResponse:
+    """Bulk update ERPNext Project fields from the dashboard."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_PROJECTS_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    try:
+        body = await request.json()
+        payload = DashboardBulkProjectUpdateRequest.model_validate(body)
+    except Exception:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    normalized_project_ids = sorted(
+        {
+            normalized_id
+            for project_id in payload.project_ids
+            if (normalized_id := _valid_uuid_or_none(project_id)) is not None
+        }
+    )
+    if not normalized_project_ids:
+        return JSONResponse({"error": "project_ids_required"}, status_code=400)
+    if len(normalized_project_ids) > 100:
+        return JSONResponse({"error": "too_many_projects"}, status_code=400)
+
+    fields: dict[str, str] = {}
+    normalized_status = (payload.status or "").strip()
+    normalized_project_type = (payload.project_type or "").strip()
+    if normalized_status:
+        if normalized_status not in {"Open", "Completed", "Cancelled"}:
+            return JSONResponse({"error": "invalid_status"}, status_code=400)
+        fields["status"] = normalized_status
+    if normalized_project_type:
+        if normalized_project_type not in {"Internal", "External"}:
+            return JSONResponse({"error": "invalid_project_type"}, status_code=400)
+        fields["project_type"] = normalized_project_type
+    if not fields:
+        return JSONResponse({"error": "no_fields_to_update"}, status_code=400)
+
+    result = await asyncio.to_thread(
+        _bulk_update_erpnext_projects,
+        project_ids=normalized_project_ids,
+        fields=fields,
+    )
+
+    actor_provider, actor_subject = _session_audit_actor(session)
+    await _write_auth_audit_event(
+        action="erpnext.projects_bulk_update",
+        result=AuditResult.SUCCESS if not result["failures"] else AuditResult.ERROR,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="erpnext_project",
+        resource_id="bulk",
+        metadata={
+            "source": "dashboard",
+            "fields": fields,
+            "project_count": len(normalized_project_ids),
+            "updated_count": len(result["projects"]),
+            "failed_count": len(result["failures"]),
+        },
+    )
+    return JSONResponse(result)
+
+
+async def dashboard_add_project_user_handler(
+    request: Request,
+    project_id: str,
+) -> JSONResponse:
+    """Add one ERPNext User to a Project roster from the dashboard."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_PROJECTS_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    project, error_response = await _dashboard_erpnext_project_or_error(project_id)
+    if error_response is not None:
+        return error_response
+    assert project is not None
+
+    try:
+        body = await request.json()
+        payload = DashboardProjectUserRequest.model_validate(body)
+    except Exception:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    normalized_user = payload.user.strip()
+    if not normalized_user or len(normalized_user) > 200:
+        return JSONResponse({"error": "invalid_user"}, status_code=400)
+
+    external_project_id = str(project["erpnext_project_id"])
+    try:
+        updated_project = await asyncio.to_thread(
+            _add_erpnext_project_user,
+            external_project_id=external_project_id,
+            user=normalized_user,
+        )
+    except ERPNextAPIError as exc:
+        return JSONResponse(
+            {"error": "erpnext_project_user_add_failed", "detail": str(exc)},
+            status_code=502,
+        )
+
+    actor_provider, actor_subject = _session_audit_actor(session)
+    await _write_auth_audit_event(
+        action="erpnext.project_user_add",
+        result=AuditResult.SUCCESS,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="erpnext_project",
+        resource_id=external_project_id,
+        metadata={
+            "source": "dashboard",
+            "user": normalized_user,
+            "local_project_id": project_id,
+        },
+    )
+    return JSONResponse({"project": updated_project})
+
+
+async def dashboard_add_project_historical_member_handler(
+    request: Request,
+    project_id: str,
+) -> JSONResponse:
+    """Add one local historical Project roster member from the dashboard."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_PROJECTS_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    project, error_response = await _dashboard_cached_project_or_error(project_id)
+    if error_response is not None:
+        return error_response
+    assert project is not None
+
+    try:
+        body = await request.json()
+        payload = DashboardProjectHistoricalMemberRequest.model_validate(body)
+    except Exception:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    normalized_person = payload.person.strip()
+    if not normalized_person or len(normalized_person) > 200:
+        return JSONResponse({"error": "invalid_person"}, status_code=400)
+
+    actor_provider, actor_subject = _session_audit_actor(session)
+    try:
+        updated_project = await asyncio.to_thread(
+            _add_historical_project_member,
+            project_id=project_id,
+            person=normalized_person,
+            candidate_id=payload.candidate_id,
+            actor_subject=actor_subject,
+        )
+    except HistoricalProjectMemberResolutionError as exc:
+        status_code = 409 if exc.candidates else 400
+        return JSONResponse(
+            {
+                "error": exc.code,
+                "detail": exc.detail,
+                "candidates": exc.candidates,
+            },
+            status_code=status_code,
+        )
+    except ValueError:
+        return JSONResponse({"error": "project_not_found"}, status_code=404)
+
+    await _write_auth_audit_event(
+        action="project.historical_member_add",
+        result=AuditResult.SUCCESS,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="project",
+        resource_id=project_id,
+        metadata={
+            "source": "dashboard",
+            "person": normalized_person,
+            "erpnext_project_id": project.get("erpnext_project_id"),
+        },
+    )
+    return JSONResponse({"project": updated_project})
+
+
+async def dashboard_update_project_wiki_match_handler(
+    request: Request,
+    project_id: str,
+) -> JSONResponse:
+    """Persist a manual project-to-wiki row match decision."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_PROJECTS_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    project, error_response = await _dashboard_cached_project_or_error(project_id)
+    if error_response is not None:
+        return error_response
+    assert project is not None
+
+    try:
+        body = await request.json()
+        payload = DashboardProjectWikiMatchRequest.model_validate(body)
+    except Exception:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    normalized_status = payload.status.strip()
+    if normalized_status not in {
+        PROJECT_WIKI_MATCH_CONFIRMED,
+        PROJECT_WIKI_MATCH_NO_ROW,
+    }:
+        return JSONResponse({"error": "invalid_status"}, status_code=400)
+
+    wiki_row: dict[str, Any] | None = None
+    if normalized_status == PROJECT_WIKI_MATCH_CONFIRMED:
+        normalized_row_key = (payload.row_key or "").strip()
+        if not normalized_row_key:
+            return JSONResponse({"error": "row_key_required"}, status_code=400)
+        try:
+            wiki_doc = await asyncio.to_thread(
+                fetch_outline_document,
+                settings,
+                document_id=DEFAULT_WIKI_PROJECT_DOC_ID,
+            )
+            wiki_rows = parse_project_wiki_tables(str(wiki_doc.get("text") or ""))
+            wiki_row = wiki_row_by_key(wiki_rows, normalized_row_key)
+        except ValueError as exc:
+            return JSONResponse(
+                {"error": "wiki_match_update_failed", "detail": str(exc)},
+                status_code=502,
+            )
+        if wiki_row is None:
+            return JSONResponse({"error": "wiki_row_not_found"}, status_code=404)
+
+    try:
+        manual_match = await asyncio.to_thread(
+            set_project_wiki_match,
+            settings,
+            project_id=project_id,
+            document_id=DEFAULT_WIKI_PROJECT_DOC_ID,
+            match_status=normalized_status,
+            wiki_row=wiki_row,
+        )
+    except ValueError as exc:
+        return JSONResponse(
+            {"error": "invalid_wiki_match", "detail": str(exc)}, status_code=400
+        )
+
+    actor_provider, actor_subject = _session_audit_actor(session)
+    await _write_auth_audit_event(
+        action="project.wiki_match_update",
+        result=AuditResult.SUCCESS,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="project",
+        resource_id=project_id,
+        metadata={
+            "source": "dashboard",
+            "status": normalized_status,
+            "row_key": payload.row_key,
+            "erpnext_project_id": project.get("erpnext_project_id"),
+        },
+    )
+    return JSONResponse({"manual_match": manual_match})
+
+
+async def dashboard_sync_projects_handler(request: Request) -> JSONResponse:
+    """Queue an ERPNext project sync from the authenticated dashboard."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_PROJECTS_SYNC,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    job = await _enqueue_erpnext_project_sync_job(
+        request.app.state.queue,
+        reason="dashboard",
+    )
+    actor_provider, actor_subject = _session_audit_actor(session)
+    await _write_auth_audit_event(
+        action="erpnext.projects_sync",
+        result=AuditResult.SUCCESS,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="erpnext_project_sync",
+        resource_id=job.id,
+        metadata={
+            "source": "dashboard",
+            "queue": settings.redis_queue_name,
+        },
+    )
+    return JSONResponse(
+        {
+            "status": "queued",
+            "source": "dashboard",
+            "job_id": job.id,
+            "created": job.created,
+        },
+        status_code=202,
     )
 
 
@@ -3894,7 +5094,7 @@ async def auth_me_handler(request: Request) -> JSONResponse:
         _clear_session_cookie(response)
         return response
 
-    return JSONResponse(_session_payload(session))
+    return JSONResponse(await _session_payload(session))
 
 
 async def auth_logout_handler(request: Request) -> JSONResponse:
@@ -4363,6 +5563,46 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
         methods=["GET"],
     )
     app.add_api_route(
+        "/dashboard/api/projects",
+        dashboard_projects_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/projects/wiki-matches",
+        dashboard_project_wiki_matches_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/projects/bulk",
+        dashboard_bulk_update_projects_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/dashboard/api/projects/{project_id}/status",
+        dashboard_update_project_status_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/dashboard/api/projects/{project_id}/users",
+        dashboard_add_project_user_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/dashboard/api/projects/{project_id}/historical-members",
+        dashboard_add_project_historical_member_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/dashboard/api/projects/{project_id}/wiki-match",
+        dashboard_update_project_wiki_match_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/dashboard/api/sync/projects",
+        dashboard_sync_projects_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
         "/dashboard/api/gigs/{engagement_id}/status",
         dashboard_update_gig_status_handler,
         methods=["POST"],
@@ -4399,6 +5639,12 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
     )
     app.add_api_route(
         "/dashboard/gigs/{item_id}",
+        dashboard_handler,
+        methods=["GET"],
+        response_model=None,
+    )
+    app.add_api_route(
+        "/dashboard/projects/{item_id}",
         dashboard_handler,
         methods=["GET"],
         response_model=None,
