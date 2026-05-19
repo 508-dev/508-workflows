@@ -111,6 +111,14 @@ from five08.engagements import (
     update_engagement_status,
     viewer_can_update_engagement,
 )
+from five08.engineer_onboarding import (
+    ActivityCostRequest,
+    EngineerOnboardingDuplicateNameError,
+    EngineerOnboardingError,
+    EngineerSetupRequest,
+    add_engineer_to_project,
+    setup_engineer,
+)
 from five08.projects import (
     DEFAULT_WIKI_PROJECT_DOC_ID,
     PROJECT_WIKI_MATCH_CONFIRMED,
@@ -208,6 +216,22 @@ class DashboardProjectUserRequest(BaseModel):
     """Payload for adding one ERPNext User to a Project roster."""
 
     user: str
+    activity_type: str | None = None
+    billing_rate: float | None = None
+    costing_rate: float | None = None
+
+
+class DashboardEngineerSetupRequest(BaseModel):
+    """Payload for setting up one ERPNext engineer account."""
+
+    email: str
+    first_name: str
+    last_name: str | None = None
+    country: str | None = None
+    department: str | None = None
+    gender: str | None = None
+    date_of_birth: str | None = None
+    create_user_permission: bool = True
 
 
 class DashboardProjectHistoricalMemberRequest(BaseModel):
@@ -3115,13 +3139,50 @@ def _add_erpnext_project_user(
     *,
     external_project_id: str,
     user: str,
+    activity_type: str | None = None,
+    billing_rate: float | None = None,
+    costing_rate: float | None = None,
 ) -> dict[str, Any]:
     client = _erpnext_client()
     try:
-        client.add_project_user(external_project_id, user)
+        activity_cost_request = None
+        if activity_type or billing_rate is not None or costing_rate is not None:
+            activity_cost_request = ActivityCostRequest(
+                user=user,
+                activity_type=activity_type or "",
+                billing_rate=billing_rate,
+                costing_rate=costing_rate,
+            )
+        result = add_engineer_to_project(
+            client,
+            project_id=external_project_id,
+            user=user,
+            activity_cost=activity_cost_request,
+        )
     finally:
         client.close()
-    return _refresh_cached_erpnext_project(external_project_id)
+    project = _refresh_cached_erpnext_project(external_project_id)
+    return {"project": project, "activity_cost": result.get("activity_cost")}
+
+
+def _setup_erpnext_engineer(payload: DashboardEngineerSetupRequest) -> dict[str, Any]:
+    client = _erpnext_client()
+    try:
+        return setup_engineer(
+            client,
+            EngineerSetupRequest(
+                email=payload.email,
+                first_name=payload.first_name,
+                last_name=payload.last_name,
+                country=payload.country,
+                department=payload.department,
+                gender=payload.gender,
+                date_of_birth=payload.date_of_birth,
+                create_user_permission=payload.create_user_permission,
+            ),
+        )
+    finally:
+        client.close()
 
 
 async def _dashboard_cached_project_or_error(
@@ -3385,6 +3446,76 @@ async def dashboard_bulk_update_projects_handler(request: Request) -> JSONRespon
     return JSONResponse(result)
 
 
+async def dashboard_setup_engineer_handler(request: Request) -> JSONResponse:
+    """Set up one ERPNext engineer account from the dashboard."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_ONBOARDING_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    try:
+        body = await request.json()
+        payload = DashboardEngineerSetupRequest.model_validate(body)
+    except Exception:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    normalized_email = payload.email.strip().lower()
+    normalized_first_name = payload.first_name.strip()
+    if not normalized_email or not normalized_email.endswith("@508.dev"):
+        return JSONResponse({"error": "invalid_email"}, status_code=400)
+    if not normalized_first_name:
+        return JSONResponse({"error": "first_name_required"}, status_code=400)
+
+    try:
+        result = await asyncio.to_thread(_setup_erpnext_engineer, payload)
+    except EngineerOnboardingDuplicateNameError as exc:
+        return JSONResponse(
+            {
+                "error": "similar_engineer_exists",
+                "detail": str(exc),
+                "matches": exc.matches,
+            },
+            status_code=409,
+        )
+    except EngineerOnboardingError as exc:
+        return JSONResponse(
+            {"error": "engineer_setup_failed", "detail": str(exc)},
+            status_code=400,
+        )
+    except ERPNextAPIError as exc:
+        return JSONResponse(
+            {"error": "erpnext_engineer_setup_failed", "detail": str(exc)},
+            status_code=502,
+        )
+
+    actor_provider, actor_subject = _session_audit_actor(session)
+    await _write_auth_audit_event(
+        action="erpnext.engineer_setup",
+        result=AuditResult.SUCCESS,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="erpnext_user",
+        resource_id=normalized_email,
+        metadata={
+            "source": "dashboard",
+            "user": result.get("user"),
+            "employee": result.get("employee"),
+            "supplier": result.get("supplier"),
+            "created": result.get("created"),
+            "updated": result.get("updated"),
+        },
+    )
+    return JSONResponse(result)
+
+
 async def dashboard_add_project_user_handler(
     request: Request,
     project_id: str,
@@ -3416,13 +3547,40 @@ async def dashboard_add_project_user_handler(
     normalized_user = payload.user.strip()
     if not normalized_user or len(normalized_user) > 200:
         return JSONResponse({"error": "invalid_user"}, status_code=400)
+    has_activity_type = bool((payload.activity_type or "").strip())
+    has_billing_rate = payload.billing_rate is not None
+    has_costing_rate = payload.costing_rate is not None
+    if (has_billing_rate or has_costing_rate) and not has_activity_type:
+        return JSONResponse({"error": "activity_type_required"}, status_code=400)
+    if has_activity_type and not (has_billing_rate and has_costing_rate):
+        return JSONResponse({"error": "activity_cost_rates_required"}, status_code=400)
 
     external_project_id = str(project["erpnext_project_id"])
     try:
-        updated_project = await asyncio.to_thread(
+        add_user_kwargs: dict[str, Any] = {
+            "external_project_id": external_project_id,
+            "user": normalized_user,
+        }
+        if (
+            payload.activity_type is not None
+            or payload.billing_rate is not None
+            or payload.costing_rate is not None
+        ):
+            add_user_kwargs.update(
+                {
+                    "activity_type": payload.activity_type,
+                    "billing_rate": payload.billing_rate,
+                    "costing_rate": payload.costing_rate,
+                }
+            )
+        project_user_result = await asyncio.to_thread(
             _add_erpnext_project_user,
-            external_project_id=external_project_id,
-            user=normalized_user,
+            **add_user_kwargs,
+        )
+    except EngineerOnboardingError as exc:
+        return JSONResponse(
+            {"error": "activity_cost_update_failed", "detail": str(exc)},
+            status_code=400,
         )
     except ERPNextAPIError as exc:
         return JSONResponse(
@@ -3443,9 +3601,12 @@ async def dashboard_add_project_user_handler(
             "source": "dashboard",
             "user": normalized_user,
             "local_project_id": project_id,
+            "activity_type": payload.activity_type,
+            "has_billing_rate": payload.billing_rate is not None,
+            "has_costing_rate": payload.costing_rate is not None,
         },
     )
-    return JSONResponse({"project": updated_project})
+    return JSONResponse(project_user_result)
 
 
 async def dashboard_add_project_historical_member_handler(
@@ -5616,6 +5777,11 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
         "/dashboard/api/onboarding",
         dashboard_onboarding_handler,
         methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/onboarding/engineers",
+        dashboard_setup_engineer_handler,
+        methods=["POST"],
     )
     app.add_api_route(
         "/dashboard/api/onboarding/{contact_id}/onboarder",

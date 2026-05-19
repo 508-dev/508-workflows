@@ -153,6 +153,92 @@ class ERPNextClient:
             )
         return [row for row in rows if isinstance(row, dict)]
 
+    def get_record(self, doctype: str, record_id: str) -> dict[str, Any]:
+        """Read one generic ERPNext document."""
+        normalized_doctype = doctype.strip()
+        normalized_id = record_id.strip()
+        if not normalized_doctype:
+            raise ERPNextAPIError("DocType is required")
+        if not normalized_id:
+            raise ERPNextAPIError(f"{normalized_doctype} id is required")
+        data = self.request(
+            "GET",
+            (
+                f"/api/resource/{quote(normalized_doctype, safe='')}/"
+                f"{quote(normalized_id, safe='')}"
+            ),
+        )
+        row = data.get("data")
+        if not isinstance(row, dict):
+            raise ERPNextAPIError(
+                f"ERPNext {normalized_doctype} detail is not an object"
+            )
+        return row
+
+    def create_record(self, doctype: str, fields: dict[str, Any]) -> dict[str, Any]:
+        """Create one generic ERPNext document."""
+        normalized_doctype = doctype.strip()
+        if not normalized_doctype:
+            raise ERPNextAPIError("DocType is required")
+        payload = {"doctype": normalized_doctype, **fields}
+        data = self.request(
+            "POST",
+            f"/api/resource/{quote(normalized_doctype, safe='')}",
+            payload=payload,
+        )
+        row = data.get("data")
+        if not isinstance(row, dict):
+            raise ERPNextAPIError(
+                f"ERPNext {normalized_doctype} create response is not an object"
+            )
+        return row
+
+    def update_record(
+        self,
+        doctype: str,
+        record_id: str,
+        fields: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Update one generic ERPNext document."""
+        normalized_doctype = doctype.strip()
+        normalized_id = record_id.strip()
+        if not normalized_doctype:
+            raise ERPNextAPIError("DocType is required")
+        if not normalized_id:
+            raise ERPNextAPIError(f"{normalized_doctype} id is required")
+        if not fields:
+            return self.get_record(normalized_doctype, normalized_id)
+        data = self.request(
+            "PUT",
+            (
+                f"/api/resource/{quote(normalized_doctype, safe='')}/"
+                f"{quote(normalized_id, safe='')}"
+            ),
+            payload=fields,
+        )
+        row = data.get("data")
+        if isinstance(row, dict):
+            return row
+        return self.get_record(normalized_doctype, normalized_id)
+
+    def call_method(
+        self,
+        method: str,
+        *,
+        params: dict[str, Any] | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Call one whitelisted Frappe method."""
+        normalized_method = method.strip()
+        if not normalized_method:
+            raise ERPNextAPIError("Frappe method is required")
+        return self.request(
+            "POST" if payload is not None else "GET",
+            f"/api/method/{quote(normalized_method, safe='.')}",
+            params=params,
+            payload=payload,
+        )
+
     def search_users(self, query: str, *, limit: int = 10) -> list[dict[str, Any]]:
         """Search ERPNext User records by email, id, or full name."""
         normalized_query = query.strip()

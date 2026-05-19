@@ -3085,7 +3085,7 @@ def test_dashboard_add_project_user_uses_erpnext_record_id(
         ),
         patch(
             "five08.backend.api._add_erpnext_project_user",
-            return_value=updated_project,
+            return_value={"project": updated_project, "activity_cost": None},
         ) as mock_add_user,
         patch(
             "five08.backend.api._write_auth_audit_event",
@@ -3098,12 +3098,58 @@ def test_dashboard_add_project_user_uses_erpnext_record_id(
         )
 
     assert response.status_code == 200
-    assert response.json() == {"project": updated_project}
+    assert response.json() == {"project": updated_project, "activity_cost": None}
     mock_add_user.assert_called_once_with(
         external_project_id="PROJ-0033",
         user="member@508.dev",
     )
     mock_audit.assert_awaited_once()
+
+
+def test_dashboard_add_project_user_rejects_activity_type_without_rate(
+    client: TestClient,
+) -> None:
+    project_id = "11111111-1111-4111-8111-111111111111"
+    session = api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    cached_project = {
+        "id": project_id,
+        "display_name": "Visible Project",
+        "erpnext_project_id": "PROJ-0033",
+        "roster_members": [],
+    }
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._cached_dashboard_project_by_id",
+            return_value=cached_project,
+        ),
+        patch("five08.backend.api._add_erpnext_project_user") as mock_add_user,
+    ):
+        response = client.post(
+            f"/dashboard/api/projects/{project_id}/users",
+            json={
+                "user": "member@508.dev",
+                "activity_type": "Engineering for Visible Project",
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "activity_cost_rates_required"}
+    mock_add_user.assert_not_called()
 
 
 def test_dashboard_add_project_historical_member_updates_local_roster(
