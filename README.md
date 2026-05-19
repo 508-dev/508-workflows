@@ -122,6 +122,13 @@ Show, export, or stop the local dev environment:
 ./scripts/dev.sh down
 ```
 
+For workspace archival, stop host-run dev processes and Docker Compose together:
+
+```bash
+./scripts/archive-workspace.sh --dry-run
+./scripts/archive-workspace.sh
+```
+
 `./scripts/dev.sh env` emits shell-safe exports for the current worktree and
 avoids printing the resolved Postgres password directly.
 
