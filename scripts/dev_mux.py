@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 from collections.abc import Iterable
+from typing import NamedTuple
 from urllib.parse import urlparse
 
 
@@ -18,6 +19,12 @@ PORT_SERVICES: list[tuple[str, str]] = [
     ("web", "BACKEND_API_BASE_URL"),
     ("discord-bot", "DISCORD_BOT_INTERNAL_BASE_URL"),
 ]
+
+
+class ProcessInfo(NamedTuple):
+    pid: int
+    ppid: int
+    command: str
 
 
 def _service_commands(env: dict[str, str]) -> list[tuple[str, list[str]]]:
@@ -167,30 +174,207 @@ def _pid_command(pid: int) -> str:
     return result.stdout.strip()
 
 
-def _stop_pid(pid: int) -> None:
+def _pid_cwd(pid: int) -> str:
     try:
-        os.kill(pid, signal.SIGTERM)
+        result = subprocess.run(
+            ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return ""
+    if result.returncode != 0:
+        return ""
+    for line in result.stdout.splitlines():
+        if line.startswith("n"):
+            return os.path.realpath(line[1:])
+    return ""
+
+
+def _process_table() -> dict[int, ProcessInfo]:
+    result = subprocess.run(
+        ["ps", "-axo", "pid=,ppid=,command="],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return {}
+
+    processes: dict[int, ProcessInfo] = {}
+    for line in result.stdout.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 2:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        processes[pid] = ProcessInfo(
+            pid=pid,
+            ppid=ppid,
+            command=parts[2] if len(parts) == 3 else "",
+        )
+    return processes
+
+
+def _child_index(processes: dict[int, ProcessInfo]) -> dict[int, list[int]]:
+    children: dict[int, list[int]] = {}
+    for process in processes.values():
+        children.setdefault(process.ppid, []).append(process.pid)
+    return children
+
+
+def _is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
     except ProcessLookupError:
-        return
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _stop_pids(pids: Iterable[int]) -> None:
+    unique_pids = sorted(set(pids))
+    for pid in unique_pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            pass
 
     deadline = time.time() + 5.0
     while time.time() < deadline:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if all(not _is_running(pid) for pid in unique_pids):
             return
         time.sleep(0.1)
 
-    try:
-        os.kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        return
+    for pid in unique_pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            pass
 
 
-def _ensure_ports_available(env: dict[str, str]) -> tuple[bool, str | None]:
+def _conductor_workspace_group(worktree_root: str) -> str:
+    marker = "/conductor/workspaces/"
+    marker_index = worktree_root.find(marker)
+    if marker_index < 0:
+        return ""
+    group_start = marker_index + len(marker)
+    group_end = worktree_root.find("/", group_start)
+    if group_end < 0:
+        return ""
+    return worktree_root[:group_end]
+
+
+def _is_under_path(path: str, root: str) -> bool:
+    if not path or not root:
+        return False
+    path = os.path.realpath(path)
+    root = os.path.realpath(root)
+    return path == root or path.startswith(root + os.sep)
+
+
+def _command_service(command: str) -> str | None:
+    if "five08.backend.api:create_app" in command or "backend-api" in command:
+        return "web"
+    if "discord-bot" in command:
+        return "discord-bot"
+    return None
+
+
+def _process_in_scope(
+    process: ProcessInfo,
+    *,
+    service_name: str,
+    worktree_root: str,
+    conductor_group: str,
+    cwd: str = "",
+) -> bool:
+    if worktree_root and (
+        worktree_root in process.command or _is_under_path(cwd, worktree_root)
+    ):
+        return True
+    return bool(
+        conductor_group
+        and _command_service(process.command) == service_name
+        and (conductor_group in process.command or _is_under_path(cwd, conductor_group))
+    )
+
+
+def _related_reclaim_pids(
+    owner_pids: Iterable[int],
+    *,
+    service_name: str,
+    worktree_root: str,
+    conductor_group: str,
+    commands: dict[int, str],
+    cwds: dict[int, str],
+    processes: dict[int, ProcessInfo],
+) -> set[int]:
+    selected: set[int] = set(owner_pids)
+
+    for owner_pid in owner_pids:
+        process = processes.get(owner_pid)
+        while process is not None:
+            parent = processes.get(process.ppid)
+            if parent is None:
+                break
+            parent_cwd = cwds.setdefault(parent.pid, _pid_cwd(parent.pid))
+            if not _process_in_scope(
+                parent,
+                service_name=service_name,
+                worktree_root=worktree_root,
+                conductor_group=conductor_group,
+                cwd=parent_cwd,
+            ):
+                break
+            selected.add(parent.pid)
+            process = parent
+
+    children = _child_index(processes)
+    stack = list(selected)
+    while stack:
+        parent_pid = stack.pop()
+        for child_pid in children.get(parent_pid, []):
+            if child_pid in selected:
+                continue
+            child = processes.get(child_pid)
+            if child is None:
+                continue
+            child_cwd = cwds.setdefault(child_pid, _pid_cwd(child_pid))
+            if not _process_in_scope(
+                child,
+                service_name=service_name,
+                worktree_root=worktree_root,
+                conductor_group=conductor_group,
+                cwd=child_cwd,
+            ):
+                continue
+            selected.add(child_pid)
+            stack.append(child_pid)
+
+    selected.update(pid for pid, command in commands.items() if command)
+    return selected
+
+
+def _ensure_ports_available(
+    env: dict[str, str], service_names: set[str] | None = None
+) -> tuple[bool, str | None]:
     worktree_root = env.get("WORKTREE_ENV_REPO_ROOT", "")
+    conductor_group = _conductor_workspace_group(worktree_root)
 
     for service_name, env_key in PORT_SERVICES:
+        if service_names is not None and service_name not in service_names:
+            continue
+
         try:
             port = _service_port(env, env_key)
         except ValueError as exc:
@@ -211,22 +395,44 @@ def _ensure_ports_available(env: dict[str, str]) -> tuple[bool, str | None]:
         if not pids:
             continue
 
+        processes = _process_table()
         commands = {pid: _pid_command(pid) for pid in pids}
-        stale_pids = [
+        cwds = {pid: _pid_cwd(pid) for pid in pids}
+        reclaimable_pids = [
             pid
-            for pid, command in commands.items()
-            if worktree_root and worktree_root in command
-        ]
-        if stale_pids and len(stale_pids) == len(pids):
-            print(
-                f"{service_name} port {port} is already in use by stale "
-                "same-worktree process(es); reclaiming it."
+            for pid in pids
+            if _process_in_scope(
+                ProcessInfo(
+                    pid=pid,
+                    ppid=processes.get(pid, ProcessInfo(pid, 0, "")).ppid,
+                    command=commands.get(pid, ""),
+                ),
+                service_name=service_name,
+                worktree_root=worktree_root,
+                conductor_group=conductor_group,
+                cwd=cwds.get(pid, ""),
             )
-            for pid in stale_pids:
-                _stop_pid(pid)
+        ]
+        if reclaimable_pids and len(reclaimable_pids) == len(pids):
+            related_pids = _related_reclaim_pids(
+                reclaimable_pids,
+                service_name=service_name,
+                worktree_root=worktree_root,
+                conductor_group=conductor_group,
+                commands=commands,
+                cwds=cwds,
+                processes=processes,
+            )
+            print(
+                f"{service_name} port {port} is already in use by "
+                "same-workspace service process(es); reclaiming it."
+            )
+            _stop_pids(related_pids)
             if _port_is_free(port):
                 continue
             pids = _listening_pids(port)
+            if pids is None:
+                pids = []
             commands = {pid: _pid_command(pid) for pid in pids}
 
         owners = (
@@ -244,9 +450,35 @@ def _ensure_ports_available(env: dict[str, str]) -> tuple[bool, str | None]:
     return True, None
 
 
-def main() -> int:
+def _ensure_selected_ports(env: dict[str, str], services: set[str]) -> int:
+    ports_ok, port_error = _ensure_ports_available(env, services)
+    if not ports_ok:
+        print(port_error, file=sys.stderr)
+        return 1
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
     env = os.environ.copy()
     env.setdefault("PYTHONUNBUFFERED", "1")
+
+    if argv:
+        if (
+            len(argv) == 2
+            and argv[0] == "--ensure-port"
+            and argv[1]
+            in {
+                "web",
+                "discord-bot",
+            }
+        ):
+            return _ensure_selected_ports(env, {argv[1]})
+        print(
+            "Usage: dev_mux.py [--ensure-port web|discord-bot]",
+            file=sys.stderr,
+        )
+        return 2
 
     print("Launching host-run services with shared worktree env:")
     print(f"  Web/API listener:     {env.get('BACKEND_API_BASE_URL', '')}")
