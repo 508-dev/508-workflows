@@ -14,6 +14,7 @@ _DASHBOARD_ROUTE_HINTS = """
 /dashboard/api/me
 /dashboard/people
 /dashboard/gigs
+/dashboard/projects
 /dashboard/onboarding
 /dashboard/jobs
 /dashboard/agent

@@ -63,6 +63,9 @@ class SharedSettings(BaseSettings):
     github_allowed_repos: str = ""
     kimai_base_url: str | None = None
     kimai_api_token: str | None = None
+    erpnext_base_url: str | None = None
+    erpnext_api_key: str | None = None
+    erpnext_api_timeout_seconds: float = 20.0
     migadu_api_user: str | None = None
     migadu_api_key: str | None = None
     migadu_mailbox_domain: str = "508.dev"

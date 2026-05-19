@@ -115,6 +115,14 @@ class AdminLoginCog(DiscordAuditCogMixin, commands.Cog):
                 exc,
             )
             return
+        except discord.HTTPException as exc:
+            if getattr(exc, "code", None) != 40060:
+                raise
+            logger.info(
+                "Continuing dashboard-login after already acknowledged interaction "
+                "for user_id=%s",
+                interaction.user.id,
+            )
 
         try:
             raw_roles = getattr(interaction.user, "roles", [])

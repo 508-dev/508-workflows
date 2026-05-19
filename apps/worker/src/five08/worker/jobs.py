@@ -13,6 +13,7 @@ from five08.worker.crm.intake_form_processor import IntakeFormProcessor
 from five08.worker.crm.people_sync import PeopleSyncProcessor
 from five08.worker.crm.processor import ContactSkillsProcessor
 from five08.worker.crm.resume_profile_processor import ResumeProfileProcessor
+from five08.worker.erpnext_project_sync import ERPNextProjectSyncProcessor
 from five08.worker.mailbox_resume_ingest import ResumeMailboxProcessor
 from five08.worker.masking import mask_email
 
@@ -156,6 +157,13 @@ def sync_person_from_crm_job(contact_id: str) -> dict[str, Any]:
     return result
 
 
+def sync_projects_from_erpnext_job() -> dict[str, Any]:
+    """Sync open ERPNext projects into the local project cache."""
+    logger.info("Processing ERPNext project sync job")
+    processor = ERPNextProjectSyncProcessor()
+    return processor.sync_open_projects()
+
+
 JOB_FUNCTIONS: dict[str, Callable[..., dict[str, Any]]] = {
     process_webhook_event.__name__: process_webhook_event,
     process_contact_skills_job.__name__: process_contact_skills_job,
@@ -165,5 +173,6 @@ JOB_FUNCTIONS: dict[str, Callable[..., dict[str, Any]]] = {
     process_mailbox_message_job.__name__: process_mailbox_message_job,
     sync_people_from_crm_job.__name__: sync_people_from_crm_job,
     sync_person_from_crm_job.__name__: sync_person_from_crm_job,
+    sync_projects_from_erpnext_job.__name__: sync_projects_from_erpnext_job,
     process_docuseal_agreement_job.__name__: process_docuseal_agreement_job,
 }

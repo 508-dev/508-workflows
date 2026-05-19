@@ -1681,6 +1681,36 @@ def test_dashboard_renders_gig_detail_shell_for_member_session(
     assert "508 Operations Dashboard" in response.text
 
 
+def test_dashboard_renders_project_detail_shell_for_member_session(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="member-1",
+        email="member@508.dev",
+        display_name="Member User",
+        groups=["Member"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api._session_can_view_any_project", return_value=True),
+    ):
+        response = client.get(
+            "/dashboard/projects/11111111-1111-4111-8111-111111111111"
+        )
+
+    assert response.status_code == 200
+    assert "508 Operations Dashboard" in response.text
+
+
 def test_dashboard_unknown_api_route_returns_not_found(client: TestClient) -> None:
     session = api.AuthSession(
         subject="admin-1",
@@ -1727,6 +1757,118 @@ def test_dashboard_me_member_session_only_gets_gig_permissions(
 
     assert response.status_code == 200
     assert response.json()["permissions"] == ["gigs:read", "gigs:write"]
+
+
+def test_dashboard_me_member_on_project_gets_project_read_permission(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="member-1",
+        email="member@508.dev",
+        display_name="Member User",
+        groups=["Member"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+        crm_contact_id="contact-member-1",
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api._session_can_view_any_project", return_value=True),
+    ):
+        response = client.get("/dashboard/api/me")
+
+    assert response.status_code == 200
+    assert response.json()["permissions"] == [
+        "gigs:read",
+        "gigs:write",
+        "projects:read",
+    ]
+
+
+def test_dashboard_gigs_does_not_check_project_roster_permission(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="member-1",
+        email="member@508.dev",
+        display_name="Member User",
+        groups=["Member"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api._session_can_view_any_project") as mock_project_check,
+        patch("five08.backend.api.list_dashboard_engagements", return_value=[]),
+    ):
+        response = client.get("/dashboard/api/gigs")
+
+    assert response.status_code == 200
+    mock_project_check.assert_not_called()
+
+
+def test_session_can_view_any_project_requires_erp_roster_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = api.AuthSession(
+        subject="member-1",
+        email="member@508.dev",
+        display_name="Member User",
+        groups=["Member"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    executed: list[str] = []
+
+    class Cursor:
+        def __enter__(self) -> object:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def execute(self, query: str, params: object) -> None:
+            executed.append(query)
+
+        def fetchone(self) -> None:
+            return None
+
+    class Connection:
+        def __enter__(self) -> object:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def cursor(self, *args: object, **kwargs: object) -> Cursor:
+            return Cursor()
+
+    monkeypatch.setattr(
+        api,
+        "_dashboard_project_viewer_emails",
+        lambda _session: ["member@508.dev"],
+    )
+    monkeypatch.setattr(api, "get_postgres_connection", lambda _settings: Connection())
+
+    assert api._session_can_view_any_project(session) is False
+    assert "source = 'erpnext'" in executed[0]
+    assert "roster_kind = 'erp_users'" in executed[0]
 
 
 def test_dashboard_renders_for_admin_session(client: TestClient) -> None:
@@ -2503,6 +2645,691 @@ def test_dashboard_gigs_allows_steering_to_see_all_gigs(client: TestClient) -> N
         status=None,
         limit=100,
     )
+
+
+def test_dashboard_projects_filters_member_to_roster_projects(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="member@508.dev",
+        display_name="Member User",
+        groups=["Member"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+        crm_contact_id="contact-member-1",
+    )
+    projects = [
+        {
+            "id": "project-1",
+            "display_name": "Visible Project",
+            "source_status": "Open",
+            "roster_count": 2,
+            "last_synced_at": "2026-05-19T12:00:00+00:00",
+        }
+    ]
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api._session_can_view_any_project", return_value=True),
+        patch(
+            "five08.backend.api._dashboard_project_viewer_emails",
+            return_value=["member@508.dev"],
+        ) as mock_emails,
+        patch(
+            "five08.backend.api.list_dashboard_projects", return_value=projects
+        ) as mock_projects,
+        patch("five08.backend.api.project_cache_summary") as mock_summary,
+    ):
+        response = client.get("/dashboard/api/projects?status=Open&limit=10")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "projects": projects,
+        "summary": {
+            "project_count": 1,
+            "open_project_count": 1,
+            "projects_with_roster": 1,
+            "roster_member_count": 2,
+            "last_synced_at": "2026-05-19T12:00:00+00:00",
+        },
+    }
+    mock_emails.assert_called_once_with(session)
+    mock_summary.assert_not_called()
+    mock_projects.assert_called_once_with(
+        api.settings,
+        query=None,
+        status="Open",
+        viewer_emails=["member@508.dev"],
+        include_all=False,
+        limit=10,
+    )
+
+
+def test_project_summary_parses_timestamps_before_max() -> None:
+    summary = api._project_summary_for_visible_rows(
+        [
+            {
+                "source_status": "Open",
+                "roster_count": 1,
+                "last_synced_at": "2026-05-19T12:00:00+00:00",
+            },
+            {
+                "source_status": "Open",
+                "roster_count": 0,
+                "last_synced_at": "2026-05-19T08:30:00-05:00",
+            },
+        ]
+    )
+
+    assert summary["last_synced_at"] == "2026-05-19T13:30:00+00:00"
+
+
+def test_dashboard_projects_allows_steering_to_see_all_projects(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    summary = {
+        "project_count": 15,
+        "open_project_count": 15,
+        "projects_with_roster": 11,
+        "roster_member_count": 17,
+        "last_synced_at": "2026-05-19T12:00:00+00:00",
+    }
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.list_dashboard_projects", return_value=[]),
+        patch("five08.backend.api.project_cache_summary", return_value=summary),
+    ):
+        response = client.get("/dashboard/api/projects")
+
+    assert response.status_code == 200
+    assert response.json() == {"projects": [], "summary": summary}
+
+
+def test_dashboard_project_wiki_matches_redacts_rows_for_project_member(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="member@508.dev",
+        display_name="Member User",
+        groups=["Member"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+        crm_contact_id="contact-member-1",
+    )
+    preview = {
+        "wiki_rows": [{"Client": "Hidden Client", "DRI": "Hidden DRI"}],
+        "matches": [
+            {
+                "project": {"id": "project-1", "display_name": "Visible Project"},
+                "best_match": {
+                    "score": 92,
+                    "confidence": "high",
+                    "row": {"Client": "Hidden Client", "DRI": "Hidden DRI"},
+                },
+                "fuzzy_match": {
+                    "score": 92,
+                    "confidence": "high",
+                    "row": {"Client": "Hidden Client", "DRI": "Hidden DRI"},
+                },
+                "manual_match": {
+                    "match_status": "confirmed",
+                    "wiki_row_label": "Hidden Client",
+                    "wiki_row_section": "Current",
+                    "source_payload": {"Client": "Hidden Client"},
+                },
+            }
+        ],
+    }
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api._session_can_view_any_project", return_value=True),
+        patch(
+            "five08.backend.api._dashboard_project_viewer_emails",
+            return_value=["member@508.dev"],
+        ),
+        patch("five08.backend.api.wiki_project_match_preview", return_value=preview),
+    ):
+        response = client.get("/dashboard/api/projects/wiki-matches")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "wiki_rows": [],
+        "matches": [
+            {
+                "project": {"id": "project-1", "display_name": "Visible Project"},
+                "best_match": {
+                    "score": 92,
+                    "confidence": "high",
+                    "row": None,
+                },
+                "fuzzy_match": {
+                    "score": 92,
+                    "confidence": "high",
+                    "row": None,
+                },
+                "manual_match": {"match_status": "confirmed"},
+            }
+        ],
+    }
+
+
+def test_dashboard_update_project_status_uses_erpnext_record_id(
+    client: TestClient,
+) -> None:
+    project_id = "11111111-1111-4111-8111-111111111111"
+    session = api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    cached_project = {
+        "id": project_id,
+        "display_name": "Visible Project",
+        "erpnext_project_id": "PROJ-0033",
+        "source_status": "Open",
+    }
+    updated_project = {**cached_project, "source_status": "Completed"}
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._cached_dashboard_project_by_id",
+            return_value=cached_project,
+        ),
+        patch(
+            "five08.backend.api._update_erpnext_project_status",
+            return_value=updated_project,
+        ) as mock_update,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            f"/dashboard/api/projects/{project_id}/status",
+            json={"status": "Completed"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"project": updated_project}
+    mock_update.assert_called_once_with(
+        external_project_id="PROJ-0033",
+        status="Completed",
+    )
+    mock_audit.assert_awaited_once()
+
+
+def test_dashboard_bulk_update_projects_updates_status_and_type(
+    client: TestClient,
+) -> None:
+    project_id = "11111111-1111-4111-8111-111111111111"
+    session = api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    updated_project = {
+        "id": project_id,
+        "display_name": "Visible Project",
+        "source_status": "Completed",
+        "project_type": "Internal",
+    }
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._bulk_update_erpnext_projects",
+            return_value={"projects": [updated_project], "failures": []},
+        ) as mock_bulk_update,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            "/dashboard/api/projects/bulk",
+            json={
+                "project_ids": [project_id],
+                "status": "Completed",
+                "project_type": "Internal",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"projects": [updated_project], "failures": []}
+    mock_bulk_update.assert_called_once_with(
+        project_ids=[project_id],
+        fields={"status": "Completed", "project_type": "Internal"},
+    )
+    mock_audit.assert_awaited_once()
+
+
+def test_bulk_update_erpnext_projects_reports_client_init_failure() -> None:
+    project_id = "11111111-1111-4111-8111-111111111111"
+    with (
+        patch(
+            "five08.backend.api._cached_erpnext_project_refs_by_id",
+            return_value={project_id: "PROJ-0033"},
+        ),
+        patch(
+            "five08.backend.api._erpnext_client",
+            side_effect=api.ERPNextAPIError("missing credentials"),
+        ),
+    ):
+        result = api._bulk_update_erpnext_projects(
+            project_ids=[project_id],
+            fields={"status": "Completed"},
+        )
+
+    assert result == {
+        "projects": [],
+        "failures": [{"project_id": project_id, "error": "missing credentials"}],
+    }
+
+
+def test_bulk_update_erpnext_projects_reuses_client_and_update_response() -> None:
+    project_id = "11111111-1111-4111-8111-111111111111"
+    client = Mock()
+    client.update_project.return_value = {
+        "name": "PROJ-0033",
+        "project_name": "Visible Project",
+        "status": "Completed",
+    }
+
+    with (
+        patch(
+            "five08.backend.api._cached_erpnext_project_refs_by_id",
+            return_value={project_id: "PROJ-0033"},
+        ) as mock_project_refs,
+        patch(
+            "five08.backend.api._cached_dashboard_project_by_id",
+            return_value={"id": project_id, "source_status": "Completed"},
+        ) as mock_cached_project,
+        patch("five08.backend.api._erpnext_client", return_value=client) as mock_client,
+        patch("five08.backend.api.upsert_project", return_value=project_id),
+    ):
+        result = api._bulk_update_erpnext_projects(
+            project_ids=[project_id],
+            fields={"status": "Completed"},
+        )
+
+    assert result == {
+        "projects": [{"id": project_id, "source_status": "Completed"}],
+        "failures": [],
+    }
+    mock_project_refs.assert_called_once_with([project_id])
+    mock_cached_project.assert_called_once_with(project_id)
+    mock_client.assert_called_once_with()
+    client.update_project.assert_called_once_with("PROJ-0033", {"status": "Completed"})
+    client.get_project.assert_not_called()
+    client.close.assert_called_once_with()
+
+
+def test_bulk_update_erpnext_projects_fetches_project_refs_once() -> None:
+    project_id = "11111111-1111-4111-8111-111111111111"
+    missing_project_id = "22222222-2222-4222-8222-222222222222"
+    client = Mock()
+    client.update_project.return_value = {
+        "name": "PROJ-0033",
+        "project_name": "Visible Project",
+        "status": "Completed",
+    }
+
+    with (
+        patch(
+            "five08.backend.api._cached_erpnext_project_refs_by_id",
+            return_value={project_id: "PROJ-0033"},
+        ) as mock_project_refs,
+        patch(
+            "five08.backend.api._cached_dashboard_project_by_id",
+            return_value={"id": project_id, "source_status": "Completed"},
+        ) as mock_cached_project,
+        patch("five08.backend.api._erpnext_client", return_value=client),
+        patch("five08.backend.api.upsert_project", return_value=project_id),
+    ):
+        result = api._bulk_update_erpnext_projects(
+            project_ids=[project_id, missing_project_id],
+            fields={"status": "Completed"},
+        )
+
+    assert result == {
+        "projects": [{"id": project_id, "source_status": "Completed"}],
+        "failures": [{"project_id": missing_project_id, "error": "project_not_found"}],
+    }
+    mock_project_refs.assert_called_once_with([project_id, missing_project_id])
+    mock_cached_project.assert_called_once_with(project_id)
+
+
+def test_dashboard_add_project_user_uses_erpnext_record_id(
+    client: TestClient,
+) -> None:
+    project_id = "11111111-1111-4111-8111-111111111111"
+    session = api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    cached_project = {
+        "id": project_id,
+        "display_name": "Visible Project",
+        "erpnext_project_id": "PROJ-0033",
+        "roster_members": [],
+    }
+    updated_project = {
+        **cached_project,
+        "roster_members": [{"email": "member@508.dev"}],
+    }
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._cached_dashboard_project_by_id",
+            return_value=cached_project,
+        ),
+        patch(
+            "five08.backend.api._add_erpnext_project_user",
+            return_value=updated_project,
+        ) as mock_add_user,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            f"/dashboard/api/projects/{project_id}/users",
+            json={"user": " member@508.dev "},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"project": updated_project}
+    mock_add_user.assert_called_once_with(
+        external_project_id="PROJ-0033",
+        user="member@508.dev",
+    )
+    mock_audit.assert_awaited_once()
+
+
+def test_dashboard_add_project_historical_member_updates_local_roster(
+    client: TestClient,
+) -> None:
+    project_id = "11111111-1111-4111-8111-111111111111"
+    session = api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    cached_project = {"id": project_id, "display_name": "Visible Project"}
+    updated_project = {
+        **cached_project,
+        "roster_members": [{"email": "past@508.dev", "roster_kind": "historical"}],
+    }
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._cached_dashboard_project_by_id",
+            return_value=cached_project,
+        ),
+        patch(
+            "five08.backend.api._add_historical_project_member",
+            return_value=updated_project,
+        ) as mock_add_member,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            f"/dashboard/api/projects/{project_id}/historical-members",
+            json={"person": " past@508.dev "},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"project": updated_project}
+    mock_add_member.assert_called_once_with(
+        project_id=project_id,
+        person="past@508.dev",
+        candidate_id=None,
+        actor_subject="steering-1",
+    )
+    mock_audit.assert_awaited_once()
+
+
+def test_dashboard_add_project_historical_member_returns_ambiguous_candidates(
+    client: TestClient,
+) -> None:
+    project_id = "11111111-1111-4111-8111-111111111111"
+    session = api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    cached_project = {"id": project_id, "display_name": "Visible Project"}
+    candidates = [
+        {"candidate_id": "email:sam@508.dev", "label": "Sam", "email": "sam@508.dev"},
+        {
+            "candidate_id": "email:samr@508.dev",
+            "label": "Sam R",
+            "email": "samr@508.dev",
+        },
+    ]
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._cached_dashboard_project_by_id",
+            return_value=cached_project,
+        ),
+        patch(
+            "five08.backend.api._add_historical_project_member",
+            side_effect=api.HistoricalProjectMemberResolutionError(
+                "ambiguous_person",
+                candidates=candidates,
+            ),
+        ),
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            f"/dashboard/api/projects/{project_id}/historical-members",
+            json={"person": " sam "},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["error"] == "ambiguous_person"
+    assert response.json()["candidates"] == candidates
+    mock_audit.assert_not_awaited()
+
+
+def test_resolve_historical_project_member_merges_crm_erp_and_supplier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        api,
+        "_dashboard_people_candidates_for_project_member",
+        lambda _query: [
+            {
+                "label": "Sam R",
+                "full_name": "Sam R",
+                "email": "samr@508.dev",
+                "crm_contact_id": "crm-sam",
+                "sources": ["CRM"],
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        api,
+        "_erpnext_candidates_for_project_member",
+        lambda _query: [
+            {
+                "label": "Sam R",
+                "full_name": "Sam R",
+                "email": "samr@508.dev",
+                "erpnext_user_id": "samr@508.dev",
+                "sources": ["ERP User"],
+            },
+            {
+                "label": "Sam R",
+                "full_name": "Sam R",
+                "email": "samr@508.dev",
+                "supplier_erpnext_id": "SUP-SAMR",
+                "supplier_name": "Sam R",
+                "sources": ["ERP Supplier"],
+            },
+        ],
+    )
+
+    candidate = api._resolve_historical_project_member(person="samr@508.dev")
+
+    assert candidate["candidate_id"] == "email:samr@508.dev"
+    assert candidate["crm_contact_id"] == "crm-sam"
+    assert candidate["erpnext_user_id"] == "samr@508.dev"
+    assert candidate["supplier_erpnext_id"] == "SUP-SAMR"
+    assert candidate["sources"] == ["CRM", "ERP User", "ERP Supplier"]
+
+
+def test_dashboard_update_project_wiki_match_confirms_row(
+    client: TestClient,
+) -> None:
+    project_id = "11111111-1111-4111-8111-111111111111"
+    session = api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    cached_project = {
+        "id": project_id,
+        "display_name": "Visible Project",
+        "erpnext_project_id": "PROJ-0033",
+    }
+    wiki_doc = {
+        "text": (
+            "## Current\n"
+            "| Client | Description | DRI | Members | Status |\n"
+            "| --- | --- | --- | --- | --- |\n"
+            "| Visible Client | Work | DRI | Member | Active |\n"
+        )
+    }
+    wiki_row = api.parse_project_wiki_tables(wiki_doc["text"])[0]
+    manual_match = {"match_status": "confirmed", "wiki_row_key": wiki_row["row_key"]}
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._cached_dashboard_project_by_id",
+            return_value=cached_project,
+        ),
+        patch("five08.backend.api.fetch_outline_document", return_value=wiki_doc),
+        patch(
+            "five08.backend.api.set_project_wiki_match",
+            return_value=manual_match,
+        ) as mock_set_match,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            f"/dashboard/api/projects/{project_id}/wiki-match",
+            json={"status": "confirmed", "row_key": wiki_row["row_key"]},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"manual_match": manual_match}
+    mock_set_match.assert_called_once_with(
+        api.settings,
+        project_id=project_id,
+        document_id=api.DEFAULT_WIKI_PROJECT_DOC_ID,
+        match_status="confirmed",
+        wiki_row=wiki_row,
+    )
+    mock_audit.assert_awaited_once()
 
 
 def test_dashboard_gig_detail_returns_visible_gig_by_id(client: TestClient) -> None:
