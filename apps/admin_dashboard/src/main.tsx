@@ -273,6 +273,18 @@ type AgentReport = {
   }>
 }
 
+type DashboardDevError = {
+  id: string
+  occurredAt: string
+  message: string
+  name?: string
+  status?: number
+  method?: string
+  url?: string
+  payload?: unknown
+  stack?: string
+}
+
 const routes: Record<View, string> = {
   people: "/dashboard/people",
   gigs: "/dashboard/gigs",
@@ -338,12 +350,37 @@ type FilterState = Partial<Record<PeopleFilterKey, string>>
 class ApiRequestError extends Error {
   status: number
   payload: unknown
+  url: string
+  method: string
 
-  constructor(message: string, status: number, payload: unknown) {
+  constructor(message: string, status: number, payload: unknown, url: string, method: string) {
     super(message)
     this.name = "ApiRequestError"
     this.status = status
     this.payload = payload
+    this.url = url
+    this.method = method
+  }
+}
+
+function messageFromUnknown(error: unknown, fallback: string) {
+  if (typeof error === "string") return error
+  return error instanceof Error ? error.message : fallback
+}
+
+function devErrorFromUnknown(error: unknown, fallback: string): DashboardDevError {
+  const message = messageFromUnknown(error, fallback)
+  const apiError = error instanceof ApiRequestError ? error : null
+  return {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    occurredAt: new Date().toLocaleTimeString(),
+    message,
+    name: error instanceof Error ? error.name : undefined,
+    status: apiError?.status,
+    method: apiError?.method,
+    url: apiError?.url,
+    payload: apiError?.payload,
+    stack: error instanceof Error ? error.stack : undefined,
   }
 }
 
@@ -367,17 +404,29 @@ function detailIdFromPath(expectedView: "gigs" | "projects" = "gigs") {
 }
 
 async function requestJson<T>(url: string, options: RequestInit = {}): Promise<T> {
+  const method = String(options.method || "GET").toUpperCase()
   const headers = new Headers(options.headers)
   headers.set("Accept", "application/json")
-  const response = await fetch(url, {
-    credentials: "same-origin",
-    ...options,
-    headers,
-  })
+  let response: Response
+  try {
+    response = await fetch(url, {
+      credentials: "same-origin",
+      ...options,
+      headers,
+    })
+  } catch (error) {
+    throw new ApiRequestError(
+      messageFromUnknown(error, "Network request failed"),
+      0,
+      null,
+      url,
+      method,
+    )
+  }
   if (response.status === 401) {
     const next = `${window.location.pathname}${window.location.search}` || "/dashboard"
     window.location.assign(`/auth/login?next=${encodeURIComponent(next)}`)
-    throw new Error("Session expired")
+    throw new ApiRequestError("Session expired", response.status, null, url, method)
   }
   if (!response.ok) {
     let detail: unknown = response.statusText
@@ -395,6 +444,8 @@ async function requestJson<T>(url: string, options: RequestInit = {}): Promise<T
       typeof detail === "string" ? detail : JSON.stringify(detail),
       response.status,
       payload,
+      url,
+      method,
     )
   }
   return response.json() as Promise<T>
@@ -567,6 +618,7 @@ function App() {
   const [agentReport, setAgentReport] = useState<AgentReport | null>(null)
   const [jobDetail, setJobDetail] = useState<JobDetail | null>(null)
   const [loading, setLoading] = useState<Record<string, boolean>>({})
+  const [devErrors, setDevErrors] = useState<DashboardDevError[]>([])
   const [historicalPersonChoice, setHistoricalPersonChoice] = useState<{
     projectId: string
     person: string
@@ -617,6 +669,13 @@ function App() {
 
   function showToast(message: string, tone?: "ok" | "error") {
     setToast({ message, tone })
+  }
+
+  function showError(error: unknown, fallback: string) {
+    showToast(messageFromUnknown(error, fallback), "error")
+    if (import.meta.env.DEV) {
+      setDevErrors((current) => [devErrorFromUnknown(error, fallback), ...current].slice(0, 8))
+    }
   }
 
   function setBusy(key: string, value: boolean) {
@@ -736,7 +795,7 @@ function App() {
       setJobs(payload)
       showToast(`Loaded ${payload.length} jobs`, "ok")
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Unable to load jobs", "error")
+      showError(error, "Unable to load jobs")
     } finally {
       setBusy("jobs", false)
     }
@@ -750,7 +809,7 @@ function App() {
       showToast(`Loaded ${payload.length} gig${payload.length === 1 ? "" : "s"}`, "ok")
       void loadNotifications()
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Unable to load gigs", "error")
+      showError(error, "Unable to load gigs")
     } finally {
       setBusy("gigs", false)
     }
@@ -767,7 +826,7 @@ function App() {
         "ok",
       )
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Unable to load projects", "error")
+      showError(error, "Unable to load projects")
     } finally {
       setBusy("projects", false)
     }
@@ -782,7 +841,7 @@ function App() {
       })
       showToast(`Queued project sync ${payload.job_id}`, "ok")
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Unable to queue project sync", "error")
+      showError(error, "Unable to queue project sync")
     } finally {
       setBusy("syncProjects", false)
     }
@@ -804,7 +863,7 @@ function App() {
       )
       showToast("Updated project status", "ok")
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Unable to update project", "error")
+      showError(error, "Unable to update project")
     } finally {
       setBusy(`project:${projectId}:status`, false)
     }
@@ -838,7 +897,7 @@ function App() {
       )
       return failures.length === 0
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Unable to bulk update projects", "error")
+      showError(error, "Unable to bulk update projects")
       return false
     } finally {
       setBusy("projectsBulkUpdate", false)
@@ -864,7 +923,7 @@ function App() {
       showToast("Added project user", "ok")
       return true
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Unable to add project user", "error")
+      showError(error, "Unable to add project user")
       return false
     } finally {
       setBusy(`project:${projectId}:user`, false)
@@ -904,7 +963,7 @@ function App() {
           return false
         }
       }
-      showToast(error instanceof Error ? error.message : "Unable to add historical member", "error")
+      showError(error, "Unable to add historical member")
       return false
     } finally {
       setBusy(`project:${projectId}:historical`, false)
@@ -925,7 +984,7 @@ function App() {
       showToast(status === "no_row" ? "Marked as no wiki row" : "Confirmed wiki match", "ok")
       await loadWikiMatches()
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Unable to save wiki match", "error")
+      showError(error, "Unable to save wiki match")
     } finally {
       setBusy(`project:${projectId}:wiki`, false)
     }
@@ -938,7 +997,7 @@ function App() {
       setWikiMatches(payload)
       showToast("Loaded wiki match preview", "ok")
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Unable to load wiki matches", "error")
+      showError(error, "Unable to load wiki matches")
     } finally {
       setBusy("wikiMatches", false)
     }
@@ -951,7 +1010,7 @@ function App() {
       setGigDetail(payload)
     } catch (error) {
       setGigDetail(null)
-      showToast(error instanceof Error ? error.message : "Unable to load gig", "error")
+      showError(error, "Unable to load gig")
     } finally {
       setBusy(`gig:${gigId}:detail`, false)
     }
@@ -972,7 +1031,7 @@ function App() {
       setStaleRecruitingDays(payload.stale_days || 7)
       setNotifications(payload.notifications || [])
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Unable to load notifications", "error")
+      showError(error, "Unable to load notifications")
     } finally {
       setBusy("notifications", false)
     }
@@ -999,7 +1058,7 @@ function App() {
       await loadGigs()
       if (selectedGigId === gigId) await loadGigDetail(gigId)
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Unable to update gig", "error")
+      showError(error, "Unable to update gig")
     } finally {
       setBusy(`gig:${gigId}:status`, false)
     }
@@ -1026,7 +1085,7 @@ function App() {
       await loadGigs()
       if (selectedGigId === gigId) await loadGigDetail(gigId)
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Unable to update candidate", "error")
+      showError(error, "Unable to update candidate")
     } finally {
       setBusy(`application:${applicationId}:status`, false)
     }
@@ -1048,7 +1107,7 @@ function App() {
       const payload = await requestJson<Person[]>(peopleUrl())
       setPeople(payload)
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Unable to load people", "error")
+      showError(error, "Unable to load people")
     } finally {
       setBusy("people", false)
     }
@@ -1071,7 +1130,7 @@ function App() {
       const payload = await requestJson<Person[]>(onboardingUrl())
       setOnboarding(payload)
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Unable to load onboarding", "error")
+      showError(error, "Unable to load onboarding")
     } finally {
       setBusy("onboarding", false)
     }
@@ -1082,7 +1141,7 @@ function App() {
     try {
       setAuditEvents(await requestJson<AuditEvent[]>("/dashboard/api/audit-events?limit=25"))
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Unable to load audit events", "error")
+      showError(error, "Unable to load audit events")
     } finally {
       setBusy("audit", false)
     }
@@ -1093,7 +1152,7 @@ function App() {
     try {
       setAgentReport(await requestJson<AgentReport>("/dashboard/api/agent?limit=100"))
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Unable to load agent report", "error")
+      showError(error, "Unable to load agent report")
     } finally {
       setBusy("agent", false)
     }
@@ -1109,7 +1168,7 @@ function App() {
       setJobDetail(detail)
       showToast(`Loaded ${jobId}`, "ok")
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Unable to load job detail", "error")
+      showError(error, "Unable to load job detail")
     } finally {
       setBusy(`detail:${jobId}`, false)
     }
@@ -1126,7 +1185,7 @@ function App() {
       showToast(`Queued rerun ${payload.job_id}`, "ok")
       await loadJobs()
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Unable to rerun job", "error")
+      showError(error, "Unable to rerun job")
     } finally {
       setBusy(`rerun:${jobId}`, false)
     }
@@ -1141,7 +1200,7 @@ function App() {
       })
       showToast(`Queued people sync ${payload.job_id}`, "ok")
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Unable to queue people sync", "error")
+      showError(error, "Unable to queue people sync")
     } finally {
       setBusy("syncPeople", false)
     }
@@ -1191,7 +1250,7 @@ function App() {
       )
       showToast(`Assigned ${payload.onboarder}`, "ok")
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Unable to assign onboarder", "error")
+      showError(error, "Unable to assign onboarder")
     } finally {
       setBusy(`onboarder:${normalizedContactId}`, false)
     }
@@ -1205,7 +1264,7 @@ function App() {
       })
       window.location.assign(payload.end_session_url || "/dashboard")
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Unable to log out", "error")
+      showError(error, "Unable to log out")
       setBusy("logout", false)
     }
   }
@@ -1229,7 +1288,7 @@ function App() {
         }
       })
       .catch((error: unknown) => {
-        showToast(error instanceof Error ? error.message : "Dashboard failed to load", "error")
+        showError(error, "Dashboard failed to load")
       })
   }, [])
 
@@ -1248,6 +1307,23 @@ function App() {
     const timeout = window.setTimeout(() => setToast({ message: "" }), 4500)
     return () => window.clearTimeout(timeout)
   }, [toast.message])
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: dev diagnostics should subscribe once to global browser errors.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return undefined
+    const onError = (event: ErrorEvent) => {
+      showError(event.error || event.message, "Unhandled dashboard error")
+    }
+    const onUnhandledRejection = (event: PromiseRejectionEvent) => {
+      showError(event.reason, "Unhandled promise rejection")
+    }
+    window.addEventListener("error", onError)
+    window.addEventListener("unhandledrejection", onUnhandledRejection)
+    return () => {
+      window.removeEventListener("error", onError)
+      window.removeEventListener("unhandledrejection", onUnhandledRejection)
+    }
+  }, [])
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: each loader reads the latest filter state for the active view.
   useEffect(() => {
@@ -1463,6 +1539,9 @@ function App() {
         onOpenNotification={openNotification}
       />
       <DashboardToast toast={toast} />
+      {import.meta.env.DEV ? (
+        <DashboardDevErrors errors={devErrors} onClear={() => setDevErrors([])} />
+      ) : null}
       <HistoricalPersonChoiceModal
         choice={historicalPersonChoice}
         loading={Boolean(
@@ -1883,6 +1962,90 @@ function DashboardToast({ toast }: { toast: { message: string; tone?: "ok" | "er
     >
       {toast.message}
     </div>
+  )
+}
+
+function DashboardDevErrors({
+  errors,
+  onClear,
+}: {
+  errors: DashboardDevError[]
+  onClear: () => void
+}) {
+  if (errors.length === 0) return null
+  const [latest, ...previous] = errors
+  const status = latest.status === 0 ? "Network" : latest.status
+  const endpoint = [latest.method, latest.url].filter(Boolean).join(" ")
+  const payload =
+    latest.payload === null || latest.payload === undefined
+      ? ""
+      : JSON.stringify(latest.payload, null, 2)
+
+  return (
+    <aside
+      aria-label="Development request errors"
+      className="fixed bottom-5 left-5 z-50 grid max-h-[70vh] w-[min(42rem,calc(100vw-2.5rem))] gap-3 overflow-auto rounded-md border border-red-500/40 bg-background p-4 text-sm shadow-2xl"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <strong className="text-red-300">Request failed</strong>
+            <Badge variant="failed">{status || latest.name || "Error"}</Badge>
+            <span className="text-muted-foreground">{latest.occurredAt}</span>
+          </div>
+          {endpoint ? (
+            <code className="mt-1 block truncate text-xs text-muted-foreground">{endpoint}</code>
+          ) : null}
+        </div>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          aria-label="Clear errors"
+          onClick={onClear}
+        >
+          <X />
+        </Button>
+      </div>
+      <div className="rounded-md border border-red-500/25 bg-red-500/5 p-3 text-red-100">
+        {latest.message}
+      </div>
+      {payload ? (
+        <details>
+          <summary className="cursor-pointer font-semibold text-muted-foreground">Payload</summary>
+          <pre className="mt-2 max-h-56 overflow-auto rounded-md bg-black/30 p-3 text-xs text-muted-foreground">
+            {payload}
+          </pre>
+        </details>
+      ) : null}
+      {latest.stack ? (
+        <details>
+          <summary className="cursor-pointer font-semibold text-muted-foreground">Stack</summary>
+          <pre className="mt-2 max-h-56 overflow-auto rounded-md bg-black/30 p-3 text-xs text-muted-foreground">
+            {latest.stack}
+          </pre>
+        </details>
+      ) : null}
+      {previous.length > 0 ? (
+        <details>
+          <summary className="cursor-pointer font-semibold text-muted-foreground">
+            Previous failures ({previous.length})
+          </summary>
+          <div className="mt-2 grid gap-2">
+            {previous.map((error) => (
+              <div key={error.id} className="rounded-md border p-2">
+                <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+                  <span>{error.occurredAt}</span>
+                  <span>{error.status === 0 ? "Network" : error.status || error.name}</span>
+                  <code>{[error.method, error.url].filter(Boolean).join(" ")}</code>
+                </div>
+                <div className="mt-1">{error.message}</div>
+              </div>
+            ))}
+          </div>
+        </details>
+      ) : null}
+    </aside>
   )
 }
 
