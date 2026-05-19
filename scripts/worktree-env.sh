@@ -87,6 +87,19 @@ worktree_env_resolve_shell_or_default() {
   printf '%s' "$default_value"
 }
 
+worktree_env_resolve_conductor_port_base() {
+  [ -n "${CONDUCTOR_PORT-}" ] || return 1
+
+  worktree_env_validate_port_number "$CONDUCTOR_PORT" "CONDUCTOR_PORT" || return 2
+
+  if [ "$CONDUCTOR_PORT" -gt 65526 ]; then
+    echo "CONDUCTOR_PORT must leave room for a 10-port range, got '$CONDUCTOR_PORT'." >&2
+    return 2
+  fi
+
+  printf '%s' "$CONDUCTOR_PORT"
+}
+
 worktree_env_validate_port_number() {
   port_value=$1
   port_label=$2
@@ -129,6 +142,11 @@ worktree_env_finalize_browser_safe_port() {
   worktree_env_validate_port_number "$resolved_value" "$port_label" || return 1
 
   if [ "$source_label" = "default" ]; then
+    if [ "${WORKTREE_ENV_PORT_DEFAULT_SOURCE-}" = "conductor" ] && worktree_env_is_browser_unsafe_port "$resolved_value"; then
+      echo "$port_label defaults to browser-unsafe port '$resolved_value' from CONDUCTOR_PORT; set $port_label explicitly or use a different CONDUCTOR_PORT." \
+        >&2
+      return 1
+    fi
     resolved_value=$(worktree_env_next_browser_safe_port "$resolved_value")
   elif worktree_env_is_browser_unsafe_port "$resolved_value"; then
     echo "$port_label cannot use browser-unsafe port '$resolved_value'; pick a different port." >&2
@@ -255,14 +273,39 @@ worktree_env_load() {
   fi
 
   COMPOSE_PROJECT_NAME=$(worktree_env_resolve_value COMPOSE_PROJECT_NAME "${project_name}-$(printf '%04d' "$WORKTREE_ENV_SLOT")" "$WORKTREE_ENV_FILE")
-  REDIS_HOST_PORT=$(worktree_env_resolve_value REDIS_HOST_PORT "$((12000 + WORKTREE_ENV_SLOT))" "$WORKTREE_ENV_FILE")
-  POSTGRES_HOST_PORT=$(worktree_env_resolve_value POSTGRES_HOST_PORT "$((15432 + WORKTREE_ENV_SLOT))" "$WORKTREE_ENV_FILE")
+  if conductor_port_base=$(worktree_env_resolve_conductor_port_base); then
+    WORKTREE_ENV_PORT_DEFAULT_SOURCE=conductor
+    REDIS_HOST_PORT_DEFAULT=$conductor_port_base
+    POSTGRES_HOST_PORT_DEFAULT=$((conductor_port_base + 1))
+    WEB_HOST_PORT_DEFAULT=$((conductor_port_base + 2))
+    MINIO_API_HOST_PORT_DEFAULT=$((conductor_port_base + 3))
+    MINIO_CONSOLE_HOST_PORT_DEFAULT=$((conductor_port_base + 4))
+    WEB_PORT_DEFAULT=$((conductor_port_base + 5))
+    HEALTHCHECK_PORT_DEFAULT=$((conductor_port_base + 6))
+  else
+    conductor_port_status=$?
+    if [ "$conductor_port_status" -ne 1 ]; then
+      return "$conductor_port_status"
+    fi
+
+    WORKTREE_ENV_PORT_DEFAULT_SOURCE=worktree
+    REDIS_HOST_PORT_DEFAULT=$((12000 + WORKTREE_ENV_SLOT))
+    POSTGRES_HOST_PORT_DEFAULT=$((15432 + WORKTREE_ENV_SLOT))
+    WEB_HOST_PORT_DEFAULT=$((20080 + WORKTREE_ENV_SLOT))
+    MINIO_API_HOST_PORT_DEFAULT=$((24000 + WORKTREE_ENV_SLOT))
+    MINIO_CONSOLE_HOST_PORT_DEFAULT=$((28000 + WORKTREE_ENV_SLOT))
+    WEB_PORT_DEFAULT=$((18080 + WORKTREE_ENV_SLOT))
+    HEALTHCHECK_PORT_DEFAULT=$((30000 + WORKTREE_ENV_SLOT))
+  fi
+
+  REDIS_HOST_PORT=$(worktree_env_resolve_value REDIS_HOST_PORT "$REDIS_HOST_PORT_DEFAULT" "$WORKTREE_ENV_FILE")
+  POSTGRES_HOST_PORT=$(worktree_env_resolve_value POSTGRES_HOST_PORT "$POSTGRES_HOST_PORT_DEFAULT" "$WORKTREE_ENV_FILE")
   POSTGRES_USER=$(worktree_env_resolve_value POSTGRES_USER "postgres" "$WORKTREE_ENV_FILE")
   POSTGRES_PASSWORD=$(worktree_env_resolve_value POSTGRES_PASSWORD "postgres" "$WORKTREE_ENV_FILE")
   POSTGRES_DB=$(worktree_env_resolve_value POSTGRES_DB "workflows" "$WORKTREE_ENV_FILE")
-  WEB_HOST_PORT=$(worktree_env_resolve_browser_safe_port_preferred WEB_HOST_PORT WEBHOOK_INGEST_HOST_PORT "$((20080 + WORKTREE_ENV_SLOT))" "$WORKTREE_ENV_FILE" "WEB_HOST_PORT")
-  MINIO_API_HOST_PORT=$(worktree_env_resolve_browser_safe_port MINIO_API_HOST_PORT "$((24000 + WORKTREE_ENV_SLOT))" "$WORKTREE_ENV_FILE" "MINIO_API_HOST_PORT")
-  MINIO_CONSOLE_HOST_PORT=$(worktree_env_resolve_browser_safe_port MINIO_CONSOLE_HOST_PORT "$((28000 + WORKTREE_ENV_SLOT))" "$WORKTREE_ENV_FILE" "MINIO_CONSOLE_HOST_PORT")
+  WEB_HOST_PORT=$(worktree_env_resolve_browser_safe_port_preferred WEB_HOST_PORT WEBHOOK_INGEST_HOST_PORT "$WEB_HOST_PORT_DEFAULT" "$WORKTREE_ENV_FILE" "WEB_HOST_PORT")
+  MINIO_API_HOST_PORT=$(worktree_env_resolve_browser_safe_port MINIO_API_HOST_PORT "$MINIO_API_HOST_PORT_DEFAULT" "$WORKTREE_ENV_FILE" "MINIO_API_HOST_PORT")
+  MINIO_CONSOLE_HOST_PORT=$(worktree_env_resolve_browser_safe_port MINIO_CONSOLE_HOST_PORT "$MINIO_CONSOLE_HOST_PORT_DEFAULT" "$WORKTREE_ENV_FILE" "MINIO_CONSOLE_HOST_PORT")
 
   export WORKTREE_ENV_REPO_ROOT
   export WORKTREE_ENV_FILE
@@ -279,10 +322,8 @@ worktree_env_load() {
   export MINIO_CONSOLE_HOST_PORT
 
   if [ "$mode" = "host" ]; then
-    # Keep host-run app ports below the Linux default ephemeral range
-    # (32768-60999) to avoid rare EADDRINUSE races with outbound sockets.
-    WEB_PORT=$(worktree_env_resolve_browser_safe_shell_or_default_preferred WEB_PORT WEBHOOK_INGEST_PORT "$((18080 + WORKTREE_ENV_SLOT))" "WEB_PORT")
-    HEALTHCHECK_PORT=$(worktree_env_resolve_browser_safe_shell_or_default HEALTHCHECK_PORT "$((30000 + WORKTREE_ENV_SLOT))" "HEALTHCHECK_PORT")
+    WEB_PORT=$(worktree_env_resolve_browser_safe_shell_or_default_preferred WEB_PORT WEBHOOK_INGEST_PORT "$WEB_PORT_DEFAULT" "WEB_PORT")
+    HEALTHCHECK_PORT=$(worktree_env_resolve_browser_safe_shell_or_default HEALTHCHECK_PORT "$HEALTHCHECK_PORT_DEFAULT" "HEALTHCHECK_PORT")
     export WEB_PORT
     export WEBHOOK_INGEST_PORT=$WEB_PORT
     export HEALTHCHECK_PORT

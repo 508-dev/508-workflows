@@ -208,6 +208,12 @@ See [LICENSE](./LICENSE).
 
 Use `.env.example` as the source of truth for defaults.
 
+When running inside Conductor, `CONDUCTOR_PORT` is treated as the first port in
+the workspace's 10-port range for unset worktree defaults: Redis uses `+0`,
+Postgres `+1`, Compose web `+2`, MinIO API `+3`, MinIO console `+4`, host-run
+web/API `+5`, and bot health `+6`. Explicit service port overrides keep their
+current precedence rules.
+
 ### Core Runtime (Bot + Worker)
 
 - `Required`: `ESPO_BASE_URL`, `ESPO_API_KEY`
@@ -220,7 +226,7 @@ Use `.env.example` as the source of truth for defaults.
 - `Optional`: `REDIS_QUEUE_NAME` (default: `jobs.default`)
 - `Optional`: `REDIS_KEY_PREFIX` (default: `jobs`)
 - `Optional`: `REDIS_HOST_BIND` (default: `127.0.0.1`)
-- `Optional`: `REDIS_HOST_PORT` (default when unset: deterministic per-worktree value `12000 + WORKTREE_ENV_SLOT`; set `REDIS_HOST_PORT=6379` in your shell or `.env` to pin it to `6379`)
+- `Optional`: `REDIS_HOST_PORT` (default when unset: `CONDUCTOR_PORT + 0` inside Conductor, otherwise deterministic per-worktree value `12000 + WORKTREE_ENV_SLOT`; set `REDIS_HOST_PORT=6379` in your shell or `.env` to pin it to `6379`)
 - `Optional`: `JOB_TIMEOUT_SECONDS` (default: `600`)
 - `Optional`: `JOB_RESULT_TTL_SECONDS` (default: `3600`)
 - `Optional`: `JOB_MAX_ATTEMPTS` (default: `8`)
@@ -235,7 +241,7 @@ Use `.env.example` as the source of truth for defaults.
 - `Optional` (Compose DB container): `POSTGRES_USER` (default: `postgres`)
 - `Optional` (Compose DB container): `POSTGRES_PASSWORD` (default: `postgres`)
 - `Optional` (Compose host bind): `POSTGRES_HOST_BIND` (default: `127.0.0.1`)
-- `Optional` (Compose host port): `POSTGRES_HOST_PORT` (default when unset: deterministic per-worktree value `15432 + WORKTREE_ENV_SLOT`; use `5432` only if you explicitly pin it, e.g. `POSTGRES_HOST_PORT=5432`; see `./scripts/docker-compose.sh print-ports`)
+- `Optional` (Compose host port): `POSTGRES_HOST_PORT` (default when unset: `CONDUCTOR_PORT + 1` inside Conductor, otherwise deterministic per-worktree value `15432 + WORKTREE_ENV_SLOT`; use `5432` only if you explicitly pin it, e.g. `POSTGRES_HOST_PORT=5432`; see `./scripts/docker-compose.sh print-ports`)
 
 ### MinIO + Internal Transfers
 
@@ -244,8 +250,8 @@ Use `.env.example` as the source of truth for defaults.
 - `Optional`: `MINIO_INTERNAL_BUCKET` (default: `internal-transfers`)
 - `Optional`: `MINIO_ROOT_USER` (default: `internal`)
 - `Optional`: `MINIO_HOST_BIND` (default: `127.0.0.1`; set `0.0.0.0` to expose externally)
-- `Optional`: `MINIO_API_HOST_PORT` (default when unset: deterministic per-worktree value `24000 + WORKTREE_ENV_SLOT`; pinned values must avoid browser-unsafe ports such as `5060`; see `./scripts/docker-compose.sh print-ports`)
-- `Optional`: `MINIO_CONSOLE_HOST_PORT` (default when unset: deterministic per-worktree value `28000 + WORKTREE_ENV_SLOT`; pinned values must avoid browser-unsafe ports such as `5060`; see `./scripts/docker-compose.sh print-ports`)
+- `Optional`: `MINIO_API_HOST_PORT` (default when unset: `CONDUCTOR_PORT + 3` inside Conductor, otherwise deterministic per-worktree value `24000 + WORKTREE_ENV_SLOT`; pinned values must avoid browser-unsafe ports such as `5060`; see `./scripts/docker-compose.sh print-ports`)
+- `Optional`: `MINIO_CONSOLE_HOST_PORT` (default when unset: `CONDUCTOR_PORT + 4` inside Conductor, otherwise deterministic per-worktree value `28000 + WORKTREE_ENV_SLOT`; pinned values must avoid browser-unsafe ports such as `5060`; see `./scripts/docker-compose.sh print-ports`)
 - Note: `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` are `SharedSettings` alias properties (`minio_access_key`, `minio_secret_key`) and are not env-loaded fields.
 - Note: use `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` as the actual env vars.
 
@@ -254,8 +260,8 @@ Use `.env.example` as the source of truth for defaults.
 - `Required` for non-dashboard protected endpoints: `API_SHARED_SECRET` (protected API requests are rejected when unset)
 - `Optional`: `WEB_HOST` (default: `0.0.0.0`; direct process bind host, while Compose pins the container bind host to `0.0.0.0`)
 - `Optional`: `WEB_HOST_BIND` (default: `127.0.0.1`; Compose host bind for Cloudflare Tunnel/local exposure)
-- `Optional`: `WEB_PORT` (direct process listen port; Compose pins the container's internal listen port to `8090`; host-run `./scripts/dev.sh` ignores `.env` for this key and defaults to a deterministic per-worktree value near `18080 + WORKTREE_ENV_SLOT`)
-- `Optional`: `WEB_HOST_PORT` (published host port for Docker/Cloudflare Tunnel; default `8090` when running `docker compose` directly; `./scripts/docker-compose.sh` computes a deterministic per-worktree value when unset, and pinned values must avoid browser-unsafe ports such as `5060`; see `./scripts/docker-compose.sh print-ports`)
+- `Optional`: `WEB_PORT` (direct process listen port; Compose pins the container's internal listen port to `8090`; host-run `./scripts/dev.sh` ignores `.env` for this key and defaults to `CONDUCTOR_PORT + 5` inside Conductor, otherwise a deterministic per-worktree value near `18080 + WORKTREE_ENV_SLOT`)
+- `Optional`: `WEB_HOST_PORT` (published host port for Docker/Cloudflare Tunnel; default `8090` when running `docker compose` directly; `./scripts/docker-compose.sh` computes `CONDUCTOR_PORT + 2` inside Conductor, otherwise a deterministic per-worktree value when unset, and pinned values must avoid browser-unsafe ports such as `5060`; see `./scripts/docker-compose.sh print-ports`)
 - Deprecated fallback names still work for now: `WEBHOOK_INGEST_HOST`, `WEBHOOK_INGEST_PORT`, `WEBHOOK_INGEST_HOST_BIND`, `WEBHOOK_INGEST_HOST_PORT`.
 
 ### Backend API OIDC Session Auth
@@ -327,7 +333,7 @@ Use `.env.example` as the source of truth for defaults.
 
 - `Required`: `DISCORD_BOT_TOKEN`
 - `Optional`: `BACKEND_API_BASE_URL` (default: `http://127.0.0.1:8090`; `./scripts/dev.sh` overrides it to the worktree web/API port, Compose injects `http://web:8090`)
-- `Optional`: `HEALTHCHECK_PORT` (host-run `./scripts/dev.sh` ignores `.env` for this key and defaults to a deterministic per-worktree value near `30000 + WORKTREE_ENV_SLOT`; export it in your shell only when you intentionally want a fixed port, and avoid browser-unsafe ports such as `5060`)
+- `Optional`: `HEALTHCHECK_PORT` (host-run `./scripts/dev.sh` ignores `.env` for this key and defaults to `CONDUCTOR_PORT + 6` inside Conductor, otherwise a deterministic per-worktree value near `30000 + WORKTREE_ENV_SLOT`; export it in your shell only when you intentionally want a fixed port, and avoid browser-unsafe ports such as `5060`)
 - `Optional`: `DISCORD_DEFAULT_JOB_FORUM_CHANNELS` (default: `gigs:part_time,fulltime-roles:full_time`; comma-separated `forum-name:posting_type` list auto-registered and backfilled on bot startup)
 - Note: bot message chunking uses Discord's 2000 character limit in code.
 
