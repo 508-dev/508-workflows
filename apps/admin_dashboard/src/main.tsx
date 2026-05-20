@@ -12,6 +12,7 @@ import {
   Search,
   ShieldCheck,
   UserMinus,
+  UserPlus,
   Users,
   X,
 } from "lucide-react"
@@ -74,6 +75,8 @@ type Person = {
   name?: string
   email?: string
   email_508?: string
+  created_at?: string
+  address_country?: string
   discord_user_id?: string
   discord_username?: string
   contact_type?: string
@@ -306,6 +309,29 @@ type AgentReport = {
     message_sanitized?: string
     result?: string
   }>
+}
+
+type EngineerSetupRequest = {
+  email: string
+  first_name: string
+  middle_name?: string
+  last_name?: string
+  country?: string
+  gender?: string
+  date_of_birth?: string
+  date_of_joining?: string
+  personal_email?: string
+  prefered_email?: string
+}
+
+type EngineerSetupResult = {
+  user?: string
+  employee?: string
+  employee_name?: string
+  supplier?: string
+  role?: string
+  created?: Record<string, boolean>
+  updated?: Record<string, boolean>
 }
 
 type DashboardDevError = {
@@ -1172,23 +1198,41 @@ function App() {
     }
   }
 
-  async function addProjectUser(projectId: string, userName: string, candidateId: string) {
+  async function addProjectUser(
+    projectId: string,
+    userName: string,
+    candidateId: string,
+    rates?: { activity_type?: string; billing_rate?: number; costing_rate?: number },
+  ) {
     const normalizedUser = userName.trim()
-    if (!normalizedUser || !candidateId.trim()) return false
+    const normalizedCandidateId = candidateId.trim()
+    if (!normalizedUser || !normalizedCandidateId) return false
     setBusy(`project:${projectId}:user`, true)
     try {
-      const payload = await requestJson<{ project: Project }>(
-        `/dashboard/api/projects/${encodeURIComponent(projectId)}/users`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ user: normalizedUser, candidate_id: candidateId }),
-        },
-      )
+      const payload = await requestJson<{
+        project: Project
+        activity_cost?: object | null
+        activity_cost_error?: string | null
+      }>(`/dashboard/api/projects/${encodeURIComponent(projectId)}/users`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user: normalizedUser,
+          candidate_id: normalizedCandidateId,
+          ...(rates || {}),
+        }),
+      })
       setProjects((current) =>
         current.map((project) => (project.id === projectId ? payload.project : project)),
       )
-      showToast("Added project user", "ok")
+      showToast(
+        payload.activity_cost_error
+          ? "Added project user; rate failed"
+          : payload.activity_cost
+            ? "Added project user and rate"
+            : "Added project user",
+        payload.activity_cost_error ? "error" : "ok",
+      )
       return true
     } catch (error) {
       showError(error, "Unable to add project user")
@@ -1595,6 +1639,57 @@ function App() {
       showError(error, "Unable to assign onboarder")
     } finally {
       setBusy(`onboarder:${normalizedContactId}`, false)
+    }
+  }
+
+  async function setupEngineer(payload: EngineerSetupRequest) {
+    const normalizedEmail = payload.email.trim().toLowerCase()
+    const normalizedFirstName = payload.first_name.trim()
+    if (!normalizedEmail?.endsWith("@508.dev")) {
+      showToast("Enter the engineer's @508.dev email", "error")
+      return null
+    }
+    if (!normalizedFirstName) {
+      showToast("Enter the engineer name", "error")
+      return null
+    }
+    setBusy("engineerSetup", true)
+    try {
+      const result = await requestJson<EngineerSetupResult>("/dashboard/api/onboarding/engineers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...payload,
+          email: normalizedEmail,
+          first_name: normalizedFirstName,
+        }),
+      })
+      showToast(`Set up ${result.employee_name || result.user || normalizedEmail}`, "ok")
+      return result
+    } catch (error) {
+      if (error instanceof ApiRequestError && error.status === 409) {
+        const payload =
+          error.payload && typeof error.payload === "object"
+            ? (error.payload as { matches?: Array<{ label?: string; email?: string }> })
+            : null
+        const matches = Array.isArray(payload?.matches) ? payload.matches : []
+        const matchLabel = matches
+          .map((match) => match?.label || match?.email)
+          .filter(Boolean)
+          .slice(0, 2)
+          .join(", ")
+        showToast(
+          matchLabel
+            ? `Similar account exists: ${matchLabel}`
+            : "Similar account exists; confirm before creating",
+          "error",
+        )
+      } else {
+        showToast(error instanceof Error ? error.message : "Unable to set up engineer", "error")
+      }
+      return null
+    } finally {
+      setBusy("engineerSetup", false)
     }
   }
 
@@ -2058,6 +2153,7 @@ function App() {
               onSearch={loadOnboarding}
               onSort={(key) => handleSort("onboarding", key)}
               onAssign={assignOnboarder}
+              onSetupEngineer={setupEngineer}
               setOnboardingQuery={setOnboardingQuery}
               setOnboardingState={setOnboardingState}
               setOnboarderFilter={setOnboarderFilter}
@@ -2078,6 +2174,7 @@ function App() {
               }}
               crmContactUrl={crmContactUrl}
               crmAttachmentUrl={crmAttachmentUrl}
+              canWrite={can("onboarding:write")}
             />
           ) : null}
 
@@ -2518,6 +2615,13 @@ function memberLabel(member: ProjectRosterMember) {
   return member.full_name || member.email || member.source_user_id || "Unknown"
 }
 
+function optionalNumber(value: string) {
+  const normalized = value.trim()
+  if (!normalized) return undefined
+  const parsed = Number(normalized)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
 function ProjectsView(props: {
   projects: Project[]
   selectedProject: Project | null
@@ -2568,7 +2672,12 @@ function ProjectsView(props: {
     projectIds: string[],
     updates: { status?: string; project_type?: string },
   ) => Promise<boolean>
-  onAddUser: (projectId: string, user: string, candidateId: string) => Promise<boolean>
+  onAddUser: (
+    projectId: string,
+    user: string,
+    candidateId: string,
+    rates?: { activity_type?: string; billing_rate?: number; costing_rate?: number },
+  ) => Promise<boolean>
   onRemoveUser: (projectId: string, user: string) => Promise<boolean>
   onAddHistoricalMember: (
     projectId: string,
@@ -3829,7 +3938,12 @@ function ProjectDetailPage(props: {
   crmContactUrl: (contactId?: string) => string
   onBack: () => void
   onUpdateStatus: (projectId: string, status: string) => void
-  onAddUser: (projectId: string, user: string, candidateId: string) => Promise<boolean>
+  onAddUser: (
+    projectId: string,
+    user: string,
+    candidateId: string,
+    rates?: { activity_type?: string; billing_rate?: number; costing_rate?: number },
+  ) => Promise<boolean>
   onRemoveUser: (projectId: string, user: string) => Promise<boolean>
   onAddHistoricalMember: (
     projectId: string,
@@ -3843,6 +3957,9 @@ function ProjectDetailPage(props: {
   const [newUser, setNewUser] = useState("")
   const [rosterCandidates, setRosterCandidates] = useState<HistoricalPersonCandidate[]>([])
   const [selectedRosterCandidateId, setSelectedRosterCandidateId] = useState("")
+  const [activityType, setActivityType] = useState("")
+  const [billingRate, setBillingRate] = useState("")
+  const [costingRate, setCostingRate] = useState("")
   const timeline =
     [
       project.actual_start_date || project.expected_start_date,
@@ -3861,6 +3978,29 @@ function ProjectDetailPage(props: {
   const queryReady = newUser.trim().includes("@")
     ? newUser.trim().length >= 5
     : newUser.trim().length >= 3
+  const hasRateFields = Boolean(activityType.trim() || billingRate.trim() || costingRate.trim())
+  const parsedBillingRate = optionalNumber(billingRate)
+  const parsedCostingRate = optionalNumber(costingRate)
+  const hasPartialRate = Boolean((billingRate.trim() || costingRate.trim()) && !activityType.trim())
+  const hasIncompleteActivityCost = Boolean(
+    activityType.trim() && (!billingRate.trim() || !costingRate.trim()),
+  )
+  const hasInvalidRateNumber =
+    Boolean(billingRate.trim() && parsedBillingRate === undefined) ||
+    Boolean(costingRate.trim() && parsedCostingRate === undefined)
+  const hasNegativeRate =
+    (parsedBillingRate !== undefined && parsedBillingRate < 0) ||
+    (parsedCostingRate !== undefined && parsedCostingRate < 0)
+  const rateInvalid =
+    hasPartialRate || hasIncompleteActivityCost || hasInvalidRateNumber || hasNegativeRate
+  const ratePayload =
+    hasRateFields && !rateInvalid
+      ? {
+          activity_type: activityType.trim(),
+          billing_rate: parsedBillingRate,
+          costing_rate: parsedCostingRate,
+        }
+      : undefined
 
   useEffect(() => {
     if (!props.canWrite) return
@@ -4013,7 +4153,7 @@ function ProjectDetailPage(props: {
           </span>
         </CardHeader>
         {props.canWrite ? (
-          <CardContent className="grid gap-3 border-b md:grid-cols-[minmax(260px,1fr)_auto_auto] md:items-end">
+          <CardContent className="grid gap-3 border-b md:grid-cols-[minmax(260px,1fr)_minmax(180px,.7fr)_minmax(130px,.45fr)_minmax(130px,.45fr)_auto_auto] md:items-end">
             <div className="relative">
               <Label>
                 Person search
@@ -4060,13 +4200,43 @@ function ProjectDetailPage(props: {
                 </div>
               ) : null}
             </div>
+            <Label>
+              Activity Type
+              <Input
+                value={activityType}
+                autoComplete="off"
+                placeholder="Optional rate step"
+                onChange={(event) => setActivityType(event.target.value)}
+              />
+            </Label>
+            <Label>
+              Billing rate
+              <Input
+                value={billingRate}
+                inputMode="decimal"
+                autoComplete="off"
+                placeholder="USD/hr"
+                onChange={(event) => setBillingRate(event.target.value)}
+              />
+            </Label>
+            <Label>
+              Costing rate
+              <Input
+                value={costingRate}
+                inputMode="decimal"
+                autoComplete="off"
+                placeholder="USD/hr"
+                onChange={(event) => setCostingRate(event.target.value)}
+              />
+            </Label>
             <Button
               type="button"
               variant="outline"
               disabled={
                 props.loading[`project:${project.id}:user`] ||
                 !selectedRosterCandidateId ||
-                !selectedRosterCandidate?.email
+                !selectedRosterCandidate?.email ||
+                rateInvalid
               }
               onClick={() =>
                 void props
@@ -4074,12 +4244,16 @@ function ProjectDetailPage(props: {
                     project.id,
                     selectedRosterCandidate?.email || newUser,
                     selectedRosterCandidateId,
+                    ratePayload,
                   )
                   .then((updated) => {
                     if (updated) {
                       setNewUser("")
                       setRosterCandidates([])
                       setSelectedRosterCandidateId("")
+                      setActivityType("")
+                      setBillingRate("")
+                      setCostingRate("")
                     }
                   })
               }
@@ -5060,6 +5234,7 @@ function OnboardingView(props: {
   people: Person[]
   sort: { key: string; direction: SortDirection }
   loading: Record<string, boolean>
+  canWrite: boolean
   onboardingQuery: string
   onboardingState: string
   onboarderFilter: string
@@ -5070,6 +5245,7 @@ function OnboardingView(props: {
   onSearch: () => void
   onSort: (key: string) => void
   onAssign: (contactId: string | undefined, onboarder: string) => void
+  onSetupEngineer: (payload: EngineerSetupRequest) => Promise<EngineerSetupResult | null>
   setOnboardingQuery: (value: string) => void
   setOnboardingState: (value: string) => void
   setOnboarderFilter: (value: string) => void
@@ -5082,174 +5258,482 @@ function OnboardingView(props: {
 }) {
   const filterOptions = peopleFilterDefinitions[props.onboardingFilterKind]?.options || []
   return (
+    <>
+      {props.canWrite ? (
+        <EngineerSetupPanel loading={props.loading.engineerSetup} onSetup={props.onSetupEngineer} />
+      ) : null}
+      <Card>
+        <CardHeader>
+          <CardTitle>Onboarding queue</CardTitle>
+          <span id="onboardingStatus" className="text-sm text-muted-foreground">
+            {props.loading.onboarding ? "Loading" : `${props.people.length} shown`}
+          </span>
+        </CardHeader>
+        <div className="grid gap-3 border-b p-4 md:grid-cols-[minmax(0,1fr)_auto]">
+          <Label>
+            Search prospects
+            <Input
+              id="onboardingQuery"
+              value={props.onboardingQuery}
+              autoComplete="off"
+              placeholder="Name, email, Discord, onboarder"
+              onChange={(event) => props.setOnboardingQuery(event.target.value)}
+              onKeyDown={(event) => event.key === "Enter" && props.onSearch()}
+            />
+          </Label>
+          <Button
+            id="searchOnboarding"
+            type="button"
+            onClick={props.onSearch}
+            disabled={props.loading.onboarding}
+          >
+            <Search />
+            Search
+          </Button>
+        </div>
+        <div className="grid gap-3 border-b bg-background p-4 md:grid-cols-[minmax(140px,.8fr)_minmax(150px,1fr)_minmax(150px,1fr)_minmax(120px,.7fr)_auto]">
+          <Label>
+            Status
+            <Select
+              id="onboardingState"
+              value={props.onboardingState}
+              onChange={(event) => props.setOnboardingState(event.target.value)}
+            >
+              <option value="">Any state</option>
+              <option value="pending">Needs review</option>
+              <option value="selected">Assigned to onboarder</option>
+              <option value="reachingout">Reaching out</option>
+              <option value="awaitingcontribution">Awaiting contribution</option>
+            </Select>
+          </Label>
+          <Label>
+            Onboarder
+            <Input
+              id="onboarderFilter"
+              value={props.onboarderFilter}
+              autoComplete="off"
+              placeholder="Any onboarder"
+              onChange={(event) => props.setOnboarderFilter(event.target.value)}
+              onKeyDown={(event) => event.key === "Enter" && props.onSearch()}
+            />
+          </Label>
+          <Label>
+            Add filter
+            <Select
+              id="onboardingFilterKind"
+              value={props.onboardingFilterKind}
+              disabled={props.onboardingFilterKeys.length === 0}
+              onChange={(event) =>
+                props.setOnboardingFilterKind(event.target.value as PeopleFilterKey)
+              }
+            >
+              {props.onboardingFilterKeys.map((key) => (
+                <option key={key} value={key}>
+                  {peopleFilterDefinitions[key].label}
+                </option>
+              ))}
+            </Select>
+          </Label>
+          <Label>
+            Value
+            <Select
+              id="onboardingFilterValue"
+              value={props.onboardingFilterValue}
+              onChange={(event) => props.setOnboardingFilterValue(event.target.value)}
+            >
+              {filterOptions.map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </Select>
+          </Label>
+          <Button
+            id="addOnboardingFilter"
+            type="button"
+            onClick={props.addFilter}
+            disabled={props.onboardingFilterKeys.length === 0}
+          >
+            Add filter
+          </Button>
+          <div id="activeOnboardingFilters" className="md:col-span-5">
+            <FilterChips
+              filters={props.onboardingFilters}
+              onRemove={props.removeFilter}
+              suffix="onboarding filter"
+            />
+          </div>
+        </div>
+        <Empty hidden={props.people.length !== 0}>No prospects match this queue view.</Empty>
+        <div className="overflow-x-auto">
+          <Table
+            id="onboardingTable"
+            className={cn("min-w-[1180px]", props.people.length === 0 && "hidden")}
+            aria-label="Onboarding queue"
+          >
+            <TableHeader>
+              <TableRow>
+                <SortableTableHead
+                  className="w-[20%]"
+                  label="Name"
+                  scope="onboarding"
+                  sort={props.sort}
+                  sortKey="name"
+                  onSort={(_, key) => props.onSort(key)}
+                />
+                <SortableTableHead
+                  className="w-[13%]"
+                  label="Status"
+                  scope="onboarding"
+                  sort={props.sort}
+                  sortKey="onboarding_state"
+                  onSort={(_, key) => props.onSort(key)}
+                />
+                <SortableTableHead
+                  className="w-[22%]"
+                  label="Onboarder"
+                  scope="onboarding"
+                  sort={props.sort}
+                  sortKey="onboarder"
+                  onSort={(_, key) => props.onSort(key)}
+                />
+                <SortableTableHead
+                  className="w-[13%]"
+                  label="Updated"
+                  scope="onboarding"
+                  sort={props.sort}
+                  sortKey="updated"
+                  onSort={(_, key) => props.onSort(key)}
+                />
+                <TableHead className="w-[15%]">Links</TableHead>
+                <SortableTableHead
+                  className="w-[17%]"
+                  label="Needs"
+                  scope="onboarding"
+                  sort={props.sort}
+                  sortKey="profile_gaps"
+                  onSort={(_, key) => props.onSort(key)}
+                />
+              </TableRow>
+            </TableHeader>
+            <TableBody id="onboardingBody">
+              {props.people.map((person) => (
+                <OnboardingRow
+                  key={person.crm_contact_id || person.name}
+                  person={person}
+                  loading={props.loading}
+                  onAssign={props.onAssign}
+                  crmContactUrl={props.crmContactUrl}
+                  crmAttachmentUrl={props.crmAttachmentUrl}
+                />
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      </Card>
+    </>
+  )
+}
+
+const employeeGenderOptions = [
+  "Female",
+  "Genderqueer",
+  "Male",
+  "Non-Conforming",
+  "Other",
+  "Prefer not to say",
+  "Transgender",
+]
+const preferredEmailOptions = ["Company Email", "Personal Email", "User ID"]
+
+function splitPersonName(value?: string) {
+  const parts = (value || "").trim().split(/\s+/).filter(Boolean)
+  if (parts.length === 0) return { first: "", middle: "", last: "" }
+  if (parts.length === 1) return { first: parts[0], middle: "", last: "" }
+  if (parts.length === 2) return { first: parts[0], middle: "", last: parts[1] }
+  return {
+    first: parts[0],
+    middle: parts.slice(1, -1).join(" "),
+    last: parts[parts.length - 1],
+  }
+}
+
+function personalEmailFromPerson(person: Person) {
+  const email = (person.email || "").trim()
+  if (!email || email.toLowerCase().endsWith("@508.dev")) return ""
+  return email
+}
+
+function companyEmailFromPerson(person: Person) {
+  const email508 = (person.email_508 || "").trim()
+  if (email508) return email508
+  const email = (person.email || "").trim()
+  return email.toLowerCase().endsWith("@508.dev") ? email : ""
+}
+
+function EngineerSetupPanel({
+  loading,
+  onSetup,
+}: {
+  loading?: boolean
+  onSetup: (payload: EngineerSetupRequest) => Promise<EngineerSetupResult | null>
+}) {
+  const [crmQuery, setCrmQuery] = useState("")
+  const [crmMatches, setCrmMatches] = useState<Person[]>([])
+  const [crmLoading, setCrmLoading] = useState(false)
+  const [crmError, setCrmError] = useState("")
+  const [companyEmail, setCompanyEmail] = useState("")
+  const [firstName, setFirstName] = useState("")
+  const [middleName, setMiddleName] = useState("")
+  const [lastName, setLastName] = useState("")
+  const [country, setCountry] = useState("")
+  const [gender, setGender] = useState("")
+  const [dateOfBirth, setDateOfBirth] = useState("")
+  const [dateOfJoining, setDateOfJoining] = useState("")
+  const [personalEmail, setPersonalEmail] = useState("")
+  const [preferedEmail, setPreferedEmail] = useState("")
+
+  function fillFromPerson(person: Person) {
+    const name = splitPersonName(person.name)
+    setFirstName(name.first)
+    setMiddleName(name.middle)
+    setLastName(name.last)
+    setCompanyEmail(companyEmailFromPerson(person))
+    setPersonalEmail(personalEmailFromPerson(person))
+    setCountry(person.address_country || "")
+    setCrmQuery(person.name || person.email_508 || person.email || "")
+    setCrmMatches([])
+    setCrmError("")
+  }
+
+  async function searchCrmPeople() {
+    const query = crmQuery.trim()
+    if (!query) return
+    setCrmLoading(true)
+    setCrmError("")
+    try {
+      const params = new URLSearchParams({ limit: "8", query })
+      setCrmMatches(await requestJson<Person[]>(`/dashboard/api/people?${params.toString()}`))
+    } catch (error) {
+      setCrmError(messageFromUnknown(error, "Unable to search people"))
+      setCrmMatches([])
+    } finally {
+      setCrmLoading(false)
+    }
+  }
+
+  async function submit() {
+    const payload: EngineerSetupRequest = {
+      email: companyEmail,
+      first_name: firstName,
+      middle_name: middleName,
+      last_name: lastName,
+      country,
+      personal_email: personalEmail,
+    }
+    if (gender.trim()) payload.gender = gender
+    if (dateOfBirth.trim()) payload.date_of_birth = dateOfBirth
+    if (dateOfJoining.trim()) payload.date_of_joining = dateOfJoining
+    if (preferedEmail.trim()) payload.prefered_email = preferedEmail
+
+    const result = await onSetup(payload)
+    if (result) {
+      setCrmQuery("")
+      setCrmMatches([])
+      setCompanyEmail("")
+      setFirstName("")
+      setMiddleName("")
+      setLastName("")
+      setCountry("")
+      setGender("")
+      setDateOfBirth("")
+      setDateOfJoining("")
+      setPersonalEmail("")
+      setPreferedEmail("")
+    }
+  }
+
+  return (
     <Card>
       <CardHeader>
-        <CardTitle>Onboarding queue</CardTitle>
-        <span id="onboardingStatus" className="text-sm text-muted-foreground">
-          {props.loading.onboarding ? "Loading" : `${props.people.length} shown`}
-        </span>
+        <CardTitle>Engineer setup</CardTitle>
       </CardHeader>
-      <div className="grid gap-3 border-b p-4 md:grid-cols-[minmax(0,1fr)_auto]">
-        <Label>
-          Search prospects
-          <Input
-            id="onboardingQuery"
-            value={props.onboardingQuery}
-            autoComplete="off"
-            placeholder="Name, email, Discord, onboarder"
-            onChange={(event) => props.setOnboardingQuery(event.target.value)}
-            onKeyDown={(event) => event.key === "Enter" && props.onSearch()}
-          />
-        </Label>
-        <Button
-          id="searchOnboarding"
-          type="button"
-          onClick={props.onSearch}
-          disabled={props.loading.onboarding}
+      <CardContent>
+        <form
+          className="grid gap-3"
+          onSubmit={(event) => {
+            event.preventDefault()
+            void submit()
+          }}
         >
-          <Search />
-          Search
-        </Button>
-      </div>
-      <div className="grid gap-3 border-b bg-background p-4 md:grid-cols-[minmax(140px,.8fr)_minmax(150px,1fr)_minmax(150px,1fr)_minmax(120px,.7fr)_auto]">
-        <Label>
-          Status
-          <Select
-            id="onboardingState"
-            value={props.onboardingState}
-            onChange={(event) => props.setOnboardingState(event.target.value)}
-          >
-            <option value="">Any state</option>
-            <option value="pending">Needs review</option>
-            <option value="selected">Assigned to onboarder</option>
-            <option value="reachingout">Reaching out</option>
-            <option value="awaitingcontribution">Awaiting contribution</option>
-          </Select>
-        </Label>
-        <Label>
-          Onboarder
-          <Input
-            id="onboarderFilter"
-            value={props.onboarderFilter}
-            autoComplete="off"
-            placeholder="Any onboarder"
-            onChange={(event) => props.setOnboarderFilter(event.target.value)}
-            onKeyDown={(event) => event.key === "Enter" && props.onSearch()}
-          />
-        </Label>
-        <Label>
-          Add filter
-          <Select
-            id="onboardingFilterKind"
-            value={props.onboardingFilterKind}
-            disabled={props.onboardingFilterKeys.length === 0}
-            onChange={(event) =>
-              props.setOnboardingFilterKind(event.target.value as PeopleFilterKey)
-            }
-          >
-            {props.onboardingFilterKeys.map((key) => (
-              <option key={key} value={key}>
-                {peopleFilterDefinitions[key].label}
-              </option>
-            ))}
-          </Select>
-        </Label>
-        <Label>
-          Value
-          <Select
-            id="onboardingFilterValue"
-            value={props.onboardingFilterValue}
-            onChange={(event) => props.setOnboardingFilterValue(event.target.value)}
-          >
-            {filterOptions.map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </Select>
-        </Label>
-        <Button
-          id="addOnboardingFilter"
-          type="button"
-          onClick={props.addFilter}
-          disabled={props.onboardingFilterKeys.length === 0}
-        >
-          Add filter
-        </Button>
-        <div id="activeOnboardingFilters" className="md:col-span-5">
-          <FilterChips
-            filters={props.onboardingFilters}
-            onRemove={props.removeFilter}
-            suffix="onboarding filter"
-          />
-        </div>
-      </div>
-      <Empty hidden={props.people.length !== 0}>No prospects match this queue view.</Empty>
-      <div className="overflow-x-auto">
-        <Table
-          id="onboardingTable"
-          className={cn("min-w-[1180px]", props.people.length === 0 && "hidden")}
-          aria-label="Onboarding queue"
-        >
-          <TableHeader>
-            <TableRow>
-              <SortableTableHead
-                className="w-[20%]"
-                label="Name"
-                scope="onboarding"
-                sort={props.sort}
-                sortKey="name"
-                onSort={(_, key) => props.onSort(key)}
+          <div className="grid gap-3 border-b pb-3 md:grid-cols-[minmax(0,1fr)_auto]">
+            <Label>
+              CRM person
+              <Input
+                value={crmQuery}
+                autoComplete="off"
+                placeholder="Search name or email"
+                onChange={(event) => setCrmQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") return
+                  event.preventDefault()
+                  void searchCrmPeople()
+                }}
               />
-              <SortableTableHead
-                className="w-[13%]"
-                label="Status"
-                scope="onboarding"
-                sort={props.sort}
-                sortKey="onboarding_state"
-                onSort={(_, key) => props.onSort(key)}
+            </Label>
+            <Button
+              type="button"
+              onClick={searchCrmPeople}
+              disabled={crmLoading || !crmQuery.trim()}
+            >
+              <Search />
+              Search
+            </Button>
+            {crmError ? (
+              <span className="text-sm font-semibold text-destructive">{crmError}</span>
+            ) : null}
+            {crmMatches.length > 0 ? (
+              <div className="grid gap-2 md:col-span-2">
+                {crmMatches.map((person) => {
+                  const label =
+                    person.name || person.email_508 || person.email || person.crm_contact_id
+                  const detail = [person.email_508 || person.email, person.contact_type]
+                    .filter(Boolean)
+                    .join(" | ")
+                  return (
+                    <button
+                      key={person.crm_contact_id || label}
+                      type="button"
+                      className="grid rounded-md border bg-background px-3 py-2 text-left text-sm hover:border-primary"
+                      onClick={() => fillFromPerson(person)}
+                    >
+                      <strong>{label}</strong>
+                      {detail ? <span className="text-muted-foreground">{detail}</span> : null}
+                    </button>
+                  )
+                })}
+              </div>
+            ) : null}
+          </div>
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(130px,.6fr)]">
+            <Label>
+              Company email
+              <Input
+                value={companyEmail}
+                autoComplete="off"
+                placeholder="engineer@508.dev"
+                onChange={(event) => setCompanyEmail(event.target.value)}
               />
-              <SortableTableHead
-                className="w-[22%]"
-                label="Onboarder"
-                scope="onboarding"
-                sort={props.sort}
-                sortKey="onboarder"
-                onSort={(_, key) => props.onSort(key)}
+            </Label>
+            <Label>
+              First name
+              <Input
+                value={firstName}
+                autoComplete="off"
+                placeholder="First"
+                onChange={(event) => setFirstName(event.target.value)}
               />
-              <SortableTableHead
-                className="w-[13%]"
-                label="Updated"
-                scope="onboarding"
-                sort={props.sort}
-                sortKey="updated"
-                onSort={(_, key) => props.onSort(key)}
+            </Label>
+            <Label>
+              Middle name
+              <Input
+                value={middleName}
+                autoComplete="off"
+                placeholder="Optional"
+                onChange={(event) => setMiddleName(event.target.value)}
               />
-              <TableHead className="w-[15%]">Links</TableHead>
-              <SortableTableHead
-                className="w-[17%]"
-                label="Needs"
-                scope="onboarding"
-                sort={props.sort}
-                sortKey="profile_gaps"
-                onSort={(_, key) => props.onSort(key)}
+            </Label>
+          </div>
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(130px,.6fr)]">
+            <Label>
+              Last name
+              <Input
+                value={lastName}
+                autoComplete="off"
+                placeholder="Last"
+                onChange={(event) => setLastName(event.target.value)}
               />
-            </TableRow>
-          </TableHeader>
-          <TableBody id="onboardingBody">
-            {props.people.map((person) => (
-              <OnboardingRow
-                key={person.crm_contact_id || person.name}
-                person={person}
-                loading={props.loading}
-                onAssign={props.onAssign}
-                crmContactUrl={props.crmContactUrl}
-                crmAttachmentUrl={props.crmAttachmentUrl}
+            </Label>
+            <Label>
+              Country
+              <Input
+                value={country}
+                autoComplete="off"
+                placeholder="Taiwan"
+                onChange={(event) => setCountry(event.target.value)}
               />
-            ))}
-          </TableBody>
-        </Table>
-      </div>
+            </Label>
+          </div>
+          <details className="rounded-md border bg-background p-3">
+            <summary className="cursor-pointer text-sm font-extrabold">Advanced options</summary>
+            <div className="mt-3 grid gap-3 md:grid-cols-2">
+              <Label>
+                Gender
+                <Select value={gender} onChange={(event) => setGender(event.target.value)}>
+                  <option value="">Default</option>
+                  {employeeGenderOptions.map((option) => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
+                </Select>
+              </Label>
+              <Label>
+                Date of birth
+                <Input
+                  value={dateOfBirth}
+                  type="date"
+                  autoComplete="off"
+                  onChange={(event) => setDateOfBirth(event.target.value)}
+                />
+              </Label>
+              <Label>
+                Date of joining
+                <Input
+                  value={dateOfJoining}
+                  type="date"
+                  autoComplete="off"
+                  onChange={(event) => setDateOfJoining(event.target.value)}
+                />
+              </Label>
+              <Label>
+                Personal email
+                <Input
+                  value={personalEmail}
+                  type="email"
+                  autoComplete="off"
+                  placeholder="Optional"
+                  onChange={(event) => setPersonalEmail(event.target.value)}
+                />
+              </Label>
+              <Label>
+                Preferred contact email
+                <Select
+                  value={preferedEmail}
+                  onChange={(event) => setPreferedEmail(event.target.value)}
+                >
+                  <option value="">Default</option>
+                  {preferredEmailOptions.map((option) => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
+                </Select>
+              </Label>
+            </div>
+          </details>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <Button
+              id="setupEngineer"
+              type="submit"
+              disabled={loading || !companyEmail.trim() || !firstName.trim()}
+            >
+              <UserPlus />
+              Set up engineer
+            </Button>
+          </div>
+        </form>
+      </CardContent>
     </Card>
   )
 }

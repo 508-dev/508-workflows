@@ -35,6 +35,10 @@ def _contact_email_matches_query(email: Any, query: str) -> bool:
 class ERPNextAPIError(Exception):
     """Raised when ERPNext returns an error or unexpected response."""
 
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
 
 class ERPNextClient:
     """Small authenticated client for ERPNext resource APIs."""
@@ -88,7 +92,8 @@ class ERPNextClient:
         if not 200 <= response.status_code < 300:
             detail = self._error_detail(response)
             raise ERPNextAPIError(
-                f"ERPNext request failed status={response.status_code}: {detail}"
+                f"ERPNext request failed status={response.status_code}: {detail}",
+                status_code=response.status_code,
             )
 
         if not response.content:
@@ -181,10 +186,14 @@ class ERPNextClient:
             raise ERPNextAPIError("DocType is required")
         if not payload:
             raise ERPNextAPIError(f"{normalized_doctype} payload is required")
+        record_payload = dict(payload)
+        record_payload.pop("doctype", None)
+        if not record_payload:
+            raise ERPNextAPIError(f"{normalized_doctype} payload is required")
         data = self.request(
             "POST",
             f"/api/resource/{quote(normalized_doctype, safe='')}",
-            payload=payload,
+            payload=record_payload,
         )
         row = data.get("data")
         if not isinstance(row, dict):
@@ -249,6 +258,24 @@ class ERPNextClient:
                 f"ERPNext {normalized_doctype} detail response is not an object"
             )
         return row
+
+    def call_method(
+        self,
+        method: str,
+        *,
+        params: dict[str, Any] | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Call one whitelisted Frappe method."""
+        normalized_method = method.strip()
+        if not normalized_method:
+            raise ERPNextAPIError("Frappe method is required")
+        return self.request(
+            "POST" if payload is not None else "GET",
+            f"/api/method/{quote(normalized_method, safe='.')}",
+            params=params,
+            payload=payload,
+        )
 
     def list_cost_centers(self, *, limit: int = 100) -> list[dict[str, Any]]:
         """List active, non-group Cost Center records."""
