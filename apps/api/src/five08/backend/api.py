@@ -3132,7 +3132,7 @@ def _list_erpnext_cost_centers() -> list[dict[str, Any]]:
 
 
 def _default_activity_type_for_project(project_name: str) -> str:
-    return f"Engineering for {project_name.strip()}"
+    return f"Engineering for {project_name.strip()}"[:140]
 
 
 def _has_any_project_create_text(
@@ -3218,9 +3218,15 @@ def _create_erpnext_project_setup(
     if contact_id is None and has_contact and contact_first_name is None:
         raise ValueError("contact_first_name_required")
 
-    activity_type_name = _text_or_none(
-        payload.activity_type
-    ) or _default_activity_type_for_project(project_name)
+    explicit_activity_type_name = _text_or_none(payload.activity_type)
+    if (
+        explicit_activity_type_name is not None
+        and len(explicit_activity_type_name) > 140
+    ):
+        raise ValueError("activity_type_too_long")
+    activity_type_name = (
+        explicit_activity_type_name or _default_activity_type_for_project(project_name)
+    )
     if len(activity_type_name) > 140:
         raise ValueError("activity_type_too_long")
 

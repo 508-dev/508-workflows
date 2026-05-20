@@ -3325,6 +3325,61 @@ def test_create_erpnext_project_setup_returns_success_when_cache_refresh_fails()
     client.close.assert_called_once_with()
 
 
+def test_create_erpnext_project_setup_truncates_default_activity_type() -> None:
+    client = Mock()
+    long_project_name = "A" * 140
+    expected_activity_type = f"Engineering for {long_project_name}"[:140]
+    client.create_project.return_value = {
+        "name": "PROJ-0001",
+        "project_name": long_project_name,
+        "customer": "Acme",
+        "status": "Open",
+    }
+    client.ensure_activity_type.return_value = {
+        "name": expected_activity_type,
+        "activity_type": expected_activity_type,
+    }
+    payload = api.DashboardProjectCreateRequest(
+        project_name=long_project_name,
+        customer_mode="existing",
+        customer="Acme",
+    )
+
+    with (
+        patch("five08.backend.api._erpnext_client", return_value=client),
+        patch("five08.backend.api.upsert_project", return_value="local-project-1"),
+        patch(
+            "five08.backend.api._cached_dashboard_project_by_id",
+            return_value={
+                "id": "local-project-1",
+                "display_name": long_project_name,
+                "erpnext_project_id": "PROJ-0001",
+            },
+        ),
+    ):
+        result = api._create_erpnext_project_setup(payload)
+
+    assert result["activity_type"]["name"] == expected_activity_type
+    client.ensure_activity_type.assert_called_once_with(expected_activity_type)
+
+
+def test_create_erpnext_project_setup_rejects_explicit_long_activity_type() -> None:
+    payload = api.DashboardProjectCreateRequest(
+        project_name="Acme Portal",
+        customer_mode="existing",
+        customer="Acme",
+        activity_type="A" * 141,
+    )
+
+    with (
+        patch("five08.backend.api._erpnext_client") as mock_client_factory,
+        pytest.raises(ValueError, match="activity_type_too_long"),
+    ):
+        api._create_erpnext_project_setup(payload)
+
+    mock_client_factory.assert_not_called()
+
+
 def test_create_erpnext_project_setup_rejects_non_508_account_manager() -> None:
     payload = api.DashboardProjectCreateRequest(
         project_name="Acme Portal",
