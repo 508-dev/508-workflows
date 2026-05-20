@@ -53,6 +53,11 @@ def test_cost_center_mismatch_flagged() -> None:
     assert any("Cost Center" in i.message for i in result.issues)
 
 
+def test_null_items_does_not_crash() -> None:
+    invoice = {**VALID_SALES_INVOICE, "items": None}
+    assert validate_invoice(invoice, "Sales Invoice").passed
+
+
 def test_no_project_skips_cost_center_check() -> None:
     invoice = {
         **VALID_SALES_INVOICE,
@@ -118,6 +123,11 @@ def test_due_date_exactly_29_days_passes() -> None:
         "posting_date": "2026-01-01",
         "due_date": "2026-01-30",
     }
+    assert validate_invoice(invoice, "Purchase Invoice").passed
+
+
+def test_due_date_non_string_value_skipped() -> None:
+    invoice = {**VALID_PURCHASE_INVOICE, "posting_date": 20260101, "due_date": 20260102}
     assert validate_invoice(invoice, "Purchase Invoice").passed
 
 

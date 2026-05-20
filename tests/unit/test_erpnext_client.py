@@ -719,9 +719,10 @@ def test_get_invoice_returns_invoice_dict() -> None:
     assert result["name"] == "TEST-SINV-0001"
 
 
-def test_get_invoice_returns_none_when_data_is_not_dict() -> None:
+def test_get_invoice_raises_on_unexpected_payload() -> None:
     client = FakeERPNextClient({"data": []})
-    assert client.get_invoice("Sales Invoice", "TEST-SINV-0001") is None
+    with pytest.raises(ERPNextAPIError, match="unexpected payload"):
+        client.get_invoice("Sales Invoice", "TEST-SINV-0001")
 
 
 def test_search_invoices_returns_list() -> None:

@@ -146,7 +146,7 @@ class ErpNextCog(commands.Cog, name="ERPNext"):
                 limit=25,
             )
             choices = []
-            for inv in invoices:
+            for inv in invoices[:25]:
                 try:
                     status_int = int(inv.get("docstatus", 0))
                 except (TypeError, ValueError):

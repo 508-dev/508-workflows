@@ -667,7 +667,7 @@ class ERPNextClient:
         )
 
     def get_invoice(self, doctype: str, name: str) -> dict[str, Any] | None:
-        """Fetch a single Sales Invoice or Purchase Invoice by name. Returns None if not found."""
+        """Fetch a single Sales Invoice or Purchase Invoice by name. Returns None on 404."""
         try:
             data = self.request(
                 "GET",
@@ -678,7 +678,11 @@ class ERPNextClient:
                 return None
             raise
         row = data.get("data")
-        return row if isinstance(row, dict) else None
+        if not isinstance(row, dict):
+            raise ERPNextAPIError(
+                f"ERPNext returned unexpected payload for {doctype} {name!r}: {type(row).__name__}"
+            )
+        return row
 
     def search_invoices(
         self,

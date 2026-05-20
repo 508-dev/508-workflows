@@ -84,7 +84,7 @@ def _check_line_item_cost_center_and_project(
     if not invoice_cost_center and not invoice_project:
         return
 
-    for idx, item in enumerate(invoice.get("items", []), start=1):
+    for idx, item in enumerate(invoice.get("items") or [], start=1):
         item_cost_center = (item.get("cost_center") or "").strip()
         item_project = item.get("project")
 
@@ -124,7 +124,7 @@ def _check_due_date(invoice: dict[str, Any], result: ValidationResult) -> None:
     try:
         posting_date = datetime.strptime(posting_date_raw, "%Y-%m-%d").date()
         due_date = datetime.strptime(due_date_raw, "%Y-%m-%d").date()
-    except ValueError:
+    except (ValueError, TypeError):
         return
 
     delta = (due_date - posting_date).days
