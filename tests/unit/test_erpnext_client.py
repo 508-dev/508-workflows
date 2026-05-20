@@ -99,3 +99,36 @@ def test_remove_project_user_updates_project_users() -> None:
         }
     ]
     assert client.updated_fields == {"users": result["users"]}
+
+
+def test_remove_project_user_does_not_match_child_row_name() -> None:
+    class CaptureClient(FakeERPNextClient):
+        def __init__(self) -> None:
+            super().__init__({})
+            self.updated = False
+
+        def get_project(self, project_id: str) -> dict[str, Any]:
+            assert project_id == "PROJ-001"
+            return {
+                "name": "PROJ-001",
+                "users": [
+                    {
+                        "name": "row-2",
+                        "user": "remove@508.dev",
+                        "email": "remove@508.dev",
+                    }
+                ],
+            }
+
+        def update_project(
+            self, project_id: str, fields: dict[str, Any]
+        ) -> dict[str, Any]:
+            self.updated = True
+            return {"name": project_id, **fields}
+
+    client = CaptureClient()
+
+    result = client.remove_project_user("PROJ-001", "row-2")
+
+    assert result["users"][0]["user"] == "remove@508.dev"
+    assert client.updated is False

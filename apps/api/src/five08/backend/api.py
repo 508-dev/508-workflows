@@ -146,6 +146,10 @@ from five08.worker.models import (
 
 logger = logging.getLogger(__name__)
 _ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+_PROJECT_ROSTER_USER_CANDIDATE_CACHE_TTL_SECONDS = 60.0
+_PROJECT_ROSTER_USER_CANDIDATE_CACHE_MAX_SIZE = 128
+_PROJECT_ROSTER_USER_CANDIDATE_CACHE_LOCK = threading.RLock()
+_PROJECT_ROSTER_USER_CANDIDATE_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
 
 class ResumeExtractRequest(BaseModel):
@@ -2740,7 +2744,7 @@ async def dashboard_project_member_candidates_handler(
         return error_response
 
     normalized_query = query.strip()
-    if len(normalized_query) < 2:
+    if not _project_roster_user_candidate_query_ready(normalized_query):
         return JSONResponse([])
     candidates = await asyncio.to_thread(
         _project_roster_user_candidates,
@@ -2806,6 +2810,42 @@ def _historical_project_member_error_payload(
         "error": exc.code,
         "detail": detail,
         "person": person,
+        "candidates": exc.candidates,
+    }
+
+
+def _project_roster_user_error_payload(
+    exc: HistoricalProjectMemberResolutionError,
+    *,
+    user: str,
+) -> dict[str, Any]:
+    """Return dashboard-friendly ERP roster person resolution errors."""
+    if exc.detail:
+        detail = exc.detail
+    elif exc.code == "candidate_required":
+        detail = (
+            f'Choose a verified @508.dev person for "{user}" from the dropdown '
+            "before adding them to the ERP roster."
+        )
+    elif exc.code == "person_not_found":
+        detail = (
+            f'No active CRM person or ERPNext user with a @508.dev email matched "{user}". '
+            "Try a 508 email address or a more specific name."
+        )
+    elif exc.code == "candidate_not_found":
+        detail = (
+            "The selected person record is no longer available. Search again and "
+            "choose one of the current matches."
+        )
+    elif exc.code == "invalid_candidate":
+        detail = "Choose a person with a verified @508.dev email before adding them."
+    else:
+        detail = "Unable to resolve that person for the ERP project roster."
+
+    return {
+        "error": exc.code,
+        "detail": detail,
+        "person": user,
         "candidates": exc.candidates,
     }
 
@@ -2974,6 +3014,32 @@ def _erpnext_candidates_for_project_member(query: str) -> list[dict[str, Any]]:
     return candidates
 
 
+def _erpnext_user_candidates_for_project_member(query: str) -> list[dict[str, Any]]:
+    """Return ERPNext User candidates without supplier fan-out for typeahead."""
+    if not (settings.erpnext_base_url and settings.erpnext_api_key):
+        return []
+    client = _erpnext_client()
+    try:
+        users = client.search_users(query, limit=10)
+    finally:
+        client.close()
+
+    candidates: list[dict[str, Any]] = []
+    for user in users:
+        email = _text_or_none(user.get("email")) or _text_or_none(user.get("name"))
+        full_name = _text_or_none(user.get("full_name"))
+        candidates.append(
+            {
+                "label": full_name or email or user.get("name"),
+                "full_name": full_name,
+                "email": email,
+                "erpnext_user_id": _text_or_none(user.get("name")) or email,
+                "sources": ["ERP User"],
+            }
+        )
+    return candidates
+
+
 def _historical_project_member_candidates(query: str) -> list[dict[str, Any]]:
     merged: dict[str, dict[str, Any]] = {}
     crm_candidates = _dashboard_people_candidates_for_project_member(query)
@@ -3011,13 +3077,81 @@ def _candidate_508_email(candidate: dict[str, Any]) -> str | None:
     return None
 
 
+def _project_roster_user_candidate_query_ready(query: str) -> bool:
+    normalized_query = query.strip()
+    if not normalized_query:
+        return False
+    if "@" in normalized_query:
+        return len(normalized_query) >= 5
+    return len(normalized_query) >= 3
+
+
+def _copy_project_roster_candidates(
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    copied: list[dict[str, Any]] = []
+    for candidate in candidates:
+        next_candidate = dict(candidate)
+        sources = next_candidate.get("sources")
+        if isinstance(sources, list):
+            next_candidate["sources"] = list(sources)
+        copied.append(next_candidate)
+    return copied
+
+
+def _project_roster_user_candidates_uncached(query: str) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for candidate in _dashboard_people_candidates_for_project_member(query):
+        if _candidate_508_email(candidate) is not None:
+            _merge_historical_candidate(merged, candidate)
+    try:
+        erpnext_candidates = _erpnext_user_candidates_for_project_member(query)
+    except ERPNextAPIError:
+        logger.warning("Failed resolving project roster user in ERPNext")
+        erpnext_candidates = []
+    for candidate in erpnext_candidates:
+        if _candidate_508_email(candidate) is not None:
+            _merge_historical_candidate(merged, candidate)
+    return sorted(
+        merged.values(),
+        key=lambda item: (
+            str(item.get("label") or "").casefold(),
+            str(item.get("email") or "").casefold(),
+        ),
+    )
+
+
 def _project_roster_user_candidates(query: str) -> list[dict[str, Any]]:
     """Return validated @508.dev people candidates for ERP roster writes."""
-    return [
-        candidate
-        for candidate in _historical_project_member_candidates(query)
-        if _candidate_508_email(candidate) is not None
-    ]
+    normalized_query = query.strip()
+    if not _project_roster_user_candidate_query_ready(normalized_query):
+        return []
+
+    cache_key = normalized_query.casefold()
+    now = time.monotonic()
+    with _PROJECT_ROSTER_USER_CANDIDATE_CACHE_LOCK:
+        cached = _PROJECT_ROSTER_USER_CANDIDATE_CACHE.get(cache_key)
+        if cached is not None:
+            expires_at, candidates = cached
+            if expires_at > now:
+                return _copy_project_roster_candidates(candidates)
+            _PROJECT_ROSTER_USER_CANDIDATE_CACHE.pop(cache_key, None)
+
+    candidates = _project_roster_user_candidates_uncached(normalized_query)
+    with _PROJECT_ROSTER_USER_CANDIDATE_CACHE_LOCK:
+        if len(_PROJECT_ROSTER_USER_CANDIDATE_CACHE) >= (
+            _PROJECT_ROSTER_USER_CANDIDATE_CACHE_MAX_SIZE
+        ):
+            oldest_key = min(
+                _PROJECT_ROSTER_USER_CANDIDATE_CACHE,
+                key=lambda key: _PROJECT_ROSTER_USER_CANDIDATE_CACHE[key][0],
+            )
+            _PROJECT_ROSTER_USER_CANDIDATE_CACHE.pop(oldest_key, None)
+        _PROJECT_ROSTER_USER_CANDIDATE_CACHE[cache_key] = (
+            now + _PROJECT_ROSTER_USER_CANDIDATE_CACHE_TTL_SECONDS,
+            _copy_project_roster_candidates(candidates),
+        )
+    return candidates
 
 
 def _resolve_project_roster_user_candidate(
@@ -3585,11 +3719,7 @@ async def dashboard_add_project_user_handler(
     except HistoricalProjectMemberResolutionError as exc:
         status_code = 409 if exc.candidates else 400
         return JSONResponse(
-            {
-                "error": exc.code,
-                "detail": exc.detail,
-                "candidates": exc.candidates,
-            },
+            _project_roster_user_error_payload(exc, user=normalized_user),
             status_code=status_code,
         )
     except ERPNextAPIError as exc:

@@ -298,12 +298,7 @@ class ERPNextClient:
                 continue
             existing_user = str(raw_user.get("user") or "").strip().casefold()
             existing_email = str(raw_user.get("email") or "").strip().casefold()
-            existing_name = str(raw_user.get("name") or "").strip().casefold()
-            if normalized_user.casefold() in {
-                existing_user,
-                existing_email,
-                existing_name,
-            }:
+            if normalized_user.casefold() in {existing_user, existing_email}:
                 removed = True
                 continue
             next_user = {

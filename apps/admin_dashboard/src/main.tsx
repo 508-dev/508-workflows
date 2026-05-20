@@ -2894,7 +2894,8 @@ function ProjectDetailPage(props: {
     if (!props.canWrite) return
     const query = newUser.trim()
     setSelectedRosterCandidateId("")
-    if (query.length < 2) {
+    const queryReady = query.includes("@") ? query.length >= 5 : query.length >= 3
+    if (!queryReady) {
       setRosterCandidates([])
       return
     }
@@ -2909,7 +2910,7 @@ function ProjectDetailPage(props: {
           if (error instanceof DOMException && error.name === "AbortError") return
           setRosterCandidates([])
         })
-    }, 250)
+    }, 500)
     return () => {
       controller.abort()
       window.clearTimeout(timer)
@@ -3049,7 +3050,9 @@ function ProjectDetailPage(props: {
                 onChange={(event) => setSelectedRosterCandidateId(event.target.value)}
               >
                 <option value="">
-                  {newUser.trim().length < 2
+                  {(newUser.trim().includes("@")
+                    ? newUser.trim().length < 5
+                    : newUser.trim().length < 3)
                     ? "Search first"
                     : rosterCandidates.length
                       ? "Choose a person"

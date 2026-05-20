@@ -3155,7 +3155,15 @@ def test_dashboard_add_project_user_requires_verified_candidate(
         )
 
     assert response.status_code == 400
-    assert response.json()["error"] == "candidate_required"
+    assert response.json() == {
+        "error": "candidate_required",
+        "detail": (
+            'Choose a verified @508.dev person for "dd" from the dropdown before '
+            "adding them to the ERP roster."
+        ),
+        "person": "dd",
+        "candidates": [],
+    }
     mock_add_user.assert_called_once_with(
         external_project_id="PROJ-0033",
         user="dd",
@@ -3527,18 +3535,72 @@ def test_resolve_historical_project_member_merges_crm_erp_and_supplier(
 def test_project_roster_user_candidates_require_508_email(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    api._PROJECT_ROSTER_USER_CANDIDATE_CACHE.clear()
     monkeypatch.setattr(
         api,
-        "_historical_project_member_candidates",
+        "_dashboard_people_candidates_for_project_member",
         lambda _query: [
-            {"candidate_id": "email:sam@508.dev", "email": "sam@508.dev"},
-            {"candidate_id": "email:sam@example.com", "email": "sam@example.com"},
+            {"label": "Sam", "email": "sam@508.dev", "sources": ["CRM"]},
+            {"label": "Sam Example", "email": "sam@example.com", "sources": ["CRM"]},
+        ],
+    )
+    monkeypatch.setattr(
+        api,
+        "_erpnext_user_candidates_for_project_member",
+        lambda _query: [
+            {
+                "label": "Sam ERP",
+                "email": "samerp@508.dev",
+                "erpnext_user_id": "samerp@508.dev",
+                "sources": ["ERP User"],
+            },
+            {
+                "label": "Sam ERP External",
+                "email": "samerp@example.com",
+                "erpnext_user_id": "samerp@example.com",
+                "sources": ["ERP User"],
+            },
         ],
     )
 
     candidates = api._project_roster_user_candidates("sam")
 
-    assert candidates == [{"candidate_id": "email:sam@508.dev", "email": "sam@508.dev"}]
+    assert [candidate["email"] for candidate in candidates] == [
+        "sam@508.dev",
+        "samerp@508.dev",
+    ]
+
+
+def test_project_roster_user_candidates_cache_avoids_repeated_erp_lookups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api._PROJECT_ROSTER_USER_CANDIDATE_CACHE.clear()
+    erp_calls = 0
+    monkeypatch.setattr(
+        api,
+        "_dashboard_people_candidates_for_project_member",
+        lambda _query: [],
+    )
+
+    def erp_candidates(_query: str) -> list[dict[str, object]]:
+        nonlocal erp_calls
+        erp_calls += 1
+        return [
+            {
+                "label": "Sam ERP",
+                "email": "samerp@508.dev",
+                "erpnext_user_id": "samerp@508.dev",
+                "sources": ["ERP User"],
+            }
+        ]
+
+    monkeypatch.setattr(
+        api, "_erpnext_user_candidates_for_project_member", erp_candidates
+    )
+
+    assert api._project_roster_user_candidates("sam")[0]["email"] == "samerp@508.dev"
+    assert api._project_roster_user_candidates("SAM")[0]["email"] == "samerp@508.dev"
+    assert erp_calls == 1
 
 
 def test_dashboard_update_project_wiki_match_confirms_row(
