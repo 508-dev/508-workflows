@@ -70,9 +70,11 @@ def setup_engineer(
     preflight_supplier_name = (
         _optional_text((preflight_employee or {}).get("employee_name")) or full_name
     )
+    preflight_supplier_id = _optional_text((preflight_employee or {}).get("supplier"))
     ensure_supplier_preconditions(
         client,
         supplier_name=preflight_supplier_name,
+        supplier_id=preflight_supplier_id,
         country=_optional_text(request.country),
     )
 
@@ -90,11 +92,13 @@ def setup_engineer(
         create_user_permission=request.create_user_permission,
     )
     employee_name = _optional_text(employee.get("employee_name")) or full_name
+    employee_supplier = _optional_text(employee.get("supplier"))
     supplier, supplier_created, portal_user_added = ensure_supplier(
         client,
         supplier_name=employee_name,
         user=email,
         country=_optional_text(request.country),
+        supplier_id=employee_supplier,
     )
     employee, supplier_linked = ensure_employee_supplier(
         client,
@@ -131,7 +135,9 @@ def ensure_user(
     normalized_full_name = _required_text(full_name, "full_name")
     try:
         return client.get_record("User", normalized_email), False
-    except ERPNextAPIError:
+    except ERPNextAPIError as exc:
+        if not _is_not_found_error(client, exc):
+            raise
         # ERPNext operator convention: put the engineer's full name in User.first_name.
         fields = {
             "email": normalized_email,
@@ -237,11 +243,17 @@ def ensure_supplier(
     supplier_name: str,
     user: str,
     country: str | None,
+    supplier_id: str | None = None,
 ) -> tuple[dict[str, Any], bool, bool]:
     """Find or create the matching Supplier and add the portal user."""
     normalized_supplier_name = _required_text(supplier_name, "supplier_name")
     normalized_user = _normalize_508_email(user)
-    supplier = supplier_by_supplier_name(client, normalized_supplier_name)
+    normalized_supplier_id = _optional_text(supplier_id)
+    supplier = None
+    if normalized_supplier_id is not None:
+        supplier = supplier_by_id(client, normalized_supplier_id)
+    if supplier is None:
+        supplier = supplier_by_supplier_name(client, normalized_supplier_name)
     created = False
     if supplier is None:
         normalized_country = _optional_text(country)
@@ -280,16 +292,34 @@ def ensure_supplier_preconditions(
     client: ERPNextClient,
     *,
     supplier_name: str,
+    supplier_id: str | None = None,
     country: str | None,
 ) -> None:
     """Validate Supplier requirements without mutating ERPNext records."""
     normalized_supplier_name = _required_text(supplier_name, "supplier_name")
+    normalized_supplier_id = _optional_text(supplier_id)
+    if (
+        normalized_supplier_id is not None
+        and supplier_by_id(client, normalized_supplier_id) is not None
+    ):
+        return
     if supplier_by_supplier_name(client, normalized_supplier_name) is not None:
         return
     if _optional_text(country) is None:
         raise EngineerOnboardingError(
             "Country is required when creating a new Supplier."
         )
+
+
+def supplier_by_id(client: ERPNextClient, supplier_id: str) -> dict[str, Any] | None:
+    """Return Supplier by document id, treating only 404 as absent."""
+    normalized_supplier_id = _required_text(supplier_id, "supplier")
+    try:
+        return client.get_record("Supplier", normalized_supplier_id)
+    except ERPNextAPIError as exc:
+        if _is_not_found_error(client, exc):
+            return None
+        raise
 
 
 def supplier_by_supplier_name(
@@ -308,8 +338,10 @@ def supplier_by_supplier_name(
         return client.get_record("Supplier", str(matches[0]["name"]))
     try:
         return client.get_record("Supplier", normalized_supplier_name)
-    except ERPNextAPIError:
-        return None
+    except ERPNextAPIError as exc:
+        if _is_not_found_error(client, exc):
+            return None
+        raise
 
 
 def ensure_employee_supplier(
@@ -499,15 +531,22 @@ def ensure_no_similar_engineer_name(
         ],
         limit=5,
     ):
-        supplier_email = _optional_text(supplier.get("email_id"))
-        if supplier_email and supplier_email.casefold() == normalized_email.casefold():
+        supplier_detail = supplier
+        supplier_id = _optional_text(supplier.get("name"))
+        if supplier_id is not None:
+            resolved_supplier = supplier_by_id(client, supplier_id)
+            if resolved_supplier is not None:
+                supplier_detail = resolved_supplier
+        supplier_email = _optional_text(supplier_detail.get("email_id"))
+        if _supplier_owned_by_email(supplier_detail, normalized_email):
             continue
         matches.append(
             {
                 "doctype": "Supplier",
-                "name": supplier.get("name"),
+                "name": supplier_detail.get("name"),
                 "email": supplier_email,
-                "label": supplier.get("supplier_name") or supplier.get("name"),
+                "label": supplier_detail.get("supplier_name")
+                or supplier_detail.get("name"),
             }
         )
 
@@ -553,9 +592,28 @@ def _activity_cost_rate_fields(request: ActivityCostRequest) -> dict[str, float]
 def _record_exists(client: ERPNextClient, doctype: str, record_id: str) -> bool:
     try:
         client.get_record(doctype, record_id)
-    except ERPNextAPIError:
-        return False
+    except ERPNextAPIError as exc:
+        if _is_not_found_error(client, exc):
+            return False
+        raise
     return True
+
+
+def _supplier_owned_by_email(supplier: dict[str, Any], email: str) -> bool:
+    normalized_email = _normalize_508_email(email)
+    supplier_email = _optional_text(supplier.get("email_id"))
+    if supplier_email and supplier_email.casefold() == normalized_email.casefold():
+        return True
+    portal_users = _normalized_child_rows(supplier.get("portal_users"))
+    for row in portal_users:
+        portal_user = _optional_text(row.get("user"))
+        if portal_user and portal_user.casefold() == normalized_email.casefold():
+            return True
+    return False
+
+
+def _is_not_found_error(client: ERPNextClient, _exc: ERPNextAPIError) -> bool:
+    return getattr(client, "status_code", None) == 404
 
 
 def _normalized_child_rows(value: Any) -> list[dict[str, Any]]:
@@ -592,7 +650,12 @@ def _required_text(value: Any, field_name: str) -> str:
 
 def _normalize_508_email(value: Any) -> str:
     email = _required_text(value, "email").lower()
-    if not email.endswith("@508.dev"):
+    if any(character.isspace() for character in email):
+        raise EngineerOnboardingError("Engineer email must be a valid @508.dev address")
+    if email.count("@") != 1:
+        raise EngineerOnboardingError("Engineer email must be a valid @508.dev address")
+    local_part, domain = email.split("@", 1)
+    if not local_part or domain != "508.dev":
         raise EngineerOnboardingError("Engineer email must be a @508.dev address")
     return email
 

@@ -19,6 +19,7 @@ from five08.engineer_onboarding import (
 
 class FakeERPNextClient:
     def __init__(self) -> None:
+        self.status_code: int | None = None
         self.records: dict[str, dict[str, dict[str, Any]]] = {
             "Role Profile": {"Engineer": {"name": "Engineer"}},
             "Company": {"508.dev": {"name": "508.dev"}},
@@ -38,8 +39,11 @@ class FakeERPNextClient:
 
     def get_record(self, doctype: str, record_id: str) -> dict[str, Any]:
         try:
-            return dict(self.records[doctype][record_id])
+            record = dict(self.records[doctype][record_id])
+            self.status_code = 200
+            return record
         except KeyError as exc:
+            self.status_code = 404
             raise ERPNextAPIError(f"{doctype} {record_id} not found") from exc
 
     def create_record(self, doctype: str, fields: dict[str, Any]) -> dict[str, Any]:
@@ -164,6 +168,51 @@ def test_setup_engineer_requires_508_email() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "email",
+    [
+        "jane @508.dev",
+        "jane@508.dev extra",
+        "@508.dev",
+        "jane@@508.dev",
+        "jane@engineering.508.dev",
+    ],
+)
+def test_setup_engineer_rejects_malformed_508_email(email: str) -> None:
+    with pytest.raises(EngineerOnboardingError, match="@508.dev"):
+        setup_engineer(
+            FakeERPNextClient(),  # type: ignore[arg-type]
+            EngineerSetupRequest(
+                email=email,
+                first_name="Jane",
+                country="Taiwan",
+            ),
+        )
+
+
+def test_setup_engineer_reraises_user_read_errors_without_creating() -> None:
+    class FailingUserReadClient(FakeERPNextClient):
+        def get_record(self, doctype: str, record_id: str) -> dict[str, Any]:
+            if doctype == "User":
+                self.status_code = 500
+                raise ERPNextAPIError("permission denied")
+            return super().get_record(doctype, record_id)
+
+    client = FailingUserReadClient()
+
+    with pytest.raises(ERPNextAPIError, match="permission denied"):
+        setup_engineer(
+            client,  # type: ignore[arg-type]
+            EngineerSetupRequest(
+                email="jane@508.dev",
+                first_name="Jane",
+                country="Taiwan",
+            ),
+        )
+
+    assert client.created == []
+
+
 def test_setup_engineer_blocks_similar_name_for_new_email() -> None:
     client = FakeERPNextClient()
     client.records["User"]["jane.old@508.dev"] = {
@@ -211,6 +260,69 @@ def test_setup_engineer_allows_existing_supplier_with_same_email() -> None:
     ]
 
 
+def test_setup_engineer_allows_existing_supplier_with_same_portal_user() -> None:
+    client = FakeERPNextClient()
+    client.records["Supplier"]["SUP-0001"] = {
+        "name": "SUP-0001",
+        "supplier_name": "Jane Engineer",
+        "email_id": "",
+        "portal_users": [{"user": "jane@508.dev"}],
+    }
+
+    result = setup_engineer(
+        client,  # type: ignore[arg-type]
+        EngineerSetupRequest(
+            email="jane@508.dev",
+            first_name="Jane",
+            last_name="Engineer",
+        ),
+    )
+
+    assert result["supplier"] == "SUP-0001"
+    assert client.records["Supplier"]["SUP-0001"]["portal_users"] == [
+        {"user": "jane@508.dev"}
+    ]
+
+
+def test_setup_engineer_reuses_employee_supplier_link_before_country_check() -> None:
+    client = FakeERPNextClient()
+    client.records["User"]["jane@508.dev"] = {
+        "name": "jane@508.dev",
+        "email": "jane@508.dev",
+        "first_name": "Jane Engineer",
+        "enabled": 1,
+        "roles": [{"role": "Employee"}],
+    }
+    client.records["Employee"]["HR-EMP-00001"] = {
+        "name": "HR-EMP-00001",
+        "employee_name": "Jane Renamed",
+        "user_id": "jane@508.dev",
+        "supplier": "SUP-0001",
+    }
+    client.records["Supplier"]["SUP-0001"] = {
+        "name": "SUP-0001",
+        "supplier_name": "Jane Original",
+        "email_id": "",
+        "portal_users": [],
+    }
+
+    result = setup_engineer(
+        client,  # type: ignore[arg-type]
+        EngineerSetupRequest(
+            email="jane@508.dev",
+            first_name="Jane",
+            last_name="Engineer",
+        ),
+    )
+
+    assert result["supplier"] == "SUP-0001"
+    assert result["created"]["supplier"] is False
+    assert client.records["Supplier"]["SUP-0001"]["portal_users"] == [
+        {"user": "jane@508.dev"}
+    ]
+    assert "Jane Renamed" not in client.records["Supplier"]
+
+
 def test_setup_engineer_requires_country_before_user_or_employee_writes() -> None:
     client = FakeERPNextClient()
 
@@ -251,6 +363,27 @@ def test_ensure_supplier_reuses_supplier_matched_by_supplier_name() -> None:
     assert client.records["Supplier"]["SUP-0001"]["portal_users"] == [
         {"user": "jane@508.dev"}
     ]
+
+
+def test_ensure_supplier_reraises_non_404_supplier_read_errors() -> None:
+    class FailingSupplierReadClient(FakeERPNextClient):
+        def get_record(self, doctype: str, record_id: str) -> dict[str, Any]:
+            if doctype == "Supplier":
+                self.status_code = 502
+                raise ERPNextAPIError("bad gateway")
+            return super().get_record(doctype, record_id)
+
+    client = FailingSupplierReadClient()
+
+    with pytest.raises(ERPNextAPIError, match="bad gateway"):
+        ensure_supplier(
+            client,  # type: ignore[arg-type]
+            supplier_name="Jane Engineer",
+            user="jane@508.dev",
+            country="Taiwan",
+        )
+
+    assert client.records["Supplier"] == {}
 
 
 def test_add_engineer_to_project_optionally_configures_activity_cost() -> None:
