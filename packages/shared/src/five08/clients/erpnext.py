@@ -666,6 +666,50 @@ class ERPNextClient:
             limit=limit,
         )
 
+    def get_invoice(self, doctype: str, name: str) -> dict[str, Any] | None:
+        """Fetch a single Sales Invoice or Purchase Invoice by name. Returns None if not found."""
+        try:
+            data = self.request(
+                "GET",
+                f"/api/resource/{quote(doctype, safe='')}/{quote(name, safe='')}",
+            )
+        except ERPNextAPIError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
+        row = data.get("data")
+        return row if isinstance(row, dict) else None
+
+    def search_invoices(
+        self,
+        doctype: str,
+        query: str = "",
+        docstatus: int | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Search invoices for autocomplete, ordered newest first."""
+        filters: list[Any] = []
+        if query:
+            filters.append([doctype, "name", "like", f"%{query}%"])
+        if docstatus is not None:
+            filters.append([doctype, "docstatus", "=", docstatus])
+
+        params: dict[str, Any] = {
+            "fields": json.dumps(["name", "posting_date", "docstatus", "owner"]),
+            "order_by": "posting_date desc",
+            "limit_page_length": limit,
+        }
+        if filters:
+            params["filters"] = json.dumps(filters)
+
+        data = self.request(
+            "GET",
+            f"/api/resource/{quote(doctype, safe='')}",
+            params=params,
+        )
+        rows = data.get("data")
+        return rows if isinstance(rows, list) else []
+
     def get_project(self, project_id: str) -> dict[str, Any]:
         """Read one ERPNext Project detail document."""
         normalized_id = project_id.strip()

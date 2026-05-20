@@ -688,3 +688,92 @@ def test_remove_project_user_does_not_match_child_row_name() -> None:
         client.remove_project_user("PROJ-001", "row-2")
 
     assert client.updated is False
+
+
+# ---------------------------------------------------------------------------
+# ERPNextClient invoice method tests
+# ---------------------------------------------------------------------------
+
+
+VALID_SALES_INVOICE: dict[str, Any] = {
+    "name": "TEST-SINV-0001",
+    "docstatus": 0,
+    "project": "TEST-PROJ-001",
+    "cost_center": "Projects - TEST",
+    "posting_date": "2026-01-01",
+    "due_date": "2026-02-01",
+    "items": [
+        {
+            "idx": 1,
+            "project": "TEST-PROJ-001",
+            "cost_center": "Projects - TEST",
+        }
+    ],
+}
+
+
+def test_get_invoice_returns_invoice_dict() -> None:
+    client = FakeERPNextClient({"data": VALID_SALES_INVOICE})
+    result = client.get_invoice("Sales Invoice", "TEST-SINV-0001")
+    assert result is not None
+    assert result["name"] == "TEST-SINV-0001"
+
+
+def test_get_invoice_returns_none_when_data_is_not_dict() -> None:
+    client = FakeERPNextClient({"data": []})
+    assert client.get_invoice("Sales Invoice", "TEST-SINV-0001") is None
+
+
+def test_search_invoices_returns_list() -> None:
+    client = FakeERPNextClient({"data": [{"name": "TEST-SINV-0001"}]})
+    assert client.search_invoices("Sales Invoice") == [{"name": "TEST-SINV-0001"}]
+
+
+def test_search_invoices_returns_empty_list_when_data_missing() -> None:
+    client = FakeERPNextClient({})
+    assert client.search_invoices("Sales Invoice") == []
+
+
+def test_search_invoices_includes_query_filter_when_given() -> None:
+    captured: dict[str, Any] = {}
+
+    class CaptureClient(FakeERPNextClient):
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            params: dict[str, Any] | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            captured["params"] = params
+            return {"data": []}
+
+    CaptureClient({}).search_invoices("Sales Invoice", query="TEST-SINV")
+
+    filters = json.loads(captured["params"]["filters"])
+    assert ["Sales Invoice", "name", "like", "%TEST-SINV%"] in filters
+
+
+def test_search_invoices_fetches_expected_fields() -> None:
+    captured: dict[str, Any] = {}
+
+    class CaptureClient(FakeERPNextClient):
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            params: dict[str, Any] | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            captured["params"] = params
+            return {"data": []}
+
+    CaptureClient({}).search_invoices("Sales Invoice")
+
+    fields = json.loads(captured["params"]["fields"])
+    assert "name" in fields
+    assert "docstatus" in fields
+    assert "posting_date" in fields
+    assert "owner" in fields
