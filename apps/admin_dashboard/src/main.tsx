@@ -5400,7 +5400,6 @@ function EngineerSetupPanel({
   const [country, setCountry] = useState("")
   const [gender, setGender] = useState("")
   const [dateOfBirth, setDateOfBirth] = useState("")
-  const [createUserPermission, setCreateUserPermission] = useState(true)
 
   async function submit() {
     const normalizedName = fullName.trim()
@@ -5412,7 +5411,7 @@ function EngineerSetupPanel({
       country,
       gender,
       date_of_birth: dateOfBirth,
-      create_user_permission: createUserPermission,
+      create_user_permission: true,
     })
     if (result) {
       setEmail("")
@@ -5420,7 +5419,6 @@ function EngineerSetupPanel({
       setCountry("")
       setGender("")
       setDateOfBirth("")
-      setCreateUserPermission(true)
     }
   }
 
@@ -5487,14 +5485,6 @@ function EngineerSetupPanel({
             </Label>
           </div>
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <label className="flex min-h-9 items-center gap-2 text-sm font-semibold">
-              <input
-                type="checkbox"
-                checked={createUserPermission}
-                onChange={(event) => setCreateUserPermission(event.target.checked)}
-              />
-              Create User Permission
-            </label>
             <Button
               id="setupEngineer"
               type="submit"

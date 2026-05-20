@@ -123,7 +123,6 @@ class EngineerOnboardingCog(DiscordAuditCogMixin, commands.Cog):
         department="Optional Employee department.",
         gender="Optional Employee gender value if ERPNext requires it.",
         date_of_birth="Optional Employee DOB if ERPNext requires it, YYYY-MM-DD.",
-        create_user_permission="Restrict permissions to this engineer's own records.",
     )
     @require_role("Steering Committee")
     async def setup_engineer_command(
@@ -135,7 +134,6 @@ class EngineerOnboardingCog(DiscordAuditCogMixin, commands.Cog):
         department: str | None = None,
         gender: str | None = None,
         date_of_birth: str | None = None,
-        create_user_permission: bool = True,
     ) -> None:
         """Set up one engineer in ERPNext."""
         await interaction.response.defer(ephemeral=True)
@@ -176,7 +174,7 @@ class EngineerOnboardingCog(DiscordAuditCogMixin, commands.Cog):
                     department=department,
                     gender=gender,
                     date_of_birth=date_of_birth,
-                    create_user_permission=create_user_permission,
+                    create_user_permission=True,
                 ),
             )
         except EngineerOnboardingDuplicateNameError as exc:
