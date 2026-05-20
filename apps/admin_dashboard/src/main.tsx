@@ -5398,7 +5398,6 @@ function EngineerSetupPanel({
   const [email, setEmail] = useState("")
   const [fullName, setFullName] = useState("")
   const [country, setCountry] = useState("")
-  const [department, setDepartment] = useState("")
   const [gender, setGender] = useState("")
   const [dateOfBirth, setDateOfBirth] = useState("")
   const [createUserPermission, setCreateUserPermission] = useState(true)
@@ -5411,7 +5410,6 @@ function EngineerSetupPanel({
       first_name: first || normalizedName,
       last_name: rest.join(" "),
       country,
-      department,
       gender,
       date_of_birth: dateOfBirth,
       create_user_permission: createUserPermission,
@@ -5420,7 +5418,6 @@ function EngineerSetupPanel({
       setEmail("")
       setFullName("")
       setCountry("")
-      setDepartment("")
       setGender("")
       setDateOfBirth("")
       setCreateUserPermission(true)
@@ -5440,7 +5437,7 @@ function EngineerSetupPanel({
             void submit()
           }}
         >
-          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(130px,.6fr)_minmax(140px,.7fr)]">
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(130px,.6fr)]">
             <Label>
               508 email
               <Input
@@ -5466,15 +5463,6 @@ function EngineerSetupPanel({
                 autoComplete="off"
                 placeholder="Taiwan"
                 onChange={(event) => setCountry(event.target.value)}
-              />
-            </Label>
-            <Label>
-              Department
-              <Input
-                value={department}
-                autoComplete="off"
-                placeholder="Optional"
-                onChange={(event) => setDepartment(event.target.value)}
               />
             </Label>
           </div>
