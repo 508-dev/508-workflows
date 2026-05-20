@@ -3,7 +3,7 @@
 import asyncio
 import re
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -3046,6 +3046,629 @@ def test_bulk_update_erpnext_projects_fetches_project_refs_once() -> None:
     }
     mock_project_refs.assert_called_once_with([project_id, missing_project_id])
     mock_cached_project.assert_called_once_with(project_id)
+
+
+def test_dashboard_search_erpnext_customers_allows_project_write(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    customers = [
+        {
+            "name": "Acme",
+            "customer_name": "Acme",
+            "default_currency": "USD",
+        }
+    ]
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._search_erpnext_customers",
+            return_value=customers,
+        ) as mock_search,
+    ):
+        response = client.get("/dashboard/api/erpnext/customers?query=acme")
+
+    assert response.status_code == 200
+    assert response.json() == {"customers": customers}
+    mock_search.assert_called_once_with("acme")
+
+
+def test_dashboard_search_erpnext_contacts_allows_project_write(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    contacts = [{"name": "Ada Lovelace", "email_id": "ada@example.test"}]
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._search_erpnext_contacts",
+            return_value=contacts,
+        ) as mock_search,
+    ):
+        response = client.get("/dashboard/api/erpnext/contacts?query=ada")
+
+    assert response.status_code == 200
+    assert response.json() == {"contacts": contacts}
+    mock_search.assert_called_once_with("ada")
+
+
+def test_dashboard_search_erpnext_account_managers_allows_project_write(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    users = [{"name": "owner@508.dev", "email": "owner@508.dev"}]
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._search_erpnext_account_managers",
+            return_value=users,
+        ) as mock_search,
+    ):
+        response = client.get("/dashboard/api/erpnext/account-managers?query=owner")
+
+    assert response.status_code == 200
+    assert response.json() == {"users": users}
+    mock_search.assert_called_once_with("owner")
+
+
+def test_search_erpnext_account_managers_filters_before_limiting() -> None:
+    client = Mock()
+    client.search_users.return_value = [
+        {
+            "name": "owner@508.dev",
+            "email": "owner@508.dev",
+            "full_name": "Owner User",
+            "enabled": 1,
+        }
+    ]
+
+    with patch("five08.backend.api._erpnext_client", return_value=client):
+        result = api._search_erpnext_account_managers("owner")
+
+    assert result == [
+        {
+            "name": "owner@508.dev",
+            "email": "owner@508.dev",
+            "full_name": "Owner User",
+            "enabled": 1,
+        }
+    ]
+    client.search_users.assert_called_once_with(
+        "owner",
+        limit=10,
+        enabled_only=True,
+        email_domain="@508.dev",
+    )
+    client.close.assert_called_once_with()
+
+
+def test_dashboard_list_erpnext_cost_centers_allows_project_write(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    cost_centers = [{"name": "Projects - 5", "cost_center_name": "Projects"}]
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._list_erpnext_cost_centers",
+            return_value=cost_centers,
+        ) as mock_list,
+    ):
+        response = client.get("/dashboard/api/erpnext/cost-centers")
+
+    assert response.status_code == 200
+    assert response.json() == {"cost_centers": cost_centers}
+    mock_list.assert_called_once_with()
+
+
+def test_dashboard_create_project_creates_customer_project_and_activity(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    created = {
+        "project": {
+            "id": "11111111-1111-4111-8111-111111111111",
+            "display_name": "Acme Portal",
+            "erpnext_project_id": "PROJ-0001",
+        },
+        "customer": {"name": "Acme", "customer_name": "Acme"},
+        "activity_type": {"name": "Engineering for Acme Portal"},
+    }
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._create_erpnext_project_setup",
+            return_value=created,
+        ) as mock_create,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            "/dashboard/api/projects/create",
+            json={
+                "project_name": " Acme Portal ",
+                "customer_mode": "new",
+                "customer_name": "Acme",
+                "default_billing_currency": "USD",
+            },
+        )
+
+    assert response.status_code == 201
+    assert response.json() == created
+    payload = mock_create.call_args.args[0]
+    assert payload.project_name == " Acme Portal "
+    assert payload.customer_mode == "new"
+    assert payload.customer_name == "Acme"
+    mock_audit.assert_awaited_once()
+
+
+def test_create_erpnext_project_setup_uses_existing_customer_and_refreshes_cache() -> (
+    None
+):
+    client = Mock()
+    client.create_project.return_value = {
+        "name": "PROJ-0001",
+        "project_name": "Acme Portal",
+        "customer": "Acme",
+        "status": "Open",
+    }
+    client.ensure_activity_type.return_value = {
+        "name": "Engineering for Acme Portal",
+        "activity_type": "Engineering for Acme Portal",
+    }
+    payload = api.DashboardProjectCreateRequest(
+        project_name="Acme Portal",
+        customer_mode="existing",
+        customer="Acme",
+    )
+
+    with (
+        patch("five08.backend.api._erpnext_client", return_value=client),
+        patch("five08.backend.api.upsert_project", return_value="local-project-1"),
+        patch(
+            "five08.backend.api._cached_dashboard_project_by_id",
+            return_value={
+                "id": "local-project-1",
+                "display_name": "Acme Portal",
+                "erpnext_project_id": "PROJ-0001",
+            },
+        ),
+    ):
+        result = api._create_erpnext_project_setup(payload)
+
+    assert result["project"]["erpnext_project_id"] == "PROJ-0001"
+    assert result["customer"]["name"] == "Acme"
+    assert result["activity_type"]["name"] == "Engineering for Acme Portal"
+    client.create_customer.assert_not_called()
+    client.create_project.assert_called_once_with(
+        project_name="Acme Portal",
+        customer="Acme",
+        project_type="External",
+        default_cost_center="Projects - 5",
+    )
+    client.ensure_activity_type.assert_called_once_with("Engineering for Acme Portal")
+    client.close.assert_called_once_with()
+
+
+def test_create_erpnext_project_setup_returns_success_when_cache_refresh_fails() -> (
+    None
+):
+    client = Mock()
+    client.create_project.return_value = {
+        "name": "PROJ-0001",
+        "project_name": "Acme Portal",
+        "customer": "Acme",
+        "status": "Open",
+    }
+    client.ensure_activity_type.return_value = {
+        "name": "Engineering for Acme Portal",
+        "activity_type": "Engineering for Acme Portal",
+    }
+    payload = api.DashboardProjectCreateRequest(
+        project_name="Acme Portal",
+        customer_mode="existing",
+        customer="Acme",
+    )
+
+    with (
+        patch("five08.backend.api._erpnext_client", return_value=client),
+        patch("five08.backend.api.upsert_project", side_effect=RuntimeError("db down")),
+    ):
+        result = api._create_erpnext_project_setup(payload)
+
+    assert result["project"]["id"] == ""
+    assert result["project"]["erpnext_project_id"] == "PROJ-0001"
+    assert result["project"]["local_cache_pending"] is True
+    assert result["cache_refresh_error"] == "cache_refresh_failed"
+    assert result["cache_refresh_message"] == (
+        "Created the project in ERPNext, but the dashboard sync is still pending. "
+        "Refresh projects in a moment."
+    )
+    client.create_project.assert_called_once()
+    client.close.assert_called_once_with()
+
+
+def test_create_erpnext_project_setup_truncates_default_activity_type() -> None:
+    client = Mock()
+    long_project_name = "A" * 140
+    expected_activity_type = f"Engineering for {long_project_name}"[:140]
+    client.create_project.return_value = {
+        "name": "PROJ-0001",
+        "project_name": long_project_name,
+        "customer": "Acme",
+        "status": "Open",
+    }
+    client.ensure_activity_type.return_value = {
+        "name": expected_activity_type,
+        "activity_type": expected_activity_type,
+    }
+    payload = api.DashboardProjectCreateRequest(
+        project_name=long_project_name,
+        customer_mode="existing",
+        customer="Acme",
+    )
+
+    with (
+        patch("five08.backend.api._erpnext_client", return_value=client),
+        patch("five08.backend.api.upsert_project", return_value="local-project-1"),
+        patch(
+            "five08.backend.api._cached_dashboard_project_by_id",
+            return_value={
+                "id": "local-project-1",
+                "display_name": long_project_name,
+                "erpnext_project_id": "PROJ-0001",
+            },
+        ),
+    ):
+        result = api._create_erpnext_project_setup(payload)
+
+    assert result["activity_type"]["name"] == expected_activity_type
+    client.ensure_activity_type.assert_called_once_with(expected_activity_type)
+
+
+def test_create_erpnext_project_setup_rejects_explicit_long_activity_type() -> None:
+    payload = api.DashboardProjectCreateRequest(
+        project_name="Acme Portal",
+        customer_mode="existing",
+        customer="Acme",
+        activity_type="A" * 141,
+    )
+
+    with (
+        patch("five08.backend.api._erpnext_client") as mock_client_factory,
+        pytest.raises(ValueError, match="activity_type_too_long"),
+    ):
+        api._create_erpnext_project_setup(payload)
+
+    mock_client_factory.assert_not_called()
+
+
+def test_create_erpnext_project_setup_rejects_non_508_account_manager() -> None:
+    payload = api.DashboardProjectCreateRequest(
+        project_name="Acme Portal",
+        customer_mode="new",
+        customer_name="Acme",
+        account_manager="owner@example.test",
+    )
+
+    with (
+        patch("five08.backend.api._erpnext_client") as mock_client_factory,
+        pytest.raises(ValueError, match="account_manager_must_be_508_email"),
+    ):
+        api._create_erpnext_project_setup(payload)
+
+    mock_client_factory.assert_not_called()
+
+
+def test_create_erpnext_project_setup_validates_address_before_customer_create() -> (
+    None
+):
+    payload = api.DashboardProjectCreateRequest(
+        project_name="Acme Portal",
+        customer_mode="new",
+        customer_name="Acme",
+        address_city="Missoula",
+    )
+
+    with (
+        patch("five08.backend.api._erpnext_client") as mock_client_factory,
+        pytest.raises(ValueError, match="address_line1_required"),
+    ):
+        api._create_erpnext_project_setup(payload)
+
+    mock_client_factory.assert_not_called()
+
+
+def test_create_erpnext_project_setup_validates_contact_before_customer_create() -> (
+    None
+):
+    payload = api.DashboardProjectCreateRequest(
+        project_name="Acme Portal",
+        customer_mode="new",
+        customer_name="Acme",
+        contact_email="ada@example.test",
+    )
+
+    with (
+        patch("five08.backend.api._erpnext_client") as mock_client_factory,
+        pytest.raises(ValueError, match="contact_first_name_required"),
+    ):
+        api._create_erpnext_project_setup(payload)
+
+    mock_client_factory.assert_not_called()
+
+
+def test_create_erpnext_project_setup_creates_customer_address_and_contact() -> None:
+    client = Mock()
+    client.create_customer.return_value = {"name": "Acme", "customer_name": "Acme"}
+    client.create_address.return_value = {"name": "ADDR-0001"}
+    client.create_contact.return_value = {"name": "CONT-0001"}
+    client.set_customer_primary_records.return_value = {
+        "name": "Acme",
+        "customer_name": "Acme",
+        "customer_primary_address": "ADDR-0001",
+        "customer_primary_contact": "CONT-0001",
+    }
+    client.create_project.return_value = {
+        "name": "PROJ-0001",
+        "project_name": "Acme Portal",
+        "customer": "Acme",
+        "status": "Open",
+    }
+    client.ensure_activity_type.return_value = {
+        "name": "Engineering for Acme Portal",
+        "activity_type": "Engineering for Acme Portal",
+    }
+    payload = api.DashboardProjectCreateRequest(
+        project_name="Acme Portal",
+        customer_mode="new",
+        customer_name="Acme",
+        customer_details="Important customer",
+        customer_website="https://acme.example",
+        address_line1="123 Main St",
+        address_city="Missoula",
+        address_country="United States",
+        contact_first_name="Ada",
+        contact_last_name="Lovelace",
+        contact_email="ada@example.test",
+        contact_phone="555-0100",
+    )
+
+    with (
+        patch("five08.backend.api._erpnext_client", return_value=client),
+        patch("five08.backend.api.upsert_project", return_value="local-project-1"),
+        patch(
+            "five08.backend.api._cached_dashboard_project_by_id",
+            return_value={
+                "id": "local-project-1",
+                "display_name": "Acme Portal",
+                "erpnext_project_id": "PROJ-0001",
+            },
+        ),
+    ):
+        result = api._create_erpnext_project_setup(payload)
+
+    assert result["address"] == {"name": "ADDR-0001"}
+    assert result["contact"] == {"name": "CONT-0001"}
+    client.create_customer.assert_called_once_with(
+        customer_name="Acme",
+        account_manager=None,
+        default_currency="USD",
+    )
+    assert client.mock_calls.index(
+        call.create_project(
+            project_name="Acme Portal",
+            customer="Acme",
+            project_type="External",
+            default_cost_center="Projects - 5",
+        )
+    ) < client.mock_calls.index(
+        call.create_address(
+            customer="Acme",
+            address_line1="123 Main St",
+            address_title="Acme",
+            address_line2=None,
+            city="Missoula",
+            state=None,
+            country="United States",
+            pincode=None,
+            email_id="ada@example.test",
+            phone="555-0100",
+        )
+    )
+    client.create_address.assert_called_once_with(
+        customer="Acme",
+        address_line1="123 Main St",
+        address_title="Acme",
+        address_line2=None,
+        city="Missoula",
+        state=None,
+        country="United States",
+        pincode=None,
+        email_id="ada@example.test",
+        phone="555-0100",
+    )
+    client.create_contact.assert_called_once_with(
+        customer="Acme",
+        first_name="Ada",
+        last_name="Lovelace",
+        email_id="ada@example.test",
+        phone="555-0100",
+        mobile_no=None,
+    )
+    client.set_customer_primary_records.assert_called_once_with(
+        "Acme",
+        address="ADDR-0001",
+        contact="CONT-0001",
+        customer_details="Important customer",
+        website="https://acme.example",
+    )
+
+
+def test_create_erpnext_project_setup_deletes_new_customer_when_project_fails() -> None:
+    client = Mock()
+    client.create_customer.return_value = {"name": "Acme", "customer_name": "Acme"}
+    client.create_project.side_effect = api.ERPNextAPIError("invalid cost center")
+    client.ensure_activity_type.return_value = {
+        "name": "Engineering for Acme Portal",
+        "activity_type": "Engineering for Acme Portal",
+    }
+    payload = api.DashboardProjectCreateRequest(
+        project_name="Acme Portal",
+        customer_mode="new",
+        customer_name="Acme",
+        address_line1="123 Main St",
+        contact_first_name="Ada",
+    )
+
+    with (
+        patch("five08.backend.api._erpnext_client", return_value=client),
+        pytest.raises(api.ERPNextAPIError, match="invalid cost center"),
+    ):
+        api._create_erpnext_project_setup(payload)
+
+    client.create_customer.assert_called_once_with(
+        customer_name="Acme",
+        account_manager=None,
+        default_currency="USD",
+    )
+    client.create_project.assert_called_once_with(
+        project_name="Acme Portal",
+        customer="Acme",
+        project_type="External",
+        default_cost_center="Projects - 5",
+    )
+    client.delete_record.assert_called_once_with("Customer", "Acme")
+    client.create_address.assert_not_called()
+    client.create_contact.assert_not_called()
+    client.set_customer_primary_records.assert_not_called()
+    client.close.assert_called_once_with()
+
+
+def test_create_erpnext_project_setup_reuses_and_links_existing_contact() -> None:
+    client = Mock()
+    client.link_contact_to_customer.return_value = {"name": "CONT-0001"}
+    client.set_customer_primary_records.return_value = {
+        "name": "Acme",
+        "customer_name": "Acme",
+        "customer_primary_contact": "CONT-0001",
+    }
+    client.create_project.return_value = {
+        "name": "PROJ-0001",
+        "project_name": "Acme Portal",
+        "customer": "Acme",
+        "status": "Open",
+    }
+    client.ensure_activity_type.return_value = {
+        "name": "Engineering for Acme Portal",
+        "activity_type": "Engineering for Acme Portal",
+    }
+    payload = api.DashboardProjectCreateRequest(
+        project_name="Acme Portal",
+        customer_mode="existing",
+        customer="Acme",
+        contact="CONT-0001",
+    )
+
+    with (
+        patch("five08.backend.api._erpnext_client", return_value=client),
+        patch("five08.backend.api.upsert_project", return_value="local-project-1"),
+        patch(
+            "five08.backend.api._cached_dashboard_project_by_id",
+            return_value={
+                "id": "local-project-1",
+                "display_name": "Acme Portal",
+                "erpnext_project_id": "PROJ-0001",
+            },
+        ),
+    ):
+        result = api._create_erpnext_project_setup(payload)
+
+    assert result["contact"] == {"name": "CONT-0001"}
+    client.create_contact.assert_not_called()
+    client.link_contact_to_customer.assert_called_once_with(
+        contact="CONT-0001",
+        customer="Acme",
+    )
+    client.set_customer_primary_records.assert_called_once_with(
+        "Acme",
+        address=None,
+        contact="CONT-0001",
+        customer_details=None,
+        website=None,
+    )
 
 
 def test_dashboard_add_project_user_uses_erpnext_record_id(

@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, cast
-from urllib.parse import urlencode, urlparse
+from urllib.parse import quote, urlencode, urlparse
 from uuid import UUID, uuid4
 
 import httpx
@@ -242,6 +242,33 @@ class DashboardProjectWikiMatchRequest(BaseModel):
 
     status: str
     row_key: str | None = None
+
+
+class DashboardProjectCreateRequest(BaseModel):
+    """Payload for creating a Customer-backed ERPNext Project."""
+
+    project_name: str
+    customer_mode: Literal["new", "existing"] = "new"
+    customer_name: str | None = None
+    customer: str | None = None
+    account_manager: str | None = None
+    default_billing_currency: str | None = "USD"
+    default_cost_center: str | None = "Projects - 5"
+    activity_type: str | None = None
+    customer_details: str | None = None
+    customer_website: str | None = None
+    address_line1: str | None = None
+    address_line2: str | None = None
+    address_city: str | None = None
+    address_state: str | None = None
+    address_country: str | None = None
+    address_postal_code: str | None = None
+    contact: str | None = None
+    contact_first_name: str | None = None
+    contact_last_name: str | None = None
+    contact_email: str | None = None
+    contact_phone: str | None = None
+    contact_mobile: str | None = None
 
 
 class DashboardGigApplicationStatusRequest(BaseModel):
@@ -3070,6 +3097,415 @@ def _historical_project_member_candidates(query: str) -> list[dict[str, Any]]:
     )
 
 
+def _erpnext_customer_lookup_url(customer_id: str) -> str | None:
+    base_url = _text_or_none(settings.erpnext_base_url)
+    normalized_customer_id = _text_or_none(customer_id)
+    if not base_url or not normalized_customer_id:
+        return None
+    return (
+        f"{base_url.rstrip('/')}/app/customer/{quote(normalized_customer_id, safe='')}"
+    )
+
+
+def _erpnext_project_lookup_url(project_id: str) -> str | None:
+    base_url = _text_or_none(settings.erpnext_base_url)
+    normalized_project_id = _text_or_none(project_id)
+    if not base_url or not normalized_project_id:
+        return None
+    return f"{base_url.rstrip('/')}/app/project/{quote(normalized_project_id, safe='')}"
+
+
+def _dashboard_project_fallback_from_erpnext(
+    project_detail: dict[str, Any],
+) -> dict[str, Any]:
+    erpnext_project_id = _text_or_none(project_detail.get("name"))
+    project_name = (
+        _text_or_none(project_detail.get("project_name")) or erpnext_project_id
+    )
+    customer = _text_or_none(project_detail.get("customer"))
+    return {
+        "id": "",
+        "display_name": project_name,
+        "customer": customer,
+        "erpnext_project_id": erpnext_project_id,
+        "erpnext_project_url": _erpnext_project_lookup_url(erpnext_project_id or ""),
+        "customer_erpnext_url": _erpnext_customer_lookup_url(customer or ""),
+        "source_status": _text_or_none(project_detail.get("status")),
+        "roster_members": [],
+        "roster_count": 0,
+        "linked_engagement_count": 0,
+        "local_cache_pending": True,
+    }
+
+
+def _dashboard_shape_erpnext_customer(customer: dict[str, Any]) -> dict[str, Any]:
+    customer_id = _text_or_none(customer.get("name")) or _text_or_none(
+        customer.get("customer_name")
+    )
+    return {
+        "name": customer_id,
+        "customer_name": _text_or_none(customer.get("customer_name")) or customer_id,
+        "customer_type": _text_or_none(customer.get("customer_type")),
+        "default_currency": _text_or_none(customer.get("default_currency")),
+        "account_manager": _text_or_none(customer.get("account_manager")),
+        "url": _erpnext_customer_lookup_url(customer_id or ""),
+    }
+
+
+def _dashboard_shape_erpnext_contact(contact: dict[str, Any]) -> dict[str, Any]:
+    contact_id = _text_or_none(contact.get("name"))
+    full_name = _text_or_none(contact.get("full_name")) or " ".join(
+        part
+        for part in [
+            _text_or_none(contact.get("first_name")),
+            _text_or_none(contact.get("last_name")),
+        ]
+        if part
+    )
+    return {
+        "name": contact_id,
+        "first_name": _text_or_none(contact.get("first_name")),
+        "last_name": _text_or_none(contact.get("last_name")),
+        "full_name": full_name or contact_id,
+        "email_id": _text_or_none(contact.get("email_id")),
+        "phone": _text_or_none(contact.get("phone")),
+        "mobile_no": _text_or_none(contact.get("mobile_no")),
+        "company_name": _text_or_none(contact.get("company_name")),
+    }
+
+
+def _dashboard_shape_erpnext_user(user: dict[str, Any]) -> dict[str, Any]:
+    user_id = _text_or_none(user.get("name")) or _text_or_none(user.get("email"))
+    email = _text_or_none(user.get("email")) or user_id
+    return {
+        "name": user_id,
+        "email": email,
+        "full_name": _text_or_none(user.get("full_name")) or email or user_id,
+        "enabled": user.get("enabled"),
+    }
+
+
+def _dashboard_shape_erpnext_cost_center(row: dict[str, Any]) -> dict[str, Any]:
+    name = _text_or_none(row.get("name")) or _text_or_none(row.get("cost_center_name"))
+    return {
+        "name": name,
+        "cost_center_name": _text_or_none(row.get("cost_center_name")) or name,
+        "company": _text_or_none(row.get("company")),
+    }
+
+
+def _search_erpnext_customers(query: str) -> list[dict[str, Any]]:
+    normalized_query = query.strip()
+    if len(normalized_query) < 2:
+        return []
+    client = _erpnext_client()
+    try:
+        return [
+            _dashboard_shape_erpnext_customer(customer)
+            for customer in client.search_customers(normalized_query, limit=10)
+        ]
+    finally:
+        client.close()
+
+
+def _search_erpnext_contacts(query: str) -> list[dict[str, Any]]:
+    normalized_query = query.strip()
+    if len(normalized_query) < 2:
+        return []
+    client = _erpnext_client()
+    try:
+        return [
+            _dashboard_shape_erpnext_contact(contact)
+            for contact in client.search_contacts(normalized_query, limit=10)
+        ]
+    finally:
+        client.close()
+
+
+def _search_erpnext_account_managers(query: str) -> list[dict[str, Any]]:
+    normalized_query = query.strip()
+    if len(normalized_query) < 2:
+        return []
+    client = _erpnext_client()
+    try:
+        users = client.search_users(
+            normalized_query,
+            limit=10,
+            enabled_only=True,
+            email_domain="@508.dev",
+        )
+    finally:
+        client.close()
+    return [_dashboard_shape_erpnext_user(user) for user in users]
+
+
+def _list_erpnext_cost_centers() -> list[dict[str, Any]]:
+    client = _erpnext_client()
+    try:
+        rows = client.list_cost_centers(limit=100)
+    finally:
+        client.close()
+
+    options = [_dashboard_shape_erpnext_cost_center(row) for row in rows]
+    by_name = {
+        cost_center["name"]: cost_center
+        for cost_center in options
+        if _text_or_none(cost_center.get("name")) is not None
+    }
+    if "Projects - 5" not in by_name:
+        by_name["Projects - 5"] = {
+            "name": "Projects - 5",
+            "cost_center_name": "Projects",
+            "company": None,
+        }
+    return sorted(
+        by_name.values(),
+        key=lambda row: (row.get("name") != "Projects - 5", str(row.get("name") or "")),
+    )
+
+
+def _default_activity_type_for_project(project_name: str) -> str:
+    return f"Engineering for {project_name.strip()}"[:140]
+
+
+def _has_any_project_create_text(
+    payload: DashboardProjectCreateRequest,
+    field_names: tuple[str, ...],
+) -> bool:
+    return any(
+        _text_or_none(getattr(payload, field_name)) for field_name in field_names
+    )
+
+
+def _create_erpnext_project_setup(
+    payload: DashboardProjectCreateRequest,
+) -> dict[str, Any]:
+    project_name = payload.project_name.strip()
+    if not project_name:
+        raise ValueError("project_name_required")
+    if len(project_name) > 140:
+        raise ValueError("project_name_too_long")
+
+    default_cost_center = (payload.default_cost_center or "Projects - 5").strip()
+    if len(default_cost_center) > 140:
+        raise ValueError("default_cost_center_too_long")
+    customer_details = _text_or_none(payload.customer_details)
+    if customer_details is not None and len(customer_details) > 2000:
+        raise ValueError("customer_details_too_long")
+    customer_website = _text_or_none(payload.customer_website)
+    if customer_website is not None and len(customer_website) > 255:
+        raise ValueError("customer_website_too_long")
+
+    customer_id: str | None = None
+    customer_name: str | None = None
+    currency = "USD"
+    account_manager: str | None = None
+    if payload.customer_mode == "existing":
+        customer_id = _text_or_none(payload.customer)
+        if customer_id is None:
+            raise ValueError("customer_required")
+        if len(customer_id) > 140:
+            raise ValueError("customer_too_long")
+    else:
+        customer_name = _text_or_none(payload.customer_name)
+        if customer_name is None:
+            raise ValueError("customer_name_required")
+        if len(customer_name) > 140:
+            raise ValueError("customer_name_too_long")
+        currency = (payload.default_billing_currency or "USD").strip().upper()
+        if len(currency) > 3:
+            raise ValueError("default_billing_currency_too_long")
+        account_manager = _text_or_none(payload.account_manager)
+        if account_manager is not None and len(account_manager) > 200:
+            raise ValueError("account_manager_too_long")
+        if account_manager is not None and not account_manager.casefold().endswith(
+            "@508.dev"
+        ):
+            raise ValueError("account_manager_must_be_508_email")
+
+    address_fields = (
+        "address_line1",
+        "address_line2",
+        "address_city",
+        "address_state",
+        "address_country",
+        "address_postal_code",
+    )
+    has_address = _has_any_project_create_text(payload, address_fields)
+    address_line1 = _text_or_none(payload.address_line1)
+    if has_address and address_line1 is None:
+        raise ValueError("address_line1_required")
+
+    contact_id = _text_or_none(payload.contact)
+    contact_fields = (
+        "contact_first_name",
+        "contact_last_name",
+        "contact_email",
+        "contact_phone",
+        "contact_mobile",
+    )
+    has_contact = _has_any_project_create_text(payload, contact_fields)
+    contact_first_name = _text_or_none(payload.contact_first_name)
+    if contact_id is not None and len(contact_id) > 140:
+        raise ValueError("contact_too_long")
+    if contact_id is None and has_contact and contact_first_name is None:
+        raise ValueError("contact_first_name_required")
+
+    explicit_activity_type_name = _text_or_none(payload.activity_type)
+    if (
+        explicit_activity_type_name is not None
+        and len(explicit_activity_type_name) > 140
+    ):
+        raise ValueError("activity_type_too_long")
+    activity_type_name = (
+        explicit_activity_type_name or _default_activity_type_for_project(project_name)
+    )
+    if len(activity_type_name) > 140:
+        raise ValueError("activity_type_too_long")
+
+    cache_refresh_error: str | None = None
+    cache_refresh_message: str | None = None
+    client = _erpnext_client()
+    try:
+        activity_type = client.ensure_activity_type(activity_type_name)
+        customer_doc: dict[str, Any]
+        created_customer_id: str | None = None
+        if payload.customer_mode == "existing":
+            assert customer_id is not None
+            customer_doc = {"name": customer_id, "customer_name": customer_id}
+        else:
+            assert customer_name is not None
+            customer_doc = client.create_customer(
+                customer_name=customer_name,
+                account_manager=account_manager,
+                default_currency=currency or "USD",
+            )
+
+        customer_id = _text_or_none(customer_doc.get("name"))
+        if customer_id is None:
+            raise ERPNextAPIError("ERPNext Customer response is missing an id")
+        if payload.customer_mode == "new":
+            created_customer_id = customer_id
+
+        def cleanup_created_customer() -> None:
+            if created_customer_id is None:
+                return
+            try:
+                client.delete_record("Customer", created_customer_id)
+            except Exception:
+                logger.exception(
+                    "ERPNext Project creation failed and new Customer cleanup failed customer=%s",
+                    created_customer_id,
+                )
+
+        try:
+            project_detail = client.create_project(
+                project_name=project_name,
+                customer=customer_id,
+                project_type="External",
+                default_cost_center=default_cost_center or "Projects - 5",
+            )
+        except Exception:
+            cleanup_created_customer()
+            raise
+        erpnext_project_id = _text_or_none(project_detail.get("name"))
+        if erpnext_project_id is None:
+            cleanup_created_customer()
+            raise ERPNextAPIError("ERPNext Project response is missing an id")
+
+        address_doc: dict[str, Any] | None = None
+        if has_address:
+            assert address_line1 is not None
+            address_doc = client.create_address(
+                customer=customer_id,
+                address_line1=address_line1,
+                address_title=_text_or_none(customer_doc.get("customer_name"))
+                or customer_id,
+                address_line2=_text_or_none(payload.address_line2),
+                city=_text_or_none(payload.address_city),
+                state=_text_or_none(payload.address_state),
+                country=_text_or_none(payload.address_country),
+                pincode=_text_or_none(payload.address_postal_code),
+                email_id=_text_or_none(payload.contact_email),
+                phone=_text_or_none(payload.contact_phone)
+                or _text_or_none(payload.contact_mobile),
+            )
+
+        contact_doc: dict[str, Any] | None = None
+        if contact_id is not None:
+            contact_doc = client.link_contact_to_customer(
+                contact=contact_id,
+                customer=customer_id,
+            )
+        elif has_contact:
+            assert contact_first_name is not None
+            contact_doc = client.create_contact(
+                customer=customer_id,
+                first_name=contact_first_name,
+                last_name=_text_or_none(payload.contact_last_name),
+                email_id=_text_or_none(payload.contact_email),
+                phone=_text_or_none(payload.contact_phone),
+                mobile_no=_text_or_none(payload.contact_mobile),
+            )
+
+        primary_address = (
+            _text_or_none(address_doc.get("name")) if address_doc is not None else None
+        )
+        primary_contact = (
+            _text_or_none(contact_doc.get("name")) if contact_doc is not None else None
+        )
+        if (
+            primary_address
+            or primary_contact
+            or customer_details is not None
+            or customer_website is not None
+        ):
+            customer_doc = client.set_customer_primary_records(
+                customer_id,
+                address=primary_address,
+                contact=primary_contact,
+                customer_details=customer_details,
+                website=customer_website,
+            )
+
+        try:
+            project = _refresh_cached_erpnext_project_with_client(
+                client,
+                erpnext_project_id,
+                detail=project_detail,
+            )
+        except Exception:
+            logger.exception(
+                "ERPNext Project was created but local cache refresh failed project=%s",
+                erpnext_project_id,
+            )
+            cache_refresh_error = "cache_refresh_failed"
+            cache_refresh_message = (
+                "Created the project in ERPNext, but the dashboard sync is still pending. "
+                "Refresh projects in a moment."
+            )
+            project = _dashboard_project_fallback_from_erpnext(project_detail)
+    finally:
+        client.close()
+
+    result: dict[str, Any] = {
+        "project": project,
+        "customer": _dashboard_shape_erpnext_customer(customer_doc),
+        "activity_type": {
+            "name": _text_or_none(activity_type.get("name")) or activity_type_name,
+            "activity_type": _text_or_none(activity_type.get("activity_type"))
+            or activity_type_name,
+        },
+        "address": address_doc,
+        "contact": contact_doc,
+    }
+    if cache_refresh_error is not None:
+        result["cache_refresh_error"] = cache_refresh_error
+    if cache_refresh_message is not None:
+        result["cache_refresh_message"] = cache_refresh_message
+    return result
+
+
 def _candidate_508_email(candidate: dict[str, Any]) -> str | None:
     email = _text_or_none(candidate.get("email"))
     if email and email.casefold().endswith("@508.dev"):
@@ -3545,6 +3981,176 @@ async def dashboard_project_wiki_matches_handler(
                 manual_match.pop("wiki_row_label", None)
                 manual_match.pop("wiki_row_section", None)
     return JSONResponse(preview)
+
+
+async def dashboard_erpnext_customers_handler(
+    request: Request,
+    query: str = Query(default="", min_length=0, max_length=140),
+) -> JSONResponse:
+    """Search ERPNext Customers for dashboard project creation."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_PROJECTS_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    try:
+        customers = await asyncio.to_thread(_search_erpnext_customers, query)
+    except ERPNextAPIError as exc:
+        return JSONResponse(
+            {"error": "erpnext_customer_search_failed", "detail": str(exc)},
+            status_code=502,
+        )
+    return JSONResponse({"customers": customers})
+
+
+async def dashboard_erpnext_contacts_handler(
+    request: Request,
+    query: str = Query(default="", min_length=0, max_length=140),
+) -> JSONResponse:
+    """Search ERPNext Contacts for dashboard project creation."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_PROJECTS_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    try:
+        contacts = await asyncio.to_thread(_search_erpnext_contacts, query)
+    except ERPNextAPIError as exc:
+        return JSONResponse(
+            {"error": "erpnext_contact_search_failed", "detail": str(exc)},
+            status_code=502,
+        )
+    return JSONResponse({"contacts": contacts})
+
+
+async def dashboard_erpnext_account_managers_handler(
+    request: Request,
+    query: str = Query(default="", min_length=0, max_length=140),
+) -> JSONResponse:
+    """Search ERPNext Users eligible for Customer Account Manager."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_PROJECTS_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    try:
+        users = await asyncio.to_thread(_search_erpnext_account_managers, query)
+    except ERPNextAPIError as exc:
+        return JSONResponse(
+            {"error": "erpnext_account_manager_search_failed", "detail": str(exc)},
+            status_code=502,
+        )
+    return JSONResponse({"users": users})
+
+
+async def dashboard_erpnext_cost_centers_handler(request: Request) -> JSONResponse:
+    """List ERPNext Cost Centers for dashboard project creation."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_PROJECTS_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    try:
+        cost_centers = await asyncio.to_thread(_list_erpnext_cost_centers)
+    except ERPNextAPIError as exc:
+        return JSONResponse(
+            {"error": "erpnext_cost_center_list_failed", "detail": str(exc)},
+            status_code=502,
+        )
+    return JSONResponse({"cost_centers": cost_centers})
+
+
+async def dashboard_create_project_handler(request: Request) -> JSONResponse:
+    """Create a Customer-backed ERPNext Project setup from the dashboard."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_PROJECTS_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    try:
+        body = await request.json()
+        payload = DashboardProjectCreateRequest.model_validate(body)
+    except Exception:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    try:
+        result = await asyncio.to_thread(_create_erpnext_project_setup, payload)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except ERPNextAPIError as exc:
+        return JSONResponse(
+            {"error": "erpnext_project_create_failed", "detail": str(exc)},
+            status_code=502,
+        )
+
+    project = (
+        cast(dict[str, Any], result.get("project"))
+        if isinstance(result.get("project"), dict)
+        else {}
+    )
+    customer = (
+        cast(dict[str, Any], result.get("customer"))
+        if isinstance(result.get("customer"), dict)
+        else {}
+    )
+    activity_type = (
+        cast(dict[str, Any], result.get("activity_type"))
+        if isinstance(result.get("activity_type"), dict)
+        else {}
+    )
+    address = (
+        cast(dict[str, Any], result.get("address"))
+        if isinstance(result.get("address"), dict)
+        else {}
+    )
+    contact = (
+        cast(dict[str, Any], result.get("contact"))
+        if isinstance(result.get("contact"), dict)
+        else {}
+    )
+    actor_provider, actor_subject = _session_audit_actor(session)
+    await _write_auth_audit_event(
+        action="erpnext.project_setup_create",
+        result=AuditResult.SUCCESS,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="erpnext_project",
+        resource_id=str(project.get("erpnext_project_id") or ""),
+        metadata={
+            "source": "dashboard",
+            "local_project_id": project.get("id"),
+            "customer": customer.get("name"),
+            "customer_mode": payload.customer_mode,
+            "activity_type": activity_type.get("name"),
+            "primary_address": address.get("name")
+            if isinstance(address, dict)
+            else None,
+            "primary_contact": contact.get("name")
+            if isinstance(contact, dict)
+            else None,
+        },
+    )
+    return JSONResponse(result, status_code=201)
 
 
 async def dashboard_update_project_status_handler(
@@ -6005,6 +6611,31 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
         "/dashboard/api/projects/wiki-matches",
         dashboard_project_wiki_matches_handler,
         methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/erpnext/customers",
+        dashboard_erpnext_customers_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/erpnext/contacts",
+        dashboard_erpnext_contacts_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/erpnext/account-managers",
+        dashboard_erpnext_account_managers_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/erpnext/cost-centers",
+        dashboard_erpnext_cost_centers_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/projects/create",
+        dashboard_create_project_handler,
+        methods=["POST"],
     )
     app.add_api_route(
         "/dashboard/api/projects/bulk",

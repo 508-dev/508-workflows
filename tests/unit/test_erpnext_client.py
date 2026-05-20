@@ -63,6 +63,437 @@ def test_search_suppliers_filters_disabled_and_frozen_records() -> None:
     assert ["Supplier", "is_frozen", "=", 0] in filters
 
 
+def test_create_customer_posts_dashboard_defaults() -> None:
+    captured: dict[str, Any] = {}
+
+    class CaptureClient(FakeERPNextClient):
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            params: dict[str, Any] | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            captured["method"] = method
+            captured["path"] = path
+            captured["payload"] = payload
+            return {"data": {"name": "Acme", "customer_name": "Acme"}}
+
+    client = CaptureClient({"data": {}})
+
+    result = client.create_customer(
+        customer_name=" Acme ",
+        account_manager="owner@example.test",
+        default_currency="usd",
+        customer_details=" Important customer ",
+        website=" https://acme.example ",
+    )
+
+    assert result["name"] == "Acme"
+    assert captured == {
+        "method": "POST",
+        "path": "/api/resource/Customer",
+        "payload": {
+            "customer_name": "Acme",
+            "customer_type": "Company",
+            "account_manager": "owner@example.test",
+            "default_currency": "USD",
+            "customer_details": "Important customer",
+            "website": "https://acme.example",
+        },
+    }
+
+
+def test_create_address_links_customer() -> None:
+    captured: dict[str, Any] = {}
+
+    class CaptureClient(FakeERPNextClient):
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            params: dict[str, Any] | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            captured["method"] = method
+            captured["path"] = path
+            captured["payload"] = payload
+            return {"data": {"name": "ADDR-0001"}}
+
+    client = CaptureClient({"data": {}})
+
+    result = client.create_address(
+        customer="Acme",
+        address_line1="123 Main St",
+        city="Missoula",
+        country="United States",
+    )
+
+    assert result["name"] == "ADDR-0001"
+    assert captured == {
+        "method": "POST",
+        "path": "/api/resource/Address",
+        "payload": {
+            "address_title": "Acme",
+            "address_type": "Billing",
+            "address_line1": "123 Main St",
+            "city": "Missoula",
+            "country": "United States",
+            "links": [{"link_doctype": "Customer", "link_name": "Acme"}],
+        },
+    }
+
+
+def test_create_address_falls_back_for_whitespace_title_and_type() -> None:
+    captured: dict[str, Any] = {}
+
+    class CaptureClient(FakeERPNextClient):
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            params: dict[str, Any] | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            captured["payload"] = payload
+            return {"data": {"name": "ADDR-0001"}}
+
+    client = CaptureClient({"data": {}})
+
+    client.create_address(
+        customer="Acme",
+        address_title="   ",
+        address_type="   ",
+        address_line1="123 Main St",
+    )
+
+    assert captured["payload"]["address_title"] == "Acme"
+    assert captured["payload"]["address_type"] == "Billing"
+
+
+def test_delete_record_deletes_one_document() -> None:
+    captured: dict[str, Any] = {}
+
+    class CaptureClient(FakeERPNextClient):
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            params: dict[str, Any] | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            captured["method"] = method
+            captured["path"] = path
+            captured["params"] = params
+            captured["payload"] = payload
+            return {}
+
+    client = CaptureClient({"data": []})
+
+    client.delete_record("Customer", "Acme LLC")
+
+    assert captured == {
+        "method": "DELETE",
+        "path": "/api/resource/Customer/Acme%20LLC",
+        "params": None,
+        "payload": None,
+    }
+
+
+def test_search_contacts_matches_dashboard_visible_fields() -> None:
+    calls: list[dict[str, Any]] = []
+
+    class CaptureClient(FakeERPNextClient):
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            params: dict[str, Any] | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            calls.append({"method": method, "path": path, "params": params})
+            if len(calls) == 1:
+                return {"data": [{"name": "CONTACT-0001", "full_name": "Acme Contact"}]}
+            return {"data": []}
+
+    client = CaptureClient({"data": []})
+
+    result = client.search_contacts("co")
+
+    assert result == [{"name": "CONTACT-0001", "full_name": "Acme Contact"}]
+    assert calls[0]["method"] == "GET"
+    assert calls[0]["path"] == "/api/resource/Contact"
+    params = calls[0]["params"]
+    assert json.loads(params["or_filters"]) == [
+        ["Contact", "full_name", "like", "%co%"],
+        ["Contact", "mobile_no", "like", "%co%"],
+        ["Contact", "phone", "like", "%co%"],
+        ["Contact", "company_name", "like", "%co%"],
+    ]
+    assert json.loads(calls[1]["params"]["or_filters"]) == [
+        ["Contact", "email_id", "like", "%co%"]
+    ]
+
+
+def test_search_contacts_ignores_email_tld_only_matches() -> None:
+    class CaptureClient(FakeERPNextClient):
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            params: dict[str, Any] | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            filters = json.loads((params or {})["or_filters"])
+            if filters == [["Contact", "email_id", "like", "%co%"]]:
+                return {
+                    "data": [
+                        {"name": "CONTACT-0001", "email_id": "ada@example.com"},
+                        {"name": "CONTACT-0002", "email_id": "cody@example.net"},
+                        {"name": "CONTACT-0003", "email_id": "lead@company.org"},
+                    ]
+                }
+            return {"data": []}
+
+    client = CaptureClient({"data": []})
+
+    result = client.search_contacts("co")
+
+    assert result == [
+        {"name": "CONTACT-0002", "email_id": "cody@example.net"},
+        {"name": "CONTACT-0003", "email_id": "lead@company.org"},
+    ]
+
+
+def test_create_contact_links_customer() -> None:
+    captured: dict[str, Any] = {}
+
+    class CaptureClient(FakeERPNextClient):
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            params: dict[str, Any] | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            captured["method"] = method
+            captured["path"] = path
+            captured["payload"] = payload
+            return {"data": {"name": "CONT-0001"}}
+
+    client = CaptureClient({"data": {}})
+
+    result = client.create_contact(
+        customer="Acme",
+        first_name="Ada",
+        last_name="Lovelace",
+        email_id="ada@example.test",
+        phone="555-0100",
+    )
+
+    assert result["name"] == "CONT-0001"
+    assert captured == {
+        "method": "POST",
+        "path": "/api/resource/Contact",
+        "payload": {
+            "first_name": "Ada",
+            "last_name": "Lovelace",
+            "email_ids": [{"email_id": "ada@example.test", "is_primary": 1}],
+            "phone_nos": [{"phone": "555-0100", "is_primary_phone": 1}],
+            "links": [{"link_doctype": "Customer", "link_name": "Acme"}],
+        },
+    }
+
+
+def test_link_contact_to_customer_preserves_existing_links() -> None:
+    calls: list[dict[str, Any]] = []
+
+    class CaptureClient(FakeERPNextClient):
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            params: dict[str, Any] | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            calls.append({"method": method, "path": path, "payload": payload})
+            if method == "GET":
+                return {
+                    "data": {
+                        "name": "CONT-0001",
+                        "links": [{"link_doctype": "Supplier", "link_name": "Ada LLC"}],
+                    }
+                }
+            return {"data": {"name": "CONT-0001"}}
+
+    client = CaptureClient({"data": {}})
+
+    result = client.link_contact_to_customer(contact="CONT-0001", customer="Acme")
+
+    assert result["name"] == "CONT-0001"
+    assert calls == [
+        {
+            "method": "GET",
+            "path": "/api/resource/Contact/CONT-0001",
+            "payload": None,
+        },
+        {
+            "method": "PUT",
+            "path": "/api/resource/Contact/CONT-0001",
+            "payload": {
+                "links": [
+                    {"link_doctype": "Supplier", "link_name": "Ada LLC"},
+                    {"link_doctype": "Customer", "link_name": "Acme"},
+                ]
+            },
+        },
+    ]
+
+
+def test_create_project_posts_external_project_then_fetches_detail() -> None:
+    calls: list[dict[str, Any]] = []
+
+    class CaptureClient(FakeERPNextClient):
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            params: dict[str, Any] | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            calls.append({"method": method, "path": path, "payload": payload})
+            if method == "POST":
+                return {"data": {"name": "PROJ-0001"}}
+            return {
+                "data": {
+                    "name": "PROJ-0001",
+                    "project_name": "Acme Portal",
+                    "customer": "Acme",
+                }
+            }
+
+    client = CaptureClient({"data": {}})
+
+    result = client.create_project(project_name="Acme Portal", customer="Acme")
+
+    assert result["name"] == "PROJ-0001"
+    assert calls[0] == {
+        "method": "POST",
+        "path": "/api/resource/Project",
+        "payload": {
+            "project_name": "Acme Portal",
+            "customer": "Acme",
+            "project_type": "External",
+            "status": "Open",
+            "cost_center": "Projects - 5",
+        },
+    }
+    assert calls[1]["method"] == "GET"
+    assert calls[1]["path"] == "/api/resource/Project/PROJ-0001"
+
+
+def test_create_project_returns_posted_record_when_detail_fetch_fails() -> None:
+    calls: list[dict[str, Any]] = []
+
+    class CaptureClient(FakeERPNextClient):
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            params: dict[str, Any] | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            calls.append({"method": method, "path": path, "payload": payload})
+            if method == "POST":
+                return {"data": {"name": "PROJ-0001", "project_name": "Acme Portal"}}
+            raise ERPNextAPIError("detail fetch failed")
+
+    client = CaptureClient({"data": {}})
+
+    result = client.create_project(project_name="Acme Portal", customer="Acme")
+
+    assert result == {"name": "PROJ-0001", "project_name": "Acme Portal"}
+    assert calls[0]["method"] == "POST"
+    assert calls[1]["method"] == "GET"
+    assert calls[1]["path"] == "/api/resource/Project/PROJ-0001"
+
+
+def test_search_users_can_filter_enabled_domain_before_limit() -> None:
+    captured: dict[str, Any] = {}
+
+    class CaptureClient(FakeERPNextClient):
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            params: dict[str, Any] | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            captured["method"] = method
+            captured["path"] = path
+            captured["params"] = params
+            return {"data": [{"name": "owner@508.dev", "email": "owner@508.dev"}]}
+
+    client = CaptureClient({"data": []})
+
+    result = client.search_users(
+        "owner",
+        limit=10,
+        enabled_only=True,
+        email_domain="@508.dev",
+    )
+
+    assert result == [{"name": "owner@508.dev", "email": "owner@508.dev"}]
+    assert captured["method"] == "GET"
+    assert captured["path"] == "/api/resource/User"
+    params = captured["params"]
+    assert params["limit_page_length"] == "10"
+    assert json.loads(params["filters"]) == [
+        ["User", "enabled", "=", 1],
+        ["User", "email", "like", "%@508.dev"],
+    ]
+    assert json.loads(params["or_filters"]) == [
+        ["User", "name", "like", "%owner%"],
+        ["User", "email", "like", "%owner%"],
+        ["User", "full_name", "like", "%owner%"],
+    ]
+
+
+def test_ensure_activity_type_reuses_existing_record() -> None:
+    class CaptureClient(FakeERPNextClient):
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            params: dict[str, Any] | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            assert method == "GET"
+            filters = json.loads((params or {})["filters"])
+            assert filters == [
+                ["Activity Type", "name", "=", "Engineering for Acme Portal"]
+            ]
+            return {"data": [{"name": "Engineering for Acme Portal"}]}
+
+    client = CaptureClient({"data": []})
+
+    assert client.ensure_activity_type("Engineering for Acme Portal") == {
+        "name": "Engineering for Acme Portal"
+    }
+
+
 def test_remove_project_user_updates_project_users() -> None:
     class CaptureClient(FakeERPNextClient):
         def __init__(self) -> None:
