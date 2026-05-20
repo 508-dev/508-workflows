@@ -77,7 +77,7 @@ ONBOARDING_STATUS_FIELD = "cOnboardingState"
 ONBOARDER_FIELD = "cOnboarder"
 SSO_ID_FIELD = "cSsoID"
 _DISCORD_ROLES_PROTECTED_FROM_APPLY: frozenset[str] = frozenset(
-    {"Member", "Admin", "Steering Committee"}
+    {"Member", "Admin", "Steering Committee", "Workflows Engineer"}
 )
 _DISCORD_ROLES_PROTECTED_FROM_APPLY_CASEFOLDED: frozenset[str] = frozenset(
     name.casefold() for name in _DISCORD_ROLES_PROTECTED_FROM_APPLY
@@ -1525,9 +1525,12 @@ class ResumeEditDiscordRolesModal(discord.ui.Modal, title="Edit Discord Roles"):
             return
 
         if blocked:
+            protected_roles_text = ", ".join(
+                sorted(_DISCORD_ROLES_PROTECTED_FROM_APPLY)
+            )
             await interaction.response.send_message(
                 "✅ No assignable Discord roles specified. "
-                "Protected roles (Member, Admin, Steering Committee) cannot be added.",
+                f"Protected roles ({protected_roles_text}) cannot be added.",
                 ephemeral=True,
             )
             return

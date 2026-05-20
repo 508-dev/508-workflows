@@ -93,6 +93,9 @@ current precedence rules.
 - `Optional`: `DISCORD_API_TIMEOUT_SECONDS` (default: `8.0`)
 - `Optional`: `DISCORD_LINK_TTL_SECONDS` (default: `600`)
 - `Optional`: `DISCORD_BOT_TOKEN` (needed only for fallback Discord API checks; DB role check remains primary)
+- `Workflows Engineer` is not an admin role. It receives Steering Committee
+  write permissions plus jobs/audit read and dry-run access for admin-only
+  rerun/sync dashboard writes.
 
 ## Worker Consumer
 

@@ -745,7 +745,7 @@ function App() {
   const initialProjectDetailId = detailIdFromPath("projects")
   const [user, setUser] = useState<User | null>(null)
   const [view, setViewState] = useState<View>(viewFromPath())
-  const [toast, setToast] = useState<{ message: string; tone?: "ok" | "error" }>({
+  const [toast, setToast] = useState<{ message: string; tone?: "ok" | "warning" | "error" }>({
     message: "",
   })
   const [permissions, setPermissions] = useState<string[]>([])
@@ -807,6 +807,14 @@ function App() {
     return permissions.includes(permission)
   }
 
+  function canDryRun(permission: string) {
+    return permissions.includes(`${permission}:dry_run`)
+  }
+
+  function canUse(permission: string) {
+    return can(permission) || canDryRun(permission)
+  }
+
   function canView(nextView: View) {
     return can(routePermissions[nextView])
   }
@@ -815,7 +823,7 @@ function App() {
     return (Object.keys(routes) as View[]).find((candidate) => canView(candidate)) || "people"
   }
 
-  function showToast(message: string, tone?: "ok" | "error") {
+  function showToast(message: string, tone?: "ok" | "warning" | "error") {
     setToast({ message, tone })
   }
 
@@ -984,10 +992,21 @@ function App() {
     setBusy("syncProjects", true)
     showToast("Queueing project sync")
     try {
-      const payload = await requestJson<{ job_id: string }>("/dashboard/api/sync/projects", {
+      const payload = await requestJson<{
+        job_id?: string
+        dry_run?: boolean
+        would_enqueue?: { job_type?: string }
+      }>("/dashboard/api/sync/projects", {
         method: "POST",
       })
-      showToast(`Queued project sync ${payload.job_id}`, "ok")
+      if (payload.dry_run) {
+        showToast(
+          `Dry run only: would queue ${payload.would_enqueue?.job_type || "project sync"}`,
+          "warning",
+        )
+      } else {
+        showToast(`Queued project sync ${payload.job_id}`, "ok")
+      }
     } catch (error) {
       showError(error, "Unable to queue project sync")
     } finally {
@@ -1526,12 +1545,20 @@ function App() {
     setBusy(`rerun:${jobId}`, true)
     showToast(`Rerunning ${jobId}`)
     try {
-      const payload = await requestJson<{ job_id: string }>(
-        `/dashboard/api/jobs/${encodeURIComponent(jobId)}/rerun`,
-        { method: "POST" },
-      )
-      showToast(`Queued rerun ${payload.job_id}`, "ok")
-      await loadJobs()
+      const payload = await requestJson<{
+        job_id?: string
+        dry_run?: boolean
+        would_enqueue?: { job_type?: string }
+      }>(`/dashboard/api/jobs/${encodeURIComponent(jobId)}/rerun`, { method: "POST" })
+      if (payload.dry_run) {
+        showToast(
+          `Dry run only: would rerun ${payload.would_enqueue?.job_type || jobId}`,
+          "warning",
+        )
+      } else {
+        showToast(`Queued rerun ${payload.job_id}`, "ok")
+        await loadJobs()
+      }
     } catch (error) {
       showError(error, "Unable to rerun job")
     } finally {
@@ -1543,10 +1570,21 @@ function App() {
     setBusy("syncPeople", true)
     showToast("Queueing people sync")
     try {
-      const payload = await requestJson<{ job_id: string }>("/dashboard/api/sync/people", {
+      const payload = await requestJson<{
+        job_id?: string
+        dry_run?: boolean
+        would_enqueue?: { job_type?: string }
+      }>("/dashboard/api/sync/people", {
         method: "POST",
       })
-      showToast(`Queued people sync ${payload.job_id}`, "ok")
+      if (payload.dry_run) {
+        showToast(
+          `Dry run only: would queue ${payload.would_enqueue?.job_type || "people sync"}`,
+          "warning",
+        )
+      } else {
+        showToast(`Queued people sync ${payload.job_id}`, "ok")
+      }
     } catch (error) {
       showError(error, "Unable to queue people sync")
     } finally {
@@ -2006,7 +2044,7 @@ function App() {
               crmBaseUrl={crmBaseUrl}
               people={sortedPeople}
               sort={sort.people}
-              canSync={can("people:sync")}
+              canSync={canUse("people:sync")}
               loading={loading}
               peopleQuery={peopleQuery}
               peopleMember={peopleMember}
@@ -2074,7 +2112,7 @@ function App() {
               loading={loading}
               query={projectQuery}
               status={projectStatus}
-              canSync={can("projects:sync")}
+              canSync={canUse("projects:sync")}
               canWrite={can("projects:write")}
               crmContactUrl={crmContactUrl}
               setQuery={setProjectQuery}
@@ -2150,7 +2188,7 @@ function App() {
               status={status}
               jobType={jobType}
               jobCounts={jobCounts}
-              canWrite={can("jobs:write")}
+              canWrite={canUse("jobs:write")}
               setMinutes={setMinutes}
               setStatus={setStatus}
               setJobType={setJobType}
@@ -2356,7 +2394,11 @@ function HistoricalPersonChoiceModal({
   )
 }
 
-function DashboardToast({ toast }: { toast: { message: string; tone?: "ok" | "error" } }) {
+function DashboardToast({
+  toast,
+}: {
+  toast: { message: string; tone?: "ok" | "warning" | "error" }
+}) {
   if (!toast.message) return null
   return (
     <div
@@ -2365,6 +2407,7 @@ function DashboardToast({ toast }: { toast: { message: string; tone?: "ok" | "er
       className={cn(
         "fixed bottom-5 right-5 z-50 max-w-sm rounded-md border bg-background px-4 py-3 text-sm font-semibold shadow-lg",
         toast.tone === "ok" && "border-emerald-500/40 text-emerald-300",
+        toast.tone === "warning" && "border-amber-500/40 text-amber-200",
         toast.tone === "error" && "border-red-500/40 text-red-300",
       )}
     >

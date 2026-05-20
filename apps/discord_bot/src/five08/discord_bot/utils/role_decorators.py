@@ -8,6 +8,14 @@ from functools import wraps
 from typing import List, Any, Callable
 import discord
 
+_ROLE_LEVELS = {
+    "Member": 0,
+    "Steering Committee": 1,
+    "Workflows Engineer": 1,
+    "Admin": 2,
+    "Owner": 3,
+}
+
 
 def require_roles(
     *required_roles: str,
@@ -15,7 +23,7 @@ def require_roles(
     """
     Decorator to require specific roles for command access.
 
-    Role hierarchy: Owner > Admin > Steering Committee > Member
+    Role hierarchy: Owner > Admin > Steering Committee/Workflows Engineer > Member
     If a higher role is present, it grants access to lower role requirements.
 
     Args:
@@ -108,8 +116,8 @@ def check_user_roles_with_hierarchy(
     """
     Check if user has any of the required roles, considering role hierarchy.
 
-    Role hierarchy: Owner > Admin > Steering Committee > Member
-    If a user has a higher role, they automatically have access to lower role requirements.
+    Role hierarchy: Owner > Admin > Steering Committee/Workflows Engineer > Member.
+    If a user has a higher or peer role, they automatically have access to lower role requirements.
 
     Args:
         user_roles: List of Discord roles the user has
@@ -118,23 +126,18 @@ def check_user_roles_with_hierarchy(
     Returns:
         True if user has at least one required role or a higher role, False otherwise
     """
-    # Define role hierarchy (higher index = higher priority)
-    ROLE_HIERARCHY = ["Member", "Steering Committee", "Admin", "Owner"]
-
     user_role_names = {role.name for role in user_roles}
 
     # Get the highest user role level
     user_highest_level = -1
     for role_name in user_role_names:
-        if role_name in ROLE_HIERARCHY:
-            user_highest_level = max(
-                user_highest_level, ROLE_HIERARCHY.index(role_name)
-            )
+        if role_name in _ROLE_LEVELS:
+            user_highest_level = max(user_highest_level, _ROLE_LEVELS[role_name])
 
     # Check if user has sufficient role level for any required role
     for required_role in required_roles:
-        if required_role in ROLE_HIERARCHY:
-            required_level = ROLE_HIERARCHY.index(required_role)
+        if required_role in _ROLE_LEVELS:
+            required_level = _ROLE_LEVELS[required_role]
             if user_highest_level >= required_level:
                 return True
         elif required_role in user_role_names:
@@ -152,14 +155,13 @@ def get_user_hierarchy_level(user_roles: List[discord.Role]) -> int:
         user_roles: List of Discord roles the user has
 
     Returns:
-        Highest role level (-1 if no hierarchical roles, 0=Member, 1=Steering Committee, 2=Admin, 3=Owner)
+        Highest role level (-1 if no hierarchical roles, 0=Member, 1=Steering Committee/Workflows Engineer, 2=Admin, 3=Owner)
     """
-    ROLE_HIERARCHY = ["Member", "Steering Committee", "Admin", "Owner"]
     user_role_names = {role.name for role in user_roles}
 
     highest_level = -1
     for role_name in user_role_names:
-        if role_name in ROLE_HIERARCHY:
-            highest_level = max(highest_level, ROLE_HIERARCHY.index(role_name))
+        if role_name in _ROLE_LEVELS:
+            highest_level = max(highest_level, _ROLE_LEVELS[role_name])
 
     return highest_level
