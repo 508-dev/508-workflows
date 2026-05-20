@@ -279,8 +279,13 @@ type DashboardDevError = {
   message: string
   name?: string
   status?: number
+  statusText?: string
   method?: string
   url?: string
+  path?: string
+  view?: string
+  detail?: string
+  error?: string
   payload?: unknown
   stack?: string
 }
@@ -349,18 +354,35 @@ type FilterState = Partial<Record<PeopleFilterKey, string>>
 
 class ApiRequestError extends Error {
   status: number
+  statusText: string
   payload: unknown
   url: string
   method: string
 
-  constructor(message: string, status: number, payload: unknown, url: string, method: string) {
+  constructor(
+    message: string,
+    status: number,
+    statusText: string,
+    payload: unknown,
+    url: string,
+    method: string,
+  ) {
     super(message)
     this.name = "ApiRequestError"
     this.status = status
+    this.statusText = statusText
     this.payload = payload
     this.url = url
     this.method = method
   }
+}
+
+function stringFieldFromPayload(payload: unknown, key: string) {
+  if (!payload || typeof payload !== "object") return undefined
+  const value = (payload as Record<string, unknown>)[key]
+  if (typeof value === "string") return value
+  if (value === undefined || value === null) return undefined
+  return JSON.stringify(value)
 }
 
 function messageFromUnknown(error: unknown, fallback: string) {
@@ -377,8 +399,13 @@ function devErrorFromUnknown(error: unknown, fallback: string): DashboardDevErro
     message,
     name: error instanceof Error ? error.name : undefined,
     status: apiError?.status,
+    statusText: apiError?.statusText,
     method: apiError?.method,
     url: apiError?.url,
+    path: `${window.location.pathname}${window.location.search}`,
+    view: rawViewFromPath() || "people",
+    detail: apiError ? stringFieldFromPayload(apiError.payload, "detail") : undefined,
+    error: apiError ? stringFieldFromPayload(apiError.payload, "error") : undefined,
     payload: apiError?.payload,
     stack: error instanceof Error ? error.stack : undefined,
   }
@@ -418,6 +445,7 @@ async function requestJson<T>(url: string, options: RequestInit = {}): Promise<T
     throw new ApiRequestError(
       messageFromUnknown(error, "Network request failed"),
       0,
+      "Network request failed",
       null,
       url,
       method,
@@ -426,7 +454,14 @@ async function requestJson<T>(url: string, options: RequestInit = {}): Promise<T
   if (response.status === 401) {
     const next = `${window.location.pathname}${window.location.search}` || "/dashboard"
     window.location.assign(`/auth/login?next=${encodeURIComponent(next)}`)
-    throw new ApiRequestError("Session expired", response.status, null, url, method)
+    throw new ApiRequestError(
+      "Session expired",
+      response.status,
+      response.statusText,
+      null,
+      url,
+      method,
+    )
   }
   if (!response.ok) {
     let detail: unknown = response.statusText
@@ -443,6 +478,7 @@ async function requestJson<T>(url: string, options: RequestInit = {}): Promise<T
     throw new ApiRequestError(
       typeof detail === "string" ? detail : JSON.stringify(detail),
       response.status,
+      response.statusText,
       payload,
       url,
       method,
@@ -1976,26 +2012,35 @@ function DashboardDevErrors({
   const [latest, ...previous] = errors
   const status = latest.status === 0 ? "Network" : latest.status
   const endpoint = [latest.method, latest.url].filter(Boolean).join(" ")
+  const statusLabel = [status, latest.statusText].filter(Boolean).join(" ")
   const payload =
     latest.payload === null || latest.payload === undefined
       ? ""
       : JSON.stringify(latest.payload, null, 2)
+  const summaryFields = [
+    ["Endpoint", endpoint],
+    ["Status", statusLabel || latest.name],
+    ["Route", latest.path],
+    ["View", latest.view],
+    ["Detail", latest.detail],
+    ["Error", latest.error],
+  ].filter(([, value]) => Boolean(value))
 
   return (
     <aside
       aria-label="Development request errors"
-      className="fixed bottom-5 left-5 z-50 grid max-h-[70vh] w-[min(42rem,calc(100vw-2.5rem))] gap-3 overflow-auto rounded-md border border-red-500/40 bg-background p-4 text-sm shadow-2xl"
+      className="fixed bottom-5 left-5 z-50 grid max-h-[78vh] w-[min(48rem,calc(100vw-2.5rem))] gap-3 overflow-auto rounded-md border border-red-500/40 bg-background p-4 text-sm shadow-2xl"
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <strong className="text-red-300">Request failed</strong>
-            <Badge variant="failed">{status || latest.name || "Error"}</Badge>
+            <Badge variant="failed">{statusLabel || latest.name || "Error"}</Badge>
             <span className="text-muted-foreground">{latest.occurredAt}</span>
           </div>
-          {endpoint ? (
-            <code className="mt-1 block truncate text-xs text-muted-foreground">{endpoint}</code>
-          ) : null}
+          <div className="mt-1 text-xs text-muted-foreground">
+            {latest.name || "Dashboard error"}
+          </div>
         </div>
         <Button
           type="button"
@@ -2010,8 +2055,18 @@ function DashboardDevErrors({
       <div className="rounded-md border border-red-500/25 bg-red-500/5 p-3 text-red-100">
         {latest.message}
       </div>
+      {summaryFields.length > 0 ? (
+        <dl className="grid gap-2 rounded-md border bg-black/20 p-3 md:grid-cols-[7rem_minmax(0,1fr)]">
+          {summaryFields.map(([label, value]) => (
+            <div key={label} className="contents">
+              <dt className="text-xs font-bold uppercase text-muted-foreground">{label}</dt>
+              <dd className="min-w-0 break-words font-mono text-xs text-foreground">{value}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : null}
       {payload ? (
-        <details>
+        <details open>
           <summary className="cursor-pointer font-semibold text-muted-foreground">Payload</summary>
           <pre className="mt-2 max-h-56 overflow-auto rounded-md bg-black/30 p-3 text-xs text-muted-foreground">
             {payload}
