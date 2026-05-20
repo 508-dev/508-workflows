@@ -398,6 +398,48 @@ def test_create_project_returns_posted_record_when_detail_fetch_fails() -> None:
     assert calls[1]["path"] == "/api/resource/Project/PROJ-0001"
 
 
+def test_search_users_can_filter_enabled_domain_before_limit() -> None:
+    captured: dict[str, Any] = {}
+
+    class CaptureClient(FakeERPNextClient):
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            params: dict[str, Any] | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            captured["method"] = method
+            captured["path"] = path
+            captured["params"] = params
+            return {"data": [{"name": "owner@508.dev", "email": "owner@508.dev"}]}
+
+    client = CaptureClient({"data": []})
+
+    result = client.search_users(
+        "owner",
+        limit=10,
+        enabled_only=True,
+        email_domain="@508.dev",
+    )
+
+    assert result == [{"name": "owner@508.dev", "email": "owner@508.dev"}]
+    assert captured["method"] == "GET"
+    assert captured["path"] == "/api/resource/User"
+    params = captured["params"]
+    assert params["limit_page_length"] == "10"
+    assert json.loads(params["filters"]) == [
+        ["User", "enabled", "=", 1],
+        ["User", "email", "like", "%@508.dev"],
+    ]
+    assert json.loads(params["or_filters"]) == [
+        ["User", "name", "like", "%owner%"],
+        ["User", "email", "like", "%owner%"],
+        ["User", "full_name", "like", "%owner%"],
+    ]
+
+
 def test_ensure_activity_type_reuses_existing_record() -> None:
     class CaptureClient(FakeERPNextClient):
         def request(

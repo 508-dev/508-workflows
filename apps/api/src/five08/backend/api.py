@@ -3124,19 +3124,15 @@ def _search_erpnext_account_managers(query: str) -> list[dict[str, Any]]:
         return []
     client = _erpnext_client()
     try:
-        users = client.search_users(normalized_query, limit=20)
+        users = client.search_users(
+            normalized_query,
+            limit=10,
+            enabled_only=True,
+            email_domain="@508.dev",
+        )
     finally:
         client.close()
-    return [
-        _dashboard_shape_erpnext_user(user)
-        for user in users
-        if (
-            (_text_or_none(user.get("email")) or _text_or_none(user.get("name")) or "")
-            .casefold()
-            .endswith("@508.dev")
-        )
-        and user.get("enabled") != 0
-    ][:10]
+    return [_dashboard_shape_erpnext_user(user) for user in users]
 
 
 def _list_erpnext_cost_centers() -> list[dict[str, Any]]:
@@ -3360,12 +3356,12 @@ def _create_erpnext_project_setup(
                 erpnext_project_id,
                 detail=project_detail,
             )
-        except Exception as exc:
+        except Exception:
             logger.exception(
                 "ERPNext Project was created but local cache refresh failed project=%s",
                 erpnext_project_id,
             )
-            cache_refresh_error = str(exc)
+            cache_refresh_error = "cache_refresh_failed"
             project = _dashboard_project_fallback_from_erpnext(project_detail)
     finally:
         client.close()

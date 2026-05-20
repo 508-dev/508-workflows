@@ -3153,6 +3153,37 @@ def test_dashboard_search_erpnext_account_managers_allows_project_write(
     mock_search.assert_called_once_with("owner")
 
 
+def test_search_erpnext_account_managers_filters_before_limiting() -> None:
+    client = Mock()
+    client.search_users.return_value = [
+        {
+            "name": "owner@508.dev",
+            "email": "owner@508.dev",
+            "full_name": "Owner User",
+            "enabled": 1,
+        }
+    ]
+
+    with patch("five08.backend.api._erpnext_client", return_value=client):
+        result = api._search_erpnext_account_managers("owner")
+
+    assert result == [
+        {
+            "name": "owner@508.dev",
+            "email": "owner@508.dev",
+            "full_name": "Owner User",
+            "enabled": 1,
+        }
+    ]
+    client.search_users.assert_called_once_with(
+        "owner",
+        limit=10,
+        enabled_only=True,
+        email_domain="@508.dev",
+    )
+    client.close.assert_called_once_with()
+
+
 def test_dashboard_list_erpnext_cost_centers_allows_project_write(
     client: TestClient,
 ) -> None:
@@ -3320,7 +3351,7 @@ def test_create_erpnext_project_setup_returns_success_when_cache_refresh_fails()
     assert result["project"]["id"] == ""
     assert result["project"]["erpnext_project_id"] == "PROJ-0001"
     assert result["project"]["local_cache_pending"] is True
-    assert result["cache_refresh_error"] == "db down"
+    assert result["cache_refresh_error"] == "cache_refresh_failed"
     client.create_project.assert_called_once()
     client.close.assert_called_once_with()
 

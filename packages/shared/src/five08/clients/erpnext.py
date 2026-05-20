@@ -548,11 +548,36 @@ class ERPNextClient:
             {"activity_type": normalized_activity_type},
         )
 
-    def search_users(self, query: str, *, limit: int = 10) -> list[dict[str, Any]]:
+    def search_users(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        enabled_only: bool = False,
+        email_domain: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Search ERPNext User records by email, id, or full name."""
         normalized_query = query.strip()
         if not normalized_query:
             return []
+        filters: list[Any] = []
+        if enabled_only:
+            filters.append(["User", "enabled", "=", 1])
+        normalized_domain = (email_domain or "").strip().casefold()
+        if normalized_domain:
+            domain_suffix = (
+                normalized_domain
+                if normalized_domain.startswith("@")
+                else f"@{normalized_domain}"
+            )
+            filters.append(
+                [
+                    "User",
+                    "email",
+                    "like",
+                    f"%{domain_suffix}",
+                ]
+            )
         if "@" in normalized_query:
             or_filters = [
                 ["User", "name", "=", normalized_query],
@@ -568,6 +593,7 @@ class ERPNextClient:
         return self.list_records(
             "User",
             fields=["name", "email", "full_name", "enabled"],
+            filters=filters,
             or_filters=or_filters,
             limit=limit,
         )
