@@ -105,10 +105,24 @@ def test_create_record_validates_inputs_and_response_shape() -> None:
         client.create_record(" ", {"email": "member@508.dev"})
     with pytest.raises(ERPNextAPIError, match="User payload is required"):
         client.create_record("User", {})
+    with pytest.raises(ERPNextAPIError, match="User payload is required"):
+        client.create_record("User", {"doctype": "Supplier"})
     with pytest.raises(ERPNextAPIError, match="create response is not an object"):
         client.create_record("User", {"email": "member@508.dev"})
 
     assert client.calls[0]["method"] == "POST"
+    assert client.calls[0]["path"] == "/api/resource/User"
+    assert client.calls[0]["payload"] == {"email": "member@508.dev"}
+
+
+def test_create_record_ignores_payload_doctype() -> None:
+    client = CaptureERPNextClient({"data": {"name": "USER-001"}})
+
+    assert client.create_record(
+        "User",
+        {"doctype": "Supplier", "email": "member@508.dev"},
+    ) == {"name": "USER-001"}
+
     assert client.calls[0]["path"] == "/api/resource/User"
     assert client.calls[0]["payload"] == {"email": "member@508.dev"}
 

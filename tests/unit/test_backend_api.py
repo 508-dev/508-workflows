@@ -4141,6 +4141,62 @@ def test_dashboard_add_project_user_returns_activity_cost_partial_success(
     assert audit_metadata["activity_cost_error"] == "activity cost write denied"
 
 
+def test_add_erpnext_project_user_refreshes_cache_on_activity_cost_partial_success() -> (
+    None
+):
+    class FakeERPNextClient:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    erpnext_client = FakeERPNextClient()
+    refreshed_project = {"id": "local-project", "roster_members": []}
+
+    with (
+        patch(
+            "five08.backend.api._resolve_project_roster_user_candidate",
+            return_value={
+                "candidate_id": "email:member@508.dev",
+                "email": "member@508.dev",
+            },
+        ),
+        patch("five08.backend.api._erpnext_client", return_value=erpnext_client),
+        patch(
+            "five08.backend.api.add_engineer_to_project",
+            return_value={
+                "project": {"name": "PROJ-0033"},
+                "activity_cost": None,
+                "activity_cost_error": "activity cost write denied",
+                "partial_success": True,
+            },
+        ) as mock_add_engineer,
+        patch(
+            "five08.backend.api._refresh_cached_erpnext_project",
+            return_value=refreshed_project,
+        ) as mock_refresh,
+    ):
+        result = api._add_erpnext_project_user(
+            external_project_id="PROJ-0033",
+            user="member@508.dev",
+            candidate_id="email:member@508.dev",
+            activity_type="Engineering",
+            billing_rate=150,
+            costing_rate=100,
+        )
+
+    assert erpnext_client.closed is True
+    mock_refresh.assert_called_once_with("PROJ-0033")
+    activity_cost_request = mock_add_engineer.call_args.kwargs["activity_cost"]
+    assert activity_cost_request.activity_type == "Engineering"
+    assert result == {
+        "project": refreshed_project,
+        "activity_cost": None,
+        "activity_cost_error": "activity cost write denied",
+        "partial_success": True,
+    }
+
+
 def test_dashboard_add_project_user_rejects_non_508_email(
     client: TestClient,
 ) -> None:

@@ -181,10 +181,14 @@ class ERPNextClient:
             raise ERPNextAPIError("DocType is required")
         if not payload:
             raise ERPNextAPIError(f"{normalized_doctype} payload is required")
+        record_payload = dict(payload)
+        record_payload.pop("doctype", None)
+        if not record_payload:
+            raise ERPNextAPIError(f"{normalized_doctype} payload is required")
         data = self.request(
             "POST",
             f"/api/resource/{quote(normalized_doctype, safe='')}",
-            payload=payload,
+            payload=record_payload,
         )
         row = data.get("data")
         if not isinstance(row, dict):

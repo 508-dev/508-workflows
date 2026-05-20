@@ -3890,7 +3890,12 @@ def _add_erpnext_project_user(
     finally:
         client.close()
     project = _refresh_cached_erpnext_project(external_project_id)
-    return {"project": project, "activity_cost": result.get("activity_cost")}
+    response = {"project": project, "activity_cost": result.get("activity_cost")}
+    if result.get("activity_cost_error"):
+        response["activity_cost_error"] = result["activity_cost_error"]
+    if result.get("partial_success"):
+        response["partial_success"] = True
+    return response
 
 
 def _setup_erpnext_engineer(payload: DashboardEngineerSetupRequest) -> dict[str, Any]:

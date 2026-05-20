@@ -76,7 +76,7 @@ class EngineerOnboardingCog(DiscordAuditCogMixin, commands.Cog):
     @app_commands.describe(
         email="The engineer's 508.dev email address.",
         name="The engineer's first and last name.",
-        country="Supplier country.",
+        country="Supplier country, required only when creating a new Supplier.",
         department="Optional Employee department.",
         gender="Optional Employee gender value if ERPNext requires it.",
         date_of_birth="Optional Employee DOB if ERPNext requires it, YYYY-MM-DD.",
@@ -88,7 +88,7 @@ class EngineerOnboardingCog(DiscordAuditCogMixin, commands.Cog):
         interaction: discord.Interaction,
         email: str,
         name: str,
-        country: str,
+        country: str | None = None,
         department: str | None = None,
         gender: str | None = None,
         date_of_birth: str | None = None,
@@ -98,6 +98,7 @@ class EngineerOnboardingCog(DiscordAuditCogMixin, commands.Cog):
         await interaction.response.defer(ephemeral=True)
         normalized_email = email.strip().lower()
         normalized_name = " ".join(name.strip().split())
+        normalized_country = country.strip() if country else None
         if not normalized_email or not normalized_email.endswith("@508.dev"):
             await interaction.followup.send(
                 "❌ Enter a valid @508.dev email.",
@@ -118,7 +119,7 @@ class EngineerOnboardingCog(DiscordAuditCogMixin, commands.Cog):
                     email=normalized_email,
                     first_name=first_name,
                     last_name=last_name or None,
-                    country=country,
+                    country=normalized_country,
                     department=department,
                     gender=gender,
                     date_of_birth=date_of_birth,
@@ -306,8 +307,13 @@ class EngineerOnboardingCog(DiscordAuditCogMixin, commands.Cog):
             return
 
         activity_cost_result = result.get("activity_cost")
+        activity_cost_error = result.get("activity_cost_error")
         lines = [
-            "✅ Engineer added to project.",
+            (
+                "⚠️ Engineer added to project, but Activity Cost failed."
+                if activity_cost_error
+                else "✅ Engineer added to project."
+            ),
             f"Project: `{normalized_project_id}`",
             f"User: `{normalized_user}`",
         ]
@@ -315,15 +321,18 @@ class EngineerOnboardingCog(DiscordAuditCogMixin, commands.Cog):
             lines.append(
                 f"Activity Cost: `{activity_cost_result.get('activity_cost')}`"
             )
+        if activity_cost_error:
+            lines.append(f"Activity Cost error: `{activity_cost_error}`")
         self._audit_command_safe(
             interaction=interaction,
             action="erpnext.project_engineer_add",
-            result="success",
+            result="partial_success" if activity_cost_error else "success",
             metadata={
                 "project_id": normalized_project_id,
                 "user": normalized_user,
                 "activity_type": normalized_activity_type,
                 "activity_cost": activity_cost_result,
+                "activity_cost_error": activity_cost_error,
             },
             resource_type="erpnext_project",
             resource_id=normalized_project_id,
