@@ -331,3 +331,16 @@ def test_service_commands_accept_legacy_webhook_ingest_port() -> None:
 
     assert web_command[web_command.index("--host") + 1] == "127.0.0.1"
     assert web_command[web_command.index("--port") + 1] == "19090"
+
+
+def test_ensure_port_usage_uses_invoked_program_name(monkeypatch, capsys) -> None:
+    module = _load_dev_mux_module()
+    monkeypatch.setattr(module.sys, "argv", ["/tmp/custom-dev-mux"])
+
+    exit_code = module.main(["--ensure-port"])
+
+    assert exit_code == 2
+    assert (
+        "Usage: custom-dev-mux [--ensure-port web|discord-bot]"
+        in capsys.readouterr().err
+    )

@@ -63,7 +63,7 @@ fi
 cd "$workspace"
 workspace=$(pwd -P)
 
-if [ ! -x "$workspace/scripts/docker-compose.sh" ]; then
+if [ "$skip_docker" -eq 0 ] && [ ! -x "$workspace/scripts/docker-compose.sh" ]; then
   echo "Expected executable wrapper not found: $workspace/scripts/docker-compose.sh" >&2
   exit 1
 fi

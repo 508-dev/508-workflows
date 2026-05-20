@@ -539,8 +539,9 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] == "--ensure-port":
         if len(argv) == 2 and argv[1] in PORT_SERVICES:
             return _ensure_selected_ports(env, {argv[1]})
+        program = os.path.basename(sys.argv[0]) or "dev_mux.py"
         print(
-            "Usage: dev_mux.py [--ensure-port web|discord-bot]",
+            f"Usage: {program} [--ensure-port web|discord-bot]",
             file=sys.stderr,
         )
         return 2
