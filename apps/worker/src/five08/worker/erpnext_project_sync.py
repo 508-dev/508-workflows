@@ -14,6 +14,9 @@ from five08.projects import (
 from five08.worker.config import settings
 
 logger = logging.getLogger(__name__)
+# ERPNext/Frappe list APIs commonly cap limit_page_length around 20. Matching
+# that cap keeps server-capped pages from looking like the final page early.
+PROJECT_LIST_PAGE_LIMIT = 20
 
 
 class ERPNextProjectSyncProcessor:
@@ -32,7 +35,7 @@ class ERPNextProjectSyncProcessor:
 
     def sync_open_projects(self) -> dict[str, Any]:
         """Sync all open ERPNext projects and their Project.users roster."""
-        project_limit = 500
+        project_limit = PROJECT_LIST_PAGE_LIMIT
         synced_count = 0
         failed_project_ids: list[str] = []
         roster_member_count = 0

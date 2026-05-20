@@ -502,13 +502,7 @@ def list_dashboard_projects(
                         or shaped_member.get("source_user_id")
                         or shaped_member.get("email"),
                     )
-                    supplier_id = source_payload.get(
-                        "supplier_erpnext_id"
-                    ) or _active_supplier_id_for_roster_member(
-                        settings,
-                        shaped_member,
-                        source_payload,
-                    )
+                    supplier_id = source_payload.get("supplier_erpnext_id")
                     shaped_member["supplier_erpnext_url"] = _erpnext_record_url(
                         settings,
                         "supplier",

@@ -251,7 +251,7 @@ def test_list_dashboard_projects_does_not_guess_supplier_link_from_full_name() -
     assert "source_payload" not in member
 
 
-def test_list_dashboard_projects_resolves_supplier_link_from_crm_email() -> None:
+def test_list_dashboard_projects_uses_stored_supplier_link() -> None:
     project_id = "11111111-1111-4111-8111-111111111111"
 
     class Cursor:
@@ -299,7 +299,7 @@ def test_list_dashboard_projects_resolves_supplier_link_from_crm_email() -> None
                     "email": "fabien@508.dev",
                     "full_name": "Fabien Rajaonarison",
                     "roster_kind": "erp_users",
-                    "source_payload": {},
+                    "source_payload": {"supplier_erpnext_id": "NAINA CONSULTING"},
                     "last_seen_at": None,
                     "crm_contact_id": "crm-fabien",
                     "crm_email": "fabien@naina.digital",
@@ -317,40 +317,18 @@ def test_list_dashboard_projects_resolves_supplier_link_from_crm_email() -> None
         def cursor(self, *args: object, **kwargs: object) -> Cursor:
             return Cursor()
 
-    class FakeERPNextClient:
-        def __init__(
-            self,
-            base_url: str,
-            api_key: str,
-            timeout_seconds: float,
-        ) -> None:
-            self.base_url = base_url
-
-        def search_suppliers(
-            self,
-            query: str,
-            *,
-            limit: int,
-        ) -> list[dict[str, object]]:
-            assert query == "fabien@naina.digital"
-            assert limit == 1
-            return [{"name": "NAINA CONSULTING"}]
-
-        def close(self) -> None:
-            return None
-
-    projects_module._SUPPLIER_EMAIL_CACHE.clear()
     settings = SharedSettings(
         erpnext_base_url="https://erp.example.test",
         erpnext_api_key="key:secret",
     )
     with (
         patch("five08.projects.get_postgres_connection", return_value=Connection()),
-        patch("five08.projects.ERPNextClient", FakeERPNextClient),
+        patch("five08.projects.ERPNextClient") as mock_erpnext_client,
     ):
         projects = list_dashboard_projects(settings, include_all=True)
 
     member = projects[0]["roster_members"][0]
+    mock_erpnext_client.assert_not_called()
     assert (
         member["supplier_erpnext_url"]
         == "https://erp.example.test/app/supplier/NAINA%20CONSULTING"

@@ -751,20 +751,47 @@ async def _sync_discord_gig_thread_status(
     return cast(dict[str, Any], payload)
 
 
+MAX_SESSION_COOKIE_CANDIDATES = 5
+
+
 async def _current_session(request: Request) -> tuple[str | None, AuthSession | None]:
     store = _auth_store_from_app(request.app)
     if store is None:
         return None, None
 
-    session_id = request.cookies.get(settings.auth_session_cookie_name)
-    if not session_id:
+    session_ids = _session_cookie_values(request)
+    if not session_ids:
         return None, None
 
-    session = await store.get_session(session_id)
-    if session is None:
-        return session_id, None
+    for session_id in session_ids:
+        session = await store.get_session(session_id)
+        if session is not None:
+            return session_id, session
 
-    return session_id, session
+    return session_ids[0], None
+
+
+def _session_cookie_values(request: Request) -> list[str]:
+    """Return bounded, de-duplicated session cookie values in browser order."""
+    cookie_name = settings.auth_session_cookie_name
+    values: list[str] = []
+
+    def append_candidate(value: str | None) -> None:
+        if (
+            value
+            and value not in values
+            and len(values) < MAX_SESSION_COOKIE_CANDIDATES
+        ):
+            values.append(value)
+
+    raw_cookie = request.headers.get("cookie", "")
+    for item in raw_cookie.split(";"):
+        name, separator, value = item.strip().partition("=")
+        if separator and name == cookie_name:
+            append_candidate(value)
+
+    append_candidate(request.cookies.get(cookie_name))
+    return values
 
 
 def _has_sso_validated_session(session: AuthSession) -> bool:
@@ -1978,6 +2005,7 @@ def _set_session_cookie(response: Response, session_id: str) -> None:
 
 def _clear_session_cookie(response: Response) -> None:
     response.delete_cookie(key=settings.auth_session_cookie_name, path="/")
+    response.delete_cookie(key=settings.auth_session_cookie_name, path="/dashboard")
 
 
 async def _write_auth_audit_event(
@@ -6222,12 +6250,7 @@ async def auth_callback_handler(
         await store.delete_discord_link(pending.discord_link_token)
 
     now = int(time.time())
-    max_session_expiry = now + max(1, settings.auth_session_ttl_seconds)
-    raw_exp = claims.get("exp")
-    token_expiry = max_session_expiry
-    if isinstance(raw_exp, int):
-        token_expiry = raw_exp
-    expires_at = min(token_expiry, max_session_expiry)
+    expires_at = now + max(1, settings.auth_session_ttl_seconds)
 
     session_id = secrets.token_urlsafe(32)
     await store.save_session(

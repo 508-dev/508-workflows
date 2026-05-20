@@ -1601,6 +1601,87 @@ def test_dashboard_clears_stale_session_cookie(client: TestClient) -> None:
     assert "Max-Age=0" in set_cookie
 
 
+def test_current_session_accepts_valid_duplicate_session_cookie(
+    app: api.FastAPI,
+) -> None:
+    valid_session = api.AuthSession(
+        subject="admin-user",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+
+    class Store(_FakeAuthStore):
+        async def get_session(self, session_id: str) -> api.AuthSession | None:
+            if session_id == "valid-session":
+                return valid_session
+            return None
+
+    app.state.auth_store = Store()
+    client = TestClient(app)
+
+    response = client.get(
+        "/dashboard/api/me",
+        headers={
+            "Cookie": (
+                f"{api.settings.auth_session_cookie_name}=stale-session; "
+                f"{api.settings.auth_session_cookie_name}=valid-session"
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["subject"] == "admin-user"
+
+
+def test_current_session_deduplicates_and_caps_duplicate_session_cookies(
+    app: api.FastAPI,
+) -> None:
+    class Store(_FakeAuthStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.session_ids: list[str] = []
+
+        async def get_session(self, session_id: str) -> api.AuthSession | None:
+            self.session_ids.append(session_id)
+            return None
+
+    store = Store()
+    app.state.auth_store = store
+    client = TestClient(app)
+
+    cookie_values = [
+        "stale-session-1",
+        "stale-session-1",
+        "stale-session-2",
+        "stale-session-3",
+        "stale-session-4",
+        "stale-session-5",
+        "stale-session-6",
+    ]
+    response = client.get(
+        "/dashboard/api/me",
+        headers={
+            "Cookie": "; ".join(
+                f"{api.settings.auth_session_cookie_name}={value}"
+                for value in cookie_values
+            )
+        },
+    )
+
+    assert response.status_code == 401
+    assert store.session_ids == [
+        "stale-session-1",
+        "stale-session-2",
+        "stale-session-3",
+        "stale-session-4",
+        "stale-session-5",
+    ]
+
+
 def test_dashboard_forbids_non_admin_session(client: TestClient) -> None:
     session = api.AuthSession(
         subject="member-1",
@@ -5653,6 +5734,53 @@ def test_auth_callback_success_writes_login_audit(client: TestClient) -> None:
     assert audit_payload.actor_subject == "admin@508.dev"
     assert audit_payload.metadata is not None
     assert "discord_link_identity_checks_enforced" not in audit_payload.metadata
+
+
+def test_auth_callback_uses_configured_session_ttl_not_id_token_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    monkeypatch.setattr(api.settings, "auth_session_ttl_seconds", 3600)
+    store = Mock()
+    store.pop_oidc_state = AsyncMock(
+        return_value=api.PendingOIDCState(
+            nonce="nonce-1",
+            code_verifier="verifier-1",
+            next_path="/dashboard",
+            discord_link_token=None,
+        )
+    )
+    store.save_session = AsyncMock()
+
+    oidc = Mock()
+    oidc.configured = True
+    oidc.exchange_code = AsyncMock(return_value={"id_token": "id-token-1"})
+    oidc.validate_id_token = AsyncMock(
+        return_value={
+            "sub": "authentik-user-1",
+            "email": "Admin@508.dev",
+            "name": "Admin User",
+            "groups": ["Admin"],
+            "exp": 1010,
+        }
+    )
+
+    with (
+        patch("five08.backend.api._auth_store_from_app", return_value=store),
+        patch("five08.backend.api._oidc_client_from_app", return_value=oidc),
+        patch("five08.backend.api._http_client_from_app", return_value=Mock()),
+        patch("five08.backend.api.insert_audit_event"),
+        patch("five08.backend.api.time.time", return_value=1000),
+    ):
+        response = client.get(
+            "/auth/callback?code=code-1&state=state-1",
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 302
+    saved_session = store.save_session.call_args.kwargs["payload"]
+    assert saved_session.expires_at == 4600
+    assert store.save_session.call_args.kwargs["ttl_seconds"] == 3600
 
 
 def test_auth_callback_denied_writes_login_audit(client: TestClient) -> None:
