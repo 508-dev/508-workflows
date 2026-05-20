@@ -4428,9 +4428,20 @@ async def dashboard_setup_engineer_handler(request: Request) -> JSONResponse:
         return JSONResponse({"error": "invalid_email"}, status_code=400)
     if not normalized_first_name:
         return JSONResponse({"error": "first_name_required"}, status_code=400)
+    normalized_payload = payload.model_copy(
+        update={
+            "email": normalized_email,
+            "first_name": normalized_first_name,
+            "last_name": _text_or_none(payload.last_name),
+            "country": _text_or_none(payload.country),
+            "department": _text_or_none(payload.department),
+            "gender": _text_or_none(payload.gender),
+            "date_of_birth": _text_or_none(payload.date_of_birth),
+        }
+    )
 
     try:
-        result = await asyncio.to_thread(_setup_erpnext_engineer, payload)
+        result = await asyncio.to_thread(_setup_erpnext_engineer, normalized_payload)
     except EngineerOnboardingDuplicateNameError as exc:
         await _audit_dashboard_engineer_setup(
             session,

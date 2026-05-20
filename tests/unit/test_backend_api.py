@@ -3170,18 +3170,20 @@ def test_dashboard_setup_engineer_returns_setup_result(client: TestClient) -> No
         response = client.post(
             "/dashboard/api/onboarding/engineers",
             json={
-                "email": " jane@508.dev ",
-                "first_name": "Jane",
-                "last_name": "Engineer",
-                "country": "Taiwan",
+                "email": " Jane@508.dev ",
+                "first_name": " Jane ",
+                "last_name": " Engineer ",
+                "country": " Taiwan ",
             },
         )
 
     assert response.status_code == 200
     assert response.json() == result
     setup_payload = mock_setup.call_args.args[0]
-    assert setup_payload.email == " jane@508.dev "
+    assert setup_payload.email == "jane@508.dev"
     assert setup_payload.first_name == "Jane"
+    assert setup_payload.last_name == "Engineer"
+    assert setup_payload.country == "Taiwan"
     mock_audit.assert_awaited_once()
     audit_kwargs = mock_audit.await_args.kwargs
     assert audit_kwargs["metadata"]["user_id"] == "jane@508.dev"
