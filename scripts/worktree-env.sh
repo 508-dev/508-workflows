@@ -148,8 +148,10 @@ worktree_env_finalize_browser_safe_port() {
   resolved_value=$1
   source_label=$2
   port_label=$3
+  raw_resolved_value=$resolved_value
 
   worktree_env_validate_port_number "$resolved_value" "$port_label" || return 1
+  resolved_value=$(worktree_env_decimal_value "$resolved_value")
 
   if [ "$source_label" = "default" ]; then
     if [ "${WORKTREE_ENV_PORT_DEFAULT_SOURCE-}" = "conductor" ] && worktree_env_is_browser_unsafe_port "$resolved_value"; then
@@ -159,7 +161,7 @@ worktree_env_finalize_browser_safe_port() {
     fi
     resolved_value=$(worktree_env_next_browser_safe_port "$resolved_value")
   elif worktree_env_is_browser_unsafe_port "$resolved_value"; then
-    echo "$port_label cannot use browser-unsafe port '$resolved_value'; pick a different port." >&2
+    echo "$port_label cannot use browser-unsafe port '$raw_resolved_value'; pick a different port." >&2
     return 1
   fi
 

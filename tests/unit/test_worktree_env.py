@@ -75,6 +75,26 @@ def test_resolve_browser_safe_port_rejects_explicit_unsafe_override() -> None:
     )
 
 
+def test_resolve_browser_safe_port_rejects_leading_zero_unsafe_override() -> None:
+    env = _base_env()
+    env["TEST_PORT"] = "05060"
+
+    result = _run_shell(
+        f"""
+        set -eu
+        . {SCRIPT_PATH}
+        worktree_env_resolve_browser_safe_port TEST_PORT 3000 /dev/null TEST_PORT
+        """,
+        env=env,
+    )
+
+    assert result.returncode != 0
+    assert (
+        "TEST_PORT cannot use browser-unsafe port '05060'; pick a different port."
+        in result.stderr
+    )
+
+
 def test_worktree_env_load_rejects_unsafe_compose_http_port_override() -> None:
     env = _base_env()
     env["WEB_HOST_PORT"] = "5060"

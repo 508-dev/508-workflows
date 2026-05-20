@@ -312,6 +312,8 @@ def _process_in_scope(
     conductor_group: str,
     cwd: str = "",
 ) -> bool:
+    if _command_service(process.command) != service_name:
+        return False
     if worktree_root and (
         _command_mentions_path(process.command, worktree_root)
         or _is_under_path(cwd, worktree_root)
@@ -319,7 +321,6 @@ def _process_in_scope(
         return True
     return bool(
         conductor_group
-        and _command_service(process.command) == service_name
         and (
             _command_mentions_path(process.command, conductor_group)
             or _is_under_path(cwd, conductor_group)

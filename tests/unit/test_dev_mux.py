@@ -130,6 +130,38 @@ def test_ensure_ports_available_does_not_reclaim_different_service(
     assert stopped == set()
 
 
+def test_ensure_ports_available_does_not_reclaim_unrelated_same_worktree_listener(
+    monkeypatch,
+) -> None:
+    module = _load_dev_mux_module()
+    stopped: set[int] = set()
+    workspace = "/Users/michaelwu/conductor/workspaces/508-workflows/victoria-v1"
+    owner_command = f"{workspace}/.venv/bin/python3 {workspace}/scripts/other.py"
+
+    monkeypatch.setattr(module, "_listening_pids", lambda port: [67428])
+    monkeypatch.setattr(module, "_pid_command", lambda pid: owner_command)
+    monkeypatch.setattr(module, "_pid_cwd", lambda pid: workspace)
+    monkeypatch.setattr(
+        module,
+        "_process_table",
+        lambda: {67428: module.ProcessInfo(67428, 1, owner_command)},
+    )
+    monkeypatch.setattr(module, "_stop_pids", lambda pids: stopped.update(pids))
+
+    ok, error = module._ensure_ports_available(
+        {
+            "WORKTREE_ENV_REPO_ROOT": workspace,
+            "DISCORD_BOT_INTERNAL_BASE_URL": "http://127.0.0.1:30054",
+        },
+        {"discord-bot"},
+    )
+
+    assert ok is False
+    assert error is not None
+    assert "discord-bot port 30054 is already in use" in error
+    assert stopped == set()
+
+
 def test_ensure_ports_available_reclaims_same_service_parent_tree(
     monkeypatch,
 ) -> None:
