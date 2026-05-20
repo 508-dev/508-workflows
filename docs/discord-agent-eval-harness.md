@@ -1,6 +1,6 @@
 # Discord Agent Eval Harness
 
-This is the PR-gated eval harness for the Discord agent planner/router.
+This is the eval harness for the Discord agent planner/router.
 
 ## Goals
 

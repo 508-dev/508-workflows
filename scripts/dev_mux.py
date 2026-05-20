@@ -15,10 +15,12 @@ from typing import NamedTuple
 from urllib.parse import urlparse
 
 
-PORT_SERVICES: list[tuple[str, str]] = [
-    ("web", "BACKEND_API_BASE_URL"),
-    ("discord-bot", "DISCORD_BOT_INTERNAL_BASE_URL"),
-]
+PORT_SERVICES: dict[str, str] = {
+    "web": "BACKEND_API_BASE_URL",
+    "discord-bot": "DISCORD_BOT_INTERNAL_BASE_URL",
+}
+
+ALL_SERVICES = ("web", "worker", "discord-bot")
 
 
 class ProcessInfo(NamedTuple):
@@ -27,8 +29,11 @@ class ProcessInfo(NamedTuple):
     command: str
 
 
-def _service_commands(env: dict[str, str]) -> list[tuple[str, list[str]]]:
-    return [
+def _service_commands(
+    env: dict[str, str], selected_services: set[str] | None = None
+) -> list[tuple[str, list[str]]]:
+    selected_services = selected_services or set(ALL_SERVICES)
+    commands = [
         (
             "web",
             [
@@ -87,6 +92,7 @@ def _service_commands(env: dict[str, str]) -> list[tuple[str, list[str]]]:
             ],
         ),
     ]
+    return [(name, command) for name, command in commands if name in selected_services]
 
 
 def _stream_output(name: str, process: subprocess.Popen[str]) -> None:
@@ -415,13 +421,14 @@ def _related_reclaim_pids(
 
 
 def _ensure_ports_available(
-    env: dict[str, str], service_names: set[str] | None = None
+    env: dict[str, str], selected_services: set[str] | None = None
 ) -> tuple[bool, str | None]:
+    selected_services = selected_services or set(ALL_SERVICES)
     worktree_root = env.get("WORKTREE_ENV_REPO_ROOT", "")
     conductor_group = _conductor_workspace_group(worktree_root)
 
-    for service_name, env_key in PORT_SERVICES:
-        if service_names is not None and service_name not in service_names:
+    for service_name, env_key in PORT_SERVICES.items():
+        if service_name not in selected_services:
             continue
 
         try:
@@ -492,21 +499,45 @@ def _ensure_selected_ports(env: dict[str, str], services: set[str]) -> int:
     return 0
 
 
+def _selected_services(argv: list[str]) -> set[str] | None:
+    if not argv:
+        return set(ALL_SERVICES)
+
+    aliases = {
+        "api": "web",
+        "bot": "discord-bot",
+        "discord_bot": "discord-bot",
+    }
+    selected: set[str] = set()
+    invalid: list[str] = []
+    for value in argv:
+        service = aliases.get(value, value)
+        if service not in ALL_SERVICES:
+            invalid.append(value)
+            continue
+        selected.add(service)
+
+    if invalid or not selected:
+        services = "|".join(ALL_SERVICES)
+        program = os.path.basename(sys.argv[0]) or "dev_mux.py"
+        print(
+            f"Usage: {program} [{services} ...]",
+            file=sys.stderr,
+        )
+        if invalid:
+            print(f"Unknown service(s): {', '.join(invalid)}", file=sys.stderr)
+        return None
+
+    return selected
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     env = os.environ.copy()
     env.setdefault("PYTHONUNBUFFERED", "1")
 
-    if argv:
-        if (
-            len(argv) == 2
-            and argv[0] == "--ensure-port"
-            and argv[1]
-            in {
-                "web",
-                "discord-bot",
-            }
-        ):
+    if argv and argv[0] == "--ensure-port":
+        if len(argv) == 2 and argv[1] in PORT_SERVICES:
             return _ensure_selected_ports(env, {argv[1]})
         print(
             "Usage: dev_mux.py [--ensure-port web|discord-bot]",
@@ -514,13 +545,27 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    selected_services = _selected_services(argv)
+    if selected_services is None:
+        return 2
+
     print("Launching host-run services with shared worktree env:")
-    print(f"  Web/API listener:     {env.get('BACKEND_API_BASE_URL', '')}")
-    print(f"  Bot health listener:  {env.get('DISCORD_BOT_INTERNAL_BASE_URL', '')}")
-    print("  Worker listener:      none (queue consumer)")
+    if "web" in selected_services:
+        print(f"  Web/API dashboard:    {env.get('BACKEND_API_BASE_URL', '')}")
+    else:
+        print("  Web/API dashboard:    skipped")
+    if "discord-bot" in selected_services:
+        print(f"  Bot health listener:  {env.get('DISCORD_BOT_INTERNAL_BASE_URL', '')}")
+    else:
+        print("  Bot health listener:  skipped")
+    print(
+        "  Worker listener:      none (queue consumer)"
+        if "worker" in selected_services
+        else "  Worker listener:      skipped"
+    )
     print()
 
-    ports_ok, port_error = _ensure_ports_available(env)
+    ports_ok, port_error = _ensure_ports_available(env, selected_services)
     if not ports_ok:
         print(port_error, file=sys.stderr)
         return 1
@@ -542,7 +587,7 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, handle_signal)
 
     try:
-        for name, command in _service_commands(env):
+        for name, command in _service_commands(env, selected_services):
             process = subprocess.Popen(
                 command,
                 cwd=env.get("WORKTREE_ENV_REPO_ROOT") or None,
