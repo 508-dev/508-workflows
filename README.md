@@ -137,6 +137,9 @@ uv run --package api backend-api
 # Worker queue consumer
 uv run --package worker worker-consumer
 
+# Web/API dashboard + worker, without the Discord bot
+./scripts/dev.sh no-bot
+
 # Jobs CLI
 uv run --package worker jobsctl --help
 # recent jobs (past hour by default):

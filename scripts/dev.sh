@@ -56,6 +56,7 @@ Run app services on the host with:
   ./scripts/dev.sh web  # ./scripts/dev.sh api also works
   ./scripts/dev.sh worker
   ./scripts/dev.sh discord-bot
+  ./scripts/dev.sh no-bot  # web dashboard + worker, no Discord bot
   ./scripts/dev.sh all
 EOF
     ;;
@@ -63,6 +64,11 @@ EOF
     start_infra
     run_migrations
     exec python3 "$script_dir/dev_mux.py"
+    ;;
+  no-bot|web-worker|dashboard)
+    start_infra
+    run_migrations
+    exec python3 "$script_dir/dev_mux.py" web worker
     ;;
   migrate|migrations)
     start_infra
@@ -127,7 +133,7 @@ EOF
     exec uv run --package discord_bot discord-bot
     ;;
   *)
-    echo "Usage: ./scripts/dev.sh [infra|all|migrate|down|ports|env|web|api|worker|discord-bot]" >&2
+    echo "Usage: ./scripts/dev.sh [infra|all|no-bot|dashboard|migrate|down|ports|env|web|api|worker|discord-bot]" >&2
     exit 1
     ;;
 esac

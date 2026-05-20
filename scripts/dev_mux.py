@@ -14,14 +14,18 @@ from collections.abc import Iterable
 from urllib.parse import urlparse
 
 
-PORT_SERVICES: list[tuple[str, str]] = [
-    ("web", "BACKEND_API_BASE_URL"),
-    ("discord-bot", "DISCORD_BOT_INTERNAL_BASE_URL"),
-]
+PORT_SERVICES: dict[str, str] = {
+    "web": "BACKEND_API_BASE_URL",
+    "discord-bot": "DISCORD_BOT_INTERNAL_BASE_URL",
+}
+
+ALL_SERVICES = ("web", "worker", "discord-bot")
 
 
-def _service_commands(env: dict[str, str]) -> list[tuple[str, list[str]]]:
-    return [
+def _service_commands(
+    env: dict[str, str], selected_services: set[str]
+) -> list[tuple[str, list[str]]]:
+    commands = [
         (
             "web",
             [
@@ -80,6 +84,7 @@ def _service_commands(env: dict[str, str]) -> list[tuple[str, list[str]]]:
             ],
         ),
     ]
+    return [(name, command) for name, command in commands if name in selected_services]
 
 
 def _stream_output(name: str, process: subprocess.Popen[str]) -> None:
@@ -187,10 +192,15 @@ def _stop_pid(pid: int) -> None:
         return
 
 
-def _ensure_ports_available(env: dict[str, str]) -> tuple[bool, str | None]:
+def _ensure_ports_available(
+    env: dict[str, str], selected_services: set[str]
+) -> tuple[bool, str | None]:
     worktree_root = env.get("WORKTREE_ENV_REPO_ROOT", "")
 
-    for service_name, env_key in PORT_SERVICES:
+    for service_name, env_key in PORT_SERVICES.items():
+        if service_name not in selected_services:
+            continue
+
         try:
             port = _service_port(env, env_key)
         except ValueError as exc:
@@ -244,17 +254,62 @@ def _ensure_ports_available(env: dict[str, str]) -> tuple[bool, str | None]:
     return True, None
 
 
+def _selected_services(argv: list[str]) -> set[str] | None:
+    if not argv:
+        return set(ALL_SERVICES)
+
+    aliases = {
+        "api": "web",
+        "bot": "discord-bot",
+        "discord_bot": "discord-bot",
+    }
+    selected: set[str] = set()
+    invalid: list[str] = []
+    for value in argv:
+        service = aliases.get(value, value)
+        if service not in ALL_SERVICES:
+            invalid.append(value)
+            continue
+        selected.add(service)
+
+    if invalid or not selected:
+        services = "|".join(ALL_SERVICES)
+        print(
+            f"Usage: dev_mux.py [{services} ...]",
+            file=sys.stderr,
+        )
+        if invalid:
+            print(f"Unknown service(s): {', '.join(invalid)}", file=sys.stderr)
+        return None
+
+    return selected
+
+
 def main() -> int:
+    selected_services = _selected_services(sys.argv[1:])
+    if selected_services is None:
+        return 2
+
     env = os.environ.copy()
     env.setdefault("PYTHONUNBUFFERED", "1")
 
     print("Launching host-run services with shared worktree env:")
-    print(f"  Web/API listener:     {env.get('BACKEND_API_BASE_URL', '')}")
-    print(f"  Bot health listener:  {env.get('DISCORD_BOT_INTERNAL_BASE_URL', '')}")
-    print("  Worker listener:      none (queue consumer)")
+    if "web" in selected_services:
+        print(f"  Web/API dashboard:    {env.get('BACKEND_API_BASE_URL', '')}")
+    else:
+        print("  Web/API dashboard:    skipped")
+    if "discord-bot" in selected_services:
+        print(f"  Bot health listener:  {env.get('DISCORD_BOT_INTERNAL_BASE_URL', '')}")
+    else:
+        print("  Bot health listener:  skipped")
+    print(
+        "  Worker listener:      none (queue consumer)"
+        if "worker" in selected_services
+        else "  Worker listener:      skipped"
+    )
     print()
 
-    ports_ok, port_error = _ensure_ports_available(env)
+    ports_ok, port_error = _ensure_ports_available(env, selected_services)
     if not ports_ok:
         print(port_error, file=sys.stderr)
         return 1
@@ -276,7 +331,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, handle_signal)
 
     try:
-        for name, command in _service_commands(env):
+        for name, command in _service_commands(env, selected_services):
             process = subprocess.Popen(
                 command,
                 cwd=env.get("WORKTREE_ENV_REPO_ROOT") or None,
