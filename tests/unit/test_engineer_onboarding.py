@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import pytest
@@ -491,6 +492,33 @@ def test_configure_engineer_activity_cost_rejects_negative_rates() -> None:
                 user="jane@508.dev",
                 activity_type="Engineering for Test Project",
                 billing_rate=-1,
+                costing_rate=100,
+            ),
+        )
+
+
+@pytest.mark.parametrize("rate", [math.nan, math.inf, -math.inf])
+def test_configure_engineer_activity_cost_rejects_non_finite_rates(
+    rate: float,
+) -> None:
+    client = FakeERPNextClient()
+    setup_engineer(
+        client,  # type: ignore[arg-type]
+        EngineerSetupRequest(
+            email="jane@508.dev",
+            first_name="Jane",
+            last_name="Engineer",
+            country="Taiwan",
+        ),
+    )
+
+    with pytest.raises(EngineerOnboardingError, match="finite"):
+        configure_engineer_activity_cost(
+            client,  # type: ignore[arg-type]
+            ActivityCostRequest(
+                user="jane@508.dev",
+                activity_type="Engineering for Test Project",
+                billing_rate=rate,
                 costing_rate=100,
             ),
         )

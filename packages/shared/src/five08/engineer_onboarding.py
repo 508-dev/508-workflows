@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+import math
 from typing import Any
 
 from five08.clients.erpnext import ERPNextAPIError, ERPNextClient
@@ -429,6 +430,12 @@ def _activity_cost_preconditions(
     if request.billing_rate is None or request.costing_rate is None:
         raise EngineerOnboardingError(
             "Billing rate and costing rate are required for Activity Cost."
+        )
+    if not math.isfinite(request.billing_rate) or not math.isfinite(
+        request.costing_rate
+    ):
+        raise EngineerOnboardingError(
+            "Billing rate and costing rate must be finite numbers."
         )
     if request.billing_rate < 0 or request.costing_rate < 0:
         raise EngineerOnboardingError(
