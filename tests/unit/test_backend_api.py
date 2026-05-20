@@ -3291,8 +3291,41 @@ def test_create_erpnext_project_setup_uses_existing_customer_and_refreshes_cache
     client.close.assert_called_once_with()
 
 
-def test_create_erpnext_project_setup_rejects_non_508_account_manager() -> None:
+def test_create_erpnext_project_setup_returns_success_when_cache_refresh_fails() -> (
+    None
+):
     client = Mock()
+    client.create_project.return_value = {
+        "name": "PROJ-0001",
+        "project_name": "Acme Portal",
+        "customer": "Acme",
+        "status": "Open",
+    }
+    client.ensure_activity_type.return_value = {
+        "name": "Engineering for Acme Portal",
+        "activity_type": "Engineering for Acme Portal",
+    }
+    payload = api.DashboardProjectCreateRequest(
+        project_name="Acme Portal",
+        customer_mode="existing",
+        customer="Acme",
+    )
+
+    with (
+        patch("five08.backend.api._erpnext_client", return_value=client),
+        patch("five08.backend.api.upsert_project", side_effect=RuntimeError("db down")),
+    ):
+        result = api._create_erpnext_project_setup(payload)
+
+    assert result["project"]["id"] == ""
+    assert result["project"]["erpnext_project_id"] == "PROJ-0001"
+    assert result["project"]["local_cache_pending"] is True
+    assert result["cache_refresh_error"] == "db down"
+    client.create_project.assert_called_once()
+    client.close.assert_called_once_with()
+
+
+def test_create_erpnext_project_setup_rejects_non_508_account_manager() -> None:
     payload = api.DashboardProjectCreateRequest(
         project_name="Acme Portal",
         customer_mode="new",
@@ -3301,12 +3334,50 @@ def test_create_erpnext_project_setup_rejects_non_508_account_manager() -> None:
     )
 
     with (
-        patch("five08.backend.api._erpnext_client", return_value=client),
+        patch("five08.backend.api._erpnext_client") as mock_client_factory,
         pytest.raises(ValueError, match="account_manager_must_be_508_email"),
     ):
         api._create_erpnext_project_setup(payload)
 
-    client.close.assert_called_once_with()
+    mock_client_factory.assert_not_called()
+
+
+def test_create_erpnext_project_setup_validates_address_before_customer_create() -> (
+    None
+):
+    payload = api.DashboardProjectCreateRequest(
+        project_name="Acme Portal",
+        customer_mode="new",
+        customer_name="Acme",
+        address_city="Missoula",
+    )
+
+    with (
+        patch("five08.backend.api._erpnext_client") as mock_client_factory,
+        pytest.raises(ValueError, match="address_line1_required"),
+    ):
+        api._create_erpnext_project_setup(payload)
+
+    mock_client_factory.assert_not_called()
+
+
+def test_create_erpnext_project_setup_validates_contact_before_customer_create() -> (
+    None
+):
+    payload = api.DashboardProjectCreateRequest(
+        project_name="Acme Portal",
+        customer_mode="new",
+        customer_name="Acme",
+        contact_email="ada@example.test",
+    )
+
+    with (
+        patch("five08.backend.api._erpnext_client") as mock_client_factory,
+        pytest.raises(ValueError, match="contact_first_name_required"),
+    ):
+        api._create_erpnext_project_setup(payload)
+
+    mock_client_factory.assert_not_called()
 
 
 def test_create_erpnext_project_setup_creates_customer_address_and_contact() -> None:

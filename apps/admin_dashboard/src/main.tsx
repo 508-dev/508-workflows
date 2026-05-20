@@ -915,21 +915,27 @@ function App() {
         project: Project
         customer: ERPNextCustomer
         activity_type: { name?: string }
+        cache_refresh_error?: string
       }>("/dashboard/api/projects/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(values),
       })
-      setProjects((current) => {
-        const existing = current.some((project) => project.id === payload.project.id)
-        return existing
-          ? current.map((project) =>
-              project.id === payload.project.id ? payload.project : project,
-            )
-          : [payload.project, ...current]
-      })
-      showToast("Created ERP project setup", "ok")
-      openProjectDetail(payload.project.id)
+      if (payload.project.id) {
+        setProjects((current) => {
+          const existing = current.some((project) => project.id === payload.project.id)
+          return existing
+            ? current.map((project) =>
+                project.id === payload.project.id ? payload.project : project,
+              )
+            : [payload.project, ...current]
+        })
+        showToast("Created ERP project setup", "ok")
+        openProjectDetail(payload.project.id)
+      } else {
+        showToast("Created ERP project in ERPNext; local sync is pending", "ok")
+        void loadProjects()
+      }
       return true
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Unable to create project", "error")
@@ -2826,6 +2832,10 @@ function CreateProjectModal(props: {
   const onSearchContactsRef = useRef(props.onSearchContacts)
   const onSearchAccountManagersRef = useRef(props.onSearchAccountManagers)
   const onLoadCostCentersRef = useRef(props.onLoadCostCenters)
+  const costCenterRequestRef = useRef(0)
+  const customerSearchRequestRef = useRef(0)
+  const accountManagerSearchRequestRef = useRef(0)
+  const contactSearchRequestRef = useRef(0)
   const defaultActivityType = projectName.trim() ? `Engineering for ${projectName.trim()}` : ""
   const addressStarted = [
     addressLine1,
@@ -2863,36 +2873,82 @@ function CreateProjectModal(props: {
   }, [props.onLoadCostCenters])
 
   useEffect(() => {
+    let active = true
+    const requestId = costCenterRequestRef.current + 1
+    costCenterRequestRef.current = requestId
     void onLoadCostCentersRef.current().then((options) => {
+      if (!active || costCenterRequestRef.current !== requestId) return
       setCostCenters(options)
       setCostCenter((current) =>
         options.some((option) => option.name === current) ? current : "Projects - 5",
       )
     })
+    return () => {
+      active = false
+    }
   }, [])
 
   useEffect(() => {
-    if (customerMode !== "existing") return
+    if (customerMode !== "existing") {
+      customerSearchRequestRef.current += 1
+      setCustomerResults([])
+      return
+    }
+    let active = true
+    const requestId = customerSearchRequestRef.current + 1
+    customerSearchRequestRef.current = requestId
     const handle = window.setTimeout(() => {
-      void onSearchCustomersRef.current(customerQuery).then(setCustomerResults)
+      void onSearchCustomersRef.current(customerQuery).then((results) => {
+        if (!active || customerSearchRequestRef.current !== requestId) return
+        setCustomerResults(results)
+      })
     }, 250)
-    return () => window.clearTimeout(handle)
+    return () => {
+      active = false
+      window.clearTimeout(handle)
+    }
   }, [customerMode, customerQuery])
 
   useEffect(() => {
-    if (customerMode !== "new") return
+    if (customerMode !== "new") {
+      accountManagerSearchRequestRef.current += 1
+      setAccountManagerResults([])
+      return
+    }
+    let active = true
+    const requestId = accountManagerSearchRequestRef.current + 1
+    accountManagerSearchRequestRef.current = requestId
     const handle = window.setTimeout(() => {
-      void onSearchAccountManagersRef.current(accountManagerQuery).then(setAccountManagerResults)
+      void onSearchAccountManagersRef.current(accountManagerQuery).then((results) => {
+        if (!active || accountManagerSearchRequestRef.current !== requestId) return
+        setAccountManagerResults(results)
+      })
     }, 250)
-    return () => window.clearTimeout(handle)
+    return () => {
+      active = false
+      window.clearTimeout(handle)
+    }
   }, [customerMode, accountManagerQuery])
 
   useEffect(() => {
-    if (customerMode !== "new" || contactMode !== "existing") return
+    if (customerMode !== "new" || contactMode !== "existing") {
+      contactSearchRequestRef.current += 1
+      setContactResults([])
+      return
+    }
+    let active = true
+    const requestId = contactSearchRequestRef.current + 1
+    contactSearchRequestRef.current = requestId
     const handle = window.setTimeout(() => {
-      void onSearchContactsRef.current(contactQuery).then(setContactResults)
+      void onSearchContactsRef.current(contactQuery).then((results) => {
+        if (!active || contactSearchRequestRef.current !== requestId) return
+        setContactResults(results)
+      })
     }, 250)
-    return () => window.clearTimeout(handle)
+    return () => {
+      active = false
+      window.clearTimeout(handle)
+    }
   }, [customerMode, contactMode, contactQuery])
 
   async function submit() {

@@ -329,9 +329,11 @@ class ERPNextClient:
             raise ERPNextAPIError("Customer is required")
         if not normalized_line1:
             raise ERPNextAPIError("Address line 1 is required")
+        normalized_title = (address_title or "").strip() or normalized_customer
+        normalized_type = (address_type or "").strip() or "Billing"
         payload: dict[str, Any] = {
-            "address_title": (address_title or normalized_customer).strip(),
-            "address_type": (address_type or "Billing").strip(),
+            "address_title": normalized_title,
+            "address_type": normalized_type,
             "address_line1": normalized_line1,
             "links": [
                 {"link_doctype": "Customer", "link_name": normalized_customer},

@@ -146,6 +146,34 @@ def test_create_address_links_customer() -> None:
     }
 
 
+def test_create_address_falls_back_for_whitespace_title_and_type() -> None:
+    captured: dict[str, Any] = {}
+
+    class CaptureClient(FakeERPNextClient):
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            params: dict[str, Any] | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            captured["payload"] = payload
+            return {"data": {"name": "ADDR-0001"}}
+
+    client = CaptureClient({"data": {}})
+
+    client.create_address(
+        customer="Acme",
+        address_title="   ",
+        address_type="   ",
+        address_line1="123 Main St",
+    )
+
+    assert captured["payload"]["address_title"] == "Acme"
+    assert captured["payload"]["address_type"] == "Billing"
+
+
 def test_create_contact_links_customer() -> None:
     captured: dict[str, Any] = {}
 

@@ -2970,6 +2970,37 @@ def _erpnext_customer_lookup_url(customer_id: str) -> str | None:
     )
 
 
+def _erpnext_project_lookup_url(project_id: str) -> str | None:
+    base_url = _text_or_none(settings.erpnext_base_url)
+    normalized_project_id = _text_or_none(project_id)
+    if not base_url or not normalized_project_id:
+        return None
+    return f"{base_url.rstrip('/')}/app/project/{quote(normalized_project_id, safe='')}"
+
+
+def _dashboard_project_fallback_from_erpnext(
+    project_detail: dict[str, Any],
+) -> dict[str, Any]:
+    erpnext_project_id = _text_or_none(project_detail.get("name"))
+    project_name = (
+        _text_or_none(project_detail.get("project_name")) or erpnext_project_id
+    )
+    customer = _text_or_none(project_detail.get("customer"))
+    return {
+        "id": "",
+        "display_name": project_name,
+        "customer": customer,
+        "erpnext_project_id": erpnext_project_id,
+        "erpnext_project_url": _erpnext_project_lookup_url(erpnext_project_id or ""),
+        "customer_erpnext_url": _erpnext_customer_lookup_url(customer or ""),
+        "source_status": _text_or_none(project_detail.get("status")),
+        "roster_members": [],
+        "roster_count": 0,
+        "linked_engagement_count": 0,
+        "local_cache_pending": True,
+    }
+
+
 def _dashboard_shape_erpnext_customer(customer: dict[str, Any]) -> dict[str, Any]:
     customer_id = _text_or_none(customer.get("name")) or _text_or_none(
         customer.get("customer_name")
@@ -3132,32 +3163,77 @@ def _create_erpnext_project_setup(
     if customer_website is not None and len(customer_website) > 255:
         raise ValueError("customer_website_too_long")
 
+    customer_id: str | None = None
+    customer_name: str | None = None
+    currency = "USD"
+    account_manager: str | None = None
+    if payload.customer_mode == "existing":
+        customer_id = _text_or_none(payload.customer)
+        if customer_id is None:
+            raise ValueError("customer_required")
+        if len(customer_id) > 140:
+            raise ValueError("customer_too_long")
+    else:
+        customer_name = _text_or_none(payload.customer_name)
+        if customer_name is None:
+            raise ValueError("customer_name_required")
+        if len(customer_name) > 140:
+            raise ValueError("customer_name_too_long")
+        currency = (payload.default_billing_currency or "USD").strip().upper()
+        if len(currency) > 3:
+            raise ValueError("default_billing_currency_too_long")
+        account_manager = _text_or_none(payload.account_manager)
+        if account_manager is not None and len(account_manager) > 200:
+            raise ValueError("account_manager_too_long")
+        if account_manager is not None and not account_manager.casefold().endswith(
+            "@508.dev"
+        ):
+            raise ValueError("account_manager_must_be_508_email")
+
+    address_fields = (
+        "address_line1",
+        "address_line2",
+        "address_city",
+        "address_state",
+        "address_country",
+        "address_postal_code",
+    )
+    has_address = _has_any_project_create_text(payload, address_fields)
+    address_line1 = _text_or_none(payload.address_line1)
+    if has_address and address_line1 is None:
+        raise ValueError("address_line1_required")
+
+    contact_id = _text_or_none(payload.contact)
+    contact_fields = (
+        "contact_first_name",
+        "contact_last_name",
+        "contact_email",
+        "contact_phone",
+        "contact_mobile",
+    )
+    has_contact = _has_any_project_create_text(payload, contact_fields)
+    contact_first_name = _text_or_none(payload.contact_first_name)
+    if contact_id is not None and len(contact_id) > 140:
+        raise ValueError("contact_too_long")
+    if contact_id is None and has_contact and contact_first_name is None:
+        raise ValueError("contact_first_name_required")
+
+    activity_type_name = _text_or_none(
+        payload.activity_type
+    ) or _default_activity_type_for_project(project_name)
+    if len(activity_type_name) > 140:
+        raise ValueError("activity_type_too_long")
+
+    cache_refresh_error: str | None = None
     client = _erpnext_client()
     try:
+        activity_type = client.ensure_activity_type(activity_type_name)
         customer_doc: dict[str, Any]
         if payload.customer_mode == "existing":
-            customer_id = _text_or_none(payload.customer)
-            if customer_id is None:
-                raise ValueError("customer_required")
-            if len(customer_id) > 140:
-                raise ValueError("customer_too_long")
+            assert customer_id is not None
             customer_doc = {"name": customer_id, "customer_name": customer_id}
         else:
-            customer_name = _text_or_none(payload.customer_name)
-            if customer_name is None:
-                raise ValueError("customer_name_required")
-            if len(customer_name) > 140:
-                raise ValueError("customer_name_too_long")
-            currency = (payload.default_billing_currency or "USD").strip().upper()
-            if len(currency) > 3:
-                raise ValueError("default_billing_currency_too_long")
-            account_manager = _text_or_none(payload.account_manager)
-            if account_manager is not None and len(account_manager) > 200:
-                raise ValueError("account_manager_too_long")
-            if account_manager is not None and not account_manager.casefold().endswith(
-                "@508.dev"
-            ):
-                raise ValueError("account_manager_must_be_508_email")
+            assert customer_name is not None
             customer_doc = client.create_customer(
                 customer_name=customer_name,
                 account_manager=account_manager,
@@ -3171,18 +3247,8 @@ def _create_erpnext_project_setup(
             raise ERPNextAPIError("ERPNext Customer response is missing an id")
 
         address_doc: dict[str, Any] | None = None
-        address_fields = (
-            "address_line1",
-            "address_line2",
-            "address_city",
-            "address_state",
-            "address_country",
-            "address_postal_code",
-        )
-        if _has_any_project_create_text(payload, address_fields):
-            address_line1 = _text_or_none(payload.address_line1)
-            if address_line1 is None:
-                raise ValueError("address_line1_required")
+        if has_address:
+            assert address_line1 is not None
             address_doc = client.create_address(
                 customer=customer_id,
                 address_line1=address_line1,
@@ -3199,28 +3265,16 @@ def _create_erpnext_project_setup(
             )
 
         contact_doc: dict[str, Any] | None = None
-        contact_id = _text_or_none(payload.contact)
-        contact_fields = (
-            "contact_first_name",
-            "contact_last_name",
-            "contact_email",
-            "contact_phone",
-            "contact_mobile",
-        )
         if contact_id is not None:
-            if len(contact_id) > 140:
-                raise ValueError("contact_too_long")
             contact_doc = client.link_contact_to_customer(
                 contact=contact_id,
                 customer=customer_id,
             )
-        elif _has_any_project_create_text(payload, contact_fields):
-            first_name = _text_or_none(payload.contact_first_name)
-            if first_name is None:
-                raise ValueError("contact_first_name_required")
+        elif has_contact:
+            assert contact_first_name is not None
             contact_doc = client.create_contact(
                 customer=customer_id,
-                first_name=first_name,
+                first_name=contact_first_name,
                 last_name=_text_or_none(payload.contact_last_name),
                 email_id=_text_or_none(payload.contact_email),
                 phone=_text_or_none(payload.contact_phone),
@@ -3261,21 +3315,23 @@ def _create_erpnext_project_setup(
         if erpnext_project_id is None:
             raise ERPNextAPIError("ERPNext Project response is missing an id")
 
-        activity_type_name = _text_or_none(
-            payload.activity_type
-        ) or _default_activity_type_for_project(project_name)
-        if len(activity_type_name) > 140:
-            raise ValueError("activity_type_too_long")
-        activity_type = client.ensure_activity_type(activity_type_name)
-        project = _refresh_cached_erpnext_project_with_client(
-            client,
-            erpnext_project_id,
-            detail=project_detail,
-        )
+        try:
+            project = _refresh_cached_erpnext_project_with_client(
+                client,
+                erpnext_project_id,
+                detail=project_detail,
+            )
+        except Exception as exc:
+            logger.exception(
+                "ERPNext Project was created but local cache refresh failed project=%s",
+                erpnext_project_id,
+            )
+            cache_refresh_error = str(exc)
+            project = _dashboard_project_fallback_from_erpnext(project_detail)
     finally:
         client.close()
 
-    return {
+    result: dict[str, Any] = {
         "project": project,
         "customer": _dashboard_shape_erpnext_customer(customer_doc),
         "activity_type": {
@@ -3286,6 +3342,9 @@ def _create_erpnext_project_setup(
         "address": address_doc,
         "contact": contact_doc,
     }
+    if cache_refresh_error is not None:
+        result["cache_refresh_error"] = cache_refresh_error
+    return result
 
 
 def _resolve_historical_project_member(
