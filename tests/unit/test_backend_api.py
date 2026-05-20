@@ -2270,6 +2270,43 @@ def test_dashboard_jobs_forbids_steering_committee_session(
     assert response.json()["error"] == "forbidden"
 
 
+def test_dashboard_me_workflows_engineer_gets_steering_write_and_admin_read(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    monkeypatch.setattr(api.settings, "environment", "production")
+    session = api.AuthSession(
+        subject="workflows-1",
+        email="workflows@508.dev",
+        display_name="Workflows Engineer",
+        groups=["Workflows Engineer"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/api/me")
+
+    permissions = set(response.json()["permissions"])
+    assert response.status_code == 200
+    assert "projects:write" in permissions
+    assert "onboarding:write" in permissions
+    assert "jobs:read" in permissions
+    assert "audit:read" in permissions
+    assert "jobs:write" not in permissions
+    assert "people:sync" not in permissions
+    assert "projects:sync" not in permissions
+    assert "jobs:write:dry_run" in permissions
+    assert "people:sync:dry_run" in permissions
+    assert "projects:sync:dry_run" in permissions
+
+
 def test_dashboard_jobs_allows_discord_admin_without_sso(
     monkeypatch: pytest.MonkeyPatch,
     client: TestClient,
@@ -5100,6 +5137,59 @@ def test_dashboard_rerun_crm_job_audits_discord_session(
     assert audit_payload.metadata["job_type"] == "sync_people_from_crm_job"
 
 
+def test_dashboard_rerun_job_workflows_engineer_is_dry_run(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    monkeypatch.setattr(api.settings, "environment", "production")
+    session = api.AuthSession(
+        subject="workflows-1",
+        email="workflows@508.dev",
+        display_name="Workflows Engineer",
+        groups=["Workflows Engineer"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    source_job = Mock(
+        id="job-old-1",
+        type="sync_people_from_crm_job",
+        max_attempts=8,
+        payload={"args": [], "kwargs": {"reason": "manual"}},
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.get_job", return_value=source_job),
+        patch("five08.backend.api._rerun_job", new_callable=AsyncMock) as mock_rerun,
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
+    ):
+        response = client.post("/dashboard/api/jobs/job-old-1/rerun")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "dry_run",
+        "dry_run": True,
+        "source_job_id": "job-old-1",
+        "type": "sync_people_from_crm_job",
+        "would_enqueue": {
+            "queue": api.settings.redis_queue_name,
+            "job_type": "sync_people_from_crm_job",
+            "args_count": 0,
+            "kwargs_keys": ["reason"],
+            "idempotency_key_prefix": "manual-rerun:job-old-1:",
+            "max_attempts": 8,
+        },
+    }
+    mock_rerun.assert_not_called()
+    mock_insert.assert_not_called()
+
+
 def test_dashboard_rerun_rejects_cross_origin_post(client: TestClient) -> None:
     session = api.AuthSession(
         subject="admin-1",
@@ -5170,6 +5260,78 @@ def test_dashboard_sync_people_audits_discord_session(client: TestClient) -> Non
     assert audit_payload.resource_id == "job-sync-1"
     assert audit_payload.metadata is not None
     assert audit_payload.metadata["source"] == "dashboard"
+
+
+def test_dashboard_sync_people_workflows_engineer_is_dry_run(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="workflows-1",
+        email="workflows@508.dev",
+        display_name="Workflows Engineer",
+        groups=["Workflows Engineer"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._enqueue_full_crm_sync_job",
+            new_callable=AsyncMock,
+        ) as mock_enqueue,
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
+    ):
+        response = client.post("/dashboard/api/sync/people")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "dry_run"
+    assert response.json()["would_enqueue"]["job_type"] == "sync_people_from_crm_job"
+    mock_enqueue.assert_not_called()
+    mock_insert.assert_not_called()
+
+
+def test_dashboard_sync_projects_workflows_engineer_is_dry_run(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="workflows-1",
+        email="workflows@508.dev",
+        display_name="Workflows Engineer",
+        groups=["Workflows Engineer"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._enqueue_erpnext_project_sync_job",
+            new_callable=AsyncMock,
+        ) as mock_enqueue,
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
+    ):
+        response = client.post("/dashboard/api/sync/projects")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "dry_run"
+    assert (
+        response.json()["would_enqueue"]["job_type"] == "sync_projects_from_erpnext_job"
+    )
+    mock_enqueue.assert_not_called()
+    mock_insert.assert_not_called()
 
 
 def test_dashboard_sync_people_rejects_cross_origin_post(client: TestClient) -> None:

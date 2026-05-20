@@ -81,7 +81,7 @@ DISCORD_LOCALITY_ROLE_NAMES: list[str] = [
 
 # Roles that should never be suggested or applied automatically.
 DISCORD_ROLES_NEVER_SUGGEST: frozenset[str] = frozenset(
-    {"Member", "FixTweet", "Bots", "Admin", "508 Bot"}
+    {"Member", "FixTweet", "Bots", "Admin", "508 Bot", "Workflows Engineer"}
 )
 
 # Map normalized country name → locality Discord roles to suggest.

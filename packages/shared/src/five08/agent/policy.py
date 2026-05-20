@@ -94,6 +94,7 @@ _MEMBER_ROLE_NAMES = frozenset(
         "project manager",
         "project_manager",
         "engineer",
+        "workflows engineer",
         *_ADMIN_ROLE_NAMES,
     }
 )
@@ -112,7 +113,7 @@ class PolicyEngine:
             or "project_manager" in normalized_roles
         ):
             scopes.update(_ROLE_SCOPES["project_manager"])
-        if "engineer" in normalized_roles:
+        if "engineer" in normalized_roles or "workflows engineer" in normalized_roles:
             scopes.update(_ROLE_SCOPES["engineer"])
         if normalized_roles & _MEMBER_ROLE_NAMES:
             scopes.update(_ROLE_SCOPES["member"])

@@ -66,7 +66,9 @@ Dashboard sessions are created by:
 Discord-backed sessions carry the linked CRM contact id from the local `people`
 cache when available. Steering Committee+ sessions can use broader CRM people
 lookup and onboarding views. Admin+ sessions can access jobs, reruns, sync
-actions, and audit views.
+actions, and audit views. The Discord `Workflows Engineer` role is a
+Steering Committee peer for write access, with admin read access to jobs/audit
+and dry-run responses for admin-only rerun/sync writes.
 
 Sensitive dashboard permissions require SSO validation in production. Local,
 dev, development, and test environments allow trusted dev role context for
