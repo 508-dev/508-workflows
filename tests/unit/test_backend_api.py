@@ -3048,7 +3048,7 @@ def test_bulk_update_erpnext_projects_fetches_project_refs_once() -> None:
     mock_cached_project.assert_called_once_with(project_id)
 
 
-def test_dashboard_search_erpnext_customers_requires_project_write(
+def test_dashboard_search_erpnext_customers_allows_project_write(
     client: TestClient,
 ) -> None:
     session = api.AuthSession(
@@ -3087,7 +3087,7 @@ def test_dashboard_search_erpnext_customers_requires_project_write(
     mock_search.assert_called_once_with("acme")
 
 
-def test_dashboard_search_erpnext_contacts_requires_project_write(
+def test_dashboard_search_erpnext_contacts_allows_project_write(
     client: TestClient,
 ) -> None:
     session = api.AuthSession(
@@ -3120,7 +3120,7 @@ def test_dashboard_search_erpnext_contacts_requires_project_write(
     mock_search.assert_called_once_with("ada")
 
 
-def test_dashboard_search_erpnext_account_managers_requires_project_write(
+def test_dashboard_search_erpnext_account_managers_allows_project_write(
     client: TestClient,
 ) -> None:
     session = api.AuthSession(
@@ -3153,7 +3153,7 @@ def test_dashboard_search_erpnext_account_managers_requires_project_write(
     mock_search.assert_called_once_with("owner")
 
 
-def test_dashboard_list_erpnext_cost_centers_requires_project_write(
+def test_dashboard_list_erpnext_cost_centers_allows_project_write(
     client: TestClient,
 ) -> None:
     session = api.AuthSession(

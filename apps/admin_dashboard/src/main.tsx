@@ -3075,7 +3075,9 @@ function CreateProjectModal(props: {
   const customerSearchRequestRef = useRef(0)
   const accountManagerSearchRequestRef = useRef(0)
   const contactSearchRequestRef = useRef(0)
-  const defaultActivityType = projectName.trim() ? `Engineering for ${projectName.trim()}` : ""
+  const defaultActivityType = projectName.trim()
+    ? `Engineering for ${projectName.trim()}`.slice(0, 140)
+    : ""
   const addressStarted = [
     addressLine1,
     addressLine2,
@@ -3192,9 +3194,6 @@ function CreateProjectModal(props: {
 
   async function submit() {
     if (!canSubmit) return
-    const effectiveActivityType = activityTypeEdited
-      ? activityType.trim()
-      : defaultActivityType.trim()
     const success = await props.onCreateProject({
       project_name: projectName.trim(),
       customer_mode: customerMode,
@@ -3203,7 +3202,7 @@ function CreateProjectModal(props: {
       account_manager: customerMode === "new" ? accountManager.trim() || undefined : undefined,
       default_billing_currency: customerMode === "new" ? currency.trim() || "USD" : undefined,
       default_cost_center: costCenter.trim() || "Projects - 5",
-      activity_type: effectiveActivityType || undefined,
+      activity_type: activityTypeEdited ? activityType.trim() || undefined : undefined,
       customer_details: customerMode === "new" ? customerDetails.trim() || undefined : undefined,
       customer_website: customerMode === "new" ? customerWebsite.trim() || undefined : undefined,
       address_line1: customerMode === "new" ? addressLine1.trim() || undefined : undefined,
@@ -3264,7 +3263,7 @@ function CreateProjectModal(props: {
               New ERP project
             </strong>
             <span className="text-sm text-muted-foreground">
-              Creates a project and associated customer.
+              Creates a project and links a new or existing customer.
             </span>
           </div>
           <Button
@@ -3642,6 +3641,7 @@ function CreateProjectModal(props: {
                   <Input
                     value={activityTypeEdited ? activityType : defaultActivityType}
                     autoComplete="off"
+                    maxLength={140}
                     placeholder={defaultActivityType || "Engineering for project"}
                     onChange={(event) => {
                       setActivityTypeEdited(true)

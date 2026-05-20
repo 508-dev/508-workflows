@@ -304,6 +304,33 @@ def test_create_project_posts_external_project_then_fetches_detail() -> None:
     assert calls[1]["path"] == "/api/resource/Project/PROJ-0001"
 
 
+def test_create_project_returns_posted_record_when_detail_fetch_fails() -> None:
+    calls: list[dict[str, Any]] = []
+
+    class CaptureClient(FakeERPNextClient):
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            params: dict[str, Any] | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            calls.append({"method": method, "path": path, "payload": payload})
+            if method == "POST":
+                return {"data": {"name": "PROJ-0001", "project_name": "Acme Portal"}}
+            raise ERPNextAPIError("detail fetch failed")
+
+    client = CaptureClient({"data": {}})
+
+    result = client.create_project(project_name="Acme Portal", customer="Acme")
+
+    assert result == {"name": "PROJ-0001", "project_name": "Acme Portal"}
+    assert calls[0]["method"] == "POST"
+    assert calls[1]["method"] == "GET"
+    assert calls[1]["path"] == "/api/resource/Project/PROJ-0001"
+
+
 def test_ensure_activity_type_reuses_existing_record() -> None:
     class CaptureClient(FakeERPNextClient):
         def request(

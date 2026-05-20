@@ -479,7 +479,10 @@ class ERPNextClient:
         row = self.create_record("Project", payload)
         project_id = str(row.get("name") or "").strip()
         if project_id:
-            return self.get_project(project_id)
+            try:
+                return self.get_project(project_id)
+            except ERPNextAPIError:
+                return row
         return row
 
     def ensure_activity_type(self, activity_type: str) -> dict[str, Any]:
