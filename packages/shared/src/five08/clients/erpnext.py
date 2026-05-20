@@ -251,7 +251,7 @@ class ERPNextClient:
         )
 
     def search_contacts(self, query: str, *, limit: int = 10) -> list[dict[str, Any]]:
-        """Search ERPNext Contact records by name, display name, or email."""
+        """Search ERPNext Contact records by fields shown in the dashboard picker."""
         normalized_query = query.strip()
         if not normalized_query:
             return []
@@ -269,9 +269,11 @@ class ERPNextClient:
                 "company_name",
             ],
             or_filters=[
-                ["Contact", "name", "like", like_query],
                 ["Contact", "full_name", "like", like_query],
                 ["Contact", "email_id", "like", like_query],
+                ["Contact", "mobile_no", "like", like_query],
+                ["Contact", "phone", "like", like_query],
+                ["Contact", "company_name", "like", like_query],
             ],
             limit=limit,
         )

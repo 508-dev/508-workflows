@@ -174,6 +174,40 @@ def test_create_address_falls_back_for_whitespace_title_and_type() -> None:
     assert captured["payload"]["address_type"] == "Billing"
 
 
+def test_search_contacts_matches_dashboard_visible_fields() -> None:
+    captured: dict[str, Any] = {}
+
+    class CaptureClient(FakeERPNextClient):
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            params: dict[str, Any] | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            captured["method"] = method
+            captured["path"] = path
+            captured["params"] = params
+            return {"data": [{"name": "CONTACT-0001", "full_name": "Acme Contact"}]}
+
+    client = CaptureClient({"data": []})
+
+    result = client.search_contacts("co")
+
+    assert result == [{"name": "CONTACT-0001", "full_name": "Acme Contact"}]
+    assert captured["method"] == "GET"
+    assert captured["path"] == "/api/resource/Contact"
+    params = captured["params"]
+    assert json.loads(params["or_filters"]) == [
+        ["Contact", "full_name", "like", "%co%"],
+        ["Contact", "email_id", "like", "%co%"],
+        ["Contact", "mobile_no", "like", "%co%"],
+        ["Contact", "phone", "like", "%co%"],
+        ["Contact", "company_name", "like", "%co%"],
+    ]
+
+
 def test_create_contact_links_customer() -> None:
     captured: dict[str, Any] = {}
 

@@ -14,7 +14,7 @@ import {
   Users,
   X,
 } from "lucide-react"
-import { StrictMode, useEffect, useMemo, useRef, useState } from "react"
+import { type ReactNode, StrictMode, useEffect, useMemo, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
 
 import { Badge } from "@/components/ui/badge"
@@ -682,6 +682,36 @@ function Metric({ label, value, id }: { label: string; value: number; id?: strin
 function Empty({ children, hidden }: { children: string; hidden: boolean }) {
   if (hidden) return null
   return <div className="px-4 py-7 text-center text-sm text-muted-foreground">{children}</div>
+}
+
+function HighlightedText({ value, query }: { value: string; query: string }) {
+  const normalizedQuery = query.trim().toLowerCase()
+  if (!normalizedQuery) return <>{value}</>
+
+  const lowerValue = value.toLowerCase()
+  const pieces: ReactNode[] = []
+  let cursor = 0
+  let matchIndex = lowerValue.indexOf(normalizedQuery)
+  while (matchIndex >= 0) {
+    if (matchIndex > cursor) {
+      pieces.push(value.slice(cursor, matchIndex))
+    }
+    const matchEnd = matchIndex + normalizedQuery.length
+    pieces.push(
+      <mark
+        key={`${matchIndex}-${matchEnd}`}
+        className="rounded-sm bg-amber-200 px-0.5 text-inherit dark:bg-amber-500/35"
+      >
+        {value.slice(matchIndex, matchEnd)}
+      </mark>,
+    )
+    cursor = matchEnd
+    matchIndex = lowerValue.indexOf(normalizedQuery, cursor)
+  }
+  if (cursor < value.length) {
+    pieces.push(value.slice(cursor))
+  }
+  return <>{pieces}</>
 }
 
 function App() {
@@ -3512,6 +3542,15 @@ function CreateProjectModal(props: {
                       {contactResults.length ? (
                         contactResults.map((contact) => {
                           const contactId = contact.name || ""
+                          const contactLabel = contact.full_name || contactId
+                          const contactMetadata = [
+                            { key: "company", value: contact.company_name },
+                            { key: "email", value: contact.email_id },
+                            { key: "phone", value: contact.phone },
+                            { key: "mobile", value: contact.mobile_no },
+                          ].filter((item): item is { key: string; value: string } =>
+                            Boolean(item.value),
+                          )
                           return (
                             <label
                               key={contactId}
@@ -3525,12 +3564,19 @@ function CreateProjectModal(props: {
                                 onChange={() => setSelectedContact(contactId)}
                               />
                               <span className="grid gap-0.5 text-sm">
-                                <strong>{contact.full_name || contactId}</strong>
-                                <span className="text-muted-foreground">
-                                  {[contact.email_id, contact.phone, contact.mobile_no]
-                                    .filter(Boolean)
-                                    .join(" | ")}
-                                </span>
+                                <strong>
+                                  <HighlightedText value={contactLabel} query={contactQuery} />
+                                </strong>
+                                {contactMetadata.length ? (
+                                  <span className="text-muted-foreground">
+                                    {contactMetadata.map((item, index) => (
+                                      <span key={item.key}>
+                                        {index > 0 ? " | " : ""}
+                                        <HighlightedText value={item.value} query={contactQuery} />
+                                      </span>
+                                    ))}
+                                  </span>
+                                ) : null}
                               </span>
                             </label>
                           )
