@@ -1,57 +1,71 @@
 # Development Guide
 
-This guide covers setup and workflows for the 508.dev monorepo (`discord bot + api + worker + shared package`).
+This guide covers local setup and day-to-day workflows for the 508.dev
+integrations monorepo.
 
 ## Prerequisites
 
 - Python 3.12+
+- `python3` on PATH
 - [uv](https://docs.astral.sh/uv/)
-- Docker (optional, for Compose-based local runs)
+- Docker with Compose support
+- Bun for the admin dashboard frontend
 
-## Monorepo Layout
+Only `python3` is assumed to exist locally; use `uv run`, package scripts, or
+repo-provided entrypoints for project commands.
 
-```text
-apps/discord_bot/src/five08/discord_bot/  # Discord bot package
-apps/api/src/five08/backend/              # Backend API package
-apps/worker/src/five08/worker/            # Worker consumer package
-packages/shared/src/five08/     # Shared package
-```
-
-## Setup
-
-1. Install dependencies:
+## First-Time Setup
 
 ```bash
 uv sync
-```
-
-2. Configure environment:
-
-```bash
 cp .env.example .env
 ```
 
-The backend API process runs Alembic migrations on startup (`apps/worker/src/five08/worker/db_migrations.py`) so the `jobs` table is created or upgraded before requests are accepted.
+Edit `.env` for the integrations you plan to exercise. At minimum, set
+`API_SHARED_SECRET` when you need protected API routes or local dashboard login
+links.
 
-3. Start local infrastructure:
+## Local Dev Stack
+
+`./scripts/dev.sh` is the primary local-dev entrypoint. It assigns deterministic
+per-worktree localhost ports, exports service URLs, starts Docker-managed infra,
+and runs migrations before DB-using app services.
+
+Recommended dashboard/worker loop without the Discord bot:
 
 ```bash
-./scripts/dev.sh infra
-./scripts/dev.sh api
-./scripts/dev.sh worker
-./scripts/dev.sh discord-bot
+./scripts/dev.sh no-bot
 ```
 
-`infra` brings up only the Docker infra. Use the host-service subcommands to run
-the app processes with per-worktree ports and derived localhost URLs.
+Aliases:
 
-To launch infra plus all host-run services together with prefixed logs:
+```bash
+./scripts/dev.sh dashboard
+./scripts/dev.sh web-worker
+```
+
+Run everything, including the Discord bot:
 
 ```bash
 ./scripts/dev.sh all
 ```
 
-Show, export, or stop the local dev environment:
+Run individual pieces:
+
+```bash
+./scripts/dev.sh infra
+./scripts/dev.sh web      # ./scripts/dev.sh api also works
+./scripts/dev.sh worker
+./scripts/dev.sh discord-bot
+```
+
+Run migrations without starting app services:
+
+```bash
+./scripts/dev.sh migrate
+```
+
+Show or stop the local environment:
 
 ```bash
 ./scripts/dev.sh ports
@@ -60,56 +74,96 @@ Show, export, or stop the local dev environment:
 ```
 
 `./scripts/dev.sh env` emits shell-safe exports for the current worktree and
-avoids printing the resolved Postgres password directly.
+avoids printing the resolved Postgres password or API shared secret directly.
 
-4. Run services on the host:
+## Dashboard Login In Development
+
+When the API is running, create a local/dev one-time dashboard login link without
+starting the Discord bot:
 
 ```bash
-# bot
-uv run --package discord_bot discord-bot
-
-# webhook ingest API
-uv run --package api backend-api
-
-# job consumer
-uv run --package worker worker-consumer
-
-# EspoCRM search / REPL / batch updates
-uv run --package five08 crmctl repl
+./scripts/dev.sh login
 ```
+
+The command calls the same `/auth/discord/links` endpoint used by the Discord
+`/dashboard-login` command, but supplies trusted local/dev role context from the
+CLI. It requires `API_SHARED_SECRET` in `.env` or the shell.
+
+Optional overrides:
+
+```bash
+DEV_DASHBOARD_DISCORD_USER_ID=dev-user \
+DEV_DASHBOARD_DISPLAY_NAME="Local Admin" \
+DEV_DASHBOARD_ROLES=Admin \
+./scripts/dev.sh login /dashboard/projects
+```
+
+The local/dev fallback only works when `ENVIRONMENT` is `local`, `dev`,
+`development`, or `test`. Production still requires normal dashboard identity
+validation.
+
+## Host-Run Entrypoints
+
+You can run service entrypoints directly when you already have infra running:
+
+```bash
+uv run --package discord_bot discord-bot
+uv run --package api backend-api
+uv run --package worker worker-consumer
+```
+
+Prefer the `dev.sh` wrappers for normal work because they derive the right
+worktree-local URLs and ports automatically.
+
+## Admin Dashboard Frontend
+
+The dashboard source lives in `apps/admin_dashboard` and builds into
+`apps/api/src/five08/backend/static/dashboard`, which the FastAPI app serves.
+
+```bash
+cd apps/admin_dashboard
+bun install --frozen-lockfile
+bun run format
+bun run lint
+bun run typecheck
+bun run test
+bun run build
+```
+
+Run `bun run build` after dashboard source changes when the checked-in FastAPI
+static bundle should be updated.
 
 ## Docker Compose Workflow
 
-For day-to-day development, prefer `./scripts/dev.sh` plus host-run app
-services. That entrypoint exports deterministic per-worktree localhost ports
-and service URLs so the apps work without manual overrides. Use the Compose
-wrapper when you need full container parity, including Coolify-style runs.
-
-Start full stack (discord_bot + api + worker + redis + postgres + minio):
+For day-to-day development, prefer host-run app services through `dev.sh`.
+Use Compose when you need container parity with deployment:
 
 ```bash
 ./scripts/docker-compose.sh up --build
-```
-
-Note: the service Dockerfiles use BuildKit cache mounts, so containerized builds
-require BuildKit-capable Docker / `docker compose build` support.
-
-Stop stack:
-
-```bash
 ./scripts/docker-compose.sh down
-```
-
-Show the deterministic host ports assigned to the current worktree:
-
-```bash
 ./scripts/docker-compose.sh print-ports
 ```
 
-Set `*_HOST_PORT` or `COMPOSE_PROJECT_NAME` in `.env` or the invoking shell if you
-need fixed values; otherwise the wrapper computes deterministic per-worktree ones.
+`compose.yaml` is the canonical Coolify/base stack. `compose.local.yaml` adds
+local host port publishing for the helper wrapper. `docker-compose.yml` is a
+compatibility wrapper for tools that still look for that filename.
 
-## Testing and Quality
+The `web` service publishes container port `8090` to
+`${WEB_HOST_BIND:-127.0.0.1}:${WEB_HOST_PORT:-8090}` so a host-side Cloudflare
+Tunnel can target the dashboard/API at localhost. Redis, Postgres, and MinIO are
+not published by the base file.
+
+The app services attach to the external infra network named by
+`INFRA_DOCKER_NETWORK`. Pre-create it if needed:
+
+```bash
+docker network create 508-infra
+```
+
+BuildKit-capable Docker / `docker compose build` support is required because the
+service Dockerfiles use BuildKit cache mounts.
+
+## Testing And Quality
 
 ```bash
 ./scripts/test.sh
@@ -118,13 +172,43 @@ need fixed values; otherwise the wrapper computes deterministic per-worktree one
 ./scripts/mypy.sh
 ```
 
-## Adding Bot Features
+For dashboard-only checks:
 
-Bot features remain Discord.py cogs in:
+```bash
+cd apps/admin_dashboard
+bun run check
+```
 
-- `apps/discord_bot/src/five08/discord_bot/cogs/`
+## Useful CLIs
 
-Pattern:
+Jobs CLI:
+
+```bash
+uv run --package worker jobsctl --help
+uv run --package worker jobsctl recent
+```
+
+EspoCRM cleanup and bulk edits:
+
+```bash
+uv run --package five08 crmctl repl
+uv run --package five08 crmctl search --where timezone__is_null=true --where location__is_not_null=true
+uv run --package five08 crmctl batch-update --where timezone__is_null=true --where location__is_not_null=true --update timezone=@location
+```
+
+Inside `crmctl repl`, contacts are mutable Python objects:
+
+```python
+contacts = search(timezone__is_null=True, location__is_not_null=True)
+contact = contacts[0]
+contact.timezone = contact.infer_timezone()
+contact.save()
+```
+
+## Feature Patterns
+
+Bot features live as Discord.py cogs in
+`apps/discord_bot/src/five08/discord_bot/cogs/`:
 
 ```python
 from discord.ext import commands
@@ -137,73 +221,14 @@ async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(MyCog(bot))
 ```
 
-## Adding Worker Jobs
+Worker jobs live in `apps/worker/src/five08/worker/jobs.py`. API-triggered jobs
+should persist state first, enqueue second, and keep long processing inside the
+worker.
 
-1. Add job function in `apps/worker/src/five08/worker/jobs.py`.
-2. Enqueue from `apps/api/src/five08/backend/api.py` (or from bot code if needed).
-3. Ensure job type/queue settings and Postgres settings are configured in `.env`.
+## More Reference
 
-### Job architecture
-
-- API layer persists jobs first in Postgres with idempotency keys.
-- Queue layer uses Dramatiq actors over Redis for delivery.
-- MinIO is the current internal transfer mechanism (bucket: `internal-transfers`) and is intended only for stack-internal file movement; external S3 integrations are separate.
-
-## Worker CRM Flow
-
-- EspoCRM webhooks are accepted at `POST /webhooks/espocrm`.
-- Each event enqueues `five08.worker.jobs.process_contact_skills_job`.
-- Jobs use modules under `apps/worker/src/five08/worker/crm/` to:
-  - fetch contact + attachments from EspoCRM
-  - extract text from resume-like files
-  - extract skills (LLM when configured, heuristic fallback otherwise)
-  - update contact skills field in EspoCRM
-- Manual queueing is available via `POST /process-contact/{contact_id}`.
-- Human action audit ingest is available at `POST /audit/events`.
-
-## CRM Cleanup CLI
-
-Use `crmctl` when you want direct EspoCRM contact search/update control outside the Discord UI.
-
-Examples:
-
-```bash
-uv run --package five08 crmctl search --where timezone__is_null=true --where location__is_not_null=true
-uv run --package five08 crmctl batch-update --where timezone__is_null=true --where location__is_not_null=true --update timezone=@location
-uv run --package five08 crmctl batch-update --where timezone__is_null=true --where location__is_not_null=true --update timezone=@location --apply
-```
-
-Inside `uv run --package five08 crmctl repl`, contacts are mutable Python objects:
-
-```python
-contacts = search(timezone__is_null=True, location__is_not_null=True)
-contact = contacts[0]
-contact.timezone = contact.infer_timezone()
-contact.save()
-```
-
-## Discord CRM Audit Flow
-
-- CRM slash commands in `apps/discord_bot/src/five08/discord_bot/cogs/crm.py` emit best-effort audit events for human actions.
-- Audit writing is centralized in `apps/discord_bot/src/five08/discord_bot/utils/audit.py`.
-- Audit writes must never break command execution; failures are logged as warnings only.
-
-## Environment Variables
-
-Use `.env.example` as source of truth. Key categories:
-
-- Shared queue/runtime: `REDIS_URL`, `REDIS_QUEUE_NAME`, `POSTGRES_URL`, `JOB_MAX_ATTEMPTS`, `JOB_RETRY_BASE_SECONDS`, `JOB_RETRY_MAX_SECONDS`, `LOG_LEVEL`, webhook settings. Local defaults target host-run services; `docker-compose.yml` injects Docker-network URLs for containerized runs.
-- Bot credentials/integrations: Discord, email, Espo, Kimai
-- Discord CRM audit writer: `AUDIT_API_BASE_URL`, `AUDIT_API_TIMEOUT_SECONDS` (plus shared `API_SHARED_SECRET`)
-- Worker controls: `WORKER_NAME`, `WORKER_QUEUE_NAMES`, `WORKER_BURST`
-- Worker CRM processing: `MAX_ATTACHMENTS_PER_CONTACT`, `MAX_FILE_SIZE_MB`, `ALLOWED_FILE_TYPES`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`, `RESUME_EXTRACTOR_VERSION`
-- Resume upload UX wiring: `BACKEND_API_BASE_URL` on bot; worker-side LinkedIn field mapping is fixed in code.
-
-## CI Notes
-
-GitHub Actions runs tests, lint, mypy, and security checks against:
-
-- `apps/discord_bot/src/five08/discord_bot/`
-- `apps/worker/src/five08/worker/`
-- `packages/shared/src/five08/`
-- `tests/`
+- [Architecture](./ARCHITECTURE.md)
+- [Configuration Reference](./docs/configuration.md)
+- [API Service](./apps/api/README.md)
+- [Worker Service](./apps/worker/README.md)
+- [Discord Bot](./apps/discord_bot/README.md)

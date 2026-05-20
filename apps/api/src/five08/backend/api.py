@@ -2766,6 +2766,39 @@ class HistoricalProjectMemberResolutionError(ValueError):
         self.detail = detail
 
 
+def _historical_project_member_error_payload(
+    exc: HistoricalProjectMemberResolutionError,
+    *,
+    person: str,
+) -> dict[str, Any]:
+    """Return dashboard-friendly resolution error details."""
+    if exc.detail:
+        detail = exc.detail
+    elif exc.code == "person_not_found":
+        detail = (
+            f'No CRM person, ERPNext user, or ERPNext supplier matched "{person}". '
+            "Try an email address or an exact name from CRM/ERPNext."
+        )
+    elif exc.code == "candidate_not_found":
+        detail = (
+            "The selected person record is no longer available. Search again and "
+            "choose one of the current matches."
+        )
+    elif exc.code == "ambiguous_person":
+        detail = (
+            f'Multiple people matched "{person}". Choose the matching person record.'
+        )
+    else:
+        detail = "Unable to resolve that person for the historical roster."
+
+    return {
+        "error": exc.code,
+        "detail": detail,
+        "person": person,
+        "candidates": exc.candidates,
+    }
+
+
 def _text_or_none(value: Any) -> str | None:
     if value is None:
         return None
@@ -4082,11 +4115,7 @@ async def dashboard_add_project_historical_member_handler(
     except HistoricalProjectMemberResolutionError as exc:
         status_code = 409 if exc.candidates else 400
         return JSONResponse(
-            {
-                "error": exc.code,
-                "detail": exc.detail,
-                "candidates": exc.candidates,
-            },
+            _historical_project_member_error_payload(exc, person=normalized_person),
             status_code=status_code,
         )
     except ValueError:
