@@ -2889,13 +2889,16 @@ function ProjectDetailPage(props: {
   const selectedRosterCandidate = rosterCandidates.find(
     (candidate) => candidate.candidate_id === selectedRosterCandidateId,
   )
+  const queryReady = newUser.trim().includes("@")
+    ? newUser.trim().length >= 5
+    : newUser.trim().length >= 3
 
   useEffect(() => {
     if (!props.canWrite) return
     const query = newUser.trim()
     setSelectedRosterCandidateId("")
-    const queryReady = query.includes("@") ? query.length >= 5 : query.length >= 3
-    if (!queryReady) {
+    const readyForLookup = query.includes("@") ? query.length >= 5 : query.length >= 3
+    if (!readyForLookup) {
       setRosterCandidates([])
       return
     }
@@ -2916,6 +2919,11 @@ function ProjectDetailPage(props: {
       window.clearTimeout(timer)
     }
   }, [newUser, props.canWrite])
+
+  function chooseRosterCandidate(candidate: HistoricalPersonCandidate) {
+    setSelectedRosterCandidateId(candidate.candidate_id)
+    setNewUser(candidate.email || candidate.label || candidate.full_name || newUser)
+  }
 
   return (
     <>
@@ -3027,50 +3035,53 @@ function ProjectDetailPage(props: {
           </span>
         </CardHeader>
         {props.canWrite ? (
-          <CardContent className="grid gap-3 border-b md:grid-cols-[minmax(0,1fr)_minmax(220px,320px)_auto_auto] md:items-end">
-            <Label>
-              Person search
-              <Input
-                value={newUser}
-                autoComplete="off"
-                placeholder="Search @508.dev person"
-                onChange={(event) => setNewUser(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault()
-                  }
-                }}
-              />
-            </Label>
-            <Label>
-              Verified result
-              <Select
-                value={selectedRosterCandidateId}
-                disabled={!rosterCandidates.length}
-                onChange={(event) => setSelectedRosterCandidateId(event.target.value)}
-              >
-                <option value="">
-                  {(newUser.trim().includes("@")
-                    ? newUser.trim().length < 5
-                    : newUser.trim().length < 3)
-                    ? "Search first"
-                    : rosterCandidates.length
-                      ? "Choose a person"
-                      : "No verified @508.dev results"}
-                </option>
-                {rosterCandidates.map((candidate) => (
-                  <option key={candidate.candidate_id} value={candidate.candidate_id}>
-                    {[
-                      candidate.label || candidate.full_name || candidate.email || "Person",
-                      candidate.email,
-                      candidate.sources?.join(", "),
-                    ]
-                      .filter(Boolean)
-                      .join(" | ")}
-                  </option>
-                ))}
-              </Select>
-            </Label>
+          <CardContent className="grid gap-3 border-b md:grid-cols-[minmax(260px,1fr)_auto_auto] md:items-end">
+            <div className="relative">
+              <Label>
+                Person search
+                <Input
+                  value={newUser}
+                  autoComplete="off"
+                  placeholder="Search @508.dev person"
+                  onChange={(event) => setNewUser(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault()
+                      if (rosterCandidates.length === 1) {
+                        chooseRosterCandidate(rosterCandidates[0])
+                      }
+                    }
+                  }}
+                />
+              </Label>
+              {queryReady && !selectedRosterCandidateId ? (
+                <div className="absolute z-20 mt-1 max-h-64 w-full overflow-auto rounded-md border bg-background shadow-lg">
+                  {rosterCandidates.length ? (
+                    rosterCandidates.map((candidate) => (
+                      <button
+                        key={candidate.candidate_id}
+                        type="button"
+                        className="grid w-full gap-0.5 px-3 py-2 text-left hover:bg-secondary focus:bg-secondary focus:outline-none"
+                        onClick={() => chooseRosterCandidate(candidate)}
+                      >
+                        <span className="truncate text-sm font-bold">
+                          {candidate.label || candidate.full_name || candidate.email || "Person"}
+                        </span>
+                        <span className="truncate text-xs text-muted-foreground">
+                          {[candidate.email, candidate.sources?.join(", ")]
+                            .filter(Boolean)
+                            .join(" | ")}
+                        </span>
+                      </button>
+                    ))
+                  ) : (
+                    <div className="px-3 py-2 text-sm text-muted-foreground">
+                      No verified @508.dev results
+                    </div>
+                  )}
+                </div>
+              ) : null}
+            </div>
             <Button
               type="button"
               variant="outline"
