@@ -149,6 +149,7 @@ def test_setup_engineer_creates_user_employee_supplier_and_links_supplier() -> N
     assert client.records["User"]["jane@508.dev"]["role_profile_name"] == "Engineer"
     assert client.records["User"]["jane@508.dev"]["first_name"] == "Jane Engineer"
     assert client.records["Employee"]["HR-EMP-00001"]["create_user_permission"] == 1
+    assert client.records["Supplier"]["Jane Engineer"]["email_id"] == "jane@508.dev"
 
 
 def test_setup_engineer_requires_508_email() -> None:
@@ -307,3 +308,35 @@ def test_add_engineer_to_project_validates_activity_cost_before_roster_update() 
         )
 
     assert client.records["Project"]["PROJ-001"]["users"] == []
+
+
+def test_add_engineer_to_project_adds_roster_before_activity_cost_write() -> None:
+    class FailingProjectClient(FakeERPNextClient):
+        def add_project_user(self, project_id: str, user: str) -> dict[str, Any]:
+            raise ERPNextAPIError("project not found")
+
+    client = FailingProjectClient()
+    setup_engineer(
+        client,  # type: ignore[arg-type]
+        EngineerSetupRequest(
+            email="jane@508.dev",
+            first_name="Jane",
+            last_name="Engineer",
+            country="Taiwan",
+        ),
+    )
+
+    with pytest.raises(ERPNextAPIError, match="project not found"):
+        add_engineer_to_project(
+            client,  # type: ignore[arg-type]
+            project_id="PROJ-MISSING",
+            user="jane@508.dev",
+            activity_cost=ActivityCostRequest(
+                user="jane@508.dev",
+                activity_type="Engineering for Test Project",
+                billing_rate=150,
+                costing_rate=100,
+            ),
+        )
+
+    assert client.records["Activity Cost"] == {}

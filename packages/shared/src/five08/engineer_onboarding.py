@@ -247,6 +247,7 @@ def ensure_supplier(
                 "supplier_group": DEFAULT_SUPPLIER_GROUP,
                 "country": normalized_country,
                 "default_currency": DEFAULT_SUPPLIER_CURRENCY,
+                "email_id": normalized_user,
                 "portal_users": [{"user": normalized_user}],
             },
         )
@@ -309,19 +310,11 @@ def configure_engineer_activity_cost(
     request: ActivityCostRequest,
 ) -> dict[str, Any]:
     """Create or update Activity Cost for an already set-up engineer."""
-    user = _normalize_508_email(request.user)
-    activity_type = _required_text(request.activity_type, "activity_type")
-    if request.billing_rate is None or request.costing_rate is None:
-        raise EngineerOnboardingError(
-            "Billing rate and costing rate are required for Activity Cost."
-        )
-
-    employee = employee_for_user(client, user)
-    if employee is None:
-        raise EngineerOnboardingError(
-            f"Employee linked to ERPNext User {user} was not found. Run setup first."
-        )
-    employee_id = _required_text(employee.get("name"), "employee")
+    _user, activity_type, employee_id = _activity_cost_preconditions(client, request)
+    billing_rate = request.billing_rate
+    costing_rate = request.costing_rate
+    assert billing_rate is not None
+    assert costing_rate is not None
     existing = client.list_records(
         "Activity Cost",
         fields=["name", "employee", "activity_type", "billing_rate", "costing_rate"],
@@ -341,8 +334,8 @@ def configure_engineer_activity_cost(
         create_fields = {
             "employee": employee_id,
             "activity_type": activity_type,
-            "billing_rate": float(request.billing_rate),
-            "costing_rate": float(request.costing_rate),
+            "billing_rate": float(billing_rate),
+            "costing_rate": float(costing_rate),
         }
         activity_cost = client.create_record("Activity Cost", create_fields)
         created = True
@@ -357,6 +350,26 @@ def configure_engineer_activity_cost(
     }
 
 
+def _activity_cost_preconditions(
+    client: ERPNextClient,
+    request: ActivityCostRequest,
+) -> tuple[str, str, str]:
+    """Validate Activity Cost inputs without mutating financial records."""
+    user = _normalize_508_email(request.user)
+    activity_type = _required_text(request.activity_type, "activity_type")
+    if request.billing_rate is None or request.costing_rate is None:
+        raise EngineerOnboardingError(
+            "Billing rate and costing rate are required for Activity Cost."
+        )
+
+    employee = employee_for_user(client, user)
+    if employee is None:
+        raise EngineerOnboardingError(
+            f"Employee linked to ERPNext User {user} was not found. Run setup first."
+        )
+    return user, activity_type, _required_text(employee.get("name"), "employee")
+
+
 def add_engineer_to_project(
     client: ERPNextClient,
     *,
@@ -369,8 +382,10 @@ def add_engineer_to_project(
     normalized_user = _normalize_508_email(user)
     activity_cost_result = None
     if activity_cost is not None:
-        activity_cost_result = configure_engineer_activity_cost(client, activity_cost)
+        _activity_cost_preconditions(client, activity_cost)
     project = client.add_project_user(normalized_project_id, normalized_user)
+    if activity_cost is not None:
+        activity_cost_result = configure_engineer_activity_cost(client, activity_cost)
     return {"project": project, "activity_cost": activity_cost_result}
 
 
