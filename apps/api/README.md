@@ -35,7 +35,7 @@ curl -X GET "http://localhost:8090/jobs/<job_id>" \
 ## Backend API Endpoints
 
 - `GET /health`: Redis/Postgres/worker health check.
-- `GET /dashboard`: Session-authenticated operations dashboard. OIDC admins and Discord Steering Committee+ users get the full dashboard; active Members may use the gig-only view for gigs they originally posted.
+- `GET /dashboard`: Session-authenticated operations dashboard. OIDC admins and Discord Steering Committee+ users get the full dashboard; active Members may use the gig-only view for gigs they originally posted. Discord users with the `Workflows Engineer` role get Steering Committee write permissions plus admin read/dry-run access.
 - `GET /dashboard/api/me`: Dashboard session identity, including linked CRM contact id when available.
 - `GET /dashboard/api/jobs`: Session-authenticated recent jobs list for the dashboard.
 - `GET /dashboard/api/jobs/{job_id}`: Session-authenticated dashboard job detail with sensitive payload keys redacted.
@@ -71,7 +71,7 @@ curl -X GET "http://localhost:8090/jobs/<job_id>" \
 
 Discord deep-link identity policy:
 
-- Discord deep links are available to active CRM-linked Discord users. Members receive gig-only permissions for their own posted gigs; Steering Committee+ users receive broader dashboard permissions.
+- Discord deep links are available to active CRM-linked Discord users. Members receive gig-only permissions for their own posted gigs; Steering Committee+ users receive broader dashboard permissions. `Workflows Engineer` users receive Steering Committee write permissions, admin read permissions for jobs/audit, and dry-run access for admin-only dashboard writes such as job reruns and people/project syncs.
 - `DISCORD_ADMIN_ROLES` controls which Discord roles can receive admin dashboard permissions (`Admin,Owner` recommended).
 - `OIDC_ADMIN_GROUPS` controls normal OIDC dashboard admin membership (`authentik Admins` recommended).
 - `AUTH_SESSION_TTL_SECONDS` controls dashboard session lifetime after login (`86400`, one day, by default).
@@ -79,7 +79,7 @@ Discord deep-link identity policy:
 - `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=true` (default): Discord deep links also require OIDC email identity checks against the linked CRM/Discord dashboard user.
 - `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=false`: Discord deep links create a Discord-backed session directly after re-validating active CRM membership + Discord Steering Committee+ role, without forcing an OIDC roundtrip.
 - In local/dev/test only, the trusted Discord bot role context can create and consume a dashboard link when the local `people` cache has no matching CRM-linked row. Production still requires the normal CRM/people identity.
-- Jobs, reruns, people sync, and audit are sensitive admin permissions and require an SSO-validated dashboard session even when the user entered through a Discord link. Local/dev/test environments allow these permissions for development.
+- Jobs, reruns, people sync, project sync, and audit are sensitive admin permissions and require an SSO-validated dashboard session even when the user entered through a Discord link. Local/dev/test environments allow these permissions for development. `Workflows Engineer` is the exception for Discord-backed sessions: it can read jobs/audit and receive dry-run responses for rerun/sync writes without receiving real admin write permissions.
 
 ### Known handler wiring expectation
 

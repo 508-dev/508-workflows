@@ -12,6 +12,7 @@ import secrets
 import json
 import threading
 import time
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -52,6 +53,7 @@ from five08.clients.espo import EspoAPIError, EspoClient
 from five08.logging import configure_observability
 from five08.queue import (
     EnqueuedJob,
+    JobRecord,
     QueueClient,
     JobStatus,
     list_jobs,
@@ -75,8 +77,12 @@ from five08.backend.auth import (
     DASHBOARD_PERMISSION_PEOPLE_SYNC,
     DASHBOARD_PERMISSION_PROJECTS_READ,
     DASHBOARD_PERMISSION_PROJECTS_SYNC,
+    DASHBOARD_PERMISSION_PROJECTS_SYNC_DRY_RUN,
     DASHBOARD_PERMISSION_PROJECTS_WRITE,
+    DASHBOARD_PERMISSION_JOBS_WRITE_DRY_RUN,
+    DASHBOARD_PERMISSION_PEOPLE_SYNC_DRY_RUN,
     DASHBOARD_SENSITIVE_PERMISSIONS,
+    DASHBOARD_WORKFLOWS_ENGINEER_SENSITIVE_PERMISSIONS,
     DiscordAdminVerifier,
     DiscordAdminIdentity,
     DiscordLinkGrant,
@@ -88,6 +94,7 @@ from five08.backend.auth import (
     dashboard_permissions_for_roles,
     extract_groups,
     has_dashboard_discord_role,
+    has_workflows_engineer_role,
     is_admin_from_groups,
     make_pkce_pair,
     normalize_next_path,
@@ -871,12 +878,18 @@ def _dashboard_permissions_for_identity(
         permissions = set(DASHBOARD_ADMIN_PERMISSIONS if is_admin else ())
     if not id_token.strip() and not _dashboard_dev_sensitive_access_enabled():
         permissions -= DASHBOARD_SENSITIVE_PERMISSIONS
+        permissions -= DASHBOARD_WORKFLOWS_ENGINEER_SENSITIVE_PERMISSIONS
         if _discord_admin_can_use_sensitive_dashboard(
             raw_roles,
             is_admin=is_admin,
             actor_provider=actor_provider,
         ):
             permissions |= DASHBOARD_SENSITIVE_PERMISSIONS
+        elif _discord_workflows_engineer_can_use_sensitive_dashboard(
+            raw_roles,
+            actor_provider=actor_provider,
+        ):
+            permissions |= DASHBOARD_WORKFLOWS_ENGINEER_SENSITIVE_PERMISSIONS
     return sorted(permissions)
 
 
@@ -893,6 +906,16 @@ def _discord_admin_can_use_sensitive_dashboard(
         "Admin",
         admin_role_names=settings.discord_admin_role_names,
     )
+
+
+def _discord_workflows_engineer_can_use_sensitive_dashboard(
+    raw_roles: object,
+    *,
+    actor_provider: ActorProvider,
+) -> bool:
+    if actor_provider != ActorProvider.DISCORD:
+        return False
+    return has_workflows_engineer_role(raw_roles)
 
 
 def _base_session_dashboard_permissions(session: AuthSession) -> set[str]:
@@ -912,12 +935,18 @@ def _base_session_dashboard_permissions(session: AuthSession) -> set[str]:
         )
     if not _has_sso_validated_session(session):
         permissions -= DASHBOARD_SENSITIVE_PERMISSIONS
+        permissions -= DASHBOARD_WORKFLOWS_ENGINEER_SENSITIVE_PERMISSIONS
         if _discord_admin_can_use_sensitive_dashboard(
             session.groups,
             is_admin=session.is_admin,
             actor_provider=actor_provider,
         ):
             permissions |= DASHBOARD_SENSITIVE_PERMISSIONS
+        elif _discord_workflows_engineer_can_use_sensitive_dashboard(
+            session.groups,
+            actor_provider=actor_provider,
+        ):
+            permissions |= DASHBOARD_WORKFLOWS_ENGINEER_SENSITIVE_PERMISSIONS
     return permissions
 
 
@@ -1124,6 +1153,27 @@ async def _dashboard_session_or_error(
     elif not await _session_has_dashboard_permission(session, required_permission):
         return None, JSONResponse({"error": "forbidden"}, status_code=403)
     return session, None
+
+
+async def _dashboard_write_session_or_dry_run(
+    request: Request,
+    *,
+    required_permission: str,
+    dry_run_permission: str,
+) -> tuple[AuthSession | None, JSONResponse | None, bool]:
+    session_id, session = await _current_session(request)
+    if session is None:
+        response = JSONResponse({"error": "unauthorized"}, status_code=401)
+        if session_id is not None:
+            _clear_session_cookie(response)
+        return None, response, False
+
+    permissions = _base_session_dashboard_permissions(session)
+    if required_permission in permissions:
+        return session, None, False
+    if dry_run_permission in permissions:
+        return session, None, True
+    return None, JSONResponse({"error": "forbidden"}, status_code=403), False
 
 
 def _origin_from_url(value: str) -> str | None:
@@ -2415,62 +2465,116 @@ async def jobs_handler(
     return JSONResponse(payload)
 
 
-async def _rerun_job(job_id: str, queue: QueueClient) -> tuple[dict[str, Any], int]:
-    """Create a duplicate queued job from an existing persisted job."""
+@dataclass(frozen=True)
+class _ValidatedRerunJob:
+    source_job: JobRecord
+    fn: Callable[..., Any]
+    args: tuple[Any, ...]
+    kwargs: dict[str, Any]
+
+
+async def _validate_rerun_job(
+    job_id: str,
+) -> tuple[_ValidatedRerunJob | None, dict[str, Any] | None, int]:
+    """Validate a persisted job can be rerun and return its call payload."""
     normalized_job_id = job_id.strip()
     if not normalized_job_id:
-        return {"error": "job_id_required"}, 400
+        return None, {"error": "job_id_required"}, 400
 
     source_job = await asyncio.to_thread(get_job, settings, normalized_job_id)
     if source_job is None:
-        return {"error": "job_not_found"}, 404
+        return None, {"error": "job_not_found"}, 404
 
     fn = JOB_FUNCTIONS.get(source_job.type)
     if fn is None:
-        return {
-            "error": "unsupported_job_type",
-            "job_type": source_job.type,
-        }, 400
+        return (
+            None,
+            {
+                "error": "unsupported_job_type",
+                "job_type": source_job.type,
+            },
+            400,
+        )
 
     raw_payload = source_job.payload
     if not isinstance(raw_payload, dict):
-        return {"error": "invalid_job_payload"}, 400
+        return None, {"error": "invalid_job_payload"}, 400
     if "args" not in raw_payload or "kwargs" not in raw_payload:
-        return {"error": "invalid_job_payload"}, 400
+        return None, {"error": "invalid_job_payload"}, 400
 
     raw_args = raw_payload["args"]
     raw_kwargs = raw_payload["kwargs"]
     if not isinstance(raw_args, list) or not isinstance(raw_kwargs, dict):
-        return {"error": "invalid_job_payload"}, 400
+        return None, {"error": "invalid_job_payload"}, 400
 
-    rerun_idempotency_key = f"manual-rerun:{source_job.id}:{_generate_ulid()}"
+    return (
+        _ValidatedRerunJob(
+            source_job=source_job,
+            fn=fn,
+            args=tuple(raw_args),
+            kwargs=raw_kwargs,
+        ),
+        None,
+        200,
+    )
+
+
+async def _rerun_job(job_id: str, queue: QueueClient) -> tuple[dict[str, Any], int]:
+    """Create a duplicate queued job from an existing persisted job."""
+    validated, error_payload, status_code = await _validate_rerun_job(job_id)
+    if validated is None:
+        return cast(dict[str, Any], error_payload), status_code
+
+    rerun_idempotency_key = f"manual-rerun:{validated.source_job.id}:{_generate_ulid()}"
 
     try:
         rerun_job: EnqueuedJob = await asyncio.to_thread(
             enqueue_job,
             queue=queue,
-            fn=fn,
-            args=tuple(raw_args),
-            kwargs=raw_kwargs,
+            fn=validated.fn,
+            args=validated.args,
+            kwargs=validated.kwargs,
             settings=settings,
             idempotency_key=rerun_idempotency_key,
-            max_attempts=source_job.max_attempts,
+            max_attempts=validated.source_job.max_attempts,
         )
     except Exception:
         logger.exception(
             "Failed rerunning job source_job_id=%s type=%s",
-            source_job.id,
-            source_job.type,
+            validated.source_job.id,
+            validated.source_job.type,
         )
         return {"error": "enqueue_failed"}, 503
 
     return {
         "status": "queued",
-        "source_job_id": source_job.id,
+        "source_job_id": validated.source_job.id,
         "job_id": rerun_job.id,
-        "type": source_job.type,
+        "type": validated.source_job.type,
         "created": rerun_job.created,
     }, 202
+
+
+async def _rerun_job_dry_run(job_id: str) -> tuple[dict[str, Any], int]:
+    """Validate a dashboard job rerun and describe the enqueue without writing."""
+    validated, error_payload, status_code = await _validate_rerun_job(job_id)
+    if validated is None:
+        return cast(dict[str, Any], error_payload), status_code
+
+    return {
+        "status": "dry_run",
+        "dry_run": True,
+        "source_job_id": validated.source_job.id,
+        "type": validated.source_job.type,
+        "would_enqueue": {
+            "queue": settings.redis_queue_name,
+            "job_type": validated.source_job.type,
+            "args_count": len(validated.args),
+            "kwargs_keys": sorted(str(key) for key in validated.kwargs),
+            "idempotency_key_prefix": f"manual-rerun:{validated.source_job.id}:",
+            "max_attempts": validated.source_job.max_attempts,
+        },
+    }, 200
 
 
 async def rerun_job_handler(request: Request, job_id: str) -> JSONResponse:
@@ -4673,9 +4777,10 @@ async def dashboard_update_project_wiki_match_handler(
 
 async def dashboard_sync_projects_handler(request: Request) -> JSONResponse:
     """Queue an ERPNext project sync from the authenticated dashboard."""
-    session, error_response = await _dashboard_session_or_error(
+    session, error_response, dry_run = await _dashboard_write_session_or_dry_run(
         request,
         required_permission=DASHBOARD_PERMISSION_PROJECTS_SYNC,
+        dry_run_permission=DASHBOARD_PERMISSION_PROJECTS_SYNC_DRY_RUN,
     )
     if error_response is not None:
         return error_response
@@ -4684,6 +4789,21 @@ async def dashboard_sync_projects_handler(request: Request) -> JSONResponse:
     csrf_error = _dashboard_same_origin_post_or_error(request)
     if csrf_error is not None:
         return csrf_error
+
+    if dry_run:
+        return JSONResponse(
+            {
+                "status": "dry_run",
+                "dry_run": True,
+                "source": "dashboard",
+                "would_enqueue": {
+                    "queue": settings.redis_queue_name,
+                    "job_type": "sync_projects_from_erpnext_job",
+                    "reason": "dashboard",
+                    "idempotency_key_pattern": "erpnext-project-sync:YYYYMMDDHHMM",
+                },
+            }
+        )
 
     job = await _enqueue_erpnext_project_sync_job(
         request.app.state.queue,
@@ -5014,9 +5134,10 @@ async def dashboard_rerun_job_handler(
     job_id: str,
 ) -> JSONResponse:
     """Rerun one job from the authenticated dashboard."""
-    session, error_response = await _dashboard_session_or_error(
+    session, error_response, dry_run = await _dashboard_write_session_or_dry_run(
         request,
         required_permission=DASHBOARD_PERMISSION_JOBS_WRITE,
+        dry_run_permission=DASHBOARD_PERMISSION_JOBS_WRITE_DRY_RUN,
     )
     if error_response is not None:
         return error_response
@@ -5025,6 +5146,10 @@ async def dashboard_rerun_job_handler(
     csrf_error = _dashboard_same_origin_post_or_error(request)
     if csrf_error is not None:
         return csrf_error
+
+    if dry_run:
+        payload, status_code = await _rerun_job_dry_run(job_id)
+        return JSONResponse(payload, status_code=status_code)
 
     payload, status_code = await _rerun_job(job_id, request.app.state.queue)
     if status_code == 202:
@@ -5034,9 +5159,10 @@ async def dashboard_rerun_job_handler(
 
 async def dashboard_sync_people_handler(request: Request) -> JSONResponse:
     """Queue a people-cache sync from the authenticated dashboard."""
-    session, error_response = await _dashboard_session_or_error(
+    session, error_response, dry_run = await _dashboard_write_session_or_dry_run(
         request,
         required_permission=DASHBOARD_PERMISSION_PEOPLE_SYNC,
+        dry_run_permission=DASHBOARD_PERMISSION_PEOPLE_SYNC_DRY_RUN,
     )
     if error_response is not None:
         return error_response
@@ -5045,6 +5171,21 @@ async def dashboard_sync_people_handler(request: Request) -> JSONResponse:
     csrf_error = _dashboard_same_origin_post_or_error(request)
     if csrf_error is not None:
         return csrf_error
+
+    if dry_run:
+        return JSONResponse(
+            {
+                "status": "dry_run",
+                "dry_run": True,
+                "source": "dashboard",
+                "would_enqueue": {
+                    "queue": settings.redis_queue_name,
+                    "job_type": "sync_people_from_crm_job",
+                    "reason": "dashboard",
+                    "idempotency_key_pattern": "crm-sync:<interval-bucket>",
+                },
+            }
+        )
 
     job = await _enqueue_full_crm_sync_job(request.app.state.queue, reason="dashboard")
     actor_provider, actor_subject = _session_audit_actor(session)

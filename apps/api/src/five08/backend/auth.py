@@ -25,7 +25,14 @@ from five08.worker.config import WorkerSettings
 logger = logging.getLogger(__name__)
 
 DISCORD_API_BASE_URL = "https://discord.com/api/v10"
-ROLE_HIERARCHY = ("Member", "Steering Committee", "Admin", "Owner")
+WORKFLOWS_ENGINEER_ROLE = "Workflows Engineer"
+_ROLE_LEVELS = {
+    "member": 0,
+    "steering committee": 1,
+    WORKFLOWS_ENGINEER_ROLE.casefold(): 1,
+    "admin": 2,
+    "owner": 3,
+}
 
 DASHBOARD_PERMISSION_PEOPLE_READ = "people:read"
 DASHBOARD_PERMISSION_ONBOARDING_READ = "onboarding:read"
@@ -39,6 +46,9 @@ DASHBOARD_PERMISSION_GIGS_WRITE = "gigs:write"
 DASHBOARD_PERMISSION_PROJECTS_READ = "projects:read"
 DASHBOARD_PERMISSION_PROJECTS_WRITE = "projects:write"
 DASHBOARD_PERMISSION_PROJECTS_SYNC = "projects:sync"
+DASHBOARD_PERMISSION_JOBS_WRITE_DRY_RUN = "jobs:write:dry_run"
+DASHBOARD_PERMISSION_PEOPLE_SYNC_DRY_RUN = "people:sync:dry_run"
+DASHBOARD_PERMISSION_PROJECTS_SYNC_DRY_RUN = "projects:sync:dry_run"
 
 DASHBOARD_MEMBER_PERMISSIONS = frozenset(
     {
@@ -66,6 +76,16 @@ DASHBOARD_ADMIN_PERMISSIONS = frozenset(
         DASHBOARD_PERMISSION_PROJECTS_SYNC,
     }
 )
+DASHBOARD_WORKFLOWS_ENGINEER_PERMISSIONS = frozenset(
+    {
+        *DASHBOARD_STEERING_PERMISSIONS,
+        DASHBOARD_PERMISSION_JOBS_READ,
+        DASHBOARD_PERMISSION_AUDIT_READ,
+        DASHBOARD_PERMISSION_JOBS_WRITE_DRY_RUN,
+        DASHBOARD_PERMISSION_PEOPLE_SYNC_DRY_RUN,
+        DASHBOARD_PERMISSION_PROJECTS_SYNC_DRY_RUN,
+    }
+)
 DASHBOARD_SENSITIVE_PERMISSIONS = frozenset(
     {
         DASHBOARD_PERMISSION_JOBS_READ,
@@ -73,6 +93,15 @@ DASHBOARD_SENSITIVE_PERMISSIONS = frozenset(
         DASHBOARD_PERMISSION_AUDIT_READ,
         DASHBOARD_PERMISSION_PEOPLE_SYNC,
         DASHBOARD_PERMISSION_PROJECTS_SYNC,
+    }
+)
+DASHBOARD_WORKFLOWS_ENGINEER_SENSITIVE_PERMISSIONS = frozenset(
+    {
+        DASHBOARD_PERMISSION_JOBS_READ,
+        DASHBOARD_PERMISSION_AUDIT_READ,
+        DASHBOARD_PERMISSION_JOBS_WRITE_DRY_RUN,
+        DASHBOARD_PERMISSION_PEOPLE_SYNC_DRY_RUN,
+        DASHBOARD_PERMISSION_PROJECTS_SYNC_DRY_RUN,
     }
 )
 
@@ -545,13 +574,12 @@ def has_role_with_hierarchy(raw_roles: object, required_role: str) -> bool:
     parsed_roles = _to_string_list(raw_roles)
     role_names = {role.casefold() for role in parsed_roles}
     required_key = required_role.casefold()
-    hierarchy = [role.casefold() for role in ROLE_HIERARCHY]
-    if required_key not in hierarchy:
+    if required_key not in _ROLE_LEVELS:
         return required_key in role_names
 
-    required_level = hierarchy.index(required_key)
+    required_level = _ROLE_LEVELS[required_key]
     for role_name in role_names:
-        if role_name in hierarchy and hierarchy.index(role_name) >= required_level:
+        if role_name in _ROLE_LEVELS and _ROLE_LEVELS[role_name] >= required_level:
             return True
     return False
 
@@ -570,6 +598,13 @@ def has_dashboard_discord_role(
     return has_role_with_hierarchy(parsed_roles, required_role)
 
 
+def has_workflows_engineer_role(raw_roles: object) -> bool:
+    """Return whether the exact Workflows Engineer Discord role is present."""
+    return WORKFLOWS_ENGINEER_ROLE.casefold() in {
+        role.casefold() for role in _to_string_list(raw_roles)
+    }
+
+
 def dashboard_permissions_for_roles(
     raw_roles: object,
     *,
@@ -583,6 +618,8 @@ def dashboard_permissions_for_roles(
         admin_role_names=admin_role_names,
     ):
         return sorted(DASHBOARD_ADMIN_PERMISSIONS)
+    if has_workflows_engineer_role(raw_roles):
+        return sorted(DASHBOARD_WORKFLOWS_ENGINEER_PERMISSIONS)
     if has_role_with_hierarchy(raw_roles, "Steering Committee"):
         return sorted(DASHBOARD_STEERING_PERMISSIONS)
     if has_role_with_hierarchy(raw_roles, "Member"):

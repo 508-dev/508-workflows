@@ -556,7 +556,11 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
     ) -> str:
         normalized_roles = {role.strip().casefold() for role in roles}
         is_admin = bool(normalized_roles & {"admin", "owner", "steering committee"})
-        is_engineer = "engineer" in normalized_roles or is_admin
+        is_engineer = (
+            "engineer" in normalized_roles
+            or "workflows engineer" in normalized_roles
+            or is_admin
+        )
         capabilities: list[str] = []
         if is_engineer:
             capabilities.append(
