@@ -291,7 +291,9 @@ def _command_mentions_path(command: str, path: str) -> bool:
         if index < 0:
             return False
         end = index + len(path)
-        if end == len(command) or command[end] == os.sep:
+        leading_boundary = index == 0 or command[index - 1] in " \t\n'\"=:("
+        trailing_boundary = end == len(command) or command[end] == os.sep
+        if leading_boundary and trailing_boundary:
             return True
         start = index + 1
 
