@@ -3307,7 +3307,64 @@ def test_dashboard_add_project_historical_member_returns_ambiguous_candidates(
 
     assert response.status_code == 409
     assert response.json()["error"] == "ambiguous_person"
+    assert response.json()["person"] == "sam"
+    assert response.json()["detail"] == (
+        'Multiple people matched "sam". Choose the matching person record.'
+    )
     assert response.json()["candidates"] == candidates
+    mock_audit.assert_not_awaited()
+
+
+def test_dashboard_add_project_historical_member_returns_person_not_found_detail(
+    client: TestClient,
+) -> None:
+    project_id = "11111111-1111-4111-8111-111111111111"
+    session = api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    cached_project = {"id": project_id, "display_name": "Visible Project"}
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._cached_dashboard_project_by_id",
+            return_value=cached_project,
+        ),
+        patch(
+            "five08.backend.api._add_historical_project_member",
+            side_effect=api.HistoricalProjectMemberResolutionError("person_not_found"),
+        ),
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            f"/dashboard/api/projects/{project_id}/historical-members",
+            json={"person": " dddd "},
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": "person_not_found",
+        "detail": (
+            'No CRM person, ERPNext user, or ERPNext supplier matched "dddd". '
+            "Try an email address or an exact name from CRM/ERPNext."
+        ),
+        "person": "dddd",
+        "candidates": [],
+    }
     mock_audit.assert_not_awaited()
 
 
