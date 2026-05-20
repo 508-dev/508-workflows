@@ -13,6 +13,7 @@ from five08.engineer_onboarding import (
     EngineerSetupRequest,
     add_engineer_to_project,
     configure_engineer_activity_cost,
+    ensure_engineer_role,
     ensure_supplier,
     ensure_user,
     setup_engineer,
@@ -336,6 +337,60 @@ def test_ensure_user_retries_create_without_role_profile_for_role_profile_errors
     assert user["name"] == "jane@508.dev"
     assert user["roles"] == [{"role": "Employee"}]
     assert client.user_create_attempts == 2
+
+
+def test_ensure_engineer_role_does_not_fallback_for_generic_role_profile_errors() -> (
+    None
+):
+    class FailingRoleProfileUpdateClient(FakeERPNextClient):
+        def update_record(
+            self,
+            doctype: str,
+            record_id: str,
+            fields: dict[str, Any],
+        ) -> dict[str, Any]:
+            if doctype == "User" and "role_profile_name" in fields:
+                raise ERPNextAPIError("HTTP request failed: timeout")
+            return super().update_record(doctype, record_id, fields)
+
+    client = FailingRoleProfileUpdateClient()
+    user = {
+        "name": "jane@508.dev",
+        "email": "jane@508.dev",
+        "roles": [],
+    }
+    client.records["User"]["jane@508.dev"] = dict(user)
+
+    with pytest.raises(ERPNextAPIError, match="timeout"):
+        ensure_engineer_role(client, user)  # type: ignore[arg-type]
+
+    assert client.records["User"]["jane@508.dev"]["roles"] == []
+
+
+def test_ensure_engineer_role_falls_back_for_role_profile_errors() -> None:
+    class RoleProfileUpdateClient(FakeERPNextClient):
+        def update_record(
+            self,
+            doctype: str,
+            record_id: str,
+            fields: dict[str, Any],
+        ) -> dict[str, Any]:
+            if doctype == "User" and "role_profile_name" in fields:
+                raise ERPNextAPIError("Unknown field role_profile_name")
+            return super().update_record(doctype, record_id, fields)
+
+    client = RoleProfileUpdateClient()
+    user = {
+        "name": "jane@508.dev",
+        "email": "jane@508.dev",
+        "roles": [],
+    }
+    client.records["User"]["jane@508.dev"] = dict(user)
+
+    updated, result = ensure_engineer_role(client, user)  # type: ignore[arg-type]
+
+    assert result == "employee_role_assigned"
+    assert updated["roles"] == [{"role": "Employee"}]
 
 
 def test_setup_engineer_blocks_similar_name_for_new_email() -> None:

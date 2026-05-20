@@ -3270,9 +3270,10 @@ def test_dashboard_setup_engineer_maps_duplicate_name_to_conflict(
     }
     mock_audit.assert_awaited_once()
     assert mock_audit.await_args.kwargs["result"] == api.AuditResult.DENIED
-    assert (
-        mock_audit.await_args.kwargs["metadata"]["error"] == "similar_engineer_exists"
-    )
+    audit_metadata = mock_audit.await_args.kwargs["metadata"]
+    assert audit_metadata["error"] == "similar_engineer_exists"
+    assert audit_metadata["matches_count"] == 1
+    assert "matches" not in audit_metadata
 
 
 def test_dashboard_setup_engineer_maps_onboarding_error_to_bad_request(

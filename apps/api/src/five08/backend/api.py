@@ -4457,7 +4457,7 @@ async def dashboard_setup_engineer_handler(request: Request) -> JSONResponse:
             metadata={
                 "error": "similar_engineer_exists",
                 "detail": str(exc),
-                "matches": exc.matches,
+                "matches_count": len(exc.matches),
             },
         )
         return JSONResponse(

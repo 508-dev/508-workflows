@@ -5401,18 +5401,7 @@ const employeeGenderOptions = [
   "Prefer not to say",
   "Transgender",
 ]
-const defaultEmployeeDateOfBirth = "1980-01-01"
 const preferredEmailOptions = ["Company Email", "Personal Email", "User ID"]
-
-function todayInputDate() {
-  return new Date().toISOString().slice(0, 10)
-}
-
-function dateInputFromTimestamp(value?: string) {
-  if (!value) return ""
-  const match = value.match(/^\d{4}-\d{2}-\d{2}/)
-  return match?.[0] || ""
-}
 
 function splitPersonName(value?: string) {
   const parts = (value || "").trim().split(/\s+/).filter(Boolean)
@@ -5455,11 +5444,11 @@ function EngineerSetupPanel({
   const [middleName, setMiddleName] = useState("")
   const [lastName, setLastName] = useState("")
   const [country, setCountry] = useState("")
-  const [gender, setGender] = useState("Male")
-  const [dateOfBirth, setDateOfBirth] = useState(defaultEmployeeDateOfBirth)
-  const [dateOfJoining, setDateOfJoining] = useState(todayInputDate())
+  const [gender, setGender] = useState("")
+  const [dateOfBirth, setDateOfBirth] = useState("")
+  const [dateOfJoining, setDateOfJoining] = useState("")
   const [personalEmail, setPersonalEmail] = useState("")
-  const [preferedEmail, setPreferedEmail] = useState("Company Email")
+  const [preferedEmail, setPreferedEmail] = useState("")
 
   function fillFromPerson(person: Person) {
     const name = splitPersonName(person.name)
@@ -5469,7 +5458,6 @@ function EngineerSetupPanel({
     setCompanyEmail(companyEmailFromPerson(person))
     setPersonalEmail(personalEmailFromPerson(person))
     setCountry(person.address_country || "")
-    setDateOfJoining(dateInputFromTimestamp(person.created_at) || todayInputDate())
     setCrmQuery(person.name || person.email_508 || person.email || "")
     setCrmMatches([])
     setCrmError("")
@@ -5492,18 +5480,20 @@ function EngineerSetupPanel({
   }
 
   async function submit() {
-    const result = await onSetup({
+    const payload: EngineerSetupRequest = {
       email: companyEmail,
       first_name: firstName,
       middle_name: middleName,
       last_name: lastName,
       country,
-      gender,
-      date_of_birth: dateOfBirth,
-      date_of_joining: dateOfJoining,
       personal_email: personalEmail,
-      prefered_email: preferedEmail,
-    })
+    }
+    if (gender.trim()) payload.gender = gender
+    if (dateOfBirth.trim()) payload.date_of_birth = dateOfBirth
+    if (dateOfJoining.trim()) payload.date_of_joining = dateOfJoining
+    if (preferedEmail.trim()) payload.prefered_email = preferedEmail
+
+    const result = await onSetup(payload)
     if (result) {
       setCrmQuery("")
       setCrmMatches([])
@@ -5512,11 +5502,11 @@ function EngineerSetupPanel({
       setMiddleName("")
       setLastName("")
       setCountry("")
-      setGender("Male")
-      setDateOfBirth(defaultEmployeeDateOfBirth)
-      setDateOfJoining(todayInputDate())
+      setGender("")
+      setDateOfBirth("")
+      setDateOfJoining("")
       setPersonalEmail("")
-      setPreferedEmail("Company Email")
+      setPreferedEmail("")
     }
   }
 
@@ -5637,6 +5627,7 @@ function EngineerSetupPanel({
               <Label>
                 Gender
                 <Select value={gender} onChange={(event) => setGender(event.target.value)}>
+                  <option value="">Default</option>
                   {employeeGenderOptions.map((option) => (
                     <option key={option} value={option}>
                       {option}
@@ -5678,6 +5669,7 @@ function EngineerSetupPanel({
                   value={preferedEmail}
                   onChange={(event) => setPreferedEmail(event.target.value)}
                 >
+                  <option value="">Default</option>
                   {preferredEmailOptions.map((option) => (
                     <option key={option} value={option}>
                       {option}

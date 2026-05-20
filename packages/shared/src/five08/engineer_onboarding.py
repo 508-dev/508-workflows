@@ -186,7 +186,7 @@ def ensure_user(
         try:
             return client.create_record("User", fields), True
         except ERPNextAPIError as exc:
-            if not _is_role_profile_create_error(exc):
+            if not _is_role_profile_error(exc):
                 raise
             fields.pop("role_profile_name", None)
             fields["roles"] = [{"role": EMPLOYEE_ROLE}]
@@ -209,8 +209,9 @@ def ensure_engineer_role(
             {"role_profile_name": ENGINEER_ROLE_PROFILE},
         )
         return updated, "role_profile_assigned"
-    except ERPNextAPIError:
-        pass
+    except ERPNextAPIError as exc:
+        if not _is_role_profile_error(exc):
+            raise
 
     roles = _normalized_child_rows(user.get("roles"))
     if any(_optional_text(role.get("role")) == EMPLOYEE_ROLE for role in roles):
@@ -679,7 +680,7 @@ def _is_not_found_error(_client: ERPNextClient, exc: ERPNextAPIError) -> bool:
     return exc.status_code == 404
 
 
-def _is_role_profile_create_error(exc: ERPNextAPIError) -> bool:
+def _is_role_profile_error(exc: ERPNextAPIError) -> bool:
     detail = str(exc).casefold()
     return "role_profile_name" in detail or "role profile" in detail
 
