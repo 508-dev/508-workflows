@@ -13,6 +13,7 @@ SCRIPT_PATH = REPO_ROOT / "scripts" / "worktree-env.sh"
 def _base_env() -> dict[str, str]:
     env = os.environ.copy()
     env.pop("CONDUCTOR_PORT", None)
+    env.pop("WORKTREE_ENV_PORT_DEFAULT_SOURCE", None)
     for key in (
         "REDIS_HOST_PORT",
         "POSTGRES_HOST_PORT",
