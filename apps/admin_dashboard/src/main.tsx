@@ -385,6 +385,26 @@ function stringFieldFromPayload(payload: unknown, key: string) {
   return JSON.stringify(value)
 }
 
+function messageForApiError(record: Record<string, unknown>, fallback: string) {
+  const detail = record.detail
+  if (typeof detail === "string" && detail.trim()) return detail
+
+  const error = record.error
+  if (typeof error !== "string") return fallback
+  if (error === "person_not_found") {
+    const person =
+      typeof record.person === "string" && record.person.trim() ? record.person : "that person"
+    return `No CRM person, ERPNext user, or ERPNext supplier matched "${person}". Try an email address or an exact name from CRM/ERPNext.`
+  }
+  if (error === "candidate_not_found") {
+    return "The selected person record is no longer available. Search again and choose one of the current matches."
+  }
+  if (error === "ambiguous_person") {
+    return "Multiple people matched. Choose the matching person record."
+  }
+  return error || fallback
+}
+
 function messageFromUnknown(error: unknown, fallback: string) {
   if (typeof error === "string") return error
   return error instanceof Error ? error.message : fallback
@@ -470,7 +490,7 @@ async function requestJson<T>(url: string, options: RequestInit = {}): Promise<T
       payload = await response.json()
       if (payload && typeof payload === "object") {
         const record = payload as Record<string, unknown>
-        detail = record.detail || record.error || detail
+        detail = messageForApiError(record, String(detail || "Request failed"))
       }
     } catch {
       detail = response.statusText
