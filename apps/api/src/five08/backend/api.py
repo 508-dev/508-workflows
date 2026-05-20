@@ -3260,6 +3260,7 @@ def _create_erpnext_project_setup(
         raise ValueError("activity_type_too_long")
 
     cache_refresh_error: str | None = None
+    cache_refresh_message: str | None = None
     client = _erpnext_client()
     try:
         activity_type = client.ensure_activity_type(activity_type_name)
@@ -3362,6 +3363,10 @@ def _create_erpnext_project_setup(
                 erpnext_project_id,
             )
             cache_refresh_error = "cache_refresh_failed"
+            cache_refresh_message = (
+                "Created the project in ERPNext, but the dashboard sync is still pending. "
+                "Refresh projects in a moment."
+            )
             project = _dashboard_project_fallback_from_erpnext(project_detail)
     finally:
         client.close()
@@ -3379,6 +3384,8 @@ def _create_erpnext_project_setup(
     }
     if cache_refresh_error is not None:
         result["cache_refresh_error"] = cache_refresh_error
+    if cache_refresh_message is not None:
+        result["cache_refresh_message"] = cache_refresh_message
     return result
 
 

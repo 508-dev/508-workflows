@@ -1062,6 +1062,7 @@ function App() {
         customer: ERPNextCustomer
         activity_type: { name?: string }
         cache_refresh_error?: string
+        cache_refresh_message?: string
       }>("/dashboard/api/projects/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1079,7 +1080,10 @@ function App() {
         showToast("Created ERP project setup", "ok")
         openProjectDetail(payload.project.id)
       } else {
-        showToast("Created ERP project in ERPNext; local sync is pending", "ok")
+        showToast(
+          payload.cache_refresh_message || "Created ERP project in ERPNext; local sync is pending",
+          "ok",
+        )
         void loadProjects()
       }
       return true

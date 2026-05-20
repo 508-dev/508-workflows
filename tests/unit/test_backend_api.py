@@ -3352,6 +3352,10 @@ def test_create_erpnext_project_setup_returns_success_when_cache_refresh_fails()
     assert result["project"]["erpnext_project_id"] == "PROJ-0001"
     assert result["project"]["local_cache_pending"] is True
     assert result["cache_refresh_error"] == "cache_refresh_failed"
+    assert result["cache_refresh_message"] == (
+        "Created the project in ERPNext, but the dashboard sync is still pending. "
+        "Refresh projects in a moment."
+    )
     client.create_project.assert_called_once()
     client.close.assert_called_once_with()
 
