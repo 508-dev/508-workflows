@@ -69,6 +69,16 @@ To run the Discord bot too:
 ./scripts/mypy.sh
 ```
 
+For workspace archival, stop host-run dev processes and Docker Compose together:
+
+```bash
+./scripts/archive-workspace.sh --dry-run
+./scripts/archive-workspace.sh
+```
+
+`./scripts/dev.sh env` emits shell-safe exports for the current worktree and
+avoids printing the resolved Postgres password directly.
+
 ## Documentation
 
 - [Development Guide](./DEVELOPMENT.md): local setup, service commands, dashboard login, Compose workflow, quality checks, and CLIs.

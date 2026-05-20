@@ -44,6 +44,11 @@ run_migrations() {
   uv run --package worker python3 -c 'from five08.worker.db_migrations import run_job_migrations; run_job_migrations()'
 }
 
+reclaim_service_port() {
+  service_name=$1
+  python3 "$script_dir/dev_mux.py" --ensure-port "$service_name"
+}
+
 create_dashboard_login_link() {
   next_path=${1:-/dashboard}
   if [ -z "${API_SHARED_SECRET-}" ]; then
@@ -213,6 +218,7 @@ EOF
     printf '%s\n' "$POSTGRES_URL"
     ;;
   web|api)
+    reclaim_service_port web
     run_migrations
     exec uv run --package api uvicorn five08.backend.api:create_app \
       --factory \
@@ -234,6 +240,7 @@ EOF
       packages/shared/src
     ;;
   discord-bot|bot)
+    reclaim_service_port discord-bot
     run_migrations
     exec uv run --package discord_bot discord-bot
     ;;

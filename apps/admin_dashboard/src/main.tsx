@@ -11,6 +11,7 @@ import {
   Search,
   ShieldCheck,
   UserPlus,
+  UserMinus,
   Users,
   X,
 } from "lucide-react"
@@ -986,10 +987,12 @@ function App() {
   async function addProjectUser(
     projectId: string,
     userName: string,
+    candidateId: string,
     rates?: { activity_type?: string; billing_rate?: number; costing_rate?: number },
   ) {
     const normalizedUser = userName.trim()
-    if (!normalizedUser) return false
+    const normalizedCandidateId = candidateId.trim()
+    if (!normalizedUser || !normalizedCandidateId) return false
     setBusy(`project:${projectId}:user`, true)
     try {
       const payload = await requestJson<{ project: Project; activity_cost?: object | null }>(
@@ -997,7 +1000,11 @@ function App() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ user: normalizedUser, ...(rates || {}) }),
+          body: JSON.stringify({
+            user: normalizedUser,
+            candidate_id: normalizedCandidateId,
+            ...(rates || {}),
+          }),
         },
       )
       setProjects((current) =>
@@ -1007,6 +1014,32 @@ function App() {
       return true
     } catch (error) {
       showError(error, "Unable to add project user")
+      return false
+    } finally {
+      setBusy(`project:${projectId}:user`, false)
+    }
+  }
+
+  async function removeProjectUser(projectId: string, userName: string) {
+    const normalizedUser = userName.trim()
+    if (!normalizedUser) return false
+    setBusy(`project:${projectId}:user`, true)
+    try {
+      const payload = await requestJson<{ project: Project }>(
+        `/dashboard/api/projects/${encodeURIComponent(projectId)}/users/remove`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ user: normalizedUser }),
+        },
+      )
+      setProjects((current) =>
+        current.map((project) => (project.id === projectId ? payload.project : project)),
+      )
+      showToast("Removed project user", "ok")
+      return true
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Unable to remove project user", "error")
       return false
     } finally {
       setBusy(`project:${projectId}:user`, false)
@@ -1047,6 +1080,35 @@ function App() {
         }
       }
       showError(error, "Unable to add historical member")
+      return false
+    } finally {
+      setBusy(`project:${projectId}:historical`, false)
+    }
+  }
+
+  async function removeHistoricalProjectMember(projectId: string, sourceUserId: string) {
+    const normalizedSourceUserId = sourceUserId.trim()
+    if (!normalizedSourceUserId) return false
+    setBusy(`project:${projectId}:historical`, true)
+    try {
+      const payload = await requestJson<{ project: Project }>(
+        `/dashboard/api/projects/${encodeURIComponent(projectId)}/historical-members/remove`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ source_user_id: normalizedSourceUserId }),
+        },
+      )
+      setProjects((current) =>
+        current.map((project) => (project.id === projectId ? payload.project : project)),
+      )
+      showToast("Removed historical project member", "ok")
+      return true
+    } catch (error) {
+      showToast(
+        error instanceof Error ? error.message : "Unable to remove historical member",
+        "error",
+      )
       return false
     } finally {
       setBusy(`project:${projectId}:historical`, false)
@@ -1816,7 +1878,9 @@ function App() {
               onUpdateStatus={updateProjectStatus}
               onBulkUpdate={bulkUpdateProjects}
               onAddUser={addProjectUser}
+              onRemoveUser={removeProjectUser}
               onAddHistoricalMember={addHistoricalProjectMember}
+              onRemoveHistoricalMember={removeHistoricalProjectMember}
               onUpdateWikiMatch={updateProjectWikiMatch}
               onWikiMatches={loadWikiMatches}
               onOpenProject={openProjectDetail}
@@ -2329,13 +2393,16 @@ function ProjectsView(props: {
   onAddUser: (
     projectId: string,
     user: string,
+    candidateId: string,
     rates?: { activity_type?: string; billing_rate?: number; costing_rate?: number },
   ) => Promise<boolean>
+  onRemoveUser: (projectId: string, user: string) => Promise<boolean>
   onAddHistoricalMember: (
     projectId: string,
     person: string,
     candidateId?: string,
   ) => Promise<boolean>
+  onRemoveHistoricalMember: (projectId: string, sourceUserId: string) => Promise<boolean>
   onUpdateWikiMatch: (projectId: string, status: string, rowKey?: string) => Promise<void>
   onWikiMatches: () => void
   onOpenProject: (projectId: string) => void
@@ -2492,7 +2559,9 @@ function ProjectsView(props: {
           onBack={props.onCloseProject}
           onUpdateStatus={props.onUpdateStatus}
           onAddUser={props.onAddUser}
+          onRemoveUser={props.onRemoveUser}
           onAddHistoricalMember={props.onAddHistoricalMember}
+          onRemoveHistoricalMember={props.onRemoveHistoricalMember}
         />
       </>
     )
@@ -3020,16 +3089,25 @@ function ProjectDetailPage(props: {
   onAddUser: (
     projectId: string,
     user: string,
+    candidateId: string,
     rates?: { activity_type?: string; billing_rate?: number; costing_rate?: number },
   ) => Promise<boolean>
+  onRemoveUser: (projectId: string, user: string) => Promise<boolean>
   onAddHistoricalMember: (
     projectId: string,
     person: string,
     candidateId?: string,
   ) => Promise<boolean>
+  onRemoveHistoricalMember: (projectId: string, sourceUserId: string) => Promise<boolean>
 }) {
   const project = props.project
   const members = project.roster_members || []
+  const [newUser, setNewUser] = useState("")
+  const [rosterCandidates, setRosterCandidates] = useState<HistoricalPersonCandidate[]>([])
+  const [selectedRosterCandidateId, setSelectedRosterCandidateId] = useState("")
+  const [activityType, setActivityType] = useState("")
+  const [billingRate, setBillingRate] = useState("")
+  const [costingRate, setCostingRate] = useState("")
   const timeline =
     [
       project.actual_start_date || project.expected_start_date,
@@ -3042,6 +3120,72 @@ function ProjectDetailPage(props: {
     typeof project.percent_complete === "number"
       ? `${Math.round(project.percent_complete)}%`
       : "Not set"
+  const selectedRosterCandidate = rosterCandidates.find(
+    (candidate) => candidate.candidate_id === selectedRosterCandidateId,
+  )
+  const queryReady = newUser.trim().includes("@")
+    ? newUser.trim().length >= 5
+    : newUser.trim().length >= 3
+  const hasRateFields = Boolean(activityType.trim() || billingRate.trim() || costingRate.trim())
+  const parsedBillingRate = optionalNumber(billingRate)
+  const parsedCostingRate = optionalNumber(costingRate)
+  const hasPartialRate = Boolean((billingRate.trim() || costingRate.trim()) && !activityType.trim())
+  const hasIncompleteActivityCost = Boolean(
+    activityType.trim() && (!billingRate.trim() || !costingRate.trim()),
+  )
+  const hasInvalidRateNumber =
+    Boolean(billingRate.trim() && parsedBillingRate === undefined) ||
+    Boolean(costingRate.trim() && parsedCostingRate === undefined)
+  const rateInvalid = hasPartialRate || hasIncompleteActivityCost || hasInvalidRateNumber
+  const ratePayload =
+    hasRateFields && !rateInvalid
+      ? {
+          activity_type: activityType.trim(),
+          billing_rate: parsedBillingRate,
+          costing_rate: parsedCostingRate,
+        }
+      : undefined
+
+  useEffect(() => {
+    if (!props.canWrite) return
+    const query = newUser.trim()
+    if (
+      selectedRosterCandidateId &&
+      selectedRosterCandidate &&
+      query === (selectedRosterCandidate.email || selectedRosterCandidate.label || "")
+    ) {
+      return
+    }
+    if (selectedRosterCandidateId) {
+      setSelectedRosterCandidateId("")
+    }
+    const readyForLookup = query.includes("@") ? query.length >= 5 : query.length >= 3
+    if (!readyForLookup) {
+      setRosterCandidates([])
+      return
+    }
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => {
+      void requestJson<HistoricalPersonCandidate[]>(
+        `/dashboard/api/project-member-candidates?query=${encodeURIComponent(query)}`,
+        { signal: controller.signal },
+      )
+        .then((candidates) => setRosterCandidates(candidates))
+        .catch((error) => {
+          if (error instanceof DOMException && error.name === "AbortError") return
+          setRosterCandidates([])
+        })
+    }, 500)
+    return () => {
+      controller.abort()
+      window.clearTimeout(timer)
+    }
+  }, [newUser, props.canWrite, selectedRosterCandidate, selectedRosterCandidateId])
+
+  function chooseRosterCandidate(candidate: HistoricalPersonCandidate) {
+    setSelectedRosterCandidateId(candidate.candidate_id)
+    setNewUser(candidate.email || candidate.label || candidate.full_name || newUser)
+  }
 
   return (
     <>
@@ -3153,17 +3297,131 @@ function ProjectDetailPage(props: {
           </span>
         </CardHeader>
         {props.canWrite ? (
-          <CardContent className="grid gap-4 border-b">
-            <ProjectRosterAddForm
-              projectId={project.id}
-              loading={props.loading}
-              onAddUser={props.onAddUser}
-              onAddHistoricalMember={props.onAddHistoricalMember}
-            />
+          <CardContent className="grid gap-3 border-b md:grid-cols-[minmax(260px,1fr)_minmax(180px,.7fr)_minmax(130px,.45fr)_minmax(130px,.45fr)_auto_auto] md:items-end">
+            <div className="relative">
+              <Label>
+                Person search
+                <Input
+                  value={newUser}
+                  autoComplete="off"
+                  placeholder="Search @508.dev person"
+                  onChange={(event) => setNewUser(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault()
+                      if (rosterCandidates.length === 1) {
+                        chooseRosterCandidate(rosterCandidates[0])
+                      }
+                    }
+                  }}
+                />
+              </Label>
+              {queryReady && !selectedRosterCandidateId ? (
+                <div className="absolute z-20 mt-1 max-h-64 w-full overflow-auto rounded-md border bg-background shadow-lg">
+                  {rosterCandidates.length ? (
+                    rosterCandidates.map((candidate) => (
+                      <button
+                        key={candidate.candidate_id}
+                        type="button"
+                        className="grid w-full gap-0.5 px-3 py-2 text-left hover:bg-secondary focus:bg-secondary focus:outline-none"
+                        onClick={() => chooseRosterCandidate(candidate)}
+                      >
+                        <span className="truncate text-sm font-bold">
+                          {candidate.label || candidate.full_name || candidate.email || "Person"}
+                        </span>
+                        <span className="truncate text-xs text-muted-foreground">
+                          {[candidate.email, candidate.sources?.join(", ")]
+                            .filter(Boolean)
+                            .join(" | ")}
+                        </span>
+                      </button>
+                    ))
+                  ) : (
+                    <div className="px-3 py-2 text-sm text-muted-foreground">
+                      No verified @508.dev results
+                    </div>
+                  )}
+                </div>
+              ) : null}
+            </div>
+            <Label>
+              Activity Type
+              <Input
+                value={activityType}
+                autoComplete="off"
+                placeholder="Optional rate step"
+                onChange={(event) => setActivityType(event.target.value)}
+              />
+            </Label>
+            <Label>
+              Billing rate
+              <Input
+                value={billingRate}
+                inputMode="decimal"
+                autoComplete="off"
+                placeholder="USD/hr"
+                onChange={(event) => setBillingRate(event.target.value)}
+              />
+            </Label>
+            <Label>
+              Costing rate
+              <Input
+                value={costingRate}
+                inputMode="decimal"
+                autoComplete="off"
+                placeholder="USD/hr"
+                onChange={(event) => setCostingRate(event.target.value)}
+              />
+            </Label>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={
+                props.loading[`project:${project.id}:user`] ||
+                !selectedRosterCandidateId ||
+                !selectedRosterCandidate?.email ||
+                rateInvalid
+              }
+              onClick={() =>
+                void props
+                  .onAddUser(
+                    project.id,
+                    selectedRosterCandidate?.email || newUser,
+                    selectedRosterCandidateId,
+                    ratePayload,
+                  )
+                  .then((updated) => {
+                    if (updated) {
+                      setNewUser("")
+                      setRosterCandidates([])
+                      setSelectedRosterCandidateId("")
+                      setActivityType("")
+                      setBillingRate("")
+                      setCostingRate("")
+                    }
+                  })
+              }
+            >
+              <Users />
+              Add ERP user
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={props.loading[`project:${project.id}:historical`] || !newUser.trim()}
+              onClick={() =>
+                void props.onAddHistoricalMember(project.id, newUser).then((updated) => {
+                  if (updated) setNewUser("")
+                })
+              }
+            >
+              <Users />
+              Add historical
+            </Button>
           </CardContent>
         ) : null}
         <div className="overflow-x-auto">
-          <Table className="min-w-[760px]" aria-label="Project roster">
+          <Table className="min-w-[860px]" aria-label="Project roster">
             <TableHeader>
               <TableRow>
                 <TableHead>Name</TableHead>
@@ -3172,68 +3430,109 @@ function ProjectDetailPage(props: {
                 <TableHead>Links</TableHead>
                 <TableHead>Source</TableHead>
                 <TableHead>Last seen</TableHead>
+                {props.canWrite ? <TableHead>Actions</TableHead> : null}
               </TableRow>
             </TableHeader>
             <TableBody>
               {members.length ? (
-                members.map((member) => (
-                  <TableRow key={`${member.source || ""}:${member.source_user_id || member.email}`}>
-                    <TableCell>
-                      <strong>{member.full_name || member.email || member.source_user_id}</strong>
-                    </TableCell>
-                    <TableCell>{member.email || "None"}</TableCell>
-                    <TableCell className="font-mono text-xs">
-                      {member.erpnext_user_url ? (
-                        <a
-                          className="inline-flex items-center gap-1 font-semibold text-primary underline-offset-4 hover:underline"
-                          href={member.erpnext_user_url}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          {member.source_user_id || "ERP user"}
-                          <ExternalLink className="size-3.5" />
-                        </a>
-                      ) : (
-                        member.source_user_id || "Unknown"
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex flex-wrap gap-2">
-                        {member.supplier_erpnext_url ? (
+                members.map((member) => {
+                  const label = memberLabel(member)
+                  const sourceUserId = member.source_user_id || member.email || ""
+                  const isHistorical =
+                    member.roster_kind === "historical" || member.source === "manual"
+                  return (
+                    <TableRow
+                      key={`${member.source || ""}:${member.source_user_id || member.email}`}
+                    >
+                      <TableCell>
+                        <strong>{member.full_name || member.email || member.source_user_id}</strong>
+                      </TableCell>
+                      <TableCell>{member.email || "None"}</TableCell>
+                      <TableCell className="font-mono text-xs">
+                        {member.erpnext_user_url ? (
                           <a
                             className="inline-flex items-center gap-1 font-semibold text-primary underline-offset-4 hover:underline"
-                            href={member.supplier_erpnext_url}
+                            href={member.erpnext_user_url}
                             target="_blank"
                             rel="noreferrer"
                           >
-                            Supplier
+                            {member.source_user_id || "ERP user"}
                             <ExternalLink className="size-3.5" />
                           </a>
-                        ) : null}
-                        {member.crm_contact_id && props.crmContactUrl(member.crm_contact_id) ? (
-                          <a
-                            className="inline-flex items-center gap-1 font-semibold text-primary underline-offset-4 hover:underline"
-                            href={props.crmContactUrl(member.crm_contact_id)}
-                            target="_blank"
-                            rel="noreferrer"
+                        ) : (
+                          member.source_user_id || "Unknown"
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex flex-wrap gap-2">
+                          {member.supplier_erpnext_url ? (
+                            <a
+                              className="inline-flex items-center gap-1 font-semibold text-primary underline-offset-4 hover:underline"
+                              href={member.supplier_erpnext_url}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              Supplier
+                              <ExternalLink className="size-3.5" />
+                            </a>
+                          ) : null}
+                          {member.crm_contact_id && props.crmContactUrl(member.crm_contact_id) ? (
+                            <a
+                              className="inline-flex items-center gap-1 font-semibold text-primary underline-offset-4 hover:underline"
+                              href={props.crmContactUrl(member.crm_contact_id)}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              CRM
+                              <ExternalLink className="size-3.5" />
+                            </a>
+                          ) : null}
+                          {!member.supplier_erpnext_url &&
+                          !(member.crm_contact_id && props.crmContactUrl(member.crm_contact_id)) ? (
+                            <span className="text-muted-foreground">None</span>
+                          ) : null}
+                        </div>
+                      </TableCell>
+                      <TableCell>{member.roster_kind || member.source || "ERP"}</TableCell>
+                      <TableCell>{formatDate(member.last_seen_at)}</TableCell>
+                      {props.canWrite ? (
+                        <TableCell>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={
+                              !sourceUserId ||
+                              props.loading[
+                                `project:${project.id}:${isHistorical ? "historical" : "user"}`
+                              ]
+                            }
+                            onClick={() => {
+                              const confirmed = window.confirm(
+                                `Remove ${label} from this project roster?`,
+                              )
+                              if (!confirmed) return
+                              if (isHistorical) {
+                                void props.onRemoveHistoricalMember(project.id, sourceUserId)
+                              } else {
+                                void props.onRemoveUser(project.id, sourceUserId)
+                              }
+                            }}
                           >
-                            CRM
-                            <ExternalLink className="size-3.5" />
-                          </a>
-                        ) : null}
-                        {!member.supplier_erpnext_url &&
-                        !(member.crm_contact_id && props.crmContactUrl(member.crm_contact_id)) ? (
-                          <span className="text-muted-foreground">None</span>
-                        ) : null}
-                      </div>
-                    </TableCell>
-                    <TableCell>{member.roster_kind || member.source || "ERP"}</TableCell>
-                    <TableCell>{formatDate(member.last_seen_at)}</TableCell>
-                  </TableRow>
-                ))
+                            <UserMinus />
+                            Remove
+                          </Button>
+                        </TableCell>
+                      ) : null}
+                    </TableRow>
+                  )
+                })
               ) : (
                 <TableRow>
-                  <TableCell colSpan={6} className="text-sm text-muted-foreground">
+                  <TableCell
+                    colSpan={props.canWrite ? 7 : 6}
+                    className="text-sm text-muted-foreground"
+                  >
                     No roster rows have been synced for this project.
                   </TableCell>
                 </TableRow>

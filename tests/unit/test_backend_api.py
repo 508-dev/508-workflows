@@ -3263,7 +3263,7 @@ def test_dashboard_add_project_user_uses_erpnext_record_id(
     ):
         response = client.post(
             f"/dashboard/api/projects/{project_id}/users",
-            json={"user": " member@508.dev "},
+            json={"user": " member@508.dev ", "candidate_id": "email:member@508.dev"},
         )
 
     assert response.status_code == 200
@@ -3271,6 +3271,7 @@ def test_dashboard_add_project_user_uses_erpnext_record_id(
     mock_add_user.assert_called_once_with(
         external_project_id="PROJ-0033",
         user="member@508.dev",
+        candidate_id="email:member@508.dev",
     )
     mock_audit.assert_awaited_once()
 
@@ -3319,6 +3320,69 @@ def test_dashboard_add_project_user_rejects_activity_type_without_rate(
     assert response.status_code == 400
     assert response.json() == {"error": "activity_cost_rates_required"}
     mock_add_user.assert_not_called()
+
+
+def test_dashboard_add_project_user_passes_activity_cost_rates(
+    client: TestClient,
+) -> None:
+    project_id = "11111111-1111-4111-8111-111111111111"
+    cached_project = {
+        "id": project_id,
+        "display_name": "Visible Project",
+        "erpnext_project_id": "PROJ-0033",
+        "roster_members": [],
+    }
+    updated_project = {
+        **cached_project,
+        "roster_members": [{"email": "member@508.dev"}],
+    }
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", _dashboard_write_session()),
+        ),
+        patch(
+            "five08.backend.api._cached_dashboard_project_by_id",
+            return_value=cached_project,
+        ),
+        patch(
+            "five08.backend.api._add_erpnext_project_user",
+            return_value={
+                "project": updated_project,
+                "activity_cost": {"activity_type": "Engineering"},
+            },
+        ) as mock_add_user,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ),
+    ):
+        response = client.post(
+            f"/dashboard/api/projects/{project_id}/users",
+            json={
+                "user": "member@508.dev",
+                "candidate_id": "email:member@508.dev",
+                "activity_type": " Engineering ",
+                "billing_rate": 150,
+                "costing_rate": 100,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "project": updated_project,
+        "activity_cost": {"activity_type": "Engineering"},
+    }
+    mock_add_user.assert_called_once_with(
+        external_project_id="PROJ-0033",
+        user="member@508.dev",
+        candidate_id="email:member@508.dev",
+        activity_type="Engineering",
+        billing_rate=150.0,
+        costing_rate=100.0,
+    )
 
 
 def test_dashboard_add_project_user_rejects_non_508_email(
@@ -3390,13 +3454,18 @@ def test_dashboard_add_project_user_treats_blank_activity_type_as_absent(
     ):
         response = client.post(
             f"/dashboard/api/projects/{project_id}/users",
-            json={"user": "MEMBER@508.dev", "activity_type": "   "},
+            json={
+                "user": "MEMBER@508.dev",
+                "candidate_id": "email:member@508.dev",
+                "activity_type": "   ",
+            },
         )
 
     assert response.status_code == 200
     mock_add_user.assert_called_once_with(
         external_project_id="PROJ-0033",
         user="member@508.dev",
+        candidate_id="email:member@508.dev",
     )
 
 
@@ -3427,6 +3496,7 @@ def test_dashboard_add_project_user_rejects_rates_with_blank_activity_type(
             f"/dashboard/api/projects/{project_id}/users",
             json={
                 "user": "member@508.dev",
+                "candidate_id": "email:member@508.dev",
                 "activity_type": "   ",
                 "billing_rate": 150,
                 "costing_rate": 100,
@@ -3436,6 +3506,106 @@ def test_dashboard_add_project_user_rejects_rates_with_blank_activity_type(
     assert response.status_code == 400
     assert response.json() == {"error": "activity_type_required"}
     mock_add_user.assert_not_called()
+
+
+def test_dashboard_add_project_user_requires_verified_candidate(
+    client: TestClient,
+) -> None:
+    project_id = "11111111-1111-4111-8111-111111111111"
+    session = api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    cached_project = {
+        "id": project_id,
+        "display_name": "Visible Project",
+        "erpnext_project_id": "PROJ-0033",
+        "roster_members": [],
+    }
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._cached_dashboard_project_by_id",
+            return_value=cached_project,
+        ),
+        patch(
+            "five08.backend.api._add_erpnext_project_user",
+            side_effect=api.HistoricalProjectMemberResolutionError(
+                "candidate_required"
+            ),
+        ) as mock_add_user,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            f"/dashboard/api/projects/{project_id}/users",
+            json={"user": " dd "},
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": "candidate_required",
+        "detail": (
+            'Choose a verified @508.dev person for "dd" from the dropdown before '
+            "adding them to the ERP roster."
+        ),
+        "person": "dd",
+        "candidates": [],
+    }
+    mock_add_user.assert_called_once_with(
+        external_project_id="PROJ-0033",
+        user="dd",
+        candidate_id=None,
+    )
+    mock_audit.assert_not_awaited()
+
+
+def test_dashboard_project_member_candidates_returns_verified_508_people(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    candidates = [
+        {"candidate_id": "email:sam@508.dev", "label": "Sam", "email": "sam@508.dev"}
+    ]
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._project_roster_user_candidates",
+            return_value=candidates,
+        ) as mock_candidates,
+    ):
+        response = client.get("/dashboard/api/project-member-candidates?query=sam")
+
+    assert response.status_code == 200
+    assert response.json() == candidates
+    mock_candidates.assert_called_once_with("sam")
 
 
 def test_dashboard_add_project_historical_member_updates_local_roster(
@@ -3607,6 +3777,115 @@ def test_dashboard_add_project_historical_member_returns_person_not_found_detail
     mock_audit.assert_not_awaited()
 
 
+def test_dashboard_remove_project_user_updates_erp_roster(
+    client: TestClient,
+) -> None:
+    project_id = "11111111-1111-4111-8111-111111111111"
+    session = api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    cached_project = {
+        "id": project_id,
+        "display_name": "Visible Project",
+        "erpnext_project_id": "PROJ-0033",
+        "roster_members": [{"email": "member@508.dev", "roster_kind": "erp_users"}],
+    }
+    updated_project = {**cached_project, "roster_members": []}
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._cached_dashboard_project_by_id",
+            return_value=cached_project,
+        ),
+        patch(
+            "five08.backend.api._remove_erpnext_project_user",
+            return_value=updated_project,
+        ) as mock_remove_user,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            f"/dashboard/api/projects/{project_id}/users/remove",
+            json={"user": " member@508.dev "},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"project": updated_project}
+    mock_remove_user.assert_called_once_with(
+        external_project_id="PROJ-0033",
+        user="member@508.dev",
+    )
+    mock_audit.assert_awaited_once()
+
+
+def test_dashboard_remove_project_historical_member_deletes_local_roster(
+    client: TestClient,
+) -> None:
+    project_id = "11111111-1111-4111-8111-111111111111"
+    session = api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    cached_project = {
+        "id": project_id,
+        "display_name": "Visible Project",
+        "roster_members": [{"email": "past@508.dev", "roster_kind": "historical"}],
+    }
+    updated_project = {**cached_project, "roster_members": []}
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._cached_dashboard_project_by_id",
+            return_value=cached_project,
+        ),
+        patch(
+            "five08.backend.api._remove_historical_project_member",
+            return_value=updated_project,
+        ) as mock_remove_member,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            f"/dashboard/api/projects/{project_id}/historical-members/remove",
+            json={"source_user_id": " past@508.dev "},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"project": updated_project}
+    mock_remove_member.assert_called_once_with(
+        project_id=project_id,
+        source_user_id="past@508.dev",
+    )
+    mock_audit.assert_awaited_once()
+
+
 def test_resolve_historical_project_member_merges_crm_erp_and_supplier(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3652,6 +3931,77 @@ def test_resolve_historical_project_member_merges_crm_erp_and_supplier(
     assert candidate["erpnext_user_id"] == "samr@508.dev"
     assert candidate["supplier_erpnext_id"] == "SUP-SAMR"
     assert candidate["sources"] == ["CRM", "ERP User", "ERP Supplier"]
+
+
+def test_project_roster_user_candidates_require_erp_backed_508_email(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api._PROJECT_ROSTER_USER_CANDIDATE_CACHE.clear()
+    monkeypatch.setattr(
+        api,
+        "_dashboard_people_candidates_for_project_member",
+        lambda _query: [
+            {"label": "Sam", "email": "sam@508.dev", "sources": ["CRM"]},
+            {"label": "Sam Example", "email": "sam@example.com", "sources": ["CRM"]},
+        ],
+    )
+    monkeypatch.setattr(
+        api,
+        "_erpnext_user_candidates_for_project_member",
+        lambda _query: [
+            {
+                "label": "Sam ERP",
+                "email": "samerp@508.dev",
+                "erpnext_user_id": "samerp@508.dev",
+                "sources": ["ERP User"],
+            },
+            {
+                "label": "Sam ERP External",
+                "email": "samerp@example.com",
+                "erpnext_user_id": "samerp@example.com",
+                "sources": ["ERP User"],
+            },
+        ],
+    )
+
+    candidates = api._project_roster_user_candidates("sam")
+
+    assert [candidate["email"] for candidate in candidates] == [
+        "samerp@508.dev",
+    ]
+    assert candidates[0]["erpnext_user_id"] == "samerp@508.dev"
+
+
+def test_project_roster_user_candidates_cache_avoids_repeated_erp_lookups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api._PROJECT_ROSTER_USER_CANDIDATE_CACHE.clear()
+    erp_calls = 0
+    monkeypatch.setattr(
+        api,
+        "_dashboard_people_candidates_for_project_member",
+        lambda _query: [],
+    )
+
+    def erp_candidates(_query: str) -> list[dict[str, object]]:
+        nonlocal erp_calls
+        erp_calls += 1
+        return [
+            {
+                "label": "Sam ERP",
+                "email": "samerp@508.dev",
+                "erpnext_user_id": "samerp@508.dev",
+                "sources": ["ERP User"],
+            }
+        ]
+
+    monkeypatch.setattr(
+        api, "_erpnext_user_candidates_for_project_member", erp_candidates
+    )
+
+    assert api._project_roster_user_candidates("sam")[0]["email"] == "samerp@508.dev"
+    assert api._project_roster_user_candidates("SAM")[0]["email"] == "samerp@508.dev"
+    assert erp_calls == 1
 
 
 def test_dashboard_update_project_wiki_match_confirms_row(
