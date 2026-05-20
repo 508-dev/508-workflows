@@ -95,11 +95,9 @@ def setup_engineer(
     employee_personal_email = _optional_text(request.personal_email)
     employee_prefered_email = _preferred_email_value(request.prefered_email)
 
-    user_exists = _record_exists(client, "User", email)
-    if not user_exists:
-        ensure_no_similar_engineer_name(client, email=email, full_name=full_name)
-
     preflight_employee = employee_for_user(client, email)
+    if preflight_employee is None:
+        ensure_no_similar_engineer_name(client, email=email, full_name=full_name)
     if preflight_employee is None:
         ensure_employee_preconditions(client)
     preflight_supplier_name = (
@@ -187,7 +185,9 @@ def ensure_user(
         }
         try:
             return client.create_record("User", fields), True
-        except ERPNextAPIError:
+        except ERPNextAPIError as exc:
+            if not _is_role_profile_create_error(exc):
+                raise
             fields.pop("role_profile_name", None)
             fields["roles"] = [{"role": EMPLOYEE_ROLE}]
             return client.create_record("User", fields), True
@@ -662,16 +662,6 @@ def _activity_cost_rate_fields(request: ActivityCostRequest) -> dict[str, float]
     return fields
 
 
-def _record_exists(client: ERPNextClient, doctype: str, record_id: str) -> bool:
-    try:
-        client.get_record(doctype, record_id)
-    except ERPNextAPIError as exc:
-        if _is_not_found_error(client, exc):
-            return False
-        raise
-    return True
-
-
 def _supplier_owned_by_email(supplier: dict[str, Any], email: str) -> bool:
     normalized_email = _normalize_508_email(email)
     supplier_email = _optional_text(supplier.get("email_id"))
@@ -685,8 +675,13 @@ def _supplier_owned_by_email(supplier: dict[str, Any], email: str) -> bool:
     return False
 
 
-def _is_not_found_error(client: ERPNextClient, _exc: ERPNextAPIError) -> bool:
-    return getattr(client, "status_code", None) == 404
+def _is_not_found_error(_client: ERPNextClient, exc: ERPNextAPIError) -> bool:
+    return exc.status_code == 404
+
+
+def _is_role_profile_create_error(exc: ERPNextAPIError) -> bool:
+    detail = str(exc).casefold()
+    return "role_profile_name" in detail or "role profile" in detail
 
 
 def _normalized_child_rows(value: Any) -> list[dict[str, Any]]:

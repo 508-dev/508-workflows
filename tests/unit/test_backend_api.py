@@ -4183,6 +4183,7 @@ def test_dashboard_add_project_user_returns_activity_cost_partial_success(
         "activity_cost_error": "activity cost write denied",
         "partial_success": True,
     }
+    assert mock_audit.await_args.kwargs["result"] == api.AuditResult.ERROR
     audit_metadata = mock_audit.await_args.kwargs["metadata"]
     assert audit_metadata["activity_cost_error"] == "activity cost write denied"
 

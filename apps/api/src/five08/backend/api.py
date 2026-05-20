@@ -4587,9 +4587,15 @@ async def dashboard_add_project_user_handler(
         )
 
     actor_provider, actor_subject = _session_audit_actor(session)
+    audit_result = (
+        AuditResult.ERROR
+        if project_user_result.get("partial_success")
+        or project_user_result.get("activity_cost_error")
+        else AuditResult.SUCCESS
+    )
     await _write_auth_audit_event(
         action="erpnext.project_user_add",
-        result=AuditResult.SUCCESS,
+        result=audit_result,
         actor_subject=actor_subject,
         actor_display_name=session.display_name,
         actor_provider=actor_provider,

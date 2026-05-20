@@ -14,6 +14,7 @@ from five08.engineer_onboarding import (
     add_engineer_to_project,
     configure_engineer_activity_cost,
     ensure_supplier,
+    ensure_user,
     setup_engineer,
 )
 
@@ -45,7 +46,10 @@ class FakeERPNextClient:
             return record
         except KeyError as exc:
             self.status_code = 404
-            raise ERPNextAPIError(f"{doctype} {record_id} not found") from exc
+            raise ERPNextAPIError(
+                f"{doctype} {record_id} not found",
+                status_code=404,
+            ) from exc
 
     def create_record(self, doctype: str, fields: dict[str, Any]) -> dict[str, Any]:
         name = str(
@@ -280,6 +284,60 @@ def test_setup_engineer_reraises_user_read_errors_without_creating() -> None:
     assert client.created == []
 
 
+def test_ensure_user_does_not_retry_create_for_generic_errors() -> None:
+    class FailingUserCreateClient(FakeERPNextClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.user_create_attempts = 0
+
+        def create_record(self, doctype: str, fields: dict[str, Any]) -> dict[str, Any]:
+            if doctype == "User":
+                self.user_create_attempts += 1
+                raise ERPNextAPIError("HTTP request failed: timeout")
+            return super().create_record(doctype, fields)
+
+    client = FailingUserCreateClient()
+
+    with pytest.raises(ERPNextAPIError, match="timeout"):
+        ensure_user(
+            client,  # type: ignore[arg-type]
+            email="jane@508.dev",
+            full_name="Jane Engineer",
+        )
+
+    assert client.user_create_attempts == 1
+    assert client.records["User"] == {}
+
+
+def test_ensure_user_retries_create_without_role_profile_for_role_profile_errors() -> (
+    None
+):
+    class RoleProfileCreateClient(FakeERPNextClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.user_create_attempts = 0
+
+        def create_record(self, doctype: str, fields: dict[str, Any]) -> dict[str, Any]:
+            if doctype == "User":
+                self.user_create_attempts += 1
+                if "role_profile_name" in fields:
+                    raise ERPNextAPIError("Unknown field role_profile_name")
+            return super().create_record(doctype, fields)
+
+    client = RoleProfileCreateClient()
+
+    user, created = ensure_user(
+        client,  # type: ignore[arg-type]
+        email="jane@508.dev",
+        full_name="Jane Engineer",
+    )
+
+    assert created is True
+    assert user["name"] == "jane@508.dev"
+    assert user["roles"] == [{"role": "Employee"}]
+    assert client.user_create_attempts == 2
+
+
 def test_setup_engineer_blocks_similar_name_for_new_email() -> None:
     client = FakeERPNextClient()
     client.records["User"]["jane.old@508.dev"] = {
@@ -301,6 +359,63 @@ def test_setup_engineer_blocks_similar_name_for_new_email() -> None:
 
     assert exc.value.matches[0]["doctype"] == "User"
     assert exc.value.matches[0]["email"] == "jane.old@508.dev"
+
+
+def test_setup_engineer_blocks_similar_supplier_for_existing_user_without_employee() -> (
+    None
+):
+    client = FakeERPNextClient()
+    client.records["User"]["jane@508.dev"] = {
+        "name": "jane@508.dev",
+        "email": "jane@508.dev",
+        "full_name": "Jane Engineer",
+    }
+    client.records["Supplier"]["SUP-0001"] = {
+        "name": "SUP-0001",
+        "supplier_name": "Jane Engineer",
+        "email_id": "",
+        "portal_users": [],
+    }
+
+    with pytest.raises(EngineerOnboardingDuplicateNameError) as exc:
+        setup_engineer(
+            client,  # type: ignore[arg-type]
+            EngineerSetupRequest(
+                email="jane@508.dev",
+                first_name="Jane",
+                last_name="Engineer",
+                country="Taiwan",
+            ),
+        )
+
+    assert exc.value.matches[0]["doctype"] == "Supplier"
+    assert client.created == []
+    assert client.records["Supplier"]["SUP-0001"]["portal_users"] == []
+
+
+def test_setup_engineer_reraises_stale_not_found_status_errors_without_creating() -> (
+    None
+):
+    class StaleStatusClient(FakeERPNextClient):
+        def get_record(self, doctype: str, record_id: str) -> dict[str, Any]:
+            if doctype == "User":
+                self.status_code = 404
+                raise ERPNextAPIError("HTTP request failed: timeout")
+            return super().get_record(doctype, record_id)
+
+    client = StaleStatusClient()
+
+    with pytest.raises(ERPNextAPIError, match="timeout"):
+        setup_engineer(
+            client,  # type: ignore[arg-type]
+            EngineerSetupRequest(
+                email="jane@508.dev",
+                first_name="Jane",
+                country="Taiwan",
+            ),
+        )
+
+    assert client.created == []
 
 
 def test_setup_engineer_allows_existing_supplier_with_same_email() -> None:
