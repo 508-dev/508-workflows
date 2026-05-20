@@ -174,6 +174,36 @@ def test_create_address_falls_back_for_whitespace_title_and_type() -> None:
     assert captured["payload"]["address_type"] == "Billing"
 
 
+def test_delete_record_deletes_one_document() -> None:
+    captured: dict[str, Any] = {}
+
+    class CaptureClient(FakeERPNextClient):
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            params: dict[str, Any] | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            captured["method"] = method
+            captured["path"] = path
+            captured["params"] = params
+            captured["payload"] = payload
+            return {}
+
+    client = CaptureClient({"data": []})
+
+    client.delete_record("Customer", "Acme LLC")
+
+    assert captured == {
+        "method": "DELETE",
+        "path": "/api/resource/Customer/Acme%20LLC",
+        "params": None,
+        "payload": None,
+    }
+
+
 def test_search_contacts_matches_dashboard_visible_fields() -> None:
     calls: list[dict[str, Any]] = []
 

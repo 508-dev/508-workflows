@@ -3265,6 +3265,7 @@ def _create_erpnext_project_setup(
     try:
         activity_type = client.ensure_activity_type(activity_type_name)
         customer_doc: dict[str, Any]
+        created_customer_id: str | None = None
         if payload.customer_mode == "existing":
             assert customer_id is not None
             customer_doc = {"name": customer_id, "customer_name": customer_id}
@@ -3274,13 +3275,39 @@ def _create_erpnext_project_setup(
                 customer_name=customer_name,
                 account_manager=account_manager,
                 default_currency=currency or "USD",
-                customer_details=customer_details,
-                website=customer_website,
             )
 
         customer_id = _text_or_none(customer_doc.get("name"))
         if customer_id is None:
             raise ERPNextAPIError("ERPNext Customer response is missing an id")
+        if payload.customer_mode == "new":
+            created_customer_id = customer_id
+
+        def cleanup_created_customer() -> None:
+            if created_customer_id is None:
+                return
+            try:
+                client.delete_record("Customer", created_customer_id)
+            except Exception:
+                logger.exception(
+                    "ERPNext Project creation failed and new Customer cleanup failed customer=%s",
+                    created_customer_id,
+                )
+
+        try:
+            project_detail = client.create_project(
+                project_name=project_name,
+                customer=customer_id,
+                project_type="External",
+                default_cost_center=default_cost_center or "Projects - 5",
+            )
+        except Exception:
+            cleanup_created_customer()
+            raise
+        erpnext_project_id = _text_or_none(project_detail.get("name"))
+        if erpnext_project_id is None:
+            cleanup_created_customer()
+            raise ERPNextAPIError("ERPNext Project response is missing an id")
 
         address_doc: dict[str, Any] | None = None
         if has_address:
@@ -3326,30 +3353,16 @@ def _create_erpnext_project_setup(
         if (
             primary_address
             or primary_contact
-            or (payload.customer_mode == "existing" and customer_details is not None)
-            or (payload.customer_mode == "existing" and customer_website is not None)
+            or customer_details is not None
+            or customer_website is not None
         ):
             customer_doc = client.set_customer_primary_records(
                 customer_id,
                 address=primary_address,
                 contact=primary_contact,
-                customer_details=(
-                    customer_details if payload.customer_mode == "existing" else None
-                ),
-                website=customer_website
-                if payload.customer_mode == "existing"
-                else None,
+                customer_details=customer_details,
+                website=customer_website,
             )
-
-        project_detail = client.create_project(
-            project_name=project_name,
-            customer=customer_id,
-            project_type="External",
-            default_cost_center=default_cost_center or "Projects - 5",
-        )
-        erpnext_project_id = _text_or_none(project_detail.get("name"))
-        if erpnext_project_id is None:
-            raise ERPNextAPIError("ERPNext Project response is missing an id")
 
         try:
             project = _refresh_cached_erpnext_project_with_client(

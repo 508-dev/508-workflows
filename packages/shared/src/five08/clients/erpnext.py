@@ -218,6 +218,19 @@ class ERPNextClient:
             return row
         return self.get_record(normalized_doctype, normalized_id)
 
+    def delete_record(self, doctype: str, record_id: str) -> None:
+        """Delete one generic ERPNext document."""
+        normalized_doctype = doctype.strip()
+        normalized_id = record_id.strip()
+        if not normalized_doctype:
+            raise ERPNextAPIError("DocType is required")
+        if not normalized_id:
+            raise ERPNextAPIError(f"{normalized_doctype} id is required")
+        self.request(
+            "DELETE",
+            f"/api/resource/{quote(normalized_doctype, safe='')}/{quote(normalized_id, safe='')}",
+        )
+
     def get_record(self, doctype: str, record_id: str) -> dict[str, Any]:
         """Read one generic ERPNext document."""
         normalized_doctype = doctype.strip()

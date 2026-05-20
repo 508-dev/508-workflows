@@ -3,7 +3,7 @@
 import asyncio
 import re
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -3526,8 +3526,27 @@ def test_create_erpnext_project_setup_creates_customer_address_and_contact() -> 
         customer_name="Acme",
         account_manager=None,
         default_currency="USD",
-        customer_details="Important customer",
-        website="https://acme.example",
+    )
+    assert client.mock_calls.index(
+        call.create_project(
+            project_name="Acme Portal",
+            customer="Acme",
+            project_type="External",
+            default_cost_center="Projects - 5",
+        )
+    ) < client.mock_calls.index(
+        call.create_address(
+            customer="Acme",
+            address_line1="123 Main St",
+            address_title="Acme",
+            address_line2=None,
+            city="Missoula",
+            state=None,
+            country="United States",
+            pincode=None,
+            email_id="ada@example.test",
+            phone="555-0100",
+        )
     )
     client.create_address.assert_called_once_with(
         customer="Acme",
@@ -3553,9 +3572,49 @@ def test_create_erpnext_project_setup_creates_customer_address_and_contact() -> 
         "Acme",
         address="ADDR-0001",
         contact="CONT-0001",
-        customer_details=None,
-        website=None,
+        customer_details="Important customer",
+        website="https://acme.example",
     )
+
+
+def test_create_erpnext_project_setup_deletes_new_customer_when_project_fails() -> None:
+    client = Mock()
+    client.create_customer.return_value = {"name": "Acme", "customer_name": "Acme"}
+    client.create_project.side_effect = api.ERPNextAPIError("invalid cost center")
+    client.ensure_activity_type.return_value = {
+        "name": "Engineering for Acme Portal",
+        "activity_type": "Engineering for Acme Portal",
+    }
+    payload = api.DashboardProjectCreateRequest(
+        project_name="Acme Portal",
+        customer_mode="new",
+        customer_name="Acme",
+        address_line1="123 Main St",
+        contact_first_name="Ada",
+    )
+
+    with (
+        patch("five08.backend.api._erpnext_client", return_value=client),
+        pytest.raises(api.ERPNextAPIError, match="invalid cost center"),
+    ):
+        api._create_erpnext_project_setup(payload)
+
+    client.create_customer.assert_called_once_with(
+        customer_name="Acme",
+        account_manager=None,
+        default_currency="USD",
+    )
+    client.create_project.assert_called_once_with(
+        project_name="Acme Portal",
+        customer="Acme",
+        project_type="External",
+        default_cost_center="Projects - 5",
+    )
+    client.delete_record.assert_called_once_with("Customer", "Acme")
+    client.create_address.assert_not_called()
+    client.create_contact.assert_not_called()
+    client.set_customer_primary_records.assert_not_called()
+    client.close.assert_called_once_with()
 
 
 def test_create_erpnext_project_setup_reuses_and_links_existing_contact() -> None:
