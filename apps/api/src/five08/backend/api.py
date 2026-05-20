@@ -3918,6 +3918,26 @@ def _setup_erpnext_engineer(payload: DashboardEngineerSetupRequest) -> dict[str,
         client.close()
 
 
+async def _audit_dashboard_engineer_setup(
+    session: AuthSession,
+    *,
+    result: AuditResult,
+    email: str,
+    metadata: dict[str, Any],
+) -> None:
+    actor_provider, actor_subject = _session_audit_actor(session)
+    await _write_auth_audit_event(
+        action="erpnext.engineer_setup",
+        result=result,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="erpnext_user",
+        resource_id=email,
+        metadata={"source": "dashboard", **metadata},
+    )
+
+
 def _remove_erpnext_project_user(
     *,
     external_project_id: str,
@@ -4412,6 +4432,16 @@ async def dashboard_setup_engineer_handler(request: Request) -> JSONResponse:
     try:
         result = await asyncio.to_thread(_setup_erpnext_engineer, payload)
     except EngineerOnboardingDuplicateNameError as exc:
+        await _audit_dashboard_engineer_setup(
+            session,
+            result=AuditResult.DENIED,
+            email=normalized_email,
+            metadata={
+                "error": "similar_engineer_exists",
+                "detail": str(exc),
+                "matches": exc.matches,
+            },
+        )
         return JSONResponse(
             {
                 "error": "similar_engineer_exists",
@@ -4421,30 +4451,36 @@ async def dashboard_setup_engineer_handler(request: Request) -> JSONResponse:
             status_code=409,
         )
     except EngineerOnboardingError as exc:
+        await _audit_dashboard_engineer_setup(
+            session,
+            result=AuditResult.DENIED,
+            email=normalized_email,
+            metadata={"error": "engineer_setup_failed", "detail": str(exc)},
+        )
         return JSONResponse(
             {"error": "engineer_setup_failed", "detail": str(exc)},
             status_code=400,
         )
     except ERPNextAPIError as exc:
+        await _audit_dashboard_engineer_setup(
+            session,
+            result=AuditResult.ERROR,
+            email=normalized_email,
+            metadata={"error": "erpnext_engineer_setup_failed", "detail": str(exc)},
+        )
         return JSONResponse(
             {"error": "erpnext_engineer_setup_failed", "detail": str(exc)},
             status_code=502,
         )
 
-    actor_provider, actor_subject = _session_audit_actor(session)
-    await _write_auth_audit_event(
-        action="erpnext.engineer_setup",
+    await _audit_dashboard_engineer_setup(
+        session,
         result=AuditResult.SUCCESS,
-        actor_subject=actor_subject,
-        actor_display_name=session.display_name,
-        actor_provider=actor_provider,
-        resource_type="erpnext_user",
-        resource_id=normalized_email,
+        email=normalized_email,
         metadata={
-            "source": "dashboard",
-            "user": result.get("user"),
-            "employee": result.get("employee"),
-            "supplier": result.get("supplier"),
+            "user_id": result.get("user"),
+            "employee_id": result.get("employee"),
+            "supplier_id": result.get("supplier"),
             "created": result.get("created"),
             "updated": result.get("updated"),
         },

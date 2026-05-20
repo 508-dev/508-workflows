@@ -1626,10 +1626,13 @@ function App() {
       return result
     } catch (error) {
       if (error instanceof ApiRequestError && error.status === 409) {
-        const payload = error.payload as { matches?: Array<{ label?: string; email?: string }> }
-        const matches = payload.matches || []
+        const payload =
+          error.payload && typeof error.payload === "object"
+            ? (error.payload as { matches?: Array<{ label?: string; email?: string }> })
+            : null
+        const matches = Array.isArray(payload?.matches) ? payload.matches : []
         const matchLabel = matches
-          .map((match) => match.label || match.email)
+          .map((match) => match?.label || match?.email)
           .filter(Boolean)
           .slice(0, 2)
           .join(", ")
@@ -3938,7 +3941,11 @@ function ProjectDetailPage(props: {
   const hasInvalidRateNumber =
     Boolean(billingRate.trim() && parsedBillingRate === undefined) ||
     Boolean(costingRate.trim() && parsedCostingRate === undefined)
-  const rateInvalid = hasPartialRate || hasIncompleteActivityCost || hasInvalidRateNumber
+  const hasNegativeRate =
+    (parsedBillingRate !== undefined && parsedBillingRate < 0) ||
+    (parsedCostingRate !== undefined && parsedCostingRate < 0)
+  const rateInvalid =
+    hasPartialRate || hasIncompleteActivityCost || hasInvalidRateNumber || hasNegativeRate
   const ratePayload =
     hasRateFields && !rateInvalid
       ? {

@@ -67,6 +67,8 @@ def setup_engineer(
         ensure_no_similar_engineer_name(client, email=email, full_name=full_name)
 
     preflight_employee = employee_for_user(client, email)
+    if preflight_employee is None:
+        ensure_employee_preconditions(client)
     preflight_supplier_name = (
         _optional_text((preflight_employee or {}).get("employee_name")) or full_name
     )
@@ -235,6 +237,15 @@ def ensure_employee(
             "ERPNext Employee creation failed. Check required Employee fields "
             f"and defaults: {exc}"
         ) from exc
+
+
+def ensure_employee_preconditions(client: ERPNextClient) -> None:
+    """Validate Employee creation requirements without mutating ERPNext."""
+    if default_company(client):
+        return
+    raise EngineerOnboardingError(
+        "ERPNext default company is required before creating Employee records."
+    )
 
 
 def ensure_supplier(
@@ -419,6 +430,10 @@ def _activity_cost_preconditions(
         raise EngineerOnboardingError(
             "Billing rate and costing rate are required for Activity Cost."
         )
+    if request.billing_rate < 0 or request.costing_rate < 0:
+        raise EngineerOnboardingError(
+            "Billing rate and costing rate must be non-negative."
+        )
 
     employee = employee_for_user(client, user)
     if employee is None:
@@ -440,6 +455,11 @@ def add_engineer_to_project(
     normalized_user = _normalize_508_email(user)
     activity_cost_result = None
     if activity_cost is not None:
+        activity_cost_user = _normalize_508_email(activity_cost.user)
+        if activity_cost_user != normalized_user:
+            raise EngineerOnboardingError(
+                "activity_cost.user must match user for project assignment."
+            )
         _activity_cost_preconditions(client, activity_cost)
     project = client.add_project_user(normalized_project_id, normalized_user)
     if activity_cost is not None:

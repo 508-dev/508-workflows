@@ -3183,6 +3183,13 @@ def test_dashboard_setup_engineer_returns_setup_result(client: TestClient) -> No
     assert setup_payload.email == " jane@508.dev "
     assert setup_payload.first_name == "Jane"
     mock_audit.assert_awaited_once()
+    audit_kwargs = mock_audit.await_args.kwargs
+    assert audit_kwargs["metadata"]["user_id"] == "jane@508.dev"
+    assert audit_kwargs["metadata"]["employee_id"] == "HR-EMP-00001"
+    assert audit_kwargs["metadata"]["supplier_id"] == "SUP-0001"
+    assert "user" not in audit_kwargs["metadata"]
+    assert "employee" not in audit_kwargs["metadata"]
+    assert "supplier" not in audit_kwargs["metadata"]
 
 
 @pytest.mark.parametrize(
@@ -3231,7 +3238,10 @@ def test_dashboard_setup_engineer_maps_duplicate_name_to_conflict(
             "five08.backend.api._setup_erpnext_engineer",
             side_effect=duplicate_error,
         ),
-        patch("five08.backend.api._write_auth_audit_event", new_callable=AsyncMock),
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
     ):
         response = client.post(
             "/dashboard/api/onboarding/engineers",
@@ -3244,6 +3254,11 @@ def test_dashboard_setup_engineer_maps_duplicate_name_to_conflict(
         "detail": "similar person exists",
         "matches": [{"doctype": "Supplier", "name": "SUP-0001"}],
     }
+    mock_audit.assert_awaited_once()
+    assert mock_audit.await_args.kwargs["result"] == api.AuditResult.DENIED
+    assert (
+        mock_audit.await_args.kwargs["metadata"]["error"] == "similar_engineer_exists"
+    )
 
 
 def test_dashboard_setup_engineer_maps_onboarding_error_to_bad_request(
@@ -3259,6 +3274,10 @@ def test_dashboard_setup_engineer_maps_onboarding_error_to_bad_request(
             "five08.backend.api._setup_erpnext_engineer",
             side_effect=api.EngineerOnboardingError("Country is required"),
         ),
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
     ):
         response = client.post(
             "/dashboard/api/onboarding/engineers",
@@ -3270,6 +3289,9 @@ def test_dashboard_setup_engineer_maps_onboarding_error_to_bad_request(
         "error": "engineer_setup_failed",
         "detail": "Country is required",
     }
+    mock_audit.assert_awaited_once()
+    assert mock_audit.await_args.kwargs["result"] == api.AuditResult.DENIED
+    assert mock_audit.await_args.kwargs["metadata"]["error"] == "engineer_setup_failed"
 
 
 def test_dashboard_setup_engineer_maps_erpnext_error_to_bad_gateway(
@@ -3285,6 +3307,10 @@ def test_dashboard_setup_engineer_maps_erpnext_error_to_bad_gateway(
             "five08.backend.api._setup_erpnext_engineer",
             side_effect=api.ERPNextAPIError("ERP unavailable"),
         ),
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
     ):
         response = client.post(
             "/dashboard/api/onboarding/engineers",
@@ -3296,6 +3322,12 @@ def test_dashboard_setup_engineer_maps_erpnext_error_to_bad_gateway(
         "error": "erpnext_engineer_setup_failed",
         "detail": "ERP unavailable",
     }
+    mock_audit.assert_awaited_once()
+    assert mock_audit.await_args.kwargs["result"] == api.AuditResult.ERROR
+    assert (
+        mock_audit.await_args.kwargs["metadata"]["error"]
+        == "erpnext_engineer_setup_failed"
+    )
 
 
 def test_dashboard_search_erpnext_customers_allows_project_write(

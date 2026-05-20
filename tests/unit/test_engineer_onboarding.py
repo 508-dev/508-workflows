@@ -341,6 +341,37 @@ def test_setup_engineer_requires_country_before_user_or_employee_writes() -> Non
     assert client.records["Supplier"] == {}
 
 
+def test_setup_engineer_requires_employee_defaults_before_user_write() -> None:
+    class MissingCompanyClient(FakeERPNextClient):
+        def call_method(
+            self,
+            method: str,
+            *,
+            params: dict[str, Any] | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            del method, params, payload
+            return {"message": None}
+
+    client = MissingCompanyClient()
+    client.records["Company"] = {}
+
+    with pytest.raises(EngineerOnboardingError, match="default company"):
+        setup_engineer(
+            client,  # type: ignore[arg-type]
+            EngineerSetupRequest(
+                email="jane@508.dev",
+                first_name="Jane",
+                last_name="Engineer",
+                country="Taiwan",
+            ),
+        )
+
+    assert client.records["User"] == {}
+    assert client.records["Employee"] == {}
+    assert client.records["Supplier"] == {}
+
+
 def test_ensure_supplier_reuses_supplier_matched_by_supplier_name() -> None:
     client = FakeERPNextClient()
     client.records["Supplier"]["SUP-0001"] = {
@@ -439,6 +470,59 @@ def test_configure_engineer_activity_cost_requires_both_rates() -> None:
                 billing_rate=150,
             ),
         )
+
+
+def test_configure_engineer_activity_cost_rejects_negative_rates() -> None:
+    client = FakeERPNextClient()
+    setup_engineer(
+        client,  # type: ignore[arg-type]
+        EngineerSetupRequest(
+            email="jane@508.dev",
+            first_name="Jane",
+            last_name="Engineer",
+            country="Taiwan",
+        ),
+    )
+
+    with pytest.raises(EngineerOnboardingError, match="non-negative"):
+        configure_engineer_activity_cost(
+            client,  # type: ignore[arg-type]
+            ActivityCostRequest(
+                user="jane@508.dev",
+                activity_type="Engineering for Test Project",
+                billing_rate=-1,
+                costing_rate=100,
+            ),
+        )
+
+
+def test_add_engineer_to_project_requires_activity_cost_user_to_match() -> None:
+    client = FakeERPNextClient()
+    setup_engineer(
+        client,  # type: ignore[arg-type]
+        EngineerSetupRequest(
+            email="jane@508.dev",
+            first_name="Jane",
+            last_name="Engineer",
+            country="Taiwan",
+        ),
+    )
+
+    with pytest.raises(EngineerOnboardingError, match="activity_cost.user"):
+        add_engineer_to_project(
+            client,  # type: ignore[arg-type]
+            project_id="PROJ-001",
+            user="jane@508.dev",
+            activity_cost=ActivityCostRequest(
+                user="other@508.dev",
+                activity_type="Engineering for Test Project",
+                billing_rate=150,
+                costing_rate=100,
+            ),
+        )
+
+    assert client.records["Project"]["PROJ-001"]["users"] == []
+    assert client.records["Activity Cost"] == {}
 
 
 def test_add_engineer_to_project_validates_activity_cost_before_roster_update() -> None:

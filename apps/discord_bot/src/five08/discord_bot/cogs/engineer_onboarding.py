@@ -69,6 +69,49 @@ class EngineerOnboardingCog(DiscordAuditCogMixin, commands.Cog):
         finally:
             client.close()
 
+    def _audit_engineer_setup_denied(
+        self,
+        *,
+        interaction: discord.Interaction,
+        email: str,
+        error: str,
+    ) -> None:
+        self._audit_command_safe(
+            interaction=interaction,
+            action="erpnext.engineer_setup",
+            result="denied",
+            metadata={"email": email, "error": error},
+            resource_type="erpnext_user",
+            resource_id=email or None,
+        )
+
+    def _audit_project_engineer_add_denied(
+        self,
+        *,
+        interaction: discord.Interaction,
+        project_id: str,
+        user: str,
+        activity_type: str,
+        billing_rate: float | None,
+        costing_rate: float | None,
+        error: str,
+    ) -> None:
+        self._audit_command_safe(
+            interaction=interaction,
+            action="erpnext.project_engineer_add",
+            result="denied",
+            metadata={
+                "project_id": project_id,
+                "user": user,
+                "activity_type": activity_type,
+                "billing_rate": billing_rate,
+                "costing_rate": costing_rate,
+                "error": error,
+            },
+            resource_type="erpnext_project",
+            resource_id=project_id or None,
+        )
+
     @app_commands.command(
         name="setup-engineer",
         description="Create or link ERPNext User, Employee, and Supplier for an engineer.",
@@ -100,12 +143,22 @@ class EngineerOnboardingCog(DiscordAuditCogMixin, commands.Cog):
         normalized_name = " ".join(name.strip().split())
         normalized_country = country.strip() if country else None
         if not normalized_email or not normalized_email.endswith("@508.dev"):
+            self._audit_engineer_setup_denied(
+                interaction=interaction,
+                email=normalized_email,
+                error="invalid_email",
+            )
             await interaction.followup.send(
                 "❌ Enter a valid @508.dev email.",
                 ephemeral=True,
             )
             return
         if not normalized_name:
+            self._audit_engineer_setup_denied(
+                interaction=interaction,
+                email=normalized_email,
+                error="missing_name",
+            )
             await interaction.followup.send(
                 "❌ Enter the engineer name.", ephemeral=True
             )
@@ -228,11 +281,29 @@ class EngineerOnboardingCog(DiscordAuditCogMixin, commands.Cog):
         normalized_user = user.strip().lower()
         normalized_activity_type = (activity_type or "").strip()
         if not normalized_project_id:
+            self._audit_project_engineer_add_denied(
+                interaction=interaction,
+                project_id=normalized_project_id,
+                user=normalized_user,
+                activity_type=normalized_activity_type,
+                billing_rate=billing_rate,
+                costing_rate=costing_rate,
+                error="missing_project_id",
+            )
             await interaction.followup.send(
                 "❌ Enter an ERPNext Project id.", ephemeral=True
             )
             return
         if not normalized_user.endswith("@508.dev"):
+            self._audit_project_engineer_add_denied(
+                interaction=interaction,
+                project_id=normalized_project_id,
+                user=normalized_user,
+                activity_type=normalized_activity_type,
+                billing_rate=billing_rate,
+                costing_rate=costing_rate,
+                error="invalid_user_email",
+            )
             await interaction.followup.send(
                 "❌ Enter the engineer's @508.dev ERPNext User email.",
                 ephemeral=True,
@@ -241,14 +312,49 @@ class EngineerOnboardingCog(DiscordAuditCogMixin, commands.Cog):
         has_billing_rate = billing_rate is not None
         has_costing_rate = costing_rate is not None
         if (has_billing_rate or has_costing_rate) and not normalized_activity_type:
+            self._audit_project_engineer_add_denied(
+                interaction=interaction,
+                project_id=normalized_project_id,
+                user=normalized_user,
+                activity_type=normalized_activity_type,
+                billing_rate=billing_rate,
+                costing_rate=costing_rate,
+                error="activity_type_required",
+            )
             await interaction.followup.send(
                 "❌ Activity Type is required when setting bill or cost rates.",
                 ephemeral=True,
             )
             return
         if normalized_activity_type and not (has_billing_rate and has_costing_rate):
+            self._audit_project_engineer_add_denied(
+                interaction=interaction,
+                project_id=normalized_project_id,
+                user=normalized_user,
+                activity_type=normalized_activity_type,
+                billing_rate=billing_rate,
+                costing_rate=costing_rate,
+                error="activity_cost_rates_required",
+            )
             await interaction.followup.send(
                 "❌ Billing rate and costing rate are required with Activity Type.",
+                ephemeral=True,
+            )
+            return
+        if (billing_rate is not None and billing_rate < 0) or (
+            costing_rate is not None and costing_rate < 0
+        ):
+            self._audit_project_engineer_add_denied(
+                interaction=interaction,
+                project_id=normalized_project_id,
+                user=normalized_user,
+                activity_type=normalized_activity_type,
+                billing_rate=billing_rate,
+                costing_rate=costing_rate,
+                error="negative_activity_cost_rate",
+            )
+            await interaction.followup.send(
+                "❌ Billing and costing rates must be non-negative.",
                 ephemeral=True,
             )
             return
