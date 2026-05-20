@@ -128,7 +128,10 @@ def test_remove_project_user_does_not_match_child_row_name() -> None:
 
     client = CaptureClient()
 
-    result = client.remove_project_user("PROJ-001", "row-2")
+    with pytest.raises(
+        ERPNextAPIError,
+        match="Project user not found: row-2 for project PROJ-001",
+    ):
+        client.remove_project_user("PROJ-001", "row-2")
 
-    assert result["users"][0]["user"] == "remove@508.dev"
     assert client.updated is False

@@ -310,7 +310,9 @@ class ERPNextClient:
                 next_user["name"] = raw_user.get("name")
             next_users.append(next_user)
         if not removed:
-            return project
+            raise ERPNextAPIError(
+                f"Project user not found: {normalized_user} for project {project_id}"
+            )
         return self.update_project(project_id, {"users": next_users})
 
     @staticmethod

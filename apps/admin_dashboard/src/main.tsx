@@ -2896,7 +2896,16 @@ function ProjectDetailPage(props: {
   useEffect(() => {
     if (!props.canWrite) return
     const query = newUser.trim()
-    setSelectedRosterCandidateId("")
+    if (
+      selectedRosterCandidateId &&
+      selectedRosterCandidate &&
+      query === (selectedRosterCandidate.email || selectedRosterCandidate.label || "")
+    ) {
+      return
+    }
+    if (selectedRosterCandidateId) {
+      setSelectedRosterCandidateId("")
+    }
     const readyForLookup = query.includes("@") ? query.length >= 5 : query.length >= 3
     if (!readyForLookup) {
       setRosterCandidates([])
@@ -2918,7 +2927,7 @@ function ProjectDetailPage(props: {
       controller.abort()
       window.clearTimeout(timer)
     }
-  }, [newUser, props.canWrite])
+  }, [newUser, props.canWrite, selectedRosterCandidate, selectedRosterCandidateId])
 
   function chooseRosterCandidate(candidate: HistoricalPersonCandidate) {
     setSelectedRosterCandidateId(candidate.candidate_id)

@@ -3101,9 +3101,11 @@ def _copy_project_roster_candidates(
 
 def _project_roster_user_candidates_uncached(query: str) -> list[dict[str, Any]]:
     merged: dict[str, dict[str, Any]] = {}
-    for candidate in _dashboard_people_candidates_for_project_member(query):
-        if _candidate_508_email(candidate) is not None:
-            _merge_historical_candidate(merged, candidate)
+    crm_candidates = [
+        candidate
+        for candidate in _dashboard_people_candidates_for_project_member(query)
+        if _candidate_508_email(candidate) is not None
+    ]
     try:
         erpnext_candidates = _erpnext_user_candidates_for_project_member(query)
     except ERPNextAPIError:
@@ -3111,6 +3113,10 @@ def _project_roster_user_candidates_uncached(query: str) -> list[dict[str, Any]]
         erpnext_candidates = []
     for candidate in erpnext_candidates:
         if _candidate_508_email(candidate) is not None:
+            _merge_historical_candidate(merged, candidate)
+    for candidate in crm_candidates:
+        email = _candidate_508_email(candidate)
+        if email and f"email:{email.casefold()}" in merged:
             _merge_historical_candidate(merged, candidate)
     return sorted(
         merged.values(),

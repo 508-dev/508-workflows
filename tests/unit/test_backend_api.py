@@ -3532,7 +3532,7 @@ def test_resolve_historical_project_member_merges_crm_erp_and_supplier(
     assert candidate["sources"] == ["CRM", "ERP User", "ERP Supplier"]
 
 
-def test_project_roster_user_candidates_require_508_email(
+def test_project_roster_user_candidates_require_erp_backed_508_email(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     api._PROJECT_ROSTER_USER_CANDIDATE_CACHE.clear()
@@ -3566,9 +3566,9 @@ def test_project_roster_user_candidates_require_508_email(
     candidates = api._project_roster_user_candidates("sam")
 
     assert [candidate["email"] for candidate in candidates] == [
-        "sam@508.dev",
         "samerp@508.dev",
     ]
+    assert candidates[0]["erpnext_user_id"] == "samerp@508.dev"
 
 
 def test_project_roster_user_candidates_cache_avoids_repeated_erp_lookups(

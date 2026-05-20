@@ -799,29 +799,37 @@ def remove_project_roster_member(
     if normalized_source_user_id is None:
         raise ValueError("source_user_id is required")
 
-    where_clause = """
-        project_id = %s::uuid
-        AND source = %s
-        AND source_user_id = %s
-    """
     params: list[Any] = [
         normalized_project_id,
         normalized_source,
         normalized_source_user_id,
     ]
     if normalized_roster_kind is not None:
-        where_clause += " AND roster_kind = %s"
         params.append(normalized_roster_kind)
 
     with get_postgres_connection(settings) as conn:
         with conn.cursor() as cursor:
-            cursor.execute(
-                f"""
-                DELETE FROM project_roster_members
-                WHERE {where_clause}
-                """,
-                params,
-            )
+            if normalized_roster_kind is None:
+                cursor.execute(
+                    """
+                    DELETE FROM project_roster_members
+                    WHERE project_id = %s::uuid
+                      AND source = %s
+                      AND source_user_id = %s
+                    """,
+                    params,
+                )
+            else:
+                cursor.execute(
+                    """
+                    DELETE FROM project_roster_members
+                    WHERE project_id = %s::uuid
+                      AND source = %s
+                      AND source_user_id = %s
+                      AND roster_kind = %s
+                    """,
+                    params,
+                )
             return bool(cursor.rowcount)
 
 
