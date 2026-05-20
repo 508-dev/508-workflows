@@ -175,7 +175,7 @@ def test_create_address_falls_back_for_whitespace_title_and_type() -> None:
 
 
 def test_search_contacts_matches_dashboard_visible_fields() -> None:
-    captured: dict[str, Any] = {}
+    calls: list[dict[str, Any]] = []
 
     class CaptureClient(FakeERPNextClient):
         def request(
@@ -186,25 +186,58 @@ def test_search_contacts_matches_dashboard_visible_fields() -> None:
             params: dict[str, Any] | None = None,
             payload: dict[str, Any] | None = None,
         ) -> dict[str, Any]:
-            captured["method"] = method
-            captured["path"] = path
-            captured["params"] = params
-            return {"data": [{"name": "CONTACT-0001", "full_name": "Acme Contact"}]}
+            calls.append({"method": method, "path": path, "params": params})
+            if len(calls) == 1:
+                return {"data": [{"name": "CONTACT-0001", "full_name": "Acme Contact"}]}
+            return {"data": []}
 
     client = CaptureClient({"data": []})
 
     result = client.search_contacts("co")
 
     assert result == [{"name": "CONTACT-0001", "full_name": "Acme Contact"}]
-    assert captured["method"] == "GET"
-    assert captured["path"] == "/api/resource/Contact"
-    params = captured["params"]
+    assert calls[0]["method"] == "GET"
+    assert calls[0]["path"] == "/api/resource/Contact"
+    params = calls[0]["params"]
     assert json.loads(params["or_filters"]) == [
         ["Contact", "full_name", "like", "%co%"],
-        ["Contact", "email_id", "like", "%co%"],
         ["Contact", "mobile_no", "like", "%co%"],
         ["Contact", "phone", "like", "%co%"],
         ["Contact", "company_name", "like", "%co%"],
+    ]
+    assert json.loads(calls[1]["params"]["or_filters"]) == [
+        ["Contact", "email_id", "like", "%co%"]
+    ]
+
+
+def test_search_contacts_ignores_email_tld_only_matches() -> None:
+    class CaptureClient(FakeERPNextClient):
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            params: dict[str, Any] | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            filters = json.loads((params or {})["or_filters"])
+            if filters == [["Contact", "email_id", "like", "%co%"]]:
+                return {
+                    "data": [
+                        {"name": "CONTACT-0001", "email_id": "ada@example.com"},
+                        {"name": "CONTACT-0002", "email_id": "cody@example.net"},
+                        {"name": "CONTACT-0003", "email_id": "lead@company.org"},
+                    ]
+                }
+            return {"data": []}
+
+    client = CaptureClient({"data": []})
+
+    result = client.search_contacts("co")
+
+    assert result == [
+        {"name": "CONTACT-0002", "email_id": "cody@example.net"},
+        {"name": "CONTACT-0003", "email_id": "lead@company.org"},
     ]
 
 

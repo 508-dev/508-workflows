@@ -11,6 +11,27 @@ import requests
 from five08.tls import default_ca_bundle_path
 
 
+def _email_search_text_without_tld(email: str) -> str:
+    normalized_email = email.strip().lower()
+    if "@" not in normalized_email:
+        return normalized_email
+    local_part, domain = normalized_email.rsplit("@", 1)
+    if "." not in domain:
+        return normalized_email
+    domain_without_tld = domain.rsplit(".", 1)[0]
+    return f"{local_part}@{domain_without_tld}"
+
+
+def _contact_email_matches_query(email: Any, query: str) -> bool:
+    normalized_email = str(email or "").strip().lower()
+    normalized_query = query.strip().lower()
+    if not (normalized_email and normalized_query):
+        return False
+    if "@" in normalized_query:
+        return normalized_query in normalized_email
+    return normalized_query in _email_search_text_without_tld(normalized_email)
+
+
 class ERPNextAPIError(Exception):
     """Raised when ERPNext returns an error or unexpected response."""
 
@@ -256,27 +277,49 @@ class ERPNextClient:
         if not normalized_query:
             return []
         like_query = f"%{normalized_query}%"
-        return self.list_records(
+        contact_fields = [
+            "name",
+            "first_name",
+            "last_name",
+            "full_name",
+            "email_id",
+            "mobile_no",
+            "phone",
+            "company_name",
+        ]
+        rows_by_name: dict[str, dict[str, Any]] = {}
+        visible_rows = self.list_records(
             "Contact",
-            fields=[
-                "name",
-                "first_name",
-                "last_name",
-                "full_name",
-                "email_id",
-                "mobile_no",
-                "phone",
-                "company_name",
-            ],
+            fields=contact_fields,
             or_filters=[
                 ["Contact", "full_name", "like", like_query],
-                ["Contact", "email_id", "like", like_query],
                 ["Contact", "mobile_no", "like", like_query],
                 ["Contact", "phone", "like", like_query],
                 ["Contact", "company_name", "like", like_query],
             ],
             limit=limit,
         )
+        for row in visible_rows:
+            contact_id = str(row.get("name") or "").strip()
+            if contact_id:
+                rows_by_name[contact_id] = row
+
+        email_rows = self.list_records(
+            "Contact",
+            fields=contact_fields,
+            or_filters=[["Contact", "email_id", "like", like_query]],
+            limit=max(limit * 5, 50),
+        )
+        for row in email_rows:
+            contact_id = str(row.get("name") or "").strip()
+            if not contact_id or contact_id in rows_by_name:
+                continue
+            if _contact_email_matches_query(row.get("email_id"), normalized_query):
+                rows_by_name[contact_id] = row
+            if len(rows_by_name) >= limit:
+                break
+
+        return list(rows_by_name.values())[:limit]
 
     def create_customer(
         self,
