@@ -23,8 +23,9 @@ ALL_SERVICES = ("web", "worker", "discord-bot")
 
 
 def _service_commands(
-    env: dict[str, str], selected_services: set[str]
+    env: dict[str, str], selected_services: set[str] | None = None
 ) -> list[tuple[str, list[str]]]:
+    selected_services = selected_services or set(ALL_SERVICES)
     commands = [
         (
             "web",
@@ -193,8 +194,9 @@ def _stop_pid(pid: int) -> None:
 
 
 def _ensure_ports_available(
-    env: dict[str, str], selected_services: set[str]
+    env: dict[str, str], selected_services: set[str] | None = None
 ) -> tuple[bool, str | None]:
+    selected_services = selected_services or set(ALL_SERVICES)
     worktree_root = env.get("WORKTREE_ENV_REPO_ROOT", "")
 
     for service_name, env_key in PORT_SERVICES.items():
@@ -274,8 +276,9 @@ def _selected_services(argv: list[str]) -> set[str] | None:
 
     if invalid or not selected:
         services = "|".join(ALL_SERVICES)
+        program = os.path.basename(sys.argv[0]) or "dev_mux.py"
         print(
-            f"Usage: dev_mux.py [{services} ...]",
+            f"Usage: {program} [{services} ...]",
             file=sys.stderr,
         )
         if invalid:

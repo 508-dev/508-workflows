@@ -156,6 +156,7 @@ Run app services on the host with:
   ./scripts/dev.sh worker
   ./scripts/dev.sh discord-bot
   ./scripts/dev.sh no-bot  # web dashboard + worker, no Discord bot
+  ./scripts/dev.sh web-worker  # alias for no-bot
   ./scripts/dev.sh login   # create a local/dev dashboard login link
   ./scripts/dev.sh all
 EOF
@@ -237,7 +238,7 @@ EOF
     exec uv run --package discord_bot discord-bot
     ;;
   *)
-    echo "Usage: ./scripts/dev.sh [infra|all|no-bot|dashboard|login|migrate|down|ports|env|web|api|worker|discord-bot]" >&2
+    echo "Usage: ./scripts/dev.sh [infra|all|no-bot|web-worker|dashboard|login|migrate|down|ports|env|web|api|worker|discord-bot]" >&2
     exit 1
     ;;
 esac

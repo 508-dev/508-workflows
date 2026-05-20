@@ -406,8 +406,9 @@ function messageForApiError(record: Record<string, unknown>, fallback: string) {
 }
 
 function messageFromUnknown(error: unknown, fallback: string) {
-  if (typeof error === "string") return error
-  return error instanceof Error ? error.message : fallback
+  if (typeof error === "string" && error.trim()) return error
+  if (error instanceof Error && error.message.trim()) return error.message
+  return fallback
 }
 
 function devErrorFromUnknown(error: unknown, fallback: string): DashboardDevError {
