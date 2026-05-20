@@ -66,6 +66,16 @@ def setup_engineer(
     if not user_exists:
         ensure_no_similar_engineer_name(client, email=email, full_name=full_name)
 
+    preflight_employee = employee_for_user(client, email)
+    preflight_supplier_name = (
+        _optional_text((preflight_employee or {}).get("employee_name")) or full_name
+    )
+    ensure_supplier_preconditions(
+        client,
+        supplier_name=preflight_supplier_name,
+        country=_optional_text(request.country),
+    )
+
     user, user_created = ensure_user(client, email=email, full_name=full_name)
     user, role_result = ensure_engineer_role(client, user)
     employee, employee_created = ensure_employee(
@@ -266,6 +276,22 @@ def ensure_supplier(
     return updated, created, True
 
 
+def ensure_supplier_preconditions(
+    client: ERPNextClient,
+    *,
+    supplier_name: str,
+    country: str | None,
+) -> None:
+    """Validate Supplier requirements without mutating ERPNext records."""
+    normalized_supplier_name = _required_text(supplier_name, "supplier_name")
+    if supplier_by_supplier_name(client, normalized_supplier_name) is not None:
+        return
+    if _optional_text(country) is None:
+        raise EngineerOnboardingError(
+            "Country is required when creating a new Supplier."
+        )
+
+
 def supplier_by_supplier_name(
     client: ERPNextClient,
     supplier_name: str,
@@ -385,7 +411,17 @@ def add_engineer_to_project(
         _activity_cost_preconditions(client, activity_cost)
     project = client.add_project_user(normalized_project_id, normalized_user)
     if activity_cost is not None:
-        activity_cost_result = configure_engineer_activity_cost(client, activity_cost)
+        try:
+            activity_cost_result = configure_engineer_activity_cost(
+                client, activity_cost
+            )
+        except (EngineerOnboardingError, ERPNextAPIError) as exc:
+            return {
+                "project": project,
+                "activity_cost": None,
+                "activity_cost_error": str(exc),
+                "partial_success": True,
+            }
     return {"project": project, "activity_cost": activity_cost_result}
 
 

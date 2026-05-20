@@ -4541,6 +4541,7 @@ async def dashboard_add_project_user_handler(
             "user": normalized_user,
             "candidate_id": payload.candidate_id,
             "activity_cost": project_user_result.get("activity_cost"),
+            "activity_cost_error": project_user_result.get("activity_cost_error"),
             "local_project_id": project_id,
         },
     )

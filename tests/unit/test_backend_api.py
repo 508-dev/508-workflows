@@ -4080,6 +4080,67 @@ def test_dashboard_add_project_user_passes_activity_cost_rates(
     )
 
 
+def test_dashboard_add_project_user_returns_activity_cost_partial_success(
+    client: TestClient,
+) -> None:
+    project_id = "11111111-1111-4111-8111-111111111111"
+    cached_project = {
+        "id": project_id,
+        "display_name": "Visible Project",
+        "erpnext_project_id": "PROJ-0033",
+        "roster_members": [],
+    }
+    updated_project = {
+        **cached_project,
+        "roster_members": [{"email": "member@508.dev"}],
+    }
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", _dashboard_write_session()),
+        ),
+        patch(
+            "five08.backend.api._cached_dashboard_project_by_id",
+            return_value=cached_project,
+        ),
+        patch(
+            "five08.backend.api._add_erpnext_project_user",
+            return_value={
+                "project": updated_project,
+                "activity_cost": None,
+                "activity_cost_error": "activity cost write denied",
+                "partial_success": True,
+            },
+        ),
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            f"/dashboard/api/projects/{project_id}/users",
+            json={
+                "user": "member@508.dev",
+                "candidate_id": "email:member@508.dev",
+                "activity_type": "Engineering",
+                "billing_rate": 150,
+                "costing_rate": 100,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "project": updated_project,
+        "activity_cost": None,
+        "activity_cost_error": "activity cost write denied",
+        "partial_success": True,
+    }
+    audit_metadata = mock_audit.await_args.kwargs["metadata"]
+    assert audit_metadata["activity_cost_error"] == "activity cost write denied"
+
+
 def test_dashboard_add_project_user_rejects_non_508_email(
     client: TestClient,
 ) -> None:

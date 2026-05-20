@@ -1186,22 +1186,30 @@ function App() {
     if (!normalizedUser || !normalizedCandidateId) return false
     setBusy(`project:${projectId}:user`, true)
     try {
-      const payload = await requestJson<{ project: Project; activity_cost?: object | null }>(
-        `/dashboard/api/projects/${encodeURIComponent(projectId)}/users`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            user: normalizedUser,
-            candidate_id: normalizedCandidateId,
-            ...(rates || {}),
-          }),
-        },
-      )
+      const payload = await requestJson<{
+        project: Project
+        activity_cost?: object | null
+        activity_cost_error?: string | null
+      }>(`/dashboard/api/projects/${encodeURIComponent(projectId)}/users`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user: normalizedUser,
+          candidate_id: normalizedCandidateId,
+          ...(rates || {}),
+        }),
+      })
       setProjects((current) =>
         current.map((project) => (project.id === projectId ? payload.project : project)),
       )
-      showToast(payload.activity_cost ? "Added project user and rate" : "Added project user", "ok")
+      showToast(
+        payload.activity_cost_error
+          ? "Added project user; rate failed"
+          : payload.activity_cost
+            ? "Added project user and rate"
+            : "Added project user",
+        payload.activity_cost_error ? "error" : "ok",
+      )
       return true
     } catch (error) {
       showError(error, "Unable to add project user")
@@ -5495,7 +5503,7 @@ function EngineerSetupPanel({
             <Button
               id="setupEngineer"
               type="submit"
-              disabled={loading || !email.trim() || !fullName.trim() || !country.trim()}
+              disabled={loading || !email.trim() || !fullName.trim()}
             >
               <UserPlus />
               Set up engineer
