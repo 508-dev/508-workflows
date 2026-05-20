@@ -3172,8 +3172,14 @@ def test_dashboard_setup_engineer_returns_setup_result(client: TestClient) -> No
             json={
                 "email": " Jane@508.dev ",
                 "first_name": " Jane ",
+                "middle_name": " Q ",
                 "last_name": " Engineer ",
                 "country": " Taiwan ",
+                "gender": " Female ",
+                "date_of_birth": " 1990-03-04 ",
+                "date_of_joining": " 2024-01-02 ",
+                "personal_email": " jane@example.com ",
+                "prefered_email": " Personal Email ",
             },
         )
 
@@ -3182,8 +3188,14 @@ def test_dashboard_setup_engineer_returns_setup_result(client: TestClient) -> No
     setup_payload = mock_setup.call_args.args[0]
     assert setup_payload.email == "jane@508.dev"
     assert setup_payload.first_name == "Jane"
+    assert setup_payload.middle_name == "Q"
     assert setup_payload.last_name == "Engineer"
     assert setup_payload.country == "Taiwan"
+    assert setup_payload.gender == "Female"
+    assert setup_payload.date_of_birth == "1990-03-04"
+    assert setup_payload.date_of_joining == "2024-01-02"
+    assert setup_payload.personal_email == "jane@example.com"
+    assert setup_payload.prefered_email == "Personal Email"
     mock_audit.assert_awaited_once()
     audit_kwargs = mock_audit.await_args.kwargs
     assert audit_kwargs["metadata"]["user_id"] == "jane@508.dev"

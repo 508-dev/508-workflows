@@ -11,8 +11,8 @@ import {
   RefreshCw,
   Search,
   ShieldCheck,
-  UserPlus,
   UserMinus,
+  UserPlus,
   Users,
   X,
 } from "lucide-react"
@@ -75,6 +75,8 @@ type Person = {
   name?: string
   email?: string
   email_508?: string
+  created_at?: string
+  address_country?: string
   discord_user_id?: string
   discord_username?: string
   contact_type?: string
@@ -312,12 +314,14 @@ type AgentReport = {
 type EngineerSetupRequest = {
   email: string
   first_name: string
+  middle_name?: string
   last_name?: string
   country?: string
-  department?: string
   gender?: string
   date_of_birth?: string
-  create_user_permission?: boolean
+  date_of_joining?: string
+  personal_email?: string
+  prefered_email?: string
 }
 
 type EngineerSetupResult = {
@@ -5388,6 +5392,53 @@ function OnboardingView(props: {
   )
 }
 
+const employeeGenderOptions = [
+  "Female",
+  "Genderqueer",
+  "Male",
+  "Non-Conforming",
+  "Other",
+  "Prefer not to say",
+  "Transgender",
+]
+const defaultEmployeeDateOfBirth = "1980-01-01"
+const preferredEmailOptions = ["Company Email", "Personal Email", "User ID"]
+
+function todayInputDate() {
+  return new Date().toISOString().slice(0, 10)
+}
+
+function dateInputFromTimestamp(value?: string) {
+  if (!value) return ""
+  const match = value.match(/^\d{4}-\d{2}-\d{2}/)
+  return match?.[0] || ""
+}
+
+function splitPersonName(value?: string) {
+  const parts = (value || "").trim().split(/\s+/).filter(Boolean)
+  if (parts.length === 0) return { first: "", middle: "", last: "" }
+  if (parts.length === 1) return { first: parts[0], middle: "", last: "" }
+  if (parts.length === 2) return { first: parts[0], middle: "", last: parts[1] }
+  return {
+    first: parts[0],
+    middle: parts.slice(1, -1).join(" "),
+    last: parts[parts.length - 1],
+  }
+}
+
+function personalEmailFromPerson(person: Person) {
+  const email = (person.email || "").trim()
+  if (!email || email.toLowerCase().endsWith("@508.dev")) return ""
+  return email
+}
+
+function companyEmailFromPerson(person: Person) {
+  const email508 = (person.email_508 || "").trim()
+  if (email508) return email508
+  const email = (person.email || "").trim()
+  return email.toLowerCase().endsWith("@508.dev") ? email : ""
+}
+
 function EngineerSetupPanel({
   loading,
   onSetup,
@@ -5395,30 +5446,77 @@ function EngineerSetupPanel({
   loading?: boolean
   onSetup: (payload: EngineerSetupRequest) => Promise<EngineerSetupResult | null>
 }) {
-  const [email, setEmail] = useState("")
-  const [fullName, setFullName] = useState("")
+  const [crmQuery, setCrmQuery] = useState("")
+  const [crmMatches, setCrmMatches] = useState<Person[]>([])
+  const [crmLoading, setCrmLoading] = useState(false)
+  const [crmError, setCrmError] = useState("")
+  const [companyEmail, setCompanyEmail] = useState("")
+  const [firstName, setFirstName] = useState("")
+  const [middleName, setMiddleName] = useState("")
+  const [lastName, setLastName] = useState("")
   const [country, setCountry] = useState("")
-  const [gender, setGender] = useState("")
-  const [dateOfBirth, setDateOfBirth] = useState("")
+  const [gender, setGender] = useState("Male")
+  const [dateOfBirth, setDateOfBirth] = useState(defaultEmployeeDateOfBirth)
+  const [dateOfJoining, setDateOfJoining] = useState(todayInputDate())
+  const [personalEmail, setPersonalEmail] = useState("")
+  const [preferedEmail, setPreferedEmail] = useState("Company Email")
+
+  function fillFromPerson(person: Person) {
+    const name = splitPersonName(person.name)
+    setFirstName(name.first)
+    setMiddleName(name.middle)
+    setLastName(name.last)
+    setCompanyEmail(companyEmailFromPerson(person))
+    setPersonalEmail(personalEmailFromPerson(person))
+    setCountry(person.address_country || "")
+    setDateOfJoining(dateInputFromTimestamp(person.created_at) || todayInputDate())
+    setCrmQuery(person.name || person.email_508 || person.email || "")
+    setCrmMatches([])
+    setCrmError("")
+  }
+
+  async function searchCrmPeople() {
+    const query = crmQuery.trim()
+    if (!query) return
+    setCrmLoading(true)
+    setCrmError("")
+    try {
+      const params = new URLSearchParams({ limit: "8", query })
+      setCrmMatches(await requestJson<Person[]>(`/dashboard/api/people?${params.toString()}`))
+    } catch (error) {
+      setCrmError(messageFromUnknown(error, "Unable to search people"))
+      setCrmMatches([])
+    } finally {
+      setCrmLoading(false)
+    }
+  }
 
   async function submit() {
-    const normalizedName = fullName.trim()
-    const [first, ...rest] = normalizedName.split(/\s+/)
     const result = await onSetup({
-      email,
-      first_name: first || normalizedName,
-      last_name: rest.join(" "),
+      email: companyEmail,
+      first_name: firstName,
+      middle_name: middleName,
+      last_name: lastName,
       country,
       gender,
       date_of_birth: dateOfBirth,
-      create_user_permission: true,
+      date_of_joining: dateOfJoining,
+      personal_email: personalEmail,
+      prefered_email: preferedEmail,
     })
     if (result) {
-      setEmail("")
-      setFullName("")
+      setCrmQuery("")
+      setCrmMatches([])
+      setCompanyEmail("")
+      setFirstName("")
+      setMiddleName("")
+      setLastName("")
       setCountry("")
-      setGender("")
-      setDateOfBirth("")
+      setGender("Male")
+      setDateOfBirth(defaultEmployeeDateOfBirth)
+      setDateOfJoining(todayInputDate())
+      setPersonalEmail("")
+      setPreferedEmail("Company Email")
     }
   }
 
@@ -5435,23 +5533,92 @@ function EngineerSetupPanel({
             void submit()
           }}
         >
+          <div className="grid gap-3 border-b pb-3 md:grid-cols-[minmax(0,1fr)_auto]">
+            <Label>
+              CRM person
+              <Input
+                value={crmQuery}
+                autoComplete="off"
+                placeholder="Search name or email"
+                onChange={(event) => setCrmQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") return
+                  event.preventDefault()
+                  void searchCrmPeople()
+                }}
+              />
+            </Label>
+            <Button
+              type="button"
+              onClick={searchCrmPeople}
+              disabled={crmLoading || !crmQuery.trim()}
+            >
+              <Search />
+              Search
+            </Button>
+            {crmError ? (
+              <span className="text-sm font-semibold text-destructive">{crmError}</span>
+            ) : null}
+            {crmMatches.length > 0 ? (
+              <div className="grid gap-2 md:col-span-2">
+                {crmMatches.map((person) => {
+                  const label =
+                    person.name || person.email_508 || person.email || person.crm_contact_id
+                  const detail = [person.email_508 || person.email, person.contact_type]
+                    .filter(Boolean)
+                    .join(" | ")
+                  return (
+                    <button
+                      key={person.crm_contact_id || label}
+                      type="button"
+                      className="grid rounded-md border bg-background px-3 py-2 text-left text-sm hover:border-primary"
+                      onClick={() => fillFromPerson(person)}
+                    >
+                      <strong>{label}</strong>
+                      {detail ? <span className="text-muted-foreground">{detail}</span> : null}
+                    </button>
+                  )
+                })}
+              </div>
+            ) : null}
+          </div>
           <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(130px,.6fr)]">
             <Label>
-              508 email
+              Company email
               <Input
-                value={email}
+                value={companyEmail}
                 autoComplete="off"
                 placeholder="engineer@508.dev"
-                onChange={(event) => setEmail(event.target.value)}
+                onChange={(event) => setCompanyEmail(event.target.value)}
               />
             </Label>
             <Label>
-              Name
+              First name
               <Input
-                value={fullName}
+                value={firstName}
                 autoComplete="off"
-                placeholder="First Last"
-                onChange={(event) => setFullName(event.target.value)}
+                placeholder="First"
+                onChange={(event) => setFirstName(event.target.value)}
+              />
+            </Label>
+            <Label>
+              Middle name
+              <Input
+                value={middleName}
+                autoComplete="off"
+                placeholder="Optional"
+                onChange={(event) => setMiddleName(event.target.value)}
+              />
+            </Label>
+          </div>
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(130px,.6fr)]">
+            <Label>
+              Last name
+              <Input
+                value={lastName}
+                autoComplete="off"
+                placeholder="Last"
+                onChange={(event) => setLastName(event.target.value)}
               />
             </Label>
             <Label>
@@ -5464,31 +5631,67 @@ function EngineerSetupPanel({
               />
             </Label>
           </div>
-          <div className="grid gap-3 md:grid-cols-2">
-            <Label>
-              Gender
-              <Input
-                value={gender}
-                autoComplete="off"
-                placeholder="Optional"
-                onChange={(event) => setGender(event.target.value)}
-              />
-            </Label>
-            <Label>
-              Date of birth
-              <Input
-                value={dateOfBirth}
-                type="date"
-                autoComplete="off"
-                onChange={(event) => setDateOfBirth(event.target.value)}
-              />
-            </Label>
-          </div>
+          <details className="rounded-md border bg-background p-3">
+            <summary className="cursor-pointer text-sm font-extrabold">Advanced options</summary>
+            <div className="mt-3 grid gap-3 md:grid-cols-2">
+              <Label>
+                Gender
+                <Select value={gender} onChange={(event) => setGender(event.target.value)}>
+                  {employeeGenderOptions.map((option) => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
+                </Select>
+              </Label>
+              <Label>
+                Date of birth
+                <Input
+                  value={dateOfBirth}
+                  type="date"
+                  autoComplete="off"
+                  onChange={(event) => setDateOfBirth(event.target.value)}
+                />
+              </Label>
+              <Label>
+                Date of joining
+                <Input
+                  value={dateOfJoining}
+                  type="date"
+                  autoComplete="off"
+                  onChange={(event) => setDateOfJoining(event.target.value)}
+                />
+              </Label>
+              <Label>
+                Personal email
+                <Input
+                  value={personalEmail}
+                  type="email"
+                  autoComplete="off"
+                  placeholder="Optional"
+                  onChange={(event) => setPersonalEmail(event.target.value)}
+                />
+              </Label>
+              <Label>
+                Preferred contact email
+                <Select
+                  value={preferedEmail}
+                  onChange={(event) => setPreferedEmail(event.target.value)}
+                >
+                  {preferredEmailOptions.map((option) => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
+                </Select>
+              </Label>
+            </div>
+          </details>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <Button
               id="setupEngineer"
               type="submit"
-              disabled={loading || !email.trim() || !fullName.trim()}
+              disabled={loading || !companyEmail.trim() || !firstName.trim()}
             >
               <UserPlus />
               Set up engineer

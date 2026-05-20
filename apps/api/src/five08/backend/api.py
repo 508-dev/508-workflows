@@ -234,12 +234,14 @@ class DashboardEngineerSetupRequest(BaseModel):
 
     email: str
     first_name: str
+    middle_name: str | None = None
     last_name: str | None = None
     country: str | None = None
-    department: str | None = None
     gender: str | None = None
     date_of_birth: str | None = None
-    create_user_permission: bool = True
+    date_of_joining: str | None = None
+    personal_email: str | None = None
+    prefered_email: str | None = None
 
 
 class DashboardProjectUserRemoveRequest(BaseModel):
@@ -3906,12 +3908,14 @@ def _setup_erpnext_engineer(payload: DashboardEngineerSetupRequest) -> dict[str,
             EngineerSetupRequest(
                 email=payload.email,
                 first_name=payload.first_name,
+                middle_name=payload.middle_name,
                 last_name=payload.last_name,
                 country=payload.country,
-                department=payload.department,
                 gender=payload.gender,
                 date_of_birth=payload.date_of_birth,
-                create_user_permission=payload.create_user_permission,
+                date_of_joining=payload.date_of_joining,
+                personal_email=payload.personal_email,
+                prefered_email=payload.prefered_email,
             ),
         )
     finally:
@@ -4432,11 +4436,14 @@ async def dashboard_setup_engineer_handler(request: Request) -> JSONResponse:
         update={
             "email": normalized_email,
             "first_name": normalized_first_name,
+            "middle_name": _text_or_none(payload.middle_name),
             "last_name": _text_or_none(payload.last_name),
             "country": _text_or_none(payload.country),
-            "department": _text_or_none(payload.department),
             "gender": _text_or_none(payload.gender),
             "date_of_birth": _text_or_none(payload.date_of_birth),
+            "date_of_joining": _text_or_none(payload.date_of_joining),
+            "personal_email": _text_or_none(payload.personal_email),
+            "prefered_email": _text_or_none(payload.prefered_email),
         }
     )
 

@@ -154,7 +154,45 @@ def test_setup_engineer_creates_user_employee_supplier_and_links_supplier() -> N
     assert client.records["User"]["jane@508.dev"]["role_profile_name"] == "Engineer"
     assert client.records["User"]["jane@508.dev"]["first_name"] == "Jane Engineer"
     assert client.records["Employee"]["HR-EMP-00001"]["create_user_permission"] == 1
+    assert client.records["Employee"]["HR-EMP-00001"]["company_email"] == "jane@508.dev"
+    assert client.records["Employee"]["HR-EMP-00001"]["gender"] == "Male"
+    assert client.records["Employee"]["HR-EMP-00001"]["date_of_birth"] == "1980-01-01"
+    assert (
+        client.records["Employee"]["HR-EMP-00001"]["prefered_email"] == "Company Email"
+    )
     assert client.records["Supplier"]["Jane Engineer"]["email_id"] == "jane@508.dev"
+
+
+def test_setup_engineer_creates_employee_with_advanced_fields() -> None:
+    client = FakeERPNextClient()
+
+    result = setup_engineer(
+        client,  # type: ignore[arg-type]
+        EngineerSetupRequest(
+            email="jane@508.dev",
+            first_name="Jane",
+            middle_name="Q",
+            last_name="Engineer",
+            country="Taiwan",
+            gender="Female",
+            date_of_birth="1990-03-04",
+            date_of_joining="2024-01-02",
+            personal_email="jane@example.com",
+            prefered_email="Personal Email",
+        ),
+    )
+
+    employee = client.records["Employee"][result["employee"]]
+    assert employee["first_name"] == "Jane"
+    assert employee["middle_name"] == "Q"
+    assert employee["last_name"] == "Engineer"
+    assert employee["employee_name"] == "Jane Q Engineer"
+    assert employee["company_email"] == "jane@508.dev"
+    assert employee["personal_email"] == "jane@example.com"
+    assert employee["gender"] == "Female"
+    assert employee["date_of_birth"] == "1990-03-04"
+    assert employee["date_of_joining"] == "2024-01-02"
+    assert employee["prefered_email"] == "Personal Email"
 
 
 def test_setup_engineer_requires_508_email() -> None:
@@ -189,6 +227,34 @@ def test_setup_engineer_rejects_malformed_508_email(email: str) -> None:
                 country="Taiwan",
             ),
         )
+
+
+@pytest.mark.parametrize(
+    ("request_kwargs", "expected_error"),
+    [
+        ({"gender": "Man"}, "gender"),
+        ({"date_of_birth": "01/01/1980"}, "date_of_birth"),
+        ({"date_of_joining": "January 1 2024"}, "date_of_joining"),
+        ({"prefered_email": "Work Email"}, "Preferred contact email"),
+    ],
+)
+def test_setup_engineer_rejects_invalid_employee_fields(
+    request_kwargs: dict[str, str],
+    expected_error: str,
+) -> None:
+    client = FakeERPNextClient()
+
+    with pytest.raises(EngineerOnboardingError, match=expected_error):
+        setup_engineer(
+            client,  # type: ignore[arg-type]
+            EngineerSetupRequest(
+                email="jane@508.dev",
+                first_name="Jane",
+                country="Taiwan",
+                **request_kwargs,
+            ),
+        )
+    assert client.created == []
 
 
 def test_setup_engineer_reraises_user_read_errors_without_creating() -> None:

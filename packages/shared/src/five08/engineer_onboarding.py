@@ -13,6 +13,21 @@ ENGINEER_ROLE_PROFILE = "Engineer"
 EMPLOYEE_ROLE = "Employee"
 DEFAULT_SUPPLIER_GROUP = "Subcontractors"
 DEFAULT_SUPPLIER_CURRENCY = "USD"
+DEFAULT_EMPLOYEE_DATE_OF_BIRTH = "1980-01-01"
+DEFAULT_EMPLOYEE_GENDER = "Male"
+DEFAULT_PREFERRED_EMAIL = "Company Email"
+EMPLOYEE_GENDER_OPTIONS = frozenset(
+    {
+        "Female",
+        "Genderqueer",
+        "Male",
+        "Non-Conforming",
+        "Other",
+        "Prefer not to say",
+        "Transgender",
+    }
+)
+PREFERRED_EMAIL_OPTIONS = frozenset({"Company Email", "Personal Email", "User ID"})
 
 
 class EngineerOnboardingError(ValueError):
@@ -33,12 +48,14 @@ class EngineerSetupRequest:
 
     email: str
     first_name: str
+    middle_name: str | None = None
     last_name: str | None = None
     country: str | None = None
-    department: str | None = None
     gender: str | None = None
     date_of_birth: str | None = None
-    create_user_permission: bool = True
+    date_of_joining: str | None = None
+    personal_email: str | None = None
+    prefered_email: str | None = None
 
 
 @dataclass(frozen=True)
@@ -58,10 +75,25 @@ def setup_engineer(
     """Create or link the ERPNext records needed for one engineer."""
     email = _normalize_508_email(request.email)
     first_name = _required_text(request.first_name, "first_name")
+    middle_name = _optional_text(request.middle_name)
     last_name = _optional_text(request.last_name)
-    full_name = " ".join(part for part in (first_name, last_name) if part)
+    full_name = " ".join(part for part in (first_name, middle_name, last_name) if part)
     if not full_name:
         raise EngineerOnboardingError("Engineer name is required")
+    country = _optional_text(request.country)
+    employee_gender = _employee_gender_value(request.gender)
+    employee_date_of_birth = _date_value(
+        request.date_of_birth,
+        "date_of_birth",
+        default=DEFAULT_EMPLOYEE_DATE_OF_BIRTH,
+    )
+    employee_date_of_joining = _date_value(
+        request.date_of_joining,
+        "date_of_joining",
+        default=date.today().isoformat(),
+    )
+    employee_personal_email = _optional_text(request.personal_email)
+    employee_prefered_email = _preferred_email_value(request.prefered_email)
 
     user_exists = _record_exists(client, "User", email)
     if not user_exists:
@@ -78,7 +110,7 @@ def setup_engineer(
         client,
         supplier_name=preflight_supplier_name,
         supplier_id=preflight_supplier_id,
-        country=_optional_text(request.country),
+        country=country,
     )
 
     user, user_created = ensure_user(client, email=email, full_name=full_name)
@@ -87,12 +119,15 @@ def setup_engineer(
         client,
         email=email,
         first_name=first_name,
+        middle_name=middle_name,
         last_name=last_name,
         full_name=full_name,
-        department=_optional_text(request.department),
-        gender=_optional_text(request.gender),
-        date_of_birth=_optional_text(request.date_of_birth),
-        create_user_permission=request.create_user_permission,
+        gender=employee_gender,
+        date_of_birth=employee_date_of_birth,
+        date_of_joining=employee_date_of_joining,
+        personal_email=employee_personal_email,
+        prefered_email=employee_prefered_email,
+        create_user_permission=True,
     )
     employee_name = _optional_text(employee.get("employee_name")) or full_name
     employee_supplier = _optional_text(employee.get("supplier"))
@@ -100,7 +135,7 @@ def setup_engineer(
         client,
         supplier_name=employee_name,
         user=email,
-        country=_optional_text(request.country),
+        country=country,
         supplier_id=employee_supplier,
     )
     employee, supplier_linked = ensure_employee_supplier(
@@ -191,11 +226,15 @@ def ensure_employee(
     *,
     email: str,
     first_name: str,
+    middle_name: str | None,
     last_name: str | None,
     full_name: str,
     department: str | None = None,
     gender: str | None = None,
     date_of_birth: str | None = None,
+    date_of_joining: str | None = None,
+    personal_email: str | None = None,
+    prefered_email: str | None = None,
     create_user_permission: bool = True,
 ) -> tuple[dict[str, Any], bool]:
     """Find or create an ERPNext Employee linked to a User."""
@@ -220,17 +259,24 @@ def ensure_employee(
         "last_name": last_name or "",
         "employee_name": full_name,
         "user_id": normalized_email,
+        "company_email": normalized_email,
         "status": "Active",
-        "date_of_joining": date.today().isoformat(),
+        "date_of_joining": date_of_joining or date.today().isoformat(),
         "company": company,
         "create_user_permission": 1 if create_user_permission else 0,
     }
+    if middle_name:
+        fields["middle_name"] = middle_name
     if department:
         fields["department"] = department
     if gender:
         fields["gender"] = gender
     if date_of_birth:
         fields["date_of_birth"] = date_of_birth
+    if personal_email:
+        fields["personal_email"] = personal_email
+    if prefered_email:
+        fields["prefered_email"] = prefered_email
     try:
         return client.create_record("Employee", fields), True
     except ERPNextAPIError as exc:
@@ -685,6 +731,31 @@ def _normalize_508_email(value: Any) -> str:
     if not local_part or domain != "508.dev":
         raise EngineerOnboardingError("Engineer email must be a @508.dev address")
     return email
+
+
+def _employee_gender_value(value: Any) -> str:
+    gender = _optional_text(value) or DEFAULT_EMPLOYEE_GENDER
+    if gender not in EMPLOYEE_GENDER_OPTIONS:
+        raise EngineerOnboardingError(
+            "Employee gender is not a supported ERPNext value"
+        )
+    return gender
+
+
+def _preferred_email_value(value: Any) -> str:
+    preferred = _optional_text(value) or DEFAULT_PREFERRED_EMAIL
+    if preferred not in PREFERRED_EMAIL_OPTIONS:
+        raise EngineerOnboardingError("Preferred contact email is not supported")
+    return preferred
+
+
+def _date_value(value: Any, field_name: str, *, default: str) -> str:
+    normalized = _optional_text(value) or default
+    try:
+        date.fromisoformat(normalized)
+    except ValueError as exc:
+        raise EngineerOnboardingError(f"{field_name} must be YYYY-MM-DD") from exc
+    return normalized
 
 
 def _optional_text(value: Any) -> str | None:

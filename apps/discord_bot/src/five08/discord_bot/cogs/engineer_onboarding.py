@@ -120,7 +120,6 @@ class EngineerOnboardingCog(DiscordAuditCogMixin, commands.Cog):
         email="The engineer's 508.dev email address.",
         name="The engineer's first and last name.",
         country="Supplier country, required only when creating a new Supplier.",
-        department="Optional Employee department.",
         gender="Optional Employee gender value if ERPNext requires it.",
         date_of_birth="Optional Employee DOB if ERPNext requires it, YYYY-MM-DD.",
     )
@@ -131,7 +130,6 @@ class EngineerOnboardingCog(DiscordAuditCogMixin, commands.Cog):
         email: str,
         name: str,
         country: str | None = None,
-        department: str | None = None,
         gender: str | None = None,
         date_of_birth: str | None = None,
     ) -> None:
@@ -171,10 +169,8 @@ class EngineerOnboardingCog(DiscordAuditCogMixin, commands.Cog):
                     first_name=first_name,
                     last_name=last_name or None,
                     country=normalized_country,
-                    department=department,
                     gender=gender,
                     date_of_birth=date_of_birth,
-                    create_user_permission=True,
                 ),
             )
         except EngineerOnboardingDuplicateNameError as exc:
