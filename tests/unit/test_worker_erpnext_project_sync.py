@@ -19,7 +19,7 @@ class FakeERPNextClient:
         offset: int,
     ) -> list[dict[str, Any]]:
         assert status == "Open"
-        assert limit == 500
+        assert limit == erpnext_project_sync.PROJECT_LIST_PAGE_LIMIT
         self.list_offsets.append(offset)
         index = offset // limit
         if index >= len(self.pages):
@@ -71,10 +71,11 @@ def test_sync_open_projects_closes_client_and_marks_missing_open_projects(
 def test_sync_open_projects_paginates_until_short_page(
     monkeypatch,
 ) -> None:
+    page_limit = erpnext_project_sync.PROJECT_LIST_PAGE_LIMIT
     client = FakeERPNextClient(
         [
-            [{"name": f"PROJ-{index:03d}"} for index in range(500)],
-            [{"name": "PROJ-500"}],
+            [{"name": f"PROJ-{index:03d}"} for index in range(page_limit)],
+            [{"name": f"PROJ-{page_limit:03d}"}],
         ]
     )
     processor = erpnext_project_sync.ERPNextProjectSyncProcessor.__new__(
@@ -95,9 +96,10 @@ def test_sync_open_projects_paginates_until_short_page(
     result = processor.sync_open_projects()
 
     assert client.closed is True
-    assert result["seen_count"] == 501
+    assert result["seen_count"] == page_limit + 1
     assert result["stale_open_count"] == 0
-    assert client.list_offsets == [0, 500]
+    assert client.list_offsets == [0, page_limit]
     assert stale_mark_calls == [
-        [f"PROJ-{index:03d}" for index in range(500)] + ["PROJ-500"]
+        [f"PROJ-{index:03d}" for index in range(page_limit)]
+        + [f"PROJ-{page_limit:03d}"]
     ]
