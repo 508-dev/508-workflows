@@ -186,6 +186,31 @@ def test_setup_engineer_blocks_similar_name_for_new_email() -> None:
     assert exc.value.matches[0]["email"] == "jane.old@508.dev"
 
 
+def test_setup_engineer_allows_existing_supplier_with_same_email() -> None:
+    client = FakeERPNextClient()
+    client.records["Supplier"]["SUP-0001"] = {
+        "name": "SUP-0001",
+        "supplier_name": "Jane Engineer",
+        "email_id": "jane@508.dev",
+        "portal_users": [],
+    }
+
+    result = setup_engineer(
+        client,  # type: ignore[arg-type]
+        EngineerSetupRequest(
+            email="jane@508.dev",
+            first_name="Jane",
+            last_name="Engineer",
+            country="Taiwan",
+        ),
+    )
+
+    assert result["supplier"] == "SUP-0001"
+    assert client.records["Supplier"]["SUP-0001"]["portal_users"] == [
+        {"user": "jane@508.dev"}
+    ]
+
+
 def test_ensure_supplier_reuses_supplier_matched_by_supplier_name() -> None:
     client = FakeERPNextClient()
     client.records["Supplier"]["SUP-0001"] = {

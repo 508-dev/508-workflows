@@ -448,11 +448,14 @@ def ensure_no_similar_engineer_name(
         ],
         limit=5,
     ):
+        supplier_email = _optional_text(supplier.get("email_id"))
+        if supplier_email and supplier_email.casefold() == normalized_email.casefold():
+            continue
         matches.append(
             {
                 "doctype": "Supplier",
                 "name": supplier.get("name"),
-                "email": supplier.get("email_id"),
+                "email": supplier_email,
                 "label": supplier.get("supplier_name") or supplier.get("name"),
             }
         )

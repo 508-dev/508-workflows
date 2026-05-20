@@ -3,6 +3,7 @@
 import asyncio
 import re
 from datetime import datetime, timedelta, timezone
+from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -82,6 +83,19 @@ def app() -> api.FastAPI:
 @pytest.fixture
 def client(app: api.FastAPI) -> TestClient:
     return TestClient(app)
+
+
+def _dashboard_write_session() -> api.AuthSession:
+    return api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
 
 
 def test_health_handler_healthy(client: TestClient) -> None:
@@ -3048,6 +3062,161 @@ def test_bulk_update_erpnext_projects_fetches_project_refs_once() -> None:
     mock_cached_project.assert_called_once_with(project_id)
 
 
+def test_dashboard_setup_engineer_returns_setup_result(client: TestClient) -> None:
+    result = {
+        "user": "jane@508.dev",
+        "employee": "HR-EMP-00001",
+        "supplier": "SUP-0001",
+        "created": {"user": True, "employee": True, "supplier": False},
+        "updated": {"supplier_portal_user": True, "employee_supplier": True},
+    }
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", _dashboard_write_session()),
+        ),
+        patch(
+            "five08.backend.api._setup_erpnext_engineer",
+            return_value=result,
+        ) as mock_setup,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            "/dashboard/api/onboarding/engineers",
+            json={
+                "email": " jane@508.dev ",
+                "first_name": "Jane",
+                "last_name": "Engineer",
+                "country": "Taiwan",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == result
+    setup_payload = mock_setup.call_args.args[0]
+    assert setup_payload.email == " jane@508.dev "
+    assert setup_payload.first_name == "Jane"
+    mock_audit.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("body", "expected_error"),
+    [
+        ({}, "invalid_payload"),
+        ({"email": "jane@example.com", "first_name": "Jane"}, "invalid_email"),
+        ({"email": "jane@508.dev", "first_name": " "}, "first_name_required"),
+    ],
+)
+def test_dashboard_setup_engineer_rejects_invalid_inputs(
+    client: TestClient,
+    body: dict[str, Any],
+    expected_error: str,
+) -> None:
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", _dashboard_write_session()),
+        ),
+        patch("five08.backend.api._setup_erpnext_engineer") as mock_setup,
+    ):
+        response = client.post("/dashboard/api/onboarding/engineers", json=body)
+
+    assert response.status_code == 400
+    assert response.json() == {"error": expected_error}
+    mock_setup.assert_not_called()
+
+
+def test_dashboard_setup_engineer_maps_duplicate_name_to_conflict(
+    client: TestClient,
+) -> None:
+    duplicate_error = api.EngineerOnboardingDuplicateNameError(
+        "similar person exists",
+        matches=[{"doctype": "Supplier", "name": "SUP-0001"}],
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", _dashboard_write_session()),
+        ),
+        patch(
+            "five08.backend.api._setup_erpnext_engineer",
+            side_effect=duplicate_error,
+        ),
+        patch("five08.backend.api._write_auth_audit_event", new_callable=AsyncMock),
+    ):
+        response = client.post(
+            "/dashboard/api/onboarding/engineers",
+            json={"email": "jane@508.dev", "first_name": "Jane"},
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": "similar_engineer_exists",
+        "detail": "similar person exists",
+        "matches": [{"doctype": "Supplier", "name": "SUP-0001"}],
+    }
+
+
+def test_dashboard_setup_engineer_maps_onboarding_error_to_bad_request(
+    client: TestClient,
+) -> None:
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", _dashboard_write_session()),
+        ),
+        patch(
+            "five08.backend.api._setup_erpnext_engineer",
+            side_effect=api.EngineerOnboardingError("Country is required"),
+        ),
+    ):
+        response = client.post(
+            "/dashboard/api/onboarding/engineers",
+            json={"email": "jane@508.dev", "first_name": "Jane"},
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": "engineer_setup_failed",
+        "detail": "Country is required",
+    }
+
+
+def test_dashboard_setup_engineer_maps_erpnext_error_to_bad_gateway(
+    client: TestClient,
+) -> None:
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", _dashboard_write_session()),
+        ),
+        patch(
+            "five08.backend.api._setup_erpnext_engineer",
+            side_effect=api.ERPNextAPIError("ERP unavailable"),
+        ),
+    ):
+        response = client.post(
+            "/dashboard/api/onboarding/engineers",
+            json={"email": "jane@508.dev", "first_name": "Jane"},
+        )
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "error": "erpnext_engineer_setup_failed",
+        "detail": "ERP unavailable",
+    }
+
+
 def test_dashboard_add_project_user_uses_erpnext_record_id(
     client: TestClient,
 ) -> None:
@@ -3149,6 +3318,123 @@ def test_dashboard_add_project_user_rejects_activity_type_without_rate(
 
     assert response.status_code == 400
     assert response.json() == {"error": "activity_cost_rates_required"}
+    mock_add_user.assert_not_called()
+
+
+def test_dashboard_add_project_user_rejects_non_508_email(
+    client: TestClient,
+) -> None:
+    project_id = "11111111-1111-4111-8111-111111111111"
+    cached_project = {
+        "id": project_id,
+        "display_name": "Visible Project",
+        "erpnext_project_id": "PROJ-0033",
+        "roster_members": [],
+    }
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", _dashboard_write_session()),
+        ),
+        patch(
+            "five08.backend.api._cached_dashboard_project_by_id",
+            return_value=cached_project,
+        ),
+        patch("five08.backend.api._add_erpnext_project_user") as mock_add_user,
+    ):
+        response = client.post(
+            f"/dashboard/api/projects/{project_id}/users",
+            json={"user": "member@example.com"},
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "invalid_user_email"}
+    mock_add_user.assert_not_called()
+
+
+def test_dashboard_add_project_user_treats_blank_activity_type_as_absent(
+    client: TestClient,
+) -> None:
+    project_id = "11111111-1111-4111-8111-111111111111"
+    cached_project = {
+        "id": project_id,
+        "display_name": "Visible Project",
+        "erpnext_project_id": "PROJ-0033",
+        "roster_members": [],
+    }
+    updated_project = {
+        **cached_project,
+        "roster_members": [{"email": "member@508.dev"}],
+    }
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", _dashboard_write_session()),
+        ),
+        patch(
+            "five08.backend.api._cached_dashboard_project_by_id",
+            return_value=cached_project,
+        ),
+        patch(
+            "five08.backend.api._add_erpnext_project_user",
+            return_value={"project": updated_project, "activity_cost": None},
+        ) as mock_add_user,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ),
+    ):
+        response = client.post(
+            f"/dashboard/api/projects/{project_id}/users",
+            json={"user": "MEMBER@508.dev", "activity_type": "   "},
+        )
+
+    assert response.status_code == 200
+    mock_add_user.assert_called_once_with(
+        external_project_id="PROJ-0033",
+        user="member@508.dev",
+    )
+
+
+def test_dashboard_add_project_user_rejects_rates_with_blank_activity_type(
+    client: TestClient,
+) -> None:
+    project_id = "11111111-1111-4111-8111-111111111111"
+    cached_project = {
+        "id": project_id,
+        "display_name": "Visible Project",
+        "erpnext_project_id": "PROJ-0033",
+        "roster_members": [],
+    }
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", _dashboard_write_session()),
+        ),
+        patch(
+            "five08.backend.api._cached_dashboard_project_by_id",
+            return_value=cached_project,
+        ),
+        patch("five08.backend.api._add_erpnext_project_user") as mock_add_user,
+    ):
+        response = client.post(
+            f"/dashboard/api/projects/{project_id}/users",
+            json={
+                "user": "member@508.dev",
+                "activity_type": "   ",
+                "billing_rate": 150,
+                "costing_rate": 100,
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "activity_type_required"}
     mock_add_user.assert_not_called()
 
 

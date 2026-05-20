@@ -3577,10 +3577,13 @@ async def dashboard_add_project_user_handler(
     except Exception:
         return JSONResponse({"error": "invalid_payload"}, status_code=400)
 
-    normalized_user = payload.user.strip()
+    normalized_user = payload.user.strip().lower()
     if not normalized_user or len(normalized_user) > 200:
         return JSONResponse({"error": "invalid_user"}, status_code=400)
-    has_activity_type = bool((payload.activity_type or "").strip())
+    if not normalized_user.endswith("@508.dev"):
+        return JSONResponse({"error": "invalid_user_email"}, status_code=400)
+    normalized_activity_type = _text_or_none(payload.activity_type)
+    has_activity_type = normalized_activity_type is not None
     has_billing_rate = payload.billing_rate is not None
     has_costing_rate = payload.costing_rate is not None
     if (has_billing_rate or has_costing_rate) and not has_activity_type:
@@ -3594,14 +3597,10 @@ async def dashboard_add_project_user_handler(
             "external_project_id": external_project_id,
             "user": normalized_user,
         }
-        if (
-            payload.activity_type is not None
-            or payload.billing_rate is not None
-            or payload.costing_rate is not None
-        ):
+        if has_activity_type or has_billing_rate or has_costing_rate:
             add_user_kwargs.update(
                 {
-                    "activity_type": payload.activity_type,
+                    "activity_type": normalized_activity_type,
                     "billing_rate": payload.billing_rate,
                     "costing_rate": payload.costing_rate,
                 }
