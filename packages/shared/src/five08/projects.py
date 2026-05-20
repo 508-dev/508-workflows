@@ -779,6 +779,52 @@ def add_project_roster_member(
             )
 
 
+def remove_project_roster_member(
+    settings: SharedSettings,
+    *,
+    project_id: str,
+    source: str,
+    source_user_id: str,
+    roster_kind: str | None = None,
+) -> bool:
+    """Remove one local project roster member."""
+    normalized_project_id = text_or_none(project_id)
+    normalized_source = text_or_none(source)
+    normalized_source_user_id = text_or_none(source_user_id)
+    normalized_roster_kind = text_or_none(roster_kind)
+    if normalized_project_id is None:
+        raise ValueError("project_id is required")
+    if normalized_source is None:
+        raise ValueError("source is required")
+    if normalized_source_user_id is None:
+        raise ValueError("source_user_id is required")
+
+    where_clause = """
+        project_id = %s::uuid
+        AND source = %s
+        AND source_user_id = %s
+    """
+    params: list[Any] = [
+        normalized_project_id,
+        normalized_source,
+        normalized_source_user_id,
+    ]
+    if normalized_roster_kind is not None:
+        where_clause += " AND roster_kind = %s"
+        params.append(normalized_roster_kind)
+
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                f"""
+                DELETE FROM project_roster_members
+                WHERE {where_clause}
+                """,
+                params,
+            )
+            return bool(cursor.rowcount)
+
+
 def wiki_project_match_preview(
     settings: SharedSettings,
     *,

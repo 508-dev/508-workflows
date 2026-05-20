@@ -113,6 +113,8 @@ from five08.engagements import (
 )
 from five08.projects import (
     DEFAULT_WIKI_PROJECT_DOC_ID,
+    PROJECT_ROSTER_KIND_HISTORICAL,
+    PROJECT_SOURCE_MANUAL,
     PROJECT_WIKI_MATCH_CONFIRMED,
     PROJECT_WIKI_MATCH_NO_ROW,
     add_project_roster_member,
@@ -121,6 +123,7 @@ from five08.projects import (
     list_dashboard_projects,
     parse_project_wiki_tables,
     project_cache_summary,
+    remove_project_roster_member,
     set_project_wiki_match,
     upsert_project,
     wiki_project_match_preview,
@@ -208,6 +211,13 @@ class DashboardProjectUserRequest(BaseModel):
     """Payload for adding one ERPNext User to a Project roster."""
 
     user: str
+    candidate_id: str | None = None
+
+
+class DashboardProjectUserRemoveRequest(BaseModel):
+    """Payload for removing one ERPNext User from a Project roster."""
+
+    user: str
 
 
 class DashboardProjectHistoricalMemberRequest(BaseModel):
@@ -215,6 +225,12 @@ class DashboardProjectHistoricalMemberRequest(BaseModel):
 
     person: str
     candidate_id: str | None = None
+
+
+class DashboardProjectHistoricalMemberRemoveRequest(BaseModel):
+    """Payload for removing one local historical Project roster member."""
+
+    source_user_id: str
 
 
 class DashboardProjectWikiMatchRequest(BaseModel):
@@ -2711,6 +2727,28 @@ async def dashboard_projects_handler(
     return JSONResponse({"projects": projects, "summary": summary})
 
 
+async def dashboard_project_member_candidates_handler(
+    request: Request,
+    query: str = Query(default="", min_length=0, max_length=200),
+) -> JSONResponse:
+    """Return validated @508.dev people candidates for project roster writes."""
+    _session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_PROJECTS_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+
+    normalized_query = query.strip()
+    if len(normalized_query) < 2:
+        return JSONResponse([])
+    candidates = await asyncio.to_thread(
+        _project_roster_user_candidates,
+        normalized_query,
+    )
+    return JSONResponse(candidates)
+
+
 def _erpnext_client() -> ERPNextClient:
     base_url = (settings.erpnext_base_url or "").strip()
     api_key = (settings.erpnext_api_key or "").strip()
@@ -2933,6 +2971,51 @@ def _historical_project_member_candidates(query: str) -> list[dict[str, Any]]:
     )
 
 
+def _candidate_508_email(candidate: dict[str, Any]) -> str | None:
+    email = _text_or_none(candidate.get("email"))
+    if email and email.casefold().endswith("@508.dev"):
+        return email
+    return None
+
+
+def _project_roster_user_candidates(query: str) -> list[dict[str, Any]]:
+    """Return validated @508.dev people candidates for ERP roster writes."""
+    return [
+        candidate
+        for candidate in _historical_project_member_candidates(query)
+        if _candidate_508_email(candidate) is not None
+    ]
+
+
+def _resolve_project_roster_user_candidate(
+    *,
+    user: str,
+    candidate_id: str | None,
+) -> dict[str, Any]:
+    normalized_user = user.strip()
+    candidates = _project_roster_user_candidates(normalized_user)
+    normalized_candidate_id = _text_or_none(candidate_id)
+    if normalized_candidate_id is None:
+        raise HistoricalProjectMemberResolutionError(
+            "candidate_required",
+            candidates=candidates,
+        )
+    if not candidates:
+        raise HistoricalProjectMemberResolutionError("person_not_found")
+    for candidate in candidates:
+        if candidate.get("candidate_id") == normalized_candidate_id:
+            if _candidate_508_email(candidate) is None:
+                raise HistoricalProjectMemberResolutionError(
+                    "invalid_candidate",
+                    candidates=candidates,
+                )
+            return candidate
+    raise HistoricalProjectMemberResolutionError(
+        "candidate_not_found",
+        candidates=candidates,
+    )
+
+
 def _resolve_historical_project_member(
     *,
     person: str,
@@ -3115,10 +3198,31 @@ def _add_erpnext_project_user(
     *,
     external_project_id: str,
     user: str,
+    candidate_id: str | None,
+) -> dict[str, Any]:
+    candidate = _resolve_project_roster_user_candidate(
+        user=user,
+        candidate_id=candidate_id,
+    )
+    resolved_user = _candidate_508_email(candidate)
+    if resolved_user is None:
+        raise HistoricalProjectMemberResolutionError("invalid_candidate")
+    client = _erpnext_client()
+    try:
+        client.add_project_user(external_project_id, resolved_user)
+    finally:
+        client.close()
+    return _refresh_cached_erpnext_project(external_project_id)
+
+
+def _remove_erpnext_project_user(
+    *,
+    external_project_id: str,
+    user: str,
 ) -> dict[str, Any]:
     client = _erpnext_client()
     try:
-        client.add_project_user(external_project_id, user)
+        client.remove_project_user(external_project_id, user)
     finally:
         client.close()
     return _refresh_cached_erpnext_project(external_project_id)
@@ -3193,6 +3297,26 @@ def _add_historical_project_member(
             "sources": candidate.get("sources") or [],
         },
     )
+    project = _cached_dashboard_project_by_id(project_id)
+    if project is None:
+        raise ValueError("project_not_found")
+    return project
+
+
+def _remove_historical_project_member(
+    *,
+    project_id: str,
+    source_user_id: str,
+) -> dict[str, Any]:
+    removed = remove_project_roster_member(
+        settings,
+        project_id=project_id,
+        source=PROJECT_SOURCE_MANUAL,
+        source_user_id=source_user_id,
+        roster_kind=PROJECT_ROSTER_KIND_HISTORICAL,
+    )
+    if not removed:
+        raise ValueError("roster_member_not_found")
     project = _cached_dashboard_project_by_id(project_id)
     if project is None:
         raise ValueError("project_not_found")
@@ -3423,6 +3547,17 @@ async def dashboard_add_project_user_handler(
             _add_erpnext_project_user,
             external_project_id=external_project_id,
             user=normalized_user,
+            candidate_id=payload.candidate_id,
+        )
+    except HistoricalProjectMemberResolutionError as exc:
+        status_code = 409 if exc.candidates else 400
+        return JSONResponse(
+            {
+                "error": exc.code,
+                "detail": exc.detail,
+                "candidates": exc.candidates,
+            },
+            status_code=status_code,
         )
     except ERPNextAPIError as exc:
         return JSONResponse(
@@ -3433,6 +3568,70 @@ async def dashboard_add_project_user_handler(
     actor_provider, actor_subject = _session_audit_actor(session)
     await _write_auth_audit_event(
         action="erpnext.project_user_add",
+        result=AuditResult.SUCCESS,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="erpnext_project",
+        resource_id=external_project_id,
+        metadata={
+            "source": "dashboard",
+            "user": normalized_user,
+            "candidate_id": payload.candidate_id,
+            "local_project_id": project_id,
+        },
+    )
+    return JSONResponse({"project": updated_project})
+
+
+async def dashboard_remove_project_user_handler(
+    request: Request,
+    project_id: str,
+) -> JSONResponse:
+    """Remove one ERPNext User from a Project roster from the dashboard."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_PROJECTS_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    project, error_response = await _dashboard_erpnext_project_or_error(project_id)
+    if error_response is not None:
+        return error_response
+    assert project is not None
+
+    try:
+        body = await request.json()
+        payload = DashboardProjectUserRemoveRequest.model_validate(body)
+    except Exception:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    normalized_user = payload.user.strip()
+    if not normalized_user or len(normalized_user) > 200:
+        return JSONResponse({"error": "invalid_user"}, status_code=400)
+
+    external_project_id = str(project["erpnext_project_id"])
+    try:
+        updated_project = await asyncio.to_thread(
+            _remove_erpnext_project_user,
+            external_project_id=external_project_id,
+            user=normalized_user,
+        )
+    except ERPNextAPIError as exc:
+        return JSONResponse(
+            {"error": "erpnext_project_user_remove_failed", "detail": str(exc)},
+            status_code=502,
+        )
+
+    actor_provider, actor_subject = _session_audit_actor(session)
+    await _write_auth_audit_event(
+        action="erpnext.project_user_remove",
         result=AuditResult.SUCCESS,
         actor_subject=actor_subject,
         actor_display_name=session.display_name,
@@ -3513,6 +3712,71 @@ async def dashboard_add_project_historical_member_handler(
         metadata={
             "source": "dashboard",
             "person": normalized_person,
+            "erpnext_project_id": project.get("erpnext_project_id"),
+        },
+    )
+    return JSONResponse({"project": updated_project})
+
+
+async def dashboard_remove_project_historical_member_handler(
+    request: Request,
+    project_id: str,
+) -> JSONResponse:
+    """Remove one local historical Project roster member from the dashboard."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_PROJECTS_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    project, error_response = await _dashboard_cached_project_or_error(project_id)
+    if error_response is not None:
+        return error_response
+    assert project is not None
+
+    try:
+        body = await request.json()
+        payload = DashboardProjectHistoricalMemberRemoveRequest.model_validate(body)
+    except Exception:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    normalized_source_user_id = payload.source_user_id.strip()
+    if not normalized_source_user_id or len(normalized_source_user_id) > 200:
+        return JSONResponse({"error": "invalid_source_user_id"}, status_code=400)
+
+    try:
+        updated_project = await asyncio.to_thread(
+            _remove_historical_project_member,
+            project_id=project_id,
+            source_user_id=normalized_source_user_id,
+        )
+    except ValueError as exc:
+        error = str(exc) or "roster_member_not_found"
+        return JSONResponse(
+            {"error": error},
+            status_code=404
+            if error in {"project_not_found", "roster_member_not_found"}
+            else 400,
+        )
+
+    actor_provider, actor_subject = _session_audit_actor(session)
+    await _write_auth_audit_event(
+        action="project.historical_member_remove",
+        result=AuditResult.SUCCESS,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="project",
+        resource_id=project_id,
+        metadata={
+            "source": "dashboard",
+            "source_user_id": normalized_source_user_id,
             "erpnext_project_id": project.get("erpnext_project_id"),
         },
     )
@@ -5568,6 +5832,11 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
         methods=["GET"],
     )
     app.add_api_route(
+        "/dashboard/api/project-member-candidates",
+        dashboard_project_member_candidates_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
         "/dashboard/api/projects/wiki-matches",
         dashboard_project_wiki_matches_handler,
         methods=["GET"],
@@ -5588,8 +5857,18 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
         methods=["POST"],
     )
     app.add_api_route(
+        "/dashboard/api/projects/{project_id}/users/remove",
+        dashboard_remove_project_user_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
         "/dashboard/api/projects/{project_id}/historical-members",
         dashboard_add_project_historical_member_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/dashboard/api/projects/{project_id}/historical-members/remove",
+        dashboard_remove_project_historical_member_handler,
         methods=["POST"],
     )
     app.add_api_route(

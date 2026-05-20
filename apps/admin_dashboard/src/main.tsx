@@ -10,6 +10,7 @@ import {
   RefreshCw,
   Search,
   ShieldCheck,
+  UserMinus,
   Users,
   X,
 } from "lucide-react"
@@ -845,9 +846,9 @@ function App() {
     }
   }
 
-  async function addProjectUser(projectId: string, userName: string) {
+  async function addProjectUser(projectId: string, userName: string, candidateId: string) {
     const normalizedUser = userName.trim()
-    if (!normalizedUser) return false
+    if (!normalizedUser || !candidateId.trim()) return false
     setBusy(`project:${projectId}:user`, true)
     try {
       const payload = await requestJson<{ project: Project }>(
@@ -855,7 +856,7 @@ function App() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ user: normalizedUser }),
+          body: JSON.stringify({ user: normalizedUser, candidate_id: candidateId }),
         },
       )
       setProjects((current) =>
@@ -865,6 +866,32 @@ function App() {
       return true
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Unable to add project user", "error")
+      return false
+    } finally {
+      setBusy(`project:${projectId}:user`, false)
+    }
+  }
+
+  async function removeProjectUser(projectId: string, userName: string) {
+    const normalizedUser = userName.trim()
+    if (!normalizedUser) return false
+    setBusy(`project:${projectId}:user`, true)
+    try {
+      const payload = await requestJson<{ project: Project }>(
+        `/dashboard/api/projects/${encodeURIComponent(projectId)}/users/remove`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ user: normalizedUser }),
+        },
+      )
+      setProjects((current) =>
+        current.map((project) => (project.id === projectId ? payload.project : project)),
+      )
+      showToast("Removed project user", "ok")
+      return true
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Unable to remove project user", "error")
       return false
     } finally {
       setBusy(`project:${projectId}:user`, false)
@@ -905,6 +932,35 @@ function App() {
         }
       }
       showToast(error instanceof Error ? error.message : "Unable to add historical member", "error")
+      return false
+    } finally {
+      setBusy(`project:${projectId}:historical`, false)
+    }
+  }
+
+  async function removeHistoricalProjectMember(projectId: string, sourceUserId: string) {
+    const normalizedSourceUserId = sourceUserId.trim()
+    if (!normalizedSourceUserId) return false
+    setBusy(`project:${projectId}:historical`, true)
+    try {
+      const payload = await requestJson<{ project: Project }>(
+        `/dashboard/api/projects/${encodeURIComponent(projectId)}/historical-members/remove`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ source_user_id: normalizedSourceUserId }),
+        },
+      )
+      setProjects((current) =>
+        current.map((project) => (project.id === projectId ? payload.project : project)),
+      )
+      showToast("Removed historical project member", "ok")
+      return true
+    } catch (error) {
+      showToast(
+        error instanceof Error ? error.message : "Unable to remove historical member",
+        "error",
+      )
       return false
     } finally {
       setBusy(`project:${projectId}:historical`, false)
@@ -1606,7 +1662,9 @@ function App() {
               onUpdateStatus={updateProjectStatus}
               onBulkUpdate={bulkUpdateProjects}
               onAddUser={addProjectUser}
+              onRemoveUser={removeProjectUser}
               onAddHistoricalMember={addHistoricalProjectMember}
+              onRemoveHistoricalMember={removeHistoricalProjectMember}
               onUpdateWikiMatch={updateProjectWikiMatch}
               onWikiMatches={loadWikiMatches}
               onOpenProject={openProjectDetail}
@@ -2004,12 +2062,14 @@ function ProjectsView(props: {
     projectIds: string[],
     updates: { status?: string; project_type?: string },
   ) => Promise<boolean>
-  onAddUser: (projectId: string, user: string) => Promise<boolean>
+  onAddUser: (projectId: string, user: string, candidateId: string) => Promise<boolean>
+  onRemoveUser: (projectId: string, user: string) => Promise<boolean>
   onAddHistoricalMember: (
     projectId: string,
     person: string,
     candidateId?: string,
   ) => Promise<boolean>
+  onRemoveHistoricalMember: (projectId: string, sourceUserId: string) => Promise<boolean>
   onUpdateWikiMatch: (projectId: string, status: string, rowKey?: string) => Promise<void>
   onWikiMatches: () => void
   onOpenProject: (projectId: string) => void
@@ -2166,7 +2226,9 @@ function ProjectsView(props: {
           onBack={props.onCloseProject}
           onUpdateStatus={props.onUpdateStatus}
           onAddUser={props.onAddUser}
+          onRemoveUser={props.onRemoveUser}
           onAddHistoricalMember={props.onAddHistoricalMember}
+          onRemoveHistoricalMember={props.onRemoveHistoricalMember}
         />
       </>
     )
@@ -2559,16 +2621,20 @@ function ProjectDetailPage(props: {
   crmContactUrl: (contactId?: string) => string
   onBack: () => void
   onUpdateStatus: (projectId: string, status: string) => void
-  onAddUser: (projectId: string, user: string) => Promise<boolean>
+  onAddUser: (projectId: string, user: string, candidateId: string) => Promise<boolean>
+  onRemoveUser: (projectId: string, user: string) => Promise<boolean>
   onAddHistoricalMember: (
     projectId: string,
     person: string,
     candidateId?: string,
   ) => Promise<boolean>
+  onRemoveHistoricalMember: (projectId: string, sourceUserId: string) => Promise<boolean>
 }) {
   const project = props.project
   const members = project.roster_members || []
   const [newUser, setNewUser] = useState("")
+  const [rosterCandidates, setRosterCandidates] = useState<HistoricalPersonCandidate[]>([])
+  const [selectedRosterCandidateId, setSelectedRosterCandidateId] = useState("")
   const timeline =
     [
       project.actual_start_date || project.expected_start_date,
@@ -2581,6 +2647,35 @@ function ProjectDetailPage(props: {
     typeof project.percent_complete === "number"
       ? `${Math.round(project.percent_complete)}%`
       : "Not set"
+  const selectedRosterCandidate = rosterCandidates.find(
+    (candidate) => candidate.candidate_id === selectedRosterCandidateId,
+  )
+
+  useEffect(() => {
+    if (!props.canWrite) return
+    const query = newUser.trim()
+    setSelectedRosterCandidateId("")
+    if (query.length < 2) {
+      setRosterCandidates([])
+      return
+    }
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => {
+      void requestJson<HistoricalPersonCandidate[]>(
+        `/dashboard/api/project-member-candidates?query=${encodeURIComponent(query)}`,
+        { signal: controller.signal },
+      )
+        .then((candidates) => setRosterCandidates(candidates))
+        .catch((error) => {
+          if (error instanceof DOMException && error.name === "AbortError") return
+          setRosterCandidates([])
+        })
+    }, 250)
+    return () => {
+      controller.abort()
+      window.clearTimeout(timer)
+    }
+  }, [newUser, props.canWrite])
 
   return (
     <>
@@ -2692,32 +2787,70 @@ function ProjectDetailPage(props: {
           </span>
         </CardHeader>
         {props.canWrite ? (
-          <CardContent className="grid gap-3 border-b md:grid-cols-[minmax(0,1fr)_auto_auto] md:items-end">
+          <CardContent className="grid gap-3 border-b md:grid-cols-[minmax(0,1fr)_minmax(220px,320px)_auto_auto] md:items-end">
             <Label>
-              Roster person
+              Person search
               <Input
                 value={newUser}
                 autoComplete="off"
-                placeholder="name@508.dev or full name"
+                placeholder="Search @508.dev person"
                 onChange={(event) => setNewUser(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter") {
                     event.preventDefault()
-                    void props
-                      .onAddUser(project.id, newUser)
-                      .then((updated) => updated && setNewUser(""))
                   }
                 }}
               />
             </Label>
+            <Label>
+              Verified result
+              <Select
+                value={selectedRosterCandidateId}
+                disabled={!rosterCandidates.length}
+                onChange={(event) => setSelectedRosterCandidateId(event.target.value)}
+              >
+                <option value="">
+                  {newUser.trim().length < 2
+                    ? "Search first"
+                    : rosterCandidates.length
+                      ? "Choose a person"
+                      : "No verified @508.dev results"}
+                </option>
+                {rosterCandidates.map((candidate) => (
+                  <option key={candidate.candidate_id} value={candidate.candidate_id}>
+                    {[
+                      candidate.label || candidate.full_name || candidate.email || "Person",
+                      candidate.email,
+                      candidate.sources?.join(", "),
+                    ]
+                      .filter(Boolean)
+                      .join(" | ")}
+                  </option>
+                ))}
+              </Select>
+            </Label>
             <Button
               type="button"
               variant="outline"
-              disabled={props.loading[`project:${project.id}:user`] || !newUser.trim()}
+              disabled={
+                props.loading[`project:${project.id}:user`] ||
+                !selectedRosterCandidateId ||
+                !selectedRosterCandidate?.email
+              }
               onClick={() =>
-                void props.onAddUser(project.id, newUser).then((updated) => {
-                  if (updated) setNewUser("")
-                })
+                void props
+                  .onAddUser(
+                    project.id,
+                    selectedRosterCandidate?.email || newUser,
+                    selectedRosterCandidateId,
+                  )
+                  .then((updated) => {
+                    if (updated) {
+                      setNewUser("")
+                      setRosterCandidates([])
+                      setSelectedRosterCandidateId("")
+                    }
+                  })
               }
             >
               <Users />
@@ -2739,7 +2872,7 @@ function ProjectDetailPage(props: {
           </CardContent>
         ) : null}
         <div className="overflow-x-auto">
-          <Table className="min-w-[760px]" aria-label="Project roster">
+          <Table className="min-w-[860px]" aria-label="Project roster">
             <TableHeader>
               <TableRow>
                 <TableHead>Name</TableHead>
@@ -2748,68 +2881,109 @@ function ProjectDetailPage(props: {
                 <TableHead>Links</TableHead>
                 <TableHead>Source</TableHead>
                 <TableHead>Last seen</TableHead>
+                {props.canWrite ? <TableHead>Actions</TableHead> : null}
               </TableRow>
             </TableHeader>
             <TableBody>
               {members.length ? (
-                members.map((member) => (
-                  <TableRow key={`${member.source || ""}:${member.source_user_id || member.email}`}>
-                    <TableCell>
-                      <strong>{member.full_name || member.email || member.source_user_id}</strong>
-                    </TableCell>
-                    <TableCell>{member.email || "None"}</TableCell>
-                    <TableCell className="font-mono text-xs">
-                      {member.erpnext_user_url ? (
-                        <a
-                          className="inline-flex items-center gap-1 font-semibold text-primary underline-offset-4 hover:underline"
-                          href={member.erpnext_user_url}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          {member.source_user_id || "ERP user"}
-                          <ExternalLink className="size-3.5" />
-                        </a>
-                      ) : (
-                        member.source_user_id || "Unknown"
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex flex-wrap gap-2">
-                        {member.supplier_erpnext_url ? (
+                members.map((member) => {
+                  const label = memberLabel(member)
+                  const sourceUserId = member.source_user_id || member.email || ""
+                  const isHistorical =
+                    member.roster_kind === "historical" || member.source === "manual"
+                  return (
+                    <TableRow
+                      key={`${member.source || ""}:${member.source_user_id || member.email}`}
+                    >
+                      <TableCell>
+                        <strong>{member.full_name || member.email || member.source_user_id}</strong>
+                      </TableCell>
+                      <TableCell>{member.email || "None"}</TableCell>
+                      <TableCell className="font-mono text-xs">
+                        {member.erpnext_user_url ? (
                           <a
                             className="inline-flex items-center gap-1 font-semibold text-primary underline-offset-4 hover:underline"
-                            href={member.supplier_erpnext_url}
+                            href={member.erpnext_user_url}
                             target="_blank"
                             rel="noreferrer"
                           >
-                            Supplier
+                            {member.source_user_id || "ERP user"}
                             <ExternalLink className="size-3.5" />
                           </a>
-                        ) : null}
-                        {member.crm_contact_id && props.crmContactUrl(member.crm_contact_id) ? (
-                          <a
-                            className="inline-flex items-center gap-1 font-semibold text-primary underline-offset-4 hover:underline"
-                            href={props.crmContactUrl(member.crm_contact_id)}
-                            target="_blank"
-                            rel="noreferrer"
+                        ) : (
+                          member.source_user_id || "Unknown"
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex flex-wrap gap-2">
+                          {member.supplier_erpnext_url ? (
+                            <a
+                              className="inline-flex items-center gap-1 font-semibold text-primary underline-offset-4 hover:underline"
+                              href={member.supplier_erpnext_url}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              Supplier
+                              <ExternalLink className="size-3.5" />
+                            </a>
+                          ) : null}
+                          {member.crm_contact_id && props.crmContactUrl(member.crm_contact_id) ? (
+                            <a
+                              className="inline-flex items-center gap-1 font-semibold text-primary underline-offset-4 hover:underline"
+                              href={props.crmContactUrl(member.crm_contact_id)}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              CRM
+                              <ExternalLink className="size-3.5" />
+                            </a>
+                          ) : null}
+                          {!member.supplier_erpnext_url &&
+                          !(member.crm_contact_id && props.crmContactUrl(member.crm_contact_id)) ? (
+                            <span className="text-muted-foreground">None</span>
+                          ) : null}
+                        </div>
+                      </TableCell>
+                      <TableCell>{member.roster_kind || member.source || "ERP"}</TableCell>
+                      <TableCell>{formatDate(member.last_seen_at)}</TableCell>
+                      {props.canWrite ? (
+                        <TableCell>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={
+                              !sourceUserId ||
+                              props.loading[
+                                `project:${project.id}:${isHistorical ? "historical" : "user"}`
+                              ]
+                            }
+                            onClick={() => {
+                              const confirmed = window.confirm(
+                                `Remove ${label} from this project roster?`,
+                              )
+                              if (!confirmed) return
+                              if (isHistorical) {
+                                void props.onRemoveHistoricalMember(project.id, sourceUserId)
+                              } else {
+                                void props.onRemoveUser(project.id, sourceUserId)
+                              }
+                            }}
                           >
-                            CRM
-                            <ExternalLink className="size-3.5" />
-                          </a>
-                        ) : null}
-                        {!member.supplier_erpnext_url &&
-                        !(member.crm_contact_id && props.crmContactUrl(member.crm_contact_id)) ? (
-                          <span className="text-muted-foreground">None</span>
-                        ) : null}
-                      </div>
-                    </TableCell>
-                    <TableCell>{member.roster_kind || member.source || "ERP"}</TableCell>
-                    <TableCell>{formatDate(member.last_seen_at)}</TableCell>
-                  </TableRow>
-                ))
+                            <UserMinus />
+                            Remove
+                          </Button>
+                        </TableCell>
+                      ) : null}
+                    </TableRow>
+                  )
+                })
               ) : (
                 <TableRow>
-                  <TableCell colSpan={6} className="text-sm text-muted-foreground">
+                  <TableCell
+                    colSpan={props.canWrite ? 7 : 6}
+                    className="text-sm text-muted-foreground"
+                  >
                     No roster rows have been synced for this project.
                   </TableCell>
                 </TableRow>

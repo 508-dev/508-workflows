@@ -283,6 +283,41 @@ class ERPNextClient:
         )
         return self.update_project(project_id, {"users": next_users})
 
+    def remove_project_user(self, project_id: str, user: str) -> dict[str, Any]:
+        """Remove one ERPNext User from Project.users when present."""
+        normalized_user = user.strip()
+        if not normalized_user:
+            raise ERPNextAPIError("Project user is required")
+        project = self.get_project(project_id)
+        raw_users = project.get("users")
+        current_users = raw_users if isinstance(raw_users, list) else []
+        next_users: list[dict[str, Any]] = []
+        removed = False
+        for raw_user in current_users:
+            if not isinstance(raw_user, dict):
+                continue
+            existing_user = str(raw_user.get("user") or "").strip().casefold()
+            existing_email = str(raw_user.get("email") or "").strip().casefold()
+            existing_name = str(raw_user.get("name") or "").strip().casefold()
+            if normalized_user.casefold() in {
+                existing_user,
+                existing_email,
+                existing_name,
+            }:
+                removed = True
+                continue
+            next_user = {
+                "user": raw_user.get("user"),
+                "view_attachments": raw_user.get("view_attachments", 0),
+                "hide_timesheets": raw_user.get("hide_timesheets", 0),
+            }
+            if raw_user.get("name"):
+                next_user["name"] = raw_user.get("name")
+            next_users.append(next_user)
+        if not removed:
+            return project
+        return self.update_project(project_id, {"users": next_users})
+
     @staticmethod
     def _error_detail(response: requests.Response) -> str:
         try:
