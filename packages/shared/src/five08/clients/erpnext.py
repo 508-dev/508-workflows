@@ -11,6 +11,27 @@ import requests
 from five08.tls import default_ca_bundle_path
 
 
+def _email_search_text_without_tld(email: str) -> str:
+    normalized_email = email.strip().lower()
+    if "@" not in normalized_email:
+        return normalized_email
+    local_part, domain = normalized_email.rsplit("@", 1)
+    if "." not in domain:
+        return normalized_email
+    domain_without_tld = domain.rsplit(".", 1)[0]
+    return f"{local_part}@{domain_without_tld}"
+
+
+def _contact_email_matches_query(email: Any, query: str) -> bool:
+    normalized_email = str(email or "").strip().lower()
+    normalized_query = query.strip().lower()
+    if not (normalized_email and normalized_query):
+        return False
+    if "@" in normalized_query:
+        return normalized_query in normalized_email
+    return normalized_query in _email_search_text_without_tld(normalized_email)
+
+
 class ERPNextAPIError(Exception):
     """Raised when ERPNext returns an error or unexpected response."""
 
@@ -153,34 +174,13 @@ class ERPNextClient:
             )
         return [row for row in rows if isinstance(row, dict)]
 
-    def get_record(self, doctype: str, record_id: str) -> dict[str, Any]:
-        """Read one generic ERPNext document."""
-        normalized_doctype = doctype.strip()
-        normalized_id = record_id.strip()
-        if not normalized_doctype:
-            raise ERPNextAPIError("DocType is required")
-        if not normalized_id:
-            raise ERPNextAPIError(f"{normalized_doctype} id is required")
-        data = self.request(
-            "GET",
-            (
-                f"/api/resource/{quote(normalized_doctype, safe='')}/"
-                f"{quote(normalized_id, safe='')}"
-            ),
-        )
-        row = data.get("data")
-        if not isinstance(row, dict):
-            raise ERPNextAPIError(
-                f"ERPNext {normalized_doctype} detail is not an object"
-            )
-        return row
-
-    def create_record(self, doctype: str, fields: dict[str, Any]) -> dict[str, Any]:
-        """Create one generic ERPNext document."""
+    def create_record(self, doctype: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Create one generic ERPNext document and return the created document."""
         normalized_doctype = doctype.strip()
         if not normalized_doctype:
             raise ERPNextAPIError("DocType is required")
-        payload = {"doctype": normalized_doctype, **fields}
+        if not payload:
+            raise ERPNextAPIError(f"{normalized_doctype} payload is required")
         data = self.request(
             "POST",
             f"/api/resource/{quote(normalized_doctype, safe='')}",
@@ -199,7 +199,7 @@ class ERPNextClient:
         record_id: str,
         fields: dict[str, Any],
     ) -> dict[str, Any]:
-        """Update one generic ERPNext document."""
+        """Update one generic ERPNext document and return the updated document."""
         normalized_doctype = doctype.strip()
         normalized_id = record_id.strip()
         if not normalized_doctype:
@@ -210,16 +210,45 @@ class ERPNextClient:
             return self.get_record(normalized_doctype, normalized_id)
         data = self.request(
             "PUT",
-            (
-                f"/api/resource/{quote(normalized_doctype, safe='')}/"
-                f"{quote(normalized_id, safe='')}"
-            ),
+            f"/api/resource/{quote(normalized_doctype, safe='')}/{quote(normalized_id, safe='')}",
             payload=fields,
         )
         row = data.get("data")
         if isinstance(row, dict):
             return row
         return self.get_record(normalized_doctype, normalized_id)
+
+    def delete_record(self, doctype: str, record_id: str) -> None:
+        """Delete one generic ERPNext document."""
+        normalized_doctype = doctype.strip()
+        normalized_id = record_id.strip()
+        if not normalized_doctype:
+            raise ERPNextAPIError("DocType is required")
+        if not normalized_id:
+            raise ERPNextAPIError(f"{normalized_doctype} id is required")
+        self.request(
+            "DELETE",
+            f"/api/resource/{quote(normalized_doctype, safe='')}/{quote(normalized_id, safe='')}",
+        )
+
+    def get_record(self, doctype: str, record_id: str) -> dict[str, Any]:
+        """Read one generic ERPNext document."""
+        normalized_doctype = doctype.strip()
+        normalized_id = record_id.strip()
+        if not normalized_doctype:
+            raise ERPNextAPIError("DocType is required")
+        if not normalized_id:
+            raise ERPNextAPIError(f"{normalized_doctype} id is required")
+        data = self.request(
+            "GET",
+            f"/api/resource/{quote(normalized_doctype, safe='')}/{quote(normalized_id, safe='')}",
+        )
+        row = data.get("data")
+        if not isinstance(row, dict):
+            raise ERPNextAPIError(
+                f"ERPNext {normalized_doctype} detail response is not an object"
+            )
+        return row
 
     def call_method(
         self,
@@ -239,11 +268,347 @@ class ERPNextClient:
             payload=payload,
         )
 
-    def search_users(self, query: str, *, limit: int = 10) -> list[dict[str, Any]]:
+    def list_cost_centers(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        """List active, non-group Cost Center records."""
+        return self.list_records(
+            "Cost Center",
+            fields=["name", "cost_center_name", "company"],
+            filters=[
+                ["Cost Center", "disabled", "=", 0],
+                ["Cost Center", "is_group", "=", 0],
+            ],
+            limit=limit,
+        )
+
+    def search_customers(self, query: str, *, limit: int = 10) -> list[dict[str, Any]]:
+        """Search ERPNext Customer records by id or display name."""
+        normalized_query = query.strip()
+        if not normalized_query:
+            return []
+        like_query = f"%{normalized_query}%"
+        return self.list_records(
+            "Customer",
+            fields=[
+                "name",
+                "customer_name",
+                "customer_type",
+                "default_currency",
+                "account_manager",
+            ],
+            or_filters=[
+                ["Customer", "name", "like", like_query],
+                ["Customer", "customer_name", "like", like_query],
+            ],
+            limit=limit,
+        )
+
+    def search_contacts(self, query: str, *, limit: int = 10) -> list[dict[str, Any]]:
+        """Search ERPNext Contact records by fields shown in the dashboard picker."""
+        normalized_query = query.strip()
+        if not normalized_query:
+            return []
+        like_query = f"%{normalized_query}%"
+        contact_fields = [
+            "name",
+            "first_name",
+            "last_name",
+            "full_name",
+            "email_id",
+            "mobile_no",
+            "phone",
+            "company_name",
+        ]
+        rows_by_name: dict[str, dict[str, Any]] = {}
+        visible_rows = self.list_records(
+            "Contact",
+            fields=contact_fields,
+            or_filters=[
+                ["Contact", "full_name", "like", like_query],
+                ["Contact", "mobile_no", "like", like_query],
+                ["Contact", "phone", "like", like_query],
+                ["Contact", "company_name", "like", like_query],
+            ],
+            limit=limit,
+        )
+        for row in visible_rows:
+            contact_id = str(row.get("name") or "").strip()
+            if contact_id:
+                rows_by_name[contact_id] = row
+
+        email_rows = self.list_records(
+            "Contact",
+            fields=contact_fields,
+            or_filters=[["Contact", "email_id", "like", like_query]],
+            limit=max(limit * 5, 50),
+        )
+        for row in email_rows:
+            contact_id = str(row.get("name") or "").strip()
+            if not contact_id or contact_id in rows_by_name:
+                continue
+            if _contact_email_matches_query(row.get("email_id"), normalized_query):
+                rows_by_name[contact_id] = row
+            if len(rows_by_name) >= limit:
+                break
+
+        return list(rows_by_name.values())[:limit]
+
+    def create_customer(
+        self,
+        *,
+        customer_name: str,
+        account_manager: str | None = None,
+        default_currency: str | None = "USD",
+        customer_details: str | None = None,
+        website: str | None = None,
+    ) -> dict[str, Any]:
+        """Create one ERPNext Customer with dashboard defaults."""
+        normalized_name = customer_name.strip()
+        if not normalized_name:
+            raise ERPNextAPIError("Customer name is required")
+        payload: dict[str, Any] = {
+            "customer_name": normalized_name,
+            "customer_type": "Company",
+        }
+        normalized_account_manager = (account_manager or "").strip()
+        if normalized_account_manager:
+            payload["account_manager"] = normalized_account_manager
+        normalized_currency = (default_currency or "").strip().upper()
+        if normalized_currency:
+            payload["default_currency"] = normalized_currency
+        normalized_details = (customer_details or "").strip()
+        if normalized_details:
+            payload["customer_details"] = normalized_details
+        normalized_website = (website or "").strip()
+        if normalized_website:
+            payload["website"] = normalized_website
+        return self.create_record("Customer", payload)
+
+    def create_address(
+        self,
+        *,
+        customer: str,
+        address_line1: str,
+        address_title: str | None = None,
+        address_type: str = "Billing",
+        address_line2: str | None = None,
+        city: str | None = None,
+        state: str | None = None,
+        country: str | None = None,
+        pincode: str | None = None,
+        email_id: str | None = None,
+        phone: str | None = None,
+    ) -> dict[str, Any]:
+        """Create one Address linked to a Customer."""
+        normalized_customer = customer.strip()
+        normalized_line1 = address_line1.strip()
+        if not normalized_customer:
+            raise ERPNextAPIError("Customer is required")
+        if not normalized_line1:
+            raise ERPNextAPIError("Address line 1 is required")
+        normalized_title = (address_title or "").strip() or normalized_customer
+        normalized_type = (address_type or "").strip() or "Billing"
+        payload: dict[str, Any] = {
+            "address_title": normalized_title,
+            "address_type": normalized_type,
+            "address_line1": normalized_line1,
+            "links": [
+                {"link_doctype": "Customer", "link_name": normalized_customer},
+            ],
+        }
+        for field, value in {
+            "address_line2": address_line2,
+            "city": city,
+            "state": state,
+            "country": country,
+            "pincode": pincode,
+            "email_id": email_id,
+            "phone": phone,
+        }.items():
+            normalized_value = (value or "").strip()
+            if normalized_value:
+                payload[field] = normalized_value
+        return self.create_record("Address", payload)
+
+    def create_contact(
+        self,
+        *,
+        customer: str,
+        first_name: str,
+        last_name: str | None = None,
+        email_id: str | None = None,
+        phone: str | None = None,
+        mobile_no: str | None = None,
+    ) -> dict[str, Any]:
+        """Create one Contact linked to a Customer."""
+        normalized_customer = customer.strip()
+        normalized_first_name = first_name.strip()
+        if not normalized_customer:
+            raise ERPNextAPIError("Customer is required")
+        if not normalized_first_name:
+            raise ERPNextAPIError("Contact first name is required")
+        payload: dict[str, Any] = {
+            "first_name": normalized_first_name,
+            "links": [
+                {"link_doctype": "Customer", "link_name": normalized_customer},
+            ],
+        }
+        normalized_last_name = (last_name or "").strip()
+        if normalized_last_name:
+            payload["last_name"] = normalized_last_name
+        normalized_email = (email_id or "").strip()
+        if normalized_email:
+            payload["email_ids"] = [{"email_id": normalized_email, "is_primary": 1}]
+        normalized_phone = (phone or "").strip()
+        if normalized_phone:
+            payload["phone_nos"] = [{"phone": normalized_phone, "is_primary_phone": 1}]
+        normalized_mobile = (mobile_no or "").strip()
+        if normalized_mobile:
+            payload.setdefault("phone_nos", []).append(
+                {"phone": normalized_mobile, "is_primary_mobile_no": 1}
+            )
+        return self.create_record("Contact", payload)
+
+    def link_contact_to_customer(
+        self,
+        *,
+        contact: str,
+        customer: str,
+    ) -> dict[str, Any]:
+        """Ensure an existing Contact has a Customer link."""
+        normalized_contact = contact.strip()
+        normalized_customer = customer.strip()
+        if not normalized_contact:
+            raise ERPNextAPIError("Contact is required")
+        if not normalized_customer:
+            raise ERPNextAPIError("Customer is required")
+        contact_doc = self.get_record("Contact", normalized_contact)
+        existing_links = [
+            link for link in contact_doc.get("links") or [] if isinstance(link, dict)
+        ]
+        if any(
+            link.get("link_doctype") == "Customer"
+            and link.get("link_name") == normalized_customer
+            for link in existing_links
+        ):
+            return contact_doc
+        return self.update_record(
+            "Contact",
+            normalized_contact,
+            {
+                "links": [
+                    *existing_links,
+                    {"link_doctype": "Customer", "link_name": normalized_customer},
+                ]
+            },
+        )
+
+    def set_customer_primary_records(
+        self,
+        customer: str,
+        *,
+        address: str | None = None,
+        contact: str | None = None,
+        customer_details: str | None = None,
+        website: str | None = None,
+    ) -> dict[str, Any]:
+        """Set primary linked records and optional detail fields on a Customer."""
+        fields: dict[str, Any] = {}
+        normalized_address = (address or "").strip()
+        if normalized_address:
+            fields["customer_primary_address"] = normalized_address
+        normalized_contact = (contact or "").strip()
+        if normalized_contact:
+            fields["customer_primary_contact"] = normalized_contact
+        normalized_details = (customer_details or "").strip()
+        if normalized_details:
+            fields["customer_details"] = normalized_details
+        normalized_website = (website or "").strip()
+        if normalized_website:
+            fields["website"] = normalized_website
+        return self.update_record("Customer", customer, fields)
+
+    def create_project(
+        self,
+        *,
+        project_name: str,
+        customer: str,
+        project_type: str = "External",
+        default_cost_center: str = "Projects - 5",
+    ) -> dict[str, Any]:
+        """Create one ERPNext Project attached to a Customer."""
+        normalized_project_name = project_name.strip()
+        normalized_customer = customer.strip()
+        normalized_project_type = project_type.strip()
+        normalized_cost_center = default_cost_center.strip()
+        if not normalized_project_name:
+            raise ERPNextAPIError("Project name is required")
+        if not normalized_customer:
+            raise ERPNextAPIError("Customer is required")
+        payload: dict[str, Any] = {
+            "project_name": normalized_project_name,
+            "customer": normalized_customer,
+            "project_type": normalized_project_type or "External",
+            "status": "Open",
+        }
+        if normalized_cost_center:
+            payload["cost_center"] = normalized_cost_center
+        row = self.create_record("Project", payload)
+        project_id = str(row.get("name") or "").strip()
+        if project_id:
+            try:
+                return self.get_project(project_id)
+            except ERPNextAPIError:
+                return row
+        return row
+
+    def ensure_activity_type(self, activity_type: str) -> dict[str, Any]:
+        """Return an existing Activity Type or create it when missing."""
+        normalized_activity_type = activity_type.strip()
+        if not normalized_activity_type:
+            raise ERPNextAPIError("Activity Type is required")
+        existing = self.list_records(
+            "Activity Type",
+            fields=["name", "activity_type"],
+            filters=[["Activity Type", "name", "=", normalized_activity_type]],
+            limit=1,
+        )
+        if existing:
+            return existing[0]
+        return self.create_record(
+            "Activity Type",
+            {"activity_type": normalized_activity_type},
+        )
+
+    def search_users(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        enabled_only: bool = False,
+        email_domain: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Search ERPNext User records by email, id, or full name."""
         normalized_query = query.strip()
         if not normalized_query:
             return []
+        filters: list[Any] = []
+        if enabled_only:
+            filters.append(["User", "enabled", "=", 1])
+        normalized_domain = (email_domain or "").strip().casefold()
+        if normalized_domain:
+            domain_suffix = (
+                normalized_domain
+                if normalized_domain.startswith("@")
+                else f"@{normalized_domain}"
+            )
+            filters.append(
+                [
+                    "User",
+                    "email",
+                    "like",
+                    f"%{domain_suffix}",
+                ]
+            )
         if "@" in normalized_query:
             or_filters = [
                 ["User", "name", "=", normalized_query],
@@ -259,6 +624,7 @@ class ERPNextClient:
         return self.list_records(
             "User",
             fields=["name", "email", "full_name", "enabled"],
+            filters=filters,
             or_filters=or_filters,
             limit=limit,
         )

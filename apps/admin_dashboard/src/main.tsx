@@ -7,6 +7,7 @@ import {
   FileClock,
   FolderKanban,
   LogOut,
+  Plus,
   RefreshCw,
   Search,
   ShieldCheck,
@@ -15,7 +16,7 @@ import {
   Users,
   X,
 } from "lucide-react"
-import { StrictMode, useEffect, useMemo, useRef, useState } from "react"
+import { type ReactNode, StrictMode, useEffect, useMemo, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
 
 import { Badge } from "@/components/ui/badge"
@@ -211,6 +212,39 @@ type Project = {
   linked_engagement_count?: number
   roster_count?: number
   roster_members?: ProjectRosterMember[]
+}
+
+type ERPNextCustomer = {
+  name?: string
+  customer_name?: string
+  customer_type?: string
+  default_currency?: string
+  account_manager?: string
+  url?: string
+}
+
+type ERPNextContact = {
+  name?: string
+  first_name?: string
+  last_name?: string
+  full_name?: string
+  email_id?: string
+  phone?: string
+  mobile_no?: string
+  company_name?: string
+}
+
+type ERPNextCostCenter = {
+  name?: string
+  cost_center_name?: string
+  company?: string
+}
+
+type ERPNextUser = {
+  name?: string
+  email?: string
+  full_name?: string
+  enabled?: number | boolean
 }
 
 type ProjectsResponse = {
@@ -673,6 +707,36 @@ function Empty({ children, hidden }: { children: string; hidden: boolean }) {
   return <div className="px-4 py-7 text-center text-sm text-muted-foreground">{children}</div>
 }
 
+function HighlightedText({ value, query }: { value: string; query: string }) {
+  const normalizedQuery = query.trim().toLowerCase()
+  if (!normalizedQuery) return <>{value}</>
+
+  const lowerValue = value.toLowerCase()
+  const pieces: ReactNode[] = []
+  let cursor = 0
+  let matchIndex = lowerValue.indexOf(normalizedQuery)
+  while (matchIndex >= 0) {
+    if (matchIndex > cursor) {
+      pieces.push(value.slice(cursor, matchIndex))
+    }
+    const matchEnd = matchIndex + normalizedQuery.length
+    pieces.push(
+      <mark
+        key={`${matchIndex}-${matchEnd}`}
+        className="rounded-sm bg-amber-200 px-0.5 text-inherit dark:bg-amber-500/35"
+      >
+        {value.slice(matchIndex, matchEnd)}
+      </mark>,
+    )
+    cursor = matchEnd
+    matchIndex = lowerValue.indexOf(normalizedQuery, cursor)
+  }
+  if (cursor < value.length) {
+    pieces.push(value.slice(cursor))
+  }
+  return <>{pieces}</>
+}
+
 function App() {
   const initialProjectDetailId = detailIdFromPath("projects")
   const [user, setUser] = useState<User | null>(null)
@@ -924,6 +988,133 @@ function App() {
       showError(error, "Unable to queue project sync")
     } finally {
       setBusy("syncProjects", false)
+    }
+  }
+
+  async function searchERPNextCustomers(query: string) {
+    const normalizedQuery = query.trim()
+    if (normalizedQuery.length < 2) return []
+    try {
+      const params = new URLSearchParams({ query: normalizedQuery })
+      const payload = await requestJson<{ customers: ERPNextCustomer[] }>(
+        `/dashboard/api/erpnext/customers?${params.toString()}`,
+      )
+      return payload.customers || []
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Unable to search customers", "error")
+      return []
+    }
+  }
+
+  async function searchERPNextContacts(query: string) {
+    const normalizedQuery = query.trim()
+    if (normalizedQuery.length < 2) return []
+    try {
+      const params = new URLSearchParams({ query: normalizedQuery })
+      const payload = await requestJson<{ contacts: ERPNextContact[] }>(
+        `/dashboard/api/erpnext/contacts?${params.toString()}`,
+      )
+      return payload.contacts || []
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Unable to search contacts", "error")
+      return []
+    }
+  }
+
+  async function searchERPNextAccountManagers(query: string) {
+    const normalizedQuery = query.trim()
+    if (normalizedQuery.length < 2) return []
+    try {
+      const params = new URLSearchParams({ query: normalizedQuery })
+      const payload = await requestJson<{ users: ERPNextUser[] }>(
+        `/dashboard/api/erpnext/account-managers?${params.toString()}`,
+      )
+      return payload.users || []
+    } catch (error) {
+      showToast(
+        error instanceof Error ? error.message : "Unable to search account managers",
+        "error",
+      )
+      return []
+    }
+  }
+
+  async function loadERPNextCostCenters() {
+    try {
+      const payload = await requestJson<{ cost_centers: ERPNextCostCenter[] }>(
+        "/dashboard/api/erpnext/cost-centers",
+      )
+      const costCenters = payload.cost_centers || []
+      return costCenters.length
+        ? costCenters
+        : [{ name: "Projects - 5", cost_center_name: "Projects" }]
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Unable to load cost centers", "error")
+      return [{ name: "Projects - 5", cost_center_name: "Projects" }]
+    }
+  }
+
+  async function createProjectSetup(values: {
+    project_name: string
+    customer_mode: "new" | "existing"
+    customer_name?: string
+    customer?: string
+    account_manager?: string
+    default_billing_currency?: string
+    default_cost_center?: string
+    activity_type?: string
+    customer_details?: string
+    customer_website?: string
+    address_line1?: string
+    address_line2?: string
+    address_city?: string
+    address_state?: string
+    address_country?: string
+    address_postal_code?: string
+    contact?: string
+    contact_first_name?: string
+    contact_last_name?: string
+    contact_email?: string
+    contact_phone?: string
+    contact_mobile?: string
+  }) {
+    setBusy("createProject", true)
+    try {
+      const payload = await requestJson<{
+        project: Project
+        customer: ERPNextCustomer
+        activity_type: { name?: string }
+        cache_refresh_error?: string
+        cache_refresh_message?: string
+      }>("/dashboard/api/projects/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(values),
+      })
+      if (payload.project.id) {
+        setProjects((current) => {
+          const existing = current.some((project) => project.id === payload.project.id)
+          return existing
+            ? current.map((project) =>
+                project.id === payload.project.id ? payload.project : project,
+              )
+            : [payload.project, ...current]
+        })
+        showToast("Created ERP project setup", "ok")
+        openProjectDetail(payload.project.id)
+      } else {
+        showToast(
+          payload.cache_refresh_message || "Created ERP project in ERPNext; local sync is pending",
+          "ok",
+        )
+        void loadProjects()
+      }
+      return true
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Unable to create project", "error")
+      return false
+    } finally {
+      setBusy("createProject", false)
     }
   }
 
@@ -1875,6 +2066,11 @@ function App() {
               setStatus={setProjectStatus}
               onSearch={loadProjects}
               onSync={syncProjects}
+              onSearchCustomers={searchERPNextCustomers}
+              onSearchContacts={searchERPNextContacts}
+              onSearchAccountManagers={searchERPNextAccountManagers}
+              onLoadCostCenters={loadERPNextCostCenters}
+              onCreateProject={createProjectSetup}
               onUpdateStatus={updateProjectStatus}
               onBulkUpdate={bulkUpdateProjects}
               onAddUser={addProjectUser}
@@ -2385,6 +2581,34 @@ function ProjectsView(props: {
   setStatus: (value: string) => void
   onSearch: () => void
   onSync: () => void
+  onSearchCustomers: (query: string) => Promise<ERPNextCustomer[]>
+  onSearchContacts: (query: string) => Promise<ERPNextContact[]>
+  onSearchAccountManagers: (query: string) => Promise<ERPNextUser[]>
+  onLoadCostCenters: () => Promise<ERPNextCostCenter[]>
+  onCreateProject: (values: {
+    project_name: string
+    customer_mode: "new" | "existing"
+    customer_name?: string
+    customer?: string
+    account_manager?: string
+    default_billing_currency?: string
+    default_cost_center?: string
+    activity_type?: string
+    customer_details?: string
+    customer_website?: string
+    address_line1?: string
+    address_line2?: string
+    address_city?: string
+    address_state?: string
+    address_country?: string
+    address_postal_code?: string
+    contact?: string
+    contact_first_name?: string
+    contact_last_name?: string
+    contact_email?: string
+    contact_phone?: string
+    contact_mobile?: string
+  }) => Promise<boolean>
   onUpdateStatus: (projectId: string, status: string) => void
   onBulkUpdate: (
     projectIds: string[],
@@ -2414,6 +2638,7 @@ function ProjectsView(props: {
   const [bulkStatus, setBulkStatus] = useState("")
   const [bulkProjectType, setBulkProjectType] = useState("")
   const [bulkModalOpen, setBulkModalOpen] = useState(false)
+  const [createModalOpen, setCreateModalOpen] = useState(false)
   const visibleProjectIds = useMemo(
     () => props.projects.map((project) => project.id),
     [props.projects],
@@ -2582,14 +2807,33 @@ function ProjectsView(props: {
             <span className="text-xs font-bold text-muted-foreground">Selected</span>
             <strong className="block">{selectedVisibleProjectIds.length} project(s)</strong>
           </div>
-          <Button
-            type="button"
-            disabled={selectedVisibleProjectIds.length === 0}
-            onClick={() => setBulkModalOpen(true)}
-          >
-            Bulk edit
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" onClick={() => setCreateModalOpen(true)}>
+              <Plus />
+              New project
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={selectedVisibleProjectIds.length === 0}
+              onClick={() => setBulkModalOpen(true)}
+            >
+              Bulk edit
+            </Button>
+          </div>
         </Card>
+      ) : null}
+
+      {createModalOpen ? (
+        <CreateProjectModal
+          loading={props.loading.createProject}
+          onClose={() => setCreateModalOpen(false)}
+          onSearchCustomers={props.onSearchCustomers}
+          onSearchContacts={props.onSearchContacts}
+          onSearchAccountManagers={props.onSearchAccountManagers}
+          onLoadCostCenters={props.onLoadCostCenters}
+          onCreateProject={props.onCreateProject}
+        />
       ) : null}
 
       {bulkModalOpen ? (
@@ -2947,135 +3191,685 @@ function ProjectsView(props: {
   )
 }
 
-function ProjectRosterAddForm({
-  projectId,
-  loading,
-  onAddUser,
-  onAddHistoricalMember,
-}: {
-  projectId: string
-  loading: Record<string, boolean>
-  onAddUser: (
-    projectId: string,
-    user: string,
-    rates?: { activity_type?: string; billing_rate?: number; costing_rate?: number },
-  ) => Promise<boolean>
-  onAddHistoricalMember: (
-    projectId: string,
-    person: string,
-    candidateId?: string,
-  ) => Promise<boolean>
+function CreateProjectModal(props: {
+  loading?: boolean
+  onClose: () => void
+  onSearchCustomers: (query: string) => Promise<ERPNextCustomer[]>
+  onSearchContacts: (query: string) => Promise<ERPNextContact[]>
+  onSearchAccountManagers: (query: string) => Promise<ERPNextUser[]>
+  onLoadCostCenters: () => Promise<ERPNextCostCenter[]>
+  onCreateProject: (values: {
+    project_name: string
+    customer_mode: "new" | "existing"
+    customer_name?: string
+    customer?: string
+    account_manager?: string
+    default_billing_currency?: string
+    default_cost_center?: string
+    activity_type?: string
+    customer_details?: string
+    customer_website?: string
+    address_line1?: string
+    address_line2?: string
+    address_city?: string
+    address_state?: string
+    address_country?: string
+    address_postal_code?: string
+    contact?: string
+    contact_first_name?: string
+    contact_last_name?: string
+    contact_email?: string
+    contact_phone?: string
+    contact_mobile?: string
+  }) => Promise<boolean>
 }) {
-  const [newUser, setNewUser] = useState("")
+  const [projectName, setProjectName] = useState("")
+  const [customerMode, setCustomerMode] = useState<"new" | "existing">("new")
+  const [customerName, setCustomerName] = useState("")
+  const [customerQuery, setCustomerQuery] = useState("")
+  const [selectedCustomer, setSelectedCustomer] = useState("")
+  const [customerResults, setCustomerResults] = useState<ERPNextCustomer[]>([])
+  const [accountManagerQuery, setAccountManagerQuery] = useState("")
+  const [accountManager, setAccountManager] = useState("")
+  const [accountManagerResults, setAccountManagerResults] = useState<ERPNextUser[]>([])
+  const [currency, setCurrency] = useState("USD")
+  const [customerDetails, setCustomerDetails] = useState("")
+  const [customerWebsite, setCustomerWebsite] = useState("")
+  const [addressLine1, setAddressLine1] = useState("")
+  const [addressLine2, setAddressLine2] = useState("")
+  const [addressCity, setAddressCity] = useState("")
+  const [addressState, setAddressState] = useState("")
+  const [addressCountry, setAddressCountry] = useState("United States")
+  const [addressPostalCode, setAddressPostalCode] = useState("")
+  const [contactMode, setContactMode] = useState<"new" | "existing">("new")
+  const [contactQuery, setContactQuery] = useState("")
+  const [selectedContact, setSelectedContact] = useState("")
+  const [contactResults, setContactResults] = useState<ERPNextContact[]>([])
+  const [contactFirstName, setContactFirstName] = useState("")
+  const [contactLastName, setContactLastName] = useState("")
+  const [contactEmail, setContactEmail] = useState("")
+  const [contactPhone, setContactPhone] = useState("")
+  const [contactMobile, setContactMobile] = useState("")
+  const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [costCenters, setCostCenters] = useState<ERPNextCostCenter[]>([
+    { name: "Projects - 5", cost_center_name: "Projects" },
+  ])
+  const [costCenter, setCostCenter] = useState("Projects - 5")
   const [activityType, setActivityType] = useState("")
-  const [billingRate, setBillingRate] = useState("")
-  const [costingRate, setCostingRate] = useState("")
-  const normalizedUser = newUser.trim()
-  const hasRateFields = Boolean(activityType.trim() || billingRate.trim() || costingRate.trim())
-  const parsedBillingRate = optionalNumber(billingRate)
-  const parsedCostingRate = optionalNumber(costingRate)
-  const hasPartialRate = Boolean((billingRate.trim() || costingRate.trim()) && !activityType.trim())
-  const hasIncompleteRate = Boolean(
-    activityType.trim() && (!billingRate.trim() || !costingRate.trim()),
-  )
-  const rateInvalid =
-    Boolean(billingRate.trim() && parsedBillingRate === undefined) ||
-    Boolean(costingRate.trim() && parsedCostingRate === undefined) ||
-    hasPartialRate ||
-    hasIncompleteRate
+  const [activityTypeEdited, setActivityTypeEdited] = useState(false)
+  const onSearchCustomersRef = useRef(props.onSearchCustomers)
+  const onSearchContactsRef = useRef(props.onSearchContacts)
+  const onSearchAccountManagersRef = useRef(props.onSearchAccountManagers)
+  const onLoadCostCentersRef = useRef(props.onLoadCostCenters)
+  const costCenterRequestRef = useRef(0)
+  const customerSearchRequestRef = useRef(0)
+  const accountManagerSearchRequestRef = useRef(0)
+  const contactSearchRequestRef = useRef(0)
+  const defaultActivityType = projectName.trim()
+    ? `Engineering for ${projectName.trim()}`.slice(0, 140)
+    : ""
+  const addressStarted = [
+    addressLine1,
+    addressLine2,
+    addressCity,
+    addressState,
+    addressPostalCode,
+  ].some((value) => value.trim())
+  const contactStarted = [
+    contactFirstName,
+    contactLastName,
+    contactEmail,
+    contactPhone,
+    contactMobile,
+  ].some((value) => value.trim())
+  const canSubmit =
+    projectName.trim() &&
+    (customerMode === "new" ? customerName.trim() : selectedCustomer.trim()) &&
+    !props.loading
 
-  async function submitEngineer() {
-    const updated = await onAddUser(
-      projectId,
-      newUser,
-      hasRateFields
-        ? {
-            activity_type: activityType.trim(),
-            billing_rate: parsedBillingRate,
-            costing_rate: parsedCostingRate,
-          }
-        : undefined,
-    )
-    if (updated) {
-      setNewUser("")
-      setActivityType("")
-      setBillingRate("")
-      setCostingRate("")
+  useEffect(() => {
+    onSearchCustomersRef.current = props.onSearchCustomers
+  }, [props.onSearchCustomers])
+
+  useEffect(() => {
+    onSearchContactsRef.current = props.onSearchContacts
+  }, [props.onSearchContacts])
+
+  useEffect(() => {
+    onSearchAccountManagersRef.current = props.onSearchAccountManagers
+  }, [props.onSearchAccountManagers])
+
+  useEffect(() => {
+    onLoadCostCentersRef.current = props.onLoadCostCenters
+  }, [props.onLoadCostCenters])
+
+  useEffect(() => {
+    let active = true
+    const requestId = costCenterRequestRef.current + 1
+    costCenterRequestRef.current = requestId
+    void onLoadCostCentersRef.current().then((options) => {
+      if (!active || costCenterRequestRef.current !== requestId) return
+      setCostCenters(options)
+      setCostCenter((current) =>
+        options.some((option) => option.name === current) ? current : "Projects - 5",
+      )
+    })
+    return () => {
+      active = false
     }
+  }, [])
+
+  useEffect(() => {
+    if (customerMode !== "existing") {
+      customerSearchRequestRef.current += 1
+      setCustomerResults([])
+      return
+    }
+    let active = true
+    const requestId = customerSearchRequestRef.current + 1
+    customerSearchRequestRef.current = requestId
+    const handle = window.setTimeout(() => {
+      void onSearchCustomersRef.current(customerQuery).then((results) => {
+        if (!active || customerSearchRequestRef.current !== requestId) return
+        setCustomerResults(results)
+      })
+    }, 250)
+    return () => {
+      active = false
+      window.clearTimeout(handle)
+    }
+  }, [customerMode, customerQuery])
+
+  useEffect(() => {
+    if (customerMode !== "new") {
+      accountManagerSearchRequestRef.current += 1
+      setAccountManagerResults([])
+      return
+    }
+    let active = true
+    const requestId = accountManagerSearchRequestRef.current + 1
+    accountManagerSearchRequestRef.current = requestId
+    const handle = window.setTimeout(() => {
+      void onSearchAccountManagersRef.current(accountManagerQuery).then((results) => {
+        if (!active || accountManagerSearchRequestRef.current !== requestId) return
+        setAccountManagerResults(results)
+      })
+    }, 250)
+    return () => {
+      active = false
+      window.clearTimeout(handle)
+    }
+  }, [customerMode, accountManagerQuery])
+
+  useEffect(() => {
+    if (customerMode !== "new" || contactMode !== "existing") {
+      contactSearchRequestRef.current += 1
+      setContactResults([])
+      return
+    }
+    let active = true
+    const requestId = contactSearchRequestRef.current + 1
+    contactSearchRequestRef.current = requestId
+    const handle = window.setTimeout(() => {
+      void onSearchContactsRef.current(contactQuery).then((results) => {
+        if (!active || contactSearchRequestRef.current !== requestId) return
+        setContactResults(results)
+      })
+    }, 250)
+    return () => {
+      active = false
+      window.clearTimeout(handle)
+    }
+  }, [customerMode, contactMode, contactQuery])
+
+  async function submit() {
+    if (!canSubmit) return
+    const success = await props.onCreateProject({
+      project_name: projectName.trim(),
+      customer_mode: customerMode,
+      customer_name: customerMode === "new" ? customerName.trim() : undefined,
+      customer: customerMode === "existing" ? selectedCustomer.trim() : undefined,
+      account_manager: customerMode === "new" ? accountManager.trim() || undefined : undefined,
+      default_billing_currency: customerMode === "new" ? currency.trim() || "USD" : undefined,
+      default_cost_center: costCenter.trim() || "Projects - 5",
+      activity_type: activityTypeEdited ? activityType.trim() || undefined : undefined,
+      customer_details: customerMode === "new" ? customerDetails.trim() || undefined : undefined,
+      customer_website: customerMode === "new" ? customerWebsite.trim() || undefined : undefined,
+      address_line1: customerMode === "new" ? addressLine1.trim() || undefined : undefined,
+      address_line2: customerMode === "new" ? addressLine2.trim() || undefined : undefined,
+      address_city: customerMode === "new" ? addressCity.trim() || undefined : undefined,
+      address_state: customerMode === "new" ? addressState.trim() || undefined : undefined,
+      address_country:
+        customerMode === "new" && addressLine1.trim()
+          ? addressCountry.trim() || "United States"
+          : undefined,
+      address_postal_code:
+        customerMode === "new" ? addressPostalCode.trim() || undefined : undefined,
+      contact:
+        customerMode === "new" && contactMode === "existing"
+          ? selectedContact.trim() || undefined
+          : undefined,
+      contact_first_name:
+        customerMode === "new" && contactMode === "new"
+          ? contactFirstName.trim() || undefined
+          : undefined,
+      contact_last_name:
+        customerMode === "new" && contactMode === "new"
+          ? contactLastName.trim() || undefined
+          : undefined,
+      contact_email:
+        customerMode === "new" && contactMode === "new"
+          ? contactEmail.trim() || undefined
+          : undefined,
+      contact_phone:
+        customerMode === "new" && contactMode === "new"
+          ? contactPhone.trim() || undefined
+          : undefined,
+      contact_mobile:
+        customerMode === "new" && contactMode === "new"
+          ? contactMobile.trim() || undefined
+          : undefined,
+    })
+    if (success) props.onClose()
   }
 
   return (
-    <form
-      className="grid gap-3"
-      onSubmit={(event) => {
-        event.preventDefault()
-        if (!rateInvalid) void submitEngineer()
-      }}
+    <div
+      className="fixed inset-0 z-50 grid place-items-center p-4"
+      aria-labelledby="createProjectTitle"
+      aria-modal="true"
+      role="dialog"
     >
-      <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(180px,.7fr)_minmax(130px,.45fr)_minmax(130px,.45fr)]">
-        <Label>
-          ERP user
-          <Input
-            value={newUser}
-            autoComplete="off"
-            placeholder="engineer@508.dev"
-            onChange={(event) => setNewUser(event.target.value)}
-          />
-        </Label>
-        <Label>
-          Activity Type
-          <Input
-            value={activityType}
-            autoComplete="off"
-            placeholder="Optional rate step"
-            onChange={(event) => setActivityType(event.target.value)}
-          />
-        </Label>
-        <Label>
-          Billing rate
-          <Input
-            value={billingRate}
-            inputMode="decimal"
-            autoComplete="off"
-            placeholder="USD/hr"
-            onChange={(event) => setBillingRate(event.target.value)}
-          />
-        </Label>
-        <Label>
-          Costing rate
-          <Input
-            value={costingRate}
-            inputMode="decimal"
-            autoComplete="off"
-            placeholder="USD/hr"
-            onChange={(event) => setCostingRate(event.target.value)}
-          />
-        </Label>
+      <button
+        type="button"
+        className="absolute inset-0 cursor-default bg-black/45"
+        aria-label="Close project creation"
+        onClick={props.onClose}
+      />
+      <div className="relative grid max-h-[90vh] w-full max-w-2xl gap-4 overflow-y-auto rounded-md border bg-background p-5 shadow-2xl">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <strong id="createProjectTitle" className="block text-base">
+              New ERP project
+            </strong>
+            <span className="text-sm text-muted-foreground">
+              Creates a project and links a new or existing customer.
+            </span>
+          </div>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label="Close project creation"
+            onClick={props.onClose}
+          >
+            <X />
+          </Button>
+        </div>
+
+        <div className="grid gap-3">
+          <Label>
+            Project name *
+            <Input
+              value={projectName}
+              autoComplete="off"
+              maxLength={140}
+              placeholder="Acme Portal"
+              onChange={(event) => setProjectName(event.target.value)}
+            />
+          </Label>
+
+          <div className="grid gap-2">
+            <span className="text-xs font-bold text-muted-foreground">Customer</span>
+            <div className="grid grid-cols-2 gap-2">
+              {(["new", "existing"] as const).map((mode) => (
+                <Button
+                  key={mode}
+                  type="button"
+                  variant={customerMode === mode ? "default" : "outline"}
+                  onClick={() => setCustomerMode(mode)}
+                >
+                  {mode === "new" ? "New customer" : "Existing customer"}
+                </Button>
+              ))}
+            </div>
+          </div>
+
+          {customerMode === "new" ? (
+            <div className="grid gap-3 md:grid-cols-2">
+              <Label className="md:col-span-2">
+                Customer name *
+                <Input
+                  value={customerName}
+                  autoComplete="off"
+                  maxLength={140}
+                  placeholder="Acme"
+                  onChange={(event) => setCustomerName(event.target.value)}
+                />
+              </Label>
+              <Label>
+                Account manager
+                <Input
+                  value={accountManagerQuery}
+                  autoComplete="off"
+                  placeholder="Search @508.dev user"
+                  onChange={(event) => {
+                    setAccountManagerQuery(event.target.value)
+                    setAccountManager("")
+                  }}
+                />
+              </Label>
+              {accountManagerQuery.trim().length >= 2 ? (
+                <div className="grid max-h-40 gap-2 overflow-y-auto rounded-md border p-2 md:col-span-2">
+                  {accountManagerResults.length ? (
+                    accountManagerResults.map((user) => {
+                      const email = user.email || user.name || ""
+                      return (
+                        <label
+                          key={email}
+                          className="flex cursor-pointer items-start gap-2 rounded-sm px-2 py-1.5 hover:bg-secondary"
+                        >
+                          <input
+                            type="radio"
+                            name="erpAccountManager"
+                            value={email}
+                            checked={accountManager === email}
+                            onChange={() => {
+                              setAccountManager(email)
+                              setAccountManagerQuery(email)
+                            }}
+                          />
+                          <span className="grid gap-0.5 text-sm">
+                            <strong>{user.full_name || email}</strong>
+                            <span className="text-muted-foreground">{email}</span>
+                          </span>
+                        </label>
+                      )
+                    })
+                  ) : (
+                    <span className="px-2 py-3 text-sm text-muted-foreground">
+                      No enabled @508.dev users found.
+                    </span>
+                  )}
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <div className="grid gap-3">
+              <Label>
+                Find customer *
+                <Input
+                  value={customerQuery}
+                  autoComplete="off"
+                  placeholder="Search customer"
+                  onChange={(event) => setCustomerQuery(event.target.value)}
+                />
+              </Label>
+              <div className="grid max-h-48 gap-2 overflow-y-auto rounded-md border p-2">
+                {customerResults.length ? (
+                  customerResults.map((customer) => {
+                    const customerId = customer.name || customer.customer_name || ""
+                    return (
+                      <label
+                        key={customerId}
+                        className="flex cursor-pointer items-start gap-2 rounded-sm px-2 py-1.5 hover:bg-secondary"
+                      >
+                        <input
+                          type="radio"
+                          name="erpCustomer"
+                          value={customerId}
+                          checked={selectedCustomer === customerId}
+                          onChange={() => setSelectedCustomer(customerId)}
+                        />
+                        <span className="grid gap-0.5 text-sm">
+                          <strong>{customer.customer_name || customerId}</strong>
+                          <span className="text-muted-foreground">
+                            {[customerId, customer.default_currency].filter(Boolean).join(" | ")}
+                          </span>
+                        </span>
+                      </label>
+                    )
+                  })
+                ) : (
+                  <span className="px-2 py-3 text-sm text-muted-foreground">
+                    Search at least two characters.
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+
+          {customerMode === "new" ? (
+            <>
+              <div className="grid gap-3 md:grid-cols-2">
+                <Label className="md:col-span-2">
+                  Customer details
+                  <textarea
+                    value={customerDetails}
+                    className="min-h-20 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground shadow-xs transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+                    maxLength={2000}
+                    placeholder="More information"
+                    onChange={(event) => setCustomerDetails(event.target.value)}
+                  />
+                </Label>
+                <Label className="md:col-span-2">
+                  Website
+                  <Input
+                    value={customerWebsite}
+                    autoComplete="url"
+                    placeholder="https://example.com"
+                    onChange={(event) => setCustomerWebsite(event.target.value)}
+                  />
+                </Label>
+              </div>
+
+              <div className="grid gap-3">
+                <div className="flex items-center justify-between gap-3">
+                  <strong className="text-sm text-foreground">Contact</strong>
+                  <div className="grid grid-cols-2 gap-2">
+                    {(["new", "existing"] as const).map((mode) => (
+                      <Button
+                        key={mode}
+                        type="button"
+                        size="sm"
+                        variant={contactMode === mode ? "default" : "outline"}
+                        onClick={() => setContactMode(mode)}
+                      >
+                        {mode === "new" ? "New" : "Existing"}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+
+                {contactMode === "new" ? (
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <Label>
+                      First name {contactStarted ? "*" : ""}
+                      <Input
+                        value={contactFirstName}
+                        autoComplete="given-name"
+                        onChange={(event) => setContactFirstName(event.target.value)}
+                      />
+                    </Label>
+                    <Label>
+                      Last name
+                      <Input
+                        value={contactLastName}
+                        autoComplete="family-name"
+                        onChange={(event) => setContactLastName(event.target.value)}
+                      />
+                    </Label>
+                    <Label>
+                      Email
+                      <Input
+                        value={contactEmail}
+                        type="email"
+                        autoComplete="email"
+                        onChange={(event) => setContactEmail(event.target.value)}
+                      />
+                    </Label>
+                    <Label>
+                      Phone
+                      <Input
+                        value={contactPhone}
+                        type="tel"
+                        autoComplete="tel"
+                        onChange={(event) => setContactPhone(event.target.value)}
+                      />
+                    </Label>
+                    <Label>
+                      Mobile
+                      <Input
+                        value={contactMobile}
+                        type="tel"
+                        autoComplete="tel"
+                        onChange={(event) => setContactMobile(event.target.value)}
+                      />
+                    </Label>
+                  </div>
+                ) : (
+                  <div className="grid gap-3">
+                    <Label>
+                      Find contact
+                      <Input
+                        value={contactQuery}
+                        autoComplete="off"
+                        placeholder="Search name or email"
+                        onChange={(event) => setContactQuery(event.target.value)}
+                      />
+                    </Label>
+                    <div className="grid max-h-48 gap-2 overflow-y-auto rounded-md border p-2">
+                      {contactResults.length ? (
+                        contactResults.map((contact) => {
+                          const contactId = contact.name || ""
+                          const contactLabel = contact.full_name || contactId
+                          const contactMetadata = [
+                            { key: "company", value: contact.company_name },
+                            { key: "email", value: contact.email_id },
+                            { key: "phone", value: contact.phone },
+                            { key: "mobile", value: contact.mobile_no },
+                          ].filter((item): item is { key: string; value: string } =>
+                            Boolean(item.value),
+                          )
+                          return (
+                            <label
+                              key={contactId}
+                              className="flex cursor-pointer items-start gap-2 rounded-sm px-2 py-1.5 hover:bg-secondary"
+                            >
+                              <input
+                                type="radio"
+                                name="erpContact"
+                                value={contactId}
+                                checked={selectedContact === contactId}
+                                onChange={() => setSelectedContact(contactId)}
+                              />
+                              <span className="grid gap-0.5 text-sm">
+                                <strong>
+                                  <HighlightedText value={contactLabel} query={contactQuery} />
+                                </strong>
+                                {contactMetadata.length ? (
+                                  <span className="text-muted-foreground">
+                                    {contactMetadata.map((item, index) => (
+                                      <span key={item.key}>
+                                        {index > 0 ? " | " : ""}
+                                        <HighlightedText value={item.value} query={contactQuery} />
+                                      </span>
+                                    ))}
+                                  </span>
+                                ) : null}
+                              </span>
+                            </label>
+                          )
+                        })
+                      ) : (
+                        <span className="px-2 py-3 text-sm text-muted-foreground">
+                          Search at least two characters.
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-2">
+                <strong className="text-sm text-foreground md:col-span-2">Address</strong>
+                <Label className="md:col-span-2">
+                  Address line 1 {addressStarted ? "*" : ""}
+                  <Input
+                    value={addressLine1}
+                    autoComplete="address-line1"
+                    onChange={(event) => setAddressLine1(event.target.value)}
+                  />
+                </Label>
+                <Label className="md:col-span-2">
+                  Address line 2
+                  <Input
+                    value={addressLine2}
+                    autoComplete="address-line2"
+                    onChange={(event) => setAddressLine2(event.target.value)}
+                  />
+                </Label>
+                <Label>
+                  City
+                  <Input
+                    value={addressCity}
+                    autoComplete="address-level2"
+                    onChange={(event) => setAddressCity(event.target.value)}
+                  />
+                </Label>
+                <Label>
+                  State
+                  <Input
+                    value={addressState}
+                    autoComplete="address-level1"
+                    onChange={(event) => setAddressState(event.target.value)}
+                  />
+                </Label>
+                <Label>
+                  Postal code
+                  <Input
+                    value={addressPostalCode}
+                    autoComplete="postal-code"
+                    onChange={(event) => setAddressPostalCode(event.target.value)}
+                  />
+                </Label>
+                <Label>
+                  Country
+                  <Input
+                    value={addressCountry}
+                    autoComplete="country-name"
+                    onChange={(event) => setAddressCountry(event.target.value)}
+                  />
+                </Label>
+              </div>
+            </>
+          ) : null}
+
+          <div className="grid gap-3 rounded-md border p-3">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setAdvancedOpen((current) => !current)}
+            >
+              {advancedOpen ? "Hide advanced" : "Show advanced"}
+            </Button>
+            {advancedOpen ? (
+              <div className="grid gap-3 md:grid-cols-2">
+                {customerMode === "new" ? (
+                  <Label>
+                    Billing currency
+                    <Input
+                      value={currency}
+                      autoComplete="off"
+                      maxLength={3}
+                      onChange={(event) => setCurrency(event.target.value.toUpperCase())}
+                    />
+                  </Label>
+                ) : null}
+                <Label>
+                  Cost center
+                  <Select
+                    value={costCenter}
+                    onChange={(event) => setCostCenter(event.target.value)}
+                  >
+                    {costCenters.map((option) => {
+                      const value = option.name || ""
+                      return (
+                        <option key={value} value={value}>
+                          {[value, option.company].filter(Boolean).join(" | ")}
+                        </option>
+                      )
+                    })}
+                  </Select>
+                </Label>
+                <Label>
+                  Activity type
+                  <Input
+                    value={activityTypeEdited ? activityType : defaultActivityType}
+                    autoComplete="off"
+                    maxLength={140}
+                    placeholder={defaultActivityType || "Engineering for project"}
+                    onChange={(event) => {
+                      setActivityTypeEdited(true)
+                      setActivityType(event.target.value)
+                    }}
+                  />
+                </Label>
+              </div>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="flex flex-wrap justify-end gap-2">
+          <Button type="button" variant="outline" onClick={props.onClose}>
+            Cancel
+          </Button>
+          <Button type="button" disabled={!canSubmit} onClick={() => void submit()}>
+            Create project
+          </Button>
+        </div>
       </div>
-      <div className="flex flex-wrap gap-2">
-        <Button
-          type="submit"
-          variant="outline"
-          disabled={loading[`project:${projectId}:user`] || !normalizedUser || rateInvalid}
-        >
-          <Users />
-          Add engineer
-        </Button>
-        <Button
-          type="button"
-          variant="outline"
-          disabled={loading[`project:${projectId}:historical`] || !normalizedUser}
-          onClick={() =>
-            void onAddHistoricalMember(projectId, newUser).then((updated) => {
-              if (updated) setNewUser("")
-            })
-          }
-        >
-          <Users />
-          Add historical
-        </Button>
-      </div>
-    </form>
+    </div>
   )
 }
 
