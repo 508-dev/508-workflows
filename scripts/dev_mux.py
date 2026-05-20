@@ -306,16 +306,13 @@ def _command_service(command: str) -> str | None:
     return None
 
 
-def _process_in_scope(
+def _process_in_path_scope(
     process: ProcessInfo,
     *,
-    service_name: str,
     worktree_root: str,
     conductor_group: str,
     cwd: str = "",
 ) -> bool:
-    if _command_service(process.command) != service_name:
-        return False
     if worktree_root and (
         _command_mentions_path(process.command, worktree_root)
         or _is_under_path(cwd, worktree_root)
@@ -330,6 +327,45 @@ def _process_in_scope(
     )
 
 
+def _service_context_chain(
+    owner_pid: int,
+    *,
+    service_name: str,
+    worktree_root: str,
+    conductor_group: str,
+    commands: dict[int, str],
+    cwds: dict[int, str],
+    processes: dict[int, ProcessInfo],
+) -> set[int]:
+    chain: list[ProcessInfo] = []
+    process = processes.get(owner_pid)
+    if process is None:
+        process = ProcessInfo(owner_pid, 0, commands.get(owner_pid, ""))
+
+    while process is not None:
+        command = commands.get(process.pid, process.command)
+        current = ProcessInfo(process.pid, process.ppid, command)
+        cwd = cwds.setdefault(current.pid, _pid_cwd(current.pid))
+        if not _process_in_path_scope(
+            current,
+            worktree_root=worktree_root,
+            conductor_group=conductor_group,
+            cwd=cwd,
+        ):
+            break
+        chain.append(current)
+        process = processes.get(current.ppid)
+
+    service_indexes = [
+        index
+        for index, process_info in enumerate(chain)
+        if _command_service(process_info.command) == service_name
+    ]
+    if not service_indexes:
+        return set()
+    return {process_info.pid for process_info in chain[: max(service_indexes) + 1]}
+
+
 def _related_reclaim_pids(
     owner_pids: Iterable[int],
     *,
@@ -340,25 +376,19 @@ def _related_reclaim_pids(
     cwds: dict[int, str],
     processes: dict[int, ProcessInfo],
 ) -> set[int]:
-    selected: set[int] = set(owner_pids)
-
+    selected: set[int] = set()
     for owner_pid in owner_pids:
-        process = processes.get(owner_pid)
-        while process is not None:
-            parent = processes.get(process.ppid)
-            if parent is None:
-                break
-            parent_cwd = cwds.setdefault(parent.pid, _pid_cwd(parent.pid))
-            if not _process_in_scope(
-                parent,
+        selected.update(
+            _service_context_chain(
+                owner_pid,
                 service_name=service_name,
                 worktree_root=worktree_root,
                 conductor_group=conductor_group,
-                cwd=parent_cwd,
-            ):
-                break
-            selected.add(parent.pid)
-            process = parent
+                commands=commands,
+                cwds=cwds,
+                processes=processes,
+            )
+        )
 
     children = _child_index(processes)
     stack = list(selected)
@@ -371,9 +401,8 @@ def _related_reclaim_pids(
             if child is None:
                 continue
             child_cwd = cwds.setdefault(child_pid, _pid_cwd(child_pid))
-            if not _process_in_scope(
+            if not _process_in_path_scope(
                 child,
-                service_name=service_name,
                 worktree_root=worktree_root,
                 conductor_group=conductor_group,
                 cwd=child_cwd,
@@ -382,7 +411,6 @@ def _related_reclaim_pids(
             selected.add(child_pid)
             stack.append(child_pid)
 
-    selected.update(pid for pid, command in commands.items() if command)
     return selected
 
 
@@ -419,31 +447,16 @@ def _ensure_ports_available(
         processes = _process_table()
         commands = {pid: _pid_command(pid) for pid in pids}
         cwds = {pid: _pid_cwd(pid) for pid in pids}
-        reclaimable_pids = [
-            pid
-            for pid in pids
-            if _process_in_scope(
-                ProcessInfo(
-                    pid=pid,
-                    ppid=processes.get(pid, ProcessInfo(pid, 0, "")).ppid,
-                    command=commands.get(pid, ""),
-                ),
-                service_name=service_name,
-                worktree_root=worktree_root,
-                conductor_group=conductor_group,
-                cwd=cwds.get(pid, ""),
-            )
-        ]
-        if reclaimable_pids and len(reclaimable_pids) == len(pids):
-            related_pids = _related_reclaim_pids(
-                reclaimable_pids,
-                service_name=service_name,
-                worktree_root=worktree_root,
-                conductor_group=conductor_group,
-                commands=commands,
-                cwds=cwds,
-                processes=processes,
-            )
+        related_pids = _related_reclaim_pids(
+            pids,
+            service_name=service_name,
+            worktree_root=worktree_root,
+            conductor_group=conductor_group,
+            commands=commands,
+            cwds=cwds,
+            processes=processes,
+        )
+        if related_pids and all(pid in related_pids for pid in pids):
             print(
                 f"{service_name} port {port} is already in use by "
                 "same-workspace service process(es); reclaiming it."

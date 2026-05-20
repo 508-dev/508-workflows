@@ -201,6 +201,54 @@ def test_ensure_ports_available_reclaims_same_service_parent_tree(
     assert stopped == {100, 101, 102}
 
 
+def test_ensure_ports_available_reclaims_web_reload_worker_tree(
+    monkeypatch,
+) -> None:
+    module = _load_dev_mux_module()
+    stopped: set[int] = set()
+    workspace = "/Users/michaelwu/conductor/workspaces/508-workflows/victoria-v1"
+
+    processes = {
+        100: module.ProcessInfo(
+            100,
+            1,
+            (
+                f"{workspace}/.venv/bin/python {workspace}/.venv/bin/uvicorn "
+                "five08.backend.api:create_app --factory --reload"
+            ),
+        ),
+        101: module.ProcessInfo(
+            101,
+            100,
+            f"{workspace}/.venv/bin/python -c from multiprocessing.spawn import spawn_main",
+        ),
+        102: module.ProcessInfo(
+            102,
+            101,
+            f"{workspace}/.venv/bin/python -c from uvicorn._subprocess import subprocess_started",
+        ),
+    }
+
+    monkeypatch.setattr(module, "_listening_pids", lambda port: [102])
+    monkeypatch.setattr(module, "_pid_command", lambda pid: processes[pid].command)
+    monkeypatch.setattr(module, "_pid_cwd", lambda pid: workspace)
+    monkeypatch.setattr(module, "_process_table", lambda: processes)
+    monkeypatch.setattr(module, "_port_is_free", lambda port: True)
+    monkeypatch.setattr(module, "_stop_pids", lambda pids: stopped.update(pids))
+
+    ok, error = module._ensure_ports_available(
+        {
+            "WORKTREE_ENV_REPO_ROOT": workspace,
+            "BACKEND_API_BASE_URL": "http://127.0.0.1:18080",
+        },
+        {"web"},
+    )
+
+    assert ok is True
+    assert error is None
+    assert stopped == {100, 101, 102}
+
+
 def test_ensure_ports_available_does_not_reclaim_prefix_sibling_workspace(
     monkeypatch,
 ) -> None:
