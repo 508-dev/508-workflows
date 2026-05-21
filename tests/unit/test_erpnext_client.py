@@ -778,3 +778,54 @@ def test_search_invoices_fetches_expected_fields() -> None:
     assert "docstatus" in fields
     assert "posting_date" in fields
     assert "owner" in fields
+
+
+def test_search_invoices_omits_or_filters_when_unscoped() -> None:
+    captured: dict[str, Any] = {}
+
+    class CaptureClient(FakeERPNextClient):
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            params: dict[str, Any] | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            captured["params"] = params
+            return {"data": []}
+
+    CaptureClient({}).search_invoices("Sales Invoice")
+
+    assert "or_filters" not in captured["params"]
+
+
+def test_search_invoices_scopes_to_owners_and_projects() -> None:
+    captured: dict[str, Any] = {}
+
+    class CaptureClient(FakeERPNextClient):
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            params: dict[str, Any] | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            captured["params"] = params
+            return {"data": []}
+
+    CaptureClient({}).search_invoices(
+        "Sales Invoice",
+        owners=["member@example.com"],
+        projects=["TEST-PROJ-001", "TEST-PROJ-002"],
+    )
+
+    or_filters = json.loads(captured["params"]["or_filters"])
+    assert ["Sales Invoice", "owner", "in", ["member@example.com"]] in or_filters
+    assert [
+        "Sales Invoice",
+        "project",
+        "in",
+        ["TEST-PROJ-001", "TEST-PROJ-002"],
+    ] in or_filters

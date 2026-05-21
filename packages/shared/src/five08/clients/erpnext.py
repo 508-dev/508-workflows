@@ -690,13 +690,25 @@ class ERPNextClient:
         query: str = "",
         docstatus: int | None = None,
         limit: int = 10,
+        owners: list[str] | None = None,
+        projects: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Search invoices for autocomplete, ordered newest first."""
+        """Search invoices for autocomplete, ordered newest first.
+
+        When owners or projects are given, results are scoped to invoices
+        created by those owners OR belonging to those projects.
+        """
         filters: list[Any] = []
         if query:
             filters.append([doctype, "name", "like", f"%{query}%"])
         if docstatus is not None:
             filters.append([doctype, "docstatus", "=", docstatus])
+
+        or_filters: list[Any] = []
+        if owners:
+            or_filters.append([doctype, "owner", "in", owners])
+        if projects:
+            or_filters.append([doctype, "project", "in", projects])
 
         params: dict[str, Any] = {
             "fields": json.dumps(["name", "posting_date", "docstatus", "owner"]),
@@ -705,6 +717,8 @@ class ERPNextClient:
         }
         if filters:
             params["filters"] = json.dumps(filters)
+        if or_filters:
+            params["or_filters"] = json.dumps(or_filters)
 
         data = self.request(
             "GET",

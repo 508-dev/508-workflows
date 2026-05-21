@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from typing import Any
 
 import discord
 from discord import app_commands
@@ -9,7 +10,9 @@ from discord.ext import commands
 
 from five08.clients.erpnext import ERPNextClient, ERPNextAPIError
 from five08.erpnext_validation import validate_invoice
+from five08.projects import list_dashboard_projects, project_viewer_emails_for_discord
 from five08.discord_bot.config import settings
+from five08.discord_bot.utils.role_decorators import check_user_roles_with_hierarchy
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +22,28 @@ DOCTYPE_CHOICES = [
 ]
 
 STATUS_LABEL = {0: "Draft", 1: "Submitted", 2: "Cancelled"}
+
+# Invoice access rules — a caller may validate an invoice if any of these hold:
+#   1. They have Steering Committee role or above (full access).
+#   2. They created the invoice (invoice owner matches one of their ERP emails).
+#   3. They are on the invoice's ERP project roster.
+_PRIVILEGED_ROLES = ["Steering Committee"]
+
+
+def _can_view_invoice(
+    invoice: dict[str, Any],
+    include_all: bool,
+    emails: list[str],
+    project_ids: list[str],
+) -> bool:
+    """Return whether the caller is authorized to see this specific invoice."""
+    if include_all:
+        return True
+    owner = str(invoice.get("owner") or "").strip().casefold()
+    if owner and owner in {email.casefold() for email in emails}:
+        return True
+    project = invoice.get("project")
+    return bool(project and project in project_ids)
 
 
 class ErpNextCog(commands.Cog, name="ERPNext"):
@@ -34,6 +59,35 @@ class ErpNextCog(commands.Cog, name="ERPNext"):
             timeout_seconds=settings.erpnext_api_timeout_seconds,
         )
         logger.info("ERPNext cog initialized")
+
+    def _resolve_access(
+        self, interaction: discord.Interaction
+    ) -> tuple[bool, list[str], list[str]]:
+        """Resolve the caller's invoice access. Run inside a worker thread.
+
+        Returns (include_all, emails, project_ids). A non-privileged caller
+        with no ERP identity returns (False, [], []).
+        """
+        roles = getattr(interaction.user, "roles", [])
+        if check_user_roles_with_hierarchy(roles, _PRIVILEGED_ROLES):
+            return True, [], []
+
+        emails = project_viewer_emails_for_discord(settings, str(interaction.user.id))
+        if not emails:
+            return False, [], []
+
+        projects = list_dashboard_projects(
+            settings,
+            viewer_emails=emails,
+            include_all=False,
+            limit=500,
+        )
+        project_ids = [
+            str(project_id)
+            for project in projects
+            if (project_id := project.get("erpnext_project_id"))
+        ]
+        return False, emails, project_ids
 
     @app_commands.command(
         name="validate-invoice",
@@ -53,13 +107,26 @@ class ErpNextCog(commands.Cog, name="ERPNext"):
         await interaction.response.defer(ephemeral=True)
 
         try:
+            include_all, emails, project_ids = await asyncio.to_thread(
+                self._resolve_access, interaction
+            )
+            if not include_all and not emails:
+                await interaction.followup.send(
+                    "Invoice validation is available to Steering Committee members "
+                    "or confirmed ERP project members.",
+                    ephemeral=True,
+                )
+                return
+
             invoice = await asyncio.to_thread(
                 self.client.get_invoice, doctype.value, invoice_name
             )
 
-            if invoice is None:
+            if invoice is None or not _can_view_invoice(
+                invoice, include_all, emails, project_ids
+            ):
                 await interaction.followup.send(
-                    f"{doctype.value} `{invoice_name}` not found in ERPNext. Please check the invoice number and type.",
+                    f"{doctype.value} `{invoice_name}` not found or you don't have access to it.",
                     ephemeral=True,
                 )
                 return
@@ -139,11 +206,19 @@ class ErpNextCog(commands.Cog, name="ERPNext"):
             return []
 
         try:
+            include_all, emails, project_ids = await asyncio.to_thread(
+                self._resolve_access, interaction
+            )
+            if not include_all and not emails:
+                return []
+
             invoices = await asyncio.to_thread(
                 self.client.search_invoices,
                 doctype=doctype_value,
                 query=current,
                 limit=25,
+                owners=None if include_all else emails,
+                projects=None if include_all else project_ids,
             )
             choices = []
             for inv in invoices[:25]:
@@ -159,7 +234,7 @@ class ErpNextCog(commands.Cog, name="ERPNext"):
                     )
                 )
             return choices
-        except ERPNextAPIError as e:
+        except Exception as e:
             logger.warning("ERPNext autocomplete error for %r: %s", doctype_value, e)
             return []
 
