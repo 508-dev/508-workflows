@@ -30,7 +30,7 @@ STATUS_LABEL = {0: "Draft", 1: "Submitted", 2: "Cancelled"}
 #   1. They have Steering Committee role or above (full access).
 #   2. They created the invoice (invoice owner matches one of their ERP emails).
 #   3. They are on the invoice's ERP project roster.
-_PRIVILEGED_ROLES = ["Steering Committee"]
+_PRIVILEGED_ROLES = ["Steering Committee", "Workflows Engineer"]
 
 
 def _can_view_invoice(
@@ -116,7 +116,7 @@ class InvoicesCog(commands.Cog, name="Invoices"):
             )
             if not include_all and not emails:
                 await interaction.followup.send(
-                    "Invoice validation is available to Steering Committee members "
+                    "Invoice validation is restricted to privileged roles "
                     "or confirmed ERP project members.",
                     ephemeral=True,
                 )

@@ -148,7 +148,7 @@ async def test_validate_invoice_denied_without_erp_identity(
             cog, mock_member_interaction, mock_doctype, "TEST-SINV-0001"
         )
     sent = mock_member_interaction.followup.send.call_args.args[0]
-    assert "Steering Committee" in sent
+    assert "privileged roles" in sent
     cog.client.get_invoice.assert_not_called()
 
 
