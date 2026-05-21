@@ -1213,18 +1213,32 @@ def _request_origin(request: Request) -> str | None:
     return _origin_from_url(str(request.base_url))
 
 
+def _dashboard_allowed_post_origins(request: Request) -> set[str]:
+    origins: set[str] = set()
+    request_origin = _request_origin(request)
+    if request_origin is not None:
+        origins.add(request_origin)
+
+    public_base_url = (settings.dashboard_public_base_url or "").strip().rstrip("/")
+    public_origin = _origin_from_url(public_base_url)
+    if public_origin is not None:
+        origins.add(public_origin)
+
+    return origins
+
+
 def _dashboard_same_origin_post_or_error(request: Request) -> JSONResponse | None:
-    expected_origin = _request_origin(request)
-    if expected_origin is None:
+    allowed_origins = _dashboard_allowed_post_origins(request)
+    if not allowed_origins:
         return JSONResponse({"error": "invalid_request_origin"}, status_code=403)
 
     origin = request.headers.get("origin")
-    if origin is not None and _origin_from_url(origin) != expected_origin:
+    if origin is not None and _origin_from_url(origin) not in allowed_origins:
         return JSONResponse({"error": "csrf_check_failed"}, status_code=403)
 
     referer = request.headers.get("referer")
     if origin is None and referer is not None:
-        if _origin_from_url(referer) != expected_origin:
+        if _origin_from_url(referer) not in allowed_origins:
             return JSONResponse({"error": "csrf_check_failed"}, status_code=403)
 
     return None

@@ -67,7 +67,7 @@ fields.
 - `WEB_HOST_BIND`
 - `WEB_HOST_PORT`
 - `DASHBOARD_DEFAULT_PATH`
-- `DASHBOARD_PUBLIC_BASE_URL`
+- `DASHBOARD_PUBLIC_BASE_URL` (public browser origin for generated dashboard links and dashboard write CSRF checks)
 
 Deprecated fallback names still work for now:
 

@@ -127,7 +127,7 @@ Discord deep-link identity policy:
 - `DISCORD_ADMIN_ROLES` controls which Discord roles can receive admin dashboard permissions (`Admin,Owner` recommended).
 - `OIDC_ADMIN_GROUPS` controls normal OIDC dashboard admin membership (`authentik Admins` recommended).
 - `AUTH_SESSION_TTL_SECONDS` controls dashboard session lifetime after login (`86400`, one day, by default).
-- `DASHBOARD_PUBLIC_BASE_URL` should be set to the public dashboard origin in production, for example `https://workflows.508.dev`, so Discord-created links use the browser-accessible host.
+- `DASHBOARD_PUBLIC_BASE_URL` should be set to the public dashboard origin in production, for example `https://workflows.508.dev`, so Discord-created links use the browser-accessible host and dashboard write CSRF checks can accept the public origin when the app is behind a proxy/tunnel.
 - `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=true` (default): Discord deep links also require OIDC email identity checks against the linked CRM/Discord dashboard user.
 - `DISCORD_LINK_REQUIRE_OIDC_IDENTITY_CHECKS=false`: Discord deep links create a Discord-backed session directly after re-validating active CRM membership + Discord Steering Committee+ role, without forcing an OIDC roundtrip.
 - In local/dev/test only, the trusted Discord bot role context can create and consume a dashboard link when the local `people` cache has no matching CRM-linked row. Production still requires the normal CRM/people identity.
