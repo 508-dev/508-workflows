@@ -668,6 +668,12 @@ class ERPNextClient:
 
     def get_invoice(self, doctype: str, name: str) -> dict[str, Any] | None:
         """Fetch a single Sales Invoice or Purchase Invoice by name. Returns None on 404."""
+        doctype = doctype.strip()
+        name = name.strip()
+        if not doctype or not name:
+            raise ValueError(
+                f"doctype and name must be non-empty strings, got {doctype!r} / {name!r}"
+            )
         try:
             data = self.request(
                 "GET",
@@ -713,7 +719,7 @@ class ERPNextClient:
         params: dict[str, Any] = {
             "fields": json.dumps(["name", "posting_date", "docstatus", "owner"]),
             "order_by": "posting_date desc",
-            "limit_page_length": limit,
+            "limit_page_length": max(1, limit),
         }
         if filters:
             params["filters"] = json.dumps(filters)

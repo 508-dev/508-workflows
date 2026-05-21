@@ -222,15 +222,25 @@ class ErpNextCog(commands.Cog, name="ERPNext"):
             )
             choices = []
             for inv in invoices[:25]:
+                inv_name = inv.get("name")
+                # Ensure inv_name is a valid string and within Discord's 100-char limit
+                if not isinstance(inv_name, str) or len(inv_name) > 100:
+                    continue  # Skip invalid or overlong IDs to prevent lookup/API failures
+
                 try:
                     status_int = int(inv.get("docstatus", 0))
                 except (TypeError, ValueError):
                     status_int = -1
-                label = f"[{STATUS_LABEL.get(status_int, '?')}] {inv['name']} · {inv.get('owner', '')} · {inv.get('posting_date', '')}"
+
+                label = f"[{STATUS_LABEL.get(status_int, '?')}] {inv_name} · {inv.get('owner', '')} · {inv.get('posting_date', '')}"
+
+                # If label exceeds 100 chars, truncate gracefully with trailing dots
+                display_name = label if len(label) <= 100 else f"{label[:97]}..."
+
                 choices.append(
                     app_commands.Choice(
-                        name=label[:100],
-                        value=inv["name"][:100],
+                        name=display_name,
+                        value=inv_name,
                     )
                 )
             return choices
