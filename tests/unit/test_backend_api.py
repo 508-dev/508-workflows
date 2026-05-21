@@ -5891,6 +5891,48 @@ def test_dashboard_sync_projects_workflows_engineer_is_dry_run(
     mock_insert.assert_not_called()
 
 
+def test_dashboard_sync_projects_accepts_configured_public_origin(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    monkeypatch.setattr(
+        api.settings, "dashboard_public_base_url", "  https://workflows.508.dev/  "
+    )
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admins"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._enqueue_erpnext_project_sync_job",
+            new_callable=AsyncMock,
+            return_value=Mock(id="job-sync-1", created=True),
+        ),
+        patch("five08.backend.api.insert_audit_event"),
+    ):
+        response = client.post(
+            "/dashboard/api/sync/projects",
+            headers={
+                "Origin": "https://workflows.508.dev",
+                "Referer": "https://workflows.508.dev/dashboard/projects",
+            },
+        )
+
+    assert response.status_code == 202
+    assert response.json()["job_id"] == "job-sync-1"
+
+
 def test_dashboard_sync_people_rejects_cross_origin_post(client: TestClient) -> None:
     session = api.AuthSession(
         subject="admin-1",
