@@ -1,4 +1,4 @@
-"""ERPNext invoice validation cog for the 508.dev Discord bot."""
+"""Invoice validation cog for the 508.dev Discord bot."""
 
 import asyncio
 import logging
@@ -10,7 +10,10 @@ from discord.ext import commands
 
 from five08.clients.erpnext import ERPNextClient, ERPNextAPIError
 from five08.erpnext_validation import validate_invoice
-from five08.projects import list_dashboard_projects, project_viewer_emails_for_discord
+from five08.projects import (
+    list_dashboard_projects,
+    project_viewer_emails_for_discord,
+)
 from five08.discord_bot.config import settings
 from five08.discord_bot.utils.role_decorators import check_user_roles_with_hierarchy
 
@@ -46,7 +49,7 @@ def _can_view_invoice(
     return bool(project and project in project_ids)
 
 
-class ErpNextCog(commands.Cog, name="ERPNext"):
+class InvoicesCog(commands.Cog, name="Invoices"):
     """Cog for ERPNext invoice validation."""
 
     def __init__(self, bot: commands.Bot) -> None:
@@ -58,7 +61,7 @@ class ErpNextCog(commands.Cog, name="ERPNext"):
             api_key=api_key,
             timeout_seconds=settings.erpnext_api_timeout_seconds,
         )
-        logger.info("ERPNext cog initialized")
+        logger.info("Invoices cog initialized")
 
     def _resolve_access(
         self, interaction: discord.Interaction
@@ -81,11 +84,12 @@ class ErpNextCog(commands.Cog, name="ERPNext"):
             viewer_emails=emails,
             include_all=False,
             limit=500,
+            include_roster=False,
         )
         project_ids = [
-            str(project_id)
+            str(pid)
             for project in projects
-            if (project_id := project.get("erpnext_project_id"))
+            if (pid := project.get("erpnext_project_id"))
         ]
         return False, emails, project_ids
 
@@ -255,4 +259,4 @@ async def setup(bot: commands.Bot) -> None:
             "ERPNext cog not loaded: missing ERPNEXT_BASE_URL or ERPNEXT_API_KEY"
         )
         return
-    await bot.add_cog(ErpNextCog(bot))
+    await bot.add_cog(InvoicesCog(bot))

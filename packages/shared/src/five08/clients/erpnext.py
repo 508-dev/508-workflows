@@ -670,10 +670,10 @@ class ERPNextClient:
         """Fetch a single Sales Invoice or Purchase Invoice by name. Returns None on 404."""
         doctype = doctype.strip()
         name = name.strip()
-        if not doctype or not name:
-            raise ValueError(
-                f"doctype and name must be non-empty strings, got {doctype!r} / {name!r}"
-            )
+        if not doctype:
+            raise ERPNextAPIError("DocType is required")
+        if not name:
+            raise ERPNextAPIError("Invoice name is required")
         try:
             data = self.request(
                 "GET",

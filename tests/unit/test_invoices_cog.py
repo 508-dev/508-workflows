@@ -1,10 +1,10 @@
-"""Unit tests for ERPNext Discord cog."""
+"""Unit tests for the invoices Discord cog."""
 
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from five08.discord_bot.cogs.erpnext import ErpNextCog
+from five08.discord_bot.cogs.invoices import InvoicesCog
 from five08.clients.erpnext import ERPNextAPIError
 
 
@@ -59,9 +59,9 @@ def mock_doctype() -> Mock:
 
 
 @pytest.fixture
-def cog() -> ErpNextCog:
-    with patch("five08.discord_bot.cogs.erpnext.ERPNextClient"):
-        return ErpNextCog(Mock())
+def cog() -> InvoicesCog:
+    with patch("five08.discord_bot.cogs.invoices.ERPNextClient"):
+        return InvoicesCog(Mock())
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +117,7 @@ async def test_validate_invoice_issues_truncated_under_discord_limit(
     cog, mock_interaction, mock_doctype
 ):
     cog.client.get_invoice = Mock(return_value=VALID_INVOICE)
-    with patch("five08.discord_bot.cogs.erpnext.validate_invoice") as mock_validate:
+    with patch("five08.discord_bot.cogs.invoices.validate_invoice") as mock_validate:
         result = Mock()
         result.passed = False
         result.issues = [Mock(message="x" * 2000)]
@@ -141,7 +141,7 @@ async def test_validate_invoice_denied_without_erp_identity(
 ):
     cog.client.get_invoice = Mock()
     with patch(
-        "five08.discord_bot.cogs.erpnext.project_viewer_emails_for_discord",
+        "five08.discord_bot.cogs.invoices.project_viewer_emails_for_discord",
         return_value=[],
     ):
         await cog.validate_invoice_command.callback(
@@ -160,11 +160,11 @@ async def test_validate_invoice_allowed_for_invoice_owner(
     cog.client.get_invoice = Mock(return_value=owned)
     with (
         patch(
-            "five08.discord_bot.cogs.erpnext.project_viewer_emails_for_discord",
+            "five08.discord_bot.cogs.invoices.project_viewer_emails_for_discord",
             return_value=["member@example.com"],
         ),
         patch(
-            "five08.discord_bot.cogs.erpnext.list_dashboard_projects",
+            "five08.discord_bot.cogs.invoices.list_dashboard_projects",
             return_value=[],
         ),
     ):
@@ -183,11 +183,11 @@ async def test_validate_invoice_allowed_for_project_member(
     cog.client.get_invoice = Mock(return_value=others)
     with (
         patch(
-            "five08.discord_bot.cogs.erpnext.project_viewer_emails_for_discord",
+            "five08.discord_bot.cogs.invoices.project_viewer_emails_for_discord",
             return_value=["member@example.com"],
         ),
         patch(
-            "five08.discord_bot.cogs.erpnext.list_dashboard_projects",
+            "five08.discord_bot.cogs.invoices.list_dashboard_projects",
             return_value=[{"erpnext_project_id": "TEST-PROJ-001"}],
         ),
     ):
@@ -210,11 +210,11 @@ async def test_validate_invoice_denied_for_unrelated_invoice(
     cog.client.get_invoice = Mock(return_value=unrelated)
     with (
         patch(
-            "five08.discord_bot.cogs.erpnext.project_viewer_emails_for_discord",
+            "five08.discord_bot.cogs.invoices.project_viewer_emails_for_discord",
             return_value=["member@example.com"],
         ),
         patch(
-            "five08.discord_bot.cogs.erpnext.list_dashboard_projects",
+            "five08.discord_bot.cogs.invoices.list_dashboard_projects",
             return_value=[{"erpnext_project_id": "TEST-PROJ-001"}],
         ),
     ):
@@ -267,7 +267,7 @@ async def test_autocomplete_returns_empty_without_erp_identity(
 ):
     cog.client.search_invoices = Mock()
     with patch(
-        "five08.discord_bot.cogs.erpnext.project_viewer_emails_for_discord",
+        "five08.discord_bot.cogs.invoices.project_viewer_emails_for_discord",
         return_value=[],
     ):
         choices = await cog.invoice_name_autocomplete(mock_member_interaction, "TEST")
@@ -282,11 +282,11 @@ async def test_autocomplete_scopes_to_owner_and_projects_for_member(
     cog.client.search_invoices = Mock(return_value=[])
     with (
         patch(
-            "five08.discord_bot.cogs.erpnext.project_viewer_emails_for_discord",
+            "five08.discord_bot.cogs.invoices.project_viewer_emails_for_discord",
             return_value=["member@example.com"],
         ),
         patch(
-            "five08.discord_bot.cogs.erpnext.list_dashboard_projects",
+            "five08.discord_bot.cogs.invoices.list_dashboard_projects",
             return_value=[
                 {"erpnext_project_id": "PROJ-1"},
                 {"erpnext_project_id": None},
