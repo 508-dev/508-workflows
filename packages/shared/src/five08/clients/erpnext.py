@@ -666,6 +666,76 @@ class ERPNextClient:
             limit=limit,
         )
 
+    def get_invoice(self, doctype: str, name: str) -> dict[str, Any] | None:
+        """Fetch a single Sales Invoice or Purchase Invoice by name. Returns None on 404."""
+        doctype = doctype.strip()
+        name = name.strip()
+        if not doctype:
+            raise ERPNextAPIError("DocType is required")
+        if not name:
+            raise ERPNextAPIError("Invoice name is required")
+        try:
+            data = self.request(
+                "GET",
+                f"/api/resource/{quote(doctype, safe='')}/{quote(name, safe='')}",
+            )
+        except ERPNextAPIError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
+        row = data.get("data")
+        if not isinstance(row, dict):
+            raise ERPNextAPIError(
+                f"ERPNext returned unexpected payload for {doctype} {name!r}: {type(row).__name__}"
+            )
+        return row
+
+    def search_invoices(
+        self,
+        doctype: str,
+        query: str = "",
+        docstatus: int | None = None,
+        limit: int = 10,
+        owners: list[str] | None = None,
+        projects: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Search invoices for autocomplete, ordered newest first.
+
+        When owners or projects are given, results are scoped to invoices
+        created by those owners OR belonging to those projects.
+        """
+        filters: list[Any] = []
+        if query:
+            filters.append([doctype, "name", "like", f"%{query}%"])
+        if docstatus is not None:
+            filters.append([doctype, "docstatus", "=", docstatus])
+
+        or_filters: list[Any] = []
+        if owners:
+            or_filters.append([doctype, "owner", "in", owners])
+        if projects:
+            or_filters.append([doctype, "project", "in", projects])
+
+        params: dict[str, Any] = {
+            "fields": json.dumps(["name", "posting_date", "docstatus", "owner"]),
+            "order_by": "posting_date desc",
+            "limit_page_length": max(1, limit),
+        }
+        if filters:
+            params["filters"] = json.dumps(filters)
+        if or_filters:
+            params["or_filters"] = json.dumps(or_filters)
+
+        data = self.request(
+            "GET",
+            f"/api/resource/{quote(doctype, safe='')}",
+            params=params,
+        )
+        rows = data.get("data")
+        if not isinstance(rows, list):
+            return []
+        return [r for r in rows if isinstance(r, dict) and r.get("name")]
+
     def get_project(self, project_id: str) -> dict[str, Any]:
         """Read one ERPNext Project detail document."""
         normalized_id = project_id.strip()

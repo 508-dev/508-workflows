@@ -344,8 +344,13 @@ def list_dashboard_projects(
     viewer_emails: list[str] | None = None,
     include_all: bool = False,
     limit: int = 100,
+    include_roster: bool = True,
 ) -> list[dict[str, Any]]:
-    """Return project cache rows shaped for the operations dashboard."""
+    """Return project cache rows shaped for the operations dashboard.
+
+    Set include_roster=False to skip the roster-members query — useful for
+    lightweight access checks where only project IDs are needed.
+    """
     where = []
     params: list[Any] = []
     normalized_query = (query or "").strip()
@@ -444,7 +449,7 @@ def list_dashboard_projects(
             members_by_project: dict[str, list[dict[str, Any]]] = {
                 project_id: [] for project_id in project_ids
             }
-            if project_ids:
+            if include_roster and project_ids:
                 cursor.execute(
                     """
                     SELECT
@@ -527,7 +532,9 @@ def list_dashboard_projects(
             "customer",
             shaped.get("customer"),
         )
-        shaped["roster_members"] = members_by_project.get(project_id, [])
+        shaped["roster_members"] = (
+            members_by_project.get(project_id, []) if include_roster else []
+        )
         shaped["roster_count"] = len(shaped["roster_members"])
         result.append(shaped)
     return result
