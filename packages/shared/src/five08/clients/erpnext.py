@@ -712,7 +712,9 @@ class ERPNextClient:
             params=params,
         )
         rows = data.get("data")
-        return rows if isinstance(rows, list) else []
+        if not isinstance(rows, list):
+            return []
+        return [r for r in rows if isinstance(r, dict) and r.get("name")]
 
     def get_project(self, project_id: str) -> dict[str, Any]:
         """Read one ERPNext Project detail document."""

@@ -155,7 +155,7 @@ class ErpNextCog(commands.Cog, name="ERPNext"):
                 choices.append(
                     app_commands.Choice(
                         name=label[:100],
-                        value=inv["name"],
+                        value=inv["name"][:100],
                     )
                 )
             return choices
