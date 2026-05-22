@@ -27,7 +27,7 @@ DOCTYPE_CHOICES = [
 STATUS_LABEL = {0: "Draft", 1: "Submitted", 2: "Cancelled"}
 
 # Invoice access rules — a caller may validate an invoice if any of these hold:
-#   1. They have Steering Committee role or above (full access).
+#   1. They have a privileged role (one of _PRIVILEGED_ROLES) for full access.
 #   2. They created the invoice (invoice owner matches one of their ERP emails).
 #   3. They are on the invoice's ERP project roster.
 _PRIVILEGED_ROLES = ["Steering Committee", "Workflows Engineer"]
@@ -115,8 +115,9 @@ class InvoicesCog(commands.Cog, name="Invoices"):
                 self._resolve_access, interaction
             )
             if not include_all and not emails:
+                roles_str = " or ".join(_PRIVILEGED_ROLES)
                 await interaction.followup.send(
-                    "Invoice validation is restricted to privileged roles "
+                    f"Invoice validation is restricted to {roles_str} "
                     "or confirmed ERP project members.",
                     ephemeral=True,
                 )
