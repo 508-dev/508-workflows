@@ -1874,8 +1874,17 @@ function App() {
 
   function openNotification(notification: DashboardNotification) {
     if (notification.type === "stale_recruiting_gig") {
-      setGigStatus("recruiting")
-      navigate("gigs", true)
+      const gigId =
+        notification.engagement_id ||
+        (notification.id.startsWith("stale-recruiting:")
+          ? notification.id.slice("stale-recruiting:".length)
+          : "")
+      if (gigId) {
+        openGigDetail(gigId)
+      } else {
+        setGigStatus("recruiting")
+        navigate("gigs", true)
+      }
     }
     setNotificationsOpen(false)
   }

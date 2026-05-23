@@ -376,7 +376,26 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             route.fulfill(
                 status=200,
                 content_type="application/json",
-                body=json.dumps({"stale_days": 7, "notifications": []}),
+                body=json.dumps(
+                    {
+                        "stale_days": 7,
+                        "notifications": [
+                            {
+                                "id": (
+                                    "stale-recruiting:"
+                                    "11111111-1111-4111-8111-111111111111"
+                                ),
+                                "type": "stale_recruiting_gig",
+                                "severity": "warning",
+                                "title": "Recruiting gig needs an update",
+                                "message": "Webflow build has had no updates for 7 day(s).",
+                                "engagement_id": "11111111-1111-4111-8111-111111111111",
+                                "gig_title": "Webflow build",
+                                "age_days": 7,
+                            }
+                        ],
+                    }
+                ),
             )
 
         def gig_application_status_route(route: Any) -> None:
@@ -431,6 +450,14 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
         page.route("**/dashboard/api/sync/people", sync_route)
 
         try:
+            page.goto("/dashboard")
+            page.get_by_role("heading", name="508 Operations Dashboard").wait_for()
+            page.locator("#notifications").click()
+            page.get_by_text("Recruiting gig needs an update").click()
+            expect(page).to_have_url(
+                f"{dashboard_server}/dashboard/gigs/11111111-1111-4111-8111-111111111111"
+            )
+            page.get_by_role("heading", name="People").wait_for()
             page.goto("/dashboard")
             page.get_by_role("heading", name="508 Operations Dashboard").wait_for()
             expect(page.locator("#userName")).to_have_text("Discord Admin")

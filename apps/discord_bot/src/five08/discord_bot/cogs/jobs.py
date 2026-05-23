@@ -38,15 +38,19 @@ from five08.discord_bot.utils.role_decorators import (
 from five08.engagements import (
     DiscordEngagementInput,
     EngagementApplicationSource,
+    EngagementStatus,
     add_engagement_event,
     get_gig_thread_interest_backfill_marker,
     list_due_recruiting_reminders,
     mark_recruiting_reminder_failed,
     mark_recruiting_reminder_sent,
+    normalize_engagement_status,
     parse_status_from_title,
     record_discord_engagement_activity,
     requirements_to_payload,
+    status_label,
     strip_status_from_title,
+    update_engagement_status,
     upsert_discord_engagement,
     upsert_discord_interest_application,
     upsert_gig_thread_interest_backfill_marker,
@@ -150,6 +154,15 @@ AUTO_MATCH_EXCLUDED_RESUME_NAMES = frozenset({"Vladyslav_Stryzhak.pdf"})
 GIG_FORUM_BACKFILL_ARCHIVED_LIMIT = 200
 GIG_INTEREST_BACKFILL_MAX_AGE_DAYS = 14
 GIG_RECRUITING_REMINDER_CHECK_SECONDS = 6 * 60 * 60
+GIG_STATUS_COMMAND_VALUES = frozenset(
+    {
+        "recruiting",
+        "filled",
+        "outdated",
+        "unknown",
+        "lost",
+    }
+)
 GIG_INTEREST_PATTERNS = (
     re.compile(r"\b(?:i'?m|i am)\s+interested\b", re.IGNORECASE),
     re.compile(r"\binterested\s+(?:in|for)\s+(?:this|the)\b", re.IGNORECASE),
@@ -2320,6 +2333,65 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             ),
         )
 
+    @staticmethod
+    async def _rename_gig_thread_for_status(
+        thread: discord.Thread,
+        status: EngagementStatus,
+        *,
+        reason: str,
+    ) -> str:
+        """Apply the visible dashboard status marker to a Discord forum thread."""
+        status_marker = status.value.upper()
+        raw_title = str(thread.name or "").strip()
+        stripped_title = strip_status_from_title(raw_title)
+        if (
+            parse_status_from_title(raw_title) is not EngagementStatus.UNKNOWN
+            and stripped_title == raw_title
+        ):
+            base_title = ""
+        else:
+            base_title = stripped_title
+        base_title = base_title.strip() or f"Discord gig {thread.id}"
+        next_name = f"[{status_marker}] {base_title}"[:100]
+        if thread.name == next_name:
+            return next_name
+
+        if thread.guild is None or thread.guild.me is None:
+            raise RuntimeError("bot_member_unresolved")
+        permissions = thread.permissions_for(thread.guild.me)
+        if not permissions.manage_threads:
+            raise PermissionError("missing_manage_threads_permission")
+
+        if thread.archived:
+            await thread.edit(archived=False, reason=reason)
+        await thread.edit(name=next_name, reason=reason)
+        return next_name
+
+    @staticmethod
+    def _interaction_user_can_update_gig_thread(
+        interaction: discord.Interaction,
+        poster_id: str | None,
+    ) -> bool:
+        user_id = str(interaction.user.id)
+        if poster_id and user_id == str(poster_id):
+            return True
+        roles = getattr(interaction.user, "roles", None)
+        return bool(
+            roles
+            and check_user_roles_with_hierarchy(
+                roles,
+                ["Steering Committee"],
+            )
+        )
+
+    @staticmethod
+    def _explicit_gig_status(value: str) -> EngagementStatus | None:
+        """Parse only slash-command status values, not broader status aliases."""
+        raw_status = value.strip().casefold()
+        if raw_status not in GIG_STATUS_COMMAND_VALUES:
+            return None
+        return normalize_engagement_status(raw_status)
+
     async def _persist_thread_engagement_index(
         self,
         thread: discord.Thread,
@@ -2808,9 +2880,11 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 message = await thread.send(
                     (
                         f'{poster_mention} any update on "{safe_title}"? '
-                        f"It has been recruiting with no updates for {age_days} day(s). "
-                        "Please update the dashboard status to FILLED, OUTDATED, "
-                        "UNKNOWN, or leave a thread reply if it is still active."
+                        "It has been in status RECRUITING with no updates for "
+                        f"{age_days} day(s). "
+                        "Please use `/update-gig-status` to set it to FILLED, "
+                        "OUTDATED, UNKNOWN, or leave a thread reply if it is "
+                        "still active."
                     ),
                     allowed_mentions=discord.AllowedMentions(
                         users=[discord.Object(id=int(poster_id))],
@@ -3394,6 +3468,261 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 f"`{normalized_posting_type.value}`. Backfill started.",
                 ephemeral=True,
             )
+
+    @app_commands.command(
+        name="update-gig-status",
+        description="Update this gig thread's dashboard status and title marker.",
+    )
+    @app_commands.describe(
+        status="New gig status.",
+    )
+    @app_commands.choices(
+        status=[
+            app_commands.Choice(name="RECRUITING", value="recruiting"),
+            app_commands.Choice(name="FILLED", value="filled"),
+            app_commands.Choice(name="OUTDATED", value="outdated"),
+            app_commands.Choice(name="UNKNOWN", value="unknown"),
+            app_commands.Choice(name="LOST", value="lost"),
+        ]
+    )
+    async def update_gig_status(
+        self,
+        interaction: discord.Interaction,
+        status: str,
+    ) -> None:
+        """Update the dashboard gig status for the current registered gig thread."""
+        thread = interaction.channel
+        if not isinstance(thread, discord.Thread) or not isinstance(
+            thread.parent,
+            discord.ForumChannel,
+        ):
+            self._audit_command_safe(
+                interaction=interaction,
+                action="crm.update_gig_status",
+                result="error",
+                metadata={"stage": "not_thread", "status": status},
+            )
+            await interaction.response.send_message(
+                "⚠️ Run this inside a registered gig forum post thread.",
+                ephemeral=True,
+            )
+            return
+
+        guild = thread.guild
+        if guild is None:
+            self._audit_command_safe(
+                interaction=interaction,
+                action="crm.update_gig_status",
+                result="error",
+                metadata={
+                    "stage": "guild_unavailable",
+                    "status": status,
+                    "thread_id": str(thread.id),
+                },
+            )
+            await interaction.response.send_message(
+                "⚠️ This command must be used inside a server.",
+                ephemeral=True,
+            )
+            return
+
+        normalized_status = self._explicit_gig_status(status)
+        if normalized_status is None:
+            await interaction.response.send_message(
+                "⚠️ Choose one of: RECRUITING, FILLED, OUTDATED, UNKNOWN, LOST.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        if not await self._refresh_jobs_channel_cache_if_missing(guild.id):
+            self._audit_command_safe(
+                interaction=interaction,
+                action="crm.update_gig_status",
+                result="error",
+                metadata={
+                    "stage": "jobs_cache_unavailable",
+                    "status": status,
+                    "guild_id": str(guild.id),
+                    "thread_id": str(thread.id),
+                    "channel_id": str(thread.parent.id),
+                },
+            )
+            await interaction.followup.send(
+                "❌ Could not load registered gig channels. Please try again.",
+                ephemeral=True,
+            )
+            return
+
+        if not self._is_jobs_channel_registered(guild.id, thread.parent.id):
+            self._audit_command_safe(
+                interaction=interaction,
+                action="crm.update_gig_status",
+                result="error",
+                metadata={
+                    "stage": "forum_not_registered",
+                    "status": status,
+                    "guild_id": str(guild.id),
+                    "thread_id": str(thread.id),
+                    "channel_id": str(thread.parent.id),
+                },
+            )
+            await interaction.followup.send(
+                "⚠️ This thread's forum is not registered as a gig channel.",
+                ephemeral=True,
+            )
+            return
+
+        post = await self._read_thread_post(thread)
+        poster_id = self._thread_poster_id(thread, post.starter if post else None)
+        if not self._interaction_user_can_update_gig_thread(interaction, poster_id):
+            self._audit_command_safe(
+                interaction=interaction,
+                action="crm.update_gig_status",
+                result="error",
+                metadata={
+                    "stage": "forbidden",
+                    "status": normalized_status.value,
+                    "guild_id": str(guild.id),
+                    "thread_id": str(thread.id),
+                    "poster_id": poster_id,
+                },
+            )
+            await interaction.followup.send(
+                "❌ Only Steering Committee+ or the original thread poster can update this gig status.",
+                ephemeral=True,
+            )
+            return
+
+        if post is None:
+            self._audit_command_safe(
+                interaction=interaction,
+                action="crm.update_gig_status",
+                result="error",
+                metadata={
+                    "stage": "starter_message_unavailable",
+                    "status": normalized_status.value,
+                    "guild_id": str(guild.id),
+                    "thread_id": str(thread.id),
+                },
+            )
+            await interaction.followup.send(
+                "❌ Could not read the original gig post for this thread.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            engagement_id = await self._upsert_thread_engagement(
+                thread,
+                post,
+                refresh_activity=False,
+            )
+            result = await asyncio.to_thread(
+                update_engagement_status,
+                settings,
+                engagement_id=engagement_id,
+                status=normalized_status,
+                actor_discord_user_id=str(interaction.user.id),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed updating gig status guild=%s thread=%s status=%s: %s",
+                guild.id,
+                thread.id,
+                normalized_status.value,
+                exc,
+            )
+            self._audit_command_safe(
+                interaction=interaction,
+                action="crm.update_gig_status",
+                result="error",
+                metadata={
+                    "stage": "dashboard_update_failed",
+                    "status": normalized_status.value,
+                    "guild_id": str(guild.id),
+                    "thread_id": str(thread.id),
+                },
+            )
+            await interaction.followup.send(
+                "❌ Failed to update the dashboard status. Please try again.",
+                ephemeral=True,
+            )
+            return
+
+        if result is None:
+            self._audit_command_safe(
+                interaction=interaction,
+                action="crm.update_gig_status",
+                result="error",
+                metadata={
+                    "stage": "gig_not_found",
+                    "status": normalized_status.value,
+                    "guild_id": str(guild.id),
+                    "thread_id": str(thread.id),
+                },
+            )
+            await interaction.followup.send(
+                "❌ Could not find this gig on the dashboard.",
+                ephemeral=True,
+            )
+            return
+
+        title_sync_status = "updated"
+        try:
+            next_title = await self._rename_gig_thread_for_status(
+                thread,
+                normalized_status,
+                reason=f"Discord /update-gig-status by {interaction.user}",
+            )
+        except PermissionError:
+            title_sync_status = "permission_error"
+            next_title = thread.name
+            logger.warning(
+                "Missing manage_threads permission for gig status title update thread=%s",
+                thread.id,
+            )
+        except discord.Forbidden:
+            title_sync_status = "forbidden"
+            next_title = thread.name
+        except discord.HTTPException as exc:
+            title_sync_status = "failed"
+            next_title = thread.name
+            logger.warning("Failed renaming gig thread %s: %s", thread.id, exc)
+        except RuntimeError as exc:
+            title_sync_status = str(exc)
+            next_title = thread.name
+
+        self._audit_command_safe(
+            interaction=interaction,
+            action="crm.update_gig_status",
+            result="success" if title_sync_status == "updated" else "partial",
+            metadata={
+                "status": normalized_status.value,
+                "guild_id": str(guild.id),
+                "thread_id": str(thread.id),
+                "channel_id": str(thread.parent.id),
+                "engagement_id": engagement_id,
+                "title_sync_status": title_sync_status,
+            },
+        )
+
+        if title_sync_status != "updated":
+            await interaction.followup.send(
+                "⚠️ Dashboard status updated to "
+                f"**{status_label(normalized_status)}**, but I could not update "
+                "the thread title. The bot may need Manage Threads permission.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            "✅ Updated status to "
+            f"**{status_label(normalized_status)}** and renamed this thread to "
+            f"`{next_title}`.",
+            ephemeral=True,
+        )
 
     @app_commands.command(
         name="backfill-gig-interest",
