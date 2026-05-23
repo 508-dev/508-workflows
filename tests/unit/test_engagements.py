@@ -12,6 +12,9 @@ from five08.engagements import (
     EngagementStatus,
     engagement_event_exists,
     get_gig_thread_interest_backfill_marker,
+    list_dashboard_engagements,
+    list_dashboard_notifications,
+    list_due_recruiting_reminders,
     normalize_engagement_status,
     parse_status_from_title,
     strip_status_from_title,
@@ -160,6 +163,210 @@ def test_engagement_event_exists_checks_event_marker(monkeypatch) -> None:
     query, params = executed[0]
     assert "FROM engagement_events" in query
     assert params == ("engagement-1", "gig_thread_interest_backfilled")
+
+
+def test_dashboard_engagements_hide_historical_statuses_by_default(
+    monkeypatch,
+) -> None:
+    executed: list[tuple[str, list[object]]] = []
+
+    class CursorStub:
+        def __enter__(self) -> "CursorStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+        def execute(self, query: str, params: list[object]) -> None:
+            executed.append((query, params))
+
+        def fetchall(self) -> list[dict[str, str]]:
+            return []
+
+    class ConnectionStub:
+        def cursor(self, row_factory=None) -> CursorStub:  # noqa: ARG002
+            return CursorStub()
+
+        def __enter__(self) -> "ConnectionStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+    @contextmanager
+    def connection_stub():
+        yield ConnectionStub()
+
+    monkeypatch.setattr(
+        engagements,
+        "get_postgres_connection",
+        lambda _settings: connection_stub(),
+    )
+
+    rows = list_dashboard_engagements(
+        SharedSettings(),
+        viewer_discord_user_id="poster-1",
+        include_all=False,
+        limit=10,
+    )
+
+    assert rows == []
+    query, params = executed[0]
+    assert "e.status IN ('recruiting', 'filled', 'unknown')" in query
+    assert "CASE e.status" in query
+    assert params == ["poster-1", 10]
+
+
+def test_dashboard_engagements_can_include_historical_statuses(
+    monkeypatch,
+) -> None:
+    executed: list[tuple[str, list[object]]] = []
+
+    class CursorStub:
+        def __enter__(self) -> "CursorStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+        def execute(self, query: str, params: list[object]) -> None:
+            executed.append((query, params))
+
+        def fetchall(self) -> list[dict[str, str]]:
+            return []
+
+    class ConnectionStub:
+        def cursor(self, row_factory=None) -> CursorStub:  # noqa: ARG002
+            return CursorStub()
+
+        def __enter__(self) -> "ConnectionStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+    @contextmanager
+    def connection_stub():
+        yield ConnectionStub()
+
+    monkeypatch.setattr(
+        engagements,
+        "get_postgres_connection",
+        lambda _settings: connection_stub(),
+    )
+
+    rows = list_dashboard_engagements(
+        SharedSettings(),
+        viewer_discord_user_id=None,
+        include_all=True,
+        include_historical=True,
+        limit=10,
+    )
+
+    assert rows == []
+    query, params = executed[0]
+    assert "e.status IN ('recruiting', 'filled', 'unknown')" not in query
+    assert params == [10]
+
+
+def test_due_recruiting_reminders_exclude_very_old_gigs(monkeypatch) -> None:
+    executed: list[tuple[str, tuple]] = []
+
+    class CursorStub:
+        def __enter__(self) -> "CursorStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+        def execute(self, query: str, params: tuple) -> None:
+            executed.append((query, params))
+
+        def fetchall(self) -> list[dict[str, str]]:
+            return []
+
+    class ConnectionStub:
+        def cursor(self, row_factory=None) -> CursorStub:  # noqa: ARG002
+            return CursorStub()
+
+        def __enter__(self) -> "ConnectionStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+    @contextmanager
+    def connection_stub():
+        yield ConnectionStub()
+
+    monkeypatch.setattr(
+        engagements,
+        "get_postgres_connection",
+        lambda _settings: connection_stub(),
+    )
+
+    rows = list_due_recruiting_reminders(
+        SharedSettings(),
+        stale_days=7,
+        max_age_days=90,
+        limit=5,
+    )
+
+    assert rows == []
+    query, params = executed[0]
+    assert "COALESCE(e.posted_at, e.created_at)" in query
+    assert params == (7, 90, 7, 5)
+
+
+def test_dashboard_notifications_exclude_very_old_gigs(monkeypatch) -> None:
+    executed: list[tuple[str, list[object]]] = []
+
+    class CursorStub:
+        def __enter__(self) -> "CursorStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+        def execute(self, query: str, params: list[object]) -> None:
+            executed.append((query, params))
+
+        def fetchall(self) -> list[dict[str, str]]:
+            return []
+
+    class ConnectionStub:
+        def cursor(self, row_factory=None) -> CursorStub:  # noqa: ARG002
+            return CursorStub()
+
+        def __enter__(self) -> "ConnectionStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+    @contextmanager
+    def connection_stub():
+        yield ConnectionStub()
+
+    monkeypatch.setattr(
+        engagements,
+        "get_postgres_connection",
+        lambda _settings: connection_stub(),
+    )
+
+    rows = list_dashboard_notifications(
+        SharedSettings(),
+        viewer_discord_user_id="poster-1",
+        include_all=False,
+        stale_days=7,
+        max_age_days=90,
+        limit=5,
+    )
+
+    assert rows == []
+    query, params = executed[0]
+    assert "COALESCE(e.posted_at, e.created_at)" in query
+    assert params == [7, 90, "poster-1", 5]
 
 
 def test_get_gig_thread_interest_backfill_marker_returns_payload(monkeypatch) -> None:

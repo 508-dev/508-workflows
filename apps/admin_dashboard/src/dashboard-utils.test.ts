@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import {
   daysSince,
   displayOnboarder,
+  formatDate,
   githubUrl,
   labelForOnboardingState,
   linkedinUrl,
@@ -44,5 +45,9 @@ describe("dashboard utility helpers", () => {
     expect(daysSince("2026-05-06T11:59:00Z", now)).toBe(10)
     expect(daysSince("2026-05-17T00:00:00Z", now)).toBe(0)
     expect(daysSince("not a date", now)).toBeNull()
+  })
+
+  it("includes the year in formatted timestamps", () => {
+    expect(formatDate("2026-01-27T02:26:00Z")).toContain("2026")
   })
 })

@@ -74,16 +74,24 @@ guards for phrases such as "not available" or "not interested".
 
 `GIG_RECRUITING_STALE_DAYS` controls when a recruiting gig is considered stale.
 The default is `7`.
+`GIG_RECRUITING_REMINDER_MAX_AGE_DAYS` bounds reminders and stale notifications
+to recently posted gigs. The default is `90`, so old backfilled Discord posts are
+not treated as active recruiting work.
 
 The dashboard notification tray uses `GET /dashboard/api/notifications` to show
 recruiting gigs whose latest known activity is older than the configured
 threshold.
+The main gig list hides only historical terminal statuses (`LOST` and
+`OUTDATED`) by default. Steering/admin viewers can opt into historical gigs when
+they need those records.
 
 The Discord bot also runs a periodic reminder loop. When a stale recruiting gig
 has a Discord thread and original poster, it replies in the thread and mentions
 the poster asking for a status update. Sent reminders update
 `last_recruiting_reminder_at` but do not advance `last_activity_at`, so passive
 reminders do not make stale gigs look active.
+Locked or archived Discord gig threads are treated as done and marked outdated
+instead of receiving a reminder.
 
 Ordinary registered gig thread replies count as activity. This makes the stale
 recruiting reminder instruction to "leave a thread reply if it is still active"

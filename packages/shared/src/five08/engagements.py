@@ -830,6 +830,7 @@ def list_dashboard_engagements(
     *,
     viewer_discord_user_id: str | None,
     include_all: bool,
+    include_historical: bool = False,
     status: EngagementStatus | None = None,
     engagement_id: str | None = None,
     limit: int = 50,
@@ -846,6 +847,8 @@ def list_dashboard_engagements(
     if status is not None:
         conditions.append("e.status = %s")
         params.append(status.value)
+    elif engagement_id is None and not include_historical:
+        conditions.append("e.status IN ('recruiting', 'filled', 'unknown')")
     params.append(max(1, min(limit, 500)))
     sql = f"""
         SELECT
@@ -923,7 +926,15 @@ def list_dashboard_engagements(
             )
         WHERE {" AND ".join(conditions)}
         GROUP BY e.id
-        ORDER BY e.last_activity_at DESC NULLS LAST, e.created_at DESC
+        ORDER BY
+            CASE e.status
+                WHEN 'recruiting' THEN 0
+                WHEN 'filled' THEN 1
+                WHEN 'unknown' THEN 2
+                ELSE 3
+            END ASC,
+            e.last_activity_at DESC NULLS LAST,
+            e.created_at DESC
         LIMIT %s
     """
     with get_postgres_connection(settings) as conn:
@@ -939,11 +950,13 @@ def list_dashboard_notifications(
     viewer_discord_user_id: str | None,
     include_all: bool,
     stale_days: int,
+    max_age_days: int,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
     """Return dashboard notification items visible to one viewer."""
     days = max(1, stale_days)
-    params: list[Any] = [days]
+    max_age = max(days, max_age_days)
+    params: list[Any] = [days, max_age]
     conditions = [
         "e.lifecycle_stage = 'pending_gig'",
         "e.status = 'recruiting'",
@@ -955,6 +968,7 @@ def list_dashboard_notifications(
             e.created_at
         ) <= NOW() - make_interval(days => %s)
         """,
+        "COALESCE(e.posted_at, e.created_at) >= NOW() - make_interval(days => %s)",
     ]
     if not include_all:
         conditions.append("e.posted_by_discord_user_id = %s")
@@ -1002,10 +1016,12 @@ def list_due_recruiting_reminders(
     settings: SharedSettings,
     *,
     stale_days: int,
+    max_age_days: int,
     limit: int = 25,
 ) -> list[dict[str, Any]]:
     """Atomically claim recruiting gig threads that need a Discord status reminder."""
     days = max(1, stale_days)
+    max_age = max(days, max_age_days)
     sql = """
         WITH due AS (
             SELECT e.id
@@ -1020,6 +1036,7 @@ def list_due_recruiting_reminders(
                     COALESCE(e.posted_at, '-infinity'::timestamptz),
                     e.created_at
                   ) <= NOW() - make_interval(days => %s)
+              AND COALESCE(e.posted_at, e.created_at) >= NOW() - make_interval(days => %s)
               AND (
                     e.last_recruiting_reminder_at IS NULL
                     OR e.last_recruiting_reminder_at <= NOW() - make_interval(days => %s)
@@ -1061,7 +1078,7 @@ def list_due_recruiting_reminders(
         FROM claimed e
         ORDER BY e.last_recruiting_reminder_at ASC NULLS FIRST, e.created_at ASC
     """
-    params = (days, days, max(1, min(limit, 100)))
+    params = (days, max_age, days, max(1, min(limit, 100)))
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(sql, params)
