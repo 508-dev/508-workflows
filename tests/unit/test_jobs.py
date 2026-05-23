@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import five08.discord_bot.cogs.jobs as jobs_module
 from five08.discord_bot.cogs.jobs import JobsCog
+from five08.engagements import EngagementStatus
 from five08.job_match import CandidateRerankResult, JobRequirements
 
 
@@ -69,6 +70,98 @@ def test_build_match_candidate_lines_uses_crm_name_and_discord_username() -> Non
         "1. **[Member]** [Caleb](<https://crm.example/#Contact/view/abc>)" in lines[0]
     )
     assert "`@caleb`" in lines[0]
+
+
+def test_update_gig_status_allows_original_thread_poster() -> None:
+    interaction = SimpleNamespace(user=SimpleNamespace(id=123, roles=[]))
+
+    assert JobsCog._interaction_user_can_update_gig_thread(interaction, "123") is True
+
+
+def test_update_gig_status_allows_steering_or_higher_role() -> None:
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(
+            id=123,
+            roles=[SimpleNamespace(name="Admin")],
+        )
+    )
+
+    assert JobsCog._interaction_user_can_update_gig_thread(interaction, "456") is True
+
+
+def test_update_gig_status_rejects_unprivileged_non_poster() -> None:
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(
+            id=123,
+            roles=[SimpleNamespace(name="Member")],
+        )
+    )
+
+    assert JobsCog._interaction_user_can_update_gig_thread(interaction, "456") is False
+
+
+def test_update_gig_status_accepts_only_explicit_command_values() -> None:
+    assert JobsCog._explicit_gig_status("FILLED") is EngagementStatus.FILLED
+    assert JobsCog._explicit_gig_status("open") is None
+    assert JobsCog._explicit_gig_status("stale") is None
+    assert JobsCog._explicit_gig_status("cancelled") is None
+
+
+def test_rename_gig_thread_for_status_rewrites_visible_marker() -> None:
+    class FakeThread:
+        id = 200
+        name = "[RECRUITING] Need help"
+        archived = False
+        guild = SimpleNamespace(me=object())
+
+        def __init__(self) -> None:
+            self.edit = AsyncMock()
+
+        def permissions_for(self, _member: object) -> SimpleNamespace:
+            return SimpleNamespace(manage_threads=True)
+
+    thread = FakeThread()
+
+    result = asyncio.run(
+        JobsCog._rename_gig_thread_for_status(
+            thread,
+            EngagementStatus.FILLED,
+            reason="test",
+        )
+    )
+
+    assert result == "[FILLED] Need help"
+    thread.edit.assert_awaited_once_with(name="[FILLED] Need help", reason="test")
+
+
+def test_rename_gig_thread_for_status_uses_fallback_for_marker_only_title() -> None:
+    class FakeThread:
+        id = 200
+        name = "[RECRUITING]"
+        archived = False
+        guild = SimpleNamespace(me=object())
+
+        def __init__(self) -> None:
+            self.edit = AsyncMock()
+
+        def permissions_for(self, _member: object) -> SimpleNamespace:
+            return SimpleNamespace(manage_threads=True)
+
+    thread = FakeThread()
+
+    result = asyncio.run(
+        JobsCog._rename_gig_thread_for_status(
+            thread,
+            EngagementStatus.FILLED,
+            reason="test",
+        )
+    )
+
+    assert result == "[FILLED] Discord gig 200"
+    thread.edit.assert_awaited_once_with(
+        name="[FILLED] Discord gig 200",
+        reason="test",
+    )
 
 
 def test_build_match_candidate_lines_handles_non_string_names() -> None:
