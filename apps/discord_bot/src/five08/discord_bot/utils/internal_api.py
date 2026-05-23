@@ -343,12 +343,14 @@ class InternalAPIRoutes:
         base_title = base_title.strip() or f"Discord gig {thread_id}"
         next_name = f"[{status_marker}] {base_title}"[:100]
         should_close_thread = normalized_status is EngagementStatus.LOST
+        is_locked = bool(getattr(channel, "locked", False))
+        is_archived = bool(getattr(channel, "archived", False))
         needs_rename = channel.name != next_name
-        needs_close = should_close_thread and (
-            not getattr(channel, "locked", False)
-            or not getattr(channel, "archived", False)
-        )
-        if not needs_rename and not needs_close:
+        needs_reopen = not should_close_thread and (is_locked or is_archived)
+        needs_close = should_close_thread and (not is_locked or not is_archived)
+        needs_unarchive_for_rename = needs_rename and is_archived
+        needs_restore_closed = should_close_thread and needs_unarchive_for_rename
+        if not needs_rename and not needs_close and not needs_reopen:
             return {
                 "status": "unchanged",
                 "thread_id": str(thread_id),
@@ -357,7 +359,13 @@ class InternalAPIRoutes:
             }, 200
 
         try:
-            if getattr(channel, "archived", False) and (needs_rename or needs_close):
+            if needs_reopen:
+                await channel.edit(
+                    locked=False,
+                    archived=False,
+                    reason="Dashboard gig status update",
+                )
+            elif needs_unarchive_for_rename:
                 await channel.edit(
                     archived=False,
                     reason="Dashboard gig status update",
@@ -367,14 +375,14 @@ class InternalAPIRoutes:
                     name=next_name,
                     reason="Dashboard gig status update",
                 )
-            if should_close_thread:
+            if needs_close or needs_restore_closed:
                 await channel.edit(
                     locked=True,
                     archived=True,
                     reason="Dashboard gig status update",
                 )
         except discord.Forbidden:
-            return {"error": "thread_rename_forbidden"}, 403
+            return {"error": "thread_update_forbidden"}, 403
         except discord.HTTPException as exc:
             logger.warning("Failed updating gig thread %s: %s", thread_id, exc)
             return {"error": "thread_update_failed"}, 502

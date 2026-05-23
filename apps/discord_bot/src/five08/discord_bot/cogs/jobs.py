@@ -2374,12 +2374,14 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         base_title = base_title.strip() or f"Discord gig {thread.id}"
         next_name = f"[{status_marker}] {base_title}"[:100]
         should_close_thread = status is EngagementStatus.LOST
+        is_locked = bool(getattr(thread, "locked", False))
+        is_archived = bool(getattr(thread, "archived", False))
         needs_rename = thread.name != next_name
-        needs_close = should_close_thread and (
-            not getattr(thread, "locked", False)
-            or not getattr(thread, "archived", False)
-        )
-        if not needs_rename and not needs_close:
+        needs_reopen = not should_close_thread and (is_locked or is_archived)
+        needs_close = should_close_thread and (not is_locked or not is_archived)
+        needs_unarchive_for_rename = needs_rename and is_archived
+        needs_restore_closed = should_close_thread and needs_unarchive_for_rename
+        if not needs_rename and not needs_close and not needs_reopen:
             return next_name
 
         if thread.guild is None or thread.guild.me is None:
@@ -2388,11 +2390,13 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         if not permissions.manage_threads:
             raise PermissionError("missing_manage_threads_permission")
 
-        if getattr(thread, "archived", False) and (needs_rename or needs_close):
+        if needs_reopen:
+            await thread.edit(locked=False, archived=False, reason=reason)
+        elif needs_unarchive_for_rename:
             await thread.edit(archived=False, reason=reason)
         if needs_rename:
             await thread.edit(name=next_name, reason=reason)
-        if should_close_thread:
+        if needs_close or needs_restore_closed:
             await thread.edit(locked=True, archived=True, reason=reason)
         return next_name
 
