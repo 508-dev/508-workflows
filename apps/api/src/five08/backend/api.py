@@ -2797,6 +2797,7 @@ async def dashboard_people_handler(
 async def dashboard_gigs_handler(
     request: Request,
     status: str | None = Query(default=None),
+    include_historical: bool = Query(default=False),
     limit: int = Query(default=100, ge=1, le=500),
 ) -> JSONResponse:
     """Return dashboard-visible Discord gigs and candidate fit snapshots."""
@@ -2826,6 +2827,7 @@ async def dashboard_gigs_handler(
         settings,
         viewer_discord_user_id=session.subject,
         include_all=include_all,
+        include_historical=include_historical and include_all,
         status=normalized_status,
         limit=limit,
     )
@@ -2855,6 +2857,7 @@ async def dashboard_gig_detail_handler(
         settings,
         viewer_discord_user_id=session.subject,
         include_all=include_all,
+        include_historical=True,
         engagement_id=normalized_engagement_id,
         limit=1,
     )
@@ -2883,6 +2886,7 @@ async def dashboard_notifications_handler(
         viewer_discord_user_id=session.subject,
         include_all=include_all,
         stale_days=settings.gig_recruiting_stale_days,
+        max_age_days=settings.gig_recruiting_reminder_max_age_days,
         limit=limit,
     )
     return JSONResponse(

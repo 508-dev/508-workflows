@@ -786,6 +786,7 @@ function App() {
   const [status, setStatus] = useState("")
   const [jobType, setJobType] = useState("")
   const [gigStatus, setGigStatus] = useState("")
+  const [gigIncludeHistorical, setGigIncludeHistorical] = useState(false)
   const [gigLimit, setGigLimit] = useState(100)
   const [projectQuery, setProjectQuery] = useState("")
   const [projectStatus, setProjectStatus] = useState(initialProjectDetailId ? "" : "Open")
@@ -934,6 +935,7 @@ function App() {
   function gigsUrl() {
     const params = new URLSearchParams({ limit: String(gigLimit) })
     if (gigStatus) params.set("status", gigStatus)
+    if (gigIncludeHistorical) params.set("include_historical", "true")
     return `/dashboard/api/gigs?${params.toString()}`
   }
 
@@ -1793,10 +1795,10 @@ function App() {
     if (view === "jobs" && permissions.length > 0) void loadJobs()
   }, [minutes, status])
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: gigs reload intentionally follows status filter changes only while gigs is active.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: gigs reload intentionally follows list filter changes only while gigs is active.
   useEffect(() => {
     if (view === "gigs" && permissions.length > 0) void loadGigs()
-  }, [gigStatus, gigLimit])
+  }, [gigStatus, gigIncludeHistorical, gigLimit])
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: projects reload intentionally follows status changes only while projects is active.
   useEffect(() => {
@@ -2094,12 +2096,15 @@ function App() {
               sort={sort.gigs}
               loading={loading}
               status={gigStatus}
+              includeHistorical={gigIncludeHistorical}
               limit={gigLimit}
               staleDays={staleRecruitingDays}
               canWrite={can("gigs:write")}
+              canIncludeHistorical={can("people:read")}
               crmContactUrl={crmContactUrl}
               crmAttachmentUrl={crmAttachmentUrl}
               setStatus={setGigStatus}
+              setIncludeHistorical={setGigIncludeHistorical}
               setLimit={setGigLimit}
               onRefresh={refreshGigsView}
               onSort={(key) => handleSort("gigs", key)}
@@ -4417,12 +4422,15 @@ function GigsView(props: {
   sort: { key: string; direction: SortDirection }
   loading: Record<string, boolean>
   status: string
+  includeHistorical: boolean
   limit: number
   staleDays: number
   canWrite: boolean
+  canIncludeHistorical: boolean
   crmContactUrl: (contactId?: string) => string
   crmAttachmentUrl: (attachmentId?: string) => string
   setStatus: (value: string) => void
+  setIncludeHistorical: (value: boolean) => void
   setLimit: (value: number) => void
   onRefresh: () => void
   onSort: (key: string) => void
@@ -4442,7 +4450,7 @@ function GigsView(props: {
     { total: 0, applications: 0, interested: 0, stale: 0 },
   )
   const filterBar = (
-    <Card className="grid gap-3 p-4 md:grid-cols-[minmax(160px,1fr)_auto_auto] md:items-end">
+    <Card className="grid gap-3 p-4 md:grid-cols-[minmax(160px,1fr)_auto_auto_auto] md:items-end">
       <Label>
         Status
         <Select
@@ -4458,6 +4466,16 @@ function GigsView(props: {
           ))}
         </Select>
       </Label>
+      {props.canIncludeHistorical ? (
+        <label className="flex min-h-9 items-center gap-2 text-xs font-bold text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={props.includeHistorical}
+            onChange={(event) => props.setIncludeHistorical(event.target.checked)}
+          />
+          Include historical
+        </label>
+      ) : null}
       <Button
         id="refreshGigs"
         type="button"

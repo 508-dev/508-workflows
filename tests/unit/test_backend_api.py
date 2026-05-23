@@ -2740,6 +2740,7 @@ def test_dashboard_gigs_filters_member_to_own_gigs(client: TestClient) -> None:
         api.settings,
         viewer_discord_user_id="123456789",
         include_all=False,
+        include_historical=False,
         status=api.EngagementStatus.RECRUITING,
         limit=10,
     )
@@ -2774,6 +2775,44 @@ def test_dashboard_gigs_allows_steering_to_see_all_gigs(client: TestClient) -> N
         api.settings,
         viewer_discord_user_id="steering-1",
         include_all=True,
+        include_historical=False,
+        status=None,
+        limit=100,
+    )
+
+
+def test_dashboard_gigs_allows_steering_to_include_historical(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="steering-1",
+        email="steering@508.dev",
+        display_name="Steering User",
+        groups=["Steering Committee"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.list_dashboard_engagements", return_value=[]
+        ) as mock_gigs,
+    ):
+        response = client.get("/dashboard/api/gigs?include_historical=true")
+
+    assert response.status_code == 200
+    mock_gigs.assert_called_once_with(
+        api.settings,
+        viewer_discord_user_id="steering-1",
+        include_all=True,
+        include_historical=True,
         status=None,
         limit=100,
     )
@@ -5007,6 +5046,7 @@ def test_dashboard_gig_detail_returns_visible_gig_by_id(client: TestClient) -> N
         api.settings,
         viewer_discord_user_id="123456789",
         include_all=False,
+        include_historical=True,
         engagement_id="11111111-1111-4111-8111-111111111111",
         limit=1,
     )
@@ -5066,6 +5106,7 @@ def test_dashboard_notifications_filters_member_to_own_gigs(
         }
     ]
     monkeypatch.setattr(api.settings, "gig_recruiting_stale_days", 9)
+    monkeypatch.setattr(api.settings, "gig_recruiting_reminder_max_age_days", 90)
 
     with (
         patch(
@@ -5087,6 +5128,7 @@ def test_dashboard_notifications_filters_member_to_own_gigs(
         viewer_discord_user_id="123456789",
         include_all=False,
         stale_days=9,
+        max_age_days=90,
         limit=10,
     )
 
@@ -5124,6 +5166,7 @@ def test_dashboard_notifications_allows_steering_to_see_all_gigs(
         viewer_discord_user_id="steering-1",
         include_all=True,
         stale_days=api.settings.gig_recruiting_stale_days,
+        max_age_days=api.settings.gig_recruiting_reminder_max_age_days,
         limit=20,
     )
 

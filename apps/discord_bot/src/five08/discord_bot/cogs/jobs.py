@@ -2242,7 +2242,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         try:
             thread_name = str(getattr(thread, "name", "") or "")
             starter_id = getattr(starter, "id", None) or thread.id
-            status = parse_status_from_title(thread_name)
+            status = self._status_for_thread(thread)
             title = (
                 requirements.title
                 or strip_status_from_title(thread_name)
@@ -2270,6 +2270,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                     preferred_skills=requirements.preferred_skills,
                     requirements=requirements_to_payload(requirements),
                     preserve_existing_status=True,
+                    refresh_activity=False,
                 ),
             )
             saved = await asyncio.to_thread(
@@ -2327,11 +2328,30 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 body_raw=body,
                 body_normalized=body,
                 posted_at=getattr(post.starter, "created_at", None),
-                status=parse_status_from_title(thread_name),
+                status=self._status_for_thread(thread),
                 preserve_existing_status=True,
                 refresh_activity=refresh_activity,
             ),
         )
+
+    @staticmethod
+    def _thread_looks_done(thread: discord.Thread) -> bool:
+        """Treat closed Discord forum posts as no longer actively recruiting."""
+        return bool(
+            getattr(thread, "locked", False) or getattr(thread, "archived", False)
+        )
+
+    @classmethod
+    def _status_for_thread(cls, thread: discord.Thread) -> EngagementStatus:
+        explicit_status = parse_status_from_title(
+            str(getattr(thread, "name", "") or "")
+        )
+        if cls._thread_looks_done(thread) and explicit_status in {
+            EngagementStatus.UNKNOWN,
+            EngagementStatus.RECRUITING,
+        }:
+            return EngagementStatus.OUTDATED
+        return explicit_status
 
     @staticmethod
     async def _rename_gig_thread_for_status(
@@ -2852,6 +2872,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 list_due_recruiting_reminders,
                 settings,
                 stale_days=settings.gig_recruiting_stale_days,
+                max_age_days=settings.gig_recruiting_reminder_max_age_days,
             )
         except Exception as exc:
             logger.warning("Failed loading due recruiting reminders: %s", exc)
@@ -2868,6 +2889,15 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 if thread is None:
                     thread = await self.bot.fetch_channel(int(thread_id))
                 if not isinstance(thread, discord.Thread):
+                    continue
+                if self._thread_looks_done(thread):
+                    await asyncio.to_thread(
+                        update_engagement_status,
+                        settings,
+                        engagement_id=str(engagement_id),
+                        status=EngagementStatus.OUTDATED,
+                        actor_discord_user_id=None,
+                    )
                     continue
                 age_days = int(
                     row.get("age_days") or settings.gig_recruiting_stale_days
@@ -2968,7 +2998,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                     body_raw=post.starter.content or None,
                     body_normalized=post.starter.content or None,
                     posted_at=getattr(post.starter, "created_at", None),
-                    status=parse_status_from_title(thread_name),
+                    status=self._status_for_thread(thread),
                     preserve_existing_status=True,
                 ),
             )
@@ -3027,7 +3057,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                     body_raw=post.starter.content or None,
                     body_normalized=post.starter.content or None,
                     posted_at=getattr(post.starter, "created_at", None),
-                    status=parse_status_from_title(thread_name),
+                    status=self._status_for_thread(thread),
                     preserve_existing_status=True,
                     refresh_activity=True,
                 ),

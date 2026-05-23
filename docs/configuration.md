@@ -23,6 +23,7 @@ that most often matter in local development and deployment.
 - `JOB_RETRY_BASE_SECONDS`
 - `JOB_RETRY_MAX_SECONDS`
 - `GIG_RECRUITING_STALE_DAYS`
+- `GIG_RECRUITING_REMINDER_MAX_AGE_DAYS`
 
 `./scripts/dev.sh` overrides local Redis settings to deterministic per-worktree
 localhost ports. Compose injects Docker-network URLs.

@@ -107,6 +107,18 @@ def test_update_gig_status_accepts_only_explicit_command_values() -> None:
     assert JobsCog._explicit_gig_status("cancelled") is None
 
 
+def test_locked_or_archived_recruiting_threads_are_treated_as_outdated() -> None:
+    locked = SimpleNamespace(name="[RECRUITING] Need help", locked=True, archived=False)
+    archived = SimpleNamespace(name="Need help", locked=False, archived=True)
+    filled = SimpleNamespace(name="[FILLED] Need help", locked=True, archived=True)
+    lost = SimpleNamespace(name="[LOST] Need help", locked=True, archived=True)
+
+    assert JobsCog._status_for_thread(locked) is EngagementStatus.OUTDATED
+    assert JobsCog._status_for_thread(archived) is EngagementStatus.OUTDATED
+    assert JobsCog._status_for_thread(filled) is EngagementStatus.FILLED
+    assert JobsCog._status_for_thread(lost) is EngagementStatus.LOST
+
+
 def test_rename_gig_thread_for_status_rewrites_visible_marker() -> None:
     class FakeThread:
         id = 200
@@ -890,3 +902,48 @@ def test_sync_job_forum_channel_isolates_backfill_crashes() -> None:
 
     assert indexed == 1
     assert failed == 0
+
+
+def test_recruiting_reminder_marks_locked_thread_outdated_without_sending(
+    monkeypatch,
+) -> None:
+    class FakeThread:
+        locked = True
+        archived = False
+
+        def __init__(self) -> None:
+            self.send = AsyncMock()
+
+    thread = FakeThread()
+    monkeypatch.setattr(jobs_module.discord, "Thread", FakeThread)
+    monkeypatch.setattr(
+        jobs_module,
+        "list_due_recruiting_reminders",
+        Mock(
+            return_value=[
+                {
+                    "id": "engagement-1",
+                    "discord_thread_id": "200",
+                    "posted_by_discord_user_id": "10",
+                    "title": "Need help",
+                    "age_days": 8,
+                }
+            ]
+        ),
+    )
+    update_status = Mock(return_value={"id": "engagement-1"})
+    monkeypatch.setattr(jobs_module, "update_engagement_status", update_status)
+
+    bot = Mock()
+    bot.get_channel.return_value = thread
+    cog = JobsCog(bot)
+
+    asyncio.run(cog._send_due_recruiting_reminders())
+
+    thread.send.assert_not_awaited()
+    update_status.assert_called_once_with(
+        jobs_module.settings,
+        engagement_id="engagement-1",
+        status=EngagementStatus.OUTDATED,
+        actor_discord_user_id=None,
+    )
