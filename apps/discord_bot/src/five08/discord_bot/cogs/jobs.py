@@ -2373,7 +2373,13 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             base_title = stripped_title
         base_title = base_title.strip() or f"Discord gig {thread.id}"
         next_name = f"[{status_marker}] {base_title}"[:100]
-        if thread.name == next_name:
+        should_close_thread = status is EngagementStatus.LOST
+        needs_rename = thread.name != next_name
+        needs_close = should_close_thread and (
+            not getattr(thread, "locked", False)
+            or not getattr(thread, "archived", False)
+        )
+        if not needs_rename and not needs_close:
             return next_name
 
         if thread.guild is None or thread.guild.me is None:
@@ -2382,9 +2388,12 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         if not permissions.manage_threads:
             raise PermissionError("missing_manage_threads_permission")
 
-        if thread.archived:
+        if getattr(thread, "archived", False) and (needs_rename or needs_close):
             await thread.edit(archived=False, reason=reason)
-        await thread.edit(name=next_name, reason=reason)
+        if needs_rename:
+            await thread.edit(name=next_name, reason=reason)
+        if should_close_thread:
+            await thread.edit(locked=True, archived=True, reason=reason)
         return next_name
 
     @staticmethod
@@ -3747,10 +3756,15 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
+        close_note = (
+            " and closed this thread"
+            if normalized_status is EngagementStatus.LOST
+            else ""
+        )
         await interaction.followup.send(
             "✅ Updated status to "
-            f"**{status_label(normalized_status)}** and renamed this thread to "
-            f"`{next_title}`.",
+            f"**{status_label(normalized_status)}**, renamed this thread to "
+            f"`{next_title}`{close_note}.",
             ephemeral=True,
         )
 
