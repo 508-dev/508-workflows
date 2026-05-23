@@ -163,6 +163,47 @@ class TestInternalAPIRoutes:
         )
 
     @pytest.mark.asyncio
+    async def test_update_gig_thread_status_uses_fallback_for_marker_only_title(
+        self, internal_api_routes, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Dashboard status sync should not stack markers for marker-only titles."""
+
+        class FakeThread:
+            id = 123
+            name = "[RECRUITING]"
+            archived = False
+            locked = False
+            guild = SimpleNamespace(me=object())
+
+            def __init__(self) -> None:
+                self.edit = AsyncMock()
+
+            def permissions_for(self, _member: object) -> SimpleNamespace:
+                return SimpleNamespace(
+                    manage_threads=True,
+                    view_channel=True,
+                    send_messages_in_threads=True,
+                )
+
+        thread = FakeThread()
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.discord.Thread",
+            FakeThread,
+        )
+        internal_api_routes.bot.get_channel.return_value = thread
+
+        result, status_code = await internal_api_routes._update_gig_thread_status(
+            GigThreadStatusRequest(thread_id="123", status="filled")
+        )
+
+        assert status_code == 200
+        assert result["title"] == "[FILLED] Discord gig 123"
+        thread.edit.assert_awaited_once_with(
+            name="[FILLED] Discord gig 123",
+            reason="Dashboard gig status update",
+        )
+
+    @pytest.mark.asyncio
     async def test_update_gig_thread_status_closes_lost_thread(
         self, internal_api_routes, monkeypatch: pytest.MonkeyPatch
     ):

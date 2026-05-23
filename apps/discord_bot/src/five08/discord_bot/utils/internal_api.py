@@ -340,11 +340,19 @@ class InternalAPIRoutes:
                 **permission_payload,
             }, 403
 
-        base_title = strip_status_from_title(channel.name) or channel.name
+        raw_title = str(channel.name or "").strip()
+        stripped_title = strip_status_from_title(raw_title)
+        if (
+            parse_status_from_title(raw_title) is not EngagementStatus.UNKNOWN
+            and stripped_title == raw_title
+        ):
+            base_title = ""
+        else:
+            base_title = stripped_title
         base_title = base_title.strip() or f"Discord gig {thread_id}"
         next_name = f"[{status_marker}] {base_title}"[:100]
         should_close_thread = normalized_status is EngagementStatus.LOST
-        was_lost_thread = parse_status_from_title(channel.name) is EngagementStatus.LOST
+        was_lost_thread = parse_status_from_title(raw_title) is EngagementStatus.LOST
         is_locked = bool(getattr(channel, "locked", False))
         is_archived = bool(getattr(channel, "archived", False))
         needs_rename = channel.name != next_name
