@@ -238,6 +238,34 @@ def test_rename_gig_thread_for_non_lost_status_reopens_thread() -> None:
     ]
 
 
+def test_rename_gig_thread_for_non_lost_status_preserves_moderator_lock() -> None:
+    class FakeThread:
+        id = 200
+        name = "[RECRUITING] Need help"
+        archived = False
+        locked = True
+        guild = SimpleNamespace(me=object())
+
+        def __init__(self) -> None:
+            self.edit = AsyncMock()
+
+        def permissions_for(self, _member: object) -> SimpleNamespace:
+            return SimpleNamespace(manage_threads=True)
+
+    thread = FakeThread()
+
+    result = asyncio.run(
+        JobsCog._rename_gig_thread_for_status(
+            thread,
+            EngagementStatus.FILLED,
+            reason="test",
+        )
+    )
+
+    assert result == "[FILLED] Need help"
+    thread.edit.assert_awaited_once_with(name="[FILLED] Need help", reason="test")
+
+
 def test_build_match_candidate_lines_handles_non_string_names() -> None:
     candidate = _make_candidate(
         is_member=True,

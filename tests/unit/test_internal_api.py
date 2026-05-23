@@ -257,6 +257,47 @@ class TestInternalAPIRoutes:
         ]
 
     @pytest.mark.asyncio
+    async def test_update_gig_thread_status_preserves_moderator_lock(
+        self, internal_api_routes, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Non-lost status sync should not clear locks unrelated to lost closure."""
+
+        class FakeThread:
+            id = 123
+            name = "[RECRUITING] Old gig"
+            archived = False
+            locked = True
+            guild = SimpleNamespace(me=object())
+
+            def __init__(self) -> None:
+                self.edit = AsyncMock()
+
+            def permissions_for(self, _member: object) -> SimpleNamespace:
+                return SimpleNamespace(
+                    manage_threads=True,
+                    view_channel=True,
+                    send_messages_in_threads=True,
+                )
+
+        thread = FakeThread()
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.discord.Thread",
+            FakeThread,
+        )
+        internal_api_routes.bot.get_channel.return_value = thread
+
+        result, status_code = await internal_api_routes._update_gig_thread_status(
+            GigThreadStatusRequest(thread_id="123", status="filled")
+        )
+
+        assert status_code == 200
+        assert result["title"] == "[FILLED] Old gig"
+        thread.edit.assert_awaited_once_with(
+            name="[FILLED] Old gig",
+            reason="Dashboard gig status update",
+        )
+
+    @pytest.mark.asyncio
     async def test_update_gig_thread_status_reports_missing_manage_threads(
         self, internal_api_routes, monkeypatch: pytest.MonkeyPatch
     ):

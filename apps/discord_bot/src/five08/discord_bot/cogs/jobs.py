@@ -2374,10 +2374,13 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         base_title = base_title.strip() or f"Discord gig {thread.id}"
         next_name = f"[{status_marker}] {base_title}"[:100]
         should_close_thread = status is EngagementStatus.LOST
+        was_lost_thread = parse_status_from_title(raw_title) is EngagementStatus.LOST
         is_locked = bool(getattr(thread, "locked", False))
         is_archived = bool(getattr(thread, "archived", False))
         needs_rename = thread.name != next_name
-        needs_reopen = not should_close_thread and (is_locked or is_archived)
+        needs_reopen = (
+            not should_close_thread and was_lost_thread and (is_locked or is_archived)
+        )
         needs_close = should_close_thread and (not is_locked or not is_archived)
         needs_unarchive_for_rename = needs_rename and is_archived
         needs_restore_closed = should_close_thread and needs_unarchive_for_rename

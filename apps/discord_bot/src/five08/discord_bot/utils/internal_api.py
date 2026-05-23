@@ -14,6 +14,7 @@ from five08.discord_bot.config import settings
 from five08.engagements import (
     EngagementStatus,
     normalize_engagement_status,
+    parse_status_from_title,
     strip_status_from_title,
 )
 
@@ -343,10 +344,13 @@ class InternalAPIRoutes:
         base_title = base_title.strip() or f"Discord gig {thread_id}"
         next_name = f"[{status_marker}] {base_title}"[:100]
         should_close_thread = normalized_status is EngagementStatus.LOST
+        was_lost_thread = parse_status_from_title(channel.name) is EngagementStatus.LOST
         is_locked = bool(getattr(channel, "locked", False))
         is_archived = bool(getattr(channel, "archived", False))
         needs_rename = channel.name != next_name
-        needs_reopen = not should_close_thread and (is_locked or is_archived)
+        needs_reopen = (
+            not should_close_thread and was_lost_thread and (is_locked or is_archived)
+        )
         needs_close = should_close_thread and (not is_locked or not is_archived)
         needs_unarchive_for_rename = needs_rename and is_archived
         needs_restore_closed = should_close_thread and needs_unarchive_for_rename
