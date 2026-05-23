@@ -3,7 +3,7 @@
 import asyncio
 from types import SimpleNamespace
 import json
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, call
 
 import discord
 import pytest
@@ -159,6 +159,182 @@ class TestInternalAPIRoutes:
         assert result["title"] == "[OUTDATED] Old gig"
         thread.edit.assert_awaited_once_with(
             name="[OUTDATED] Old gig",
+            reason="Dashboard gig status update",
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_gig_thread_status_uses_fallback_for_marker_only_title(
+        self, internal_api_routes, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Dashboard status sync should not stack markers for marker-only titles."""
+
+        class FakeThread:
+            id = 123
+            name = "[RECRUITING]"
+            archived = False
+            locked = False
+            guild = SimpleNamespace(me=object())
+
+            def __init__(self) -> None:
+                self.edit = AsyncMock()
+
+            def permissions_for(self, _member: object) -> SimpleNamespace:
+                return SimpleNamespace(
+                    manage_threads=True,
+                    view_channel=True,
+                    send_messages_in_threads=True,
+                )
+
+        thread = FakeThread()
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.discord.Thread",
+            FakeThread,
+        )
+        internal_api_routes.bot.get_channel.return_value = thread
+
+        result, status_code = await internal_api_routes._update_gig_thread_status(
+            GigThreadStatusRequest(thread_id="123", status="filled")
+        )
+
+        assert status_code == 200
+        assert result["title"] == "[FILLED] Discord gig 123"
+        thread.edit.assert_awaited_once_with(
+            name="[FILLED] Discord gig 123",
+            reason="Dashboard gig status update",
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_gig_thread_status_closes_lost_thread(
+        self, internal_api_routes, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Dashboard lost status changes should lock and archive the Discord thread."""
+
+        class FakeThread:
+            id = 123
+            name = "[RECRUITING] Old gig"
+            archived = False
+            locked = False
+            guild = SimpleNamespace(me=object())
+
+            def __init__(self) -> None:
+                self.edit = AsyncMock()
+
+            def permissions_for(self, _member: object) -> SimpleNamespace:
+                return SimpleNamespace(
+                    manage_threads=True,
+                    view_channel=True,
+                    send_messages_in_threads=True,
+                )
+
+        thread = FakeThread()
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.discord.Thread",
+            FakeThread,
+        )
+        internal_api_routes.bot.get_channel.return_value = thread
+
+        result, status_code = await internal_api_routes._update_gig_thread_status(
+            GigThreadStatusRequest(thread_id="123", status="lost")
+        )
+
+        assert status_code == 200
+        assert result["status"] == "updated"
+        assert result["title"] == "[LOST] Old gig"
+        assert result["closed"] is True
+        assert thread.edit.await_args_list == [
+            call(name="[LOST] Old gig", reason="Dashboard gig status update"),
+            call(
+                locked=True,
+                archived=True,
+                reason="Dashboard gig status update",
+            ),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_update_gig_thread_status_reopens_non_lost_thread(
+        self, internal_api_routes, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Moving a closed lost thread away from lost should make it usable again."""
+
+        class FakeThread:
+            id = 123
+            name = "[LOST] Old gig"
+            archived = True
+            locked = True
+            guild = SimpleNamespace(me=object())
+
+            def __init__(self) -> None:
+                self.edit = AsyncMock()
+
+            def permissions_for(self, _member: object) -> SimpleNamespace:
+                return SimpleNamespace(
+                    manage_threads=True,
+                    view_channel=True,
+                    send_messages_in_threads=True,
+                )
+
+        thread = FakeThread()
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.discord.Thread",
+            FakeThread,
+        )
+        internal_api_routes.bot.get_channel.return_value = thread
+
+        result, status_code = await internal_api_routes._update_gig_thread_status(
+            GigThreadStatusRequest(thread_id="123", status="recruiting")
+        )
+
+        assert status_code == 200
+        assert result["status"] == "updated"
+        assert result["title"] == "[RECRUITING] Old gig"
+        assert result["closed"] is False
+        assert thread.edit.await_args_list == [
+            call(
+                locked=False,
+                archived=False,
+                reason="Dashboard gig status update",
+            ),
+            call(name="[RECRUITING] Old gig", reason="Dashboard gig status update"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_update_gig_thread_status_preserves_moderator_lock(
+        self, internal_api_routes, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Non-lost status sync should not clear locks unrelated to lost closure."""
+
+        class FakeThread:
+            id = 123
+            name = "[RECRUITING] Old gig"
+            archived = False
+            locked = True
+            guild = SimpleNamespace(me=object())
+
+            def __init__(self) -> None:
+                self.edit = AsyncMock()
+
+            def permissions_for(self, _member: object) -> SimpleNamespace:
+                return SimpleNamespace(
+                    manage_threads=True,
+                    view_channel=True,
+                    send_messages_in_threads=True,
+                )
+
+        thread = FakeThread()
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.discord.Thread",
+            FakeThread,
+        )
+        internal_api_routes.bot.get_channel.return_value = thread
+
+        result, status_code = await internal_api_routes._update_gig_thread_status(
+            GigThreadStatusRequest(thread_id="123", status="filled")
+        )
+
+        assert status_code == 200
+        assert result["title"] == "[FILLED] Old gig"
+        thread.edit.assert_awaited_once_with(
+            name="[FILLED] Old gig",
             reason="Dashboard gig status update",
         )
 

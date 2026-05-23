@@ -11,7 +11,12 @@ from discord.ext import commands
 from pydantic import BaseModel, ValidationError
 
 from five08.discord_bot.config import settings
-from five08.engagements import normalize_engagement_status, strip_status_from_title
+from five08.engagements import (
+    EngagementStatus,
+    normalize_engagement_status,
+    parse_status_from_title,
+    strip_status_from_title,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -335,36 +340,70 @@ class InternalAPIRoutes:
                 **permission_payload,
             }, 403
 
-        base_title = strip_status_from_title(channel.name) or channel.name
+        raw_title = str(channel.name or "").strip()
+        stripped_title = strip_status_from_title(raw_title)
+        if (
+            parse_status_from_title(raw_title) is not EngagementStatus.UNKNOWN
+            and stripped_title == raw_title
+        ):
+            base_title = ""
+        else:
+            base_title = stripped_title
         base_title = base_title.strip() or f"Discord gig {thread_id}"
         next_name = f"[{status_marker}] {base_title}"[:100]
-        if channel.name == next_name:
+        should_close_thread = normalized_status is EngagementStatus.LOST
+        was_lost_thread = parse_status_from_title(raw_title) is EngagementStatus.LOST
+        is_locked = bool(getattr(channel, "locked", False))
+        is_archived = bool(getattr(channel, "archived", False))
+        needs_rename = channel.name != next_name
+        needs_reopen = (
+            not should_close_thread and was_lost_thread and (is_locked or is_archived)
+        )
+        needs_close = should_close_thread and (not is_locked or not is_archived)
+        needs_unarchive_for_rename = needs_rename and is_archived
+        needs_restore_closed = should_close_thread and needs_unarchive_for_rename
+        if not needs_rename and not needs_close and not needs_reopen:
             return {
                 "status": "unchanged",
                 "thread_id": str(thread_id),
                 "title": next_name,
+                "closed": should_close_thread,
             }, 200
 
         try:
-            if channel.archived:
+            if needs_reopen:
+                await channel.edit(
+                    locked=False,
+                    archived=False,
+                    reason="Dashboard gig status update",
+                )
+            elif needs_unarchive_for_rename:
                 await channel.edit(
                     archived=False,
                     reason="Dashboard gig status update",
                 )
-            await channel.edit(
-                name=next_name,
-                reason="Dashboard gig status update",
-            )
+            if needs_rename:
+                await channel.edit(
+                    name=next_name,
+                    reason="Dashboard gig status update",
+                )
+            if needs_close or needs_restore_closed:
+                await channel.edit(
+                    locked=True,
+                    archived=True,
+                    reason="Dashboard gig status update",
+                )
         except discord.Forbidden:
-            return {"error": "thread_rename_forbidden"}, 403
+            return {"error": "thread_update_forbidden"}, 403
         except discord.HTTPException as exc:
-            logger.warning("Failed renaming gig thread %s: %s", thread_id, exc)
-            return {"error": "thread_rename_failed"}, 502
+            logger.warning("Failed updating gig thread %s: %s", thread_id, exc)
+            return {"error": "thread_update_failed"}, 502
 
         return {
             "status": "updated",
             "thread_id": str(thread_id),
             "title": next_name,
+            "closed": should_close_thread,
         }, 200
 
     async def gig_thread_status_handler(self, request: web.Request) -> web.Response:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, call
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -174,6 +174,96 @@ def test_rename_gig_thread_for_status_uses_fallback_for_marker_only_title() -> N
         name="[FILLED] Discord gig 200",
         reason="test",
     )
+
+
+def test_rename_gig_thread_for_lost_status_locks_and_archives() -> None:
+    class FakeThread:
+        id = 200
+        name = "[RECRUITING] Need help"
+        archived = False
+        locked = False
+        guild = SimpleNamespace(me=object())
+
+        def __init__(self) -> None:
+            self.edit = AsyncMock()
+
+        def permissions_for(self, _member: object) -> SimpleNamespace:
+            return SimpleNamespace(manage_threads=True)
+
+    thread = FakeThread()
+
+    result = asyncio.run(
+        JobsCog._rename_gig_thread_for_status(
+            thread,
+            EngagementStatus.LOST,
+            reason="test",
+        )
+    )
+
+    assert result == "[LOST] Need help"
+    assert thread.edit.await_args_list == [
+        call(name="[LOST] Need help", reason="test"),
+        call(locked=True, archived=True, reason="test"),
+    ]
+
+
+def test_rename_gig_thread_for_non_lost_status_reopens_thread() -> None:
+    class FakeThread:
+        id = 200
+        name = "[LOST] Need help"
+        archived = True
+        locked = True
+        guild = SimpleNamespace(me=object())
+
+        def __init__(self) -> None:
+            self.edit = AsyncMock()
+
+        def permissions_for(self, _member: object) -> SimpleNamespace:
+            return SimpleNamespace(manage_threads=True)
+
+    thread = FakeThread()
+
+    result = asyncio.run(
+        JobsCog._rename_gig_thread_for_status(
+            thread,
+            EngagementStatus.RECRUITING,
+            reason="test",
+        )
+    )
+
+    assert result == "[RECRUITING] Need help"
+    assert thread.edit.await_args_list == [
+        call(locked=False, archived=False, reason="test"),
+        call(name="[RECRUITING] Need help", reason="test"),
+    ]
+
+
+def test_rename_gig_thread_for_non_lost_status_preserves_moderator_lock() -> None:
+    class FakeThread:
+        id = 200
+        name = "[RECRUITING] Need help"
+        archived = False
+        locked = True
+        guild = SimpleNamespace(me=object())
+
+        def __init__(self) -> None:
+            self.edit = AsyncMock()
+
+        def permissions_for(self, _member: object) -> SimpleNamespace:
+            return SimpleNamespace(manage_threads=True)
+
+    thread = FakeThread()
+
+    result = asyncio.run(
+        JobsCog._rename_gig_thread_for_status(
+            thread,
+            EngagementStatus.FILLED,
+            reason="test",
+        )
+    )
+
+    assert result == "[FILLED] Need help"
+    thread.edit.assert_awaited_once_with(name="[FILLED] Need help", reason="test")
 
 
 def test_build_match_candidate_lines_handles_non_string_names() -> None:

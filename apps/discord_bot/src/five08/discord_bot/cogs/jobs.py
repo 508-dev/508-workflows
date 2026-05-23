@@ -2373,7 +2373,18 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             base_title = stripped_title
         base_title = base_title.strip() or f"Discord gig {thread.id}"
         next_name = f"[{status_marker}] {base_title}"[:100]
-        if thread.name == next_name:
+        should_close_thread = status is EngagementStatus.LOST
+        was_lost_thread = parse_status_from_title(raw_title) is EngagementStatus.LOST
+        is_locked = bool(getattr(thread, "locked", False))
+        is_archived = bool(getattr(thread, "archived", False))
+        needs_rename = thread.name != next_name
+        needs_reopen = (
+            not should_close_thread and was_lost_thread and (is_locked or is_archived)
+        )
+        needs_close = should_close_thread and (not is_locked or not is_archived)
+        needs_unarchive_for_rename = needs_rename and is_archived
+        needs_restore_closed = should_close_thread and needs_unarchive_for_rename
+        if not needs_rename and not needs_close and not needs_reopen:
             return next_name
 
         if thread.guild is None or thread.guild.me is None:
@@ -2382,9 +2393,14 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         if not permissions.manage_threads:
             raise PermissionError("missing_manage_threads_permission")
 
-        if thread.archived:
+        if needs_reopen:
+            await thread.edit(locked=False, archived=False, reason=reason)
+        elif needs_unarchive_for_rename:
             await thread.edit(archived=False, reason=reason)
-        await thread.edit(name=next_name, reason=reason)
+        if needs_rename:
+            await thread.edit(name=next_name, reason=reason)
+        if needs_close or needs_restore_closed:
+            await thread.edit(locked=True, archived=True, reason=reason)
         return next_name
 
     @staticmethod
@@ -3747,10 +3763,15 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
+        close_note = (
+            " and closed this thread"
+            if normalized_status is EngagementStatus.LOST
+            else ""
+        )
         await interaction.followup.send(
             "✅ Updated status to "
-            f"**{status_label(normalized_status)}** and renamed this thread to "
-            f"`{next_title}`.",
+            f"**{status_label(normalized_status)}**, renamed this thread to "
+            f"`{next_title}`{close_note}.",
             ephemeral=True,
         )
 
