@@ -134,7 +134,7 @@ def test_update_supplier_payment_details_requires_supplier_details() -> None:
         )
 
 
-def test_update_supplier_payment_details_replaces_supplier_details() -> None:
+def test_update_supplier_payment_details_preserves_unrelated_supplier_details() -> None:
     client = FakeERPNextClient()
     identity = resolve_payment_identity(client, "jane@508.dev")
     client.records["Supplier"]["SUP-0001"]["supplier_details"] = "Tax ID: 12-3456789"
@@ -153,12 +153,48 @@ def test_update_supplier_payment_details_replaces_supplier_details() -> None:
         ),
     )
 
-    assert supplier["supplier_details"] == (
-        "Bank: Test Bank\n"
-        "Routing / SWIFT / branch: 011000015\n"
-        "Account number: 123456789"
-    )
+    details = supplier["supplier_details"]
+    assert "Tax ID: 12-3456789" in details
+    assert "=== 508 Payment Info ===" in details
+    assert "Bank: Test Bank" in details
+    assert "Routing / SWIFT / branch: 011000015" in details
+    assert "Account number: 123456789" in details
+    assert "=== End 508 Payment Info ===" in details
+    assert details.startswith("Tax ID: 12-3456789")
     assert changed_fields == ["supplier_details"]
+
+
+def test_update_supplier_payment_details_replaces_existing_payment_block() -> None:
+    client = FakeERPNextClient()
+    identity = resolve_payment_identity(client, "jane@508.dev")
+    client.records["Supplier"]["SUP-0001"]["supplier_details"] = (
+        "Tax ID: 12-3456789\n\n"
+        "=== 508 Payment Info ===\n"
+        "Bank: Old Bank\n"
+        "Account number: 999999999\n"
+        "=== End 508 Payment Info ==="
+    )
+
+    supplier, _changed_fields = update_supplier_payment_details(
+        client,
+        identity,
+        PaymentInfoInput(
+            supplier_details="\n".join(
+                [
+                    "Bank: New Bank",
+                    "Account number: 123456789",
+                ]
+            )
+        ),
+    )
+
+    details = supplier["supplier_details"]
+    assert "Tax ID: 12-3456789" in details
+    assert "Bank: New Bank" in details
+    assert "Account number: 123456789" in details
+    assert "Old Bank" not in details
+    assert "999999999" not in details
+    assert details.count("=== 508 Payment Info ===") == 1
 
 
 def test_payment_info_summary_masks_account_numbers_but_not_bank_or_routing() -> None:
@@ -253,6 +289,20 @@ def test_mask_payment_details_does_not_mask_account_holder() -> None:
     masked = mask_payment_details_for_display(details)
 
     assert "Account holder: Jane Engineer" in masked
+    assert "Account number: 12****90" in masked
+
+
+def test_mask_payment_details_keeps_bank_account_text_without_digits() -> None:
+    details = "\n".join(
+        [
+            "Bank account: Test Bank",
+            "Account number: 1234567890",
+        ]
+    )
+
+    masked = mask_payment_details_for_display(details)
+
+    assert "Bank account: Test Bank" in masked
     assert "Account number: 12****90" in masked
 
 

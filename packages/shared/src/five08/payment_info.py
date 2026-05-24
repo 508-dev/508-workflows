@@ -37,6 +37,8 @@ _MASKABLE_ACCOUNT_TOKEN_RE = re.compile(
     r"\b[A-Z]{0,4}\d[A-Za-z0-9]*(?:[ -]+[A-Za-z0-9]*\d[A-Za-z0-9]*)*\b",
     flags=re.IGNORECASE,
 )
+_PAYMENT_INFO_BLOCK_START = "=== 508 Payment Info ==="
+_PAYMENT_INFO_BLOCK_END = "=== End 508 Payment Info ==="
 
 
 def normalize_508_email(value: str | None) -> str:
@@ -114,11 +116,14 @@ def update_supplier_payment_details(
     identity: PaymentIdentity,
     payment_info: PaymentInfoInput,
 ) -> tuple[dict[str, Any], list[str]]:
-    """Replace Supplier.supplier_details with the user-submitted text."""
-    supplier_details = _text(payment_info.supplier_details)
-    if supplier_details is None:
+    """Replace the managed payment block inside Supplier.supplier_details."""
+    payment_details = _text(payment_info.supplier_details)
+    if payment_details is None:
         raise PaymentInfoError("Enter Supplier Details to update.")
 
+    supplier = get_supplier_payment_details(client, identity)
+    existing_details = str(supplier.get("supplier_details") or "").strip()
+    supplier_details = _replace_payment_info_block(existing_details, payment_details)
     updated_supplier = client.update_record(
         "Supplier",
         identity.supplier_id,
@@ -160,6 +165,32 @@ def mask_payment_details_for_display(details: str) -> str:
 
 def _sanitize_code_block_text(value: str) -> str:
     return value.replace("```", "'''")
+
+
+def _replace_payment_info_block(existing_details: str, payment_details: str) -> str:
+    payment_block = _payment_info_block(payment_details)
+    if not existing_details:
+        return payment_block
+
+    pattern = re.compile(
+        rf"{re.escape(_PAYMENT_INFO_BLOCK_START)}.*?"
+        rf"{re.escape(_PAYMENT_INFO_BLOCK_END)}",
+        flags=re.DOTALL,
+    )
+    if pattern.search(existing_details):
+        return pattern.sub(payment_block, existing_details).strip()
+
+    return f"{existing_details}\n\n{payment_block}".strip()
+
+
+def _payment_info_block(payment_details: str) -> str:
+    return "\n".join(
+        [
+            _PAYMENT_INFO_BLOCK_START,
+            payment_details.strip(),
+            _PAYMENT_INFO_BLOCK_END,
+        ]
+    )
 
 
 def _employee_for_user(
@@ -251,7 +282,11 @@ def _mask_account_value(value: str) -> str:
     core = value.strip()
     if not core:
         return value
-    return f"{leading_space}{_mask_token(core)}{trailing_space}"
+    masked = _MASKABLE_ACCOUNT_TOKEN_RE.sub(
+        lambda match: _mask_token(match.group(0)),
+        core,
+    )
+    return f"{leading_space}{masked}{trailing_space}"
 
 
 def _mask_token(value: str) -> str:
