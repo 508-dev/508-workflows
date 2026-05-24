@@ -28,24 +28,15 @@ class PaymentIdentity:
 class PaymentInfoInput:
     """User-submitted payment information."""
 
-    account_name: str | None = None
-    bank: str | None = None
-    bank_account_no: str | None = None
-    branch_code: str | None = None
-    iban: str | None = None
+    supplier_details: str | None = None
 
 
-PAYMENT_INFO_BLOCK_START = "=== 508 Payment Info ==="
-PAYMENT_INFO_BLOCK_END = "=== End 508 Payment Info ==="
-_ACCOUNT_NUMBER_LABELS = (
-    "account number",
-    "account no",
-    "account #",
-    "acct number",
-    "acct no",
-    "iban",
+_ACCOUNT_LINE_TOKENS = ("account", "acct", "iban")
+_ACCOUNT_LINE_EXCLUSIONS = ("account holder", "account name", "account manager")
+_MASKABLE_ACCOUNT_TOKEN_RE = re.compile(
+    r"\b[A-Z]{0,4}\d[A-Za-z0-9]*(?:[ -]+[A-Za-z0-9]*\d[A-Za-z0-9]*)*\b",
+    flags=re.IGNORECASE,
 )
-_MASKABLE_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 -]{3,}[A-Za-z0-9]")
 
 
 def normalize_508_email(value: str | None) -> str:
@@ -123,21 +114,17 @@ def update_supplier_payment_details(
     identity: PaymentIdentity,
     payment_info: PaymentInfoInput,
 ) -> tuple[dict[str, Any], list[str]]:
-    """Replace the managed payment block inside Supplier.supplier_details."""
-    fields = _payment_info_fields(payment_info)
-    if not fields:
-        raise PaymentInfoError("Enter at least one payment-info field to update.")
+    """Replace Supplier.supplier_details with the user-submitted text."""
+    supplier_details = _text(payment_info.supplier_details)
+    if supplier_details is None:
+        raise PaymentInfoError("Enter Supplier Details to update.")
 
-    supplier = get_supplier_payment_details(client, identity)
-    existing_details = str(supplier.get("supplier_details") or "").strip()
-    payment_block = _format_payment_info_block(fields)
-    updated_details = _replace_managed_payment_block(existing_details, payment_block)
     updated_supplier = client.update_record(
         "Supplier",
         identity.supplier_id,
-        {"supplier_details": updated_details},
+        {"supplier_details": supplier_details},
     )
-    return updated_supplier, list(fields)
+    return updated_supplier, ["supplier_details"]
 
 
 def payment_info_summary(
@@ -162,46 +149,11 @@ def payment_info_summary(
 
 
 def mask_payment_details_for_display(details: str) -> str:
-    """Mask account-number style lines while leaving bank and routing text readable."""
+    """Mask account-number lines while leaving bank and routing text readable."""
     output_lines: list[str] = []
     for line in details.splitlines():
-        label, separator, value = line.partition(":")
-        if separator and _is_account_number_label(label):
-            output_lines.append(f"{label}{separator}{_mask_payment_token(value)}")
-        else:
-            output_lines.append(line)
+        output_lines.append(_mask_account_line(line))
     return "\n".join(output_lines)
-
-
-def _replace_managed_payment_block(existing_details: str, payment_block: str) -> str:
-    if not existing_details:
-        return payment_block
-
-    pattern = re.compile(
-        rf"{re.escape(PAYMENT_INFO_BLOCK_START)}.*?"
-        rf"{re.escape(PAYMENT_INFO_BLOCK_END)}",
-        flags=re.DOTALL,
-    )
-    if pattern.search(existing_details):
-        return pattern.sub(payment_block, existing_details).strip()
-
-    return f"{existing_details}\n\n{payment_block}".strip()
-
-
-def _format_payment_info_block(fields: dict[str, str]) -> str:
-    lines = [PAYMENT_INFO_BLOCK_START]
-    for field, label in (
-        ("account_name", "Account holder"),
-        ("bank", "Bank"),
-        ("branch_code", "Routing / SWIFT / branch"),
-        ("bank_account_no", "Account number"),
-        ("iban", "IBAN"),
-    ):
-        value = fields.get(field)
-        if value:
-            lines.append(f"{label}: {value}")
-    lines.append(PAYMENT_INFO_BLOCK_END)
-    return "\n".join(lines)
 
 
 def _employee_for_user(
@@ -268,37 +220,32 @@ def _supplier_owned_by_email_or_employee(
     return False
 
 
-def _payment_info_fields(payment_info: PaymentInfoInput) -> dict[str, str]:
-    fields: dict[str, str] = {}
-    for field in (
-        "account_name",
-        "bank",
-        "bank_account_no",
-        "branch_code",
-        "iban",
-    ):
-        value = _text(getattr(payment_info, field))
-        if value:
-            fields[field] = value
-    return fields
+def _mask_account_line(line: str) -> str:
+    if not _is_account_number_line(line):
+        return line
+    label, separator, value = line.partition(":")
+    if separator:
+        return f"{label}{separator}{_mask_account_value(value)}"
+    return _MASKABLE_ACCOUNT_TOKEN_RE.sub(
+        lambda match: _mask_token(match.group(0)),
+        line,
+    )
 
 
-def _is_account_number_label(label: str) -> bool:
-    normalized = label.strip().casefold()
-    return any(token in normalized for token in _ACCOUNT_NUMBER_LABELS)
+def _is_account_number_line(line: str) -> bool:
+    normalized = line.casefold()
+    if any(exclusion in normalized for exclusion in _ACCOUNT_LINE_EXCLUSIONS):
+        return False
+    return any(token in normalized for token in _ACCOUNT_LINE_TOKENS)
 
 
-def _mask_payment_token(value: str) -> str:
+def _mask_account_value(value: str) -> str:
     leading_space = value[: len(value) - len(value.lstrip())]
     trailing_space = value[len(value.rstrip()) :]
     core = value.strip()
     if not core:
         return value
-    masked = _MASKABLE_TOKEN_RE.sub(
-        lambda match: _mask_token(match.group(0)),
-        core,
-    )
-    return f"{leading_space}{masked}{trailing_space}"
+    return f"{leading_space}{_mask_token(core)}{trailing_space}"
 
 
 def _mask_token(value: str) -> str:

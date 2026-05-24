@@ -121,11 +121,11 @@ def test_get_supplier_payment_details_reads_supplier_details_field() -> None:
     assert supplier["supplier_details"] == "Bank: Test Bank"
 
 
-def test_update_supplier_payment_details_requires_some_payment_info() -> None:
+def test_update_supplier_payment_details_requires_supplier_details() -> None:
     client = FakeERPNextClient()
     identity = resolve_payment_identity(client, "jane@508.dev")
 
-    with pytest.raises(PaymentInfoError, match="at least one"):
+    with pytest.raises(PaymentInfoError, match="Supplier Details"):
         update_supplier_payment_details(
             client,
             identity,
@@ -133,9 +133,7 @@ def test_update_supplier_payment_details_requires_some_payment_info() -> None:
         )
 
 
-def test_update_supplier_payment_details_appends_managed_supplier_details_block() -> (
-    None
-):
+def test_update_supplier_payment_details_replaces_supplier_details() -> None:
     client = FakeERPNextClient()
     identity = resolve_payment_identity(client, "jane@508.dev")
     client.records["Supplier"]["SUP-0001"]["supplier_details"] = "Tax ID: 12-3456789"
@@ -144,52 +142,22 @@ def test_update_supplier_payment_details_appends_managed_supplier_details_block(
         client,
         identity,
         PaymentInfoInput(
-            account_name="Jane Engineer",
-            bank="Test Bank",
-            bank_account_no="123456789",
-            branch_code="011000015",
+            supplier_details="\n".join(
+                [
+                    "Bank: Test Bank",
+                    "Routing / SWIFT / branch: 011000015",
+                    "Account number: 123456789",
+                ]
+            )
         ),
     )
 
-    details = supplier["supplier_details"]
-    assert "Tax ID: 12-3456789" in details
-    assert "=== 508 Payment Info ===" in details
-    assert "Bank: Test Bank" in details
-    assert "Routing / SWIFT / branch: 011000015" in details
-    assert "Account number: 123456789" in details
-    assert changed_fields == [
-        "account_name",
-        "bank",
-        "bank_account_no",
-        "branch_code",
-    ]
-
-
-def test_update_supplier_payment_details_replaces_existing_managed_block() -> None:
-    client = FakeERPNextClient()
-    identity = resolve_payment_identity(client, "jane@508.dev")
-    client.records["Supplier"]["SUP-0001"]["supplier_details"] = (
-        "Tax ID: 12-3456789\n\n"
-        "=== 508 Payment Info ===\n"
-        "Bank: Old Bank\n"
-        "Account number: 999999999\n"
-        "=== End 508 Payment Info ==="
+    assert supplier["supplier_details"] == (
+        "Bank: Test Bank\n"
+        "Routing / SWIFT / branch: 011000015\n"
+        "Account number: 123456789"
     )
-
-    supplier, _changed_fields = update_supplier_payment_details(
-        client,
-        identity,
-        PaymentInfoInput(
-            bank="New Bank",
-            bank_account_no="123456789",
-        ),
-    )
-
-    details = supplier["supplier_details"]
-    assert "Tax ID: 12-3456789" in details
-    assert "New Bank" in details
-    assert "Old Bank" not in details
-    assert "999999999" not in details
+    assert changed_fields == ["supplier_details"]
 
 
 def test_payment_info_summary_masks_account_numbers_but_not_bank_or_routing() -> None:
@@ -230,6 +198,38 @@ def test_mask_payment_details_for_display_leaves_routing_numbers_readable() -> N
     masked = mask_payment_details_for_display(details)
 
     assert "Routing / SWIFT / branch: 011000015" in masked
+    assert "Account number: 12****90" in masked
+
+
+def test_mask_payment_details_handles_account_lines_without_colons() -> None:
+    details = "\n".join(
+        [
+            "Bank Test Bank",
+            "ACH Account 1234567890",
+            "Account # 9876543210",
+        ]
+    )
+
+    masked = mask_payment_details_for_display(details)
+
+    assert "Bank Test Bank" in masked
+    assert "1234567890" not in masked
+    assert "9876543210" not in masked
+    assert "12****90" in masked
+    assert "98****10" in masked
+
+
+def test_mask_payment_details_does_not_mask_account_holder() -> None:
+    details = "\n".join(
+        [
+            "Account holder: Jane Engineer",
+            "Account number: 1234567890",
+        ]
+    )
+
+    masked = mask_payment_details_for_display(details)
+
+    assert "Account holder: Jane Engineer" in masked
     assert "Account number: 12****90" in masked
 
 
@@ -327,10 +327,13 @@ async def test_payment_info_update_is_ephemeral_and_does_not_echo_full_account(
     await payment_cog.handle_payment_info_update(
         interaction,
         PaymentInfoInput(
-            account_name="Jane Engineer",
-            bank="Test Bank",
-            bank_account_no="123456789",
-            branch_code="011000015",
+            supplier_details="\n".join(
+                [
+                    "Bank: Test Bank",
+                    "Routing / SWIFT / branch: 011000015",
+                    "ACH Account 123456789",
+                ]
+            ),
         ),
     )
 
@@ -338,5 +341,5 @@ async def test_payment_info_update_is_ephemeral_and_does_not_echo_full_account(
     assert "Payment info updated" in sent
     assert "123456789" not in sent
     assert "Routing / SWIFT / branch: 011000015" in sent
-    assert "Account number: 12****89" in sent
+    assert "ACH Account 12****89" in sent
     assert interaction.followup.send.call_args.kwargs["ephemeral"] is True

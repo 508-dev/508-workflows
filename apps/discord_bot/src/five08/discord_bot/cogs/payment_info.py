@@ -31,35 +31,12 @@ logger = logging.getLogger(__name__)
 class PaymentInfoModal(discord.ui.Modal, title="Update Payment Info"):
     """Modal for self-service payment-info updates."""
 
-    account_name: discord.ui.TextInput = discord.ui.TextInput(
-        label="Account holder",
-        placeholder="Legal name on the account",
-        required=False,
-        max_length=140,
-    )
-    bank: discord.ui.TextInput = discord.ui.TextInput(
-        label="Bank name",
-        placeholder="Bank name in ERPNext",
-        required=False,
-        max_length=140,
-    )
-    branch_code: discord.ui.TextInput = discord.ui.TextInput(
-        label="Routing / SWIFT / branch code",
-        placeholder="Routing number, SWIFT, or branch code",
-        required=False,
-        max_length=80,
-    )
-    bank_account_no: discord.ui.TextInput = discord.ui.TextInput(
-        label="Account number",
-        placeholder="Full account number",
-        required=False,
-        max_length=120,
-    )
-    iban: discord.ui.TextInput = discord.ui.TextInput(
-        label="IBAN",
-        placeholder="Optional IBAN",
-        required=False,
-        max_length=120,
+    supplier_details: discord.ui.TextInput = discord.ui.TextInput(
+        label="Supplier Details",
+        placeholder="Paste the Supplier Details payment text here.",
+        required=True,
+        style=discord.TextStyle.paragraph,
+        max_length=4000,
     )
 
     def __init__(self, cog: "PaymentInfoCog", owner_user_id: str) -> None:
@@ -79,11 +56,7 @@ class PaymentInfoModal(discord.ui.Modal, title="Update Payment Info"):
         await self.cog.handle_payment_info_update(
             interaction,
             PaymentInfoInput(
-                account_name=str(self.account_name.value or ""),
-                bank=str(self.bank.value or ""),
-                bank_account_no=str(self.bank_account_no.value or ""),
-                branch_code=str(self.branch_code.value or ""),
-                iban=str(self.iban.value or ""),
+                supplier_details=str(self.supplier_details.value or ""),
             ),
         )
 
