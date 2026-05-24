@@ -149,19 +149,6 @@ class PaymentInfoCog(DiscordAuditCogMixin, commands.Cog, name="Payment Info"):
             raise PaymentInfoError("CRM Discord link did not match your Discord user.")
         return contact
 
-    def _resolve_self_identity(
-        self,
-        discord_user_id: str,
-    ) -> tuple[dict[str, Any], PaymentIdentity]:
-        contact = self._crm_contact_for_discord_user(discord_user_id)
-        email = normalize_508_email(contact.get("c508Email"))
-        client = self._erpnext_client()
-        try:
-            identity = resolve_payment_identity(client, email)
-        finally:
-            client.close()
-        return contact, identity
-
     def _read_self_payment_info(
         self,
         discord_user_id: str,
@@ -248,6 +235,7 @@ class PaymentInfoCog(DiscordAuditCogMixin, commands.Cog, name="Payment Info"):
         await interaction.followup.send(
             "\n".join(payment_info_summary(identity, supplier)),
             view=PaymentInfoView(self, str(interaction.user.id)),
+            allowed_mentions=discord.AllowedMentions.none(),
             ephemeral=True,
         )
 
@@ -309,18 +297,19 @@ class PaymentInfoCog(DiscordAuditCogMixin, commands.Cog, name="Payment Info"):
         await interaction.followup.send(
             "✅ Payment info updated.\n"
             + "\n".join(payment_info_summary(identity, supplier)),
+            allowed_mentions=discord.AllowedMentions.none(),
             ephemeral=True,
         )
 
 
 async def setup(bot: commands.Bot) -> None:
     if not all(
-        [
-            settings.espo_base_url,
-            settings.espo_api_key,
-            settings.erpnext_base_url,
-            settings.erpnext_api_key,
-        ]
+        (
+            (settings.espo_base_url or "").strip(),
+            (settings.espo_api_key or "").strip(),
+            (settings.erpnext_base_url or "").strip(),
+            (settings.erpnext_api_key or "").strip(),
+        )
     ):
         logger.warning(
             "Payment Info cog not loaded: missing CRM or ERPNext API settings"

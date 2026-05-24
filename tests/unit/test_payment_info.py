@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from five08.clients.erpnext import ERPNextAPIError
+from five08.discord_bot.cogs import payment_info as payment_info_cog
 from five08.discord_bot.cogs.payment_info import PaymentInfoCog
 from five08.payment_info import (
     PaymentInfoError,
@@ -186,6 +187,28 @@ def test_payment_info_summary_masks_account_numbers_but_not_bank_or_routing() ->
     assert "GB****32" in summary
 
 
+def test_payment_info_summary_sanitizes_nested_code_fences() -> None:
+    client = FakeERPNextClient()
+    identity = resolve_payment_identity(client, "jane@508.dev")
+    supplier = {
+        "supplier_details": "\n".join(
+            [
+                "Bank: Test Bank",
+                "```",
+                "@everyone",
+                "Account number: 1234567890",
+            ]
+        )
+    }
+
+    summary = "\n".join(payment_info_summary(identity, supplier))
+
+    assert summary.count("```") == 2
+    assert "'''" in summary
+    assert "1234567890" not in summary
+    assert "12****90" in summary
+
+
 def test_mask_payment_details_for_display_leaves_routing_numbers_readable() -> None:
     details = "\n".join(
         [
@@ -298,6 +321,7 @@ async def test_payment_info_command_is_ephemeral_and_self_scoped(
     assert params["select"] == "id,name,emailAddress,c508Email,cDiscordUserID"
     assert interaction.response.defer.call_args.kwargs["ephemeral"] is True
     assert interaction.followup.send.call_args.kwargs["ephemeral"] is True
+    assert "allowed_mentions" in interaction.followup.send.call_args.kwargs
     assert "jane@508.dev" in interaction.followup.send.call_args.args[0]
 
 
@@ -342,4 +366,22 @@ async def test_payment_info_update_is_ephemeral_and_does_not_echo_full_account(
     assert "123456789" not in sent
     assert "Routing / SWIFT / branch: 011000015" in sent
     assert "ACH Account 12****89" in sent
+    assert "allowed_mentions" in interaction.followup.send.call_args.kwargs
     assert interaction.followup.send.call_args.kwargs["ephemeral"] is True
+
+
+@pytest.mark.asyncio
+async def test_setup_rejects_whitespace_only_config() -> None:
+    bot = Mock()
+    bot.add_cog = AsyncMock()
+    fake_settings = Mock(
+        espo_base_url="https://crm.test",
+        espo_api_key="   ",
+        erpnext_base_url="https://erp.test",
+        erpnext_api_key="key:secret",
+    )
+
+    with patch.object(payment_info_cog, "settings", fake_settings):
+        await payment_info_cog.setup(bot)
+
+    bot.add_cog.assert_not_called()

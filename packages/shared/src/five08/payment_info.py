@@ -140,7 +140,9 @@ def payment_info_summary(
         lines.append("Supplier Details: not set")
         return lines
 
-    masked_details = mask_payment_details_for_display(details)
+    masked_details = _sanitize_code_block_text(
+        mask_payment_details_for_display(details)
+    )
     if len(masked_details) > 1500:
         masked_details = masked_details[:1497].rstrip() + "..."
     lines.append("Supplier Details:")
@@ -154,6 +156,10 @@ def mask_payment_details_for_display(details: str) -> str:
     for line in details.splitlines():
         output_lines.append(_mask_account_line(line))
     return "\n".join(output_lines)
+
+
+def _sanitize_code_block_text(value: str) -> str:
+    return value.replace("```", "'''")
 
 
 def _employee_for_user(
