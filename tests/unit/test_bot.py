@@ -32,6 +32,11 @@ class TestBot508:
 
         assert bot.command_prefix == "$508$"
         assert bot.intents.value == discord.Intents.all().value
+        assert bot.tree.allowed_contexts.guild is True
+        assert bot.tree.allowed_contexts.dm_channel is False
+        assert bot.tree.allowed_contexts.private_channel is False
+        assert bot.tree.allowed_installs.guild is True
+        assert bot.tree.allowed_installs.user is False
 
     @pytest.mark.asyncio
     async def test_setup_hook_calls_load_extensions(self):

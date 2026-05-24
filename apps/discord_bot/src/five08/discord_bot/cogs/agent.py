@@ -204,7 +204,9 @@ class AgentConfirmationView(discord.ui.View):
                 guild_id=str(original_guild_id),
                 user_id=interaction.user.id,
             )
-            context["roles"] = fresh_roles or self._original_roles()
+            context["roles"] = (
+                self._original_roles() if fresh_roles is None else fresh_roles
+            )
         original_message_id = self.context.get("message_id")
         if original_message_id:
             context["message_id"] = original_message_id
@@ -236,6 +238,8 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         name="agent",
         description="Run an approved English workflow through the agent gateway",
     )
+    @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=False)
+    @app_commands.allowed_installs(guilds=True, users=False)
     @app_commands.describe(request="The workflow to plan or execute")
     async def agent_command(
         self,
@@ -243,18 +247,42 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         request: str,
     ) -> None:
         """Send a natural-language request to the backend agent gateway."""
-        await interaction.response.defer(ephemeral=True)
+        response_ephemeral = self._interaction_response_ephemeral(interaction)
+        await interaction.response.defer(ephemeral=response_ephemeral)
 
+        slash_context = await self._resolve_slash_context(interaction)
+        if slash_context is None:
+            self._audit_command_safe(
+                interaction=interaction,
+                action="agent.request",
+                result="denied",
+                metadata={"reason": "member_not_in_configured_guild"},
+            )
+            await interaction.followup.send(
+                "I can only run DM workflows for current members of the "
+                "configured 508 server.",
+                ephemeral=response_ephemeral,
+            )
+            return
+
+        slash_guild, slash_user = slash_context
         local_response = self._local_agent_response(
             request=request,
-            roles=self._role_names_from_user(interaction.user),
+            roles=self._role_names_from_user(slash_user),
             transport="slash",
         )
         if local_response is not None:
-            await interaction.followup.send(local_response, ephemeral=True)
+            await interaction.followup.send(
+                local_response,
+                ephemeral=response_ephemeral,
+            )
             return
 
-        context = self._build_agent_context(interaction)
+        context = self._build_agent_context(
+            interaction,
+            guild=slash_guild,
+            user=slash_user,
+        )
         try:
             response = await self._post_agent_request(
                 message=request,
@@ -270,7 +298,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             )
             await interaction.followup.send(
                 "Agent gateway request failed. Check backend API configuration.",
-                ephemeral=True,
+                ephemeral=response_ephemeral,
             )
             return
 
@@ -300,27 +328,24 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         if view is None:
             await interaction.followup.send(
                 self._format_agent_response(response),
-                ephemeral=True,
+                ephemeral=response_ephemeral,
             )
             return
 
         await interaction.followup.send(
             self._format_agent_response(response),
             view=view,
-            ephemeral=True,
+            ephemeral=response_ephemeral,
         )
 
     @commands.Cog.listener("on_message")
     async def agent_mention(self, message: discord.Message) -> None:
-        """Handle natural-language agent requests when the bot is mentioned."""
+        """Handle natural-language agent requests from mentions or DMs."""
         bot_user = self.bot.user
         if bot_user is None or message.author.bot:
             return
         if message.guild is None:
-            await message.reply(
-                "Agent mentions only work in servers.",
-                mention_author=False,
-            )
+            await self._handle_agent_dm(message=message, bot_user_id=bot_user.id)
             return
         bot_mentioned = any(user.id == bot_user.id for user in message.mentions)
         agent_thread = self._is_agent_thread(message.channel, bot_user.id)
@@ -347,20 +372,88 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
-        local_response = self._local_agent_response(
+        await self._handle_agent_message_request(
+            message=message,
             request=request,
-            roles=self._role_names_from_user(message.author),
-            transport="mention",
+            context=self._build_agent_context_from_message(message),
+            source="mention",
         )
-        if local_response is not None:
-            await self._send_mention_public_response(
+
+    async def _handle_agent_dm(
+        self,
+        *,
+        message: discord.Message,
+        bot_user_id: int,
+    ) -> None:
+        request = self._extract_mention_request(message.content, bot_user_id)
+        if not request:
+            return
+
+        member_context = await self._resolve_dm_member_context(message.author.id)
+        if member_context is None:
+            self._audit_message_safe(
                 message=message,
-                request=request,
-                content=local_response,
+                action="agent.dm",
+                result="denied",
+                metadata={"reason": "member_not_in_configured_guild"},
+            )
+            await message.reply(
+                "I can only run DM workflows for current members of the "
+                "configured 508 server.",
+                mention_author=False,
             )
             return
 
-        context = self._build_agent_context_from_message(message)
+        guild, member = member_context
+        if self._mention_rate_limited(message.author.id):
+            self._audit_message_safe(
+                message=message,
+                action="agent.dm",
+                result="denied",
+                metadata={"reason": "rate_limited"},
+            )
+            await message.reply(
+                "Too many agent requests. Try again in a minute.",
+                mention_author=False,
+            )
+            return
+
+        await self._handle_agent_message_request(
+            message=message,
+            request=request,
+            context=self._build_agent_context_from_message(
+                message,
+                guild=guild,
+                user=member,
+            ),
+            source="dm",
+        )
+
+    async def _handle_agent_message_request(
+        self,
+        *,
+        message: discord.Message,
+        request: str,
+        context: dict[str, Any],
+        source: Literal["mention", "dm"],
+    ) -> None:
+        transport: Literal["mention", "dm"] = source
+        local_response = self._local_agent_response(
+            request=request,
+            roles=context["roles"],
+            transport=transport,
+        )
+        if local_response is not None:
+            if source == "dm":
+                await message.reply(local_response, mention_author=False)
+            else:
+                await self._send_mention_public_response(
+                    message=message,
+                    request=request,
+                    content=local_response,
+                )
+            return
+
         try:
             async with message.channel.typing():
                 response = await self._post_agent_request(
@@ -368,10 +461,10 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                     context=context,
                 )
         except Exception as exc:
-            logger.warning("Agent mention request failed: %s", exc)
+            logger.warning("Agent %s request failed: %s", source, exc)
             self._audit_message_safe(
                 message=message,
-                action="agent.mention",
+                action=f"agent.{source}",
                 result="error",
                 metadata={"error": str(exc)},
             )
@@ -381,9 +474,10 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
-        self._audit_agent_mention_response_safe(
+        self._audit_agent_message_response_safe(
             message=message,
             response=response,
+            action=f"agent.{source}",
             metadata={
                 "status": response.get("status"),
                 "error": response.get("error"),
@@ -402,6 +496,14 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                     plan_id=plan_id,
                     context=context,
                 )
+
+        if source == "dm":
+            await self._send_agent_dm_response(
+                message=message,
+                response=response,
+                view=view,
+            )
+            return
 
         if self._should_reply_publicly_to_mention(response=response, view=view):
             await self._send_mention_public_response(
@@ -454,11 +556,12 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         self._mention_request_timestamps[user_id] = timestamps
         return False
 
-    def _audit_agent_mention_response_safe(
+    def _audit_agent_message_response_safe(
         self,
         *,
         message: discord.Message,
         response: dict[str, Any],
+        action: str,
         metadata: dict[str, Any] | None = None,
     ) -> None:
         result = self._audit_result_for_agent_response(response)
@@ -466,7 +569,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             return
         self._audit_message_safe(
             message=message,
-            action="agent.mention",
+            action=action,
             result=result,
             metadata=metadata,
         )
@@ -497,7 +600,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         *,
         request: str,
         roles: list[str],
-        transport: Literal["slash", "mention"],
+        transport: Literal["slash", "mention", "dm"],
     ) -> str | None:
         if self._is_agent_help_request(request):
             return self._agent_capabilities_message(roles=roles, transport=transport)
@@ -514,6 +617,11 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                     "That report includes member identity/linkage data, so use "
                     "`/unlinked-discord-users` for the dedicated report."
                 )
+            if transport == "dm":
+                return (
+                    "That report includes member identity/linkage data, so use "
+                    "`/unlinked-discord-users` in the 508 server."
+                )
             return (
                 "That report includes member identity/linkage data, so use "
                 "`/unlinked-discord-users` for the private ephemeral response."
@@ -524,6 +632,12 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                     "That is CRM people/onboarding data, so use "
                     "`/view-onboarding-queue` for the dedicated queue view. "
                     "For targeted lookup, keep using `/agent`."
+                )
+            if transport == "dm":
+                return (
+                    "That is CRM people/onboarding data, so use "
+                    "`/view-onboarding-queue` in the 508 server. "
+                    "For targeted lookup, use `/search-members`."
                 )
             return (
                 "That is CRM people/onboarding data, so use "
@@ -552,7 +666,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
     def _agent_capabilities_message(
         *,
         roles: list[str],
-        transport: Literal["slash", "mention"] = "mention",
+        transport: Literal["slash", "mention", "dm"] = "mention",
     ) -> str:
         normalized_roles = {role.strip().casefold() for role in roles}
         is_admin = bool(normalized_roles & {"admin", "owner", "steering committee"})
@@ -747,8 +861,45 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             )
             return False
 
-    def _build_agent_context(self, interaction: discord.Interaction) -> dict[str, Any]:
-        role_names = self._role_names_from_user(interaction.user)
+    async def _send_agent_dm_response(
+        self,
+        *,
+        message: discord.Message,
+        response: dict[str, Any],
+        view: AgentConfirmationView | None,
+    ) -> None:
+        formatted_response = self._format_agent_response(response)
+        if view is None:
+            await message.reply(formatted_response, mention_author=False)
+            return
+        await message.reply(formatted_response, view=view, mention_author=False)
+
+    @staticmethod
+    def _interaction_response_ephemeral(interaction: discord.Interaction) -> bool:
+        if not hasattr(interaction, "guild_id"):
+            return True
+        return interaction.guild_id is not None
+
+    async def _resolve_slash_context(
+        self,
+        interaction: discord.Interaction,
+    ) -> tuple[discord.Guild | None, discord.abc.User] | None:
+        if not hasattr(interaction, "guild_id") or interaction.guild_id is not None:
+            return getattr(interaction, "guild", None), interaction.user
+        return await self._resolve_dm_member_context(interaction.user.id)
+
+    def _build_agent_context(
+        self,
+        interaction: discord.Interaction,
+        *,
+        guild: discord.Guild | None = None,
+        user: discord.abc.User | None = None,
+    ) -> dict[str, Any]:
+        context_user = user or interaction.user
+        role_names = self._role_names_from_user(context_user)
+        guild_id = (
+            guild.id if guild is not None else getattr(interaction, "guild_id", None)
+        )
 
         # Slash commands do not have a Discord message id; button interactions do.
         # Keep message_id as the visible Discord message when present and use
@@ -765,10 +916,8 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             "discord_user_id": str(interaction.user.id),
             "operation_id": str(uuid4()),
             "internal_user_id": None,
-            "organization_id": str(interaction.guild_id)
-            if interaction.guild_id
-            else None,
-            "guild_id": str(interaction.guild_id) if interaction.guild_id else None,
+            "organization_id": str(guild_id) if guild_id else None,
+            "guild_id": str(guild_id) if guild_id else None,
             "channel_id": (
                 str(interaction.channel_id)
                 if interaction.channel_id is not None
@@ -791,8 +940,13 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
     def _build_agent_context_from_message(
         self,
         message: discord.Message,
+        *,
+        guild: discord.Guild | None = None,
+        user: discord.abc.User | None = None,
     ) -> dict[str, Any]:
-        guild_id = message.guild.id if message.guild is not None else None
+        context_guild = guild or message.guild
+        context_user = user or message.author
+        guild_id = context_guild.id if context_guild is not None else None
         channel_id = getattr(message.channel, "id", None)
         return {
             "discord_user_id": str(message.author.id),
@@ -806,7 +960,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             "response_destination_visibility": (
                 self._response_destination_visibility_from_message(message)
             ),
-            "roles": self._role_names_from_user(message.author),
+            "roles": self._role_names_from_user(context_user),
             "scopes": [],
             "impersonation": False,
             "interaction_id": None,
@@ -856,19 +1010,59 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             return []
         return self._role_names_from_user(member)
 
-    async def _guild_role_names(self, *, guild_id: str, user_id: int) -> list[str]:
-        try:
-            guild = self.bot.get_guild(int(guild_id))
-        except (TypeError, ValueError):
-            return []
+    def _resolve_target_guild(self) -> discord.Guild | None:
+        configured_guild_id = str(settings.discord_server_id or "").strip()
+        if configured_guild_id:
+            try:
+                return self.bot.get_guild(int(configured_guild_id))
+            except ValueError:
+                return None
+
+        guilds = getattr(self.bot, "guilds", [])
+        if len(guilds) == 1:
+            return guilds[0]
+        return None
+
+    async def _resolve_dm_member_context(
+        self,
+        user_id: int,
+    ) -> tuple[discord.Guild, discord.Member] | None:
+        guild = self._resolve_target_guild()
         if guild is None:
-            return []
+            return None
+
+        member = await self._member_from_guild(guild=guild, user_id=user_id)
+        if member is None:
+            return None
+        return guild, member
+
+    async def _member_from_guild(
+        self,
+        *,
+        guild: discord.Guild,
+        user_id: int,
+    ) -> discord.Member | None:
         member = guild.get_member(user_id)
         if member is None and hasattr(guild, "fetch_member"):
             try:
                 member = await guild.fetch_member(user_id)
             except (discord.HTTPException, discord.NotFound, discord.Forbidden):
                 member = None
+        return member
+
+    async def _guild_role_names(
+        self,
+        *,
+        guild_id: str,
+        user_id: int,
+    ) -> list[str] | None:
+        try:
+            guild = self.bot.get_guild(int(guild_id))
+        except (TypeError, ValueError):
+            return None
+        if guild is None:
+            return None
+        member = await self._member_from_guild(guild=guild, user_id=user_id)
         if member is None:
             return []
         return self._role_names_from_user(member)

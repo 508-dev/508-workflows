@@ -63,12 +63,17 @@ Long-running service changes should be implemented as PR-based workflows rather
 than direct production mutations. Task reads require an explicit project filter
 to avoid guild-wide task enumeration.
 
-Mention flow is opt-in per message: the bot runs the agent only when directly
-mentioned in a server channel or thread. Mention-triggered agent results and
-confirmation buttons are sent by DM to avoid leaking task or plan details into
-public channels. A follow-up in the same thread should mention the bot again so
-the bot has an explicit user trigger and fresh Discord role context for that
-request.
+Mention flow is opt-in per message: the bot runs the agent when directly
+mentioned in a server channel or thread, or when a user sends the bot a DM.
+DM requests are accepted only after resolving the sender as a current member of
+the configured 508 Discord server. The `/agent` slash command is also registered
+for bot DMs and uses the same configured-server membership and role resolution.
+Other slash commands default to guild-only registration unless they are
+explicitly reviewed and opted in to DM contexts.
+Mention-triggered agent results and confirmation buttons are sent by DM to avoid
+leaking task or plan details into public channels. A follow-up in the same
+thread should mention the bot again so the bot has an explicit user trigger and
+fresh Discord role context for that request.
 
 Production mention handling depends on Discord gateway and channel access:
 The bot requests all intents in code, but the production Discord application
