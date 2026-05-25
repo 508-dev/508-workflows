@@ -513,6 +513,22 @@ def test_mask_payment_details_masks_wire_account_lines() -> None:
     assert "Routing / SWIFT / branch: 011000015" in masked
 
 
+def test_mask_payment_details_redacts_short_account_tokens() -> None:
+    details = "\n".join(
+        [
+            "Account number: 1234",
+            "Wire: 987",
+        ]
+    )
+
+    masked = mask_payment_details_for_display(details)
+
+    assert "1234" not in masked
+    assert "987" not in masked
+    assert "Account number: ****" in masked
+    assert "Wire: ****" in masked
+
+
 def _make_interaction(user_id: int = 123456789) -> AsyncMock:
     interaction = AsyncMock()
     interaction.response = AsyncMock()

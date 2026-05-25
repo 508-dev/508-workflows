@@ -393,7 +393,7 @@ def _mask_account_value(value: str) -> str:
 def _mask_token(value: str) -> str:
     compact = re.sub(r"\s+", "", value.strip())
     if len(compact) <= 4:
-        return compact
+        return "****"
     return f"{compact[:2]}****{compact[-2:]}"
 
 
