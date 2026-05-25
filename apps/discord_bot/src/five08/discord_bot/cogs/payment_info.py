@@ -26,6 +26,7 @@ from five08.payment_info import (
 )
 
 logger = logging.getLogger(__name__)
+NO_MENTIONS = discord.AllowedMentions.none()
 
 
 class PaymentInfoModal(discord.ui.Modal, title="Update Payment Info"):
@@ -48,6 +49,7 @@ class PaymentInfoModal(discord.ui.Modal, title="Update Payment Info"):
         if str(interaction.user.id) != self.owner_user_id:
             await interaction.response.send_message(
                 "This payment-info form belongs to another Discord user.",
+                allowed_mentions=NO_MENTIONS,
                 ephemeral=True,
             )
             return
@@ -82,6 +84,7 @@ class PaymentInfoView(discord.ui.View):
         if str(interaction.user.id) != self.owner_user_id:
             await interaction.response.send_message(
                 "This payment-info view belongs to another Discord user.",
+                allowed_mentions=NO_MENTIONS,
                 ephemeral=True,
             )
             return
@@ -202,7 +205,11 @@ class PaymentInfoCog(DiscordAuditCogMixin, commands.Cog, name="Payment Info"):
                 metadata={"error": str(exc)},
                 resource_type="erpnext_payment_info",
             )
-            await interaction.followup.send(f"⚠️ {exc}", ephemeral=True)
+            await interaction.followup.send(
+                f"⚠️ {exc}",
+                allowed_mentions=NO_MENTIONS,
+                ephemeral=True,
+            )
             return
         except (ERPNextAPIError, EspoAPIError, ValueError) as exc:
             logger.error("Payment-info lookup failed: %s", exc)
@@ -215,6 +222,7 @@ class PaymentInfoCog(DiscordAuditCogMixin, commands.Cog, name="Payment Info"):
             )
             await interaction.followup.send(
                 "❌ Payment-info lookup failed. Please try again later.",
+                allowed_mentions=NO_MENTIONS,
                 ephemeral=True,
             )
             return
@@ -235,7 +243,7 @@ class PaymentInfoCog(DiscordAuditCogMixin, commands.Cog, name="Payment Info"):
         await interaction.followup.send(
             "\n".join(payment_info_summary(identity, supplier)),
             view=PaymentInfoView(self, str(interaction.user.id)),
-            allowed_mentions=discord.AllowedMentions.none(),
+            allowed_mentions=NO_MENTIONS,
             ephemeral=True,
         )
 
@@ -264,7 +272,11 @@ class PaymentInfoCog(DiscordAuditCogMixin, commands.Cog, name="Payment Info"):
                 metadata={"error": str(exc)},
                 resource_type="erpnext_payment_info",
             )
-            await interaction.followup.send(f"⚠️ {exc}", ephemeral=True)
+            await interaction.followup.send(
+                f"⚠️ {exc}",
+                allowed_mentions=NO_MENTIONS,
+                ephemeral=True,
+            )
             return
         except (ERPNextAPIError, EspoAPIError, ValueError) as exc:
             logger.error("Payment-info update failed: %s", exc)
@@ -277,6 +289,7 @@ class PaymentInfoCog(DiscordAuditCogMixin, commands.Cog, name="Payment Info"):
             )
             await interaction.followup.send(
                 "❌ Payment-info update failed. Please try again later.",
+                allowed_mentions=NO_MENTIONS,
                 ephemeral=True,
             )
             return
@@ -297,7 +310,7 @@ class PaymentInfoCog(DiscordAuditCogMixin, commands.Cog, name="Payment Info"):
         await interaction.followup.send(
             "✅ Payment info updated.\n"
             + "\n".join(payment_info_summary(identity, supplier)),
-            allowed_mentions=discord.AllowedMentions.none(),
+            allowed_mentions=NO_MENTIONS,
             ephemeral=True,
         )
 

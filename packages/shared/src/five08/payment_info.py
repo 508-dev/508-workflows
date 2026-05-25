@@ -31,8 +31,10 @@ class PaymentInfoInput:
     supplier_details: str | None = None
 
 
-_ACCOUNT_LINE_TOKENS = ("account", "acct", "iban")
+_508_EMAIL_RE = re.compile(r"^[^\s@]+@508\.dev$", flags=re.IGNORECASE)
+_ACCOUNT_LINE_TOKENS = ("account", "acct", "iban", "wire")
 _ACCOUNT_LINE_EXCLUSIONS = ("account holder", "account name", "account manager")
+_ROUTING_LINE_TOKENS = ("routing", "swift", "branch")
 _MASKABLE_ACCOUNT_TOKEN_RE = re.compile(
     r"\b[A-Z]{0,4}\d[A-Za-z0-9]*(?:[ -]+[A-Za-z0-9]*\d[A-Za-z0-9]*)*\b",
     flags=re.IGNORECASE,
@@ -44,7 +46,7 @@ _PAYMENT_INFO_BLOCK_END = "=== End 508 Payment Info ==="
 def normalize_508_email(value: str | None) -> str:
     """Return a normalized 508.dev email or raise PaymentInfoError."""
     email = str(value or "").strip().lower()
-    if not email or not email.endswith("@508.dev"):
+    if not _508_EMAIL_RE.fullmatch(email):
         raise PaymentInfoError("A linked @508.dev email is required.")
     return email
 
@@ -71,7 +73,7 @@ def resolve_payment_identity(client: ERPNextClient, email: str) -> PaymentIdenti
     supplier_id = _text((employee or {}).get("supplier"))
     if supplier_id:
         supplier = _supplier_by_id(client, supplier_id)
-        if supplier and not _supplier_is_active(supplier):
+        if not supplier or not _supplier_is_active(supplier):
             supplier = _supplier_for_email(client, normalized_email)
             supplier_id = _text((supplier or {}).get("name"))
     else:
@@ -367,6 +369,10 @@ def _mask_account_line(line: str) -> str:
 def _is_account_number_line(line: str) -> bool:
     normalized = line.casefold()
     if any(exclusion in normalized for exclusion in _ACCOUNT_LINE_EXCLUSIONS):
+        return False
+    if any(token in normalized for token in _ROUTING_LINE_TOKENS) and not any(
+        token in normalized for token in ("account", "acct", "iban")
+    ):
         return False
     return any(token in normalized for token in _ACCOUNT_LINE_TOKENS)
 

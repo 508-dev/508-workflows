@@ -13,6 +13,7 @@ from five08.payment_info import (
     PaymentInfoInput,
     get_supplier_payment_details,
     mask_payment_details_for_display,
+    normalize_508_email,
     payment_info_summary,
     resolve_payment_identity,
     update_supplier_payment_details,
@@ -124,6 +125,11 @@ def test_resolve_payment_identity_rejects_non_508_email() -> None:
         resolve_payment_identity(client, "jane@example.com")
 
 
+def test_normalize_508_email_rejects_internal_whitespace() -> None:
+    with pytest.raises(PaymentInfoError, match="@508.dev"):
+        normalize_508_email("jane\n@508.dev")
+
+
 def test_resolve_payment_identity_finds_supplier_by_portal_user() -> None:
     client = FakeERPNextClient()
     client.records["Employee"] = {}
@@ -191,6 +197,25 @@ def test_resolve_payment_identity_rejects_inactive_employee_supplier_without_fal
 
     with pytest.raises(PaymentInfoError, match="No ERPNext Supplier"):
         resolve_payment_identity(client, "jane@508.dev")
+
+
+def test_resolve_payment_identity_falls_back_from_deleted_employee_supplier() -> None:
+    client = FakeERPNextClient()
+    client.records["Supplier"].pop("SUP-0001")
+    client.records["Supplier"]["SUP-0002"] = {
+        "name": "SUP-0002",
+        "supplier_name": "Jane Active",
+        "email_id": "",
+        "disabled": 0,
+        "is_frozen": 0,
+        "portal_users": [{"user": "jane@508.dev"}],
+        "supplier_details": "",
+    }
+
+    identity = resolve_payment_identity(client, "jane@508.dev")
+
+    assert identity.employee_id == "HR-EMP-0001"
+    assert identity.supplier_id == "SUP-0002"
 
 
 def test_get_supplier_payment_details_reads_supplier_details_field() -> None:
@@ -473,6 +498,21 @@ def test_mask_payment_details_masks_account_tokens_before_colon() -> None:
     assert "Account 12****89: primary payroll" in masked
 
 
+def test_mask_payment_details_masks_wire_account_lines() -> None:
+    details = "\n".join(
+        [
+            "Wire: 1234567890",
+            "Routing / SWIFT / branch: 011000015",
+        ]
+    )
+
+    masked = mask_payment_details_for_display(details)
+
+    assert "Wire: 12****90" in masked
+    assert "1234567890" not in masked
+    assert "Routing / SWIFT / branch: 011000015" in masked
+
+
 def _make_interaction(user_id: int = 123456789) -> AsyncMock:
     interaction = AsyncMock()
     interaction.response = AsyncMock()
@@ -557,6 +597,24 @@ async def test_payment_info_command_denies_when_crm_email_is_not_508(
     sent = interaction.followup.send.call_args.args[0]
     assert "@508.dev" in sent
     assert interaction.followup.send.call_args.kwargs["ephemeral"] is True
+    assert "allowed_mentions" in interaction.followup.send.call_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_payment_info_command_generic_error_disables_mentions(
+    payment_cog: PaymentInfoCog,
+) -> None:
+    payment_cog._read_self_payment_info = Mock(  # type: ignore[method-assign]
+        side_effect=ValueError("bad <@123>")
+    )
+    interaction = _make_interaction()
+
+    await payment_cog.payment_info_command.callback(payment_cog, interaction)
+
+    sent = interaction.followup.send.call_args.args[0]
+    assert "lookup failed" in sent
+    assert interaction.followup.send.call_args.kwargs["ephemeral"] is True
+    assert "allowed_mentions" in interaction.followup.send.call_args.kwargs
 
 
 @pytest.mark.asyncio
@@ -585,6 +643,26 @@ async def test_payment_info_update_is_ephemeral_and_does_not_echo_full_account(
     assert "ACH Account 12****89" in sent
     assert "allowed_mentions" in interaction.followup.send.call_args.kwargs
     assert interaction.followup.send.call_args.kwargs["ephemeral"] is True
+
+
+@pytest.mark.asyncio
+async def test_payment_info_update_error_disables_mentions(
+    payment_cog: PaymentInfoCog,
+) -> None:
+    payment_cog._update_self_payment_info = Mock(  # type: ignore[method-assign]
+        side_effect=PaymentInfoError("bad <@123>")
+    )
+    interaction = _make_interaction()
+
+    await payment_cog.handle_payment_info_update(
+        interaction,
+        PaymentInfoInput(supplier_details="Bank: Test Bank"),
+    )
+
+    sent = interaction.followup.send.call_args.args[0]
+    assert "bad <@123>" in sent
+    assert interaction.followup.send.call_args.kwargs["ephemeral"] is True
+    assert "allowed_mentions" in interaction.followup.send.call_args.kwargs
 
 
 @pytest.mark.asyncio
