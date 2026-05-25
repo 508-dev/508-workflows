@@ -69,7 +69,18 @@ class FakeERPNextClient:
         for raw_filter in filters or []:
             _doctype, field, operator, value = raw_filter
             if operator == "=":
-                rows = [row for row in rows if row.get(field) == value]
+                if field == "portal_users.user":
+                    rows = [
+                        row
+                        for row in rows
+                        if any(
+                            isinstance(portal_user, dict)
+                            and portal_user.get("user") == value
+                            for portal_user in row.get("portal_users", [])
+                        )
+                    ]
+                else:
+                    rows = [row for row in rows if row.get(field) == value]
         return [dict(row) for row in rows[:limit]]
 
     def search_suppliers(self, query: str, *, limit: int = 10) -> list[dict[str, Any]]:
@@ -109,6 +120,17 @@ def test_resolve_payment_identity_rejects_non_508_email() -> None:
 
     with pytest.raises(PaymentInfoError, match="@508.dev"):
         resolve_payment_identity(client, "jane@example.com")
+
+
+def test_resolve_payment_identity_finds_supplier_by_portal_user() -> None:
+    client = FakeERPNextClient()
+    client.records["Employee"] = {}
+    client.records["Supplier"]["SUP-0001"]["portal_users"] = [{"user": "jane@508.dev"}]
+
+    identity = resolve_payment_identity(client, "jane@508.dev")
+
+    assert identity.employee_id is None
+    assert identity.supplier_id == "SUP-0001"
 
 
 def test_get_supplier_payment_details_reads_supplier_details_field() -> None:

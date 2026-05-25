@@ -230,6 +230,20 @@ def _supplier_for_email(client: ERPNextClient, email: str) -> dict[str, Any] | N
             employee_supplier_id=None,
         ):
             return detail
+    for supplier in client.list_records(
+        "Supplier",
+        fields=["name", "supplier_name", "email_id", "portal_users"],
+        filters=[["Supplier", "portal_users.user", "=", email]],
+        limit=10,
+    ):
+        supplier_id = _text(supplier.get("name"))
+        detail = _supplier_by_id(client, supplier_id) if supplier_id else supplier
+        if detail and _supplier_owned_by_email_or_employee(
+            supplier=detail,
+            email=email,
+            employee_supplier_id=None,
+        ):
+            return detail
     return None
 
 
