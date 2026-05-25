@@ -40,6 +40,8 @@ class FakeERPNextClient:
                     "name": "SUP-0001",
                     "supplier_name": "Jane Engineer",
                     "email_id": "",
+                    "disabled": 0,
+                    "is_frozen": 0,
                     "portal_users": [],
                     "supplier_details": "",
                 }
@@ -133,6 +135,35 @@ def test_resolve_payment_identity_finds_supplier_by_portal_user() -> None:
     assert identity.supplier_id == "SUP-0001"
 
 
+def test_resolve_payment_identity_skips_inactive_portal_user_suppliers() -> None:
+    client = FakeERPNextClient()
+    client.records["Employee"] = {}
+    client.records["Supplier"]["SUP-0001"]["portal_users"] = []
+    client.records["Supplier"]["SUP-OLD"] = {
+        "name": "SUP-OLD",
+        "supplier_name": "Jane Old",
+        "email_id": "",
+        "disabled": 1,
+        "is_frozen": 0,
+        "portal_users": [{"user": "jane@508.dev"}],
+        "supplier_details": "",
+    }
+    client.records["Supplier"]["SUP-0002"] = {
+        "name": "SUP-0002",
+        "supplier_name": "Jane Active",
+        "email_id": "",
+        "disabled": 0,
+        "is_frozen": 0,
+        "portal_users": [{"user": "jane@508.dev"}],
+        "supplier_details": "",
+    }
+
+    identity = resolve_payment_identity(client, "jane@508.dev")
+
+    assert identity.employee_id is None
+    assert identity.supplier_id == "SUP-0002"
+
+
 def test_get_supplier_payment_details_reads_supplier_details_field() -> None:
     client = FakeERPNextClient()
     identity = resolve_payment_identity(client, "jane@508.dev")
@@ -217,6 +248,46 @@ def test_update_supplier_payment_details_replaces_existing_payment_block() -> No
     assert "Old Bank" not in details
     assert "999999999" not in details
     assert details.count("=== 508 Payment Info ===") == 1
+
+
+def test_update_supplier_payment_details_removes_pasted_and_nested_markers() -> None:
+    client = FakeERPNextClient()
+    identity = resolve_payment_identity(client, "jane@508.dev")
+    client.records["Supplier"]["SUP-0001"]["supplier_details"] = (
+        "Tax ID: 12-3456789\n\n"
+        "=== 508 Payment Info ===\n"
+        "Bank: Old Bank\n"
+        "=== 508 Payment Info ===\n"
+        "Account number: 999999999\n"
+        "=== End 508 Payment Info ===\n"
+        "=== End 508 Payment Info ===\n\n"
+        "VAT: JP123"
+    )
+
+    supplier, _changed_fields = update_supplier_payment_details(
+        client,
+        identity,
+        PaymentInfoInput(
+            supplier_details="\n".join(
+                [
+                    "=== 508 Payment Info ===",
+                    "Bank: New Bank",
+                    "Account number: 123456789",
+                    "=== End 508 Payment Info ===",
+                ]
+            )
+        ),
+    )
+
+    details = supplier["supplier_details"]
+    assert "Tax ID: 12-3456789" in details
+    assert "VAT: JP123" in details
+    assert "Bank: New Bank" in details
+    assert "Account number: 123456789" in details
+    assert "Old Bank" not in details
+    assert "999999999" not in details
+    assert details.count("=== 508 Payment Info ===") == 1
+    assert details.count("=== End 508 Payment Info ===") == 1
 
 
 def test_payment_info_summary_masks_account_numbers_but_not_bank_or_routing() -> None:

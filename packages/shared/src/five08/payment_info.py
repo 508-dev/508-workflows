@@ -117,7 +117,7 @@ def update_supplier_payment_details(
     payment_info: PaymentInfoInput,
 ) -> tuple[dict[str, Any], list[str]]:
     """Replace the managed payment block inside Supplier.supplier_details."""
-    payment_details = _text(payment_info.supplier_details)
+    payment_details = _normalize_payment_details(payment_info.supplier_details)
     if payment_details is None:
         raise PaymentInfoError("Enter Supplier Details to update.")
 
@@ -172,15 +172,42 @@ def _replace_payment_info_block(existing_details: str, payment_details: str) -> 
     if not existing_details:
         return payment_block
 
-    pattern = re.compile(
-        rf"{re.escape(_PAYMENT_INFO_BLOCK_START)}.*?"
-        rf"{re.escape(_PAYMENT_INFO_BLOCK_END)}",
-        flags=re.DOTALL,
-    )
-    if pattern.search(existing_details):
-        return pattern.sub(payment_block, existing_details).strip()
+    unmanaged_details = _remove_payment_info_blocks(existing_details)
+    if unmanaged_details:
+        return f"{unmanaged_details}\n\n{payment_block}".strip()
 
-    return f"{existing_details}\n\n{payment_block}".strip()
+    return payment_block
+
+
+def _normalize_payment_details(payment_details: str | None) -> str | None:
+    text = _text(payment_details)
+    if text is None:
+        return None
+
+    lines = [
+        line
+        for line in text.splitlines()
+        if line.strip() not in {_PAYMENT_INFO_BLOCK_START, _PAYMENT_INFO_BLOCK_END}
+    ]
+    return _text("\n".join(lines))
+
+
+def _remove_payment_info_blocks(existing_details: str) -> str:
+    output_lines: list[str] = []
+    block_depth = 0
+    for line in existing_details.splitlines():
+        marker = line.strip()
+        if marker == _PAYMENT_INFO_BLOCK_START:
+            block_depth += 1
+            continue
+        if marker == _PAYMENT_INFO_BLOCK_END:
+            if block_depth > 0:
+                block_depth -= 1
+            continue
+        if block_depth == 0:
+            output_lines.append(line)
+
+    return "\n".join(output_lines).strip()
 
 
 def _payment_info_block(payment_details: str) -> str:
@@ -232,8 +259,19 @@ def _supplier_for_email(client: ERPNextClient, email: str) -> dict[str, Any] | N
             return detail
     for supplier in client.list_records(
         "Supplier",
-        fields=["name", "supplier_name", "email_id", "portal_users"],
-        filters=[["Supplier", "portal_users.user", "=", email]],
+        fields=[
+            "name",
+            "supplier_name",
+            "email_id",
+            "disabled",
+            "is_frozen",
+            "portal_users",
+        ],
+        filters=[
+            ["Supplier", "disabled", "=", 0],
+            ["Supplier", "is_frozen", "=", 0],
+            ["Supplier", "portal_users.user", "=", email],
+        ],
         limit=10,
     ):
         supplier_id = _text(supplier.get("name"))
