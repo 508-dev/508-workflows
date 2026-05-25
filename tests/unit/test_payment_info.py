@@ -335,6 +335,26 @@ def test_update_supplier_payment_details_removes_pasted_and_nested_markers() -> 
     assert details.count("=== End 508 Payment Info ===") == 1
 
 
+def test_update_supplier_payment_details_preserves_tail_after_malformed_block() -> None:
+    client = FakeERPNextClient()
+    identity = resolve_payment_identity(client, "jane@508.dev")
+    client.records["Supplier"]["SUP-0001"]["supplier_details"] = (
+        "Tax ID: 12-3456789\n\n=== 508 Payment Info ===\nBank: Old Bank\nVAT: JP123"
+    )
+
+    supplier, _changed_fields = update_supplier_payment_details(
+        client,
+        identity,
+        PaymentInfoInput(supplier_details="Bank: New Bank"),
+    )
+
+    details = supplier["supplier_details"]
+    assert "Tax ID: 12-3456789" in details
+    assert "Bank: Old Bank" in details
+    assert "VAT: JP123" in details
+    assert "Bank: New Bank" in details
+
+
 def test_payment_info_summary_masks_account_numbers_but_not_bank_or_routing() -> None:
     client = FakeERPNextClient()
     identity = resolve_payment_identity(client, "jane@508.dev")
@@ -442,6 +462,15 @@ def test_mask_payment_details_keeps_bank_account_text_without_digits() -> None:
 
     assert "Bank account: Test Bank" in masked
     assert "Account number: 12****90" in masked
+
+
+def test_mask_payment_details_masks_account_tokens_before_colon() -> None:
+    details = "Account 123456789: primary payroll"
+
+    masked = mask_payment_details_for_display(details)
+
+    assert "123456789" not in masked
+    assert "Account 12****89: primary payroll" in masked
 
 
 def _make_interaction(user_id: int = 123456789) -> AsyncMock:

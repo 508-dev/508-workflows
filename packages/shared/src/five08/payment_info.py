@@ -197,20 +197,39 @@ def _normalize_payment_details(payment_details: str | None) -> str | None:
 
 def _remove_payment_info_blocks(existing_details: str) -> str:
     output_lines: list[str] = []
+    pending_block_lines: list[str] = []
     block_depth = 0
     for line in existing_details.splitlines():
         marker = line.strip()
         if marker == _PAYMENT_INFO_BLOCK_START:
+            pending_block_lines.append(line)
             block_depth += 1
             continue
         if marker == _PAYMENT_INFO_BLOCK_END:
             if block_depth > 0:
+                pending_block_lines.append(line)
                 block_depth -= 1
-            continue
-        if block_depth == 0:
+                if block_depth == 0:
+                    pending_block_lines = []
+                continue
             output_lines.append(line)
+            continue
+        if block_depth > 0:
+            pending_block_lines.append(line)
+            continue
+        output_lines.append(line)
+
+    if block_depth > 0:
+        output_lines.extend(pending_block_lines)
 
     return "\n".join(output_lines)
+
+
+def _mask_account_tokens(value: str) -> str:
+    return _MASKABLE_ACCOUNT_TOKEN_RE.sub(
+        lambda match: _mask_token(match.group(0)),
+        value,
+    )
 
 
 def _payment_info_block(payment_details: str) -> str:
@@ -341,11 +360,8 @@ def _mask_account_line(line: str) -> str:
         return line
     label, separator, value = line.partition(":")
     if separator:
-        return f"{label}{separator}{_mask_account_value(value)}"
-    return _MASKABLE_ACCOUNT_TOKEN_RE.sub(
-        lambda match: _mask_token(match.group(0)),
-        line,
-    )
+        return f"{_mask_account_tokens(label)}{separator}{_mask_account_value(value)}"
+    return _mask_account_tokens(line)
 
 
 def _is_account_number_line(line: str) -> bool:
