@@ -138,6 +138,15 @@ Relevant configuration:
     - Returns an ephemeral one-time URL with expiry.
     - Opening the URL loads a short browser page that automatically continues with a POST. The link is not consumed by the initial GET, so normal Discord link previews and security scanners do not burn the token.
 
+- `/payment-info`
+  - Description: View masked ERPNext Supplier Details payment info and open a modal to update your own payment details.
+  - Behavior:
+    - Resolves only the invoking Discord user through CRM `cDiscordUserID`.
+    - Requires the linked CRM contact to have a matching `@508.dev` email and ERPNext User/Supplier identity.
+    - Stores updates in the Supplier `supplier_details` field.
+    - Sends all responses ephemerally.
+    - Does not accept a user/contact/supplier argument or provide an admin override path.
+
 - `/create-mailbox`
   - Description: Create a Migadu mailbox for a 508 user, optionally link it to a CRM contact, and sync `c508Email`.
   - Prerequisites: `MIGADU_API_USER` and `MIGADU_API_KEY` must be configured (configured in env; command will fail if missing).
