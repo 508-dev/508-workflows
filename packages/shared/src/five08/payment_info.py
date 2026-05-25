@@ -71,6 +71,9 @@ def resolve_payment_identity(client: ERPNextClient, email: str) -> PaymentIdenti
     supplier_id = _text((employee or {}).get("supplier"))
     if supplier_id:
         supplier = _supplier_by_id(client, supplier_id)
+        if supplier and not _supplier_is_active(supplier):
+            supplier = _supplier_for_email(client, normalized_email)
+            supplier_id = _text((supplier or {}).get("name"))
     else:
         supplier = _supplier_for_email(client, normalized_email)
         supplier_id = _text((supplier or {}).get("name"))
@@ -122,7 +125,7 @@ def update_supplier_payment_details(
         raise PaymentInfoError("Enter Supplier Details to update.")
 
     supplier = get_supplier_payment_details(client, identity)
-    existing_details = str(supplier.get("supplier_details") or "").strip()
+    existing_details = str(supplier.get("supplier_details") or "")
     supplier_details = _replace_payment_info_block(existing_details, payment_details)
     updated_supplier = client.update_record(
         "Supplier",
@@ -169,12 +172,12 @@ def _sanitize_code_block_text(value: str) -> str:
 
 def _replace_payment_info_block(existing_details: str, payment_details: str) -> str:
     payment_block = _payment_info_block(payment_details)
-    if not existing_details:
+    if not existing_details.strip():
         return payment_block
 
     unmanaged_details = _remove_payment_info_blocks(existing_details)
-    if unmanaged_details:
-        return f"{unmanaged_details}\n\n{payment_block}".strip()
+    if unmanaged_details.strip():
+        return f"{unmanaged_details}\n\n{payment_block}"
 
     return payment_block
 
@@ -207,7 +210,7 @@ def _remove_payment_info_blocks(existing_details: str) -> str:
         if block_depth == 0:
             output_lines.append(line)
 
-    return "\n".join(output_lines).strip()
+    return "\n".join(output_lines)
 
 
 def _payment_info_block(payment_details: str) -> str:
@@ -247,14 +250,24 @@ def _supplier_by_id(client: ERPNextClient, supplier_id: str) -> dict[str, Any] |
         raise
 
 
+def _supplier_is_active(supplier: dict[str, Any]) -> bool:
+    return not _is_enabled_flag(supplier.get("disabled")) and not _is_enabled_flag(
+        supplier.get("is_frozen")
+    )
+
+
 def _supplier_for_email(client: ERPNextClient, email: str) -> dict[str, Any] | None:
     for supplier in client.search_suppliers(email, limit=10):
         supplier_id = _text(supplier.get("name"))
         detail = _supplier_by_id(client, supplier_id) if supplier_id else supplier
-        if detail and _supplier_owned_by_email_or_employee(
-            supplier=detail,
-            email=email,
-            employee_supplier_id=None,
+        if (
+            detail
+            and _supplier_is_active(detail)
+            and _supplier_owned_by_email_or_employee(
+                supplier=detail,
+                email=email,
+                employee_supplier_id=None,
+            )
         ):
             return detail
     for supplier in client.list_records(
@@ -276,13 +289,27 @@ def _supplier_for_email(client: ERPNextClient, email: str) -> dict[str, Any] | N
     ):
         supplier_id = _text(supplier.get("name"))
         detail = _supplier_by_id(client, supplier_id) if supplier_id else supplier
-        if detail and _supplier_owned_by_email_or_employee(
-            supplier=detail,
-            email=email,
-            employee_supplier_id=None,
+        if (
+            detail
+            and _supplier_is_active(detail)
+            and _supplier_owned_by_email_or_employee(
+                supplier=detail,
+                email=email,
+                employee_supplier_id=None,
+            )
         ):
             return detail
     return None
+
+
+def _is_enabled_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().casefold() in {"1", "true", "yes", "on"}
+    return False
 
 
 def _supplier_owned_by_email_or_employee(

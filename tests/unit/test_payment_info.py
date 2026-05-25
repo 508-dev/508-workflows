@@ -164,6 +164,35 @@ def test_resolve_payment_identity_skips_inactive_portal_user_suppliers() -> None
     assert identity.supplier_id == "SUP-0002"
 
 
+def test_resolve_payment_identity_falls_back_from_inactive_employee_supplier() -> None:
+    client = FakeERPNextClient()
+    client.records["Supplier"]["SUP-0001"]["disabled"] = 1
+    client.records["Supplier"]["SUP-0002"] = {
+        "name": "SUP-0002",
+        "supplier_name": "Jane Active",
+        "email_id": "",
+        "disabled": 0,
+        "is_frozen": 0,
+        "portal_users": [{"user": "jane@508.dev"}],
+        "supplier_details": "",
+    }
+
+    identity = resolve_payment_identity(client, "jane@508.dev")
+
+    assert identity.employee_id == "HR-EMP-0001"
+    assert identity.supplier_id == "SUP-0002"
+
+
+def test_resolve_payment_identity_rejects_inactive_employee_supplier_without_fallback() -> (
+    None
+):
+    client = FakeERPNextClient()
+    client.records["Supplier"]["SUP-0001"]["is_frozen"] = 1
+
+    with pytest.raises(PaymentInfoError, match="No ERPNext Supplier"):
+        resolve_payment_identity(client, "jane@508.dev")
+
+
 def test_get_supplier_payment_details_reads_supplier_details_field() -> None:
     client = FakeERPNextClient()
     identity = resolve_payment_identity(client, "jane@508.dev")
@@ -215,6 +244,22 @@ def test_update_supplier_payment_details_preserves_unrelated_supplier_details() 
     assert "=== End 508 Payment Info ===" in details
     assert details.startswith("Tax ID: 12-3456789")
     assert changed_fields == ["supplier_details"]
+
+
+def test_update_supplier_payment_details_preserves_unrelated_leading_formatting() -> (
+    None
+):
+    client = FakeERPNextClient()
+    identity = resolve_payment_identity(client, "jane@508.dev")
+    client.records["Supplier"]["SUP-0001"]["supplier_details"] = "  Tax ID: 12-3456789"
+
+    supplier, _changed_fields = update_supplier_payment_details(
+        client,
+        identity,
+        PaymentInfoInput(supplier_details="Bank: Test Bank"),
+    )
+
+    assert supplier["supplier_details"].startswith("  Tax ID: 12-3456789")
 
 
 def test_update_supplier_payment_details_replaces_existing_payment_block() -> None:
