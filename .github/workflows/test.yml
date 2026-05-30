@@ -17,7 +17,7 @@ jobs:
     - name: Install uv
       uses: astral-sh/setup-uv@v7
       with:
-        version: "0.6.6"
+        version: "0.9.17"
 
     - name: Set up Python 3.12
       run: uv python install 3.12
@@ -65,7 +65,7 @@ jobs:
     - name: Install uv
       uses: astral-sh/setup-uv@v7
       with:
-        version: "0.6.6"
+        version: "0.9.17"
 
     - name: Set up Python 3.12
       run: uv python install 3.12
@@ -101,7 +101,7 @@ jobs:
     - name: Install uv
       uses: astral-sh/setup-uv@v7
       with:
-        version: "0.6.6"
+        version: "0.9.17"
 
     - name: Set up Python
       run: uv python install 3.12
@@ -109,7 +109,6 @@ jobs:
     - name: Install dependencies
       run: |
         uv sync --all-extras
-        uv add --dev ruff mypy
 
     - name: Run ruff linter
       run: |
@@ -163,7 +162,7 @@ jobs:
       if: steps.agent-eval-changes.outputs.run == 'true'
       uses: astral-sh/setup-uv@v7
       with:
-        version: "0.6.6"
+        version: "0.9.17"
 
     - name: Set up Python
       if: steps.agent-eval-changes.outputs.run == 'true'
