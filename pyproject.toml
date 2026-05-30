@@ -12,6 +12,10 @@ dependencies = [
 
 [tool.uv]
 package = false
+exclude-newer = "7 days"
+
+[tool.uv.pip]
+exclude-newer = "7 days"
 
 [tool.uv.sources]
 discord_bot = { workspace = true }

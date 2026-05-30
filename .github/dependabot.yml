@@ -5,12 +5,25 @@ updates:
     directory: /
     schedule:
       interval: daily
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: ⬆
-  # Python - use pip ecosystem (works with pyproject.toml)
-  - package-ecosystem: pip
+  # Python
+  - package-ecosystem: uv
     directory: /
     schedule:
       interval: daily
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: ⬆
+  # Admin dashboard
+  - package-ecosystem: bun
+    directory: /apps/admin_dashboard
+    schedule:
+      interval: daily
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: ⬆
