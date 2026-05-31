@@ -268,8 +268,24 @@ def discord_link_continue_html(*, token: str) -> str:
     </form>
   </main>
   <script>
+    const form = document.getElementById("discord-link-consume");
+    const button = form?.querySelector("button");
+    let submitted = false;
+    form?.addEventListener("submit", (event) => {{
+      if (submitted) {{
+        event.preventDefault();
+        return;
+      }}
+      submitted = true;
+      if (button) {{
+        button.disabled = true;
+        button.textContent = "Continuing...";
+      }}
+    }});
     window.setTimeout(() => {{
-      document.getElementById("discord-link-consume")?.requestSubmit();
+      if (!submitted) {{
+        form?.requestSubmit();
+      }}
     }}, 150);
   </script>
 </body>

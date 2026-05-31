@@ -33,6 +33,8 @@ class _FailingRedis:
 class _FakeAuthStore(api.RedisAuthStore):
     def __init__(self) -> None:
         self.saved_links: dict[str, object] = {}
+        self.consumed_links: dict[str, object] = {}
+        self.saved_sessions: dict[str, object] = {}
 
     async def save_discord_link(
         self,
@@ -48,6 +50,27 @@ class _FakeAuthStore(api.RedisAuthStore):
 
     async def delete_discord_link(self, token: str) -> None:
         self.saved_links.pop(token, None)
+
+    async def save_consumed_discord_link(
+        self,
+        *,
+        token: str,
+        payload: object,
+        ttl_seconds: int,
+    ) -> None:
+        self.consumed_links[token] = payload
+
+    async def get_consumed_discord_link(self, token: str) -> object | None:
+        return self.consumed_links.get(token)
+
+    async def save_session(
+        self,
+        *,
+        session_id: str,
+        payload: object,
+        ttl_seconds: int,
+    ) -> None:
+        self.saved_sessions[session_id] = payload
 
     async def get_session(self, session_id: str) -> object | None:
         return None
@@ -6539,6 +6562,109 @@ def test_auth_discord_link_redirect_creates_discord_session_when_disabled(
     assert audit_payload.actor_subject == "123456789"
     assert audit_payload.metadata is not None
     assert audit_payload.metadata["discord_link_identity_checks_enforced"] is False
+
+
+def test_auth_discord_link_consume_replays_recent_same_browser_source(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    monkeypatch.setattr(api.settings, "environment", "production")
+    monkeypatch.setattr(
+        api.settings, "discord_link_require_oidc_identity_checks", False
+    )
+    store = _FakeAuthStore()
+    store.saved_links["link-1"] = api.DiscordLinkGrant(
+        discord_user_id="123456789",
+        next_path="/dashboard",
+    )
+    verifier = Mock()
+    verifier.resolve_dashboard_identity = AsyncMock(
+        return_value=Mock(
+            discord_user_id="123456789",
+            crm_contact_id="contact-123",
+            email="admin@508.dev",
+            display_name="Discord Admin",
+            discord_roles=["Admin"],
+        )
+    )
+    headers = {"User-Agent": "discord-browser"}
+
+    with (
+        patch("five08.backend.api._auth_store_from_app", return_value=store),
+        patch(
+            "five08.backend.api._discord_admin_verifier_from_app",
+            return_value=verifier,
+        ),
+        patch("five08.backend.api._http_client_from_app", return_value=Mock()),
+        patch("five08.backend.api.insert_audit_event"),
+    ):
+        first = client.post(
+            "/auth/discord/link/link-1/consume",
+            headers=headers,
+            follow_redirects=False,
+        )
+        second = client.post(
+            "/auth/discord/link/link-1/consume",
+            headers=headers,
+            follow_redirects=False,
+        )
+
+    assert first.status_code == 302
+    assert second.status_code == 302
+    assert second.headers["location"] == "/dashboard"
+    assert first.headers["set-cookie"] == second.headers["set-cookie"]
+    assert "link-1" not in store.saved_links
+    assert "link-1" in store.consumed_links
+    assert len(store.saved_sessions) == 1
+
+
+def test_auth_discord_link_consume_replay_rejects_different_browser_source(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    monkeypatch.setattr(api.settings, "environment", "production")
+    monkeypatch.setattr(
+        api.settings, "discord_link_require_oidc_identity_checks", False
+    )
+    store = _FakeAuthStore()
+    store.saved_links["link-1"] = api.DiscordLinkGrant(
+        discord_user_id="123456789",
+        next_path="/dashboard",
+    )
+    verifier = Mock()
+    verifier.resolve_dashboard_identity = AsyncMock(
+        return_value=Mock(
+            discord_user_id="123456789",
+            crm_contact_id="contact-123",
+            email="admin@508.dev",
+            display_name="Discord Admin",
+            discord_roles=["Admin"],
+        )
+    )
+
+    with (
+        patch("five08.backend.api._auth_store_from_app", return_value=store),
+        patch(
+            "five08.backend.api._discord_admin_verifier_from_app",
+            return_value=verifier,
+        ),
+        patch("five08.backend.api._http_client_from_app", return_value=Mock()),
+        patch("five08.backend.api.insert_audit_event"),
+    ):
+        first = client.post(
+            "/auth/discord/link/link-1/consume",
+            headers={"User-Agent": "discord-browser"},
+            follow_redirects=False,
+        )
+        second = client.post(
+            "/auth/discord/link/link-1/consume",
+            headers={"User-Agent": "other-browser"},
+            follow_redirects=False,
+        )
+
+    assert first.status_code == 302
+    assert second.status_code == 404
+    assert "This dashboard link is no longer available" in second.text
 
 
 def test_auth_discord_link_consume_allows_local_role_fallback(

@@ -83,6 +83,7 @@ from five08.backend.auth import (
     DASHBOARD_PERMISSION_PEOPLE_SYNC_DRY_RUN,
     DASHBOARD_SENSITIVE_PERMISSIONS,
     DASHBOARD_WORKFLOWS_ENGINEER_SENSITIVE_PERMISSIONS,
+    ConsumedDiscordLinkGrant,
     DiscordAdminVerifier,
     DiscordAdminIdentity,
     DiscordLinkGrant,
@@ -162,6 +163,7 @@ from five08.worker.models import (
 logger = logging.getLogger(__name__)
 _ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 _PROJECT_ROSTER_USER_CANDIDATE_CACHE_TTL_SECONDS = 60.0
+_DISCORD_LINK_REPLAY_TTL_SECONDS = 10
 _PROJECT_ROSTER_USER_CANDIDATE_CACHE_MAX_SIZE = 128
 _PROJECT_ROSTER_USER_CANDIDATE_CACHE_LOCK = threading.RLock()
 _PROJECT_ROSTER_USER_CANDIDATE_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
@@ -848,6 +850,66 @@ def _request_prefers_json(request: Request) -> bool:
     return _accept_quality(accept, "application/json") > _accept_quality(
         accept, "text/html"
     )
+
+
+def _discord_link_request_fingerprint(request: Request) -> str:
+    """Fingerprint the browser source for a short consumed-link replay window."""
+    forwarded_for = request.headers.get("x-forwarded-for", "")
+    client_ip = forwarded_for.split(",", 1)[0].strip()
+    if not client_ip:
+        client_ip = request.headers.get("x-real-ip", "").strip()
+    if not client_ip and request.client is not None:
+        client_ip = request.client.host
+    user_agent = request.headers.get("user-agent", "").strip()
+    fingerprint_source = f"{client_ip}\n{user_agent}"
+    return hashlib.sha256(fingerprint_source.encode("utf-8")).hexdigest()
+
+
+async def _discord_link_replay_from_request(
+    *,
+    store: RedisAuthStore,
+    token: str,
+    request: Request,
+) -> ConsumedDiscordLinkGrant | None:
+    if not isinstance(store, RedisAuthStore):
+        return None
+
+    replay = await store.get_consumed_discord_link(token)
+    if replay is None:
+        return None
+    if replay.request_fingerprint != _discord_link_request_fingerprint(request):
+        return None
+    return replay
+
+
+async def _save_discord_link_replay(
+    *,
+    store: RedisAuthStore,
+    token: str,
+    request: Request,
+    session_id: str,
+    next_path: str,
+) -> None:
+    if not isinstance(store, RedisAuthStore):
+        return
+
+    await store.save_consumed_discord_link(
+        token=token,
+        payload=ConsumedDiscordLinkGrant(
+            session_id=session_id,
+            next_path=next_path,
+            request_fingerprint=_discord_link_request_fingerprint(request),
+        ),
+        ttl_seconds=_DISCORD_LINK_REPLAY_TTL_SECONDS,
+    )
+
+
+def _discord_link_replay_redirect(
+    replay: ConsumedDiscordLinkGrant,
+) -> RedirectResponse:
+    response = RedirectResponse(url=replay.next_path, status_code=302)
+    _set_session_cookie(response, replay.session_id)
+    return response
 
 
 def _accept_quality(accept: str, media_type: str) -> float:
@@ -6708,6 +6770,13 @@ async def auth_discord_link_consume_handler(
 
     grant = await store.get_discord_link(token)
     if grant is None:
+        replay = await _discord_link_replay_from_request(
+            store=store,
+            token=token,
+            request=request,
+        )
+        if replay is not None:
+            return _discord_link_replay_redirect(replay)
         if _request_prefers_json(request):
             return JSONResponse({"error": "link_not_found"}, status_code=404)
         response = HTMLResponse(discord_link_unavailable_html(), status_code=404)
@@ -6762,6 +6831,13 @@ async def auth_discord_link_consume_handler(
                 ),
             ),
             ttl_seconds=settings.auth_session_ttl_seconds,
+        )
+        await _save_discord_link_replay(
+            store=store,
+            token=token,
+            request=request,
+            session_id=session_id,
+            next_path=grant.next_path,
         )
         await store.delete_discord_link(token)
 
@@ -6861,6 +6937,13 @@ async def auth_discord_link_consume_handler(
                 ),
             ),
             ttl_seconds=settings.auth_session_ttl_seconds,
+        )
+        await _save_discord_link_replay(
+            store=store,
+            token=token,
+            request=request,
+            session_id=session_id,
+            next_path=grant.next_path,
         )
         await store.delete_discord_link(token)
         await _write_auth_audit_event(

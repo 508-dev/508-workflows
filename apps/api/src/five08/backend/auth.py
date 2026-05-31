@@ -154,6 +154,15 @@ class DiscordLinkGrant:
 
 
 @dataclass(frozen=True)
+class ConsumedDiscordLinkGrant:
+    """Short-lived replay data for a just-consumed Discord link."""
+
+    session_id: str
+    next_path: str
+    request_fingerprint: str
+
+
+@dataclass(frozen=True)
 class DiscordAdminIdentity:
     """Resolved CRM-backed Discord admin identity details."""
 
@@ -274,6 +283,37 @@ class RedisAuthStore:
             self._discord_link_key(token),
         )
 
+    async def save_consumed_discord_link(
+        self,
+        *,
+        token: str,
+        payload: ConsumedDiscordLinkGrant,
+        ttl_seconds: int,
+    ) -> None:
+        await self._set_json(
+            self._consumed_discord_link_key(token),
+            asdict(payload),
+            ttl_seconds=ttl_seconds,
+        )
+
+    async def get_consumed_discord_link(
+        self,
+        token: str,
+    ) -> ConsumedDiscordLinkGrant | None:
+        value = await self._get_json(self._consumed_discord_link_key(token))
+        if value is None:
+            return None
+
+        try:
+            return ConsumedDiscordLinkGrant(
+                session_id=str(value["session_id"]),
+                next_path=str(value["next_path"]),
+                request_fingerprint=str(value["request_fingerprint"]),
+            )
+        except Exception:
+            logger.warning("Invalid consumed discord-link payload in Redis")
+            return None
+
     async def _set_json(
         self, key: str, payload: dict[str, Any], *, ttl_seconds: int
     ) -> None:
@@ -329,6 +369,10 @@ class RedisAuthStore:
     @staticmethod
     def _discord_link_key(token: str) -> str:
         return f"auth:discord-link:{token}"
+
+    @staticmethod
+    def _consumed_discord_link_key(token: str) -> str:
+        return f"auth:discord-link-consumed:{token}"
 
 
 class OIDCProviderClient:
