@@ -272,6 +272,7 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
         rerun_requested = threading.Event()
         sync_requested = threading.Event()
         assign_onboarder_requested = threading.Event()
+        update_onboarding_status_requested = threading.Event()
         detail_requested = threading.Event()
         gig_application_requested = threading.Event()
         gig_detail_requests: list[str] = []
@@ -345,6 +346,24 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
                         "previous_state": "reachingout",
                         "onboarding_state": "reachingout",
                         "state_updated": False,
+                        "sync_job_id": "sync-job-person",
+                    }
+                ),
+            )
+
+        def update_onboarding_status_route(route: Any) -> None:
+            update_onboarding_status_requested.set()
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "status": "updated",
+                        "contact_id": "contact-prospect-1",
+                        "contact_name": "Bea Prospect",
+                        "previous_state": "reachingout",
+                        "onboarding_state": "awaitingcontribution",
+                        "onboarding_status_label": "Awaiting contribution",
                         "sync_job_id": "sync-job-person",
                     }
                 ),
@@ -433,6 +452,10 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             "**/dashboard/api/onboarding/contact-prospect-1/onboarder",
             assign_onboarder_route,
         )
+        page.route(
+            "**/dashboard/api/onboarding/contact-prospect-1/status",
+            update_onboarding_status_route,
+        )
         page.route("**/dashboard/api/onboarding?*", onboarding_route)
         page.route("**/dashboard/api/people?*", people_route)
         page.route("**/dashboard/api/audit-events?*", audit_route)
@@ -494,7 +517,9 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             page.get_by_role("link", name="Onboarding").click()
             expect(page).to_have_url(f"{dashboard_server}/dashboard/onboarding")
             page.get_by_text("Bea Prospect").wait_for()
-            page.locator("#onboardingBody").get_by_text("Reaching out").wait_for()
+            page.locator("#onboardingBody [data-slot='badge']").filter(
+                has_text="Reaching out"
+            ).wait_for()
             expect(
                 page.get_by_role("link", name="Open Bea Prospect resume")
             ).to_have_attribute(
@@ -520,6 +545,14 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             expect(
                 page.get_by_role("textbox", name="Onboarder for Bea Prospect")
             ).to_have_value("jane")
+            page.get_by_label("Onboarding status for Bea Prospect").select_option(
+                "awaitingcontribution"
+            )
+            assert update_onboarding_status_requested.wait(timeout=5)
+            page.get_by_text("Status set to Awaiting contribution").wait_for()
+            page.locator("#onboardingBody [data-slot='badge']").filter(
+                has_text="Awaiting contribution"
+            ).wait_for()
             expect(page.get_by_role("button", name="Status ↑")).to_be_visible()
             page.locator("#onboardingFilterKind").select_option("skills")
             page.locator("#onboardingFilterValue").select_option("missing")

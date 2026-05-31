@@ -5471,6 +5471,175 @@ def test_dashboard_assign_onboarder_rejects_invalid_onboarder(
     assert audit_kwargs["metadata"]["reason"] == "invalid_onboarder"
 
 
+def test_dashboard_update_onboarding_status_updates_crm_and_audits(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="admin@508.dev",
+        display_name="Discord Admin",
+        groups=["discord_admin"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    espo_client = Mock()
+    espo_client.request.side_effect = [
+        {
+            "id": "contact-prospect-1",
+            "name": "Bea Prospect",
+            "cOnboardingState": "reachingout",
+        },
+        {"id": "contact-prospect-1"},
+    ]
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._is_dashboard_onboarding_contact_eligible",
+            return_value=True,
+        ),
+        patch("five08.backend.api.EspoClient", return_value=espo_client),
+        patch(
+            "five08.backend.api.enqueue_job", return_value=Mock(id="sync-job-1")
+        ) as mock_enqueue,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            "/dashboard/api/onboarding/contact-prospect-1/status",
+            json={"status": "Awaiting Contribution"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["contact_id"] == "contact-prospect-1"
+    assert payload["contact_name"] == "Bea Prospect"
+    assert payload["previous_state"] == "reachingout"
+    assert payload["onboarding_state"] == "awaitingcontribution"
+    assert payload["onboarding_status_label"] == "Awaiting contribution"
+    assert payload["sync_job_id"] == "sync-job-1"
+    assert espo_client.request.call_args_list[0].args == (
+        "GET",
+        "Contact/contact-prospect-1",
+    )
+    assert espo_client.request.call_args_list[1].args == (
+        "PUT",
+        "Contact/contact-prospect-1",
+        {"cOnboardingState": "awaitingcontribution"},
+    )
+    assert mock_enqueue.call_args.kwargs["args"] == ("contact-prospect-1",)
+    audit_kwargs = mock_audit.call_args.kwargs
+    assert audit_kwargs["action"] == "crm.update_onboarding_status"
+    assert audit_kwargs["result"] == api.AuditResult.SUCCESS
+    assert audit_kwargs["actor_provider"] == api.ActorProvider.DISCORD
+    assert audit_kwargs["actor_subject"] == "123456789"
+    assert audit_kwargs["resource_id"] == "contact-prospect-1"
+    assert audit_kwargs["metadata"]["onboarding_status"] == "awaitingcontribution"
+    assert audit_kwargs["metadata"]["previous_state"] == "reachingout"
+
+
+def test_dashboard_update_onboarding_status_rejects_invalid_status(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admins"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.EspoClient") as mock_espo_client,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            "/dashboard/api/onboarding/contact-prospect-1/status",
+            json={"status": "not-a-real-status"},
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "invalid_status"}
+    mock_espo_client.assert_not_called()
+    audit_kwargs = mock_audit.call_args.kwargs
+    assert audit_kwargs["action"] == "crm.update_onboarding_status"
+    assert audit_kwargs["result"] == api.AuditResult.ERROR
+    assert audit_kwargs["metadata"]["reason"] == "invalid_status"
+
+
+def test_dashboard_update_onboarding_status_requires_onboarder_for_selected(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admins"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+    )
+    espo_client = Mock()
+    espo_client.request.return_value = {
+        "id": "contact-prospect-1",
+        "name": "Bea Prospect",
+        "cOnboardingState": "pending",
+        "cOnboarder": "none",
+    }
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._is_dashboard_onboarding_contact_eligible",
+            return_value=True,
+        ),
+        patch("five08.backend.api.EspoClient", return_value=espo_client),
+        patch(
+            "five08.backend.api.enqueue_job", return_value=Mock(id="sync-job-1")
+        ) as mock_enqueue,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            "/dashboard/api/onboarding/contact-prospect-1/status",
+            json={"status": "selected"},
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {"error": "onboarder_required_for_selected"}
+    assert espo_client.request.call_count == 1
+    assert espo_client.request.call_args.args == ("GET", "Contact/contact-prospect-1")
+    mock_enqueue.assert_not_called()
+    audit_kwargs = mock_audit.call_args.kwargs
+    assert audit_kwargs["action"] == "crm.update_onboarding_status"
+    assert audit_kwargs["result"] == api.AuditResult.ERROR
+    assert audit_kwargs["metadata"]["reason"] == "onboarder_required_for_selected"
+
+
 def test_dashboard_audit_events_returns_recent_events(client: TestClient) -> None:
     session = api.AuthSession(
         subject="admin-1",
