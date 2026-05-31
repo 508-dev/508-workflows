@@ -413,6 +413,26 @@ const peopleFilterDefinitions = {
 type PeopleFilterKey = keyof typeof peopleFilterDefinitions
 type FilterState = Partial<Record<PeopleFilterKey, string>>
 
+const onboardingStatusOptions = [
+  ["pending", "Needs review"],
+  ["selected", "Assigned to onboarder"],
+  ["reachingout", "Reaching out"],
+  ["awaitingcontribution", "Awaiting contribution"],
+  ["onboarded", "Onboarded"],
+  ["waitlist", "Waitlist"],
+  ["rejected", "Rejected"],
+] as const
+
+const onboardingQueueFilterStatuses = onboardingStatusOptions.slice(0, 4)
+const terminalOnboardingStatuses = new Set(["onboarded", "waitlist", "rejected"])
+
+function normalizedOnboardingStatusValue(value?: string) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[-_\s]+/g, "")
+}
+
 class ApiRequestError extends Error {
   status: number
   statusText: string
@@ -1644,6 +1664,56 @@ function App() {
     }
   }
 
+  async function updateOnboardingStatus(contactId: string | undefined, status: string) {
+    const normalizedContactId = String(contactId || "").trim()
+    const normalizedStatus = status.trim()
+    if (!normalizedContactId) {
+      showToast("Missing CRM contact id", "error")
+      return
+    }
+    if (!normalizedStatus) {
+      showToast("Choose an onboarding status", "error")
+      return
+    }
+    setBusy(`onboarding-status:${normalizedContactId}`, true)
+    showToast("Updating onboarding status")
+    try {
+      const payload = await requestJson<{
+        contact_id: string
+        onboarding_state: string
+        onboarding_status_label?: string
+      }>(`/dashboard/api/onboarding/${encodeURIComponent(normalizedContactId)}/status`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: normalizedStatus }),
+      })
+      const nextState = normalizedOnboardingStatusValue(payload.onboarding_state)
+      const nextLabel = payload.onboarding_status_label || labelForOnboardingState(nextState)
+      setOnboarding((current) =>
+        current
+          .map((person) =>
+            person.crm_contact_id === payload.contact_id
+              ? {
+                  ...person,
+                  onboarding_state: nextState,
+                  onboarding_status_label: nextLabel,
+                }
+              : person,
+          )
+          .filter(
+            (person) =>
+              person.crm_contact_id !== payload.contact_id ||
+              !terminalOnboardingStatuses.has(nextState),
+          ),
+      )
+      showToast(`Status set to ${nextLabel}`, "ok")
+    } catch (error) {
+      showError(error, "Unable to update onboarding status")
+    } finally {
+      setBusy(`onboarding-status:${normalizedContactId}`, false)
+    }
+  }
+
   async function setupEngineer(payload: EngineerSetupRequest) {
     const normalizedEmail = payload.email.trim().toLowerCase()
     const normalizedFirstName = payload.first_name.trim()
@@ -2167,6 +2237,7 @@ function App() {
               onSearch={loadOnboarding}
               onSort={(key) => handleSort("onboarding", key)}
               onAssign={assignOnboarder}
+              onStatusChange={updateOnboardingStatus}
               onSetupEngineer={setupEngineer}
               setOnboardingQuery={setOnboardingQuery}
               setOnboardingState={setOnboardingState}
@@ -5272,6 +5343,7 @@ function OnboardingView(props: {
   onSearch: () => void
   onSort: (key: string) => void
   onAssign: (contactId: string | undefined, onboarder: string) => void
+  onStatusChange: (contactId: string | undefined, status: string) => void
   onSetupEngineer: (payload: EngineerSetupRequest) => Promise<EngineerSetupResult | null>
   setOnboardingQuery: (value: string) => void
   setOnboardingState: (value: string) => void
@@ -5327,10 +5399,11 @@ function OnboardingView(props: {
               onChange={(event) => props.setOnboardingState(event.target.value)}
             >
               <option value="">Any state</option>
-              <option value="pending">Needs review</option>
-              <option value="selected">Assigned to onboarder</option>
-              <option value="reachingout">Reaching out</option>
-              <option value="awaitingcontribution">Awaiting contribution</option>
+              {onboardingQueueFilterStatuses.map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
             </Select>
           </Label>
           <Label>
@@ -5449,7 +5522,9 @@ function OnboardingView(props: {
                   key={person.crm_contact_id || person.name}
                   person={person}
                   loading={props.loading}
+                  canWrite={props.canWrite}
                   onAssign={props.onAssign}
+                  onStatusChange={props.onStatusChange}
                   crmContactUrl={props.crmContactUrl}
                   crmAttachmentUrl={props.crmAttachmentUrl}
                 />
@@ -5768,19 +5843,24 @@ function EngineerSetupPanel({
 function OnboardingRow({
   person,
   loading,
+  canWrite,
   onAssign,
+  onStatusChange,
   crmContactUrl,
   crmAttachmentUrl,
 }: {
   person: Person
   loading: Record<string, boolean>
+  canWrite: boolean
   onAssign: (contactId: string | undefined, onboarder: string) => void
+  onStatusChange: (contactId: string | undefined, status: string) => void
   crmContactUrl: (contactId?: string) => string
   crmAttachmentUrl: (attachmentId?: string) => string
 }) {
   const displayName = person.name || person.email_508 || person.email || "CRM contact"
   const [value, setValue] = useState(displayOnboarder(person.onboarder))
   useEffect(() => setValue(displayOnboarder(person.onboarder)), [person.onboarder])
+  const currentStatus = normalizedOnboardingStatusValue(onboardingStateValue(person))
   const status = person.profile_status || {}
   const gaps = [
     ["Discord", status.discord_linked],
@@ -5810,9 +5890,31 @@ function OnboardingRow({
         </div>
       </TableCell>
       <TableCell>
-        <Badge variant={toneForOnboardingState(onboardingStateValue(person))}>
-          {person.onboarding_status_label || labelForOnboardingState(onboardingStateValue(person))}
-        </Badge>
+        <div className="grid max-w-56 gap-2">
+          <Badge variant={toneForOnboardingState(onboardingStateValue(person))}>
+            {person.onboarding_status_label ||
+              labelForOnboardingState(onboardingStateValue(person))}
+          </Badge>
+          {canWrite ? (
+            <Select
+              aria-label={`Onboarding status for ${displayName}`}
+              value={currentStatus}
+              disabled={loading[`onboarding-status:${person.crm_contact_id}`]}
+              onChange={(event) => onStatusChange(person.crm_contact_id, event.target.value)}
+            >
+              {currentStatus ? null : (
+                <option value="" disabled>
+                  No status
+                </option>
+              )}
+              {onboardingStatusOptions.map(([statusValue, label]) => (
+                <option key={statusValue} value={statusValue}>
+                  {label}
+                </option>
+              ))}
+            </Select>
+          ) : null}
+        </div>
       </TableCell>
       <TableCell>
         <form

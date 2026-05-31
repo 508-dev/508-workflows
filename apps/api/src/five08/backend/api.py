@@ -208,6 +208,12 @@ class DashboardAssignOnboarderRequest(BaseModel):
     onboarder: str
 
 
+class DashboardOnboardingStatusRequest(BaseModel):
+    """Payload for updating one dashboard onboarding status."""
+
+    status: str
+
+
 class DashboardGigStatusRequest(BaseModel):
     """Payload for updating one dashboard gig status."""
 
@@ -1448,6 +1454,7 @@ _ONBOARDING_STATUS_LABELS = {
     "waitlist": "Waitlist",
     "rejected": "Rejected",
 }
+_DASHBOARD_ONBOARDING_STATUS_VALUES = frozenset(_ONBOARDING_STATUS_LABELS)
 
 
 _DASHBOARD_PEOPLE_SEARCH_SQL = """
@@ -1512,6 +1519,13 @@ def _onboarding_status_label(value: Any) -> str:
     if normalized in _ONBOARDING_STATUS_LABELS:
         return _ONBOARDING_STATUS_LABELS[normalized]
     return raw.replace("_", " ").replace("-", " ").title()
+
+
+def _normalize_dashboard_onboarding_status(value: Any) -> str | None:
+    normalized = _normalize_onboarding_state_key(value)
+    if normalized not in _DASHBOARD_ONBOARDING_STATUS_VALUES:
+        return None
+    return normalized
 
 
 def _dashboard_job_payload(job: Any) -> dict[str, Any]:
@@ -2108,6 +2122,59 @@ def _assign_dashboard_onboarder_in_crm(
     }
 
 
+def _update_dashboard_onboarding_status_in_crm(
+    *,
+    contact_id: str,
+    status: str,
+) -> dict[str, Any]:
+    normalized_contact_id = contact_id.strip()
+    if not normalized_contact_id:
+        raise DashboardOnboarderAssignmentError("contact_id_required")
+
+    normalized_status = _normalize_dashboard_onboarding_status(status)
+    if normalized_status is None:
+        raise DashboardOnboarderAssignmentError("invalid_status")
+
+    if not _is_dashboard_onboarding_contact_eligible(normalized_contact_id):
+        raise DashboardOnboarderAssignmentError(
+            "contact_not_onboarding_eligible",
+            status_code=403,
+        )
+
+    client = EspoClient(settings.espo_base_url, settings.espo_api_key)
+    full_contact = client.request("GET", f"Contact/{normalized_contact_id}")
+    if _ONBOARDING_STATUS_FIELD not in full_contact:
+        raise DashboardOnboarderAssignmentError(
+            "missing_onboarding_status_field",
+            status_code=422,
+        )
+
+    previous_state = str(full_contact.get(_ONBOARDING_STATUS_FIELD) or "").strip()
+    onboarder_raw = str(full_contact.get(_ONBOARDER_FIELD) or "").strip()
+    onboarder_username = _normalize_508_username(onboarder_raw)
+    onboarder_is_unassigned = (
+        onboarder_username is None or onboarder_raw.casefold() in {"none", "no discord"}
+    )
+    if normalized_status == "selected" and onboarder_is_unassigned:
+        raise DashboardOnboarderAssignmentError(
+            "onboarder_required_for_selected",
+            status_code=409,
+        )
+    client.request(
+        "PUT",
+        f"Contact/{normalized_contact_id}",
+        {_ONBOARDING_STATUS_FIELD: normalized_status},
+    )
+    return {
+        "status": "updated",
+        "contact_id": normalized_contact_id,
+        "contact_name": full_contact.get("name") or "CRM contact",
+        "previous_state": previous_state or None,
+        "onboarding_state": normalized_status,
+        "onboarding_status_label": _onboarding_status_label(normalized_status),
+    }
+
+
 def _session_actor_provider(session: AuthSession) -> ActorProvider:
     raw_provider = session.actor_provider.strip().lower()
     if raw_provider == ActorProvider.DISCORD.value:
@@ -2237,6 +2304,32 @@ async def _audit_dashboard_assign_onboarder(
     audit_metadata.update(metadata or {})
     await _write_auth_audit_event(
         action="crm.assign_onboarder",
+        result=result,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="crm_contact",
+        resource_id=contact_id,
+        metadata=audit_metadata,
+    )
+
+
+async def _audit_dashboard_update_onboarding_status(
+    session: AuthSession,
+    *,
+    result: AuditResult,
+    contact_id: str,
+    onboarding_status: str | None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    actor_provider, actor_subject = _session_audit_actor(session)
+    audit_metadata = {
+        "source": "dashboard",
+        "onboarding_status": onboarding_status,
+    }
+    audit_metadata.update(metadata or {})
+    await _write_auth_audit_event(
+        action="crm.update_onboarding_status",
         result=result,
         actor_subject=actor_subject,
         actor_display_name=session.display_name,
@@ -5403,6 +5496,98 @@ async def dashboard_assign_onboarder_handler(
     return JSONResponse(result, status_code=200)
 
 
+async def dashboard_update_onboarding_status_handler(
+    request: Request,
+    contact_id: str,
+) -> JSONResponse:
+    """Update one CRM contact's onboarding status from the dashboard."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_ONBOARDING_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    try:
+        body = await request.json()
+        payload = DashboardOnboardingStatusRequest.model_validate(body)
+    except Exception:
+        return JSONResponse({"error": "invalid_request"}, status_code=400)
+
+    try:
+        result = await asyncio.to_thread(
+            _update_dashboard_onboarding_status_in_crm,
+            contact_id=contact_id,
+            status=payload.status,
+        )
+    except DashboardOnboarderAssignmentError as exc:
+        await _audit_dashboard_update_onboarding_status(
+            session,
+            result=AuditResult.ERROR,
+            contact_id=contact_id,
+            onboarding_status=_normalize_dashboard_onboarding_status(payload.status),
+            metadata={"reason": exc.error},
+        )
+        return JSONResponse({"error": exc.error}, status_code=exc.status_code)
+    except EspoAPIError as exc:
+        logger.error(
+            "CRM onboarding status update failed contact_id=%s error=%s",
+            contact_id,
+            exc,
+        )
+        await _audit_dashboard_update_onboarding_status(
+            session,
+            result=AuditResult.ERROR,
+            contact_id=contact_id,
+            onboarding_status=_normalize_dashboard_onboarding_status(payload.status),
+            metadata={"reason": "crm_update_failed", "error": str(exc)},
+        )
+        return JSONResponse(
+            {"error": "crm_update_failed", "detail": str(exc)},
+            status_code=502,
+        )
+
+    sync_job_id: str | None = None
+    try:
+        sync_job = await asyncio.to_thread(
+            enqueue_job,
+            queue=request.app.state.queue,
+            fn=JOB_FUNCTIONS["sync_person_from_crm_job"],
+            args=(result["contact_id"],),
+            settings=settings,
+            idempotency_key=(
+                "dashboard-onboarding-status-sync:"
+                f"{result['contact_id']}:{_generate_ulid()}"
+            ),
+        )
+        sync_job_id = sync_job.id
+    except Exception:
+        logger.warning(
+            "Failed enqueueing post-status-update people sync contact_id=%s",
+            result["contact_id"],
+            exc_info=True,
+        )
+
+    await _audit_dashboard_update_onboarding_status(
+        session,
+        result=AuditResult.SUCCESS,
+        contact_id=result["contact_id"],
+        onboarding_status=result["onboarding_state"],
+        metadata={
+            "contact_name": result["contact_name"],
+            "previous_state": result["previous_state"],
+            "sync_job_id": sync_job_id,
+        },
+    )
+    result["sync_job_id"] = sync_job_id
+    return JSONResponse(result, status_code=200)
+
+
 async def dashboard_audit_events_handler(
     request: Request,
     limit: int = Query(default=25, ge=1, le=100),
@@ -7191,6 +7376,11 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
     app.add_api_route(
         "/dashboard/api/onboarding/{contact_id}/onboarder",
         dashboard_assign_onboarder_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/dashboard/api/onboarding/{contact_id}/status",
+        dashboard_update_onboarding_status_handler,
         methods=["POST"],
     )
     app.add_api_route(
