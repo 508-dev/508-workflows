@@ -173,7 +173,7 @@ def upgrade() -> None:
             server_default=sa.text("NOW()"),
         ),
         sa.CheckConstraint(
-            "status IN ('suggested', 'interested', 'reviewing', 'contacted', 'accepted', 'rejected', 'withdrawn')",
+            "status IN ('suggested', 'interested', 'reviewing', 'contacted', 'accepted', 'unavailable', 'rejected', 'withdrawn')",
             name="ck_engagement_applications_status",
         ),
         sa.CheckConstraint(

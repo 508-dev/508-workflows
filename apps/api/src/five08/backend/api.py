@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, cast
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import quote, unquote, urlencode, urlparse
 from uuid import UUID, uuid4
 
 import httpx
@@ -112,6 +112,7 @@ from five08.backend.dashboard import (
 from five08.engagements import (
     EngagementApplicationStatus,
     EngagementStatus,
+    add_crm_application_to_engagement,
     list_dashboard_engagements,
     list_dashboard_notifications,
     normalize_engagement_status,
@@ -316,6 +317,12 @@ class DashboardGigApplicationStatusRequest(BaseModel):
     """Payload for updating one dashboard gig candidate/application status."""
 
     status: str
+
+
+class DashboardGigApplicationCreateRequest(BaseModel):
+    """Payload for adding one CRM-verified gig candidate/application."""
+
+    crm_profile: str = Field(min_length=1, max_length=500)
 
 
 @dataclass(frozen=True)
@@ -1076,6 +1083,32 @@ def _crm_web_base_url(value: str) -> str:
 
 def _crm_base_url() -> str:
     return _crm_web_base_url(settings.espo_base_url)
+
+
+def _contact_id_from_crm_profile(value: str) -> str | None:
+    raw = value.strip()
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    haystacks = [parsed.fragment, parsed.path, raw]
+    for haystack in haystacks:
+        parts = [
+            unquote(part).strip()
+            for part in re.split(r"[/?#]+", haystack)
+            if part.strip()
+        ]
+        for index, part in enumerate(parts):
+            if (
+                part == "Contact"
+                and index + 2 < len(parts)
+                and parts[index + 1] == "view"
+            ):
+                return parts[index + 2]
+            if part == "Contact" and index + 1 < len(parts):
+                return parts[index + 1]
+    if re.fullmatch(r"[A-Za-z0-9_-]+", raw):
+        return raw
+    return None
 
 
 async def _session_has_dashboard_permission(
@@ -5392,6 +5425,74 @@ async def dashboard_update_gig_application_status_handler(
     return JSONResponse(result)
 
 
+async def dashboard_add_gig_application_handler(
+    request: Request,
+    engagement_id: str,
+) -> JSONResponse:
+    """Add one CRM-verified candidate/application to a dashboard gig."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_GIGS_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    normalized_engagement_id = _valid_uuid_or_none(engagement_id)
+    if normalized_engagement_id is None:
+        return JSONResponse({"error": "invalid_engagement_id"}, status_code=400)
+
+    try:
+        body = await request.json()
+        payload = DashboardGigApplicationCreateRequest.model_validate(body)
+    except Exception:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    contact_id = _contact_id_from_crm_profile(payload.crm_profile)
+    if contact_id is None:
+        return JSONResponse({"error": "invalid_crm_profile"}, status_code=400)
+
+    include_all = _session_has_steering_access(session)
+    can_update = await asyncio.to_thread(
+        viewer_can_update_engagement,
+        settings,
+        engagement_id=normalized_engagement_id,
+        viewer_discord_user_id=session.subject,
+        include_all=include_all,
+    )
+    if not can_update:
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+
+    client = EspoClient(settings.espo_base_url, settings.espo_api_key)
+    try:
+        contact = await asyncio.to_thread(
+            client.request, "GET", f"Contact/{contact_id}"
+        )
+    except EspoAPIError:
+        if client.status_code == 404:
+            return JSONResponse({"error": "crm_profile_not_found"}, status_code=404)
+        return JSONResponse({"error": "crm_profile_lookup_failed"}, status_code=502)
+
+    if str(contact.get("id") or "").strip() != contact_id:
+        return JSONResponse({"error": "crm_profile_mismatch"}, status_code=409)
+
+    result = await asyncio.to_thread(
+        add_crm_application_to_engagement,
+        settings,
+        engagement_id=normalized_engagement_id,
+        crm_contact_id=contact_id,
+        contact_payload=contact,
+        actor_discord_user_id=_session_discord_actor_id(session),
+    )
+    if result is None:
+        return JSONResponse({"error": "gig_not_found"}, status_code=404)
+    return JSONResponse(result, status_code=201)
+
+
 async def dashboard_onboarding_handler(
     request: Request,
     query: str | None = Query(default=None),
@@ -7392,6 +7493,11 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
     app.add_api_route(
         "/dashboard/api/gigs/{engagement_id}/status",
         dashboard_update_gig_status_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/dashboard/api/gigs/{engagement_id}/applications",
+        dashboard_add_gig_application_handler,
         methods=["POST"],
     )
     app.add_api_route(
