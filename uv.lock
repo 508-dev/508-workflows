@@ -10,6 +10,9 @@ resolution-markers = [
 exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P7D"
 
+[options.exclude-newer-package]
+cloakbrowser = "2026-06-01T16:00:00Z"
+
 [manifest]
 members = [
     "api",
@@ -423,15 +426,15 @@ wheels = [
 
 [[package]]
 name = "cloakbrowser"
-version = "0.3.18"
+version = "0.3.31"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
     { name = "playwright" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/54/19/e6e07d32a1463039780b625f1eeb792ed8da803a312b438ce706f34c4ef7/cloakbrowser-0.3.18.tar.gz", hash = "sha256:48874975cad210c7a1d1042d8cabb3eabdf888b607b369f607ea1f17e6982725", size = 5244832, upload-time = "2026-03-15T16:23:02.032Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/54/12/50296c1adf7f09988a8ae300f2472e8c33a9d79826980579f0aa7b938b74/cloakbrowser-0.3.31.tar.gz", hash = "sha256:7109961fc9ef0c9a288547eff6717d3cb2cc7ad7b14fecfef1221357b9a0d870", size = 5365798, upload-time = "2026-05-26T18:32:45.045Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c8/f3/fd3f00535420543ce9add0ccee66d9afe75c7c669af6f118f736f4987a6a/cloakbrowser-0.3.18-py3-none-any.whl", hash = "sha256:a47e66b7162cb3ec654d597525f743f5f104a8d16d3ea0cb4ae0f58956f59dd9", size = 53055, upload-time = "2026-03-15T16:23:00.416Z" },
+    { url = "https://files.pythonhosted.org/packages/42/ba/7acb1250c0d453124f6bff0185296fa75618b0a4924cdf9ef5f27d1337ec/cloakbrowser-0.3.31-py3-none-any.whl", hash = "sha256:0496f586c9a580b03ef69dc26b931bbe3ad93b944be2750edcc423379d97d2d3", size = 76582, upload-time = "2026-05-26T18:32:43.436Z" },
 ]
 
 [[package]]
@@ -712,7 +715,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cloakbrowser", specifier = ">=0.3.18" },
+    { name = "cloakbrowser", specifier = ">=0.3.31" },
     { name = "curl-cffi", specifier = ">=0.10.0" },
     { name = "langfuse", specifier = "==4.6.1" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2.5" },
