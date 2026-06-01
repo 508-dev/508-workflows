@@ -1089,6 +1089,15 @@ def _contact_id_from_crm_profile(value: str) -> str | None:
     raw = value.strip()
     if not raw:
         return None
+
+    def valid_contact_id(candidate: str | None) -> str | None:
+        normalized = str(candidate or "").strip()
+        if not normalized or normalized.casefold() in {"view", "list", "create"}:
+            return None
+        if re.fullmatch(r"[A-Za-z0-9_-]+", normalized):
+            return normalized
+        return None
+
     parsed = urlparse(raw)
     haystacks = [parsed.fragment, parsed.path, raw]
     for haystack in haystacks:
@@ -1103,12 +1112,16 @@ def _contact_id_from_crm_profile(value: str) -> str | None:
                 and index + 2 < len(parts)
                 and parts[index + 1] == "view"
             ):
-                return parts[index + 2]
+                return valid_contact_id(parts[index + 2])
+            if (
+                part == "Contact"
+                and index + 1 < len(parts)
+                and parts[index + 1] == "view"
+            ):
+                return None
             if part == "Contact" and index + 1 < len(parts):
-                return parts[index + 1]
-    if re.fullmatch(r"[A-Za-z0-9_-]+", raw):
-        return raw
-    return None
+                return valid_contact_id(parts[index + 1])
+    return valid_contact_id(raw)
 
 
 async def _session_has_dashboard_permission(

@@ -5475,6 +5475,40 @@ def test_dashboard_add_gig_application_verifies_crm_profile(
     )
 
 
+def test_dashboard_add_gig_application_rejects_incomplete_crm_profile(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="admin@508.dev",
+        display_name="Discord Admin",
+        groups=["discord_admin"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.viewer_can_update_engagement") as can_update,
+        patch("five08.backend.api.EspoClient") as espo_client,
+    ):
+        response = client.post(
+            "/dashboard/api/gigs/11111111-1111-4111-8111-111111111111/applications",
+            json={"crm_profile": "https://crm.508.dev/#Contact/view"},
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "invalid_crm_profile"}
+    can_update.assert_not_called()
+    espo_client.assert_not_called()
+
+
 def test_dashboard_update_gig_status_rejects_malformed_id(
     client: TestClient,
 ) -> None:
