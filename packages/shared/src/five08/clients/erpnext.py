@@ -447,6 +447,7 @@ class ERPNextClient:
         email_id: str | None = None,
         phone: str | None = None,
         mobile_no: str | None = None,
+        portal_user: str | None = None,
     ) -> dict[str, Any]:
         """Create one Contact linked to a Customer."""
         normalized_customer = customer.strip()
@@ -475,13 +476,40 @@ class ERPNextClient:
             payload.setdefault("phone_nos", []).append(
                 {"phone": normalized_mobile, "is_primary_mobile_no": 1}
             )
+        normalized_portal_user = (portal_user or "").strip()
+        if normalized_portal_user:
+            payload["user"] = normalized_portal_user
         return self.create_record("Contact", payload)
+
+    def set_contact_portal_user(
+        self,
+        *,
+        contact: str,
+        portal_user: str,
+    ) -> dict[str, Any]:
+        """Set Contact.user when the Contact does not already have one."""
+        normalized_contact = contact.strip()
+        normalized_portal_user = portal_user.strip()
+        if not normalized_contact:
+            raise ERPNextAPIError("Contact is required")
+        if not normalized_portal_user:
+            raise ERPNextAPIError("Portal user is required")
+        contact_doc = self.get_record("Contact", normalized_contact)
+        existing_user = str(contact_doc.get("user") or "").strip()
+        if existing_user:
+            return contact_doc
+        return self.update_record(
+            "Contact",
+            normalized_contact,
+            {"user": normalized_portal_user},
+        )
 
     def link_contact_to_customer(
         self,
         *,
         contact: str,
         customer: str,
+        portal_user: str | None = None,
     ) -> dict[str, Any]:
         """Ensure an existing Contact has a Customer link."""
         normalized_contact = contact.strip()
@@ -499,17 +527,22 @@ class ERPNextClient:
             and link.get("link_name") == normalized_customer
             for link in existing_links
         ):
+            links = existing_links
+        else:
+            links = [
+                *existing_links,
+                {"link_doctype": "Customer", "link_name": normalized_customer},
+            ]
+        updates: dict[str, Any] = {}
+        if links != existing_links:
+            updates["links"] = links
+        normalized_portal_user = (portal_user or "").strip()
+        existing_user = str(contact_doc.get("user") or "").strip()
+        if normalized_portal_user and not existing_user:
+            updates["user"] = normalized_portal_user
+        if not updates:
             return contact_doc
-        return self.update_record(
-            "Contact",
-            normalized_contact,
-            {
-                "links": [
-                    *existing_links,
-                    {"link_doctype": "Customer", "link_name": normalized_customer},
-                ]
-            },
-        )
+        return self.update_record("Contact", normalized_contact, updates)
 
     def set_customer_primary_records(
         self,

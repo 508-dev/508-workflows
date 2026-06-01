@@ -3871,6 +3871,7 @@ def test_create_erpnext_project_setup_creates_customer_address_and_contact() -> 
     client.create_customer.return_value = {"name": "Acme", "customer_name": "Acme"}
     client.create_address.return_value = {"name": "ADDR-0001"}
     client.create_contact.return_value = {"name": "CONT-0001"}
+    client.set_contact_portal_user.return_value = {"name": "CONT-0001"}
     client.set_customer_primary_records.return_value = {
         "name": "Acme",
         "customer_name": "Acme",
@@ -3883,6 +3884,7 @@ def test_create_erpnext_project_setup_creates_customer_address_and_contact() -> 
         "customer": "Acme",
         "status": "Open",
     }
+    client.add_project_user.return_value = client.create_project.return_value
     client.ensure_activity_type.return_value = {
         "name": "Engineering for Acme Portal",
         "activity_type": "Engineering for Acme Portal",
@@ -3891,6 +3893,7 @@ def test_create_erpnext_project_setup_creates_customer_address_and_contact() -> 
         project_name="Acme Portal",
         customer_mode="new",
         customer_name="Acme",
+        account_manager="owner@508.dev",
         customer_details="Important customer",
         customer_website="https://acme.example",
         address_line1="123 Main St",
@@ -3920,28 +3923,32 @@ def test_create_erpnext_project_setup_creates_customer_address_and_contact() -> 
     assert result["contact"] == {"name": "CONT-0001"}
     client.create_customer.assert_called_once_with(
         customer_name="Acme",
-        account_manager=None,
+        account_manager="owner@508.dev",
         default_currency="USD",
     )
-    assert client.mock_calls.index(
-        call.create_project(
-            project_name="Acme Portal",
-            customer="Acme",
-            project_type="External",
-            default_cost_center="Projects - 5",
+    assert (
+        client.mock_calls.index(
+            call.create_project(
+                project_name="Acme Portal",
+                customer="Acme",
+                project_type="External",
+                default_cost_center="Projects - 5",
+            )
         )
-    ) < client.mock_calls.index(
-        call.create_address(
-            customer="Acme",
-            address_line1="123 Main St",
-            address_title="Acme",
-            address_line2=None,
-            city="Missoula",
-            state=None,
-            country="United States",
-            pincode=None,
-            email_id="ada@example.test",
-            phone="555-0100",
+        < client.mock_calls.index(call.add_project_user("PROJ-0001", "owner@508.dev"))
+        < client.mock_calls.index(
+            call.create_address(
+                customer="Acme",
+                address_line1="123 Main St",
+                address_title="Acme",
+                address_line2=None,
+                city="Missoula",
+                state=None,
+                country="United States",
+                pincode=None,
+                email_id="ada@example.test",
+                phone="555-0100",
+            )
         )
     )
     client.create_address.assert_called_once_with(
@@ -3963,6 +3970,10 @@ def test_create_erpnext_project_setup_creates_customer_address_and_contact() -> 
         email_id="ada@example.test",
         phone="555-0100",
         mobile_no=None,
+    )
+    client.set_contact_portal_user.assert_called_once_with(
+        contact="CONT-0001",
+        portal_user="owner@508.dev",
     )
     client.set_customer_primary_records.assert_called_once_with(
         "Acme",
@@ -4010,6 +4021,109 @@ def test_create_erpnext_project_setup_deletes_new_customer_when_project_fails() 
     client.create_address.assert_not_called()
     client.create_contact.assert_not_called()
     client.set_customer_primary_records.assert_not_called()
+    client.close.assert_called_once_with()
+
+
+def test_create_erpnext_project_setup_warns_when_account_manager_user_add_fails() -> (
+    None
+):
+    client = Mock()
+    client.create_customer.return_value = {"name": "Acme", "customer_name": "Acme"}
+    client.create_project.return_value = {
+        "name": "PROJ-0001",
+        "project_name": "Acme Portal",
+        "customer": "Acme",
+        "status": "Open",
+    }
+    client.add_project_user.side_effect = api.ERPNextAPIError("permission denied")
+    client.ensure_activity_type.return_value = {
+        "name": "Engineering for Acme Portal",
+        "activity_type": "Engineering for Acme Portal",
+    }
+    payload = api.DashboardProjectCreateRequest(
+        project_name="Acme Portal",
+        customer_mode="new",
+        customer_name="Acme",
+        account_manager="owner@508.dev",
+    )
+
+    with (
+        patch("five08.backend.api._erpnext_client", return_value=client),
+        patch("five08.backend.api.upsert_project", return_value="local-project-1"),
+        patch(
+            "five08.backend.api._cached_dashboard_project_by_id",
+            return_value={
+                "id": "local-project-1",
+                "display_name": "Acme Portal",
+                "erpnext_project_id": "PROJ-0001",
+            },
+        ),
+    ):
+        result = api._create_erpnext_project_setup(payload)
+
+    assert result["project"]["erpnext_project_id"] == "PROJ-0001"
+    assert result["setup_warnings"] == ["account_manager_project_user_failed"]
+    assert result["setup_warning_message"] == (
+        "Created the project, but account manager setup needs follow-up."
+    )
+    client.delete_record.assert_not_called()
+    client.close.assert_called_once_with()
+
+
+def test_create_erpnext_project_setup_warns_when_contact_portal_user_fails() -> None:
+    client = Mock()
+    client.create_customer.return_value = {"name": "Acme", "customer_name": "Acme"}
+    client.create_contact.return_value = {"name": "CONT-0001"}
+    client.set_contact_portal_user.side_effect = api.ERPNextAPIError(
+        "permission denied"
+    )
+    client.set_customer_primary_records.return_value = {
+        "name": "Acme",
+        "customer_name": "Acme",
+        "customer_primary_contact": "CONT-0001",
+    }
+    client.create_project.return_value = {
+        "name": "PROJ-0001",
+        "project_name": "Acme Portal",
+        "customer": "Acme",
+        "status": "Open",
+    }
+    client.add_project_user.return_value = client.create_project.return_value
+    client.ensure_activity_type.return_value = {
+        "name": "Engineering for Acme Portal",
+        "activity_type": "Engineering for Acme Portal",
+    }
+    payload = api.DashboardProjectCreateRequest(
+        project_name="Acme Portal",
+        customer_mode="new",
+        customer_name="Acme",
+        account_manager="owner@508.dev",
+        contact_first_name="Ada",
+    )
+
+    with (
+        patch("five08.backend.api._erpnext_client", return_value=client),
+        patch("five08.backend.api.upsert_project", return_value="local-project-1"),
+        patch(
+            "five08.backend.api._cached_dashboard_project_by_id",
+            return_value={
+                "id": "local-project-1",
+                "display_name": "Acme Portal",
+                "erpnext_project_id": "PROJ-0001",
+            },
+        ),
+    ):
+        result = api._create_erpnext_project_setup(payload)
+
+    assert result["contact"] == {"name": "CONT-0001"}
+    assert result["setup_warnings"] == ["account_manager_contact_user_failed"]
+    client.set_customer_primary_records.assert_called_once_with(
+        "Acme",
+        address=None,
+        contact="CONT-0001",
+        customer_details=None,
+        website=None,
+    )
     client.close.assert_called_once_with()
 
 
