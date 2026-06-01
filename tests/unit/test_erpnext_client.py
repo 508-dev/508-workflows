@@ -500,6 +500,38 @@ def test_set_contact_portal_user_updates_blank_user() -> None:
     ]
 
 
+def test_set_contact_portal_user_preserves_existing_user() -> None:
+    calls: list[dict[str, Any]] = []
+
+    class CaptureClient(FakeERPNextClient):
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            params: dict[str, Any] | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            calls.append({"method": method, "path": path, "payload": payload})
+            return {"data": {"name": "CONT-0001", "user": "owner@508.dev"}}
+
+    client = CaptureClient({"data": {}})
+
+    result = client.set_contact_portal_user(
+        contact="CONT-0001",
+        portal_user="new-owner@508.dev",
+    )
+
+    assert result["user"] == "owner@508.dev"
+    assert calls == [
+        {
+            "method": "GET",
+            "path": "/api/resource/Contact/CONT-0001",
+            "payload": None,
+        },
+    ]
+
+
 def test_link_contact_to_customer_preserves_existing_links() -> None:
     calls: list[dict[str, Any]] = []
 
