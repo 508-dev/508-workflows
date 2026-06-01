@@ -3749,7 +3749,7 @@ def _create_erpnext_project_setup(
                 project_detail = client.add_project_user(
                     erpnext_project_id, account_manager
                 )
-            except Exception:
+            except ERPNextAPIError:
                 logger.exception(
                     "ERPNext Project was created but account manager roster setup failed project=%s account_manager=%s",
                     erpnext_project_id,
@@ -3799,7 +3799,7 @@ def _create_erpnext_project_setup(
                         contact=contact_doc_id,
                         portal_user=account_manager,
                     )
-                except Exception:
+                except ERPNextAPIError:
                     logger.exception(
                         "ERPNext Contact was linked but portal user setup failed contact=%s account_manager=%s",
                         contact_doc_id,

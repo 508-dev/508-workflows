@@ -1156,12 +1156,13 @@ function App() {
         )
         openProjectDetail(payload.project.id)
       } else {
+        const cacheRefreshMessage =
+          payload.cache_refresh_message || "Created ERP project in ERPNext; local sync is pending"
+        const setupWarningMessage = payload.setup_warnings?.length
+          ? payload.setup_warning_message || "Account manager setup needs follow-up"
+          : ""
         showToast(
-          payload.setup_warnings?.length
-            ? payload.setup_warning_message ||
-                "Created ERP project in ERPNext; account manager setup needs follow-up"
-            : payload.cache_refresh_message ||
-                "Created ERP project in ERPNext; local sync is pending",
+          [cacheRefreshMessage, setupWarningMessage].filter(Boolean).join(" "),
           payload.setup_warnings?.length ? "warning" : "ok",
         )
         void loadProjects()
