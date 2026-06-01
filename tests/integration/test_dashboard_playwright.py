@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import threading
 import time
@@ -275,6 +276,8 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
         update_onboarding_status_requested = threading.Event()
         detail_requested = threading.Event()
         gig_application_requested = threading.Event()
+        gig_application_add_requested = threading.Event()
+        gig_list_requests: list[str] = []
         gig_detail_requests: list[str] = []
         gigs_list_payload = _gigs_payload()
 
@@ -377,6 +380,7 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             )
 
         def gigs_route(route: Any) -> None:
+            gig_list_requests.append(route.request.url)
             route.fulfill(
                 status=200,
                 content_type="application/json",
@@ -388,7 +392,9 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             route.fulfill(
                 status=200,
                 content_type="application/json",
-                body=json.dumps(_gigs_payload()[0]),
+                body=json.dumps(
+                    gigs_list_payload[0] if gigs_list_payload else _gigs_payload()[0]
+                ),
             )
 
         def notifications_route(route: Any) -> None:
@@ -419,15 +425,37 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
 
         def gig_application_status_route(route: Any) -> None:
             gig_application_requested.set()
+            body = route.request.post_data_json
+            assert body["status"] == "unavailable"
             route.fulfill(
                 status=200,
                 content_type="application/json",
                 body=json.dumps(
                     {
                         "id": "22222222-2222-4222-8222-222222222222",
-                        "status": "contacted",
+                        "status": "unavailable",
                     }
                 ),
+            )
+
+        def gig_application_add_route(route: Any) -> None:
+            gig_application_add_requested.set()
+            body = route.request.post_data_json
+            assert body["crm_profile"].endswith("/#Contact/view/contact-candidate-2")
+            new_application = {
+                "id": "33333333-3333-4333-8333-333333333333",
+                "status": "suggested",
+                "source": "crm",
+                "crm_contact_id": "contact-candidate-2",
+                "name": "Devon Candidate",
+                "evaluation": {"crm_name": "Devon Candidate"},
+            }
+            gigs_list_payload[0]["applications"].append(new_application)
+            gigs_list_payload[0]["application_count"] = 2
+            route.fulfill(
+                status=201,
+                content_type="application/json",
+                body=json.dumps(new_application),
             )
 
         def sync_route(route: Any) -> None:
@@ -461,13 +489,22 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
         page.route("**/dashboard/api/audit-events?*", audit_route)
         page.route("**/dashboard/api/notifications?*", notifications_route)
         page.route(
-            "**/dashboard/api/gigs/11111111-1111-4111-8111-111111111111",
+            re.compile(".*/dashboard/api/gigs/11111111-1111-4111-8111-111111111111$"),
             gig_detail_route,
         )
         page.route(
-            "**/dashboard/api/gigs/11111111-1111-4111-8111-111111111111"
-            "/applications/22222222-2222-4222-8222-222222222222/status",
+            re.compile(
+                ".*/dashboard/api/gigs/11111111-1111-4111-8111-111111111111"
+                "/applications/22222222-2222-4222-8222-222222222222/status$"
+            ),
             gig_application_status_route,
+        )
+        page.route(
+            re.compile(
+                ".*/dashboard/api/gigs/11111111-1111-4111-8111-111111111111"
+                "/applications$"
+            ),
+            gig_application_add_route,
         )
         page.route("**/dashboard/api/gigs?*", gigs_route)
         page.route("**/dashboard/api/sync/people", sync_route)
@@ -565,6 +602,8 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             page.get_by_role("link", name="Gigs").click()
             expect(page).to_have_url(f"{dashboard_server}/dashboard/gigs")
             page.get_by_text("Webflow build").wait_for()
+            expect(page.locator("#gigStatus")).to_have_value("recruiting")
+            assert any("status=recruiting" in url for url in gig_list_requests)
             page.get_by_role("button", name="Manage people").click()
             expect(page).to_have_url(
                 f"{dashboard_server}/dashboard/gigs/11111111-1111-4111-8111-111111111111"
@@ -582,8 +621,14 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
                 "href",
                 f"{crm_base_url}/#Contact/view/contact-candidate-1",
             )
+            page.get_by_label("CRM profile for candidate").fill(
+                f"{crm_base_url}/#Contact/view/contact-candidate-2"
+            )
+            page.get_by_role("button", name="Add candidate").click()
+            assert gig_application_add_requested.wait(timeout=5)
+            page.get_by_text("Devon Candidate").wait_for()
             page.get_by_label("Candidate status for Casey Candidate").select_option(
-                "contacted"
+                "unavailable"
             )
             assert gig_application_requested.wait(timeout=5)
             assert gig_detail_requests

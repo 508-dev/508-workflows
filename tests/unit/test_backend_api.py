@@ -5420,6 +5420,95 @@ def test_dashboard_update_gig_application_status_omits_discord_actor_for_admin_s
     )
 
 
+def test_dashboard_add_gig_application_verifies_crm_profile(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="admin@508.dev",
+        display_name="Discord Admin",
+        groups=["discord_admin"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    espo_client = Mock()
+    espo_client.request.return_value = {
+        "id": "contact-candidate-2",
+        "name": "Devon Candidate",
+        "emailAddress": "devon@508.dev",
+    }
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.viewer_can_update_engagement", return_value=True),
+        patch("five08.backend.api.EspoClient", return_value=espo_client),
+        patch(
+            "five08.backend.api.add_crm_application_to_engagement",
+            return_value={"id": "application-2", "status": "suggested"},
+        ) as add_application,
+    ):
+        response = client.post(
+            "/dashboard/api/gigs/11111111-1111-4111-8111-111111111111/applications",
+            json={
+                "crm_profile": "https://crm.508.dev/#Contact/view/contact-candidate-2"
+            },
+        )
+
+    assert response.status_code == 201
+    espo_client.request.assert_called_once_with("GET", "Contact/contact-candidate-2")
+    add_application.assert_called_once_with(
+        api.settings,
+        engagement_id="11111111-1111-4111-8111-111111111111",
+        crm_contact_id="contact-candidate-2",
+        contact_payload={
+            "id": "contact-candidate-2",
+            "name": "Devon Candidate",
+            "emailAddress": "devon@508.dev",
+        },
+        actor_discord_user_id="123456789",
+    )
+
+
+def test_dashboard_add_gig_application_rejects_incomplete_crm_profile(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="admin@508.dev",
+        display_name="Discord Admin",
+        groups=["discord_admin"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.viewer_can_update_engagement") as can_update,
+        patch("five08.backend.api.EspoClient") as espo_client,
+    ):
+        response = client.post(
+            "/dashboard/api/gigs/11111111-1111-4111-8111-111111111111/applications",
+            json={"crm_profile": "https://crm.508.dev/#Contact/view"},
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "invalid_crm_profile"}
+    can_update.assert_not_called()
+    espo_client.assert_not_called()
+
+
 def test_dashboard_update_gig_status_rejects_malformed_id(
     client: TestClient,
 ) -> None:

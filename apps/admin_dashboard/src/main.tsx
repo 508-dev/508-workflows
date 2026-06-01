@@ -480,6 +480,18 @@ function messageForApiError(record: Record<string, unknown>, fallback: string) {
   if (error === "candidate_not_found") {
     return "The selected person record is no longer available. Search again and choose one of the current matches."
   }
+  if (error === "invalid_crm_profile") {
+    return "Paste a valid CRM Contact profile URL or Contact id."
+  }
+  if (error === "crm_profile_not_found") {
+    return "That CRM Contact profile was not found."
+  }
+  if (error === "crm_profile_mismatch") {
+    return "CRM returned a different Contact than the profile requested. Check the profile URL and try again."
+  }
+  if (error === "crm_profile_lookup_failed") {
+    return "CRM profile lookup failed. Try again after CRM is reachable."
+  }
   if (error === "ambiguous_person") {
     return "Multiple people matched. Choose the matching person record."
   }
@@ -805,7 +817,7 @@ function App() {
   const [minutes, setMinutes] = useState("60")
   const [status, setStatus] = useState("")
   const [jobType, setJobType] = useState("")
-  const [gigStatus, setGigStatus] = useState("")
+  const [gigStatus, setGigStatus] = useState("recruiting")
   const [gigIncludeHistorical, setGigIncludeHistorical] = useState(false)
   const [gigLimit, setGigLimit] = useState(100)
   const [projectQuery, setProjectQuery] = useState("")
@@ -1490,6 +1502,34 @@ function App() {
       showError(error, "Unable to update candidate")
     } finally {
       setBusy(`application:${applicationId}:status`, false)
+    }
+  }
+
+  async function addGigApplication(gigId: string, crmProfile: string) {
+    const normalizedProfile = crmProfile.trim()
+    if (!normalizedProfile) {
+      showToast("Paste a CRM Contact profile first", "warning")
+      return false
+    }
+    setBusy(`gig:${gigId}:addCandidate`, true)
+    try {
+      await requestJson<GigApplication>(
+        `/dashboard/api/gigs/${encodeURIComponent(gigId)}/applications`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ crm_profile: normalizedProfile }),
+        },
+      )
+      showToast("Added candidate", "ok")
+      await loadGigs()
+      if (selectedGigId === gigId) await loadGigDetail(gigId)
+      return true
+    } catch (error) {
+      showError(error, "Unable to add candidate")
+      return false
+    } finally {
+      setBusy(`gig:${gigId}:addCandidate`, false)
     }
   }
 
@@ -2194,6 +2234,7 @@ function App() {
               onOpenGig={openGigDetail}
               onCloseGig={closeGigDetail}
               onUpdateStatus={updateGigStatus}
+              onAddApplication={addGigApplication}
               onUpdateApplicationStatus={updateGigApplicationStatus}
             />
           ) : null}
@@ -2657,6 +2698,7 @@ const applicationStatuses = [
   "reviewing",
   "contacted",
   "accepted",
+  "unavailable",
   "rejected",
   "withdrawn",
 ] as const
@@ -4521,6 +4563,7 @@ function GigsView(props: {
   onOpenGig: (gigId: string) => void
   onCloseGig: () => void
   onUpdateStatus: (gigId: string, status: string) => void
+  onAddApplication: (gigId: string, crmProfile: string) => Promise<boolean>
   onUpdateApplicationStatus: (gigId: string, applicationId: string, status: string) => void
 }) {
   const counts = props.gigs.reduce(
@@ -4635,6 +4678,7 @@ function GigsView(props: {
           staleDays={props.staleDays}
           onBack={props.onCloseGig}
           onUpdateStatus={props.onUpdateStatus}
+          onAddApplication={props.onAddApplication}
           onUpdateApplicationStatus={props.onUpdateApplicationStatus}
         />
       </>
@@ -4715,6 +4759,7 @@ function GigListItem({
   staleDays: number
 }) {
   const applications = Array.isArray(gig.applications) ? gig.applications : []
+  const isRecruiting = gig.status === "recruiting"
   const threadUrl =
     gig.discord_guild_id && gig.discord_thread_id
       ? `https://discord.com/channels/${encodeURIComponent(
@@ -4723,7 +4768,12 @@ function GigListItem({
       : ""
   const staleAge = staleRecruitingAge(gig, staleDays)
   return (
-    <article className="grid gap-4 rounded-md border bg-background p-4 lg:grid-cols-[minmax(0,1fr)_220px_180px] lg:items-start">
+    <article
+      className={cn(
+        "grid gap-4 rounded-md border bg-background p-4 lg:grid-cols-[minmax(0,1fr)_220px_180px] lg:items-start",
+        !isRecruiting && "border-l-4 border-l-muted-foreground/60 bg-secondary/45",
+      )}
+    >
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
           <a
@@ -4738,11 +4788,18 @@ function GigListItem({
           </a>
           <Badge
             variant={
-              gig.status === "filled" ? "succeeded" : gig.status === "lost" ? "failed" : "queued"
+              gig.status === "filled"
+                ? "succeeded"
+                : gig.status === "lost"
+                  ? "failed"
+                  : isRecruiting
+                    ? "queued"
+                    : "neutral"
             }
           >
             {gig.status_label || titleCase(gig.status)}
           </Badge>
+          {!isRecruiting ? <Badge variant="neutral">Not recruiting</Badge> : null}
           {staleAge !== null ? <Badge variant="running">{staleAge}d stale</Badge> : null}
         </div>
         <div className="mt-2 flex flex-wrap gap-1.5">
@@ -4838,6 +4895,7 @@ function GigDetailPage({
   staleDays,
   onBack,
   onUpdateStatus,
+  onAddApplication,
   onUpdateApplicationStatus,
 }: {
   gig: Gig
@@ -4848,9 +4906,12 @@ function GigDetailPage({
   staleDays: number
   onBack: () => void
   onUpdateStatus: (gigId: string, status: string) => void
+  onAddApplication: (gigId: string, crmProfile: string) => Promise<boolean>
   onUpdateApplicationStatus: (gigId: string, applicationId: string, status: string) => void
 }) {
+  const [crmProfile, setCrmProfile] = useState("")
   const applications = Array.isArray(gig.applications) ? gig.applications : []
+  const isRecruiting = gig.status === "recruiting"
   const threadUrl =
     gig.discord_guild_id && gig.discord_thread_id
       ? `https://discord.com/channels/${encodeURIComponent(
@@ -4860,7 +4921,9 @@ function GigDetailPage({
   const staleAge = staleRecruitingAge(gig, staleDays)
   return (
     <div className="grid gap-5">
-      <Card>
+      <Card
+        className={cn(!isRecruiting && "border-l-4 border-l-muted-foreground/60 bg-secondary/35")}
+      >
         <CardHeader className="items-start">
           <div className="grid gap-2">
             <Button type="button" variant="ghost" size="sm" className="w-fit" onClick={onBack}>
@@ -4876,11 +4939,14 @@ function GigDetailPage({
                       ? "succeeded"
                       : gig.status === "lost"
                         ? "failed"
-                        : "queued"
+                        : isRecruiting
+                          ? "queued"
+                          : "neutral"
                   }
                 >
                   {gig.status_label || titleCase(gig.status)}
                 </Badge>
+                {!isRecruiting ? <Badge variant="neutral">Not recruiting</Badge> : null}
                 {staleAge !== null ? <Badge variant="running">{staleAge}d stale</Badge> : null}
                 {gig.posting_type ? (
                   <Badge variant="neutral">{titleCase(gig.posting_type)}</Badge>
@@ -4964,6 +5030,35 @@ function GigDetailPage({
             {applications.length} candidate{applications.length === 1 ? "" : "s"}
           </span>
         </CardHeader>
+        {canWrite ? (
+          <form
+            className="grid gap-2 border-t p-4 md:grid-cols-[minmax(220px,1fr)_auto]"
+            onSubmit={(event) => {
+              event.preventDefault()
+              void onAddApplication(gig.id, crmProfile).then((added) => {
+                if (added) setCrmProfile("")
+              })
+            }}
+          >
+            <Label className="min-w-0">
+              CRM profile
+              <Input
+                value={crmProfile}
+                onChange={(event) => setCrmProfile(event.target.value)}
+                placeholder="https://crm.508.dev/#Contact/view/..."
+                aria-label="CRM profile for candidate"
+              />
+            </Label>
+            <Button
+              type="submit"
+              className="self-end"
+              disabled={loading[`gig:${gig.id}:addCandidate`] || !crmProfile.trim()}
+            >
+              <UserPlus />
+              Add candidate
+            </Button>
+          </form>
+        ) : null}
         <Empty hidden={applications.length !== 0}>No suggested or interested people yet.</Empty>
         <div className={cn("grid gap-3 p-4", applications.length === 0 && "hidden")}>
           {applications.map((application) => (

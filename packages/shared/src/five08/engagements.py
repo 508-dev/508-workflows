@@ -37,6 +37,7 @@ class EngagementApplicationStatus(StrEnum):
     REVIEWING = "reviewing"
     CONTACTED = "contacted"
     ACCEPTED = "accepted"
+    UNAVAILABLE = "unavailable"
     REJECTED = "rejected"
     WITHDRAWN = "withdrawn"
 
@@ -825,6 +826,198 @@ def upsert_discord_interest_application(
     return str(row["id"])
 
 
+def add_crm_application_to_engagement(
+    settings: SharedSettings,
+    *,
+    engagement_id: str,
+    crm_contact_id: str,
+    contact_payload: dict[str, Any],
+    actor_discord_user_id: str | None,
+) -> dict[str, Any] | None:
+    """Add or refresh a CRM-verified candidate/application for one gig."""
+    normalized_contact_id = crm_contact_id.strip()
+    if not normalized_contact_id:
+        return None
+
+    application_id = str(uuid4())
+    contact_name = str(contact_payload.get("name") or "").strip() or None
+    contact_email = str(contact_payload.get("emailAddress") or "").strip() or None
+    evaluation = Jsonb(
+        {
+            "crm_contact_id": normalized_contact_id,
+            "crm_name": contact_name,
+            "crm_email": contact_email,
+        }
+    )
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                SELECT id
+                FROM engagements
+                WHERE id = %s AND lifecycle_stage = 'pending_gig'
+                FOR UPDATE
+                """,
+                (engagement_id,),
+            )
+            if cursor.fetchone() is None:
+                return None
+
+            cursor.execute(
+                """
+                SELECT id, discord_user_id
+                FROM people
+                WHERE crm_contact_id = %s
+                ORDER BY sync_status = 'active' DESC, updated_at DESC
+                LIMIT 1
+                """,
+                (normalized_contact_id,),
+            )
+            person = cursor.fetchone()
+            person_id = person["id"] if person is not None else None
+            discord_user_id = (
+                str(person["discord_user_id"]).strip()
+                if person is not None and person.get("discord_user_id")
+                else None
+            )
+
+            cursor.execute(
+                """
+                UPDATE engagement_applications
+                SET
+                    person_id = COALESCE(person_id, %s),
+                    crm_contact_id = %s,
+                    source = CASE
+                        WHEN source = 'direct_interest' THEN source
+                        ELSE 'crm'
+                    END,
+                    evaluation = evaluation || %s
+                WHERE engagement_id = %s
+                  AND (
+                    (%s::uuid IS NOT NULL AND person_id = %s)
+                    OR (
+                        %s::text IS NOT NULL
+                        AND discord_user_id = %s
+                        AND crm_contact_id IS NULL
+                    )
+                  )
+                  AND (crm_contact_id IS NULL OR crm_contact_id = %s)
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM engagement_applications other
+                    WHERE other.engagement_id = engagement_applications.engagement_id
+                      AND other.crm_contact_id = %s
+                      AND other.id <> engagement_applications.id
+                  )
+                RETURNING
+                    id::text,
+                    engagement_id::text,
+                    status,
+                    source,
+                    crm_contact_id,
+                    updated_at
+                """,
+                (
+                    person_id,
+                    normalized_contact_id,
+                    evaluation,
+                    engagement_id,
+                    person_id,
+                    person_id,
+                    discord_user_id,
+                    discord_user_id,
+                    normalized_contact_id,
+                    normalized_contact_id,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    INSERT INTO engagement_applications (
+                        id,
+                        engagement_id,
+                        person_id,
+                        crm_contact_id,
+                        status,
+                        source,
+                        evaluation
+                    ) VALUES (%s, %s, %s, %s, 'suggested', 'crm', %s)
+                    ON CONFLICT (engagement_id, crm_contact_id) DO UPDATE SET
+                        person_id = COALESCE(
+                            engagement_applications.person_id,
+                            EXCLUDED.person_id
+                        ),
+                        source = CASE
+                            WHEN engagement_applications.source = 'direct_interest'
+                            THEN engagement_applications.source
+                            ELSE EXCLUDED.source
+                        END,
+                        evaluation = engagement_applications.evaluation || EXCLUDED.evaluation
+                    RETURNING
+                        id::text,
+                        engagement_id::text,
+                        status,
+                        source,
+                        crm_contact_id,
+                        updated_at
+                    """,
+                    (
+                        application_id,
+                        engagement_id,
+                        person_id,
+                        normalized_contact_id,
+                        evaluation,
+                    ),
+                )
+                row = cursor.fetchone()
+
+            if row is None:
+                return None
+
+            cursor.execute(
+                """
+                UPDATE engagements
+                SET last_activity_at = NOW()
+                WHERE id = %s
+                """,
+                (engagement_id,),
+            )
+            cursor.execute(
+                """
+                INSERT INTO engagement_events (
+                    id,
+                    engagement_id,
+                    event_type,
+                    actor_discord_user_id,
+                    payload
+                ) VALUES (%s, %s, 'candidate_added', %s, %s)
+                """,
+                (
+                    str(uuid4()),
+                    engagement_id,
+                    actor_discord_user_id,
+                    Jsonb(
+                        {
+                            "application_id": row["id"],
+                            "crm_contact_id": normalized_contact_id,
+                            "source": "crm",
+                        }
+                    ),
+                ),
+            )
+
+    result = dict(row)
+    result["updated_at"] = (
+        row["updated_at"].isoformat()
+        if isinstance(row.get("updated_at"), datetime)
+        else None
+    )
+    result["name"] = contact_name
+    result["email_508"] = contact_email
+    return result
+
+
 def list_dashboard_engagements(
     settings: SharedSettings,
     *,
@@ -885,8 +1078,8 @@ def list_dashboard_engagements(
                         'evaluation', a.evaluation,
                         'crm_contact_id', COALESCE(a.crm_contact_id, p.crm_contact_id),
                         'discord_user_id', COALESCE(a.discord_user_id, p.discord_user_id),
-                        'name', p.name,
-                        'email_508', p.email_508,
+                        'name', COALESCE(p.name, a.evaluation->>'crm_name'),
+                        'email_508', COALESCE(p.email_508, a.evaluation->>'crm_email'),
                         'discord_username', COALESCE(
                             p.discord_username,
                             a.evaluation->>'discord_username'
@@ -903,7 +1096,8 @@ def list_dashboard_engagements(
                             WHEN 'contacted' THEN 2
                             WHEN 'reviewing' THEN 3
                             WHEN 'suggested' THEN 4
-                            ELSE 5
+                            WHEN 'unavailable' THEN 5
+                            ELSE 6
                         END,
                         COALESCE(a.fit_score, a.match_score, 0) DESC,
                         a.created_at ASC
