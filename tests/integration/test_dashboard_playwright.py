@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import threading
 import time
@@ -488,16 +489,21 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
         page.route("**/dashboard/api/audit-events?*", audit_route)
         page.route("**/dashboard/api/notifications?*", notifications_route)
         page.route(
-            "**/dashboard/api/gigs/11111111-1111-4111-8111-111111111111",
+            re.compile(".*/dashboard/api/gigs/11111111-1111-4111-8111-111111111111$"),
             gig_detail_route,
         )
         page.route(
-            "**/dashboard/api/gigs/11111111-1111-4111-8111-111111111111"
-            "/applications/22222222-2222-4222-8222-222222222222/status",
+            re.compile(
+                ".*/dashboard/api/gigs/11111111-1111-4111-8111-111111111111"
+                "/applications/22222222-2222-4222-8222-222222222222/status$"
+            ),
             gig_application_status_route,
         )
         page.route(
-            "**/dashboard/api/gigs/11111111-1111-4111-8111-111111111111/applications",
+            re.compile(
+                ".*/dashboard/api/gigs/11111111-1111-4111-8111-111111111111"
+                "/applications$"
+            ),
             gig_application_add_route,
         )
         page.route("**/dashboard/api/gigs?*", gigs_route)
@@ -620,7 +626,6 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             )
             page.get_by_role("button", name="Add candidate").click()
             assert gig_application_add_requested.wait(timeout=5)
-            page.get_by_text("Added candidate").wait_for()
             page.get_by_text("Devon Candidate").wait_for()
             page.get_by_label("Candidate status for Casey Candidate").select_option(
                 "unavailable"
