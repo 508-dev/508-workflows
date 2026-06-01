@@ -434,6 +434,72 @@ def test_create_contact_links_customer() -> None:
     }
 
 
+def test_create_contact_sets_portal_user_when_provided() -> None:
+    captured: dict[str, Any] = {}
+
+    class CaptureClient(FakeERPNextClient):
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            params: dict[str, Any] | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            captured["payload"] = payload
+            return {"data": {"name": "CONT-0001"}}
+
+    client = CaptureClient({"data": {}})
+
+    result = client.create_contact(
+        customer="Acme",
+        first_name="Ada",
+        portal_user="owner@508.dev",
+    )
+
+    assert result["name"] == "CONT-0001"
+    assert captured["payload"]["user"] == "owner@508.dev"
+
+
+def test_set_contact_portal_user_updates_blank_user() -> None:
+    calls: list[dict[str, Any]] = []
+
+    class CaptureClient(FakeERPNextClient):
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            params: dict[str, Any] | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            calls.append({"method": method, "path": path, "payload": payload})
+            if method == "GET":
+                return {"data": {"name": "CONT-0001", "user": ""}}
+            return {"data": {"name": "CONT-0001", "user": "owner@508.dev"}}
+
+    client = CaptureClient({"data": {}})
+
+    result = client.set_contact_portal_user(
+        contact="CONT-0001",
+        portal_user="owner@508.dev",
+    )
+
+    assert result["user"] == "owner@508.dev"
+    assert calls == [
+        {
+            "method": "GET",
+            "path": "/api/resource/Contact/CONT-0001",
+            "payload": None,
+        },
+        {
+            "method": "PUT",
+            "path": "/api/resource/Contact/CONT-0001",
+            "payload": {"user": "owner@508.dev"},
+        },
+    ]
+
+
 def test_link_contact_to_customer_preserves_existing_links() -> None:
     calls: list[dict[str, Any]] = []
 
@@ -476,6 +542,51 @@ def test_link_contact_to_customer_preserves_existing_links() -> None:
                     {"link_doctype": "Customer", "link_name": "Acme"},
                 ]
             },
+        },
+    ]
+
+
+def test_link_contact_to_customer_sets_blank_portal_user() -> None:
+    calls: list[dict[str, Any]] = []
+
+    class CaptureClient(FakeERPNextClient):
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            params: dict[str, Any] | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            calls.append({"method": method, "path": path, "payload": payload})
+            if method == "GET":
+                return {
+                    "data": {
+                        "name": "CONT-0001",
+                        "links": [{"link_doctype": "Customer", "link_name": "Acme"}],
+                    }
+                }
+            return {"data": {"name": "CONT-0001", "user": "owner@508.dev"}}
+
+    client = CaptureClient({"data": {}})
+
+    result = client.link_contact_to_customer(
+        contact="CONT-0001",
+        customer="Acme",
+        portal_user="owner@508.dev",
+    )
+
+    assert result["user"] == "owner@508.dev"
+    assert calls == [
+        {
+            "method": "GET",
+            "path": "/api/resource/Contact/CONT-0001",
+            "payload": None,
+        },
+        {
+            "method": "PUT",
+            "path": "/api/resource/Contact/CONT-0001",
+            "payload": {"user": "owner@508.dev"},
         },
     ]
 

@@ -1131,6 +1131,8 @@ function App() {
         activity_type: { name?: string }
         cache_refresh_error?: string
         cache_refresh_message?: string
+        setup_warnings?: string[]
+        setup_warning_message?: string
       }>("/dashboard/api/projects/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1145,12 +1147,22 @@ function App() {
               )
             : [payload.project, ...current]
         })
-        showToast("Created ERP project setup", "ok")
+        showToast(
+          payload.setup_warnings?.length
+            ? payload.setup_warning_message ||
+                "Created ERP project setup; account manager setup needs follow-up"
+            : "Created ERP project setup",
+          payload.setup_warnings?.length ? "warning" : "ok",
+        )
         openProjectDetail(payload.project.id)
       } else {
         showToast(
-          payload.cache_refresh_message || "Created ERP project in ERPNext; local sync is pending",
-          "ok",
+          payload.setup_warnings?.length
+            ? payload.setup_warning_message ||
+                "Created ERP project in ERPNext; account manager setup needs follow-up"
+            : payload.cache_refresh_message ||
+                "Created ERP project in ERPNext; local sync is pending",
+          payload.setup_warnings?.length ? "warning" : "ok",
         )
         void loadProjects()
       }

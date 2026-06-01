@@ -3696,6 +3696,7 @@ def _create_erpnext_project_setup(
 
     cache_refresh_error: str | None = None
     cache_refresh_message: str | None = None
+    setup_warnings: list[str] = []
     client = _erpnext_client()
     try:
         activity_type = client.ensure_activity_type(activity_type_name)
@@ -3743,6 +3744,18 @@ def _create_erpnext_project_setup(
         if erpnext_project_id is None:
             cleanup_created_customer()
             raise ERPNextAPIError("ERPNext Project response is missing an id")
+        if account_manager is not None:
+            try:
+                project_detail = client.add_project_user(
+                    erpnext_project_id, account_manager
+                )
+            except Exception:
+                logger.exception(
+                    "ERPNext Project was created but account manager roster setup failed project=%s account_manager=%s",
+                    erpnext_project_id,
+                    account_manager,
+                )
+                setup_warnings.append("account_manager_project_user_failed")
 
         address_doc: dict[str, Any] | None = None
         if has_address:
@@ -3778,6 +3791,21 @@ def _create_erpnext_project_setup(
                 phone=_text_or_none(payload.contact_phone),
                 mobile_no=_text_or_none(payload.contact_mobile),
             )
+        if account_manager is not None and contact_doc is not None:
+            contact_doc_id = _text_or_none(contact_doc.get("name"))
+            if contact_doc_id is not None:
+                try:
+                    contact_doc = client.set_contact_portal_user(
+                        contact=contact_doc_id,
+                        portal_user=account_manager,
+                    )
+                except Exception:
+                    logger.exception(
+                        "ERPNext Contact was linked but portal user setup failed contact=%s account_manager=%s",
+                        contact_doc_id,
+                        account_manager,
+                    )
+                    setup_warnings.append("account_manager_contact_user_failed")
 
         primary_address = (
             _text_or_none(address_doc.get("name")) if address_doc is not None else None
@@ -3834,6 +3862,11 @@ def _create_erpnext_project_setup(
         result["cache_refresh_error"] = cache_refresh_error
     if cache_refresh_message is not None:
         result["cache_refresh_message"] = cache_refresh_message
+    if setup_warnings:
+        result["setup_warnings"] = setup_warnings
+        result["setup_warning_message"] = (
+            "Created the project, but account manager setup needs follow-up."
+        )
     return result
 
 
@@ -4525,7 +4558,9 @@ async def dashboard_create_project_handler(request: Request) -> JSONResponse:
     actor_provider, actor_subject = _session_audit_actor(session)
     await _write_auth_audit_event(
         action="erpnext.project_setup_create",
-        result=AuditResult.SUCCESS,
+        result=AuditResult.ERROR
+        if isinstance(result.get("setup_warnings"), list)
+        else AuditResult.SUCCESS,
         actor_subject=actor_subject,
         actor_display_name=session.display_name,
         actor_provider=actor_provider,
@@ -4543,6 +4578,7 @@ async def dashboard_create_project_handler(request: Request) -> JSONResponse:
             "primary_contact": contact.get("name")
             if isinstance(contact, dict)
             else None,
+            "setup_warnings": result.get("setup_warnings"),
         },
     )
     return JSONResponse(result, status_code=201)
