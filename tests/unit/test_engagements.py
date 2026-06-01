@@ -721,7 +721,8 @@ def test_add_crm_application_to_engagement_uses_verified_contact_payload(
     fetches = iter(
         [
             {"id": "engagement-1"},
-            {"id": "person-1"},
+            {"id": "person-1", "discord_user_id": None},
+            None,
             {
                 "id": "application-1",
                 "engagement_id": "engagement-1",
@@ -777,10 +778,87 @@ def test_add_crm_application_to_engagement_uses_verified_contact_payload(
     assert result is not None
     assert result["id"] == "application-1"
     assert result["name"] == "Casey Candidate"
-    insert_query, insert_params = executed[2]
+    update_query, update_params = executed[2]
+    assert "UPDATE engagement_applications" in update_query
+    assert update_params[0:2] == ("person-1", "crm-1")
+    insert_query, insert_params = executed[3]
     assert "INSERT INTO engagement_applications" in insert_query
     assert "ON CONFLICT (engagement_id, crm_contact_id)" in insert_query
     assert insert_params[2:4] == ("person-1", "crm-1")
+    event_query, event_params = executed[5]
+    assert "candidate_added" in event_query
+    assert event_params[2] == "actor-1"
+
+
+def test_add_crm_application_to_engagement_merges_existing_discord_interest(
+    monkeypatch,
+) -> None:
+    executed: list[tuple[str, tuple]] = []
+    fetches = iter(
+        [
+            {"id": "engagement-1"},
+            {"id": "person-1", "discord_user_id": "discord-1"},
+            {
+                "id": "application-1",
+                "engagement_id": "engagement-1",
+                "status": "interested",
+                "source": "direct_interest",
+                "crm_contact_id": "crm-1",
+                "updated_at": datetime(2026, 6, 1, 1, 2, tzinfo=timezone.utc),
+            },
+        ]
+    )
+
+    class CursorStub:
+        def __enter__(self) -> "CursorStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+        def execute(self, query: str, params: tuple) -> None:
+            executed.append((query, params))
+
+        def fetchone(self) -> dict[str, str] | None:
+            return next(fetches, None)
+
+    class ConnectionStub:
+        def cursor(self, row_factory=None) -> CursorStub:  # noqa: ARG002
+            return CursorStub()
+
+        def __enter__(self) -> "ConnectionStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+    @contextmanager
+    def connection_stub():
+        yield ConnectionStub()
+
+    monkeypatch.setattr(
+        engagements,
+        "get_postgres_connection",
+        lambda _settings: connection_stub(),
+    )
+
+    result = add_crm_application_to_engagement(
+        SharedSettings(),
+        engagement_id="engagement-1",
+        crm_contact_id="crm-1",
+        contact_payload={"name": "Casey Candidate", "emailAddress": "casey@508.dev"},
+        actor_discord_user_id="actor-1",
+    )
+
+    assert result is not None
+    assert result["id"] == "application-1"
+    update_query, update_params = executed[2]
+    assert "UPDATE engagement_applications" in update_query
+    assert "discord_user_id = %s" in update_query
+    assert update_params[6:8] == ("discord-1", "discord-1")
+    assert all(
+        "INSERT INTO engagement_applications" not in query for query, _ in executed
+    )
     event_query, event_params = executed[4]
     assert "candidate_added" in event_query
     assert event_params[2] == "actor-1"

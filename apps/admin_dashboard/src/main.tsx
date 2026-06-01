@@ -486,6 +486,9 @@ function messageForApiError(record: Record<string, unknown>, fallback: string) {
   if (error === "crm_profile_not_found") {
     return "That CRM Contact profile was not found."
   }
+  if (error === "crm_profile_mismatch") {
+    return "CRM returned a different Contact than the profile requested. Check the profile URL and try again."
+  }
   if (error === "crm_profile_lookup_failed") {
     return "CRM profile lookup failed. Try again after CRM is reachable."
   }

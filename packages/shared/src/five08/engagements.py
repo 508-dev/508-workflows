@@ -865,7 +865,7 @@ def add_crm_application_to_engagement(
 
             cursor.execute(
                 """
-                SELECT id
+                SELECT id, discord_user_id
                 FROM people
                 WHERE crm_contact_id = %s
                 ORDER BY sync_status = 'active' DESC, updated_at DESC
@@ -875,29 +875,40 @@ def add_crm_application_to_engagement(
             )
             person = cursor.fetchone()
             person_id = person["id"] if person is not None else None
+            discord_user_id = (
+                str(person["discord_user_id"]).strip()
+                if person is not None and person.get("discord_user_id")
+                else None
+            )
 
             cursor.execute(
                 """
-                INSERT INTO engagement_applications (
-                    id,
-                    engagement_id,
-                    person_id,
-                    crm_contact_id,
-                    status,
-                    source,
-                    evaluation
-                ) VALUES (%s, %s, %s, %s, 'suggested', 'crm', %s)
-                ON CONFLICT (engagement_id, crm_contact_id) DO UPDATE SET
-                    person_id = COALESCE(
-                        engagement_applications.person_id,
-                        EXCLUDED.person_id
-                    ),
+                UPDATE engagement_applications
+                SET
+                    person_id = COALESCE(person_id, %s),
+                    crm_contact_id = %s,
                     source = CASE
-                        WHEN engagement_applications.source = 'direct_interest'
-                        THEN engagement_applications.source
-                        ELSE EXCLUDED.source
+                        WHEN source = 'direct_interest' THEN source
+                        ELSE 'crm'
                     END,
-                    evaluation = engagement_applications.evaluation || EXCLUDED.evaluation
+                    evaluation = evaluation || %s
+                WHERE engagement_id = %s
+                  AND (
+                    (%s::uuid IS NOT NULL AND person_id = %s)
+                    OR (
+                        %s::text IS NOT NULL
+                        AND discord_user_id = %s
+                        AND crm_contact_id IS NULL
+                    )
+                  )
+                  AND (crm_contact_id IS NULL OR crm_contact_id = %s)
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM engagement_applications other
+                    WHERE other.engagement_id = engagement_applications.engagement_id
+                      AND other.crm_contact_id = %s
+                      AND other.id <> engagement_applications.id
+                  )
                 RETURNING
                     id::text,
                     engagement_id::text,
@@ -907,14 +918,60 @@ def add_crm_application_to_engagement(
                     updated_at
                 """,
                 (
-                    application_id,
-                    engagement_id,
                     person_id,
                     normalized_contact_id,
                     evaluation,
+                    engagement_id,
+                    person_id,
+                    person_id,
+                    discord_user_id,
+                    discord_user_id,
+                    normalized_contact_id,
+                    normalized_contact_id,
                 ),
             )
             row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    INSERT INTO engagement_applications (
+                        id,
+                        engagement_id,
+                        person_id,
+                        crm_contact_id,
+                        status,
+                        source,
+                        evaluation
+                    ) VALUES (%s, %s, %s, %s, 'suggested', 'crm', %s)
+                    ON CONFLICT (engagement_id, crm_contact_id) DO UPDATE SET
+                        person_id = COALESCE(
+                            engagement_applications.person_id,
+                            EXCLUDED.person_id
+                        ),
+                        source = CASE
+                            WHEN engagement_applications.source = 'direct_interest'
+                            THEN engagement_applications.source
+                            ELSE EXCLUDED.source
+                        END,
+                        evaluation = engagement_applications.evaluation || EXCLUDED.evaluation
+                    RETURNING
+                        id::text,
+                        engagement_id::text,
+                        status,
+                        source,
+                        crm_contact_id,
+                        updated_at
+                    """,
+                    (
+                        application_id,
+                        engagement_id,
+                        person_id,
+                        normalized_contact_id,
+                        evaluation,
+                    ),
+                )
+                row = cursor.fetchone()
+
             if row is None:
                 return None
 
