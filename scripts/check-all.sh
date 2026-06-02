@@ -18,9 +18,15 @@ echo
 echo
 
 echo "Building admin dashboard..."
+dashboard_build_dir=$(mktemp -d "${TMPDIR:-/tmp}/five08-dashboard-build.XXXXXX")
+cleanup_dashboard_build_dir() {
+  rm -rf "$dashboard_build_dir"
+}
+trap cleanup_dashboard_build_dir EXIT HUP INT TERM
 (
   cd apps/admin_dashboard
-  bun run build
+  bun run typecheck
+  bun run vite build --outDir "$dashboard_build_dir"
 )
 if [ -n "$(git status --porcelain -- apps/api/src/five08/backend/static/dashboard)" ]; then
   echo
