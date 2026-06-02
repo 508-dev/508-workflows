@@ -627,10 +627,23 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             page.get_by_role("button", name="Add candidate").click()
             assert gig_application_add_requested.wait(timeout=5)
             page.get_by_text("Devon Candidate").wait_for()
-            page.get_by_label("Candidate status for Casey Candidate").select_option(
-                "unavailable"
-            )
+            casey_status = page.get_by_label("Candidate status for Casey Candidate")
+            expect(casey_status).to_be_enabled()
+            expect(casey_status).to_have_value("suggested")
+            with page.expect_request(
+                lambda request: (
+                    request.method == "POST"
+                    and request.url.endswith(
+                        "/dashboard/api/gigs/"
+                        "11111111-1111-4111-8111-111111111111"
+                        "/applications/"
+                        "22222222-2222-4222-8222-222222222222/status"
+                    )
+                )
+            ):
+                casey_status.select_option("unavailable")
             assert gig_application_requested.wait(timeout=5)
+            expect(casey_status).to_have_value(re.compile("suggested|unavailable"))
             assert gig_detail_requests
 
             gigs_list_payload = []
