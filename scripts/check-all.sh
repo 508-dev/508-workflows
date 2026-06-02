@@ -24,7 +24,7 @@ echo "Building admin dashboard..."
 )
 if [ -n "$(git status --porcelain -- apps/api/src/five08/backend/static/dashboard)" ]; then
   echo
-  echo "Dashboard build output is stale. Run apps/admin_dashboard build and commit the generated static assets."
+  echo "Dashboard build output is stale. Run 'cd apps/admin_dashboard && bun run build' and commit the generated static assets."
   git status --short -- apps/api/src/five08/backend/static/dashboard
   exit 1
 fi
