@@ -1,16 +1,27 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env sh
+set -eu
 
 echo "Running all checks..."
-echo
-
-./scripts/format.sh
 echo
 
 ./scripts/lint.sh
 echo
 
-./scripts/mypy.sh
+echo "Checking Python formatting..."
+uv run ruff format --check apps packages tests
 echo
 
-echo "✅ All checks passed!"
+./scripts/typecheck.sh
+echo
+
+./scripts/test.sh
+echo
+
+echo "Building admin dashboard..."
+(
+  cd apps/admin_dashboard
+  bun run build
+)
+echo
+
+echo "All checks passed."

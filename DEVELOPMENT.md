@@ -169,10 +169,13 @@ service Dockerfiles use BuildKit cache mounts.
 ./scripts/test.sh
 ./scripts/lint.sh
 ./scripts/format.sh
+./scripts/typecheck.sh
 ./scripts/mypy.sh
+./scripts/check-all.sh
 ```
 
-For dashboard-only checks:
+These top-level scripts include the admin dashboard where applicable. For
+dashboard-only checks:
 
 ```bash
 cd apps/admin_dashboard

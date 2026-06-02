@@ -66,7 +66,9 @@ To run the Discord bot too:
 ./scripts/test.sh
 ./scripts/lint.sh
 ./scripts/format.sh
+./scripts/typecheck.sh
 ./scripts/mypy.sh
+./scripts/check-all.sh
 ```
 
 For workspace archival, stop host-run dev processes and Docker Compose together:
