@@ -2971,7 +2971,8 @@ class TestCRMCog:
         await crm_cog.search_members.callback(crm_cog, mock_interaction, "")
 
         mock_interaction.followup.send.assert_called_once_with(
-            "❌ Please provide a search term or `skills:...` to search by."
+            "❌ Please provide a search term or `skills:...` to search by.",
+            ephemeral=True,
         )
         crm_cog.espo_api.request.assert_not_called()
 
@@ -2985,7 +2986,8 @@ class TestCRMCog:
         await crm_cog.search_members.callback(crm_cog, mock_interaction, "skills:")
 
         mock_interaction.followup.send.assert_called_once_with(
-            "❌ Please provide a search term or `skills:...` to search by."
+            "❌ Please provide a search term or `skills:...` to search by.",
+            ephemeral=True,
         )
         crm_cog.espo_api.request.assert_not_called()
 
@@ -3897,7 +3899,8 @@ class TestCRMCog:
         await crm_cog.search_members.callback(crm_cog, mock_interaction, "nonexistent")
 
         mock_interaction.followup.send.assert_called_once_with(
-            "🔍 No contacts found for: `nonexistent`"
+            "🔍 No contacts found for: `nonexistent`",
+            ephemeral=True,
         )
 
     @pytest.mark.asyncio
@@ -3951,7 +3954,8 @@ class TestCRMCog:
         )
 
         mock_interaction.followup.send.assert_called_once_with(
-            "❌ No contact found for: `nonexistent@example.com`"
+            "❌ No contact found for: `nonexistent@example.com`",
+            ephemeral=True,
         )
 
     @pytest.mark.asyncio
@@ -3978,7 +3982,8 @@ class TestCRMCog:
         await crm_cog.get_resume.callback(crm_cog, mock_interaction, "john@508.dev")
 
         mock_interaction.followup.send.assert_called_once_with(
-            "❌ No resume found for John Doe"
+            "❌ No resume found for John Doe",
+            ephemeral=True,
         )
 
     @pytest.mark.asyncio
@@ -6892,7 +6897,8 @@ class TestCRMCog:
             )
 
         mock_interaction.followup.send.assert_called_once_with(
-            "❌ No contact found for: `missing-user`"
+            "❌ No contact found for: `missing-user`",
+            ephemeral=True,
         )
 
     @pytest.mark.asyncio
@@ -7026,7 +7032,8 @@ class TestCRMCog:
         )
 
         mock_interaction.followup.send.assert_called_once_with(
-            "❌ Contact ID not found."
+            "❌ Contact ID not found.",
+            ephemeral=True,
         )
 
     @pytest.mark.asyncio
@@ -7506,7 +7513,8 @@ class TestCRMCog:
         crm_cog._create_member_agreement_submission_for_contact.assert_awaited_once()
         mock_interaction.followup.send.assert_called_once_with(
             "✅ Sent the member agreement to **Jane Doe** at `jane@example.com`."
-            " Submission ID: `4200`."
+            " Submission ID: `4200`.",
+            ephemeral=True,
         )
         audit_kwargs = crm_cog._audit_command.call_args.kwargs
         assert audit_kwargs["action"] == "crm.send_member_agreement"
@@ -7541,7 +7549,8 @@ class TestCRMCog:
         crm_cog._create_member_agreement_submission_for_contact.assert_not_awaited()
         mock_interaction.followup.send.assert_called_once_with(
             "⚠️ **Jane Doe** already signed the member agreement at "
-            "`2026-03-20 10:00:00`. No DocuSeal submission was sent."
+            "`2026-03-20 10:00:00`. No DocuSeal submission was sent.",
+            ephemeral=True,
         )
         audit_kwargs = crm_cog._audit_command.call_args.kwargs
         assert audit_kwargs["result"] == "denied"
@@ -7573,7 +7582,8 @@ class TestCRMCog:
 
         crm_cog._create_member_agreement_submission_for_contact.assert_not_awaited()
         mock_interaction.followup.send.assert_called_once_with(
-            "❌ **Jane Doe** does not have an email address in CRM."
+            "❌ **Jane Doe** does not have an email address in CRM.",
+            ephemeral=True,
         )
         audit_kwargs = crm_cog._audit_command.call_args.kwargs
         assert audit_kwargs["result"] == "denied"
