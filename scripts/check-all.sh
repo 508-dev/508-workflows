@@ -8,7 +8,7 @@ echo
 echo
 
 echo "Checking Python formatting..."
-uv run ruff format --check apps packages tests
+uv run ruff format --check apps/api/src/five08 apps/discord_bot/src/five08 apps/worker/src/five08 packages/shared/src/five08 tests
 echo
 
 ./scripts/typecheck.sh

@@ -66,8 +66,8 @@ To run the Discord bot too:
 ./scripts/test.sh
 ./scripts/lint.sh
 ./scripts/format.sh
-./scripts/typecheck.sh
-./scripts/mypy.sh
+./scripts/typecheck.sh # Python mypy + dashboard TypeScript
+./scripts/mypy.sh      # Python-only typecheck
 ./scripts/check-all.sh
 ```
 
