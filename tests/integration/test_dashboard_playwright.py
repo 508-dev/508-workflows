@@ -427,6 +427,10 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             gig_application_requested.set()
             body = route.request.post_data_json
             assert body["status"] == "unavailable"
+            for application in gigs_list_payload[0]["applications"]:
+                if application["id"] == "22222222-2222-4222-8222-222222222222":
+                    application["status"] = "unavailable"
+                    break
             route.fulfill(
                 status=200,
                 content_type="application/json",
@@ -643,7 +647,7 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             ):
                 casey_status.select_option("unavailable")
             assert gig_application_requested.wait(timeout=5)
-            expect(casey_status).to_have_value(re.compile("suggested|unavailable"))
+            expect(casey_status).to_have_value("unavailable")
             assert gig_detail_requests
 
             gigs_list_payload = []

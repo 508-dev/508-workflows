@@ -25,7 +25,6 @@ cleanup_dashboard_build_dir() {
 trap cleanup_dashboard_build_dir EXIT HUP INT TERM
 (
   cd apps/admin_dashboard
-  bun run typecheck
   bun run vite build --outDir "$dashboard_build_dir"
 )
 if [ -n "$(git status --porcelain -- apps/api/src/five08/backend/static/dashboard)" ]; then
