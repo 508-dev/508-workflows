@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import os
+import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -33,11 +35,13 @@ def _service_commands(
     env: dict[str, str], selected_services: set[str] | None = None
 ) -> list[tuple[str, list[str]]]:
     selected_services = selected_services or set(ALL_SERVICES)
+    uv_bin = env.get("UV_BIN") or shutil.which("uv") or "uv"
+    uv_command = shlex.quote(uv_bin)
     commands = [
         (
             "web",
             [
-                "uv",
+                uv_bin,
                 "run",
                 "--package",
                 "api",
@@ -60,7 +64,7 @@ def _service_commands(
         (
             "worker",
             [
-                "uv",
+                uv_bin,
                 "run",
                 "watchfiles",
                 "--filter",
@@ -69,7 +73,7 @@ def _service_commands(
                 "5",
                 "--sigkill-timeout",
                 "10",
-                "uv run --package worker worker-consumer",
+                f"{uv_command} run --package worker worker-consumer",
                 "apps/worker/src",
                 "packages/shared/src",
             ],
@@ -77,7 +81,7 @@ def _service_commands(
         (
             "discord-bot",
             [
-                "uv",
+                uv_bin,
                 "run",
                 "watchfiles",
                 "--filter",
@@ -86,7 +90,7 @@ def _service_commands(
                 "5",
                 "--sigkill-timeout",
                 "10",
-                "uv run --package discord_bot discord-bot",
+                f"{uv_command} run --package discord_bot discord-bot",
                 "apps/discord_bot/src",
                 "packages/shared/src",
             ],
