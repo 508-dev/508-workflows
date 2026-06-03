@@ -11,7 +11,7 @@ echo "Checking Python formatting..."
 uv run ruff format --check apps/api/src/five08 apps/discord_bot/src/five08 apps/worker/src/five08 packages/shared/src/five08 tests
 echo
 
-./scripts/typecheck.sh
+./scripts/mypy.sh
 echo
 
 ./scripts/test.sh
@@ -26,7 +26,7 @@ cleanup_dashboard_build_dir() {
 trap cleanup_dashboard_build_dir EXIT HUP INT TERM
 (
   cd apps/admin_dashboard
-  bun run vite build --outDir "$dashboard_build_dir"
+  bun run build -- --outDir "$dashboard_build_dir"
 )
 if ! diff_output=$(diff -qr "$dashboard_static_dir" "$dashboard_build_dir"); then
   echo
