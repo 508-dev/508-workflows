@@ -14,6 +14,7 @@ from five08.discord_bot.cogs.crm import (
     CRMCog,
     DiscordLinkOverwriteConfirmationView,
     ResumeButtonView,
+    ResumeConfirmationView,
     ResumeCreateContactView,
     ResumeUpdateConfirmationView,
     ResumeReprocessConfirmationView,
@@ -5369,6 +5370,41 @@ class TestCRMCog:
         # Check PUT call - should not add duplicate
         put_call = crm_cog.espo_api.request.call_args_list[1]
         assert put_call[0][2]["resumeIds"] == ["attachment_id"]
+
+    @pytest.mark.asyncio
+    async def test_resume_duplicate_confirmation_defers_ephemerally(
+        self, crm_cog, mock_interaction
+    ):
+        """Duplicate-resume confirmation must keep the first followup private."""
+        mock_interaction.message = None
+        file = AsyncMock()
+        file.filename = "resume.pdf"
+        file.size = 2048
+        file.read = AsyncMock(return_value=b"%PDF")
+
+        crm_cog.espo_api.upload_file.return_value = {"id": "attachment_id"}
+        crm_cog._update_contact_resume = AsyncMock(return_value=True)
+
+        view = ResumeConfirmationView(
+            crm_cog=crm_cog,
+            interaction=mock_interaction,
+            file=file,
+            contact_id="contact123",
+            contact_name="Jane Candidate",
+            existing_resume_id="existing_resume_id",
+        )
+        button = next(
+            child
+            for child in view.children
+            if isinstance(child, discord.ui.Button)
+            and child.label == "Yes, Upload Anyway"
+        )
+
+        await button.callback(mock_interaction)
+
+        mock_interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        mock_interaction.followup.send.assert_awaited_once()
+        assert mock_interaction.followup.send.await_args.kwargs["ephemeral"] is True
 
     async def test_update_contact_resume_no_existing_resumes(
         self, crm_cog, mock_interaction

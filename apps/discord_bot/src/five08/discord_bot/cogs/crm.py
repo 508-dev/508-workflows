@@ -1084,7 +1084,7 @@ class ResumeConfirmationView(discord.ui.View):
         button: discord.ui.Button["ResumeConfirmationView"],
     ) -> None:
         """Proceed with the upload despite duplicate."""
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
 
         try:
             # Download file content from Discord
