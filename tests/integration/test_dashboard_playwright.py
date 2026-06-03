@@ -427,16 +427,21 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             gig_application_requested.set()
             body = route.request.post_data_json
             assert body["status"] == "unavailable"
+            casey_application_id = "22222222-2222-4222-8222-222222222222"
             for application in gigs_list_payload[0]["applications"]:
-                if application["id"] == "22222222-2222-4222-8222-222222222222":
+                if application["id"] == casey_application_id:
                     application["status"] = "unavailable"
                     break
+            else:
+                raise AssertionError(
+                    f"Expected Casey Candidate application fixture {casey_application_id}"
+                )
             route.fulfill(
                 status=200,
                 content_type="application/json",
                 body=json.dumps(
                     {
-                        "id": "22222222-2222-4222-8222-222222222222",
+                        "id": casey_application_id,
                         "status": "unavailable",
                     }
                 ),
