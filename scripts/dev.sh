@@ -5,6 +5,9 @@ script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
 . "$script_dir/worktree-env.sh"
 worktree_env_load "$script_dir"
 
+UV_BIN=${UV_BIN:-$(command -v uv)}
+export UV_BIN
+
 # dev.sh owns host-run service URLs so every launched process shares the same
 # worktree-local infra and app ports.
 export REDIS_URL="redis://127.0.0.1:${REDIS_HOST_PORT}/0"
@@ -41,7 +44,7 @@ start_infra() {
 }
 
 run_migrations() {
-  uv run --package worker python3 -c 'from five08.worker.db_migrations import run_job_migrations; run_job_migrations()'
+  "$UV_BIN" run --package worker python3 -c 'from five08.worker.db_migrations import run_job_migrations; run_job_migrations()'
 }
 
 reclaim_service_port() {
@@ -220,7 +223,7 @@ EOF
   web|api)
     reclaim_service_port web
     run_migrations
-    exec uv run --package api uvicorn five08.backend.api:create_app \
+    exec "$UV_BIN" run --package api uvicorn five08.backend.api:create_app \
       --factory \
       --host "${WEB_HOST:-${WEBHOOK_INGEST_HOST:-0.0.0.0}}" \
       --port "$WEB_PORT" \
@@ -231,11 +234,12 @@ EOF
     ;;
   worker)
     run_migrations
-    exec uv run watchfiles \
+    worker_command="$(shell_quote "$UV_BIN") run --package worker worker-consumer"
+    exec "$UV_BIN" run watchfiles \
       --filter python \
       --sigint-timeout 5 \
       --sigkill-timeout 10 \
-      'uv run --package worker worker-consumer' \
+      "$worker_command" \
       apps/worker/src \
       packages/shared/src
     ;;

@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1.7
-# Pinned from ghcr.io/astral-sh/uv:python3.12-bookworm-slim (verified 2026-02-21).
-FROM ghcr.io/astral-sh/uv@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58
+# Python pinned from python:3.12-slim-bookworm and uv pinned from ghcr.io/astral-sh/uv:0.11.18 (verified 2026-06-03).
+FROM ghcr.io/astral-sh/uv@sha256:78bc42400d77b0678ba95765305c826652ed5431f399257271dda681d0318f03 AS uv
+FROM python@sha256:93ab4b7fa528b25124c97bcc755415e60eb671a86b4dbe0328df2fe2d1c1193d
+COPY --from=uv /uv /uvx /usr/local/bin/
 
 WORKDIR /app
 ENV UV_LINK_MODE=copy

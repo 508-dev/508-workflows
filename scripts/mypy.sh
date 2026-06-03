@@ -1,5 +1,5 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env sh
+set -eu
 
 echo "Running mypy..."
 uv run mypy apps/api/src/five08/ apps/discord_bot/src/five08/ apps/worker/src/five08/ packages/shared/src/five08/ --ignore-missing-imports --explicit-package-bases
