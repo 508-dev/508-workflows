@@ -11,6 +11,9 @@ that most often matter in local development and deployment.
 - `LOG_LEVEL`: defaults to `INFO`.
 - `API_SHARED_SECRET`: required for protected non-dashboard API routes and for
   `./scripts/dev.sh login`.
+- `WEBHOOK_SHARED_SECRET`: optional separate secret for external `/webhooks/*`
+  callers such as DocuSeal, Google Forms, and EspoCRM. When unset, webhook
+  routes fall back to `API_SHARED_SECRET` for compatibility.
 
 ## Queue And Jobs
 

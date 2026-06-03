@@ -351,7 +351,7 @@ class ContactSelectionButton(discord.ui.Button[ContactSelectionView]):
 
             # Get the CRM cog to perform the linking
             if not self.view:
-                await interaction.followup.send("❌ View not found.")
+                await interaction.followup.send("❌ View not found.", ephemeral=True)
                 return
 
             from discord.ext import commands
@@ -360,7 +360,7 @@ class ContactSelectionButton(discord.ui.Button[ContactSelectionView]):
             assert isinstance(bot, commands.Bot)
             cog = bot.get_cog("CRMCog")
             if not cog or not isinstance(cog, CRMCog):
-                await interaction.followup.send("❌ CRM cog not found.")
+                await interaction.followup.send("❌ CRM cog not found.", ephemeral=True)
                 return
 
             # Perform the Discord linking
@@ -397,7 +397,8 @@ class ContactSelectionButton(discord.ui.Button[ContactSelectionView]):
         except Exception as e:
             logger.error(f"Error in contact selection callback: {e}")
             await interaction.followup.send(
-                "❌ An error occurred while linking the contact."
+                "❌ An error occurred while linking the contact.",
+                ephemeral=True,
             )
 
 
@@ -768,7 +769,8 @@ class MarkIdVerifiedSelectionButton(discord.ui.Button["MarkIdVerifiedSelectionVi
         except Exception as exc:
             logger.error(f"Error in ID verified selection callback: {exc}")
             await interaction.followup.send(
-                "❌ An error occurred while marking ID verification."
+                "❌ An error occurred while marking ID verification.",
+                ephemeral=True,
             )
 
 
@@ -876,7 +878,8 @@ class ReprocessResumeSelectionButton(discord.ui.Button["ReprocessResumeSelection
         except Exception as exc:
             logger.error("Error in reprocess resume selection callback: %s", exc)
             await interaction.followup.send(
-                "❌ An error occurred while handling the selection."
+                "❌ An error occurred while handling the selection.",
+                ephemeral=True,
             )
 
 
@@ -1081,7 +1084,7 @@ class ResumeConfirmationView(discord.ui.View):
         button: discord.ui.Button["ResumeConfirmationView"],
     ) -> None:
         """Proceed with the upload despite duplicate."""
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
 
         try:
             # Download file content from Discord
@@ -1098,7 +1101,9 @@ class ResumeConfirmationView(discord.ui.View):
 
             attachment_id = attachment.get("id")
             if not attachment_id:
-                await interaction.followup.send("❌ Failed to upload file to CRM.")
+                await interaction.followup.send(
+                    "❌ Failed to upload file to CRM.", ephemeral=True
+                )
                 return
 
             # Update contact's resume field (use original overwrite setting)
@@ -1125,7 +1130,7 @@ class ResumeConfirmationView(discord.ui.View):
                     inline=False,
                 )
 
-                await interaction.followup.send(embed=embed)
+                await interaction.followup.send(embed=embed, ephemeral=True)
 
                 logger.info(
                     f"Resume uploaded for {self.contact_name} (ID: {self.contact_id}) "
@@ -1133,13 +1138,15 @@ class ResumeConfirmationView(discord.ui.View):
                 )
             else:
                 await interaction.followup.send(
-                    "⚠️ File uploaded but failed to link to contact. Please check CRM manually."
+                    "⚠️ File uploaded but failed to link to contact. Please check CRM manually.",
+                    ephemeral=True,
                 )
 
         except Exception as e:
             logger.error(f"Error during confirmed resume upload: {e}")
             await interaction.followup.send(
-                "❌ An error occurred while uploading the resume."
+                "❌ An error occurred while uploading the resume.",
+                ephemeral=True,
             )
 
         # Disable all buttons
@@ -5260,7 +5267,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     metadata={"reason": "missing_query_and_skills"},
                 )
                 await interaction.followup.send(
-                    "❌ Please provide a search term or `skills:...` to search by."
+                    "❌ Please provide a search term or `skills:...` to search by.",
+                    ephemeral=True,
                 )
                 return
 
@@ -5319,7 +5327,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     )
                     await interaction.followup.send(
                         "❌ Your Discord account is not linked to a CRM contact. "
-                        "Please ask a Steering Committee member to link your account first."
+                        "Please ask a Steering Committee member to link your account first.",
+                        ephemeral=True,
                     )
                     return
 
@@ -5403,7 +5412,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     },
                 )
                 await interaction.followup.send(
-                    f"🔍 No contacts found for: {search_summary}"
+                    f"🔍 No contacts found for: {search_summary}",
+                    ephemeral=True,
                 )
                 return
 
@@ -5422,7 +5432,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                             "error": "missing_contact_id",
                         },
                     )
-                    await interaction.followup.send("❌ Contact ID not found.")
+                    await interaction.followup.send(
+                        "❌ Contact ID not found.", ephemeral=True
+                    )
                     return
 
                 full_contact = self.espo_api.request("GET", f"Contact/{contact_id}")
@@ -5436,10 +5448,11 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
 
                 if skills_count == 0:
                     await interaction.followup.send(
-                        f"ℹ️ No skills found for **{contact_name}**."
+                        f"ℹ️ No skills found for **{contact_name}**.",
+                        ephemeral=True,
                     )
                 else:
-                    await interaction.followup.send(embed=skill_embed)
+                    await interaction.followup.send(embed=skill_embed, ephemeral=True)
 
                 self._audit_command_safe(
                     interaction=interaction,
@@ -5510,9 +5523,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
 
             # Send embed with view only if there are buttons
             if view.children:
-                await interaction.followup.send(embed=embed, view=view)
+                await interaction.followup.send(embed=embed, view=view, ephemeral=True)
             else:
-                await interaction.followup.send(embed=embed)
+                await interaction.followup.send(embed=embed, ephemeral=True)
 
             self._audit_command(
                 interaction=interaction,
@@ -5536,7 +5549,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 result="error",
                 metadata={"error": str(e)},
             )
-            await interaction.followup.send(f"❌ CRM API error: {str(e)}")
+            await interaction.followup.send(
+                f"❌ CRM API error: {str(e)}", ephemeral=True
+            )
         except Exception as e:
             logger.error(f"Unexpected error in CRM search: {e}")
             self._audit_command(
@@ -5546,7 +5561,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 metadata={"error": str(e)},
             )
             await interaction.followup.send(
-                "❌ An unexpected error occurred while searching the CRM."
+                "❌ An unexpected error occurred while searching the CRM.",
+                ephemeral=True,
             )
 
     @app_commands.command(
@@ -5577,7 +5593,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 )
                 await interaction.followup.send(
                     "❌ Could not resolve a valid 508 onboarder username. "
-                    "Use a 508 username directly or a linked Discord mention."
+                    "Use a 508 username directly or a linked Discord mention.",
+                    ephemeral=True,
                 )
                 return
 
@@ -5589,7 +5606,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     result="error",
                     metadata={"contact": contact, "onboarder": onboarder_username},
                 )
-                await interaction.followup.send(f"❌ No contact found for: `{contact}`")
+                await interaction.followup.send(
+                    f"❌ No contact found for: `{contact}`", ephemeral=True
+                )
                 return
 
             if len(contacts) > 1:
@@ -5615,7 +5634,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                         value=contact_info,
                         inline=False,
                     )
-                await interaction.followup.send(embed=embed)
+                await interaction.followup.send(embed=embed, ephemeral=True)
                 self._audit_command(
                     interaction=interaction,
                     action="crm.assign_onboarder",
@@ -5637,7 +5656,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     result="error",
                     metadata={"contact": contact, "onboarder": onboarder_username},
                 )
-                await interaction.followup.send("❌ Selected contact is missing an ID.")
+                await interaction.followup.send(
+                    "❌ Selected contact is missing an ID.", ephemeral=True
+                )
                 return
 
             full_contact = self.espo_api.request("GET", f"Contact/{contact_id}")
@@ -5655,7 +5676,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     resource_id=str(contact_id),
                 )
                 await interaction.followup.send(
-                    "❌ Could not locate the `cOnboarder` field for this CRM contact."
+                    "❌ Could not locate the `cOnboarder` field for this CRM contact.",
+                    ephemeral=True,
                 )
                 return
 
@@ -5679,7 +5701,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
             await interaction.followup.send(
                 f"✅ Assigned **{onboarder_username}** as onboarder for "
-                f"**{contact_name}** (`{contact_id}`); {status_line}."
+                f"**{contact_name}** (`{contact_id}`); {status_line}.",
+                ephemeral=True,
             )
             self._audit_command(
                 interaction=interaction,
@@ -5704,7 +5727,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 result="error",
                 metadata={"contact": contact, "onboarder": onboarder, "error": str(e)},
             )
-            await interaction.followup.send(f"❌ CRM API error: {str(e)}")
+            await interaction.followup.send(
+                f"❌ CRM API error: {str(e)}", ephemeral=True
+            )
         except Exception as e:
             logger.error(f"Unexpected error in assign_onboarder: {e}")
             self._audit_command(
@@ -5714,7 +5739,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 metadata={"contact": contact, "onboarder": onboarder, "error": str(e)},
             )
             await interaction.followup.send(
-                "❌ An unexpected error occurred while assigning the onboarder."
+                "❌ An unexpected error occurred while assigning the onboarder.",
+                ephemeral=True,
             )
 
     @app_commands.command(
@@ -5757,7 +5783,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     metadata={"count": 0},
                 )
                 await interaction.followup.send(
-                    "✅ No contacts found in onboarding queue."
+                    "✅ No contacts found in onboarding queue.",
+                    ephemeral=True,
                 )
                 return
 
@@ -5785,11 +5812,14 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
             if view.total_pages > 1:
                 message = await interaction.followup.send(
-                    embed=embed, view=view, wait=True
+                    embed=embed,
+                    view=view,
+                    wait=True,
+                    ephemeral=True,
                 )
                 view._set_message(message)
             else:
-                await interaction.followup.send(embed=embed)
+                await interaction.followup.send(embed=embed, ephemeral=True)
 
         except EspoAPIError as e:
             logger.error(f"EspoCRM API error in view_onboarding_queue: {e}")
@@ -5799,7 +5829,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 result="error",
                 metadata={"error": str(e)},
             )
-            await interaction.followup.send(f"❌ CRM API error: {str(e)}")
+            await interaction.followup.send(
+                f"❌ CRM API error: {str(e)}", ephemeral=True
+            )
         except Exception as e:
             logger.error(f"Unexpected error in view_onboarding_queue: {e}")
             self._audit_command(
@@ -5809,7 +5841,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 metadata={"error": str(e)},
             )
             await interaction.followup.send(
-                "❌ An unexpected error occurred while loading onboarding queue."
+                "❌ An unexpected error occurred while loading onboarding queue.",
+                ephemeral=True,
             )
 
     @app_commands.command(
@@ -5832,7 +5865,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             embed.add_field(name="Connected as", value=user_name, inline=True)
             embed.add_field(name="Base URL", value=settings.espo_base_url, inline=True)
 
-            await interaction.followup.send(embed=embed)
+            await interaction.followup.send(embed=embed, ephemeral=True)
             self._audit_command(
                 interaction=interaction,
                 action="crm.status",
@@ -5853,7 +5886,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 description=f"Failed to connect to EspoCRM: {str(e)}",
                 color=0xFF0000,
             )
-            await interaction.followup.send(embed=embed)
+            await interaction.followup.send(embed=embed, ephemeral=True)
         except Exception as e:
             logger.error(f"Unexpected error in CRM status: {e}")
             self._audit_command(
@@ -5867,7 +5900,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 description="An unexpected error occurred while checking CRM status.",
                 color=0xFF0000,
             )
-            await interaction.followup.send(embed=embed)
+            await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(
         name="get-resume", description="Download and send a contact's resume"
@@ -5894,7 +5927,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     result="success",
                     metadata={"query": query, "contact_found": False},
                 )
-                await interaction.followup.send(f"❌ No contact found for: `{query}`")
+                await interaction.followup.send(
+                    f"❌ No contact found for: `{query}`", ephemeral=True
+                )
                 return
 
             contact = contacts[0]
@@ -5916,7 +5951,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     },
                 )
                 await interaction.followup.send(
-                    f"❌ No resume found for {contact_name}"
+                    f"❌ No resume found for {contact_name}",
+                    ephemeral=True,
                 )
                 return
 
@@ -5954,7 +5990,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 result="error",
                 metadata={"query": query, "error": str(e)},
             )
-            await interaction.followup.send(f"❌ CRM API error: {str(e)}")
+            await interaction.followup.send(
+                f"❌ CRM API error: {str(e)}", ephemeral=True
+            )
         except Exception as e:
             logger.error(f"Unexpected error in get_resume: {e}")
             self._audit_command(
@@ -5964,7 +6002,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 metadata={"query": query, "error": str(e)},
             )
             await interaction.followup.send(
-                "❌ An unexpected error occurred while fetching the resume."
+                "❌ An unexpected error occurred while fetching the resume.",
+                ephemeral=True,
             )
 
     def _is_hex_string(self, s: str) -> bool:
@@ -6268,7 +6307,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             await interaction.followup.send(
                 "❌ Invalid file type. "
                 f"Upload a {resume_config.allowed_file_extensions_label} file.\n"
-                f"You uploaded: `{attachment.filename}`"
+                f"You uploaded: `{attachment.filename}`",
+                ephemeral=True,
             )
             return False
 
@@ -6285,7 +6325,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
             await interaction.followup.send(
                 f"❌ File too large. Maximum size is {resume_config.max_file_size_mb}MB.\n"
-                f"Your file: {attachment.size / (1024 * 1024):.1f}MB"
+                f"Your file: {attachment.size / (1024 * 1024):.1f}MB",
+                ephemeral=True,
             )
             return False
 
@@ -6997,7 +7038,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 )
                 await interaction.followup.send(
                     f"ℹ️ Nothing changed. **{contact_name}** is already linked to "
-                    f"{user.mention} ({discord_display})."
+                    f"{user.mention} ({discord_display}).",
+                    ephemeral=True,
                 )
                 return True
 
@@ -7032,6 +7074,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                         user=user,
                         requester_id=interaction.user.id,
                     ),
+                    ephemeral=True,
                 )
                 return False
 
@@ -7077,7 +7120,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                         inline=True,
                     )
 
-                await interaction.followup.send(embed=embed)
+                await interaction.followup.send(embed=embed, ephemeral=True)
 
                 logger.info(
                     f"Discord user {user.name} (ID: {user.id}) linked to CRM contact "
@@ -7110,7 +7153,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     resource_id=str(contact_id),
                 )
                 await interaction.followup.send(
-                    "❌ Failed to update contact in CRM. Please try again."
+                    "❌ Failed to update contact in CRM. Please try again.",
+                    ephemeral=True,
                 )
                 return False
 
@@ -7122,7 +7166,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 result="error",
                 metadata={"linked_user_id": str(user.id), "error": str(e)},
             )
-            await interaction.followup.send(f"❌ CRM API error: {str(e)}")
+            await interaction.followup.send(
+                f"❌ CRM API error: {str(e)}", ephemeral=True
+            )
             return False
         except Exception as e:
             logger.error(f"Unexpected error in _perform_discord_linking: {e}")
@@ -7133,7 +7179,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 metadata={"linked_user_id": str(user.id), "error": str(e)},
             )
             await interaction.followup.send(
-                "❌ An unexpected error occurred while linking the user."
+                "❌ An unexpected error occurred while linking the user.",
+                ephemeral=True,
             )
             return False
 
@@ -7174,7 +7221,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             inline=False,
         )
 
-        await interaction.followup.send(embed=embed, view=view)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     def _normalize_508_username(self, value: str | None) -> str | None:
         """Normalize a 508 username candidate."""
@@ -7389,7 +7436,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     "error": "contact_id_missing",
                 },
             )
-            await interaction.followup.send("❌ Contact ID not found.")
+            await interaction.followup.send("❌ Contact ID not found.", ephemeral=True)
             return False
 
         try:
@@ -7412,7 +7459,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 resource_id=str(contact_id),
             )
             await interaction.followup.send(
-                "❌ Failed to load current verification data from CRM."
+                "❌ Failed to load current verification data from CRM.",
+                ephemeral=True,
             )
             return False
 
@@ -7470,6 +7518,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     "Select **Overwrite** only if you want to replace existing values."
                 ),
                 view=confirm_view,
+                ephemeral=True,
             )
             return False
 
@@ -7500,7 +7549,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     value=f"[View in CRM]({profile_url})",
                     inline=True,
                 )
-                await interaction.followup.send(embed=embed)
+                await interaction.followup.send(embed=embed, ephemeral=True)
 
                 self._audit_command(
                     interaction=interaction,
@@ -7530,7 +7579,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 resource_id=str(contact_id),
             )
             await interaction.followup.send(
-                "❌ Failed to update contact in CRM. Please try again."
+                "❌ Failed to update contact in CRM. Please try again.",
+                ephemeral=True,
             )
             return False
 
@@ -7549,7 +7599,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 resource_type="crm_contact",
                 resource_id=str(contact_id),
             )
-            await interaction.followup.send(f"❌ CRM API error: {str(exc)}")
+            await interaction.followup.send(
+                f"❌ CRM API error: {str(exc)}", ephemeral=True
+            )
             return False
         except Exception as exc:
             logger.error(f"Unexpected error marking ID verification: {exc}")
@@ -7567,7 +7619,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 resource_id=str(contact_id),
             )
             await interaction.followup.send(
-                "❌ An unexpected error occurred while marking ID verification."
+                "❌ An unexpected error occurred while marking ID verification.",
+                ephemeral=True,
             )
             return False
 
@@ -7615,7 +7668,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             inline=False,
         )
 
-        await interaction.followup.send(embed=embed, view=view)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     async def _show_create_sso_user_contact_choices(
         self,
@@ -8659,7 +8712,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     },
                 )
                 await interaction.followup.send(
-                    "❌ Unable to resolve verifier from `verified_by`."
+                    "❌ Unable to resolve verifier from `verified_by`.",
+                    ephemeral=True,
                 )
                 return
 
@@ -8690,7 +8744,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     },
                 )
                 await interaction.followup.send(
-                    f"❌ No contact found for: `{search_term}`"
+                    f"❌ No contact found for: `{search_term}`",
+                    ephemeral=True,
                 )
                 return
 
@@ -8748,7 +8803,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 result="denied",
                 metadata={"verified_at": verified_at, "reason": str(exc)},
             )
-            await interaction.followup.send(f"❌ {exc}")
+            await interaction.followup.send(f"❌ {exc}", ephemeral=True)
         except Exception as exc:
             logger.error(f"Unexpected error in mark_id_verified: {exc}")
             self._audit_command(
@@ -8758,7 +8813,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 metadata={"search_term": search_term, "error": str(exc)},
             )
             await interaction.followup.send(
-                "❌ An unexpected error occurred while marking ID verification."
+                "❌ An unexpected error occurred while marking ID verification.",
+                ephemeral=True,
             )
 
     @app_commands.command(
@@ -8986,7 +9042,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     metadata={"search_term": search_term, "contacts_found": 0},
                 )
                 await interaction.followup.send(
-                    f"❌ No contact found for: `{search_term}`"
+                    f"❌ No contact found for: `{search_term}`",
+                    ephemeral=True,
                 )
                 return
 
@@ -9015,7 +9072,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 await interaction.followup.send(
                     "⚠️ Multiple contacts found. Please refine your search:\n"
                     + "\n".join(lines)
-                    + suffix
+                    + suffix,
+                    ephemeral=True,
                 )
                 return
 
@@ -9044,7 +9102,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 )
                 await interaction.followup.send(
                     f"⚠️ **{contact_name}** already signed the member agreement at "
-                    f"`{signed_at}`. No DocuSeal submission was sent."
+                    f"`{signed_at}`. No DocuSeal submission was sent.",
+                    ephemeral=True,
                 )
                 return
 
@@ -9062,7 +9121,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     resource_id=contact_id,
                 )
                 await interaction.followup.send(
-                    f"❌ **{contact_name}** does not have an email address in CRM."
+                    f"❌ **{contact_name}** does not have an email address in CRM.",
+                    ephemeral=True,
                 )
                 return
 
@@ -9091,7 +9151,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
             await interaction.followup.send(
                 f"✅ Sent the member agreement to **{contact_name}** at `{contact_email}`."
-                f"{submission_label}"
+                f"{submission_label}",
+                ephemeral=True,
             )
         except ValueError as exc:
             logger.error("Member agreement command configuration/input error: %s", exc)
@@ -9101,7 +9162,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 result="error",
                 metadata={"search_term": search_term, "error": str(exc)},
             )
-            await interaction.followup.send(f"❌ {exc}")
+            await interaction.followup.send(f"❌ {exc}", ephemeral=True)
         except DocusealAPIError as exc:
             logger.error("DocuSeal API error in send_member_agreement: %s", exc)
             sanitized_error = self._sanitize_error_message_for_discord(exc)
@@ -9111,7 +9172,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 result="error",
                 metadata={"search_term": search_term, "error": sanitized_error},
             )
-            await interaction.followup.send(f"❌ DocuSeal API error: {sanitized_error}")
+            await interaction.followup.send(
+                f"❌ DocuSeal API error: {sanitized_error}", ephemeral=True
+            )
         except Exception as exc:
             logger.error("Unexpected error in send_member_agreement: %s", exc)
             self._audit_command(
@@ -9121,7 +9184,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 metadata={"search_term": search_term, "error": str(exc)},
             )
             await interaction.followup.send(
-                "❌ An unexpected error occurred while sending the member agreement."
+                "❌ An unexpected error occurred while sending the member agreement.",
+                ephemeral=True,
             )
 
     @app_commands.command(
@@ -9158,7 +9222,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     },
                 )
                 await interaction.followup.send(
-                    f"❌ No contact found for: `{search_term}`"
+                    f"❌ No contact found for: `{search_term}`",
+                    ephemeral=True,
                 )
                 return
 
@@ -9209,7 +9274,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     "error": str(e),
                 },
             )
-            await interaction.followup.send(f"❌ CRM API error: {str(e)}")
+            await interaction.followup.send(
+                f"❌ CRM API error: {str(e)}", ephemeral=True
+            )
         except Exception as e:
             logger.error(f"Unexpected error in link_discord_user: {e}")
             self._audit_command(
@@ -9223,7 +9290,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 },
             )
             await interaction.followup.send(
-                "❌ An unexpected error occurred while linking the Discord user."
+                "❌ An unexpected error occurred while linking the Discord user.",
+                ephemeral=True,
             )
 
     @app_commands.command(
@@ -9244,7 +9312,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     metadata={"reason": "not_in_guild"},
                 )
                 await interaction.followup.send(
-                    "❌ This command can only be used in a server."
+                    "❌ This command can only be used in a server.",
+                    ephemeral=True,
                 )
                 return
 
@@ -9272,7 +9341,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     metadata={"unlinked_count": 0},
                 )
                 await interaction.followup.send(
-                    "✅ **All Members Linked**\nAll Discord users with Member role are linked in the CRM!"
+                    "✅ **All Members Linked**\nAll Discord users with Member role are linked in the CRM!",
+                    ephemeral=True,
                 )
                 return
 
@@ -9293,7 +9363,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 result="error",
                 metadata={"error": str(e)},
             )
-            await interaction.followup.send(f"❌ CRM API error: {str(e)}")
+            await interaction.followup.send(
+                f"❌ CRM API error: {str(e)}", ephemeral=True
+            )
         except Exception as e:
             logger.error(f"Unexpected error in unlinked_discord_users: {e}")
             self._audit_command(
@@ -9303,7 +9375,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 metadata={"error": str(e)},
             )
             await interaction.followup.send(
-                "❌ An unexpected error occurred while checking unlinked users."
+                "❌ An unexpected error occurred while checking unlinked users.",
+                ephemeral=True,
             )
 
     async def _get_linked_discord_user_ids(self) -> set[str]:
@@ -9348,7 +9421,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
 
         # Discord message limit is 2000 characters, split if needed
         if len(message) <= 2000:
-            await interaction.followup.send(message)
+            await interaction.followup.send(message, ephemeral=True)
         else:
             # Split into multiple messages if too long
             messages = []
@@ -9369,7 +9442,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
 
             # Send all messages
             for message in messages:
-                await interaction.followup.send(message)
+                await interaction.followup.send(message, ephemeral=True)
 
     async def _find_contact_by_discord_id(
         self,
@@ -9823,7 +9896,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 },
             )
             await interaction.followup.send(
-                "You must have Steering Committee role or higher to run this."
+                "You must have Steering Committee role or higher to run this.",
+                ephemeral=True,
             )
             return
 
@@ -9848,7 +9922,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
             await interaction.followup.send(
                 "No contacts found with missing country/timezone, skills/roles, "
-                "or seniority and reprocessable profile inputs."
+                "or seniority and reprocessable profile inputs.",
+                ephemeral=True,
             )
             return
 
@@ -10041,7 +10116,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     "reason": "contact_id_missing",
                 },
             )
-            await interaction.followup.send("❌ Contact ID not found.")
+            await interaction.followup.send("❌ Contact ID not found.", ephemeral=True)
             return
 
         contact_name = str(contact.get("name", "Unknown"))
@@ -10065,7 +10140,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 resource_id=contact_id,
             )
             await interaction.followup.send(
-                f"❌ No resume found for `{contact_name}`. Upload a resume first."
+                f"❌ No resume found for `{contact_name}`. Upload a resume first.",
+                ephemeral=True,
             )
             return
 
@@ -10113,7 +10189,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     "reason": "contact_id_missing",
                 },
             )
-            await interaction.followup.send("❌ Contact ID not found.")
+            await interaction.followup.send("❌ Contact ID not found.", ephemeral=True)
             return
 
         contact_name = str(contact.get("name", "Unknown"))
@@ -10167,7 +10243,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     "stage": "upload_resume_prompt",
                 },
             )
-            await interaction.followup.send("❌ Contact ID not found.")
+            await interaction.followup.send("❌ Contact ID not found.", ephemeral=True)
             return
 
         contact_name = str(contact.get("name", "Unknown"))
@@ -10247,7 +10323,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 )
                 await interaction.followup.send(
                     "❌ Provide at least one of `github`, `linkedin`, `skills`, `rate_range`, "
-                    "`desired_hours`, `website`, `location`, or `resume`."
+                    "`desired_hours`, `website`, `location`, or `resume`.",
+                    ephemeral=True,
                 )
                 return
 
@@ -10276,7 +10353,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     },
                 )
                 await interaction.followup.send(
-                    "❌ You must have Steering Committee role or higher to update another contact."
+                    "❌ You must have Steering Committee role or higher to update another contact.",
+                    ephemeral=True,
                 )
                 return
 
@@ -10297,7 +10375,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                         },
                     )
                     await interaction.followup.send(
-                        f"❌ No contact found for: `{search_term}`"
+                        f"❌ No contact found for: `{search_term}`",
+                        ephemeral=True,
                     )
                     return
 
@@ -10314,7 +10393,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                         },
                     )
                     await interaction.followup.send(
-                        f"❌ Multiple contacts found for `{search_term}`. Please be more specific or use the contact ID."
+                        f"❌ Multiple contacts found for `{search_term}`. Please be more specific or use the contact ID.",
+                        ephemeral=True,
                     )
                     return
 
@@ -10336,7 +10416,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     )
                     await interaction.followup.send(
                         "❌ Your Discord account is not linked to a CRM contact. "
-                        "Please ask a Steering Committee member to link your account first."
+                        "Please ask a Steering Committee member to link your account first.",
+                        ephemeral=True,
                     )
                     return
 
@@ -10352,7 +10433,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                         "error": "contact_id_missing",
                     },
                 )
-                await interaction.followup.send("❌ Contact ID not found.")
+                await interaction.followup.send(
+                    "❌ Contact ID not found.", ephemeral=True
+                )
                 return
 
             contact_name = target_contact.get("name", "Unknown")
@@ -10394,7 +10477,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                         },
                     )
                     await interaction.followup.send(
-                        "❌ Invalid desired_hours. Use a number between 0-60 or a range like `0-60`."
+                        "❌ Invalid desired_hours. Use a number between 0-60 or a range like `0-60`.",
+                        ephemeral=True,
                     )
                     return
 
@@ -10419,7 +10503,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     )
                     await interaction.followup.send(
                         f"❌ Invalid website entries: {invalid_message}. "
-                        "Provide comma-separated URLs (e.g. `https://example.com, github.com/name`)."
+                        "Provide comma-separated URLs (e.g. `https://example.com, github.com/name`).",
+                        ephemeral=True,
                     )
                     return
                 if website_links:
@@ -10437,7 +10522,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                         },
                     )
                     await interaction.followup.send(
-                        "❌ Invalid website list. Provide comma-separated URLs (e.g. `https://example.com, github.com/name`)."
+                        "❌ Invalid website list. Provide comma-separated URLs (e.g. `https://example.com, github.com/name`).",
+                        ephemeral=True,
                     )
                     return
 
@@ -10458,7 +10544,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                         },
                     )
                     await interaction.followup.send(
-                        "❌ Unable to parse location. Try `City, State, Country` and optionally include `UTC-05:00` or `PST`."
+                        "❌ Unable to parse location. Try `City, State, Country` and optionally include `UTC-05:00` or `PST`.",
+                        ephemeral=True,
                     )
                     return
 
@@ -10480,7 +10567,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     )
                     await interaction.followup.send(
                         f"❌ Invalid skill entries: {invalid_message}. "
-                        "Use `skill` or `skill:1-5` (e.g. `go`, `python:4`)."
+                        "Use `skill` or `skill:1-5` (e.g. `go`, `python:4`).",
+                        ephemeral=True,
                     )
                     return
 
@@ -10503,7 +10591,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     },
                 )
                 await interaction.followup.send(
-                    "❌ No valid updatable fields were provided."
+                    "❌ No valid updatable fields were provided.",
+                    ephemeral=True,
                 )
                 return
 
@@ -10603,7 +10692,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                         value=f"[View in CRM]({profile_url})",
                         inline=True,
                     )
-                    await interaction.followup.send(embed=embed)
+                    await interaction.followup.send(embed=embed, ephemeral=True)
 
                     logger.info(
                         f"Contact updated for {contact_name} (ID: {contact_id}) fields={requested_updates} by {interaction.user.name}"
@@ -10634,7 +10723,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                         resource_id=str(contact_id),
                     )
                     await interaction.followup.send(
-                        "❌ Failed to update contact in CRM. Please try again."
+                        "❌ Failed to update contact in CRM. Please try again.",
+                        ephemeral=True,
                     )
                     return
 
@@ -10661,7 +10751,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 result="error",
                 metadata={"search_term": search_term, "error": str(e)},
             )
-            await interaction.followup.send(f"❌ CRM API error: {str(e)}")
+            await interaction.followup.send(
+                f"❌ CRM API error: {str(e)}", ephemeral=True
+            )
         except Exception as e:
             logger.error(f"Unexpected error in update_contact: {e}")
             self._audit_command(
@@ -10671,7 +10763,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 metadata={"search_term": search_term, "error": str(e)},
             )
             await interaction.followup.send(
-                "❌ An unexpected error occurred while updating the contact."
+                "❌ An unexpected error occurred while updating the contact.",
+                ephemeral=True,
             )
 
     def _parse_desired_hours(self, desired_hours: str) -> str | None:
@@ -11064,7 +11157,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     "error": "contact_id_missing",
                 },
             )
-            await interaction.followup.send("❌ Contact ID not found.")
+            await interaction.followup.send("❌ Contact ID not found.", ephemeral=True)
             return
 
         try:
@@ -11090,7 +11183,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     resource_type="crm_contact",
                     resource_id=str(contact_id),
                 )
-                await interaction.followup.send("❌ Failed to upload file to CRM.")
+                await interaction.followup.send(
+                    "❌ Failed to upload file to CRM.", ephemeral=True
+                )
                 return
 
             if not await self._update_contact_resume(
@@ -11112,7 +11207,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     resource_id=str(contact_id),
                 )
                 await interaction.followup.send(
-                    "⚠️ File uploaded, but failed to link in contact resume field."
+                    "⚠️ File uploaded, but failed to link in contact resume field.",
+                    ephemeral=True,
                 )
                 return
 
@@ -11169,7 +11265,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 resource_id=str(contact_id),
             )
             await interaction.followup.send(
-                f"❌ Failed to upload file to CRM: {str(e)}"
+                f"❌ Failed to upload file to CRM: {str(e)}",
+                ephemeral=True,
             )
 
     @app_commands.command(
@@ -11220,7 +11317,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     },
                 )
                 await interaction.followup.send(
-                    "❌ You must have Steering Committee role or higher to upload a resume for another contact."
+                    "❌ You must have Steering Committee role or higher to upload a resume for another contact.",
+                    ephemeral=True,
                 )
                 return
             if (
@@ -11239,7 +11337,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     },
                 )
                 await interaction.followup.send(
-                    "❌ You must have Steering Committee role or higher to upload a resume for another Discord user."
+                    "❌ You must have Steering Committee role or higher to upload a resume for another Discord user.",
+                    ephemeral=True,
                 )
                 return
             if not is_steering:
@@ -11268,7 +11367,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                         },
                     )
                     await interaction.followup.send(
-                        f"❌ No contact found for: `{search_term}`"
+                        f"❌ No contact found for: `{search_term}`",
+                        ephemeral=True,
                     )
                     return
                 if len(contacts) > 1:
@@ -11286,7 +11386,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     )
                     await interaction.followup.send(
                         f"⚠️ Multiple contacts found for `{search_term}`. "
-                        "Please be more specific or use the contact ID."
+                        "Please be more specific or use the contact ID.",
+                        ephemeral=True,
                     )
                     return
                 target_contact = contacts[0]
@@ -11337,6 +11438,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                         "Would you like to create a new contact for this Discord user "
                         "from the resume details?",
                         view=view,
+                        ephemeral=True,
                     )
                     return
             elif is_steering:
@@ -11434,7 +11536,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                         )
                         await interaction.followup.send(
                             "⚠️ Resume-based contact inference failed. "
-                            "Please provide `search_term` or `link_user`."
+                            "Please provide `search_term` or `link_user`.",
+                            ephemeral=True,
                         )
                     return
                 target_scope = "resume"
@@ -11456,7 +11559,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     )
                     await interaction.followup.send(
                         "❌ Your Discord account is not linked to a CRM contact. "
-                        "Please ask a Steering Committee member to link your account first."
+                        "Please ask a Steering Committee member to link your account first.",
+                        ephemeral=True,
                     )
                     return
 
@@ -11487,7 +11591,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 },
             )
             await interaction.followup.send(
-                "❌ An unexpected error occurred while uploading the resume."
+                "❌ An unexpected error occurred while uploading the resume.",
+                ephemeral=True,
             )
 
     @app_commands.command(
@@ -11519,7 +11624,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     },
                 )
                 await interaction.followup.send(
-                    "❌ You must have Steering Committee role or higher to reprocess another profile."
+                    "❌ You must have Steering Committee role or higher to reprocess another profile.",
+                    ephemeral=True,
                 )
                 return
 
@@ -11536,7 +11642,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     },
                 )
                 await interaction.followup.send(
-                    f"❌ No contact found for: `{search_term}`"
+                    f"❌ No contact found for: `{search_term}`",
+                    ephemeral=True,
                 )
                 return
 
@@ -11575,7 +11682,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 },
             )
             await interaction.followup.send(
-                "❌ An unexpected error occurred while reprocessing the profile."
+                "❌ An unexpected error occurred while reprocessing the profile.",
+                ephemeral=True,
             )
 
     @app_commands.command(
@@ -11614,7 +11722,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 },
             )
             await interaction.followup.send(
-                "An unexpected error occurred while loading bulk resume results."
+                "An unexpected error occurred while loading bulk resume results.",
+                ephemeral=True,
             )
 
     @app_commands.command(
@@ -11653,7 +11762,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 },
             )
             await interaction.followup.send(
-                "An unexpected error occurred while loading bulk profile results."
+                "An unexpected error occurred while loading bulk profile results.",
+                ephemeral=True,
             )
 
 

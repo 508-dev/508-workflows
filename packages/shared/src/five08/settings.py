@@ -54,6 +54,7 @@ class SharedSettings(BaseSettings):
         validation_alias=AliasChoices("WEB_PORT", "WEBHOOK_INGEST_PORT"),
     )
     api_shared_secret: str | None = None
+    webhook_shared_secret: str | None = None
     discord_logs_webhook_url: str | None = None
     discord_logs_webhook_wait: bool = True
     docuseal_base_url: str | None = None

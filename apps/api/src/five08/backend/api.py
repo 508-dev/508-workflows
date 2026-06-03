@@ -410,17 +410,49 @@ def _get_agent_orchestrator() -> AgentOrchestrator:
     return _AGENT_ORCHESTRATOR
 
 
-def _is_authorized(request: Request) -> bool:
-    """Validate shared API secret."""
-    if not settings.api_shared_secret:
-        logger.error("Rejecting request: API_SHARED_SECRET is not configured")
+def _is_authorized_with_secret(
+    request: Request,
+    *,
+    configured_secret: str | None,
+    setting_name: str,
+) -> bool:
+    """Validate an X-API-Secret header against one configured secret."""
+    secret = (configured_secret or "").strip()
+    if not secret:
+        logger.error("Rejecting request: %s is not configured", setting_name)
         return False
 
     provided_secret = request.headers.get("X-API-Secret", "")
-    if secrets.compare_digest(provided_secret, settings.api_shared_secret):
+    if secrets.compare_digest(provided_secret, secret):
         return True
-    logger.warning("Rejecting request: invalid X-API-Secret")
+    logger.warning("Rejecting request: invalid X-API-Secret for %s", setting_name)
     return False
+
+
+def _is_authorized(request: Request) -> bool:
+    """Validate the internal shared API secret."""
+    return _is_authorized_with_secret(
+        request,
+        configured_secret=settings.api_shared_secret,
+        setting_name="API_SHARED_SECRET",
+    )
+
+
+def _is_webhook_authorized(request: Request) -> bool:
+    """Validate the external webhook secret, with legacy API secret fallback."""
+    webhook_secret = (settings.webhook_shared_secret or "").strip()
+    if webhook_secret:
+        return _is_authorized_with_secret(
+            request,
+            configured_secret=webhook_secret,
+            setting_name="WEBHOOK_SHARED_SECRET",
+        )
+
+    return _is_authorized_with_secret(
+        request,
+        configured_secret=settings.api_shared_secret,
+        setting_name="API_SHARED_SECRET",
+    )
 
 
 def _agent_request_rate_limited(discord_user_id: str) -> bool:
@@ -2411,7 +2443,7 @@ async def health_handler(request: Request) -> JSONResponse:
 
 async def ingest_handler(request: Request, source: str) -> JSONResponse:
     """Validate and enqueue incoming webhook payloads."""
-    if not _is_authorized(request):
+    if not _is_webhook_authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     try:
@@ -2446,7 +2478,7 @@ async def ingest_handler(request: Request, source: str) -> JSONResponse:
 
 async def espocrm_webhook_handler(request: Request) -> JSONResponse:
     """Validate EspoCRM webhook payload and enqueue per-contact jobs."""
-    if not _is_authorized(request):
+    if not _is_webhook_authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     try:
@@ -5856,7 +5888,7 @@ async def dashboard_sync_people_handler(request: Request) -> JSONResponse:
 
 async def espocrm_people_sync_webhook_handler(request: Request) -> JSONResponse:
     """Queue per-contact people cache sync jobs from CRM webhook events."""
-    if not _is_authorized(request):
+    if not _is_webhook_authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     try:
@@ -5910,7 +5942,7 @@ async def docuseal_webhook_handler(request: Request) -> JSONResponse:
     Job payload contract for the queue is:
     completed_at = "YYYY-MM-DD HH:mm:ss" in UTC.
     """
-    if not _is_authorized(request):
+    if not _is_webhook_authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     try:
@@ -6027,7 +6059,7 @@ async def docuseal_webhook_handler(request: Request) -> JSONResponse:
 
 async def google_forms_intake_webhook_handler(request: Request) -> JSONResponse:
     """Validate a Google Forms intake submission and enqueue a processing job."""
-    if not _is_authorized(request):
+    if not _is_webhook_authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     try:
