@@ -189,6 +189,26 @@ def test_webhook_secret_isolated_from_internal_api_secret(
     mock_enqueue.assert_called_once()
 
 
+def test_blank_webhook_secret_falls_back_to_internal_api_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Whitespace WEBHOOK_SHARED_SECRET should behave like it is unset."""
+    monkeypatch.setattr(api.settings, "webhook_shared_secret", "  ")
+
+    with patch("five08.backend.api.enqueue_job") as mock_enqueue:
+        mock_enqueue.return_value = Mock(id="job-123")
+        response = client.post(
+            "/webhooks/github",
+            json={"id": "evt-1"},
+            headers=auth_headers,
+        )
+
+    assert response.status_code == 202
+    mock_enqueue.assert_called_once()
+
+
 def test_ingest_handler_rejects_non_object_payload(
     client: TestClient,
     auth_headers: dict[str, str],
@@ -276,6 +296,23 @@ def test_internal_api_secret_isolated_from_webhook_secret(
     assert webhook_secret_response.status_code == 401
     assert internal_secret_response.status_code == 202
     mock_enqueue.assert_called_once()
+
+
+def test_blank_internal_api_secret_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    """Whitespace API_SHARED_SECRET should not authorize protected endpoints."""
+    monkeypatch.setattr(api.settings, "api_shared_secret", "  ")
+
+    with patch("five08.backend.api.enqueue_job") as mock_enqueue:
+        response = client.post(
+            "/process-contact/c-123",
+            headers={"X-API-Secret": "  "},
+        )
+
+    assert response.status_code == 401
+    mock_enqueue.assert_not_called()
 
 
 def test_resume_extract_handler_enqueues_job(

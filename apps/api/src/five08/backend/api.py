@@ -417,12 +417,13 @@ def _is_authorized_with_secret(
     setting_name: str,
 ) -> bool:
     """Validate an X-API-Secret header against one configured secret."""
-    if not configured_secret:
+    secret = (configured_secret or "").strip()
+    if not secret:
         logger.error("Rejecting request: %s is not configured", setting_name)
         return False
 
     provided_secret = request.headers.get("X-API-Secret", "")
-    if secrets.compare_digest(provided_secret, configured_secret):
+    if secrets.compare_digest(provided_secret, secret):
         return True
     logger.warning("Rejecting request: invalid X-API-Secret for %s", setting_name)
     return False
@@ -439,10 +440,11 @@ def _is_authorized(request: Request) -> bool:
 
 def _is_webhook_authorized(request: Request) -> bool:
     """Validate the external webhook secret, with legacy API secret fallback."""
-    if settings.webhook_shared_secret:
+    webhook_secret = (settings.webhook_shared_secret or "").strip()
+    if webhook_secret:
         return _is_authorized_with_secret(
             request,
-            configured_secret=settings.webhook_shared_secret,
+            configured_secret=webhook_secret,
             setting_name="WEBHOOK_SHARED_SECRET",
         )
 
