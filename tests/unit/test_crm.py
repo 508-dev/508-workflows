@@ -13,6 +13,7 @@ from curl_cffi import CurlOpt
 from five08.discord_bot.cogs.crm import (
     CRMCog,
     DiscordLinkOverwriteConfirmationView,
+    MemberAgreementSelectionView,
     ResumeButtonView,
     ResumeConfirmationView,
     ResumeCreateContactView,
@@ -7624,6 +7625,334 @@ class TestCRMCog:
         audit_kwargs = crm_cog._audit_command.call_args.kwargs
         assert audit_kwargs["result"] == "denied"
         assert audit_kwargs["metadata"]["reason"] == "missing_email"
+
+    @pytest.mark.asyncio
+    async def test_send_member_agreement_shows_selection_view_for_multiple_contacts(
+        self, crm_cog, mock_interaction
+    ):
+        """Ambiguous contact searches should show buttons for sending to a match."""
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.id = 123
+        mock_interaction.user.roles = [steering_role]
+        crm_cog._audit_command = Mock()
+        contacts = [
+            {
+                "id": "crm-123",
+                "name": "Will Gutierrez",
+                "emailAddress": "will.gutierrez@example.com",
+                "cMemberAgreementSignedAt": None,
+            },
+            {
+                "id": "crm-456",
+                "name": "Wilson Kao",
+                "emailAddress": "wilson.kao@example.com",
+                "cMemberAgreementSignedAt": None,
+            },
+        ]
+        crm_cog._search_contacts_for_lookup = AsyncMock(return_value=contacts)
+        crm_cog._create_member_agreement_submission_for_contact = AsyncMock()
+
+        await crm_cog.send_member_agreement.callback(crm_cog, mock_interaction, "wil")
+
+        crm_cog._create_member_agreement_submission_for_contact.assert_not_awaited()
+        kwargs = mock_interaction.followup.send.call_args.kwargs
+        assert kwargs["ephemeral"] is True
+        assert kwargs["wait"] is True
+        view = kwargs["view"]
+        assert isinstance(view, MemberAgreementSelectionView)
+        labels = [item.label for item in view.children if hasattr(item, "label")]
+        assert labels == ["Will Gutierrez", "Wilson Kao"]
+        audit_kwargs = crm_cog._audit_command.call_args.kwargs
+        assert audit_kwargs["metadata"]["requires_selection"] is True
+
+    @pytest.mark.asyncio
+    async def test_send_member_agreement_marks_signed_contacts_without_buttons(
+        self, crm_cog, mock_interaction
+    ):
+        """Already signed ambiguous matches should be labeled and not selectable."""
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.id = 123
+        mock_interaction.user.roles = [steering_role]
+        crm_cog._audit_command = Mock()
+        contacts = [
+            {
+                "id": "crm-123",
+                "name": "Will Gutierrez",
+                "emailAddress": "will.gutierrez@example.com",
+                "cMemberAgreementSignedAt": None,
+            },
+            {
+                "id": "crm-456",
+                "name": "Wilson Kao",
+                "emailAddress": "wilson.kao@example.com",
+                "cMemberAgreementSignedAt": "2026-03-20 10:00:00",
+            },
+        ]
+        crm_cog._search_contacts_for_lookup = AsyncMock(return_value=contacts)
+        crm_cog._create_member_agreement_submission_for_contact = AsyncMock()
+
+        await crm_cog.send_member_agreement.callback(crm_cog, mock_interaction, "wil")
+
+        kwargs = mock_interaction.followup.send.call_args.kwargs
+        view = kwargs["view"]
+        assert isinstance(view, MemberAgreementSelectionView)
+        labels = [item.label for item in view.children if hasattr(item, "label")]
+        assert labels == ["Will Gutierrez"]
+        embed = kwargs["embed"]
+        field_values = [field.value for field in embed.fields]
+        assert any("Not signed; send/resend allowed" in value for value in field_values)
+        assert any(
+            "Already signed: `2026-03-20 10:00:00`" in value for value in field_values
+        )
+
+    @pytest.mark.asyncio
+    async def test_send_member_agreement_prioritizes_unsigned_contact_after_first_five(
+        self, crm_cog, mock_interaction
+    ):
+        """Eligible unsigned matches after the first five should still be selectable."""
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.id = 123
+        mock_interaction.user.roles = [steering_role]
+        crm_cog._audit_command = Mock()
+        contacts = [
+            {
+                "id": f"signed-{index}",
+                "name": f"Signed Contact {index}",
+                "emailAddress": f"signed{index}@example.com",
+                "cMemberAgreementSignedAt": "2026-03-20 10:00:00",
+            }
+            for index in range(1, 6)
+        ]
+        contacts.append(
+            {
+                "id": "unsigned-6",
+                "name": "Unsigned Contact",
+                "emailAddress": "unsigned@example.com",
+                "cMemberAgreementSignedAt": None,
+            }
+        )
+        crm_cog._search_contacts_for_lookup = AsyncMock(return_value=contacts)
+
+        await crm_cog.send_member_agreement.callback(crm_cog, mock_interaction, "wil")
+
+        kwargs = mock_interaction.followup.send.call_args.kwargs
+        view = kwargs["view"]
+        assert isinstance(view, MemberAgreementSelectionView)
+        labels = [item.label for item in view.children if hasattr(item, "label")]
+        assert labels == ["Unsigned Contact"]
+        embed = kwargs["embed"]
+        field_names = [field.name for field in embed.fields]
+        assert "1. Unsigned Contact" in field_names
+        tip = embed.fields[-1].value
+        assert "prioritizing unsigned contacts" in tip
+
+    @pytest.mark.asyncio
+    async def test_send_member_agreement_all_signed_has_no_button_tip(
+        self, crm_cog, mock_interaction
+    ):
+        """All-signed ambiguous matches should not tell users to click buttons."""
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.id = 123
+        mock_interaction.user.roles = [steering_role]
+        crm_cog._audit_command = Mock()
+        contacts = [
+            {
+                "id": "crm-123",
+                "name": "Will Gutierrez",
+                "emailAddress": "will.gutierrez@example.com",
+                "cMemberAgreementSignedAt": "2026-03-20 10:00:00",
+            },
+            {
+                "id": "crm-456",
+                "name": "Wilson Kao",
+                "emailAddress": "wilson.kao@example.com",
+                "cMemberAgreementSignedAt": "2026-03-21 10:00:00",
+            },
+        ]
+        crm_cog._search_contacts_for_lookup = AsyncMock(return_value=contacts)
+
+        await crm_cog.send_member_agreement.callback(crm_cog, mock_interaction, "wil")
+
+        kwargs = mock_interaction.followup.send.call_args.kwargs
+        assert "view" not in kwargs
+        assert "wait" not in kwargs
+        assert kwargs["embed"].fields[-1].value == (
+            "All matching contacts already signed. No send buttons are available."
+        )
+
+    @pytest.mark.asyncio
+    async def test_member_agreement_selection_button_sends_selected_contact(
+        self, crm_cog
+    ):
+        """Clicking a member agreement selection button should send to that contact."""
+        contact = {
+            "id": "crm-123",
+            "name": "Will Gutierrez",
+            "emailAddress": "will.gutierrez@example.com",
+        }
+        view = MemberAgreementSelectionView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            search_term="wil",
+        )
+        view.add_contact_button(contact)
+        button = view.children[0]
+        crm_cog._send_member_agreement_for_contact_flow = AsyncMock()
+
+        interaction = AsyncMock()
+        interaction.response = AsyncMock()
+        interaction.response.defer = AsyncMock()
+        interaction.followup = AsyncMock()
+        interaction.user = Mock()
+        interaction.user.id = 123
+        interaction.message = AsyncMock()
+        interaction.message.edit = AsyncMock()
+
+        await button.callback(interaction)
+
+        crm_cog._send_member_agreement_for_contact_flow.assert_awaited_once_with(
+            interaction=interaction,
+            contact=contact,
+            search_term="wil",
+        )
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        assert all(
+            item.disabled
+            for item in view.children
+            if isinstance(item, discord.ui.Button)
+        )
+        interaction.message.edit.assert_awaited_once_with(view=view)
+
+    @pytest.mark.asyncio
+    async def test_member_agreement_selection_button_audits_requester_mismatch(
+        self, crm_cog
+    ):
+        """Non-requester button clicks should be denied and audited."""
+        contact = {
+            "id": "crm-123",
+            "name": "Will Gutierrez",
+            "emailAddress": "will.gutierrez@example.com",
+        }
+        view = MemberAgreementSelectionView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            search_term="wil",
+        )
+        view.add_contact_button(contact)
+        button = view.children[0]
+        crm_cog._audit_command_safe = Mock()
+        crm_cog._send_member_agreement_for_contact_flow = AsyncMock()
+
+        interaction = AsyncMock()
+        interaction.response = AsyncMock()
+        interaction.response.send_message = AsyncMock()
+        interaction.user = Mock()
+        interaction.user.id = 456
+
+        await button.callback(interaction)
+
+        crm_cog._audit_command_safe.assert_called_once()
+        audit_kwargs = crm_cog._audit_command_safe.call_args.kwargs
+        assert audit_kwargs["result"] == "denied"
+        assert audit_kwargs["metadata"]["reason"] == "requester_mismatch"
+        assert audit_kwargs["resource_id"] == "crm-123"
+        crm_cog._send_member_agreement_for_contact_flow.assert_not_awaited()
+        interaction.response.send_message.assert_awaited_once_with(
+            "❌ Only the command requester can confirm this action.",
+            ephemeral=True,
+        )
+
+    @pytest.mark.asyncio
+    async def test_member_agreement_selection_button_audits_callback_error(
+        self, crm_cog
+    ):
+        """Unexpected button callback errors should be audited."""
+        contact = {
+            "id": "crm-123",
+            "name": "Will Gutierrez",
+            "emailAddress": "will.gutierrez@example.com",
+        }
+        view = MemberAgreementSelectionView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            search_term="wil",
+        )
+        view.add_contact_button(contact)
+        button = view.children[0]
+        crm_cog._audit_command_safe = Mock()
+        crm_cog._send_member_agreement_for_contact_flow = AsyncMock(
+            side_effect=RuntimeError("docuseal failed")
+        )
+
+        interaction = AsyncMock()
+        interaction.response = AsyncMock()
+        interaction.response.defer = AsyncMock()
+        interaction.followup = AsyncMock()
+        interaction.followup.send = AsyncMock()
+        interaction.user = Mock()
+        interaction.user.id = 123
+        interaction.message = None
+
+        await button.callback(interaction)
+
+        crm_cog._audit_command_safe.assert_called_once()
+        audit_kwargs = crm_cog._audit_command_safe.call_args.kwargs
+        assert audit_kwargs["result"] == "error"
+        assert audit_kwargs["metadata"]["stage"] == "selection_callback"
+        assert audit_kwargs["metadata"]["selected_contact_id"] == "crm-123"
+        interaction.followup.send.assert_awaited_once_with(
+            "❌ An error occurred while handling the selection.",
+            ephemeral=True,
+        )
+
+    @pytest.mark.asyncio
+    async def test_member_agreement_selection_button_rejects_duplicate_click(
+        self, crm_cog
+    ):
+        """A second member agreement selection should not send another submission."""
+        contact = {
+            "id": "crm-123",
+            "name": "Will Gutierrez",
+            "emailAddress": "will.gutierrez@example.com",
+        }
+        view = MemberAgreementSelectionView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            search_term="wil",
+        )
+        view.add_contact_button(contact)
+        button = view.children[0]
+        crm_cog._audit_command_safe = Mock()
+        crm_cog._send_member_agreement_for_contact_flow = AsyncMock()
+        assert view.try_start_selection() is True
+
+        interaction = AsyncMock()
+        interaction.response = AsyncMock()
+        interaction.response.defer = AsyncMock()
+        interaction.response.send_message = AsyncMock()
+        interaction.followup = AsyncMock()
+        interaction.user = Mock()
+        interaction.user.id = 123
+        interaction.message = AsyncMock()
+        interaction.message.edit = AsyncMock()
+
+        await button.callback(interaction)
+
+        crm_cog._send_member_agreement_for_contact_flow.assert_not_awaited()
+        crm_cog._audit_command_safe.assert_called_once()
+        audit_kwargs = crm_cog._audit_command_safe.call_args.kwargs
+        assert audit_kwargs["result"] == "denied"
+        assert audit_kwargs["metadata"]["reason"] == "selection_already_processing"
+        interaction.response.defer.assert_not_awaited()
+        interaction.response.send_message.assert_awaited_once_with(
+            "⚠️ This member agreement selection is already being processed.",
+            ephemeral=True,
+        )
+        interaction.message.edit.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_send_member_agreement_search_includes_discord_username(
