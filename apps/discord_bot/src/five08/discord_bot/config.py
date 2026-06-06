@@ -61,6 +61,62 @@ class Settings(SharedSettings):
     resume_ai_base_url: str | None = None
     resume_ai_model: str = "gpt-4.1-mini"
     resume_extractor_max_tokens: int = 2000
+    onboarding_email_smtp_server: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "ONBOARDING_EMAIL_SMTP_SERVER",
+            "SMTP_SERVER",
+            "onboarding_email_smtp_server",
+            "smtp_server",
+        ),
+    )
+    onboarding_email_smtp_port: int = Field(
+        default=465,
+        validation_alias=AliasChoices(
+            "ONBOARDING_EMAIL_SMTP_PORT",
+            "SMTP_PORT",
+            "onboarding_email_smtp_port",
+            "smtp_port",
+        ),
+    )
+    onboarding_email_smtp_use_ssl: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "ONBOARDING_EMAIL_SMTP_USE_SSL",
+            "SMTP_USE_SSL",
+            "onboarding_email_smtp_use_ssl",
+            "smtp_use_ssl",
+        ),
+    )
+    onboarding_email_smtp_starttls: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "ONBOARDING_EMAIL_SMTP_STARTTLS",
+            "SMTP_STARTTLS",
+            "onboarding_email_smtp_starttls",
+            "smtp_starttls",
+        ),
+    )
+    onboarding_email_smtp_username: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "ONBOARDING_EMAIL_SMTP_USERNAME",
+            "EMAIL_USERNAME",
+            "onboarding_email_smtp_username",
+            "email_username",
+        ),
+    )
+    onboarding_email_smtp_password: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "ONBOARDING_EMAIL_SMTP_PASSWORD",
+            "EMAIL_PASSWORD",
+            "onboarding_email_smtp_password",
+            "email_password",
+        ),
+    )
+    onboarding_email_sender_email: str = "onboarding@508.dev"
+    onboarding_email_smtp_timeout_seconds: float = 20.0
 
     # Kimai time tracking settings
     kimai_base_url: str
