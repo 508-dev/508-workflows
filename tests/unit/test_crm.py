@@ -7667,6 +7667,47 @@ class TestCRMCog:
         assert audit_kwargs["metadata"]["requires_selection"] is True
 
     @pytest.mark.asyncio
+    async def test_send_member_agreement_marks_signed_contacts_without_buttons(
+        self, crm_cog, mock_interaction
+    ):
+        """Already signed ambiguous matches should be labeled and not selectable."""
+        steering_role = Mock()
+        steering_role.name = "Steering Committee"
+        mock_interaction.user.id = 123
+        mock_interaction.user.roles = [steering_role]
+        crm_cog._audit_command = Mock()
+        contacts = [
+            {
+                "id": "crm-123",
+                "name": "Will Gutierrez",
+                "emailAddress": "will.gutierrez@gmail.com",
+                "cMemberAgreementSignedAt": None,
+            },
+            {
+                "id": "crm-456",
+                "name": "Wilson Kao",
+                "emailAddress": "lairwaves5888@gmail.com",
+                "cMemberAgreementSignedAt": "2026-03-20 10:00:00",
+            },
+        ]
+        crm_cog._search_contacts_for_lookup = AsyncMock(return_value=contacts)
+        crm_cog._create_member_agreement_submission_for_contact = AsyncMock()
+
+        await crm_cog.send_member_agreement.callback(crm_cog, mock_interaction, "wil")
+
+        kwargs = mock_interaction.followup.send.call_args.kwargs
+        view = kwargs["view"]
+        assert isinstance(view, MemberAgreementSelectionView)
+        labels = [item.label for item in view.children if hasattr(item, "label")]
+        assert labels == ["Will Gutierrez"]
+        embed = kwargs["embed"]
+        field_values = [field.value for field in embed.fields]
+        assert any("Not signed; send/resend allowed" in value for value in field_values)
+        assert any(
+            "Already signed: `2026-03-20 10:00:00`" in value for value in field_values
+        )
+
+    @pytest.mark.asyncio
     async def test_member_agreement_selection_button_sends_selected_contact(
         self, crm_cog
     ):

@@ -8812,23 +8812,43 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             name = contact.get("name", "Unknown")
             email = self._contact_preferred_email(contact) or "No email"
             contact_id = contact.get("id", "")
-            contact_info = f"📧 {email}\n🆔 ID: `{contact_id}`"
+            signed_at = self._contact_text_value(
+                contact.get(MEMBER_AGREEMENT_SIGNED_AT_FIELD)
+            )
+            agreement_status = (
+                f"✅ Already signed: `{signed_at}`"
+                if signed_at
+                else "📝 Not signed; send/resend allowed"
+            )
+            contact_info = f"📧 {email}\n🆔 ID: `{contact_id}`\n{agreement_status}"
             embed.add_field(name=f"{i}. {name}", value=contact_info, inline=True)
-            view.add_contact_button(contact)
+            if not signed_at:
+                view.add_contact_button(contact)
 
         embed.add_field(
             name="💡 Tip",
-            value="Select the contact button to continue, or rerun with a more specific term.",
+            value=(
+                "Select an unsigned contact button to continue. "
+                "Prior send requests are not tracked, so unsigned contacts can be resent."
+            ),
             inline=False,
         )
 
-        message = await interaction.followup.send(
+        has_send_options = len(view.children) > 0
+        if has_send_options:
+            message = await interaction.followup.send(
+                embed=embed,
+                view=view,
+                ephemeral=True,
+                wait=True,
+            )
+            view.set_message(message)
+            return
+
+        await interaction.followup.send(
             embed=embed,
-            view=view,
             ephemeral=True,
-            wait=True,
         )
-        view.set_message(message)
 
     @app_commands.command(
         name="mark-id-verified",
