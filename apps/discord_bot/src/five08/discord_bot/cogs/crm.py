@@ -731,12 +731,34 @@ class MemberAgreementSelectionButton(discord.ui.Button["MemberAgreementSelection
                 )
                 return
             if interaction.user.id != self.requester_id:
+                self.view.crm_cog._audit_command_safe(
+                    interaction=interaction,
+                    action="crm.send_member_agreement",
+                    result="denied",
+                    metadata={
+                        "reason": "requester_mismatch",
+                        "selected_contact_id": str(self.contact.get("id") or ""),
+                    },
+                    resource_type="crm_contact",
+                    resource_id=str(self.contact.get("id") or ""),
+                )
                 await interaction.response.send_message(
                     "❌ Only the command requester can confirm this action.",
                     ephemeral=True,
                 )
                 return
             if not self.view.try_start_selection():
+                self.view.crm_cog._audit_command_safe(
+                    interaction=interaction,
+                    action="crm.send_member_agreement",
+                    result="denied",
+                    metadata={
+                        "reason": "selection_already_processing",
+                        "selected_contact_id": str(self.contact.get("id") or ""),
+                    },
+                    resource_type="crm_contact",
+                    resource_id=str(self.contact.get("id") or ""),
+                )
                 await interaction.response.send_message(
                     "⚠️ This member agreement selection is already being processed.",
                     ephemeral=True,
@@ -763,6 +785,19 @@ class MemberAgreementSelectionButton(discord.ui.Button["MemberAgreementSelection
             )
         except Exception as exc:
             logger.error("Error in send_member_agreement selection callback: %s", exc)
+            if self.view:
+                self.view.crm_cog._audit_command_safe(
+                    interaction=interaction,
+                    action="crm.send_member_agreement",
+                    result="error",
+                    metadata={
+                        "stage": "selection_callback",
+                        "error": str(exc),
+                        "selected_contact_id": str(self.contact.get("id") or ""),
+                    },
+                    resource_type="crm_contact",
+                    resource_id=str(self.contact.get("id") or ""),
+                )
             await interaction.followup.send(
                 "❌ An error occurred while handling the selection.",
                 ephemeral=True,
@@ -8786,6 +8821,27 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         )
         view.set_message(message)
 
+    def _member_agreement_choice_contacts(
+        self, contacts: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Return up to five member-agreement choices, prioritizing unsigned contacts."""
+        unsigned_contacts = [
+            contact
+            for contact in contacts
+            if not self._contact_has_signed_member_agreement(contact)
+        ]
+        if not unsigned_contacts:
+            return contacts[:5]
+
+        signed_contacts = [
+            contact
+            for contact in contacts
+            if self._contact_has_signed_member_agreement(contact)
+        ]
+        choices = unsigned_contacts[:5]
+        choices.extend(signed_contacts[: max(0, 5 - len(choices))])
+        return choices
+
     async def _show_send_member_agreement_contact_choices(
         self,
         interaction: discord.Interaction,
@@ -8808,7 +8864,14 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             search_term=search_term,
         )
 
-        for i, contact in enumerate(contacts[:5], 1):
+        displayed_contacts = self._member_agreement_choice_contacts(contacts)
+        unsigned_count = sum(
+            1
+            for contact in contacts
+            if not self._contact_has_signed_member_agreement(contact)
+        )
+
+        for i, contact in enumerate(displayed_contacts, 1):
             name = contact.get("name", "Unknown")
             email = self._contact_preferred_email(contact) or "No email"
             contact_id = contact.get("id", "")
@@ -8825,12 +8888,21 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             if not signed_at:
                 view.add_contact_button(contact)
 
+        tip_value = (
+            "Select an unsigned contact button to continue. "
+            "Prior send requests are not tracked, so unsigned contacts can be resent."
+            if unsigned_count
+            else "All matching contacts already signed. No send buttons are available."
+        )
+        if len(contacts) > len(displayed_contacts):
+            tip_value += (
+                "\nShowing up to 5 matches, prioritizing unsigned contacts. "
+                "Refine your search for omitted matches."
+            )
+
         embed.add_field(
             name="💡 Tip",
-            value=(
-                "Select an unsigned contact button to continue. "
-                "Prior send requests are not tracked, so unsigned contacts can be resent."
-            ),
+            value=tip_value,
             inline=False,
         )
 
