@@ -736,18 +736,15 @@ class MemberAgreementSelectionButton(discord.ui.Button["MemberAgreementSelection
                     ephemeral=True,
                 )
                 return
+            if not self.view.try_start_selection():
+                await interaction.response.send_message(
+                    "⚠️ This member agreement selection is already being processed.",
+                    ephemeral=True,
+                )
+                return
 
             await interaction.response.defer(ephemeral=True)
-            await self.view.crm_cog._send_member_agreement_for_contact_flow(
-                interaction=interaction,
-                contact=self.contact,
-                search_term=self.view.search_term,
-            )
-
-            for item in self.view.children:
-                if isinstance(item, discord.ui.Button):
-                    item.disabled = True
-
+            self.view.disable_controls()
             if interaction.message:
                 try:
                     await interaction.message.edit(view=self.view)
@@ -758,6 +755,12 @@ class MemberAgreementSelectionButton(discord.ui.Button["MemberAgreementSelection
                         "Failed to update send_member_agreement selection view: %s",
                         exc,
                     )
+
+            await self.view.crm_cog._send_member_agreement_for_contact_flow(
+                interaction=interaction,
+                contact=self.contact,
+                search_term=self.view.search_term,
+            )
         except Exception as exc:
             logger.error("Error in send_member_agreement selection callback: %s", exc)
             await interaction.followup.send(
@@ -780,6 +783,7 @@ class MemberAgreementSelectionView(discord.ui.View):
         self.requester_id = requester_id
         self.search_term = search_term
         self._message: discord.Message | None = None
+        self._selection_started = False
 
     def add_contact_button(self, contact: dict[str, Any]) -> None:
         """Add a contact selection button."""
@@ -796,11 +800,22 @@ class MemberAgreementSelectionView(discord.ui.View):
         """Store the sent message so timeout can disable its controls."""
         self._message = message
 
-    async def on_timeout(self) -> None:
-        """Disable controls when the selection times out and update the message."""
+    def try_start_selection(self) -> bool:
+        """Mark this view as processing one selection if it has not started."""
+        if self._selection_started:
+            return False
+        self._selection_started = True
+        return True
+
+    def disable_controls(self) -> None:
+        """Disable all controls in the view."""
         for item in self.children:
             if isinstance(item, discord.ui.Button):
                 item.disabled = True
+
+    async def on_timeout(self) -> None:
+        """Disable controls when the selection times out and update the message."""
+        self.disable_controls()
         if self._message:
             try:
                 await self._message.edit(view=self)

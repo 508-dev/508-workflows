@@ -7710,6 +7710,46 @@ class TestCRMCog:
         interaction.message.edit.assert_awaited_once_with(view=view)
 
     @pytest.mark.asyncio
+    async def test_member_agreement_selection_button_rejects_duplicate_click(
+        self, crm_cog
+    ):
+        """A second member agreement selection should not send another submission."""
+        contact = {
+            "id": "crm-123",
+            "name": "Will Gutierrez",
+            "emailAddress": "will.gutierrez@gmail.com",
+        }
+        view = MemberAgreementSelectionView(
+            crm_cog=crm_cog,
+            requester_id=123,
+            search_term="wil",
+        )
+        view.add_contact_button(contact)
+        button = view.children[0]
+        crm_cog._send_member_agreement_for_contact_flow = AsyncMock()
+        assert view.try_start_selection() is True
+
+        interaction = AsyncMock()
+        interaction.response = AsyncMock()
+        interaction.response.defer = AsyncMock()
+        interaction.response.send_message = AsyncMock()
+        interaction.followup = AsyncMock()
+        interaction.user = Mock()
+        interaction.user.id = 123
+        interaction.message = AsyncMock()
+        interaction.message.edit = AsyncMock()
+
+        await button.callback(interaction)
+
+        crm_cog._send_member_agreement_for_contact_flow.assert_not_awaited()
+        interaction.response.defer.assert_not_awaited()
+        interaction.response.send_message.assert_awaited_once_with(
+            "⚠️ This member agreement selection is already being processed.",
+            ephemeral=True,
+        )
+        interaction.message.edit.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_send_member_agreement_search_includes_discord_username(
         self, crm_cog
     ):
