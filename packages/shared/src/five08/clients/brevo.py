@@ -78,3 +78,70 @@ class BrevoClient:
         if not isinstance(data, dict):
             raise BrevoAPIError("Brevo response payload must be a JSON object.")
         return data
+
+    def find_list_id_by_name(self, name: str) -> int | None:
+        """Find a Brevo contact list ID by exact case-insensitive name."""
+        normalized_name = name.strip().casefold()
+        if not normalized_name:
+            raise ValueError("Brevo list name must be non-empty.")
+
+        limit = 50
+        offset = 0
+        while True:
+            payload = self._get_lists_page(limit=limit, offset=offset)
+            lists = payload.get("lists", [])
+            if not isinstance(lists, list):
+                raise BrevoAPIError("Brevo lists payload must include a list array.")
+
+            for item in lists:
+                if not isinstance(item, dict):
+                    continue
+                item_name = str(item.get("name") or "").strip().casefold()
+                if item_name != normalized_name:
+                    continue
+                list_id = item.get("id")
+                if not isinstance(list_id, int):
+                    raise BrevoAPIError("Brevo list ID must be an integer.")
+                return list_id
+
+            count = payload.get("count")
+            offset += limit
+            if isinstance(count, int) and offset >= count:
+                return None
+            if len(lists) < limit:
+                return None
+
+    def _get_lists_page(self, *, limit: int, offset: int) -> dict[str, Any]:
+        headers = {
+            "Accept": "application/json",
+            "api-key": self.api_key,
+        }
+        params: dict[str, str | int] = {
+            "limit": limit,
+            "offset": offset,
+            "sort": "asc",
+        }
+        try:
+            response = requests.get(
+                f"{self.base_url}/contacts/lists",
+                headers=headers,
+                params=params,
+                timeout=self.timeout_seconds,
+            )
+        except requests.RequestException as exc:
+            raise BrevoAPIError(f"Brevo API request failed: {exc}") from exc
+
+        if response.status_code != 200:
+            raise BrevoAPIError(
+                "Brevo list lookup failed: "
+                f"status={response.status_code}, body={response.text}"
+            )
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise BrevoAPIError("Brevo response payload must be valid JSON.") from exc
+
+        if not isinstance(data, dict):
+            raise BrevoAPIError("Brevo response payload must be a JSON object.")
+        return data

@@ -61,3 +61,37 @@ def test_add_contact_to_list_raises_on_request_error() -> None:
                 email="jane@example.com",
                 list_id=4,
             )
+
+
+def test_find_list_id_by_name_gets_matching_list() -> None:
+    response = Mock()
+    response.status_code = 200
+    response.json.return_value = {
+        "count": 2,
+        "lists": [
+            {"id": 3, "name": "Other"},
+            {"id": 4, "name": "508 members"},
+        ],
+    }
+
+    with patch("five08.clients.brevo.requests.get", return_value=response) as get:
+        list_id = BrevoClient(api_key="brevo-key").find_list_id_by_name("508 Members")
+
+    get.assert_called_once_with(
+        "https://api.brevo.com/v3/contacts/lists",
+        headers={"Accept": "application/json", "api-key": "brevo-key"},
+        params={"limit": 50, "offset": 0, "sort": "asc"},
+        timeout=20.0,
+    )
+    assert list_id == 4
+
+
+def test_find_list_id_by_name_returns_none_when_missing() -> None:
+    response = Mock()
+    response.status_code = 200
+    response.json.return_value = {"count": 1, "lists": [{"id": 3, "name": "Other"}]}
+
+    with patch("five08.clients.brevo.requests.get", return_value=response):
+        list_id = BrevoClient(api_key="brevo-key").find_list_id_by_name("508 members")
+
+    assert list_id is None

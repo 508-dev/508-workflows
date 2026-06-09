@@ -35,7 +35,8 @@ def migadu_cog(mock_bot: Mock) -> MigaduCog:
         mock_settings.brevo_api_key = None
         mock_settings.brevo_api_base_url = "https://api.brevo.com/v3"
         mock_settings.brevo_api_timeout_seconds = 20.0
-        mock_settings.brevo_newsletter_list_id = 4
+        mock_settings.brevo_508_members_newsletter_list_id = None
+        mock_settings.brevo_508_members_newsletter_list_name = "508 members"
         cog = MigaduCog(mock_bot)
     cog.espo_api = Mock()
     return cog

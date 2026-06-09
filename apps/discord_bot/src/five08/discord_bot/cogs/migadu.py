@@ -226,8 +226,21 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
         client = self._brevo_client()
         if client is None:
             return "BREVO_API_KEY is not configured."
-        if settings.brevo_newsletter_list_id is None:
-            return "BREVO_NEWSLETTER_LIST_ID is not configured."
+
+        list_id = settings.brevo_508_members_newsletter_list_id
+        if list_id is None:
+            try:
+                list_id = await asyncio.to_thread(
+                    client.find_list_id_by_name,
+                    settings.brevo_508_members_newsletter_list_name,
+                )
+            except (BrevoAPIError, ValueError) as exc:
+                return f"Brevo list lookup failed: {exc}"
+        if list_id is None:
+            return (
+                "Brevo list not found: "
+                f"{settings.brevo_508_members_newsletter_list_name}"
+            )
 
         errors: list[str] = []
         seen: set[str] = set()
@@ -240,7 +253,7 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
                 await asyncio.to_thread(
                     client.add_contact_to_list,
                     email=normalized_email,
-                    list_id=settings.brevo_newsletter_list_id,
+                    list_id=list_id,
                 )
             except (BrevoAPIError, ValueError) as exc:
                 logger.warning(

@@ -1891,7 +1891,7 @@ def _account_runtime_config(
         authentik_recovery_email_stage_id="stage-1",
         outline_api_key=outline_api_key,
         brevo_api_key=brevo_api_key,
-        brevo_newsletter_list_id=4,
+        brevo_508_members_newsletter_list_id=4,
     )
 
 
@@ -2101,6 +2101,9 @@ def _install_account_tool_fakes(
         def add_contact_to_list(self, *, email: str, list_id: int) -> dict[str, Any]:
             self.subscriptions.append({"email": email, "list_id": list_id})
             return {"id": len(self.subscriptions)}
+
+        def find_list_id_by_name(self, name: str) -> int | None:
+            return 4 if name == "508 members" else None
 
     monkeypatch.setattr("five08.agent.tools.EspoClient", FakeEspoClient)
     monkeypatch.setattr("five08.agent.tools.AuthentikClient", FakeAuthentikClient)

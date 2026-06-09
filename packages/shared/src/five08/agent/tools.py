@@ -79,7 +79,8 @@ class ToolRuntimeConfig:
     brevo_api_key: str | None = None
     brevo_api_base_url: str = "https://api.brevo.com/v3"
     brevo_api_timeout_seconds: float = 20.0
-    brevo_newsletter_list_id: int | None = None
+    brevo_508_members_newsletter_list_id: int | None = None
+    brevo_508_members_newsletter_list_name: str = "508 members"
 
     @classmethod
     def from_settings(cls, settings: Any) -> "ToolRuntimeConfig":
@@ -143,8 +144,11 @@ class ToolRuntimeConfig:
                 "brevo_api_timeout_seconds",
                 20.0,
             ),
-            brevo_newsletter_list_id=getattr(
-                settings, "brevo_newsletter_list_id", None
+            brevo_508_members_newsletter_list_id=getattr(
+                settings, "brevo_508_members_newsletter_list_id", None
+            ),
+            brevo_508_members_newsletter_list_name=getattr(
+                settings, "brevo_508_members_newsletter_list_name", "508 members"
             ),
         )
 
@@ -1422,8 +1426,20 @@ class ToolRegistry:
         client = self._brevo_client()
         if client is None:
             return "BREVO_API_KEY is not configured."
-        if self.runtime_config.brevo_newsletter_list_id is None:
-            return "BREVO_NEWSLETTER_LIST_ID is not configured."
+
+        list_id = self.runtime_config.brevo_508_members_newsletter_list_id
+        if list_id is None:
+            try:
+                list_id = client.find_list_id_by_name(
+                    self.runtime_config.brevo_508_members_newsletter_list_name
+                )
+            except (BrevoAPIError, ValueError) as exc:
+                return f"Brevo list lookup failed: {_short_error(exc)}"
+        if list_id is None:
+            return (
+                "Brevo list not found: "
+                f"{self.runtime_config.brevo_508_members_newsletter_list_name}"
+            )
 
         errors: list[str] = []
         seen: set[str] = set()
@@ -1435,7 +1451,7 @@ class ToolRegistry:
             try:
                 client.add_contact_to_list(
                     email=normalized_email,
-                    list_id=self.runtime_config.brevo_newsletter_list_id,
+                    list_id=list_id,
                 )
             except (BrevoAPIError, ValueError) as exc:
                 errors.append(f"{normalized_email}: {_short_error(exc)}")
