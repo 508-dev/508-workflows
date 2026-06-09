@@ -17,6 +17,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from five08.clients.espo import EspoAPIError, EspoClient
+from five08.clients.brevo import BrevoAPIError, BrevoClient
 from five08.clients.migadu import (
     MigaduAPIError,
     MigaduClient,
@@ -55,6 +56,7 @@ class MailboxCreationOutcome:
     mailbox_name: str
     crm_contact: dict[str, Any] | None
     sync_error: str | None = None
+    newsletter_error: str | None = None
 
 
 def _truncate_discord_text(value: str, *, limit: int) -> str:
@@ -207,6 +209,47 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
             api_key=token,
             domain=self._migadu_mailbox_domain(),
         )
+
+    def _brevo_client(self) -> BrevoClient | None:
+        """Build a Brevo client when newsletter sync is configured."""
+        api_key = (settings.brevo_api_key or "").strip()
+        if not api_key:
+            return None
+        return BrevoClient(
+            api_key=api_key,
+            base_url=settings.brevo_api_base_url,
+            timeout_seconds=settings.brevo_api_timeout_seconds,
+        )
+
+    async def _add_emails_to_newsletter(self, emails: list[str]) -> str | None:
+        """Best-effort subscribe mailbox and backup addresses to Brevo."""
+        client = self._brevo_client()
+        if client is None:
+            return "BREVO_API_KEY is not configured."
+        if settings.brevo_newsletter_list_id is None:
+            return "BREVO_NEWSLETTER_LIST_ID is not configured."
+
+        errors: list[str] = []
+        seen: set[str] = set()
+        for email in emails:
+            normalized_email = email.strip().lower()
+            if not normalized_email or normalized_email in seen:
+                continue
+            seen.add(normalized_email)
+            try:
+                await asyncio.to_thread(
+                    client.add_contact_to_list,
+                    email=normalized_email,
+                    list_id=settings.brevo_newsletter_list_id,
+                )
+            except (BrevoAPIError, ValueError) as exc:
+                logger.warning(
+                    "Failed to add %s to Brevo newsletter list: %s",
+                    normalized_email,
+                    exc,
+                )
+                errors.append(f"{normalized_email}: {exc}")
+        return "; ".join(errors) if errors else None
 
     def _normalize_mailbox_request(self, mailbox_username: str) -> tuple[str, str]:
         """
@@ -580,6 +623,9 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
             name=mailbox_name,
         )
         created_address = str(mailbox.get("address") or context.mailbox_email)
+        newsletter_error = await self._add_emails_to_newsletter(
+            [created_address, backup_email]
+        )
 
         contact_to_update = pre_resolved_contact
         sync_error: str | None = None
@@ -617,6 +663,7 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
             mailbox_name=mailbox_name,
             crm_contact=contact_to_update,
             sync_error=sync_error,
+            newsletter_error=newsletter_error,
         )
 
     def _build_mailbox_embed(
@@ -648,6 +695,18 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
             embed.add_field(
                 name="CRM Sync",
                 value=outcome.sync_error,
+                inline=False,
+            )
+        if outcome.newsletter_error:
+            embed.add_field(
+                name="Newsletter",
+                value=f"Brevo subscription failed: {outcome.newsletter_error}",
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="Newsletter",
+                value="Added mailbox and backup email to Brevo.",
                 inline=False,
             )
 
@@ -754,6 +813,7 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
                         else None
                     ),
                     "crm_sync_error": outcome.sync_error,
+                    "newsletter_error": outcome.newsletter_error,
                     "mailbox_created": True,
                 },
                 resource_type="discord_command",
@@ -789,6 +849,8 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
                     else None
                 ),
                 "forwarded_to": outcome.backup_email,
+                "newsletter_subscribed": outcome.newsletter_error is None,
+                "newsletter_error": outcome.newsletter_error,
             },
             resource_type="discord_command",
         )

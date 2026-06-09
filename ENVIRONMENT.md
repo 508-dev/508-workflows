@@ -161,6 +161,9 @@ current precedence rules.
 
 - `Required for /create-mailbox and /create-user-accounts`: `MIGADU_API_USER`, `MIGADU_API_KEY`
 - `Optional`: `MIGADU_MAILBOX_DOMAIN` (default: `508.dev`)
+- `Optional for Brevo newsletter sync`: `BREVO_API_KEY`
+- `Optional for Brevo newsletter sync`: `BREVO_NEWSLETTER_LIST_ID` (set to the production Brevo newsletter list ID)
+- Note: mailbox and backup email subscription to Brevo is best effort. Failures are reported as warnings and do not block mailbox or account creation.
 
 ## Authentik SSO Provisioning
 

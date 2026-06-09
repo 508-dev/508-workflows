@@ -22,6 +22,7 @@ from discord.ext import commands
 
 from five08.discord_bot.config import settings
 from five08.clients.authentik import AuthentikAPIError, AuthentikClient
+from five08.clients.brevo import BrevoAPIError, BrevoClient
 from five08.clients import espo
 from five08.clients.docuseal import (
     DocusealAPIError,
@@ -133,10 +134,12 @@ class MailboxProvisioningPartialError(RuntimeError):
         *,
         mailbox_email: str,
         partial_success: str,
+        newsletter_error: str | None = None,
     ) -> None:
         super().__init__(message)
         self.mailbox_email = mailbox_email
         self.partial_success = partial_success
+        self.newsletter_error = newsletter_error
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +150,7 @@ class MailboxProvisioningResult:
     created: bool
     crm_updated: bool
     backup_email: str
+    newsletter_error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -3815,6 +3819,47 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             api_key=api_key,
             domain=self._migadu_mailbox_domain(),
         )
+
+    def _brevo_client(self) -> BrevoClient | None:
+        """Build a Brevo client when newsletter sync is configured."""
+        api_key = self._contact_text_value(settings.brevo_api_key)
+        if not api_key:
+            return None
+        return BrevoClient(
+            api_key=api_key,
+            base_url=settings.brevo_api_base_url,
+            timeout_seconds=settings.brevo_api_timeout_seconds,
+        )
+
+    async def _add_emails_to_newsletter(self, emails: list[str]) -> str | None:
+        """Best-effort subscribe mailbox and backup addresses to Brevo."""
+        client = self._brevo_client()
+        if client is None:
+            return "BREVO_API_KEY is not configured."
+        if settings.brevo_newsletter_list_id is None:
+            return "BREVO_NEWSLETTER_LIST_ID is not configured."
+
+        errors: list[str] = []
+        seen: set[str] = set()
+        for email in emails:
+            normalized_email = email.strip().lower()
+            if not normalized_email or normalized_email in seen:
+                continue
+            seen.add(normalized_email)
+            try:
+                await asyncio.to_thread(
+                    client.add_contact_to_list,
+                    email=normalized_email,
+                    list_id=settings.brevo_newsletter_list_id,
+                )
+            except (BrevoAPIError, ValueError) as exc:
+                logger.warning(
+                    "Failed to add %s to Brevo newsletter list: %s",
+                    normalized_email,
+                    exc,
+                )
+                errors.append(f"{normalized_email}: {exc}")
+        return "; ".join(errors) if errors else None
 
     def _normalize_mailbox_request(self, mailbox_username: str) -> tuple[str, str]:
         """Normalize a bare or full 508 mailbox request to email and local-part."""
@@ -8284,6 +8329,12 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 created=False,
                 crm_updated=False,
                 backup_email="",
+                newsletter_error=await self._add_emails_to_newsletter(
+                    [
+                        existing_email,
+                        self._contact_text_value(contact.get("emailAddress")) or "",
+                    ]
+                ),
             )
 
         backup_email = self._normalize_full_email(
@@ -8307,6 +8358,10 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 partial_success="mailbox_created_address_mismatch",
             )
 
+        newsletter_error = await self._add_emails_to_newsletter(
+            [target_email, backup_email]
+        )
+
         try:
             await asyncio.to_thread(
                 self.espo_api.request,
@@ -8319,6 +8374,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 str(exc),
                 mailbox_email=target_email,
                 partial_success="mailbox_created_crm_update_failed",
+                newsletter_error=newsletter_error,
             ) from exc
         contact["c508Email"] = target_email
 
@@ -8327,6 +8383,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             created=True,
             crm_updated=True,
             backup_email=backup_email,
+            newsletter_error=newsletter_error,
         )
 
     async def _invite_outline_user_for_contact(
@@ -8564,22 +8621,30 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     "mailbox_username": mailbox_username,
                     "mailbox_email": exc.mailbox_email,
                     "partial_success": exc.partial_success,
+                    "newsletter_error": exc.newsletter_error,
                     "error": message,
                 },
+            )
+            newsletter_line = (
+                f"\nNewsletter: Brevo subscription failed: `{exc.newsletter_error}`"
+                if exc.newsletter_error
+                else "\nNewsletter: added mailbox and backup email to Brevo."
             )
             if exc.partial_success == "mailbox_created_crm_update_failed":
                 await interaction.followup.send(
                     "⚠️ Created the mailbox, but failed to update CRM `c508Email`.\n"
                     f"Email: `{exc.mailbox_email}`\n"
                     f"Error: `{message}`\n"
-                    "SSO provisioning and Outline invite were not started.",
+                    "SSO provisioning and Outline invite were not started."
+                    f"{newsletter_line}",
                     ephemeral=True,
                 )
             else:
                 await interaction.followup.send(
                     f"⚠️ {message}\n"
                     f"Created mailbox: `{exc.mailbox_email}`\n"
-                    "SSO provisioning and Outline invite were not started.",
+                    "SSO provisioning and Outline invite were not started."
+                    f"{newsletter_line}",
                     ephemeral=True,
                 )
         except SSOProvisioningPartialError as exc:
@@ -8704,6 +8769,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     "sso_created": result.sso.created,
                     "sso_crm_updated": result.sso.crm_updated,
                     "outline_invited": result.outline_invited,
+                    "newsletter_subscribed": result.mailbox.newsletter_error is None,
+                    "newsletter_error": result.mailbox.newsletter_error,
                     "recovery_email_error": result.sso.recovery_email_error,
                 },
                 resource_type="crm_contact",
@@ -8720,6 +8787,15 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 f"(user ID `{result.sso.user_id}`).",
                 "Outline invite: sent.",
             ]
+            if result.mailbox.newsletter_error is None:
+                message_lines.append(
+                    "Newsletter: added mailbox and backup email to Brevo."
+                )
+            else:
+                message_lines.append(
+                    "Newsletter: Brevo subscription failed: "
+                    f"`{result.mailbox.newsletter_error}`"
+                )
             if result.sso.created:
                 if result.sso.recovery_email_error is None:
                     message_lines.append("SSO recovery email: sent.")

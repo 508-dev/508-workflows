@@ -79,6 +79,10 @@ class SharedSettings(BaseSettings):
     outline_base_url: str = "https://app.getoutline.com"
     outline_api_key: str | None = None
     outline_api_timeout_seconds: float = 20.0
+    brevo_api_key: str | None = None
+    brevo_api_base_url: str = "https://api.brevo.com/v3"
+    brevo_api_timeout_seconds: float = 20.0
+    brevo_newsletter_list_id: int | None = Field(default=None, ge=1)
 
     model_config = SettingsConfigDict(
         env_file=".env",

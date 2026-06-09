@@ -17,6 +17,7 @@ from five08.agent.models import (
     RiskLevel,
 )
 from five08.clients.authentik import AuthentikAPIError, AuthentikClient
+from five08.clients.brevo import BrevoAPIError, BrevoClient
 from five08.clients.docuseal import create_member_agreement_submission
 from five08.clients.espo import EspoAPIError, EspoClient
 from five08.clients.github import GitHubClient
@@ -75,6 +76,10 @@ class ToolRuntimeConfig:
     outline_base_url: str = "https://app.getoutline.com"
     outline_api_key: str | None = None
     outline_api_timeout_seconds: float = 20.0
+    brevo_api_key: str | None = None
+    brevo_api_base_url: str = "https://api.brevo.com/v3"
+    brevo_api_timeout_seconds: float = 20.0
+    brevo_newsletter_list_id: int | None = None
 
     @classmethod
     def from_settings(cls, settings: Any) -> "ToolRuntimeConfig":
@@ -126,6 +131,20 @@ class ToolRuntimeConfig:
                 settings,
                 "outline_api_timeout_seconds",
                 20.0,
+            ),
+            brevo_api_key=getattr(settings, "brevo_api_key", None),
+            brevo_api_base_url=getattr(
+                settings,
+                "brevo_api_base_url",
+                "https://api.brevo.com/v3",
+            ),
+            brevo_api_timeout_seconds=getattr(
+                settings,
+                "brevo_api_timeout_seconds",
+                20.0,
+            ),
+            brevo_newsletter_list_id=getattr(
+                settings, "brevo_newsletter_list_id", None
             ),
         )
 
@@ -1389,7 +1408,45 @@ class ToolRegistry:
             ),
         )
 
-    def _create_migadu_mailbox(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    def _brevo_client(self) -> BrevoClient | None:
+        api_key = _optional_str(self.runtime_config.brevo_api_key)
+        if api_key is None:
+            return None
+        return BrevoClient(
+            api_key=api_key,
+            base_url=self.runtime_config.brevo_api_base_url,
+            timeout_seconds=self.runtime_config.brevo_api_timeout_seconds,
+        )
+
+    def _add_emails_to_newsletter(self, emails: list[str]) -> str | None:
+        client = self._brevo_client()
+        if client is None:
+            return "BREVO_API_KEY is not configured."
+        if self.runtime_config.brevo_newsletter_list_id is None:
+            return "BREVO_NEWSLETTER_LIST_ID is not configured."
+
+        errors: list[str] = []
+        seen: set[str] = set()
+        for email in emails:
+            normalized_email = email.strip().lower()
+            if not normalized_email or normalized_email in seen:
+                continue
+            seen.add(normalized_email)
+            try:
+                client.add_contact_to_list(
+                    email=normalized_email,
+                    list_id=self.runtime_config.brevo_newsletter_list_id,
+                )
+            except (BrevoAPIError, ValueError) as exc:
+                errors.append(f"{normalized_email}: {_short_error(exc)}")
+        return "; ".join(errors) if errors else None
+
+    def _create_migadu_mailbox(
+        self,
+        arguments: dict[str, Any],
+        *,
+        subscribe_newsletter: bool = True,
+    ) -> dict[str, Any]:
         local_part = str(arguments.get("local_part") or "").strip().lower()
         backup_email = _normalize_full_email(
             arguments.get("backup_email"),
@@ -1398,13 +1455,25 @@ class ToolRegistry:
         name = str(arguments.get("name") or "").strip()
         if not local_part or not backup_email or not name:
             raise ValueError("Mailbox local_part, backup_email, and name are required")
-        return self._migadu_client().create_mailbox(
+        mailbox = self._migadu_client().create_mailbox(
             MigaduMailboxCreateRequest(
                 local_part=local_part,
                 backup_email=backup_email,
                 name=name,
             )
         )
+        if subscribe_newsletter:
+            mailbox_email = str(mailbox.get("address") or "").strip().lower()
+            if not mailbox_email:
+                domain = normalize_migadu_mailbox_domain(
+                    self.runtime_config.migadu_mailbox_domain
+                )
+                mailbox_email = f"{local_part}@{domain}"
+            mailbox["newsletter_error"] = self._add_emails_to_newsletter(
+                [mailbox_email, backup_email]
+            )
+            mailbox["newsletter_subscribed"] = mailbox["newsletter_error"] is None
+        return mailbox
 
     def _create_migadu_mailbox_for_contact(
         self,
@@ -1427,6 +1496,9 @@ class ToolRegistry:
                 created=False,
                 crm_updated=False,
                 backup_email="",
+                newsletter_error=self._add_emails_to_newsletter(
+                    [existing_email, _optional_str(contact.get("emailAddress")) or ""]
+                ),
             )
 
         backup_email = _normalize_full_email(
@@ -1439,7 +1511,8 @@ class ToolRegistry:
                 "local_part": local_part,
                 "backup_email": backup_email,
                 "name": contact_name,
-            }
+            },
+            subscribe_newsletter=False,
         )
         created_address = str(mailbox.get("address") or target_email).strip().lower()
         if created_address != target_email:
@@ -1457,6 +1530,8 @@ class ToolRegistry:
             )
             raise ToolPartialSuccessError(message, result)
 
+        newsletter_error = self._add_emails_to_newsletter([target_email, backup_email])
+
         try:
             self._espo_client().update_contact(contact_id, {"c508Email": target_email})
         except EspoAPIError as exc:
@@ -1467,6 +1542,7 @@ class ToolRegistry:
                 backup_email=backup_email,
                 partial_success="mailbox_created_crm_update_failed",
                 error=_short_error(exc),
+                newsletter_error=newsletter_error,
             )
             raise ToolPartialSuccessError(
                 "Mailbox was created, but updating CRM c508Email failed.",
@@ -1478,6 +1554,7 @@ class ToolRegistry:
             created=True,
             crm_updated=True,
             backup_email=backup_email,
+            newsletter_error=newsletter_error,
         )
 
     @staticmethod
@@ -1489,12 +1566,15 @@ class ToolRegistry:
         backup_email: str,
         partial_success: str | None = None,
         error: str | None = None,
+        newsletter_error: str | None = None,
     ) -> dict[str, Any]:
         result: dict[str, Any] = {
             "email": email,
             "created": created,
             "crm_updated": crm_updated,
             "backup_email": backup_email,
+            "newsletter_subscribed": newsletter_error is None,
+            "newsletter_error": newsletter_error,
         }
         if partial_success is not None:
             result["partial_success"] = partial_success

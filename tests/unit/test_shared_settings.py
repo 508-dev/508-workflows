@@ -99,6 +99,8 @@ def test_shared_settings_expose_agent_external_tool_credentials() -> None:
         migadu_api_user="migadu-user",
         migadu_api_key="migadu-key",
         migadu_mailbox_domain="mail.example.com",
+        brevo_api_key="brevo-key",
+        brevo_newsletter_list_id=4,
     )
 
     runtime_config = ToolRuntimeConfig.from_settings(settings)
@@ -107,6 +109,8 @@ def test_shared_settings_expose_agent_external_tool_credentials() -> None:
     assert runtime_config.migadu_api_user == "migadu-user"
     assert runtime_config.migadu_api_key == "migadu-key"
     assert runtime_config.migadu_mailbox_domain == "mail.example.com"
+    assert runtime_config.brevo_api_key == "brevo-key"
+    assert runtime_config.brevo_newsletter_list_id == 4
 
 
 def test_shared_settings_docuseal_template_id_accepts_numeric_string() -> None:
