@@ -1,5 +1,7 @@
 """Unit tests for dashboard-managed runtime configuration."""
 
+from pathlib import Path
+
 import pytest
 
 from five08.runtime_config import (
@@ -141,3 +143,56 @@ def test_startup_bound_espo_settings_are_restart_required() -> None:
     assert api_key_definition is not None
     assert base_url_definition.restart_required is True
     assert api_key_definition.restart_required is True
+
+
+def test_runtime_config_list_marks_falsy_numeric_values_as_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    definition = runtime_config_definition_for_key("CRM_SYNC_INTERVAL_SECONDS")
+    assert definition is not None
+    monkeypatch.setenv("RUNTIME_CONFIG_TEST_ENABLE", "true")
+    monkeypatch.setattr(
+        "five08.runtime_config._load_db_values",
+        lambda settings: {definition.key: "0"},
+    )
+    monkeypatch.setattr("five08.runtime_config._parse_dotenv_keys", lambda: {})
+
+    settings = WorkerSettings(espo_base_url="", espo_api_key="")
+    items = list_runtime_config(settings)
+    item = next(entry for entry in items if entry["key"] == definition.key)
+
+    assert item["source"] == "database"
+    assert item["configured"] is True
+    assert item["value"] == 0
+
+
+def test_parse_dotenv_keys_reads_env_file_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from five08 import runtime_config
+
+    runtime_config._parse_dotenv_keys_cached.cache_clear()
+    env_path = tmp_path / ".env"
+    env_path.write_text("OPENAI_API_KEY=from-dotenv\n", encoding="utf-8")
+    read_count = 0
+    original_read_text = Path.read_text
+
+    def counted_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        nonlocal read_count
+        if self == env_path:
+            read_count += 1
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counted_read_text)
+
+    path_str = str(env_path)
+    assert (
+        runtime_config._parse_dotenv_keys_cached(path_str)["OPENAI_API_KEY"]
+        == "from-dotenv"
+    )
+    assert (
+        runtime_config._parse_dotenv_keys_cached(path_str)["OPENAI_API_KEY"]
+        == "from-dotenv"
+    )
+    assert read_count == 1

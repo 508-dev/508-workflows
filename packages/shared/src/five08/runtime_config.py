@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 import time
+from functools import lru_cache
 from base64 import urlsafe_b64encode
 from dataclasses import dataclass
 from pathlib import Path
@@ -590,7 +591,9 @@ def runtime_config_definition_for_attr(attr: str) -> RuntimeConfigDefinition | N
     return _DEFINITIONS_BY_ATTR.get(attr)
 
 
-def _parse_dotenv_keys(path: Path = Path(".env")) -> dict[str, str]:
+@lru_cache(maxsize=1)
+def _parse_dotenv_keys_cached(path_str: str) -> dict[str, str]:
+    path = Path(path_str)
     if not path.exists():
         return {}
     parsed: dict[str, str] = {}
@@ -607,6 +610,10 @@ def _parse_dotenv_keys(path: Path = Path(".env")) -> dict[str, str]:
     except OSError:
         return {}
     return parsed
+
+
+def _parse_dotenv_keys(path: Path = Path(".env")) -> dict[str, str]:
+    return _parse_dotenv_keys_cached(str(path))
 
 
 def env_value_for_definition(definition: RuntimeConfigDefinition) -> str | None:
@@ -736,8 +743,8 @@ def resolve_runtime_setting_value(
     definition = runtime_config_definition_for_attr(attr)
     if (
         definition is None
-        or definition_is_env_locked(definition)
         or not runtime_config_db_overlay_enabled()
+        or definition_is_env_locked(definition)
     ):
         return default_value
     raw_value = _load_db_values(settings).get(definition.key)
@@ -766,7 +773,12 @@ def list_runtime_config(settings: Any) -> list[dict[str, object]]:
             source = "env"
         elif db_value is not None:
             source = "database"
-        configured = bool(str(effective or "").strip())
+        configured = (
+            env_locked
+            or db_value is not None
+            or definition.value_type in {"bool", "int", "float"}
+            or bool(str(effective or "").strip())
+        )
         item: dict[str, object] = {
             "key": definition.key,
             "label": definition.label,
