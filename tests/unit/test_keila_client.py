@@ -141,6 +141,47 @@ def test_upsert_active_contact_updates_existing_contact_without_status() -> None
     assert result == {"id": "contact-1"}
 
 
+def test_upsert_active_contact_preserves_existing_contact_data() -> None:
+    existing = Mock()
+    existing.status_code = 200
+    existing.content = (
+        b'{"data":{"id":"contact-1","status":"active",'
+        b'"data":{"form":"member-intake","audiences":["old"]}}}'
+    )
+    existing.json.return_value = {
+        "data": {
+            "id": "contact-1",
+            "status": "active",
+            "data": {"form": "member-intake", "audiences": ["old"]},
+        }
+    }
+    updated = Mock()
+    updated.status_code = 200
+    updated.content = b'{"data":{"id":"contact-1"}}'
+    updated.json.return_value = {"data": {"id": "contact-1"}}
+
+    with patch(
+        "five08.clients.keila.requests.request",
+        side_effect=[existing, updated],
+    ) as request:
+        result = KeilaClient(api_key="keila-key").upsert_active_contact(
+            email="jane@example.com",
+            data={"audiences": ["508_members"], "mailbox_email": "jane@example.com"},
+        )
+
+    assert request.call_args_list[1].kwargs["json"] == {
+        "data": {
+            "email": "jane@example.com",
+            "data": {
+                "form": "member-intake",
+                "audiences": ["508_members"],
+                "mailbox_email": "jane@example.com",
+            },
+        }
+    }
+    assert result == {"id": "contact-1"}
+
+
 def test_upsert_active_contact_requires_existing_contact_id() -> None:
     existing = Mock()
     existing.status_code = 200

@@ -33,8 +33,8 @@ class Settings(SharedSettings):
     healthcheck_port: int = 3000
 
     # CRM/EspoCRM settings
-    espo_api_key: str
-    espo_base_url: str
+    espo_api_key: str = ""
+    espo_base_url: str = ""
     discord_server_id: str | None = None
     backend_api_base_url: str = "http://127.0.0.1:8090"
     audit_api_base_url: str | None = None
@@ -61,10 +61,6 @@ class Settings(SharedSettings):
     resume_ai_base_url: str | None = None
     resume_ai_model: str = "gpt-4.1-mini"
     resume_extractor_max_tokens: int = 2000
-
-    # Kimai time tracking settings
-    kimai_base_url: str
-    kimai_api_token: str
 
     @property
     def discord_sendmsg_character_limit(self) -> int:

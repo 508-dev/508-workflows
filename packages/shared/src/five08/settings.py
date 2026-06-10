@@ -63,8 +63,6 @@ class SharedSettings(BaseSettings):
     github_api_token: str | None = None
     github_default_repo: str | None = None
     github_allowed_repos: str = ""
-    kimai_base_url: str | None = None
-    kimai_api_token: str | None = None
     erpnext_base_url: str | None = None
     erpnext_api_key: str | None = None
     erpnext_api_timeout_seconds: float = 20.0
@@ -101,6 +99,17 @@ class SharedSettings(BaseSettings):
         extra="ignore",
         populate_by_name=True,
     )
+
+    def __getattribute__(self, name: str) -> object:
+        value = super().__getattribute__(name)
+        if name.startswith("_"):
+            return value
+        try:
+            from five08.runtime_config import resolve_runtime_setting_value
+
+            return resolve_runtime_setting_value(self, name, value)
+        except ImportError:
+            return value
 
     @field_validator("docuseal_member_agreement_template_id", mode="before")
     @classmethod

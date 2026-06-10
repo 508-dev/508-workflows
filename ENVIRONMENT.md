@@ -161,10 +161,11 @@ current precedence rules.
 
 - `Required for /create-mailbox and /create-user-accounts`: `MIGADU_API_USER`, `MIGADU_API_KEY`
 - `Optional`: `MIGADU_MAILBOX_DOMAIN` (default: `508.dev`)
+- Newsletter sync settings are normally set from the admin dashboard configuration page. A non-empty env or `.env` value locks the matching dashboard field.
 - `Optional for Brevo newsletter sync`: `BREVO_API_KEY`
 - `Optional`: `BREVO_API_BASE_URL` (default: `https://api.brevo.com/v3`)
 - `Optional`: `BREVO_API_TIMEOUT_SECONDS` (default: `20.0`)
-- `Optional for Brevo newsletter sync`: `BREVO_508_MEMBERS_NEWSLETTER_LIST_ID` (explicit production Brevo list ID override; production should set `4` for the 508 members list)
+- `Optional for Brevo newsletter sync`: `BREVO_508_MEMBERS_NEWSLETTER_LIST_ID` (explicit Brevo list ID override; use `4` for the 508 members list when setting it directly)
 - `Optional`: `BREVO_508_MEMBERS_NEWSLETTER_LIST_NAME` (default: `508 members`; used to look up the list ID when the explicit ID is unset)
 - `Optional for Keila contact sync`: `KEILA_API_KEY`
 - `Optional`: `KEILA_API_BASE_URL` (default: `https://app.keila.io`)
@@ -195,7 +196,3 @@ current precedence rules.
 - `Optional`: `AUDIT_API_TIMEOUT_SECONDS` (default: `2.0`)
 - `Optional`: `DISCORD_LOGS_WEBHOOK_URL` (if set, command and job events are posted to this Discord webhook)
 - `Optional`: `DISCORD_LOGS_WEBHOOK_WAIT` (default: `true`; appends `wait=true` unless already present in the webhook URL)
-
-## Kimai (Legacy/Deprecating)
-
-- `Currently required by config model`: `KIMAI_BASE_URL`, `KIMAI_API_TOKEN`

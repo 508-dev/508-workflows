@@ -11,9 +11,32 @@ that most often matter in local development and deployment.
 - `LOG_LEVEL`: defaults to `INFO`.
 - `API_SHARED_SECRET`: required for protected non-dashboard API routes and for
   `./scripts/dev.sh login`.
+- `CONFIG_SECRET_KEY`: environment or `.env` key used to encrypt secret values
+  saved from the admin dashboard configuration page. This key is not
+  dashboard-managed, and dashboard-managed secret saves are rejected when it is
+  unset.
 - `WEBHOOK_SHARED_SECRET`: optional separate secret for external `/webhooks/*`
   callers such as DocuSeal, Google Forms, and EspoCRM. When unset, webhook
   routes fall back to `API_SHARED_SECRET` for compatibility.
+
+## Admin Dashboard Configuration
+
+The admin dashboard can store a small allowlist of movable integration
+credentials and business knobs in Postgres. Non-empty env or `.env` values
+always win and appear as environment-locked in the dashboard. If no env value is
+present, the database value overrides the code default.
+
+Secret values saved from the dashboard are encrypted before storage using
+`CONFIG_SECRET_KEY`. API responses never include full secret values. Database
+secrets return configured state and a short first/last-character mask for
+confirmation; env and `.env` secrets return only configured state.
+
+Core bootstrap systems such as EspoCRM, Authentik, and Migadu remain env-managed
+and are intentionally not dashboard-configurable.
+
+Newsletter sync settings are normally set from the admin dashboard
+configuration page. A non-empty env or `.env` value locks the matching
+dashboard field.
 
 ## Queue And Jobs
 
@@ -188,9 +211,24 @@ Agent model base URLs must be HTTPS endpoints on allowed provider hosts, except
 the internal Docker-network Bifrost URL `http://bifrost:8080/openai` is allowed
 for same-host deployments.
 
-## Legacy/Deprecating Integrations
+## Migadu Mailbox And Newsletter Sync
 
-- `KIMAI_BASE_URL`
-- `KIMAI_API_TOKEN`
+- `MIGADU_API_USER`, `MIGADU_API_KEY`: required for `/create-mailbox` and `/create-user-accounts`.
+- `MIGADU_MAILBOX_DOMAIN`: optional, defaults to `508.dev`.
+- `BREVO_API_KEY`: optional for Brevo newsletter sync.
+- `BREVO_API_BASE_URL`: optional, defaults to `https://api.brevo.com/v3`.
+- `BREVO_API_TIMEOUT_SECONDS`: optional, defaults to `20.0`.
+- `BREVO_508_MEMBERS_NEWSLETTER_LIST_ID`: optional explicit Brevo list ID override; use `4` for the 508 members list when setting it directly.
+- `BREVO_508_MEMBERS_NEWSLETTER_LIST_NAME`: optional, defaults to `508 members` and is used to look up the list ID when the explicit ID is unset.
+- `KEILA_API_KEY`: optional for Keila contact sync.
+- `KEILA_API_BASE_URL`: optional, defaults to `https://app.keila.io`.
+- `KEILA_API_TIMEOUT_SECONDS`: optional, defaults to `20.0`.
+- `NEWSLETTER_SYNC_ENABLED`: optional, defaults to `true`; dashboard changes require an API restart because the scheduler starts at startup.
+- `NEWSLETTER_SYNC_INTERVAL_SECONDS`: optional, defaults to `604800`; dashboard changes require an API restart because the scheduler sleep interval is startup-bound.
+- `NEWSLETTER_SYNC_EXCLUDED_MAILBOXES`: optional comma-separated system mailboxes to skip during Migadu resync.
 
-Kimai settings are still required by the current config model.
+Mailbox and backup email subscription to configured newsletter tools is best
+effort. Failures are reported as warnings and do not block mailbox or account
+creation. The periodic sync uses Migadu mailboxes and password recovery emails
+as the source of truth for `@508.dev`, skips configured system mailboxes, and
+does not re-add provider-suppressed contacts.

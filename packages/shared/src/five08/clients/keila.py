@@ -74,6 +74,11 @@ class KeilaClient:
                 f"Existing Keila contact {normalized_email} missing id."
             )
         contact_id = str(contact_id_value)
+        existing_data = existing.get("data")
+        payload["data"] = {
+            **(existing_data if isinstance(existing_data, dict) else {}),
+            **(data or {}),
+        }
         payload.pop("status", None)
         return (
             self._request(

@@ -962,4 +962,12 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
 
 async def setup(bot: commands.Bot) -> None:
     """Add the Migadu cog to the bot."""
+    if (
+        not (settings.espo_base_url or "").strip()
+        or not (settings.espo_api_key or "").strip()
+    ):
+        logger.warning(
+            "Migadu cog not loaded: missing ESPO_BASE_URL and/or ESPO_API_KEY"
+        )
+        return
     await bot.add_cog(MigaduCog(bot))
