@@ -586,6 +586,30 @@ class OnboardingEmailCog(DiscordAuditCogMixin, commands.Cog):
         recipient_email: str | None,
     ) -> list[dict[str, Any]]:
         filters: list[dict[str, Any]] = []
+        search_term = candidate_name.strip()
+        if search_term:
+            filters.append(
+                {
+                    "type": "contains",
+                    "attribute": "name",
+                    "value": search_term,
+                }
+            )
+            if EMAIL_RE.fullmatch(search_term):
+                filters.extend(
+                    [
+                        {
+                            "type": "equals",
+                            "attribute": "emailAddress",
+                            "value": search_term,
+                        },
+                        {
+                            "type": "equals",
+                            "attribute": "c508Email",
+                            "value": search_term,
+                        },
+                    ]
+                )
         if recipient_email:
             filters.extend(
                 [
@@ -601,31 +625,6 @@ class OnboardingEmailCog(DiscordAuditCogMixin, commands.Cog):
                     },
                 ]
             )
-        else:
-            search_term = candidate_name.strip()
-            if search_term:
-                filters.append(
-                    {
-                        "type": "contains",
-                        "attribute": "name",
-                        "value": search_term,
-                    }
-                )
-                if EMAIL_RE.fullmatch(search_term):
-                    filters.extend(
-                        [
-                            {
-                                "type": "equals",
-                                "attribute": "emailAddress",
-                                "value": search_term,
-                            },
-                            {
-                                "type": "equals",
-                                "attribute": "c508Email",
-                                "value": search_term,
-                            },
-                        ]
-                    )
 
         if not filters:
             return []

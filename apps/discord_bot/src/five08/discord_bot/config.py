@@ -101,18 +101,18 @@ class Settings(SharedSettings):
         default=None,
         validation_alias=AliasChoices(
             "ONBOARDING_EMAIL_SMTP_USERNAME",
-            "EMAIL_USERNAME",
+            "SMTP_USERNAME",
             "onboarding_email_smtp_username",
-            "email_username",
+            "smtp_username",
         ),
     )
     onboarding_email_smtp_password: str | None = Field(
         default=None,
         validation_alias=AliasChoices(
             "ONBOARDING_EMAIL_SMTP_PASSWORD",
-            "EMAIL_PASSWORD",
+            "SMTP_PASSWORD",
             "onboarding_email_smtp_password",
-            "email_password",
+            "smtp_password",
         ),
     )
     onboarding_email_sender_email: str = "onboarding@508.dev"

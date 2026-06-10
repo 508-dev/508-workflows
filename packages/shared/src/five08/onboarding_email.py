@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from email.message import EmailMessage
+from email.utils import formataddr, parseaddr
 from html import escape
+import re
+import smtplib
+import ssl
 from typing import Literal
 
 TriState = Literal["yes", "no", "unknown"]
+
+EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
 
 DISCORD_INVITE_URL = "https://discord.gg/9zAKxmUZJf"
 PROSPECTIVE_MEMBERS_CHANNEL_URL = (
@@ -39,6 +47,20 @@ class OnboardingEmailDraft:
     text_body: str
     markdown_body: str
     html_body: str
+
+
+@dataclass(frozen=True, slots=True)
+class OnboardingEmailSmtpConfig:
+    """SMTP settings needed to send onboarding email."""
+
+    smtp_server: str | None
+    smtp_port: int = 465
+    smtp_use_ssl: bool = True
+    smtp_starttls: bool = False
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_timeout_seconds: float = 20.0
+    sender_email: str = "onboarding@508.dev"
 
 
 def build_onboarding_email(request: OnboardingEmailRequest) -> OnboardingEmailDraft:
@@ -83,6 +105,111 @@ def build_onboarding_email(request: OnboardingEmailRequest) -> OnboardingEmailDr
         markdown_body="\n".join(markdown_lines).strip() + "\n",
         html_body=_render_html_document(html_paragraphs),
     )
+
+
+def build_onboarding_email_message(
+    *,
+    recipient_email: str,
+    reply_to_email: str,
+    sender_name: str,
+    sender_email: str,
+    subject: str,
+    text_body: str,
+    html_body: str,
+) -> EmailMessage:
+    """Build an EmailMessage for onboarding delivery."""
+    normalized_sender = validate_plain_email(
+        sender_email,
+        "ONBOARDING_EMAIL_SENDER_EMAIL",
+    )
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = formataddr((sender_name, normalized_sender))
+    message["To"] = validate_plain_email(recipient_email, "recipient_email")
+    message["Reply-To"] = formataddr(
+        (sender_name, validate_plain_email(reply_to_email, "reply_to_email"))
+    )
+    message.set_content(text_body)
+    message.add_alternative(html_body, subtype="html")
+    return message
+
+
+def send_onboarding_email_message(
+    message: EmailMessage,
+    *,
+    config: OnboardingEmailSmtpConfig,
+) -> None:
+    """Send an onboarding email through configured SMTP."""
+    smtp_server = (config.smtp_server or "").strip()
+    smtp_username = (config.smtp_username or "").strip()
+    smtp_password = (config.smtp_password or "").strip()
+    if not smtp_server:
+        raise ValueError("ONBOARDING_EMAIL_SMTP_SERVER is required to send.")
+    if not smtp_username or not smtp_password:
+        raise ValueError(
+            "ONBOARDING_EMAIL_SMTP_USERNAME and "
+            "ONBOARDING_EMAIL_SMTP_PASSWORD are required to send."
+        )
+    if not config.smtp_use_ssl and not config.smtp_starttls:
+        raise ValueError(
+            "Onboarding email SMTP requires TLS. Enable "
+            "ONBOARDING_EMAIL_SMTP_USE_SSL or ONBOARDING_EMAIL_SMTP_STARTTLS."
+        )
+
+    tls_context = ssl.create_default_context()
+    if config.smtp_use_ssl:
+        with smtplib.SMTP_SSL(
+            smtp_server,
+            config.smtp_port,
+            timeout=config.smtp_timeout_seconds,
+            context=tls_context,
+        ) as smtp:
+            smtp.login(smtp_username, smtp_password)
+            smtp.send_message(message)
+        return
+
+    with smtplib.SMTP(
+        smtp_server,
+        config.smtp_port,
+        timeout=config.smtp_timeout_seconds,
+    ) as smtp:
+        if config.smtp_starttls:
+            smtp.starttls(context=tls_context)
+        smtp.login(smtp_username, smtp_password)
+        smtp.send_message(message)
+
+
+def validate_plain_email(value: str, field_name: str) -> str:
+    """Validate a plain email address without display-name syntax."""
+    normalized = value.strip()
+    parsed_name, parsed_email = parseaddr(normalized)
+    if parsed_name or parsed_email != normalized:
+        raise ValueError(f"{field_name} must be a plain email address.")
+    if not EMAIL_RE.fullmatch(normalized):
+        raise ValueError(f"{field_name} must be a valid email address.")
+    return normalized
+
+
+def markdown_body_to_text(markdown_body: str) -> str:
+    """Convert dashboard-edited Markdown draft to plain-text email body."""
+    text = MARKDOWN_LINK_RE.sub(
+        lambda match: f"{match.group(1)} ({match.group(2)})",
+        markdown_body,
+    )
+    return text.strip() + "\n"
+
+
+def markdown_body_to_html(markdown_body: str) -> str:
+    """Convert dashboard-edited Markdown draft to minimal HTML email body."""
+    paragraphs = [
+        paragraph
+        for paragraph in re.split(r"\n{2,}", markdown_body.strip())
+        if paragraph.strip()
+    ]
+    body = "\n".join(
+        f"  <p>{_markdown_fragment_to_html(paragraph)}</p>" for paragraph in paragraphs
+    )
+    return _render_html_document_body(body)
 
 
 def _prospective_member_paragraphs(
@@ -279,6 +406,10 @@ def _render_html_paragraph(parts: list[tuple[str, str | None]]) -> str:
 
 def _render_html_document(paragraphs: list[str]) -> str:
     body = "\n".join(f"  <p>{paragraph}</p>" for paragraph in paragraphs)
+    return _render_html_document_body(body)
+
+
+def _render_html_document_body(body: str) -> str:
     return (
         "<!doctype html>\n"
         '<html lang="en">\n'
@@ -291,6 +422,19 @@ def _render_html_document(paragraphs: list[str]) -> str:
         "</body>\n"
         "</html>\n"
     )
+
+
+def _markdown_fragment_to_html(markdown_fragment: str) -> str:
+    output: list[str] = []
+    cursor = 0
+    for match in MARKDOWN_LINK_RE.finditer(markdown_fragment):
+        output.append(escape(markdown_fragment[cursor : match.start()]))
+        label = match.group(1)
+        url = match.group(2)
+        output.append(f'<a href="{escape(url, quote=True)}">{escape(label)}</a>')
+        cursor = match.end()
+    output.append(escape(markdown_fragment[cursor:]))
+    return "".join(output).replace("\n", "<br>")
 
 
 def _required_text(value: str, field_name: str) -> str:

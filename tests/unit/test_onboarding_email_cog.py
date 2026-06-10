@@ -98,6 +98,42 @@ def _contact_search_response(params: dict[str, object]) -> dict[str, object]:
     return {"list": []}
 
 
+def test_candidate_lookup_keeps_name_filter_when_recipient_is_overridden(
+    onboarding_cog: OnboardingEmailCog,
+) -> None:
+    onboarding_cog.crm.list_contacts.return_value = {
+        "list": [
+            {
+                "id": "contact-candidate",
+                "name": "Jane Example",
+                "emailAddress": "jane@example.com",
+                "c508Email": "",
+                "cOnboarder": "michael",
+                "cOnboardingState": "selected",
+            }
+        ]
+    }
+
+    contacts = onboarding_cog._search_candidate_contacts(
+        candidate_name="Jane Example",
+        recipient_email="jane.personal@example.com",
+    )
+
+    assert contacts[0]["id"] == "contact-candidate"
+    params = onboarding_cog.crm.list_contacts.call_args.args[0]
+    filters = params["where"][0]["value"]  # type: ignore[index]
+    assert {
+        "type": "contains",
+        "attribute": "name",
+        "value": "Jane Example",
+    } in filters
+    assert {
+        "type": "equals",
+        "attribute": "emailAddress",
+        "value": "jane.personal@example.com",
+    } in filters
+
+
 @pytest.mark.asyncio
 async def test_onboarding_email_command_generates_draft(
     onboarding_cog: OnboardingEmailCog,
