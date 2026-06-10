@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from five08.runtime_config import (
+    RuntimeConfigDBSnapshot,
     _decrypt_secret_value,
     _encrypt_secret_value,
     _load_db_values,
@@ -17,6 +18,13 @@ from five08.runtime_config import (
     set_runtime_config_value,
 )
 from five08.worker.config import WorkerSettings
+
+
+def _db_snapshot(values: dict[str, str]) -> RuntimeConfigDBSnapshot:
+    return RuntimeConfigDBSnapshot(
+        values=values,
+        present_keys=frozenset(values.keys()),
+    )
 
 
 def test_secret_mask_shows_confirmable_edges() -> None:
@@ -75,6 +83,8 @@ def test_load_db_values_skips_invalid_secret_overrides(
         "five08.runtime_config.psycopg.connect",
         lambda _: FakeConnection(),
     )
+    monkeypatch.setattr("five08.runtime_config._parse_dotenv_keys", lambda: {})
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     settings = WorkerSettings(espo_base_url="", espo_api_key="")
     invalidate_runtime_config_cache(settings)
@@ -83,6 +93,60 @@ def test_load_db_values_skips_invalid_secret_overrides(
 
     assert "OPENAI_API_KEY" not in values
     assert values["OPENAI_MODEL"] == "gpt-test"
+    items = list_runtime_config(settings)
+    item = next(entry for entry in items if entry["key"] == "OPENAI_API_KEY")
+    assert item["source"] == "database"
+    assert item["masked_value"] is None
+
+
+def test_load_db_values_returns_cached_values_on_db_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from five08 import runtime_config
+
+    class FakeCursor:
+        def __enter__(self) -> "FakeCursor":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def execute(self, query: str) -> None:
+            assert "runtime_config_values" in query
+
+        def fetchall(self) -> list[dict[str, str]]:
+            return [{"key": "OPENAI_MODEL", "value": "gpt-cached"}]
+
+    class FakeConnection:
+        def __enter__(self) -> "FakeConnection":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def cursor(self, **_: object) -> FakeCursor:
+            return FakeCursor()
+
+    settings = WorkerSettings(espo_base_url="", espo_api_key="")
+    invalidate_runtime_config_cache(settings)
+    monkeypatch.setattr(
+        "five08.runtime_config.psycopg.connect",
+        lambda _: FakeConnection(),
+    )
+
+    assert _load_db_values(settings)["OPENAI_MODEL"] == "gpt-cached"
+
+    with runtime_config._CACHE_LOCK:
+        cache_key = runtime_config._cache_key(settings)
+        cached_snapshot = runtime_config._CACHE[cache_key][1]
+        runtime_config._CACHE[cache_key] = (0.0, cached_snapshot)
+
+    def fail_connect(_: str) -> object:
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr("five08.runtime_config.psycopg.connect", fail_connect)
+
+    assert _load_db_values(settings)["OPENAI_MODEL"] == "gpt-cached"
 
 
 def test_saving_secret_requires_encryption_key(
@@ -117,7 +181,10 @@ def test_runtime_config_list_does_not_mask_env_secrets(
 ) -> None:
     definition = runtime_config_definition_for_key("OPENAI_API_KEY")
     assert definition is not None
-    monkeypatch.setattr("five08.runtime_config._load_db_values", lambda settings: {})
+    monkeypatch.setattr(
+        "five08.runtime_config._load_db_snapshot",
+        lambda settings: _db_snapshot({}),
+    )
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-secret-value")
 
     settings = WorkerSettings(espo_base_url="", espo_api_key="")
@@ -136,8 +203,8 @@ def test_runtime_config_list_masks_database_secrets(
     definition = runtime_config_definition_for_key("OPENAI_API_KEY")
     assert definition is not None
     monkeypatch.setattr(
-        "five08.runtime_config._load_db_values",
-        lambda settings: {definition.key: "sk-test-secret-value"},
+        "five08.runtime_config._load_db_snapshot",
+        lambda settings: _db_snapshot({definition.key: "sk-test-secret-value"}),
     )
     monkeypatch.setattr("five08.runtime_config._parse_dotenv_keys", lambda: {})
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -150,6 +217,31 @@ def test_runtime_config_list_masks_database_secrets(
     assert item["source"] == "database"
     assert item["env_locked"] is False
     assert item["masked_value"] == "sec...lue"
+    assert "value" not in item
+
+
+def test_runtime_config_list_allows_clearing_invalid_database_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    definition = runtime_config_definition_for_key("OPENAI_API_KEY")
+    assert definition is not None
+    monkeypatch.setattr(
+        "five08.runtime_config._load_db_snapshot",
+        lambda settings: RuntimeConfigDBSnapshot(
+            values={},
+            present_keys=frozenset({definition.key}),
+        ),
+    )
+    monkeypatch.setattr("five08.runtime_config._parse_dotenv_keys", lambda: {})
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    settings = WorkerSettings(espo_base_url="", espo_api_key="")
+    items = list_runtime_config(settings)
+    item = next(entry for entry in items if entry["key"] == definition.key)
+
+    assert item["source"] == "database"
+    assert item["configured"] is True
+    assert item["masked_value"] is None
     assert "value" not in item
 
 
@@ -233,8 +325,8 @@ def test_runtime_config_list_marks_numeric_values_as_configured(
     assert definition is not None
     monkeypatch.setenv("RUNTIME_CONFIG_TEST_ENABLE", "true")
     monkeypatch.setattr(
-        "five08.runtime_config._load_db_values",
-        lambda settings: {definition.key: "1"},
+        "five08.runtime_config._load_db_snapshot",
+        lambda settings: _db_snapshot({definition.key: "1"}),
     )
     monkeypatch.setattr("five08.runtime_config._parse_dotenv_keys", lambda: {})
 

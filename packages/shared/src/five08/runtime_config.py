@@ -5,10 +5,11 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
 import time
-from functools import lru_cache
 from base64 import urlsafe_b64encode
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
@@ -42,6 +43,14 @@ class RuntimeConfigDefinition:
     @property
     def primary_env_name(self) -> str:
         return self.env_names[0] if self.env_names else self.key
+
+
+@dataclass(frozen=True)
+class RuntimeConfigDBSnapshot:
+    """Cached runtime configuration DB rows."""
+
+    values: dict[str, str]
+    present_keys: frozenset[str]
 
 
 _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
@@ -448,7 +457,8 @@ _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
 _DEFINITIONS_BY_KEY = {definition.key: definition for definition in _DEFINITIONS}
 _DEFINITIONS_BY_ATTR = {definition.attr: definition for definition in _DEFINITIONS}
 _CACHE_TTL_SECONDS = 5.0
-_CACHE: dict[str, tuple[float, dict[str, str]]] = {}
+_CACHE: dict[str, tuple[float, RuntimeConfigDBSnapshot]] = {}
+_CACHE_LOCK = threading.Lock()
 _ENCRYPTED_PREFIX = "fernet:v1:"
 _ENCRYPTION_KEY_ENV_NAMES = ("CONFIG_SECRET_KEY",)
 _SECRET_MASK_PREFIXES = (
@@ -611,14 +621,20 @@ def _cache_key(settings: Any) -> str:
     return str(object.__getattribute__(settings, "postgres_url"))
 
 
-def _load_db_values(settings: Any) -> dict[str, str]:
+def _empty_db_snapshot() -> RuntimeConfigDBSnapshot:
+    return RuntimeConfigDBSnapshot(values={}, present_keys=frozenset())
+
+
+def _load_db_snapshot(settings: Any) -> RuntimeConfigDBSnapshot:
     key = _cache_key(settings)
     now = time.monotonic()
-    cached = _CACHE.get(key)
-    if cached is not None and now - cached[0] < _CACHE_TTL_SECONDS:
-        return cached[1]
+    with _CACHE_LOCK:
+        cached = _CACHE.get(key)
+        if cached is not None and now - cached[0] < _CACHE_TTL_SECONDS:
+            return cached[1]
 
     values: dict[str, str] = {}
+    present_keys: set[str] = set()
     try:
         with psycopg.connect(key) as conn:
             with conn.cursor(row_factory=dict_row) as cursor:
@@ -628,6 +644,7 @@ def _load_db_values(settings: Any) -> dict[str, str]:
                     definition = _DEFINITIONS_BY_KEY.get(row_key)
                     if definition is None:
                         continue
+                    present_keys.add(row_key)
                     row_value = str(row["value"])
                     if definition.is_secret:
                         decrypted_value = _decrypt_secret_value(row_value)
@@ -637,16 +654,32 @@ def _load_db_values(settings: Any) -> dict[str, str]:
                     values[row_key] = row_value
     except Exception:
         logger.debug("Runtime configuration DB overlay is unavailable", exc_info=True)
-    _CACHE[key] = (now, values)
-    return values
+        with _CACHE_LOCK:
+            cached = _CACHE.get(key)
+            if cached is not None:
+                return cached[1]
+        return _empty_db_snapshot()
+
+    snapshot = RuntimeConfigDBSnapshot(
+        values=values,
+        present_keys=frozenset(present_keys),
+    )
+    with _CACHE_LOCK:
+        _CACHE[key] = (time.monotonic(), snapshot)
+    return snapshot
+
+
+def _load_db_values(settings: Any) -> dict[str, str]:
+    return dict(_load_db_snapshot(settings).values)
 
 
 def invalidate_runtime_config_cache(settings: Any | None = None) -> None:
     """Clear cached runtime config values."""
-    if settings is None:
-        _CACHE.clear()
-        return
-    _CACHE.pop(_cache_key(settings), None)
+    with _CACHE_LOCK:
+        if settings is None:
+            _CACHE.clear()
+            return
+        _CACHE.pop(_cache_key(settings), None)
 
 
 def coerce_runtime_config_value(
@@ -751,20 +784,22 @@ def resolve_runtime_setting_value(
 
 def list_runtime_config(settings: Any) -> list[dict[str, object]]:
     """Return dashboard-safe runtime config metadata and effective values."""
-    db_values = _load_db_values(settings)
+    db_snapshot = _load_db_snapshot(settings)
+    db_values = db_snapshot.values
     db_overlay_enabled = runtime_config_db_overlay_enabled()
     items: list[dict[str, object]] = []
     for definition in _DEFINITIONS:
         env_locked = definition_is_env_locked(definition)
         raw_default = object.__getattribute__(settings, definition.attr)
+        db_present = definition.key in db_snapshot.present_keys
         db_value = db_values.get(definition.key)
         effective = raw_default
         source = "default"
         if env_locked:
             source = "env"
-        elif db_value is not None:
+        elif db_present:
             source = "database"
-            if db_overlay_enabled:
+            if db_value is not None and db_overlay_enabled:
                 try:
                     effective = _coerce_for_settings(definition, db_value)
                 except Exception:
@@ -774,7 +809,7 @@ def list_runtime_config(settings: Any) -> list[dict[str, object]]:
                     )
         configured = (
             env_locked
-            or db_value is not None
+            or db_present
             or definition.value_type in {"bool", "int", "float"}
             or bool(str(effective or "").strip())
         )
@@ -797,7 +832,9 @@ def list_runtime_config(settings: Any) -> list[dict[str, object]]:
             item["value"] = effective
         else:
             item["masked_value"] = (
-                mask_runtime_secret(effective) if source == "database" else None
+                mask_runtime_secret(effective)
+                if source == "database" and db_value is not None
+                else None
             )
         items.append(item)
     return items

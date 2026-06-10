@@ -150,7 +150,6 @@ from five08.projects import (
 )
 from five08.runtime_config import (
     delete_runtime_config_value,
-    invalidate_runtime_config_cache,
     list_runtime_config,
     runtime_config_definition_for_key,
     set_runtime_config_value,
@@ -5966,7 +5965,6 @@ async def dashboard_update_configuration_handler(
         )
         return JSONResponse({"error": str(exc)}, status_code=409)
 
-    invalidate_runtime_config_cache(settings)
     global _AGENT_ORCHESTRATOR
     with _AGENT_ORCHESTRATOR_LOCK:
         _AGENT_ORCHESTRATOR = None
