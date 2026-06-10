@@ -6876,10 +6876,7 @@ function ConfigurationView({
     const busy = loading[`configuration:${item.key}`]
     const writable = canWrite && !item.env_locked && !busy
     const draft = drafts[item.key] ?? ""
-    const emptyTypedDraft =
-      !item.is_secret &&
-      (item.value_type === "bool" || item.value_type === "int" || item.value_type === "float") &&
-      !draft.trim()
+    const emptyNonSecretDraft = !item.is_secret && !draft.trim()
     return (
       <TableRow key={item.key}>
         <TableCell>
@@ -6933,7 +6930,7 @@ function ConfigurationView({
               disabled={
                 !writable ||
                 (item.is_secret && !draft.trim()) ||
-                emptyTypedDraft ||
+                emptyNonSecretDraft ||
                 (item.is_secret && item.secret_encryption_configured === false)
               }
             >

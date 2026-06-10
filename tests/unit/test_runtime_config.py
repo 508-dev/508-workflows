@@ -163,6 +163,25 @@ def test_runtime_config_value_type_validation() -> None:
 
 
 @pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("OPENAI_MODEL", ""),
+        ("DOCUSEAL_BASE_URL", " "),
+        ("GITHUB_ALLOWED_REPOS", ",, "),
+    ],
+)
+def test_runtime_config_rejects_blank_non_secret_overrides(
+    key: str,
+    value: str,
+) -> None:
+    definition = runtime_config_definition_for_key(key)
+    assert definition is not None
+
+    with pytest.raises(ValueError, match="must not be blank"):
+        coerce_runtime_config_value(definition, value)
+
+
+@pytest.mark.parametrize(
     "key",
     [
         "DOCUSEAL_MEMBER_AGREEMENT_TEMPLATE_ID",

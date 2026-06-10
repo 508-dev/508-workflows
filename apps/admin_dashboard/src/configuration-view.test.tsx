@@ -112,7 +112,7 @@ describe("ConfigurationView", () => {
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled()
   })
 
-  it("disables save for empty numeric drafts so clear remains explicit", () => {
+  it("disables save for empty non-secret drafts so clear remains explicit", () => {
     render(
       <ConfigurationView
         items={items.slice(0, 3)}
@@ -123,6 +123,14 @@ describe("ConfigurationView", () => {
         onClear={vi.fn()}
       />,
     )
+
+    fireEvent.change(screen.getByLabelText("DocuSeal base URL value"), {
+      target: { value: "" },
+    })
+    const primaryTable = screen.getByRole("table", {
+      name: "Onboarding configuration settings",
+    })
+    expect(within(primaryTable).getAllByRole("button", { name: "Save" })[0]).toBeDisabled()
 
     fireEvent.click(screen.getByText("Advanced"))
     fireEvent.change(screen.getByLabelText("DocuSeal member agreement template value"), {

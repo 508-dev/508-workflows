@@ -661,6 +661,9 @@ def coerce_runtime_config_value(
     else:
         text = str(value).strip()
 
+    if not definition.is_secret and definition.value_type in {"string", "url", "csv"}:
+        if not text:
+            raise ValueError(f"{definition.key} must not be blank")
     if definition.value_type == "bool":
         normalized = text.casefold()
         if normalized in {"1", "true", "yes", "on"}:
@@ -704,7 +707,12 @@ def coerce_runtime_config_value(
         if "://" not in text:
             raise ValueError(f"{definition.key} must be a URL")
     if definition.value_type == "csv":
-        return ",".join(part.strip() for part in text.split(",") if part.strip())
+        normalized_csv = ",".join(
+            part.strip() for part in text.split(",") if part.strip()
+        )
+        if not normalized_csv:
+            raise ValueError(f"{definition.key} must not be blank")
+        return normalized_csv
     return text
 
 
