@@ -134,7 +134,15 @@ class SharedSettings(BaseSettings):
         ),
     )
     onboarding_email_sender_email: str = "onboarding@508.dev"
-    onboarding_email_smtp_timeout_seconds: float = 20.0
+    onboarding_email_smtp_timeout_seconds: float = Field(
+        default=20.0,
+        validation_alias=AliasChoices(
+            "ONBOARDING_EMAIL_SMTP_TIMEOUT_SECONDS",
+            "SMTP_TIMEOUT_SECONDS",
+            "onboarding_email_smtp_timeout_seconds",
+            "smtp_timeout_seconds",
+        ),
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

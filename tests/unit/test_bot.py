@@ -166,11 +166,13 @@ class TestBot508:
         monkeypatch.delenv("ONBOARDING_EMAIL_SMTP_STARTTLS", raising=False)
         monkeypatch.delenv("ONBOARDING_EMAIL_SMTP_USERNAME", raising=False)
         monkeypatch.delenv("ONBOARDING_EMAIL_SMTP_PASSWORD", raising=False)
+        monkeypatch.delenv("ONBOARDING_EMAIL_SMTP_TIMEOUT_SECONDS", raising=False)
         monkeypatch.setenv("SMTP_PORT", "587")
         monkeypatch.setenv("SMTP_USE_SSL", "false")
         monkeypatch.setenv("SMTP_STARTTLS", "true")
         monkeypatch.setenv("SMTP_USERNAME", "onboarding@508.dev")
         monkeypatch.setenv("SMTP_PASSWORD", "secret")
+        monkeypatch.setenv("SMTP_TIMEOUT_SECONDS", "45")
 
         config = Settings(
             discord_bot_token="token",
@@ -185,6 +187,7 @@ class TestBot508:
         assert config.onboarding_email_smtp_starttls is True
         assert config.onboarding_email_smtp_username == "onboarding@508.dev"
         assert config.onboarding_email_smtp_password == "secret"
+        assert config.onboarding_email_smtp_timeout_seconds == 45.0
 
     def test_validate_app_command_descriptions_accepts_valid_lengths(self):
         """Test that valid command descriptions pass validation."""

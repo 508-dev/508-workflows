@@ -143,7 +143,7 @@ current precedence rules.
 - `Optional`: `ONBOARDING_EMAIL_SMTP_USERNAME` (falls back to `SMTP_USERNAME`)
 - `Optional`: `ONBOARDING_EMAIL_SMTP_PASSWORD` (falls back to `SMTP_PASSWORD`)
 - `Optional`: `ONBOARDING_EMAIL_SENDER_EMAIL` (default: `onboarding@508.dev`)
-- `Optional`: `ONBOARDING_EMAIL_SMTP_TIMEOUT_SECONDS` (default: `20.0`)
+- `Optional`: `ONBOARDING_EMAIL_SMTP_TIMEOUT_SECONDS` (falls back to `SMTP_TIMEOUT_SECONDS`; default: `20.0`)
 - Note: `/onboarding-email` is limited to Steering Committee+ or the candidate's designated CRM onboarder. The command always creates an editable draft first; when recipient and Reply-To are resolved, the draft includes a `Send Email` button. Sent emails use the configured sender address with the command sender's name as the display name, and set `Reply-To` to the command user's CRM-linked email or the explicit `reply_to_email` option.
 
 ## Discord Bot Core
