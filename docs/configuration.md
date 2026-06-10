@@ -187,10 +187,3 @@ Agent gateway:
 Agent model base URLs must be HTTPS endpoints on allowed provider hosts, except
 the internal Docker-network Bifrost URL `http://bifrost:8080/openai` is allowed
 for same-host deployments.
-
-## Legacy/Deprecating Integrations
-
-- `KIMAI_BASE_URL`
-- `KIMAI_API_TOKEN`
-
-Kimai settings are still required by the current config model.

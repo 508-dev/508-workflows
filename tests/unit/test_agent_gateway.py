@@ -1293,19 +1293,6 @@ def test_member_cannot_create_github_issue() -> None:
     assert "github:issue:create" in response.message
 
 
-def test_kimai_project_hours_is_not_supported_by_agent() -> None:
-    orchestrator = AgentOrchestrator()
-
-    response = orchestrator.plan(
-        "Kimai hours for project Atlas in 2026-05",
-        _context(roles=["Admin"]),
-    )
-
-    assert response.status == "needs_clarification"
-    assert response.plan is None
-    assert response.results == []
-
-
 def test_admin_can_draft_docuseal_member_agreement_with_confirmation() -> None:
     orchestrator = AgentOrchestrator()
 

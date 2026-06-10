@@ -1,6 +1,6 @@
 """API clients shared across services."""
 
-from . import authentik, discord_bot, docuseal, erpnext, espo, kimai, migadu
+from . import authentik, discord_bot, docuseal, erpnext, espo, migadu
 
 __all__ = [
     "authentik",
@@ -8,6 +8,5 @@ __all__ = [
     "docuseal",
     "erpnext",
     "espo",
-    "kimai",
     "migadu",
 ]
