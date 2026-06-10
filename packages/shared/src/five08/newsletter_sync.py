@@ -199,14 +199,14 @@ class NewsletterSyncProcessor:
                 continue
 
             try:
-                crm_contact = self._find_crm_contact(mailbox)
+                crm_contacts = self._list_crm_contacts(mailbox)
             except CRMContactLookupError as exc:
                 result["crm_lookup_failed_skipped"] += 1
                 failures = result.setdefault("crm_lookup_failures", [])
                 if isinstance(failures, list) and len(failures) < 20:
                     failures.append({"mailbox": mailbox.address, "error": str(exc)})
                 continue
-            if _is_crm_blocked(crm_contact):
+            if any(_is_crm_blocked(contact) for contact in crm_contacts):
                 result["crm_blocked_skipped"] += 1
                 continue
 
@@ -245,10 +245,10 @@ class NewsletterSyncProcessor:
             return None
         return EspoClient(base_url, api_key)
 
-    def _find_crm_contact(self, mailbox: MigaduMailbox) -> dict[str, Any] | None:
+    def _list_crm_contacts(self, mailbox: MigaduMailbox) -> list[dict[str, Any]]:
         client = self._crm_client()
         if client is None:
-            return None
+            return []
         filters: list[dict[str, Any]] = [
             {"type": "equals", "attribute": "c508Email", "value": mailbox.address},
             {"type": "equals", "attribute": "emailAddress", "value": mailbox.address},
@@ -265,7 +265,7 @@ class NewsletterSyncProcessor:
             response = client.list_contacts(
                 {
                     "where": [{"type": "or", "value": filters}],
-                    "maxSize": 1,
+                    "maxSize": 20,
                     "select": "id,name,emailAddress,c508Email,type,cOnboardingState",
                 }
             )
@@ -274,10 +274,9 @@ class NewsletterSyncProcessor:
                 f"CRM contact lookup failed for {mailbox.address}: {exc}"
             ) from exc
         contacts = response.get("list", [])
-        if not isinstance(contacts, list) or not contacts:
-            return None
-        contact = contacts[0]
-        return contact if isinstance(contact, dict) else None
+        if not isinstance(contacts, list):
+            return []
+        return [contact for contact in contacts if isinstance(contact, dict)]
 
 
 def _required(value: str | None, name: str) -> str:
@@ -292,6 +291,15 @@ def build_newsletter_providers(settings: Any) -> list[NewsletterProvider]:
     providers: list[NewsletterProvider] = []
     brevo_api_key = str(getattr(settings, "brevo_api_key", "") or "").strip()
     if brevo_api_key:
+        list_name = (
+            str(
+                getattr(
+                    settings, "brevo_508_members_newsletter_list_name", "508 members"
+                )
+                or ""
+            ).strip()
+            or "508 members"
+        )
         providers.append(
             BrevoNewsletterProvider(
                 BrevoClient(
@@ -304,9 +312,7 @@ def build_newsletter_providers(settings: Any) -> list[NewsletterProvider]:
                     ),
                 ),
                 list_id=getattr(settings, "brevo_508_members_newsletter_list_id", None),
-                list_name=getattr(
-                    settings, "brevo_508_members_newsletter_list_name", "508 members"
-                ),
+                list_name=list_name,
             )
         )
 

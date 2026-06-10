@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote
 
 import requests
 
@@ -32,7 +33,7 @@ class KeilaClient:
         normalized_email = email.strip().lower()
         response = self._request(
             "GET",
-            f"/api/v1/contacts/{normalized_email}",
+            f"/api/v1/contacts/{quote(normalized_email, safe='')}",
             params={"id_type": "email"},
             allow_not_found=True,
         )

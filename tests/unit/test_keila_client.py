@@ -25,7 +25,7 @@ def test_get_contact_by_email_fetches_contact() -> None:
 
     request.assert_called_once_with(
         "GET",
-        "https://app.keila.io/api/v1/contacts/jane@example.com",
+        "https://app.keila.io/api/v1/contacts/jane%40example.com",
         headers={
             "Accept": "application/json",
             "Authorization": "Bearer keila-key",
@@ -35,6 +35,35 @@ def test_get_contact_by_email_fetches_contact() -> None:
         timeout=20.0,
     )
     assert result == {"id": "contact-1", "email": "jane@example.com"}
+
+
+def test_get_contact_by_email_url_encodes_plus_in_email() -> None:
+    response = Mock()
+    response.status_code = 200
+    response.content = b'{"data":{"id":"contact-1","email":"jane+tag@example.com"}}'
+    response.json.return_value = {
+        "data": {"id": "contact-1", "email": "jane+tag@example.com"}
+    }
+
+    with patch(
+        "five08.clients.keila.requests.request", return_value=response
+    ) as request:
+        result = KeilaClient(api_key="keila-key").get_contact_by_email(
+            "Jane+Tag@Example.com"
+        )
+
+    request.assert_called_once_with(
+        "GET",
+        "https://app.keila.io/api/v1/contacts/jane%2Btag%40example.com",
+        headers={
+            "Accept": "application/json",
+            "Authorization": "Bearer keila-key",
+        },
+        params={"id_type": "email"},
+        json=None,
+        timeout=20.0,
+    )
+    assert result == {"id": "contact-1", "email": "jane+tag@example.com"}
 
 
 def test_get_contact_by_email_returns_none_for_missing_contact() -> None:

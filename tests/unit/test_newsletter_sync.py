@@ -9,7 +9,7 @@ import pytest
 
 from five08.clients.migadu import MigaduMailbox
 from five08.clients.espo import EspoAPIError
-from five08.newsletter_sync import NewsletterSyncProcessor
+from five08.newsletter_sync import NewsletterSyncProcessor, build_newsletter_providers
 
 
 class FakeMigaduClient:
@@ -237,6 +237,41 @@ def test_sync_508_members_skips_crm_blocked_mailboxes() -> None:
     assert result["contacts_considered"] == 0
     assert FakeBrevoClient.subscriptions == []
     assert FakeKeilaClient.upserts == []
+
+
+def test_sync_508_members_skips_mailbox_when_any_crm_match_is_blocked() -> None:
+    FakeMigaduClient.mailboxes = [
+        MigaduMailbox(
+            address="jane@508.dev",
+            name="Jane Doe",
+            password_recovery_email="jane@example.com",
+        )
+    ]
+    FakeEspoClient.contacts = [
+        {"id": "contact-1", "type": "Member"},
+        {"id": "contact-2", "type": "Inactive Member"},
+    ]
+
+    result = NewsletterSyncProcessor(
+        _settings(espo_base_url="https://crm.example", espo_api_key="espo-key")
+    ).sync_508_members()
+
+    assert result["crm_blocked_skipped"] == 1
+    assert result["contacts_considered"] == 0
+    assert FakeBrevoClient.subscriptions == []
+    assert FakeKeilaClient.upserts == []
+
+
+def test_build_newsletter_providers_uses_default_list_name_when_blank() -> None:
+    providers = build_newsletter_providers(
+        _settings(
+            brevo_508_members_newsletter_list_id=None,
+            brevo_508_members_newsletter_list_name="   ",
+        )
+    )
+
+    assert len(providers) == 2
+    assert providers[0].list_name == "508 members"
 
 
 def test_sync_508_members_skips_mailbox_when_crm_lookup_fails() -> None:

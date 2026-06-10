@@ -72,11 +72,27 @@ def test_get_contact_fetches_contact_by_email() -> None:
         result = BrevoClient(api_key="brevo-key").get_contact("Jane@Example.com")
 
     get.assert_called_once_with(
-        "https://api.brevo.com/v3/contacts/jane@example.com",
+        "https://api.brevo.com/v3/contacts/jane%40example.com",
         headers={"Accept": "application/json", "api-key": "brevo-key"},
         timeout=20.0,
     )
     assert result == {"email": "jane@example.com"}
+
+
+def test_get_contact_url_encodes_plus_in_email() -> None:
+    response = Mock()
+    response.status_code = 200
+    response.json.return_value = {"email": "jane+tag@example.com"}
+
+    with patch("five08.clients.brevo.requests.get", return_value=response) as get:
+        result = BrevoClient(api_key="brevo-key").get_contact("Jane+Tag@Example.com")
+
+    get.assert_called_once_with(
+        "https://api.brevo.com/v3/contacts/jane%2Btag%40example.com",
+        headers={"Accept": "application/json", "api-key": "brevo-key"},
+        timeout=20.0,
+    )
+    assert result == {"email": "jane+tag@example.com"}
 
 
 def test_get_contact_returns_none_for_missing_contact() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote
 
 import requests
 
@@ -88,7 +89,7 @@ class BrevoClient:
         }
         try:
             response = requests.get(
-                f"{self.base_url}/contacts/{normalized_email}",
+                f"{self.base_url}/contacts/{quote(normalized_email, safe='')}",
                 headers=headers,
                 timeout=self.timeout_seconds,
             )
