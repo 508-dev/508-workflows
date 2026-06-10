@@ -414,7 +414,13 @@ def format_newsletter_sync_warning(result: dict[str, Any]) -> str | None:
             messages.append(f"{provider_name} failed for {failed} contact(s)")
 
         statuses = provider_result.get("statuses")
-        if isinstance(statuses, dict) and statuses.get("skipped_list_missing"):
-            messages.append(f"{provider_name} list was not found")
+        if isinstance(statuses, dict):
+            if statuses.get("skipped_list_missing"):
+                messages.append(f"{provider_name} list was not found")
+            suppressed = int(statuses.get("skipped_provider_suppressed") or 0)
+            if suppressed:
+                messages.append(
+                    f"{provider_name} skipped {suppressed} suppressed contact(s)"
+                )
 
     return "; ".join(messages) if messages else None

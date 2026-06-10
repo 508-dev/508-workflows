@@ -9,7 +9,11 @@ import pytest
 
 from five08.clients.migadu import MigaduMailbox
 from five08.clients.espo import EspoAPIError
-from five08.newsletter_sync import NewsletterSyncProcessor, build_newsletter_providers
+from five08.newsletter_sync import (
+    NewsletterSyncProcessor,
+    build_newsletter_providers,
+    format_newsletter_sync_warning,
+)
 
 
 class FakeMigaduClient:
@@ -272,6 +276,23 @@ def test_build_newsletter_providers_uses_default_list_name_when_blank() -> None:
 
     assert len(providers) == 2
     assert providers[0].list_name == "508 members"
+
+
+def test_format_newsletter_sync_warning_reports_suppressed_skips() -> None:
+    warning = format_newsletter_sync_warning(
+        {
+            "providers": {
+                "brevo": {
+                    "synced": 1,
+                    "skipped": 1,
+                    "failed": 0,
+                    "statuses": {"skipped_provider_suppressed": 1},
+                }
+            }
+        }
+    )
+
+    assert warning == "brevo skipped 1 suppressed contact(s)"
 
 
 def test_sync_508_members_skips_mailbox_when_crm_lookup_fails() -> None:

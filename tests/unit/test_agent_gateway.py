@@ -2087,6 +2087,7 @@ def _install_account_tool_fakes(
             return invite
 
     class FakeBrevoClient:
+        contacts: dict[str, dict[str, Any]] = {}
         subscriptions: list[dict[str, Any]] = []
 
         def __init__(
@@ -2105,12 +2106,13 @@ def _install_account_tool_fakes(
             return {"id": len(self.subscriptions)}
 
         def get_contact(self, email: str) -> dict[str, Any] | None:
-            return None
+            return self.contacts.get(email)
 
         def find_list_id_by_name(self, name: str) -> int | None:
             return 4 if name == "508 members" else None
 
     class FakeKeilaClient:
+        contacts: dict[str, dict[str, Any]] = {}
         upserts: list[dict[str, Any]] = []
 
         def __init__(
@@ -2125,7 +2127,7 @@ def _install_account_tool_fakes(
             self.timeout_seconds = timeout_seconds
 
         def get_contact_by_email(self, email: str) -> dict[str, Any] | None:
-            return None
+            return self.contacts.get(email)
 
         def upsert_active_contact(
             self,
@@ -2144,6 +2146,11 @@ def _install_account_tool_fakes(
                 }
             )
             return {"id": str(len(self.upserts))}
+
+    FakeBrevoClient.contacts = {}
+    FakeBrevoClient.subscriptions = []
+    FakeKeilaClient.contacts = {}
+    FakeKeilaClient.upserts = []
 
     monkeypatch.setattr("five08.agent.tools.EspoClient", FakeEspoClient)
     monkeypatch.setattr("five08.agent.tools.AuthentikClient", FakeAuthentikClient)
@@ -2558,6 +2565,34 @@ def test_user_accounts_tool_subscribes_mailbox_and_backup_email_to_brevo(
         {"email": "jane@508.dev", "list_id": 4},
         {"email": "jane@example.com", "list_id": 4},
     ]
+
+
+def test_user_accounts_tool_reports_suppressed_newsletter_contact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fakes = _install_account_tool_fakes(monkeypatch)
+    fakes.brevo.contacts = {"jane@example.com": {"emailBlacklisted": True}}
+    registry = ToolRegistry(runtime_config=_account_runtime_config(brevo_api_key="key"))
+
+    result = registry.execute(
+        "account_write.create_user_accounts",
+        {"contact_id": "contact-1", "mailbox_username": "jane@508.dev"},
+        organization_id="org-1",
+        actor_id="123",
+        actor_scopes={
+            "mailbox:create",
+            "user:manage",
+            "integration:manage",
+            "crm:contact:read",
+            "crm:contact:update",
+        },
+    )
+
+    assert result["mailbox"]["newsletter_subscribed"] is False
+    assert result["mailbox"]["newsletter_error"] == (
+        "brevo skipped 1 suppressed contact(s)"
+    )
+    assert fakes.brevo.subscriptions == [{"email": "jane@508.dev", "list_id": 4}]
 
 
 def test_user_accounts_tool_subscribes_mailbox_and_backup_email_to_keila(
