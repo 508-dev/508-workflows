@@ -12057,6 +12057,12 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
 
 async def setup(bot: commands.Bot) -> None:
     """Add the CRM cog to the bot."""
+    if (
+        not (settings.espo_base_url or "").strip()
+        or not (settings.espo_api_key or "").strip()
+    ):
+        logger.warning("CRM cog not loaded: missing ESPO_BASE_URL and/or ESPO_API_KEY")
+        return
     cog = CRMCog(bot)
     await bot.add_cog(cog)
     # Slash commands will be synced automatically in bot.py

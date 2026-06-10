@@ -205,6 +205,69 @@ def _audit_payload() -> list[dict[str, object]]:
     ]
 
 
+def _configuration_payload() -> dict[str, object]:
+    return {
+        "items": [
+            {
+                "key": "DOCUSEAL_BASE_URL",
+                "label": "DocuSeal base URL",
+                "category": "Onboarding",
+                "description": "DocuSeal API endpoint used for agreement workflows.",
+                "value_type": "url",
+                "is_secret": False,
+                "env_locked": False,
+                "source": "database",
+                "configured": True,
+                "restart_required": False,
+                "secret_encryption_configured": None,
+                "value": "https://docuseal.example.com",
+            },
+            {
+                "key": "DOCUSEAL_API_KEY",
+                "label": "DocuSeal API key",
+                "category": "Onboarding",
+                "description": "DocuSeal API key for agreement workflows.",
+                "value_type": "string",
+                "is_secret": True,
+                "env_locked": False,
+                "source": "database",
+                "configured": True,
+                "restart_required": False,
+                "secret_encryption_configured": True,
+                "masked_value": "doc...key",
+            },
+            {
+                "key": "DOCUSEAL_MEMBER_AGREEMENT_TEMPLATE_ID",
+                "label": "DocuSeal member agreement template",
+                "category": "Onboarding",
+                "description": "Template ID used to filter/sign member agreements.",
+                "value_type": "int",
+                "is_secret": False,
+                "env_locked": False,
+                "source": "default",
+                "configured": True,
+                "restart_required": False,
+                "secret_encryption_configured": None,
+                "value": 123,
+            },
+            {
+                "key": "OPENAI_API_KEY",
+                "label": "OpenAI API key",
+                "category": "AI",
+                "description": "Primary OpenAI-compatible API key.",
+                "value_type": "string",
+                "is_secret": True,
+                "env_locked": False,
+                "source": "database",
+                "configured": True,
+                "restart_required": False,
+                "secret_encryption_configured": True,
+                "masked_value": "sec...lue",
+            },
+        ]
+    }
+
+
 def _gigs_payload() -> list[dict[str, object]]:
     return [
         {
@@ -379,6 +442,13 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
                 body=json.dumps(_audit_payload()),
             )
 
+        def configuration_route(route: Any) -> None:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(_configuration_payload()),
+            )
+
         def gigs_route(route: Any) -> None:
             gig_list_requests.append(route.request.url)
             route.fulfill(
@@ -496,6 +566,7 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
         page.route("**/dashboard/api/onboarding?*", onboarding_route)
         page.route("**/dashboard/api/people?*", people_route)
         page.route("**/dashboard/api/audit-events?*", audit_route)
+        page.route("**/dashboard/api/configuration", configuration_route)
         page.route("**/dashboard/api/notifications?*", notifications_route)
         page.route(
             re.compile(".*/dashboard/api/gigs/11111111-1111-4111-8111-111111111111$"),
@@ -709,6 +780,29 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             page.get_by_role("link", name="Audit").click()
             expect(page).to_have_url(f"{dashboard_server}/dashboard/audit")
             page.get_by_text("worker.job_rerun").wait_for()
+
+            page.get_by_role("link", name="Configuration").click()
+            expect(page).to_have_url(f"{dashboard_server}/dashboard/configuration")
+            page.get_by_role("heading", name="Onboarding").wait_for()
+            page.get_by_role("heading", name="AI Providers").wait_for()
+            onboarding_table = page.get_by_role(
+                "table", name="Onboarding configuration settings"
+            )
+            expect(onboarding_table).to_contain_text("DocuSeal base URL")
+            expect(onboarding_table).to_contain_text("DocuSeal API key")
+            expect(page.get_by_text("doc...key")).to_be_visible()
+            expect(
+                page.get_by_text("DocuSeal member agreement template", exact=True)
+            ).not_to_be_visible()
+            page.get_by_text("Advanced").click()
+            expect(
+                page.get_by_text("DocuSeal member agreement template", exact=True)
+            ).to_be_visible()
+            page.get_by_role("button", name=re.compile("AI Providers")).click()
+            expect(page.get_by_role("heading", name="Onboarding")).not_to_be_visible()
+            page.get_by_role("heading", name="AI Providers").wait_for()
+            expect(page.get_by_text("OpenAI API key")).to_be_visible()
+            expect(page.get_by_text("sec...lue")).to_be_visible()
 
             with page.expect_response(
                 lambda response: (

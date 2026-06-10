@@ -6,6 +6,27 @@ from pydantic import ValidationError
 from five08.worker.config import WorkerSettings
 
 
+def test_non_local_worker_requires_espo_config() -> None:
+    with pytest.raises(ValidationError, match="ESPO_BASE_URL and ESPO_API_KEY"):
+        WorkerSettings(
+            environment="production",
+            minio_root_password="secret",
+            espo_base_url="",
+            espo_api_key="test-key",
+        )
+
+
+def test_local_worker_allows_missing_espo_config() -> None:
+    settings = WorkerSettings(
+        environment="local",
+        espo_base_url="",
+        espo_api_key="",
+    )
+
+    assert settings.espo_base_url == ""
+    assert settings.espo_api_key == ""
+
+
 def test_email_intake_requires_mailbox_credentials() -> None:
     with pytest.raises(ValidationError, match="EMAIL_PASSWORD must be set"):
         WorkerSettings(

@@ -701,6 +701,7 @@ version = "0.1.0"
 source = { editable = "packages/shared" }
 dependencies = [
     { name = "cloakbrowser" },
+    { name = "cryptography" },
     { name = "curl-cffi" },
     { name = "langfuse" },
     { name = "psycopg", extra = ["binary"] },
@@ -716,6 +717,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "cloakbrowser", specifier = ">=0.3.31" },
+    { name = "cryptography", specifier = ">=46.0.0" },
     { name = "curl-cffi", specifier = ">=0.10.0" },
     { name = "langfuse", specifier = "==4.6.1" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2.5" },

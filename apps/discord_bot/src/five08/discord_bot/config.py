@@ -33,8 +33,8 @@ class Settings(SharedSettings):
     healthcheck_port: int = 3000
 
     # CRM/EspoCRM settings
-    espo_api_key: str
-    espo_base_url: str
+    espo_api_key: str = ""
+    espo_base_url: str = ""
     discord_server_id: str | None = None
     backend_api_base_url: str = "http://127.0.0.1:8090"
     audit_api_base_url: str | None = None
