@@ -994,7 +994,6 @@ async def test_agent_mention_answers_help_without_backend() -> None:
     assert "Authentik SSO users" in response
     assert "Outline invites" in response
     assert "Tasks:" not in response
-    assert "Kimai" not in response
     assert "`/agent`" in response
     assert "/unlinked-discord-users" not in response
     assert "/view-onboarding-queue" not in response

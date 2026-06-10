@@ -151,8 +151,6 @@ class TestBot508:
             discord_bot_token="token",
             espo_api_key="espo-key",
             espo_base_url="https://crm.example.com",
-            kimai_base_url="https://kimai.example.com",
-            kimai_api_token="kimai-token",
         )
 
         assert config.backend_api_base_url == "http://127.0.0.1:8090"
@@ -178,8 +176,6 @@ class TestBot508:
             discord_bot_token="token",
             espo_api_key="espo-key",
             espo_base_url="https://crm.example.com",
-            kimai_base_url="https://kimai.example.com",
-            kimai_api_token="kimai-token",
         )
 
         assert config.onboarding_email_smtp_port == 587

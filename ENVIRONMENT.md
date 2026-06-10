@@ -194,7 +194,3 @@ current precedence rules.
 - `Optional`: `AUDIT_API_TIMEOUT_SECONDS` (default: `2.0`)
 - `Optional`: `DISCORD_LOGS_WEBHOOK_URL` (if set, command and job events are posted to this Discord webhook)
 - `Optional`: `DISCORD_LOGS_WEBHOOK_WAIT` (default: `true`; appends `wait=true` unless already present in the webhook URL)
-
-## Kimai (Legacy/Deprecating)
-
-- `Currently required by config model`: `KIMAI_BASE_URL`, `KIMAI_API_TOKEN`

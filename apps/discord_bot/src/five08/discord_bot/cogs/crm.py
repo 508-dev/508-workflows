@@ -711,6 +711,158 @@ class OutlineInviteSelectionView(discord.ui.View):
                 )
 
 
+class MemberAgreementSelectionButton(discord.ui.Button["MemberAgreementSelectionView"]):
+    """Button for selecting a contact to send the member agreement to."""
+
+    def __init__(self, contact: dict[str, Any], requester_id: int) -> None:
+        contact_name = str(contact.get("name", "Unknown"))
+        label = contact_name[:80] if len(contact_name) > 80 else contact_name
+        super().__init__(style=discord.ButtonStyle.primary, label=label, emoji="📄")
+        self.contact = contact
+        self.requester_id = requester_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        """Handle contact selection and send the member agreement."""
+        try:
+            if not self.view:
+                await interaction.response.send_message(
+                    "❌ View not found.",
+                    ephemeral=True,
+                )
+                return
+            if interaction.user.id != self.requester_id:
+                self.view.crm_cog._audit_command_safe(
+                    interaction=interaction,
+                    action="crm.send_member_agreement",
+                    result="denied",
+                    metadata={
+                        "reason": "requester_mismatch",
+                        "selected_contact_id": str(self.contact.get("id") or ""),
+                    },
+                    resource_type="crm_contact",
+                    resource_id=str(self.contact.get("id") or ""),
+                )
+                await interaction.response.send_message(
+                    "❌ Only the command requester can confirm this action.",
+                    ephemeral=True,
+                )
+                return
+            if not self.view.try_start_selection():
+                self.view.crm_cog._audit_command_safe(
+                    interaction=interaction,
+                    action="crm.send_member_agreement",
+                    result="denied",
+                    metadata={
+                        "reason": "selection_already_processing",
+                        "selected_contact_id": str(self.contact.get("id") or ""),
+                    },
+                    resource_type="crm_contact",
+                    resource_id=str(self.contact.get("id") or ""),
+                )
+                await interaction.response.send_message(
+                    "⚠️ This member agreement selection is already being processed.",
+                    ephemeral=True,
+                )
+                return
+
+            await interaction.response.defer(ephemeral=True)
+            self.view.disable_controls()
+            if interaction.message:
+                try:
+                    await interaction.message.edit(view=self.view)
+                except discord.NotFound:
+                    pass
+                except discord.HTTPException as exc:
+                    logger.warning(
+                        "Failed to update send_member_agreement selection view: %s",
+                        exc,
+                    )
+
+            await self.view.crm_cog._send_member_agreement_for_contact_flow(
+                interaction=interaction,
+                contact=self.contact,
+                search_term=self.view.search_term,
+            )
+        except Exception as exc:
+            logger.error("Error in send_member_agreement selection callback: %s", exc)
+            if self.view:
+                self.view.crm_cog._audit_command_safe(
+                    interaction=interaction,
+                    action="crm.send_member_agreement",
+                    result="error",
+                    metadata={
+                        "stage": "selection_callback",
+                        "error": str(exc),
+                        "selected_contact_id": str(self.contact.get("id") or ""),
+                    },
+                    resource_type="crm_contact",
+                    resource_id=str(self.contact.get("id") or ""),
+                )
+            await interaction.followup.send(
+                "❌ An error occurred while handling the selection.",
+                ephemeral=True,
+            )
+
+
+class MemberAgreementSelectionView(discord.ui.View):
+    """View containing contact selection buttons for member agreements."""
+
+    def __init__(
+        self,
+        crm_cog: "CRMCog",
+        requester_id: int,
+        search_term: str,
+    ) -> None:
+        super().__init__(timeout=300)
+        self.crm_cog = crm_cog
+        self.requester_id = requester_id
+        self.search_term = search_term
+        self._message: discord.Message | None = None
+        self._selection_started = False
+
+    def add_contact_button(self, contact: dict[str, Any]) -> None:
+        """Add a contact selection button."""
+        if len(self.children) >= 5:
+            return
+        self.add_item(
+            MemberAgreementSelectionButton(
+                contact=contact,
+                requester_id=self.requester_id,
+            )
+        )
+
+    def set_message(self, message: discord.Message | None) -> None:
+        """Store the sent message so timeout can disable its controls."""
+        self._message = message
+
+    def try_start_selection(self) -> bool:
+        """Mark this view as processing one selection if it has not started."""
+        if self._selection_started:
+            return False
+        self._selection_started = True
+        return True
+
+    def disable_controls(self) -> None:
+        """Disable all controls in the view."""
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+
+    async def on_timeout(self) -> None:
+        """Disable controls when the selection times out and update the message."""
+        self.disable_controls()
+        if self._message:
+            try:
+                await self._message.edit(view=self)
+            except discord.NotFound:
+                pass
+            except discord.HTTPException as exc:
+                logger.warning(
+                    "Failed to disable send_member_agreement selection view: %s",
+                    exc,
+                )
+
+
 class MarkIdVerifiedSelectionButton(discord.ui.Button["MarkIdVerifiedSelectionView"]):
     """Button for selecting a contact to mark ID verification on."""
 
@@ -8669,6 +8821,107 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         )
         view.set_message(message)
 
+    def _member_agreement_choice_contacts(
+        self, contacts: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Return up to five member-agreement choices, prioritizing unsigned contacts."""
+        unsigned_contacts = [
+            contact
+            for contact in contacts
+            if not self._contact_has_signed_member_agreement(contact)
+        ]
+        if not unsigned_contacts:
+            return contacts[:5]
+
+        signed_contacts = [
+            contact
+            for contact in contacts
+            if self._contact_has_signed_member_agreement(contact)
+        ]
+        choices = unsigned_contacts[:5]
+        choices.extend(signed_contacts[: max(0, 5 - len(choices))])
+        return choices
+
+    async def _show_send_member_agreement_contact_choices(
+        self,
+        interaction: discord.Interaction,
+        *,
+        search_term: str,
+        contacts: list[dict[str, Any]],
+    ) -> None:
+        """Show contact choices for the member agreement command."""
+        embed = discord.Embed(
+            title="🔍 Multiple Contacts Found",
+            description=(
+                f"Found {len(contacts)} contacts for `{search_term}`. "
+                "Select the correct person to send the member agreement."
+            ),
+            color=0xFFA500,
+        )
+        view = MemberAgreementSelectionView(
+            crm_cog=self,
+            requester_id=interaction.user.id,
+            search_term=search_term,
+        )
+
+        displayed_contacts = self._member_agreement_choice_contacts(contacts)
+        unsigned_count = sum(
+            1
+            for contact in contacts
+            if not self._contact_has_signed_member_agreement(contact)
+        )
+
+        for i, contact in enumerate(displayed_contacts, 1):
+            name = contact.get("name", "Unknown")
+            email = self._contact_preferred_email(contact) or "No email"
+            contact_id = contact.get("id", "")
+            signed_at = self._contact_text_value(
+                contact.get(MEMBER_AGREEMENT_SIGNED_AT_FIELD)
+            )
+            agreement_status = (
+                f"✅ Already signed: `{signed_at}`"
+                if signed_at
+                else "📝 Not signed; send/resend allowed"
+            )
+            contact_info = f"📧 {email}\n🆔 ID: `{contact_id}`\n{agreement_status}"
+            embed.add_field(name=f"{i}. {name}", value=contact_info, inline=True)
+            if not signed_at:
+                view.add_contact_button(contact)
+
+        tip_value = (
+            "Select an unsigned contact button to continue. "
+            "Prior send requests are not tracked, so unsigned contacts can be resent."
+            if unsigned_count
+            else "All matching contacts already signed. No send buttons are available."
+        )
+        if len(contacts) > len(displayed_contacts):
+            tip_value += (
+                "\nShowing up to 5 matches, prioritizing unsigned contacts. "
+                "Refine your search for omitted matches."
+            )
+
+        embed.add_field(
+            name="💡 Tip",
+            value=tip_value,
+            inline=False,
+        )
+
+        has_send_options = len(view.children) > 0
+        if has_send_options:
+            message = await interaction.followup.send(
+                embed=embed,
+                view=view,
+                ephemeral=True,
+                wait=True,
+            )
+            view.set_message(message)
+            return
+
+        await interaction.followup.send(
+            embed=embed,
+            ephemeral=True,
+        )
+
     @app_commands.command(
         name="mark-id-verified",
         description="Mark a contact as ID verified (Admin only).",
@@ -9009,82 +9262,22 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 ephemeral=True,
             )
 
-    @app_commands.command(
-        name="send-member-agreement",
-        description="Send the member agreement for signing to a CRM contact.",
-    )
-    @app_commands.describe(
-        search_term="Email, 508 email, Discord username, name, or contact ID."
-    )
-    @require_role("Steering Committee")
-    async def send_member_agreement(
+    async def _send_member_agreement_for_contact_flow(
         self,
+        *,
         interaction: discord.Interaction,
+        contact: dict[str, Any],
         search_term: str,
     ) -> None:
-        """Send the member agreement to a contact via DocuSeal."""
+        """Send the member agreement for one selected CRM contact."""
+        contact_id = str(contact.get("id") or "").strip()
+        contact_name = str(contact.get("name") or "Unknown").strip() or "Unknown"
+        contact_email = self._contact_preferred_email(contact)
+        signed_at = self._contact_text_value(
+            contact.get(MEMBER_AGREEMENT_SIGNED_AT_FIELD)
+        )
+
         try:
-            await interaction.response.defer(ephemeral=True)
-
-            contacts = await self._search_contacts_for_lookup(
-                search_term,
-                select=(
-                    "id,name,emailAddress,c508Email,cDiscordUsername,"
-                    f"{MEMBER_AGREEMENT_SIGNED_AT_FIELD}"
-                ),
-                include_discord_user_search=True,
-            )
-            if not contacts:
-                self._audit_command(
-                    interaction=interaction,
-                    action="crm.send_member_agreement",
-                    result="success",
-                    metadata={"search_term": search_term, "contacts_found": 0},
-                )
-                await interaction.followup.send(
-                    f"❌ No contact found for: `{search_term}`",
-                    ephemeral=True,
-                )
-                return
-
-            if len(contacts) > 1:
-                lines: list[str] = []
-                for contact in contacts[:5]:
-                    contact_name = str(contact.get("name") or "Unknown")
-                    contact_id = str(contact.get("id") or "")
-                    display_email = self._contact_preferred_email(contact) or "No email"
-                    lines.append(
-                        f"- **{contact_name}** (`{contact_id}`) - `{display_email}`"
-                    )
-                suffix = (
-                    f"\n...and {len(contacts) - 5} more." if len(contacts) > 5 else ""
-                )
-                self._audit_command(
-                    interaction=interaction,
-                    action="crm.send_member_agreement",
-                    result="success",
-                    metadata={
-                        "search_term": search_term,
-                        "contacts_found": len(contacts),
-                        "requires_selection": True,
-                    },
-                )
-                await interaction.followup.send(
-                    "⚠️ Multiple contacts found. Please refine your search:\n"
-                    + "\n".join(lines)
-                    + suffix,
-                    ephemeral=True,
-                )
-                return
-
-            contact = contacts[0]
-            contact_id = str(contact.get("id") or "").strip()
-            contact_name = str(contact.get("name") or "Unknown").strip() or "Unknown"
-            contact_email = self._contact_preferred_email(contact)
-            signed_at = self._contact_text_value(
-                contact.get(MEMBER_AGREEMENT_SIGNED_AT_FIELD)
-            )
-
             if self._contact_has_signed_member_agreement(contact):
                 self._audit_command(
                     interaction=interaction,
@@ -9153,6 +9346,101 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 f"✅ Sent the member agreement to **{contact_name}** at `{contact_email}`."
                 f"{submission_label}",
                 ephemeral=True,
+            )
+        except ValueError as exc:
+            logger.error("Member agreement command configuration/input error: %s", exc)
+            self._audit_command(
+                interaction=interaction,
+                action="crm.send_member_agreement",
+                result="error",
+                metadata={"search_term": search_term, "error": str(exc)},
+            )
+            await interaction.followup.send(f"❌ {exc}", ephemeral=True)
+        except DocusealAPIError as exc:
+            logger.error("DocuSeal API error in send_member_agreement: %s", exc)
+            sanitized_error = self._sanitize_error_message_for_discord(exc)
+            self._audit_command(
+                interaction=interaction,
+                action="crm.send_member_agreement",
+                result="error",
+                metadata={"search_term": search_term, "error": sanitized_error},
+            )
+            await interaction.followup.send(
+                f"❌ DocuSeal API error: {sanitized_error}", ephemeral=True
+            )
+        except Exception as exc:
+            logger.error("Unexpected error in send_member_agreement: %s", exc)
+            self._audit_command(
+                interaction=interaction,
+                action="crm.send_member_agreement",
+                result="error",
+                metadata={"search_term": search_term, "error": str(exc)},
+            )
+            await interaction.followup.send(
+                "❌ An unexpected error occurred while sending the member agreement.",
+                ephemeral=True,
+            )
+
+    @app_commands.command(
+        name="send-member-agreement",
+        description="Send the member agreement for signing to a CRM contact.",
+    )
+    @app_commands.describe(
+        search_term="Email, 508 email, Discord username, name, or contact ID."
+    )
+    @require_role("Steering Committee")
+    async def send_member_agreement(
+        self,
+        interaction: discord.Interaction,
+        search_term: str,
+    ) -> None:
+        """Send the member agreement to a contact via DocuSeal."""
+        try:
+            await interaction.response.defer(ephemeral=True)
+
+            contacts = await self._search_contacts_for_lookup(
+                search_term,
+                select=(
+                    "id,name,emailAddress,c508Email,cDiscordUsername,"
+                    f"{MEMBER_AGREEMENT_SIGNED_AT_FIELD}"
+                ),
+                include_discord_user_search=True,
+            )
+            if not contacts:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.send_member_agreement",
+                    result="success",
+                    metadata={"search_term": search_term, "contacts_found": 0},
+                )
+                await interaction.followup.send(
+                    f"❌ No contact found for: `{search_term}`",
+                    ephemeral=True,
+                )
+                return
+
+            if len(contacts) > 1:
+                self._audit_command(
+                    interaction=interaction,
+                    action="crm.send_member_agreement",
+                    result="success",
+                    metadata={
+                        "search_term": search_term,
+                        "contacts_found": len(contacts),
+                        "requires_selection": True,
+                    },
+                )
+                await self._show_send_member_agreement_contact_choices(
+                    interaction,
+                    search_term=search_term,
+                    contacts=contacts,
+                )
+                return
+
+            await self._send_member_agreement_for_contact_flow(
+                interaction=interaction,
+                contact=contacts[0],
+                search_term=search_term,
             )
         except ValueError as exc:
             logger.error("Member agreement command configuration/input error: %s", exc)

@@ -61,9 +61,6 @@ class Settings(SharedSettings):
     resume_ai_base_url: str | None = None
     resume_ai_model: str = "gpt-4.1-mini"
     resume_extractor_max_tokens: int = 2000
-    # Kimai time tracking settings
-    kimai_base_url: str
-    kimai_api_token: str
 
     @property
     def discord_sendmsg_character_limit(self) -> int:
