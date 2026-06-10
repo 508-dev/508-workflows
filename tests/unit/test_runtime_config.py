@@ -182,6 +182,20 @@ def test_runtime_config_numeric_bounds_are_preserved(
         coerce_runtime_config_value(definition, value)
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "DISCORD_LOGS_WEBHOOK_URL",
+        "KIMAI_BASE_URL",
+        "KIMAI_API_TOKEN",
+    ],
+)
+def test_startup_bound_runtime_config_is_restart_required(key: str) -> None:
+    definition = runtime_config_definition_for_key(key)
+    assert definition is not None
+    assert definition.restart_required is True
+
+
 def test_core_crm_auth_and_mailbox_settings_are_not_dashboard_configurable() -> None:
     assert runtime_config_definition_for_key("ESPO_BASE_URL") is None
     assert runtime_config_definition_for_key("ESPO_API_KEY") is None

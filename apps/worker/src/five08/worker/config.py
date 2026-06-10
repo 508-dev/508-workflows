@@ -118,6 +118,19 @@ class WorkerSettings(SharedSettings):
             return value.strip()
         return value
 
+    @model_validator(mode="after")
+    def validate_required_crm_settings(self) -> "WorkerSettings":
+        """Require EspoCRM settings outside local/test runtime environments."""
+        env = self.environment.strip().lower()
+        if env in {"local", "dev", "development", "test"}:
+            return self
+        if not self.espo_base_url or not self.espo_api_key:
+            raise ValueError(
+                "ESPO_BASE_URL and ESPO_API_KEY must be set when ENVIRONMENT "
+                "is non-local."
+            )
+        return self
+
     @property
     def google_forms_allowed_form_ids_set(self) -> set[str]:
         """Allowed Google Forms IDs used by intake webhook validation."""

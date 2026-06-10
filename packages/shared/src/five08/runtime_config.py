@@ -318,6 +318,7 @@ _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
         value_type="url",
         is_secret=True,
         env_names=("DISCORD_LOGS_WEBHOOK_URL",),
+        restart_required=True,
     ),
     RuntimeConfigDefinition(
         key="SENTRY_DSN",
@@ -430,6 +431,7 @@ _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
         description="Kimai endpoint for legacy time tracking workflows.",
         value_type="url",
         env_names=("KIMAI_BASE_URL",),
+        restart_required=True,
     ),
     RuntimeConfigDefinition(
         key="KIMAI_API_TOKEN",
@@ -439,6 +441,7 @@ _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
         description="Kimai API token for legacy time tracking workflows.",
         is_secret=True,
         env_names=("KIMAI_API_TOKEN",),
+        restart_required=True,
     ),
 )
 
@@ -741,19 +744,26 @@ def resolve_runtime_setting_value(
 def list_runtime_config(settings: Any) -> list[dict[str, object]]:
     """Return dashboard-safe runtime config metadata and effective values."""
     db_values = _load_db_values(settings)
+    db_overlay_enabled = runtime_config_db_overlay_enabled()
     items: list[dict[str, object]] = []
     for definition in _DEFINITIONS:
         env_locked = definition_is_env_locked(definition)
         raw_default = object.__getattribute__(settings, definition.attr)
         db_value = db_values.get(definition.key)
-        effective = resolve_runtime_setting_value(
-            settings, definition.attr, raw_default
-        )
+        effective = raw_default
         source = "default"
         if env_locked:
             source = "env"
         elif db_value is not None:
             source = "database"
+            if db_overlay_enabled:
+                try:
+                    effective = _coerce_for_settings(definition, db_value)
+                except Exception:
+                    logger.warning(
+                        "Ignoring invalid runtime config value for %s",
+                        definition.key,
+                    )
         configured = (
             env_locked
             or db_value is not None

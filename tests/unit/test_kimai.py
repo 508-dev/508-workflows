@@ -6,8 +6,24 @@ import pytest
 from unittest.mock import Mock, AsyncMock, patch
 from freezegun import freeze_time
 
+from five08.discord_bot.cogs import kimai as kimai_module
 from five08.discord_bot.cogs.kimai import KimaiCog
 from five08.clients.kimai import KimaiAPIError
+
+
+@pytest.mark.asyncio
+async def test_setup_skips_kimai_cog_when_espo_config_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = AsyncMock()
+    monkeypatch.setattr(kimai_module.settings, "kimai_base_url", "https://kimai.test")
+    monkeypatch.setattr(kimai_module.settings, "kimai_api_token", "kimai-token")
+    monkeypatch.setattr(kimai_module.settings, "espo_base_url", "")
+    monkeypatch.setattr(kimai_module.settings, "espo_api_key", "espo-token")
+
+    await kimai_module.setup(bot)
+
+    bot.add_cog.assert_not_awaited()
 
 
 class TestKimaiCog:

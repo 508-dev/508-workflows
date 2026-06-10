@@ -580,9 +580,12 @@ async def setup(bot: commands.Bot) -> None:
     if (
         not (settings.kimai_base_url or "").strip()
         or not (settings.kimai_api_token or "").strip()
+        or not (settings.espo_base_url or "").strip()
+        or not (settings.espo_api_key or "").strip()
     ):
         logger.warning(
-            "Kimai cog not loaded: missing KIMAI_BASE_URL and/or KIMAI_API_TOKEN"
+            "Kimai cog not loaded: missing KIMAI_BASE_URL, KIMAI_API_TOKEN, "
+            "ESPO_BASE_URL, and/or ESPO_API_KEY"
         )
         return
     await bot.add_cog(KimaiCog(bot))
