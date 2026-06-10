@@ -5,12 +5,9 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from email.message import EmailMessage
-from email.utils import formataddr, parseaddr
-from html import escape
 import logging
 import re
 import smtplib
-import ssl
 from typing import Any
 
 import discord
@@ -21,12 +18,20 @@ from five08.clients.espo import EspoAPIError, EspoClient
 from five08.discord_bot.config import settings
 from five08.discord_bot.utils.audit import DiscordAuditCogMixin
 from five08.discord_bot.utils.role_decorators import check_user_roles_with_hierarchy
-from five08.onboarding_email import OnboardingEmailRequest, build_onboarding_email
+from five08.onboarding_email import (
+    OnboardingEmailRequest,
+    OnboardingEmailSmtpConfig,
+    build_onboarding_email,
+    build_onboarding_email_message,
+    markdown_body_to_html,
+    markdown_body_to_text,
+    send_onboarding_email_message,
+    validate_plain_email,
+)
 
 logger = logging.getLogger(__name__)
 NO_MENTIONS = discord.AllowedMentions.none()
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
-MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
 ONBOARDER_FIELD = "cOnboarder"
 ONBOARDING_STATUS_FIELD = "cOnboardingState"
 ONBOARDING_EMAIL_CONTACT_SELECT_FIELDS = (
@@ -82,50 +87,6 @@ def _truncate_component_text(value: str, *, limit: int) -> str:
 def _discord_inline_code(value: object) -> str:
     text = " ".join(str(value or "").split())
     return text.replace("`", "'") or "unknown"
-
-
-def _markdown_body_to_text(markdown_body: str) -> str:
-    text = MARKDOWN_LINK_RE.sub(
-        lambda match: f"{match.group(1)} ({match.group(2)})",
-        markdown_body,
-    )
-    return text.strip() + "\n"
-
-
-def _markdown_body_to_html(markdown_body: str) -> str:
-    paragraphs = [
-        paragraph
-        for paragraph in re.split(r"\n{2,}", markdown_body.strip())
-        if paragraph.strip()
-    ]
-    body = "\n".join(
-        f"  <p>{_markdown_fragment_to_html(paragraph)}</p>" for paragraph in paragraphs
-    )
-    return (
-        "<!doctype html>\n"
-        '<html lang="en">\n'
-        "<head>\n"
-        '  <meta charset="utf-8">\n'
-        "  <title>508.dev onboarding</title>\n"
-        "</head>\n"
-        "<body>\n"
-        f"{body}\n"
-        "</body>\n"
-        "</html>\n"
-    )
-
-
-def _markdown_fragment_to_html(markdown_fragment: str) -> str:
-    output: list[str] = []
-    cursor = 0
-    for match in MARKDOWN_LINK_RE.finditer(markdown_fragment):
-        output.append(escape(markdown_fragment[cursor : match.start()]))
-        label = match.group(1)
-        url = match.group(2)
-        output.append(f'<a href="{escape(url, quote=True)}">{escape(label)}</a>')
-        cursor = match.end()
-    output.append(escape(markdown_fragment[cursor:]))
-    return "".join(output).replace("\n", "<br>")
 
 
 class OnboardingEmailContactSelect(
@@ -415,13 +376,7 @@ class OnboardingEmailCog(DiscordAuditCogMixin, commands.Cog):
 
     @staticmethod
     def _validate_email(value: str, field_name: str) -> str:
-        normalized = value.strip()
-        parsed_name, parsed_email = parseaddr(normalized)
-        if parsed_name or parsed_email != normalized:
-            raise ValueError(f"{field_name} must be a plain email address.")
-        if not EMAIL_RE.fullmatch(normalized):
-            raise ValueError(f"{field_name} must be a valid email address.")
-        return normalized
+        return validate_plain_email(value, field_name)
 
     def _reply_to_email_for_user(
         self,
@@ -811,58 +766,29 @@ class OnboardingEmailCog(DiscordAuditCogMixin, commands.Cog):
         text_body: str,
         html_body: str,
     ) -> EmailMessage:
-        sender_email = self._validate_email(
-            settings.onboarding_email_sender_email,
-            "ONBOARDING_EMAIL_SENDER_EMAIL",
+        return build_onboarding_email_message(
+            recipient_email=recipient_email,
+            reply_to_email=reply_to_email,
+            sender_name=sender_name,
+            sender_email=settings.onboarding_email_sender_email,
+            subject=subject,
+            text_body=text_body,
+            html_body=html_body,
         )
-        message = EmailMessage()
-        message["Subject"] = subject
-        message["From"] = formataddr((sender_name, sender_email))
-        message["To"] = recipient_email
-        message["Reply-To"] = formataddr((sender_name, reply_to_email))
-        message.set_content(text_body)
-        message.add_alternative(html_body, subtype="html")
-        return message
 
     def _send_message(self, message: EmailMessage) -> None:
-        smtp_server = (settings.onboarding_email_smtp_server or "").strip()
-        smtp_username = (settings.onboarding_email_smtp_username or "").strip()
-        smtp_password = (settings.onboarding_email_smtp_password or "").strip()
-        if not smtp_server:
-            raise ValueError("ONBOARDING_EMAIL_SMTP_SERVER is required to send.")
-        if not smtp_username or not smtp_password:
-            raise ValueError(
-                "ONBOARDING_EMAIL_SMTP_USERNAME and "
-                "ONBOARDING_EMAIL_SMTP_PASSWORD are required to send."
-            )
-        if (
-            not settings.onboarding_email_smtp_use_ssl
-            and not settings.onboarding_email_smtp_starttls
-        ):
-            raise ValueError(
-                "Onboarding email SMTP requires TLS. Enable "
-                "ONBOARDING_EMAIL_SMTP_USE_SSL or ONBOARDING_EMAIL_SMTP_STARTTLS."
-            )
-
-        port = settings.onboarding_email_smtp_port
-        timeout = settings.onboarding_email_smtp_timeout_seconds
-        tls_context = ssl.create_default_context()
-        if settings.onboarding_email_smtp_use_ssl:
-            with smtplib.SMTP_SSL(
-                smtp_server,
-                port,
-                timeout=timeout,
-                context=tls_context,
-            ) as smtp:
-                smtp.login(smtp_username, smtp_password)
-                smtp.send_message(message)
-            return
-
-        with smtplib.SMTP(smtp_server, port, timeout=timeout) as smtp:
-            if settings.onboarding_email_smtp_starttls:
-                smtp.starttls(context=tls_context)
-            smtp.login(smtp_username, smtp_password)
-            smtp.send_message(message)
+        send_onboarding_email_message(
+            message,
+            config=OnboardingEmailSmtpConfig(
+                smtp_server=settings.onboarding_email_smtp_server,
+                smtp_port=settings.onboarding_email_smtp_port,
+                smtp_use_ssl=settings.onboarding_email_smtp_use_ssl,
+                smtp_starttls=settings.onboarding_email_smtp_starttls,
+                smtp_username=settings.onboarding_email_smtp_username,
+                smtp_password=settings.onboarding_email_smtp_password,
+                smtp_timeout_seconds=settings.onboarding_email_smtp_timeout_seconds,
+            ),
+        )
 
     async def _send_reviewed_onboarding_email(
         self,
@@ -911,8 +837,8 @@ class OnboardingEmailCog(DiscordAuditCogMixin, commands.Cog):
             text_body = payload.original_text_body
             html_body = payload.original_html_body
         else:
-            text_body = _markdown_body_to_text(markdown_body)
-            html_body = _markdown_body_to_html(markdown_body)
+            text_body = markdown_body_to_text(markdown_body)
+            html_body = markdown_body_to_html(markdown_body)
 
         message = self._build_message(
             recipient_email=recipient_email,

@@ -1156,10 +1156,10 @@ def test_send_message_uses_ssl_context(
 
     with (
         patch(
-            "five08.discord_bot.cogs.onboarding_email.ssl.create_default_context",
+            "five08.onboarding_email.ssl.create_default_context",
             return_value=tls_context,
         ),
-        patch("five08.discord_bot.cogs.onboarding_email.smtplib.SMTP_SSL") as smtp_ssl,
+        patch("five08.onboarding_email.smtplib.SMTP_SSL") as smtp_ssl,
     ):
         smtp = smtp_ssl.return_value.__enter__.return_value
 

@@ -5990,6 +5990,7 @@ def test_dashboard_onboarding_email_draft_uses_crm_contact_and_local_marker(
                 "onboarding_email_recipient": "old@example.com",
             },
         ),
+        patch("five08.backend.api.onboarding_email_smtp_ready", return_value=True),
     ):
         response = client.post(
             "/dashboard/api/onboarding/contact-prospect-1/email/draft",
@@ -6012,6 +6013,52 @@ def test_dashboard_onboarding_email_draft_uses_crm_contact_and_local_marker(
     assert payload["can_send"] is True
     assert payload["markdown_body"].startswith("Great talking Jesse,")
     assert payload["onboarding_email_sent_at"] == "2026-06-10T12:00:00+00:00"
+
+
+def test_dashboard_onboarding_email_draft_marks_not_sendable_without_smtp(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+    espo_client = Mock()
+    espo_client.request.return_value = {
+        "id": "contact-prospect-1",
+        "name": "Jesse Candidate",
+        "emailAddress": "jesse@example.com",
+        "cOnboardingState": "selected",
+    }
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._is_dashboard_onboarding_contact_eligible",
+            return_value=True,
+        ),
+        patch("five08.backend.api.EspoClient", return_value=espo_client),
+        patch(
+            "five08.backend.api._dashboard_session_profile_row",
+            return_value={"name": "Michael Wu", "email_508": "michael@508.dev"},
+        ),
+        patch(
+            "five08.backend.api._dashboard_onboarding_email_marker",
+            return_value={
+                "onboarding_email_sent_at": None,
+                "onboarding_email_sent_by": None,
+                "onboarding_email_recipient": None,
+            },
+        ),
+        patch("five08.backend.api.onboarding_email_smtp_ready", return_value=False),
+    ):
+        response = client.post(
+            "/dashboard/api/onboarding/contact-prospect-1/email/draft",
+            json={},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["can_send"] is False
 
 
 def test_dashboard_onboarding_email_send_sends_and_marks_local_state(

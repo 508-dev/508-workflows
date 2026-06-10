@@ -136,6 +136,7 @@ from five08.onboarding_email import (
     build_onboarding_email_message,
     markdown_body_to_html,
     markdown_body_to_text,
+    onboarding_email_smtp_ready,
     send_onboarding_email_message,
     validate_plain_email,
 )
@@ -2246,7 +2247,6 @@ def _dashboard_onboarding_email_smtp_config() -> OnboardingEmailSmtpConfig:
         smtp_username=settings.onboarding_email_smtp_username,
         smtp_password=settings.onboarding_email_smtp_password,
         smtp_timeout_seconds=settings.onboarding_email_smtp_timeout_seconds,
-        sender_email=settings.onboarding_email_sender_email,
     )
 
 
@@ -6104,6 +6104,7 @@ async def dashboard_onboarding_email_draft_handler(
         _dashboard_onboarding_email_marker,
         contact_id.strip(),
     )
+    smtp_ready = onboarding_email_smtp_ready(_dashboard_onboarding_email_smtp_config())
 
     return JSONResponse(
         {
@@ -6115,7 +6116,7 @@ async def dashboard_onboarding_email_draft_handler(
             "signature_name": signature_name,
             "subject": draft.subject,
             "markdown_body": draft.markdown_body,
-            "can_send": bool(recipient_email and reply_to_email),
+            "can_send": bool(recipient_email and reply_to_email and smtp_ready),
             **marker,
         }
     )

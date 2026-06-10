@@ -60,7 +60,6 @@ class OnboardingEmailSmtpConfig:
     smtp_username: str | None = None
     smtp_password: str | None = None
     smtp_timeout_seconds: float = 20.0
-    sender_email: str = "onboarding@508.dev"
 
 
 def build_onboarding_email(request: OnboardingEmailRequest) -> OnboardingEmailDraft:
@@ -140,6 +139,52 @@ def send_onboarding_email_message(
     config: OnboardingEmailSmtpConfig,
 ) -> None:
     """Send an onboarding email through configured SMTP."""
+    if not onboarding_email_smtp_ready(config):
+        _validate_onboarding_email_smtp_config(config)
+
+    tls_context = ssl.create_default_context()
+    if config.smtp_use_ssl:
+        with smtplib.SMTP_SSL(
+            (config.smtp_server or "").strip(),
+            config.smtp_port,
+            timeout=config.smtp_timeout_seconds,
+            context=tls_context,
+        ) as smtp:
+            smtp.login(
+                (config.smtp_username or "").strip(),
+                (config.smtp_password or "").strip(),
+            )
+            smtp.send_message(message)
+        return
+
+    with smtplib.SMTP(
+        (config.smtp_server or "").strip(),
+        config.smtp_port,
+        timeout=config.smtp_timeout_seconds,
+    ) as smtp:
+        if config.smtp_starttls:
+            smtp.starttls(context=tls_context)
+        smtp.login(
+            (config.smtp_username or "").strip(),
+            (config.smtp_password or "").strip(),
+        )
+        smtp.send_message(message)
+
+
+def onboarding_email_smtp_ready(config: OnboardingEmailSmtpConfig) -> bool:
+    """Return whether SMTP settings are complete enough to attempt delivery."""
+    smtp_server = (config.smtp_server or "").strip()
+    smtp_username = (config.smtp_username or "").strip()
+    smtp_password = (config.smtp_password or "").strip()
+    return bool(
+        smtp_server
+        and smtp_username
+        and smtp_password
+        and (config.smtp_use_ssl or config.smtp_starttls)
+    )
+
+
+def _validate_onboarding_email_smtp_config(config: OnboardingEmailSmtpConfig) -> None:
     smtp_server = (config.smtp_server or "").strip()
     smtp_username = (config.smtp_username or "").strip()
     smtp_password = (config.smtp_password or "").strip()
@@ -155,28 +200,6 @@ def send_onboarding_email_message(
             "Onboarding email SMTP requires TLS. Enable "
             "ONBOARDING_EMAIL_SMTP_USE_SSL or ONBOARDING_EMAIL_SMTP_STARTTLS."
         )
-
-    tls_context = ssl.create_default_context()
-    if config.smtp_use_ssl:
-        with smtplib.SMTP_SSL(
-            smtp_server,
-            config.smtp_port,
-            timeout=config.smtp_timeout_seconds,
-            context=tls_context,
-        ) as smtp:
-            smtp.login(smtp_username, smtp_password)
-            smtp.send_message(message)
-        return
-
-    with smtplib.SMTP(
-        smtp_server,
-        config.smtp_port,
-        timeout=config.smtp_timeout_seconds,
-    ) as smtp:
-        if config.smtp_starttls:
-            smtp.starttls(context=tls_context)
-        smtp.login(smtp_username, smtp_password)
-        smtp.send_message(message)
 
 
 def validate_plain_email(value: str, field_name: str) -> str:
