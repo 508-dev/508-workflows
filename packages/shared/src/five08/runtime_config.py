@@ -523,7 +523,7 @@ def mask_runtime_secret(value: object) -> str | None:
         return None
     if len(text) <= 10:
         return f"{text[:2]}...{text[-2:]}" if len(text) > 4 else "****"
-    return f"{text[:5]}...{text[-5:]}"
+    return f"{text[:5]}...{text[-3:]}"
 
 
 def _runtime_config_secret_key() -> str | None:

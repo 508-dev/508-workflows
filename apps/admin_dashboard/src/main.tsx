@@ -90,6 +90,74 @@ type ConfigurationResponse = {
   items: ConfigurationItem[]
 }
 
+type ConfigurationGroupMetadata = {
+  category: string
+  label: string
+  description: string
+}
+
+const configurationGroups: ConfigurationGroupMetadata[] = [
+  {
+    category: "CRM",
+    label: "CRM",
+    description: "EspoCRM connection settings used by the API, worker, and Discord bot.",
+  },
+  {
+    category: "Projects",
+    label: "Projects",
+    description: "ERPNext credentials and project workflow settings.",
+  },
+  {
+    category: "Onboarding",
+    label: "Onboarding",
+    description: "Provisioning integrations for Authentik, Outline, Migadu, and DocuSeal.",
+  },
+  {
+    category: "AI",
+    label: "AI Providers",
+    description: "Provider credentials, base URLs, and model defaults.",
+  },
+  {
+    category: "Agent",
+    label: "Agent Runtime",
+    description: "Planner, fallback, and tiered model routing for agent workflows.",
+  },
+  {
+    category: "Observability",
+    label: "Observability",
+    description: "Telemetry and request tracing integrations.",
+  },
+  {
+    category: "Intake",
+    label: "Intake",
+    description: "Resume and mailbox intake limits and parser defaults.",
+  },
+  {
+    category: "Operations",
+    label: "Operations",
+    description: "Queue, sync, GitHub, and notification behavior.",
+  },
+  {
+    category: "Legacy",
+    label: "Legacy",
+    description: "Older integrations retained for compatibility.",
+  },
+]
+
+const configurationGroupByCategory = new Map(
+  configurationGroups.map((group, index) => [group.category, { ...group, index }]),
+)
+
+function isPrimaryConfiguration(item: ConfigurationItem) {
+  return (
+    item.is_secret ||
+    item.value_type === "url" ||
+    item.key.endsWith("_MODEL") ||
+    item.key.endsWith("_API_USER") ||
+    item.key.endsWith("_BASE_URL")
+  )
+}
+
 type ProfileStatus = {
   crm_active?: boolean
   is_member?: boolean
@@ -6669,22 +6737,60 @@ function ConfigurationView({
   onSave: (key: string, value: string) => void
   onClear: (key: string) => void
 }) {
-  const [category, setCategory] = useState("All")
+  const [selectedCategory, setSelectedCategory] = useState("All")
   const [drafts, setDrafts] = useState<Record<string, string>>({})
-  const categories = useMemo(
-    () => ["All", ...Array.from(new Set(items.map((item) => item.category))).sort()],
+  const categories = useMemo(() => {
+    const present = new Set(items.map((item) => item.category))
+    const known = configurationGroups.filter((group) => present.has(group.category))
+    const unknown = Array.from(present)
+      .filter((category) => !configurationGroupByCategory.has(category))
+      .sort()
+      .map((category) => ({
+        category,
+        label: category,
+        description: "Additional runtime settings.",
+      }))
+    return known.concat(unknown)
+  }, [items])
+  const groupedItems = useMemo(() => {
+    const groups = new Map<string, ConfigurationItem[]>()
+    for (const item of items) {
+      if (selectedCategory !== "All" && item.category !== selectedCategory) continue
+      const current = groups.get(item.category) ?? []
+      current.push(item)
+      groups.set(item.category, current)
+    }
+    return Array.from(groups.entries())
+      .map(([category, groupItems]) => {
+        const known = configurationGroupByCategory.get(category)
+        const sortedItems = groupItems.sort((left, right) => {
+          const priorityOrder =
+            Number(!isPrimaryConfiguration(left)) - Number(!isPrimaryConfiguration(right))
+          return priorityOrder || left.label.localeCompare(right.label)
+        })
+        const primaryItems = sortedItems.filter(isPrimaryConfiguration)
+        const advancedItems = sortedItems.filter((item) => !isPrimaryConfiguration(item))
+        return {
+          category,
+          label: known?.label ?? category,
+          description: known?.description ?? "Additional runtime settings.",
+          order: known?.index ?? configurationGroups.length,
+          primaryItems: primaryItems.length ? primaryItems : sortedItems,
+          advancedItems: primaryItems.length ? advancedItems : [],
+          items: sortedItems,
+        }
+      })
+      .sort((left, right) => left.order - right.order || left.label.localeCompare(right.label))
+  }, [items, selectedCategory])
+  const summary = useMemo(
+    () => ({
+      configured: items.filter((item) => item.configured).length,
+      envLocked: items.filter((item) => item.env_locked).length,
+      missing: items.filter((item) => !item.configured).length,
+    }),
     [items],
   )
-  const visibleItems = useMemo(
-    () =>
-      items
-        .filter((item) => category === "All" || item.category === category)
-        .sort((left, right) => {
-          const categoryOrder = left.category.localeCompare(right.category)
-          return categoryOrder || left.label.localeCompare(right.label)
-        }),
-    [items, category],
-  )
+  const visibleItemCount = groupedItems.reduce((count, group) => count + group.items.length, 0)
 
   useEffect(() => {
     setDrafts(
@@ -6693,6 +6799,12 @@ function ConfigurationView({
       ),
     )
   }, [items])
+
+  useEffect(() => {
+    if (selectedCategory !== "All" && !items.some((item) => item.category === selectedCategory)) {
+      setSelectedCategory("All")
+    }
+  }, [items, selectedCategory])
 
   function sourceBadge(item: ConfigurationItem) {
     if (item.source === "env") return "ENV"
@@ -6735,23 +6847,113 @@ function ConfigurationView({
     )
   }
 
+  function configurationTable(groupLabel: string, tableItems: ConfigurationItem[], suffix: string) {
+    return (
+      <div className="overflow-x-auto">
+        <Table
+          id={`configurationTable-${suffix}`}
+          className="min-w-[980px]"
+          aria-label={`${groupLabel} configuration settings`}
+        >
+          <TableHeader>
+            <TableRow>
+              <TableHead className="w-[26%]">Setting</TableHead>
+              <TableHead className="w-[12%]">Source</TableHead>
+              <TableHead className="w-[18%]">Active</TableHead>
+              <TableHead className="w-[29%]">Value</TableHead>
+              <TableHead className="w-[15%]">Actions</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody id={`configurationBody-${suffix}`}>
+            {tableItems.map((item) => renderConfigurationRow(item))}
+          </TableBody>
+        </Table>
+      </div>
+    )
+  }
+
+  function renderConfigurationRow(item: ConfigurationItem) {
+    const busy = loading[`configuration:${item.key}`]
+    const writable = canWrite && !item.env_locked && !busy
+    const draft = drafts[item.key] ?? ""
+    return (
+      <TableRow key={item.key}>
+        <TableCell>
+          <div className="grid gap-1">
+            <strong>{item.label}</strong>
+            <span className="font-mono text-xs text-muted-foreground">{item.key}</span>
+            <span className="text-xs text-muted-foreground">{item.description}</span>
+            {item.restart_required ? (
+              <div>
+                <Badge variant="running">Restart</Badge>
+              </div>
+            ) : null}
+          </div>
+        </TableCell>
+        <TableCell>
+          <div className="grid gap-1.5">
+            <Badge variant={item.source === "env" ? "running" : "neutral"}>
+              {sourceBadge(item)}
+            </Badge>
+            {item.env_locked ? (
+              <span className="text-xs text-muted-foreground">Environment locked</span>
+            ) : null}
+          </div>
+        </TableCell>
+        <TableCell>
+          <div className="grid gap-1">
+            <Badge variant={item.configured ? "succeeded" : "missing"}>
+              {item.configured ? "Configured" : "Missing"}
+            </Badge>
+            {item.is_secret ? (
+              <span className="font-mono text-xs text-muted-foreground">
+                {item.masked_value || "No secret"}
+              </span>
+            ) : (
+              <span className="break-words text-xs text-muted-foreground">
+                {String(item.value ?? "") || "Default"}
+              </span>
+            )}
+            {item.is_secret && item.secret_encryption_configured === false ? (
+              <span className="text-xs text-red-300">Encryption key missing</span>
+            ) : null}
+          </div>
+        </TableCell>
+        <TableCell>{valueInput(item)}</TableCell>
+        <TableCell>
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => onSave(item.key, draft)}
+              disabled={
+                !writable ||
+                (item.is_secret && !draft.trim()) ||
+                (item.is_secret && item.secret_encryption_configured === false)
+              }
+            >
+              Save
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => onClear(item.key)}
+              disabled={!writable || item.source !== "database"}
+            >
+              Clear
+            </Button>
+          </div>
+        </TableCell>
+      </TableRow>
+    )
+  }
+
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Configuration</CardTitle>
-        <div className="flex flex-wrap items-center gap-2">
-          <Select
-            aria-label="Configuration category"
-            className="w-44"
-            value={category}
-            onChange={(event) => setCategory(event.target.value)}
-          >
-            {categories.map((value) => (
-              <option key={value} value={value}>
-                {value}
-              </option>
-            ))}
-          </Select>
+    <div className="grid gap-4">
+      <Card>
+        <CardHeader>
+          <CardTitle>Configuration</CardTitle>
           <Button
             id="refreshConfiguration"
             type="button"
@@ -6762,115 +6964,113 @@ function ConfigurationView({
             <RefreshCw />
             Refresh
           </Button>
-        </div>
-      </CardHeader>
-      <Empty hidden={visibleItems.length !== 0}>No configuration entries found.</Empty>
-      <div className="overflow-x-auto">
-        <Table
-          id="configurationTable"
-          className={cn("min-w-[1100px]", visibleItems.length === 0 && "hidden")}
-          aria-label="Runtime configuration"
-        >
-          <TableHeader>
-            <TableRow>
-              <TableHead className="w-[22%]">Setting</TableHead>
-              <TableHead className="w-[13%]">Source</TableHead>
-              <TableHead className="w-[17%]">Active</TableHead>
-              <TableHead className="w-[31%]">Value</TableHead>
-              <TableHead className="w-[17%]">Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody id="configurationBody">
-            {visibleItems.map((item) => {
-              const busy = loading[`configuration:${item.key}`]
-              const writable = canWrite && !item.env_locked && !busy
-              const draft = drafts[item.key] ?? ""
+        </CardHeader>
+        <CardContent className="grid gap-4">
+          <section
+            className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"
+            aria-label="Configuration summary"
+          >
+            {[
+              ["Total", items.length],
+              ["Configured", summary.configured],
+              ["Missing", summary.missing],
+              ["Env locked", summary.envLocked],
+            ].map(([label, value]) => (
+              <div key={label} className="rounded-md border bg-background p-3">
+                <span className="text-[11px] font-extrabold uppercase text-muted-foreground">
+                  {label}
+                </span>
+                <strong className="mt-1 block text-xl">{value}</strong>
+              </div>
+            ))}
+          </section>
+          <section className="flex flex-wrap gap-2" aria-label="Configuration groups">
+            <Button
+              type="button"
+              size="sm"
+              variant={selectedCategory === "All" ? "default" : "outline"}
+              aria-pressed={selectedCategory === "All"}
+              onClick={() => setSelectedCategory("All")}
+            >
+              All groups
+              <span className="font-mono text-[11px]">{items.length}</span>
+            </Button>
+            {categories.map((group) => {
+              const count = items.filter((item) => item.category === group.category).length
               return (
-                <TableRow key={item.key}>
-                  <TableCell>
-                    <div className="grid gap-1">
-                      <strong>{item.label}</strong>
-                      <span className="font-mono text-xs text-muted-foreground">{item.key}</span>
-                      <span className="text-xs text-muted-foreground">{item.description}</span>
-                      <div className="flex flex-wrap gap-1.5">
-                        <Badge>{item.category}</Badge>
-                        {item.restart_required ? <Badge variant="running">Restart</Badge> : null}
-                      </div>
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <div className="grid gap-1.5">
-                      <Badge variant={item.source === "env" ? "running" : "neutral"}>
-                        {sourceBadge(item)}
-                      </Badge>
-                      {item.env_locked ? (
-                        <span className="text-xs text-muted-foreground">Environment locked</span>
-                      ) : null}
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <div className="grid gap-1">
-                      <Badge variant={item.configured ? "succeeded" : "missing"}>
-                        {item.configured ? "Configured" : "Missing"}
-                      </Badge>
-                      {item.is_secret ? (
-                        <span className="font-mono text-xs text-muted-foreground">
-                          {item.masked_value || "No secret"}
-                        </span>
-                      ) : (
-                        <span className="break-words text-xs text-muted-foreground">
-                          {String(item.value ?? "") || "Default"}
-                        </span>
-                      )}
-                      {item.is_secret && item.secret_encryption_configured === false ? (
-                        <span className="text-xs text-red-300">Encryption key missing</span>
-                      ) : null}
-                    </div>
-                  </TableCell>
-                  <TableCell>{valueInput(item)}</TableCell>
-                  <TableCell>
-                    <div className="flex flex-wrap justify-end gap-2">
-                      <Button
-                        type="button"
-                        size="sm"
-                        onClick={() => onSave(item.key, draft)}
-                        disabled={
-                          !writable ||
-                          (item.is_secret && !draft.trim()) ||
-                          (item.is_secret && item.secret_encryption_configured === false)
-                        }
-                      >
-                        Save
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        onClick={() => onClear(item.key)}
-                        disabled={!writable || item.source !== "database"}
-                      >
-                        Clear
-                      </Button>
-                    </div>
-                  </TableCell>
-                </TableRow>
+                <Button
+                  key={group.category}
+                  type="button"
+                  size="sm"
+                  variant={selectedCategory === group.category ? "default" : "outline"}
+                  aria-pressed={selectedCategory === group.category}
+                  onClick={() => setSelectedCategory(group.category)}
+                >
+                  {group.label}
+                  <span className="font-mono text-[11px]">{count}</span>
+                </Button>
               )
             })}
-          </TableBody>
-        </Table>
-      </div>
-    </Card>
+          </section>
+        </CardContent>
+      </Card>
+
+      <Empty hidden={visibleItemCount !== 0}>No configuration entries found.</Empty>
+      {groupedItems.map((group) => {
+        const configured = group.items.filter((item) => item.configured).length
+        const missing = group.items.length - configured
+        const restartRequired = group.items.some((item) => item.restart_required)
+        return (
+          <Card key={group.category}>
+            <CardHeader className="items-start">
+              <div className="grid gap-1">
+                <CardTitle>{group.label}</CardTitle>
+                <span className="text-sm text-muted-foreground">{group.description}</span>
+              </div>
+              <div className="flex flex-wrap justify-end gap-1.5">
+                <Badge variant="neutral">{group.items.length} settings</Badge>
+                <Badge variant={missing ? "missing" : "succeeded"}>{configured} configured</Badge>
+                {restartRequired ? <Badge variant="running">Restart</Badge> : null}
+              </div>
+            </CardHeader>
+            {configurationTable(group.label, group.primaryItems, group.category)}
+            {group.advancedItems.length ? (
+              <details className="border-t bg-background/40">
+                <summary className="flex min-h-11 cursor-pointer items-center justify-between gap-3 px-4 py-3 text-sm font-extrabold">
+                  <span>Advanced</span>
+                  <span className="font-mono text-xs text-muted-foreground">
+                    {group.advancedItems.length} settings
+                  </span>
+                </summary>
+                <div className="border-t">
+                  {configurationTable(
+                    `${group.label} advanced`,
+                    group.advancedItems,
+                    `${group.category}-advanced`,
+                  )}
+                </div>
+              </details>
+            ) : null}
+          </Card>
+        )
+      })}
+    </div>
   )
 }
 
 const root = document.getElementById("root")
 
 if (!root) {
-  throw new Error("Missing #root container")
+  if (import.meta.env.MODE !== "test") {
+    throw new Error("Missing #root container")
+  }
+} else {
+  createRoot(root).render(
+    <StrictMode>
+      <App />
+    </StrictMode>,
+  )
 }
 
-createRoot(root).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-)
+export type { ConfigurationItem }
+export { ConfigurationView }

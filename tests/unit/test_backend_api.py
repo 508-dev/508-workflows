@@ -2218,7 +2218,7 @@ def test_dashboard_configuration_requires_admin_permission(
                     "key": "OPENAI_API_KEY",
                     "label": "OpenAI API key",
                     "is_secret": True,
-                    "masked_value": "sk-te...value",
+                    "masked_value": "sk-te...lue",
                 }
             ],
         ) as mock_list,
@@ -2226,7 +2226,7 @@ def test_dashboard_configuration_requires_admin_permission(
         response = client.get("/dashboard/api/configuration")
 
     assert response.status_code == 200
-    assert response.json()["items"][0]["masked_value"] == "sk-te...value"
+    assert response.json()["items"][0]["masked_value"] == "sk-te...lue"
     mock_list.assert_called_once()
 
     non_admin_session = api.AuthSession(
