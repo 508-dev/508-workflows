@@ -79,6 +79,39 @@ class BrevoClient:
             raise BrevoAPIError("Brevo response payload must be a JSON object.")
         return data
 
+    def get_contact(self, email: str) -> dict[str, Any] | None:
+        """Return one Brevo contact by email, or None when it does not exist."""
+        normalized_email = email.strip().lower()
+        headers = {
+            "Accept": "application/json",
+            "api-key": self.api_key,
+        }
+        try:
+            response = requests.get(
+                f"{self.base_url}/contacts/{normalized_email}",
+                headers=headers,
+                timeout=self.timeout_seconds,
+            )
+        except requests.RequestException as exc:
+            raise BrevoAPIError(f"Brevo API request failed: {exc}") from exc
+
+        if response.status_code == 404:
+            return None
+        if response.status_code != 200:
+            raise BrevoAPIError(
+                "Brevo contact lookup failed: "
+                f"status={response.status_code}, body={response.text}"
+            )
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise BrevoAPIError("Brevo response payload must be valid JSON.") from exc
+
+        if not isinstance(data, dict):
+            raise BrevoAPIError("Brevo response payload must be a JSON object.")
+        return data
+
     def find_list_id_by_name(self, name: str) -> int | None:
         """Find a Brevo contact list ID by exact case-insensitive name."""
         normalized_name = name.strip().casefold()

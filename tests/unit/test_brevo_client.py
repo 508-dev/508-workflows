@@ -63,6 +63,32 @@ def test_add_contact_to_list_raises_on_request_error() -> None:
             )
 
 
+def test_get_contact_fetches_contact_by_email() -> None:
+    response = Mock()
+    response.status_code = 200
+    response.json.return_value = {"email": "jane@example.com"}
+
+    with patch("five08.clients.brevo.requests.get", return_value=response) as get:
+        result = BrevoClient(api_key="brevo-key").get_contact("Jane@Example.com")
+
+    get.assert_called_once_with(
+        "https://api.brevo.com/v3/contacts/jane@example.com",
+        headers={"Accept": "application/json", "api-key": "brevo-key"},
+        timeout=20.0,
+    )
+    assert result == {"email": "jane@example.com"}
+
+
+def test_get_contact_returns_none_for_missing_contact() -> None:
+    response = Mock()
+    response.status_code = 404
+
+    with patch("five08.clients.brevo.requests.get", return_value=response):
+        result = BrevoClient(api_key="brevo-key").get_contact("jane@example.com")
+
+    assert result is None
+
+
 def test_find_list_id_by_name_gets_matching_list() -> None:
     response = Mock()
     response.status_code = 200

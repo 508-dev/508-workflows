@@ -162,9 +162,16 @@ current precedence rules.
 - `Required for /create-mailbox and /create-user-accounts`: `MIGADU_API_USER`, `MIGADU_API_KEY`
 - `Optional`: `MIGADU_MAILBOX_DOMAIN` (default: `508.dev`)
 - `Optional for Brevo newsletter sync`: `BREVO_API_KEY`
-- `Optional for Brevo newsletter sync`: `BREVO_508_MEMBERS_NEWSLETTER_LIST_ID` (explicit production Brevo list ID override)
+- `Optional for Brevo newsletter sync`: `BREVO_508_MEMBERS_NEWSLETTER_LIST_ID` (explicit production Brevo list ID override; production should set `4` for the 508 members list)
 - `Optional`: `BREVO_508_MEMBERS_NEWSLETTER_LIST_NAME` (default: `508 members`; used to look up the list ID when the explicit ID is unset)
-- Note: mailbox and backup email subscription to Brevo is best effort. Failures are reported as warnings and do not block mailbox or account creation.
+- `Optional for Keila contact sync`: `KEILA_API_KEY`
+- `Optional`: `KEILA_API_BASE_URL` (default: `https://app.keila.io`)
+- `Optional`: `KEILA_API_TIMEOUT_SECONDS` (default: `20.0`)
+- `Optional`: `NEWSLETTER_SYNC_ENABLED` (default: `true`)
+- `Optional`: `NEWSLETTER_SYNC_INTERVAL_SECONDS` (default: `604800`, one week)
+- `Optional`: `NEWSLETTER_SYNC_EXCLUDED_MAILBOXES` (comma-separated system mailboxes to skip during Migadu resync)
+- Note: mailbox and backup email subscription to configured newsletter tools is best effort. Failures are reported as warnings and do not block mailbox or account creation.
+- Note: the periodic sync uses Migadu mailboxes and password recovery emails as the source of truth for `@508.dev`, skips configured system mailboxes, and does not re-add provider-suppressed contacts.
 
 ## Authentik SSO Provisioning
 

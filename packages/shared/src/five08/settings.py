@@ -84,6 +84,17 @@ class SharedSettings(BaseSettings):
     brevo_api_timeout_seconds: float = 20.0
     brevo_508_members_newsletter_list_id: int | None = Field(default=None, ge=1)
     brevo_508_members_newsletter_list_name: str = "508 members"
+    keila_api_key: str | None = None
+    keila_api_base_url: str = "https://app.keila.io"
+    keila_api_timeout_seconds: float = 20.0
+    newsletter_sync_enabled: bool = True
+    newsletter_sync_interval_seconds: int = 604800
+    newsletter_sync_excluded_mailboxes: str = (
+        "authentik@508.dev,baserow@508.dev,cal@508.dev,calendar@508.dev,"
+        "coolify@508.dev,crm@508.dev,docuseal@508.dev,events@508.dev,"
+        "keycloak@508.dev,kimai@508.dev,matrix@508.dev,openproject@508.dev,"
+        "supabase@508.dev,vaultwarden@508.dev,wiki@508.dev"
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

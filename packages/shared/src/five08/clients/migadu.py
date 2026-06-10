@@ -31,6 +31,15 @@ class MigaduMailboxCreateRequest:
     name: str
 
 
+@dataclass(frozen=True, slots=True)
+class MigaduMailbox:
+    """Mailbox fields needed for member audience sync."""
+
+    address: str
+    name: str
+    password_recovery_email: str | None
+
+
 class MigaduClient:
     """Small Migadu API wrapper for mailbox creation."""
 
@@ -84,3 +93,49 @@ class MigaduClient:
             raise MigaduAPIError("Migadu response payload must be a JSON object.")
 
         return data
+
+    def list_mailboxes(self) -> list[MigaduMailbox]:
+        """List mailboxes for the configured domain."""
+        try:
+            response = requests.get(
+                f"{self.base_url}/domains/{self.domain}/mailboxes",
+                auth=(self.username, self.api_key),
+                timeout=self.timeout_seconds,
+            )
+        except requests.RequestException as exc:
+            raise MigaduAPIError(f"Migadu API request failed: {exc}") from exc
+
+        if response.status_code != 200:
+            raise MigaduAPIError(
+                "Migadu mailbox listing failed: "
+                f"status={response.status_code}, body={response.text}"
+            )
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise MigaduAPIError("Migadu response payload must be valid JSON.") from exc
+
+        if not isinstance(data, dict):
+            raise MigaduAPIError("Migadu response payload must be a JSON object.")
+
+        raw_mailboxes = data.get("mailboxes", [])
+        if not isinstance(raw_mailboxes, list):
+            raise MigaduAPIError("Migadu response payload must include mailboxes list.")
+
+        mailboxes: list[MigaduMailbox] = []
+        for item in raw_mailboxes:
+            if not isinstance(item, dict):
+                continue
+            address = str(item.get("address") or "").strip().lower()
+            if not address:
+                continue
+            recovery = str(item.get("password_recovery_email") or "").strip().lower()
+            mailboxes.append(
+                MigaduMailbox(
+                    address=address,
+                    name=str(item.get("name") or "").strip(),
+                    password_recovery_email=recovery or None,
+                )
+            )
+        return mailboxes

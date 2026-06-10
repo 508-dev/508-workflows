@@ -17,7 +17,6 @@ from five08.agent.models import (
     RiskLevel,
 )
 from five08.clients.authentik import AuthentikAPIError, AuthentikClient
-from five08.clients.brevo import BrevoAPIError, BrevoClient
 from five08.clients.docuseal import create_member_agreement_submission
 from five08.clients.espo import EspoAPIError, EspoClient
 from five08.clients.github import GitHubClient
@@ -28,6 +27,10 @@ from five08.clients.migadu import (
 )
 from five08.clients.outline import OutlineClient
 from five08.crm_contacts import EspoContactRepository
+from five08.newsletter_sync import (
+    format_newsletter_sync_warning,
+    sync_newsletter_contacts,
+)
 
 SSO_ID_FIELD = "cSsoID"
 
@@ -81,6 +84,9 @@ class ToolRuntimeConfig:
     brevo_api_timeout_seconds: float = 20.0
     brevo_508_members_newsletter_list_id: int | None = None
     brevo_508_members_newsletter_list_name: str = "508 members"
+    keila_api_key: str | None = None
+    keila_api_base_url: str = "https://app.keila.io"
+    keila_api_timeout_seconds: float = 20.0
 
     @classmethod
     def from_settings(cls, settings: Any) -> "ToolRuntimeConfig":
@@ -149,6 +155,13 @@ class ToolRuntimeConfig:
             ),
             brevo_508_members_newsletter_list_name=getattr(
                 settings, "brevo_508_members_newsletter_list_name", "508 members"
+            ),
+            keila_api_key=getattr(settings, "keila_api_key", None),
+            keila_api_base_url=getattr(
+                settings, "keila_api_base_url", "https://app.keila.io"
+            ),
+            keila_api_timeout_seconds=getattr(
+                settings, "keila_api_timeout_seconds", 20.0
             ),
         )
 
@@ -1412,50 +1425,17 @@ class ToolRegistry:
             ),
         )
 
-    def _brevo_client(self) -> BrevoClient | None:
-        api_key = _optional_str(self.runtime_config.brevo_api_key)
-        if api_key is None:
-            return None
-        return BrevoClient(
-            api_key=api_key,
-            base_url=self.runtime_config.brevo_api_base_url,
-            timeout_seconds=self.runtime_config.brevo_api_timeout_seconds,
-        )
-
     def _add_emails_to_newsletter(self, emails: list[str]) -> str | None:
-        client = self._brevo_client()
-        if client is None:
-            return "BREVO_API_KEY is not configured."
-
-        list_id = self.runtime_config.brevo_508_members_newsletter_list_id
-        if list_id is None:
-            try:
-                list_id = client.find_list_id_by_name(
-                    self.runtime_config.brevo_508_members_newsletter_list_name
-                )
-            except (BrevoAPIError, ValueError) as exc:
-                return f"Brevo list lookup failed: {_short_error(exc)}"
-        if list_id is None:
-            return (
-                "Brevo list not found: "
-                f"{self.runtime_config.brevo_508_members_newsletter_list_name}"
-            )
-
-        errors: list[str] = []
-        seen: set[str] = set()
-        for email in emails:
-            normalized_email = email.strip().lower()
-            if not normalized_email or normalized_email in seen:
-                continue
-            seen.add(normalized_email)
-            try:
-                client.add_contact_to_list(
-                    email=normalized_email,
-                    list_id=list_id,
-                )
-            except (BrevoAPIError, ValueError) as exc:
-                errors.append(f"{normalized_email}: {_short_error(exc)}")
-        return "; ".join(errors) if errors else None
+        result = sync_newsletter_contacts(
+            self.runtime_config,
+            emails,
+            source="agent_account_creation",
+        )
+        warning = format_newsletter_sync_warning(result)
+        if not warning:
+            return None
+        text = " ".join(warning.split()).strip()
+        return f"{text[:197]}..." if len(text) > 200 else text
 
     def _create_migadu_mailbox(
         self,

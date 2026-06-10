@@ -568,7 +568,7 @@ async def test_create_user_accounts_creates_mailbox_sso_and_outline_invite(
     assert "User accounts are ready" in message
     assert "Email: `jane@508.dev`" in message
     assert "Outline invite: sent." in message
-    assert "Newsletter: added mailbox and backup email to Brevo." in message
+    assert "Newsletter: added mailbox and backup email." in message
     assert mock_interaction.followup.send.call_args.kwargs["ephemeral"] is True
     assert mock_audit.call_args.kwargs["metadata"]["outline_invited"] is True
 

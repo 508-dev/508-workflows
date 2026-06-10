@@ -1667,6 +1667,32 @@ function App() {
     }
   }
 
+  async function syncNewsletters() {
+    setBusy("syncNewsletters", true)
+    showToast("Queueing newsletter sync")
+    try {
+      const payload = await requestJson<{
+        job_id?: string
+        dry_run?: boolean
+        would_enqueue?: { job_type?: string }
+      }>("/dashboard/api/sync/newsletters", {
+        method: "POST",
+      })
+      if (payload.dry_run) {
+        showToast(
+          `Dry run only: would queue ${payload.would_enqueue?.job_type || "newsletter sync"}`,
+          "warning",
+        )
+      } else {
+        showToast(`Queued newsletter sync ${payload.job_id}`, "ok")
+      }
+    } catch (error) {
+      showError(error, "Unable to queue newsletter sync")
+    } finally {
+      setBusy("syncNewsletters", false)
+    }
+  }
+
   async function assignOnboarder(contactId: string | undefined, onboarder: string) {
     const normalizedContactId = String(contactId || "").trim()
     const normalizedOnboarder = onboarder.trim()
@@ -2179,6 +2205,7 @@ function App() {
               people={sortedPeople}
               sort={sort.people}
               canSync={canUse("people:sync")}
+              canSyncNewsletters={canUse("people:sync")}
               loading={loading}
               peopleQuery={peopleQuery}
               peopleMember={peopleMember}
@@ -2188,6 +2215,7 @@ function App() {
               peopleFilterKeys={peopleFilterKeys}
               onSearch={loadPeople}
               onSync={syncPeople}
+              onSyncNewsletters={syncNewsletters}
               onSort={(key) => handleSort("people", key)}
               setPeopleQuery={setPeopleQuery}
               setPeopleMember={setPeopleMember}
@@ -5177,6 +5205,7 @@ function PeopleView(props: {
   people: Person[]
   sort: { key: string; direction: SortDirection }
   canSync: boolean
+  canSyncNewsletters: boolean
   loading: Record<string, boolean>
   peopleQuery: string
   peopleMember: string
@@ -5186,6 +5215,7 @@ function PeopleView(props: {
   peopleFilterKeys: PeopleFilterKey[]
   onSearch: () => void
   onSync: () => void
+  onSyncNewsletters: () => void
   onSort: (key: string) => void
   setPeopleQuery: (value: string) => void
   setPeopleMember: (value: string) => void
@@ -5212,6 +5242,19 @@ function PeopleView(props: {
             >
               <RefreshCw />
               Sync people
+            </Button>
+          ) : null}
+          {props.canSyncNewsletters ? (
+            <Button
+              id="syncNewsletters"
+              data-permission="people:sync"
+              type="button"
+              variant="secondary"
+              onClick={props.onSyncNewsletters}
+              disabled={props.loading.syncNewsletters}
+            >
+              <RefreshCw />
+              Sync newsletters
             </Button>
           ) : null}
           {props.crmBaseUrl ? (

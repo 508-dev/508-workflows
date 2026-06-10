@@ -102,6 +102,8 @@ def test_shared_settings_expose_agent_external_tool_credentials() -> None:
         brevo_api_key="brevo-key",
         brevo_508_members_newsletter_list_id=4,
         brevo_508_members_newsletter_list_name="508 members",
+        keila_api_key="keila-key",
+        keila_api_base_url="https://keila.example",
     )
 
     runtime_config = ToolRuntimeConfig.from_settings(settings)
@@ -113,6 +115,8 @@ def test_shared_settings_expose_agent_external_tool_credentials() -> None:
     assert runtime_config.brevo_api_key == "brevo-key"
     assert runtime_config.brevo_508_members_newsletter_list_id == 4
     assert runtime_config.brevo_508_members_newsletter_list_name == "508 members"
+    assert runtime_config.keila_api_key == "keila-key"
+    assert runtime_config.keila_api_base_url == "https://keila.example"
 
 
 def test_shared_settings_docuseal_template_id_accepts_numeric_string() -> None:

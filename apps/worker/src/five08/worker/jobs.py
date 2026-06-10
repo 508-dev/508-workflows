@@ -16,6 +16,7 @@ from five08.worker.crm.resume_profile_processor import ResumeProfileProcessor
 from five08.worker.erpnext_project_sync import ERPNextProjectSyncProcessor
 from five08.worker.mailbox_resume_ingest import ResumeMailboxProcessor
 from five08.worker.masking import mask_email
+from five08.newsletter_sync import NewsletterSyncProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +165,13 @@ def sync_projects_from_erpnext_job() -> dict[str, Any]:
     return processor.sync_open_projects()
 
 
+def sync_508_members_newsletters_job() -> dict[str, Any]:
+    """Sync Migadu member emails into configured newsletter providers."""
+    logger.info("Processing 508 members newsletter sync job")
+    processor = NewsletterSyncProcessor(settings)
+    return processor.sync_508_members()
+
+
 JOB_FUNCTIONS: dict[str, Callable[..., dict[str, Any]]] = {
     process_webhook_event.__name__: process_webhook_event,
     process_contact_skills_job.__name__: process_contact_skills_job,
@@ -174,5 +182,6 @@ JOB_FUNCTIONS: dict[str, Callable[..., dict[str, Any]]] = {
     sync_people_from_crm_job.__name__: sync_people_from_crm_job,
     sync_person_from_crm_job.__name__: sync_person_from_crm_job,
     sync_projects_from_erpnext_job.__name__: sync_projects_from_erpnext_job,
+    sync_508_members_newsletters_job.__name__: sync_508_members_newsletters_job,
     process_docuseal_agreement_job.__name__: process_docuseal_agreement_job,
 }

@@ -6380,6 +6380,85 @@ def test_dashboard_sync_people_workflows_engineer_is_dry_run(
     mock_insert.assert_not_called()
 
 
+def test_dashboard_sync_newsletters_audits_discord_session(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="admin@508.dev",
+        display_name="Discord Admin",
+        groups=["discord_admin"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+        crm_contact_id="contact-123",
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._enqueue_newsletter_sync_job",
+            new_callable=AsyncMock,
+            return_value=Mock(id="job-newsletter-1", created=True),
+        ),
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
+    ):
+        response = client.post("/dashboard/api/sync/newsletters")
+
+    assert response.status_code == 202
+    assert response.json()["job_id"] == "job-newsletter-1"
+    audit_payload = mock_insert.call_args.args[1]
+    assert audit_payload.source == api.AuditSource.ADMIN_DASHBOARD
+    assert audit_payload.action == "newsletter.508_members_sync"
+    assert audit_payload.result == api.AuditResult.SUCCESS
+    assert audit_payload.actor_provider == api.ActorProvider.DISCORD
+    assert audit_payload.actor_subject == "123456789"
+    assert audit_payload.resource_type == "newsletter_sync"
+    assert audit_payload.resource_id == "job-newsletter-1"
+    assert audit_payload.metadata is not None
+    assert audit_payload.metadata["source"] == "dashboard"
+
+
+def test_dashboard_sync_newsletters_workflows_engineer_is_dry_run(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="workflows-1",
+        email="workflows@508.dev",
+        display_name="Workflows Engineer",
+        groups=["Workflows Engineer"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._enqueue_newsletter_sync_job",
+            new_callable=AsyncMock,
+        ) as mock_enqueue,
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
+    ):
+        response = client.post("/dashboard/api/sync/newsletters")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "dry_run"
+    assert response.json()["would_enqueue"]["job_type"] == (
+        "sync_508_members_newsletters_job"
+    )
+    mock_enqueue.assert_not_called()
+    mock_insert.assert_not_called()
+
+
 def test_dashboard_sync_projects_workflows_engineer_is_dry_run(
     client: TestClient,
 ) -> None:

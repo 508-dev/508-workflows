@@ -17,7 +17,6 @@ from discord import app_commands
 from discord.ext import commands
 
 from five08.clients.espo import EspoAPIError, EspoClient
-from five08.clients.brevo import BrevoAPIError, BrevoClient
 from five08.clients.migadu import (
     MigaduAPIError,
     MigaduClient,
@@ -27,6 +26,10 @@ from five08.clients.migadu import (
 from five08.discord_bot.config import settings
 from five08.discord_bot.utils.audit import DiscordAuditCogMixin
 from five08.discord_bot.utils.role_decorators import require_role
+from five08.newsletter_sync import (
+    format_newsletter_sync_warning,
+    sync_newsletter_contacts,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -210,59 +213,18 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
             domain=self._migadu_mailbox_domain(),
         )
 
-    def _brevo_client(self) -> BrevoClient | None:
-        """Build a Brevo client when newsletter sync is configured."""
-        api_key = (settings.brevo_api_key or "").strip()
-        if not api_key:
-            return None
-        return BrevoClient(
-            api_key=api_key,
-            base_url=settings.brevo_api_base_url,
-            timeout_seconds=settings.brevo_api_timeout_seconds,
-        )
-
     async def _add_emails_to_newsletter(self, emails: list[str]) -> str | None:
-        """Best-effort subscribe mailbox and backup addresses to Brevo."""
-        client = self._brevo_client()
-        if client is None:
-            return "BREVO_API_KEY is not configured."
-
-        list_id = settings.brevo_508_members_newsletter_list_id
-        if list_id is None:
-            try:
-                list_id = await asyncio.to_thread(
-                    client.find_list_id_by_name,
-                    settings.brevo_508_members_newsletter_list_name,
-                )
-            except (BrevoAPIError, ValueError) as exc:
-                return f"Brevo list lookup failed: {exc}"
-        if list_id is None:
-            return (
-                "Brevo list not found: "
-                f"{settings.brevo_508_members_newsletter_list_name}"
-            )
-
-        errors: list[str] = []
-        seen: set[str] = set()
-        for email in emails:
-            normalized_email = email.strip().lower()
-            if not normalized_email or normalized_email in seen:
-                continue
-            seen.add(normalized_email)
-            try:
-                await asyncio.to_thread(
-                    client.add_contact_to_list,
-                    email=normalized_email,
-                    list_id=list_id,
-                )
-            except (BrevoAPIError, ValueError) as exc:
-                logger.warning(
-                    "Failed to add %s to Brevo newsletter list: %s",
-                    normalized_email,
-                    exc,
-                )
-                errors.append(f"{normalized_email}: {exc}")
-        return "; ".join(errors) if errors else None
+        """Best-effort subscribe mailbox and backup addresses to newsletter tools."""
+        result = await asyncio.to_thread(
+            sync_newsletter_contacts,
+            settings,
+            emails,
+            source="discord_create_mailbox",
+        )
+        warning = format_newsletter_sync_warning(result)
+        if warning:
+            logger.warning("Newsletter sync warning: %s", warning)
+        return warning
 
     def _normalize_mailbox_request(self, mailbox_username: str) -> tuple[str, str]:
         """
@@ -713,13 +675,13 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
         if outcome.newsletter_error:
             embed.add_field(
                 name="Newsletter",
-                value=f"Brevo subscription failed: {outcome.newsletter_error}",
+                value=f"Newsletter subscription warning: {outcome.newsletter_error}",
                 inline=False,
             )
         else:
             embed.add_field(
                 name="Newsletter",
-                value="Added mailbox and backup email to Brevo.",
+                value="Added mailbox and backup email to newsletter tools.",
                 inline=False,
             )
 

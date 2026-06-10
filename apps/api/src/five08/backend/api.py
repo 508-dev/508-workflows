@@ -527,6 +527,12 @@ def _crm_sync_idempotency_key(*, now: datetime) -> str:
     return f"crm-sync:{bucket}"
 
 
+def _newsletter_sync_idempotency_key(*, now: datetime) -> str:
+    interval_seconds = max(1, settings.newsletter_sync_interval_seconds)
+    bucket = int(now.timestamp()) // interval_seconds
+    return f"newsletter-sync:508-members:{bucket}"
+
+
 def _normalize_google_forms_input(value: str | None) -> str | None:
     if not isinstance(value, str):
         return None
@@ -610,6 +616,34 @@ async def _enqueue_erpnext_project_sync_job(
     return job
 
 
+async def _enqueue_newsletter_sync_job(
+    queue: QueueClient,
+    *,
+    reason: str,
+) -> EnqueuedJob:
+    now = datetime.now(tz=timezone.utc)
+    idempotency_key = (
+        _newsletter_sync_idempotency_key(now=now)
+        if reason == "scheduler"
+        else f"newsletter-sync:508-members:{reason}:{now.strftime('%Y%m%d%H%M%S')}"
+    )
+    job: EnqueuedJob = await asyncio.to_thread(
+        enqueue_job,
+        queue=queue,
+        fn=JOB_FUNCTIONS["sync_508_members_newsletters_job"],
+        args=(),
+        settings=settings,
+        idempotency_key=idempotency_key,
+    )
+    logger.info(
+        "Enqueued 508 members newsletter sync job id=%s created=%s reason=%s",
+        job.id,
+        job.created,
+        reason,
+    )
+    return job
+
+
 async def _crm_sync_scheduler(app: FastAPI) -> None:
     queue = app.state.queue
     interval_seconds = max(1, settings.crm_sync_interval_seconds)
@@ -618,6 +652,17 @@ async def _crm_sync_scheduler(app: FastAPI) -> None:
             await _enqueue_full_crm_sync_job(queue, reason="scheduler")
         except Exception:
             logger.exception("Failed scheduling CRM full-sync job")
+        await asyncio.sleep(interval_seconds)
+
+
+async def _newsletter_sync_scheduler(app: FastAPI) -> None:
+    queue = app.state.queue
+    interval_seconds = max(1, settings.newsletter_sync_interval_seconds)
+    while True:
+        try:
+            await _enqueue_newsletter_sync_job(queue, reason="scheduler")
+        except Exception:
+            logger.exception("Failed scheduling 508 members newsletter sync job")
         await asyncio.sleep(interval_seconds)
 
 
@@ -5886,6 +5931,64 @@ async def dashboard_sync_people_handler(request: Request) -> JSONResponse:
     )
 
 
+async def dashboard_sync_newsletters_handler(request: Request) -> JSONResponse:
+    """Queue a 508 members newsletter sync from the authenticated dashboard."""
+    session, error_response, dry_run = await _dashboard_write_session_or_dry_run(
+        request,
+        required_permission=DASHBOARD_PERMISSION_PEOPLE_SYNC,
+        dry_run_permission=DASHBOARD_PERMISSION_PEOPLE_SYNC_DRY_RUN,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    if dry_run:
+        return JSONResponse(
+            {
+                "status": "dry_run",
+                "dry_run": True,
+                "source": "dashboard",
+                "would_enqueue": {
+                    "queue": settings.redis_queue_name,
+                    "job_type": "sync_508_members_newsletters_job",
+                    "reason": "dashboard",
+                    "idempotency_key_pattern": "newsletter-sync:508-members:dashboard:<timestamp>",
+                },
+            }
+        )
+
+    job = await _enqueue_newsletter_sync_job(
+        request.app.state.queue, reason="dashboard"
+    )
+    actor_provider, actor_subject = _session_audit_actor(session)
+    await _write_auth_audit_event(
+        action="newsletter.508_members_sync",
+        result=AuditResult.SUCCESS,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="newsletter_sync",
+        resource_id=job.id,
+        metadata={
+            "source": "dashboard",
+            "queue": settings.redis_queue_name,
+        },
+    )
+    return JSONResponse(
+        {
+            "status": "queued",
+            "source": "dashboard",
+            "job_id": job.id,
+            "created": job.created,
+        },
+        status_code=202,
+    )
+
+
 async def espocrm_people_sync_webhook_handler(request: Request) -> JSONResponse:
     """Queue per-contact people cache sync jobs from CRM webhook events."""
     if not _is_webhook_authorized(request):
@@ -7360,6 +7463,13 @@ async def _lifespan(app: FastAPI) -> Any:
     else:
         logger.info("CRM sync scheduler disabled by config")
 
+    if settings.newsletter_sync_enabled:
+        app.state.newsletter_sync_task = asyncio.create_task(
+            _newsletter_sync_scheduler(app)
+        )
+    else:
+        logger.info("508 members newsletter sync scheduler disabled by config")
+
     if settings.email_resume_intake_enabled:
         app.state.email_resume_task = asyncio.create_task(_email_resume_scheduler())
     else:
@@ -7376,6 +7486,12 @@ async def _lifespan(app: FastAPI) -> Any:
 
         if hasattr(app.state, "email_resume_task"):
             task = app.state.email_resume_task
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        if hasattr(app.state, "newsletter_sync_task"):
+            task = app.state.newsletter_sync_task
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
@@ -7583,6 +7699,11 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
     app.add_api_route(
         "/dashboard/api/sync/people",
         dashboard_sync_people_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/dashboard/api/sync/newsletters",
+        dashboard_sync_newsletters_handler,
         methods=["POST"],
     )
     app.add_api_route(
