@@ -67,6 +67,8 @@ from five08.backend.auth import (
     AuthSession,
     DASHBOARD_ADMIN_PERMISSIONS,
     DASHBOARD_PERMISSION_AUDIT_READ,
+    DASHBOARD_PERMISSION_CONFIGURATION_READ,
+    DASHBOARD_PERMISSION_CONFIGURATION_WRITE,
     DASHBOARD_PERMISSION_GIGS_READ,
     DASHBOARD_PERMISSION_GIGS_WRITE,
     DASHBOARD_PERMISSION_JOBS_READ,
@@ -145,6 +147,13 @@ from five08.projects import (
     upsert_project,
     wiki_project_match_preview,
     wiki_row_by_key,
+)
+from five08.runtime_config import (
+    delete_runtime_config_value,
+    invalidate_runtime_config_cache,
+    list_runtime_config,
+    runtime_config_definition_for_key,
+    set_runtime_config_value,
 )
 from five08.worker.config import settings
 from five08.worker.db_migrations import run_job_migrations
@@ -323,6 +332,13 @@ class DashboardGigApplicationCreateRequest(BaseModel):
     """Payload for adding one CRM-verified gig candidate/application."""
 
     crm_profile: str = Field(min_length=1, max_length=500)
+
+
+class DashboardConfigurationUpdateRequest(BaseModel):
+    """Payload for updating one admin-managed configuration value."""
+
+    value: str | bool | int | float | None = None
+    clear: bool = False
 
 
 @dataclass(frozen=True)
@@ -4330,6 +4346,27 @@ async def _audit_dashboard_engineer_setup(
     )
 
 
+async def _audit_dashboard_configuration_change(
+    session: AuthSession,
+    *,
+    result: AuditResult,
+    key: str,
+    action: str,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    actor_provider, actor_subject = _session_audit_actor(session)
+    await _write_auth_audit_event(
+        action=action,
+        result=result,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="runtime_config",
+        resource_id=key,
+        metadata={"source": "dashboard", **(metadata or {})},
+    )
+
+
 def _remove_erpnext_project_user(
     *,
     external_project_id: str,
@@ -5800,6 +5837,111 @@ async def dashboard_agent_report_handler(
 
     report = await asyncio.to_thread(_dashboard_agent_request_report, limit)
     return JSONResponse(report)
+
+
+async def dashboard_configuration_handler(request: Request) -> JSONResponse:
+    """Return admin-only dashboard configuration metadata."""
+    _, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_CONFIGURATION_READ,
+    )
+    if error_response is not None:
+        return error_response
+
+    items = await asyncio.to_thread(list_runtime_config, settings)
+    return JSONResponse({"items": items})
+
+
+async def dashboard_update_configuration_handler(
+    request: Request,
+    key: str,
+) -> JSONResponse:
+    """Update or clear one admin-managed dashboard configuration value."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_CONFIGURATION_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    definition = runtime_config_definition_for_key(key)
+    if definition is None:
+        return JSONResponse({"error": "unknown_configuration_key"}, status_code=404)
+
+    try:
+        payload = DashboardConfigurationUpdateRequest.model_validate(
+            await request.json()
+        )
+    except ValidationError as exc:
+        return JSONResponse(
+            {"error": "invalid_configuration_payload", "detail": exc.errors()},
+            status_code=400,
+        )
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+
+    actor_provider, actor_subject = _session_audit_actor(session)
+    audit_action = "configuration.clear" if payload.clear else "configuration.update"
+    metadata = {
+        "key": definition.key,
+        "category": definition.category,
+        "is_secret": definition.is_secret,
+    }
+    try:
+        if payload.clear:
+            await asyncio.to_thread(delete_runtime_config_value, settings, definition)
+        else:
+            if definition.is_secret and not str(payload.value or "").strip():
+                return JSONResponse(
+                    {"error": "secret_value_required"},
+                    status_code=400,
+                )
+            await asyncio.to_thread(
+                set_runtime_config_value,
+                settings,
+                definition,
+                payload.value,
+                updated_by_provider=actor_provider.value,
+                updated_by_subject=actor_subject,
+            )
+    except ValueError as exc:
+        status_code = 409 if "environment" in str(exc) else 400
+        await _audit_dashboard_configuration_change(
+            session,
+            result=AuditResult.ERROR,
+            key=definition.key,
+            action=audit_action,
+            metadata={**metadata, "error": str(exc)},
+        )
+        return JSONResponse({"error": str(exc)}, status_code=status_code)
+    except RuntimeError as exc:
+        await _audit_dashboard_configuration_change(
+            session,
+            result=AuditResult.ERROR,
+            key=definition.key,
+            action=audit_action,
+            metadata={**metadata, "error": str(exc)},
+        )
+        return JSONResponse({"error": str(exc)}, status_code=409)
+
+    invalidate_runtime_config_cache(settings)
+    global _AGENT_ORCHESTRATOR
+    with _AGENT_ORCHESTRATOR_LOCK:
+        _AGENT_ORCHESTRATOR = None
+    await _audit_dashboard_configuration_change(
+        session,
+        result=AuditResult.SUCCESS,
+        key=definition.key,
+        action=audit_action,
+        metadata=metadata,
+    )
+    items = await asyncio.to_thread(list_runtime_config, settings)
+    return JSONResponse({"items": items})
 
 
 async def dashboard_rerun_job_handler(
@@ -7579,6 +7721,16 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
         "/dashboard/api/agent",
         dashboard_agent_report_handler,
         methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/configuration",
+        dashboard_configuration_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/configuration/{key}",
+        dashboard_update_configuration_handler,
+        methods=["PUT"],
     )
     app.add_api_route(
         "/dashboard/api/sync/people",

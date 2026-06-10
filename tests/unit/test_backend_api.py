@@ -2187,6 +2187,47 @@ def test_dashboard_me_allows_discord_admin_sensitive_permissions_without_sso(
     assert "jobs:read" in response.json()["permissions"]
     assert "jobs:write" in response.json()["permissions"]
     assert "people:sync" in response.json()["permissions"]
+    assert "configuration:read" in response.json()["permissions"]
+    assert "configuration:write" in response.json()["permissions"]
+
+
+def test_dashboard_configuration_requires_admin_permission(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.list_runtime_config",
+            return_value=[
+                {
+                    "key": "OPENAI_API_KEY",
+                    "label": "OpenAI API key",
+                    "is_secret": True,
+                    "masked_value": "sk-te...value",
+                }
+            ],
+        ) as mock_list,
+    ):
+        response = client.get("/dashboard/api/configuration")
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["masked_value"] == "sk-te...value"
+    mock_list.assert_called_once()
 
 
 def test_dashboard_me_keeps_sensitive_permissions_for_admin_sso_without_token(
@@ -2215,6 +2256,7 @@ def test_dashboard_me_keeps_sensitive_permissions_for_admin_sso_without_token(
     assert response.status_code == 200
     assert "audit:read" not in response.json()["permissions"]
     assert "jobs:write" not in response.json()["permissions"]
+    assert "configuration:write" not in response.json()["permissions"]
 
 
 def test_dashboard_me_allows_sensitive_permissions_without_sso_in_dev(

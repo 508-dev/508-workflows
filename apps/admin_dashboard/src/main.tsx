@@ -10,6 +10,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Settings,
   ShieldCheck,
   UserMinus,
   UserPlus,
@@ -48,7 +49,15 @@ import {
 import { cn } from "@/lib/utils"
 import "./index.css"
 
-type View = "people" | "gigs" | "projects" | "onboarding" | "jobs" | "agent" | "audit"
+type View =
+  | "people"
+  | "gigs"
+  | "projects"
+  | "onboarding"
+  | "jobs"
+  | "agent"
+  | "audit"
+  | "configuration"
 type SortDirection = "asc" | "desc"
 
 type User = {
@@ -59,6 +68,26 @@ type User = {
   crm_contact_id?: string
   crm_base_url?: string
   permissions?: string[]
+}
+
+type ConfigurationItem = {
+  key: string
+  label: string
+  category: string
+  description: string
+  value_type: "string" | "bool" | "int" | "float" | "url" | "csv"
+  is_secret: boolean
+  env_locked: boolean
+  source: "env" | "database" | "default"
+  configured: boolean
+  restart_required: boolean
+  secret_encryption_configured?: boolean | null
+  value?: string | number | boolean | null
+  masked_value?: string | null
+}
+
+type ConfigurationResponse = {
+  items: ConfigurationItem[]
 }
 
 type ProfileStatus = {
@@ -359,6 +388,7 @@ const routes: Record<View, string> = {
   jobs: "/dashboard/jobs",
   agent: "/dashboard/agent",
   audit: "/dashboard/audit",
+  configuration: "/dashboard/configuration",
 }
 
 const routePermissions: Record<View, string> = {
@@ -369,6 +399,7 @@ const routePermissions: Record<View, string> = {
   jobs: "jobs:read",
   agent: "audit:read",
   audit: "audit:read",
+  configuration: "configuration:read",
 }
 
 const peopleFilterDefinitions = {
@@ -796,6 +827,7 @@ function App() {
   const [onboarding, setOnboarding] = useState<Person[]>([])
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([])
   const [agentReport, setAgentReport] = useState<AgentReport | null>(null)
+  const [configurationItems, setConfigurationItems] = useState<ConfigurationItem[]>([])
   const [jobDetail, setJobDetail] = useState<JobDetail | null>(null)
   const [loading, setLoading] = useState<Record<string, boolean>>({})
   const [devErrors, setDevErrors] = useState<DashboardDevError[]>([])
@@ -812,6 +844,7 @@ function App() {
     people: { key: "name", direction: "asc" },
     agent: { key: "occurred_at", direction: "desc" },
     audit: { key: "occurred_at", direction: "desc" },
+    configuration: { key: "category", direction: "asc" },
   })
 
   const [minutes, setMinutes] = useState("60")
@@ -1600,6 +1633,58 @@ function App() {
     }
   }
 
+  async function loadConfiguration() {
+    setBusy("configuration", true)
+    try {
+      const payload = await requestJson<ConfigurationResponse>("/dashboard/api/configuration")
+      setConfigurationItems(payload.items)
+    } catch (error) {
+      showError(error, "Unable to load configuration")
+    } finally {
+      setBusy("configuration", false)
+    }
+  }
+
+  async function updateConfigurationValue(key: string, value: string) {
+    setBusy(`configuration:${key}`, true)
+    try {
+      const payload = await requestJson<ConfigurationResponse>(
+        `/dashboard/api/configuration/${encodeURIComponent(key)}`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ value }),
+        },
+      )
+      setConfigurationItems(payload.items)
+      showToast(`Saved ${key}`, "ok")
+    } catch (error) {
+      showError(error, `Unable to save ${key}`)
+    } finally {
+      setBusy(`configuration:${key}`, false)
+    }
+  }
+
+  async function clearConfigurationValue(key: string) {
+    setBusy(`configuration:${key}`, true)
+    try {
+      const payload = await requestJson<ConfigurationResponse>(
+        `/dashboard/api/configuration/${encodeURIComponent(key)}`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ clear: true }),
+        },
+      )
+      setConfigurationItems(payload.items)
+      showToast(`Cleared ${key}`, "ok")
+    } catch (error) {
+      showError(error, `Unable to clear ${key}`)
+    } finally {
+      setBusy(`configuration:${key}`, false)
+    }
+  }
+
   async function loadJobDetail(jobId: string) {
     setBusy(`detail:${jobId}`, true)
     showToast(`Loading ${jobId}`)
@@ -1898,6 +1983,7 @@ function App() {
     if (view === "jobs") void loadJobs()
     if (view === "agent") void loadAgentReport()
     if (view === "audit") void loadAuditEvents()
+    if (view === "configuration") void loadConfiguration()
   }, [view])
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: permission loading is the first authorized data fetch for the current view.
@@ -1911,6 +1997,7 @@ function App() {
     if (view === "jobs") void loadJobs()
     if (view === "agent") void loadAgentReport()
     if (view === "audit") void loadAuditEvents()
+    if (view === "configuration") void loadConfiguration()
   }, [permissions])
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: jobs reload intentionally follows filter changes only while jobs is active.
@@ -2145,6 +2232,7 @@ function App() {
               ["jobs", "Jobs", BriefcaseBusiness],
               ["agent", "Agent", ShieldCheck],
               ["audit", "Audit", FileClock],
+              ["configuration", "Configuration", Settings],
             ] as const
           )
             .filter(([key]) => canView(key))
@@ -2350,6 +2438,17 @@ function App() {
 
           {view === "agent" ? (
             <AgentView report={agentReport} loading={loading} onRefresh={loadAgentReport} />
+          ) : null}
+
+          {view === "configuration" ? (
+            <ConfigurationView
+              items={configurationItems}
+              loading={loading}
+              canWrite={can("configuration:write")}
+              onRefresh={loadConfiguration}
+              onSave={updateConfigurationValue}
+              onClear={clearConfigurationValue}
+            />
           ) : null}
         </div>
       </main>
@@ -6552,6 +6651,218 @@ function AgentView({
         </div>
       </Card>
     </>
+  )
+}
+
+function ConfigurationView({
+  items,
+  loading,
+  canWrite,
+  onRefresh,
+  onSave,
+  onClear,
+}: {
+  items: ConfigurationItem[]
+  loading: Record<string, boolean>
+  canWrite: boolean
+  onRefresh: () => void
+  onSave: (key: string, value: string) => void
+  onClear: (key: string) => void
+}) {
+  const [category, setCategory] = useState("All")
+  const [drafts, setDrafts] = useState<Record<string, string>>({})
+  const categories = useMemo(
+    () => ["All", ...Array.from(new Set(items.map((item) => item.category))).sort()],
+    [items],
+  )
+  const visibleItems = useMemo(
+    () =>
+      items
+        .filter((item) => category === "All" || item.category === category)
+        .sort((left, right) => {
+          const categoryOrder = left.category.localeCompare(right.category)
+          return categoryOrder || left.label.localeCompare(right.label)
+        }),
+    [items, category],
+  )
+
+  useEffect(() => {
+    setDrafts((current) => {
+      const next = { ...current }
+      for (const item of items) {
+        if (!(item.key in next)) {
+          next[item.key] = item.is_secret ? "" : String(item.value ?? "")
+        }
+      }
+      for (const key of Object.keys(next)) {
+        if (!items.some((item) => item.key === key)) delete next[key]
+      }
+      return next
+    })
+  }, [items])
+
+  function sourceBadge(item: ConfigurationItem) {
+    if (item.source === "env") return "ENV"
+    if (item.source === "database") return "DB"
+    return "Default"
+  }
+
+  function valueInput(item: ConfigurationItem) {
+    const value = drafts[item.key] ?? ""
+    const disabled = !canWrite || item.env_locked || loading[`configuration:${item.key}`]
+    if (item.value_type === "bool") {
+      return (
+        <Select
+          aria-label={`${item.label} value`}
+          value={value}
+          disabled={disabled}
+          onChange={(event) =>
+            setDrafts((current) => ({ ...current, [item.key]: event.target.value }))
+          }
+        >
+          <option value="">Default</option>
+          <option value="true">True</option>
+          <option value="false">False</option>
+        </Select>
+      )
+    }
+    return (
+      <Input
+        aria-label={`${item.label} value`}
+        value={value}
+        type={item.is_secret ? "password" : item.value_type === "int" ? "number" : "text"}
+        inputMode={item.value_type === "int" || item.value_type === "float" ? "numeric" : "text"}
+        placeholder={item.is_secret ? "Set new value" : ""}
+        autoComplete="off"
+        disabled={disabled}
+        onChange={(event) =>
+          setDrafts((current) => ({ ...current, [item.key]: event.target.value }))
+        }
+      />
+    )
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Configuration</CardTitle>
+        <div className="flex flex-wrap items-center gap-2">
+          <Select
+            aria-label="Configuration category"
+            className="w-44"
+            value={category}
+            onChange={(event) => setCategory(event.target.value)}
+          >
+            {categories.map((value) => (
+              <option key={value} value={value}>
+                {value}
+              </option>
+            ))}
+          </Select>
+          <Button
+            id="refreshConfiguration"
+            type="button"
+            variant="outline"
+            onClick={onRefresh}
+            disabled={loading.configuration}
+          >
+            <RefreshCw />
+            Refresh
+          </Button>
+        </div>
+      </CardHeader>
+      <Empty hidden={visibleItems.length !== 0}>No configuration entries found.</Empty>
+      <div className="overflow-x-auto">
+        <Table
+          id="configurationTable"
+          className={cn("min-w-[1100px]", visibleItems.length === 0 && "hidden")}
+          aria-label="Runtime configuration"
+        >
+          <TableHeader>
+            <TableRow>
+              <TableHead className="w-[22%]">Setting</TableHead>
+              <TableHead className="w-[13%]">Source</TableHead>
+              <TableHead className="w-[17%]">Active</TableHead>
+              <TableHead className="w-[31%]">Value</TableHead>
+              <TableHead className="w-[17%]">Actions</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody id="configurationBody">
+            {visibleItems.map((item) => {
+              const busy = loading[`configuration:${item.key}`]
+              const writable = canWrite && !item.env_locked && !busy
+              const draft = drafts[item.key] ?? ""
+              return (
+                <TableRow key={item.key}>
+                  <TableCell>
+                    <div className="grid gap-1">
+                      <strong>{item.label}</strong>
+                      <span className="font-mono text-xs text-muted-foreground">{item.key}</span>
+                      <span className="text-xs text-muted-foreground">{item.description}</span>
+                      <div className="flex flex-wrap gap-1.5">
+                        <Badge>{item.category}</Badge>
+                        {item.restart_required ? <Badge variant="running">Restart</Badge> : null}
+                      </div>
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    <div className="grid gap-1.5">
+                      <Badge variant={item.source === "env" ? "running" : "neutral"}>
+                        {sourceBadge(item)}
+                      </Badge>
+                      {item.env_locked ? (
+                        <span className="text-xs text-muted-foreground">Environment locked</span>
+                      ) : null}
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    <div className="grid gap-1">
+                      <Badge variant={item.configured ? "succeeded" : "missing"}>
+                        {item.configured ? "Configured" : "Missing"}
+                      </Badge>
+                      {item.is_secret ? (
+                        <span className="font-mono text-xs text-muted-foreground">
+                          {item.masked_value || "No secret"}
+                        </span>
+                      ) : (
+                        <span className="break-words text-xs text-muted-foreground">
+                          {String(item.value ?? "") || "Default"}
+                        </span>
+                      )}
+                      {item.is_secret && item.secret_encryption_configured === false ? (
+                        <span className="text-xs text-red-300">Encryption key missing</span>
+                      ) : null}
+                    </div>
+                  </TableCell>
+                  <TableCell>{valueInput(item)}</TableCell>
+                  <TableCell>
+                    <div className="flex flex-wrap justify-end gap-2">
+                      <Button
+                        type="button"
+                        size="sm"
+                        onClick={() => onSave(item.key, draft)}
+                        disabled={!writable || (item.is_secret && !draft.trim())}
+                      >
+                        Save
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => onClear(item.key)}
+                        disabled={!writable || item.source !== "database"}
+                      >
+                        Clear
+                      </Button>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              )
+            })}
+          </TableBody>
+        </Table>
+      </div>
+    </Card>
   )
 }
 
