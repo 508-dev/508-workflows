@@ -131,3 +131,13 @@ def test_runtime_config_value_type_validation() -> None:
     assert coerce_runtime_config_value(definition, "30") == "30"
     with pytest.raises(ValueError, match="integer"):
         coerce_runtime_config_value(definition, "soon")
+
+
+def test_startup_bound_espo_settings_are_restart_required() -> None:
+    base_url_definition = runtime_config_definition_for_key("ESPO_BASE_URL")
+    api_key_definition = runtime_config_definition_for_key("ESPO_API_KEY")
+
+    assert base_url_definition is not None
+    assert api_key_definition is not None
+    assert base_url_definition.restart_required is True
+    assert api_key_definition.restart_required is True

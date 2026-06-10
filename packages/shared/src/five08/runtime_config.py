@@ -50,6 +50,7 @@ _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
         description="Base URL used for CRM API calls and dashboard profile links.",
         value_type="url",
         env_names=("ESPO_BASE_URL",),
+        restart_required=True,
     ),
     RuntimeConfigDefinition(
         key="ESPO_API_KEY",
@@ -59,6 +60,7 @@ _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
         description="API key used by API, worker, and bot CRM clients.",
         is_secret=True,
         env_names=("ESPO_API_KEY",),
+        restart_required=True,
     ),
     RuntimeConfigDefinition(
         key="ERPNEXT_BASE_URL",
