@@ -10,8 +10,6 @@ _TEST_ENV = {
     "DISCORD_BOT_TOKEN": "test_token",
     "ESPO_API_KEY": "test_api_key",
     "ESPO_BASE_URL": "https://crm.test.com",
-    "KIMAI_BASE_URL": "https://kimai.test.com",
-    "KIMAI_API_TOKEN": "test_kimai_token",
     "CHANNEL_ID": "123456789",
     "EMAIL_USERNAME": "test@example.com",
     "EMAIL_PASSWORD": "test_password",

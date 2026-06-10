@@ -63,8 +63,6 @@ class SharedSettings(BaseSettings):
     github_api_token: str | None = None
     github_default_repo: str | None = None
     github_allowed_repos: str = ""
-    kimai_base_url: str | None = None
-    kimai_api_token: str | None = None
     erpnext_base_url: str | None = None
     erpnext_api_key: str | None = None
     erpnext_api_timeout_seconds: float = 20.0
