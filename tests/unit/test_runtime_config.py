@@ -20,7 +20,11 @@ from five08.worker.config import WorkerSettings
 
 
 def test_secret_mask_shows_confirmable_edges() -> None:
-    assert mask_runtime_secret("sk-abcdefghijklmnopqrstuvwxyz") == "sk-ab...xyz"
+    assert mask_runtime_secret("sk-abcdefghijklmnopqrstuvwxyz") == "abc...xyz"
+    assert mask_runtime_secret("sk_or_v1_abcdefghijklmnopqrstuvwxyz") == "abc...xyz"
+    assert mask_runtime_secret("sk-test-secret-value") == "sec...lue"
+    assert mask_runtime_secret("pk_live_abcdefghijklmnopqrstuvwxyz") == "abc...xyz"
+    assert mask_runtime_secret("espo-secret-key") == "esp...key"
     assert mask_runtime_secret("abcdef") == "ab...ef"
     assert mask_runtime_secret("abc") == "****"
     assert mask_runtime_secret("") is None
@@ -122,7 +126,7 @@ def test_runtime_config_list_masks_secrets(
 
     assert item["source"] == "env"
     assert item["env_locked"] is True
-    assert item["masked_value"] == "sk-te...lue"
+    assert item["masked_value"] == "sec...lue"
     assert "value" not in item
 
 

@@ -41,7 +41,7 @@ const items: ConfigurationItem[] = [
     is_secret: true,
     configured: true,
     restart_required: true,
-    masked_value: "espo-...key",
+    masked_value: "esp...key",
     secret_encryption_configured: true,
   }),
   configItem({
@@ -59,7 +59,7 @@ const items: ConfigurationItem[] = [
     description: "Primary OpenAI-compatible API key.",
     is_secret: true,
     configured: true,
-    masked_value: "sk-te...lue",
+    masked_value: "sec...lue",
     secret_encryption_configured: false,
   }),
 ]
@@ -107,7 +107,7 @@ describe("ConfigurationView", () => {
     expect(screen.queryByRole("heading", { name: "CRM" })).not.toBeInTheDocument()
     expect(screen.getByRole("heading", { name: "AI Providers" })).toBeVisible()
     expect(screen.getByText("OpenAI API key")).toBeVisible()
-    expect(screen.getByText("sk-te...lue")).toBeVisible()
+    expect(screen.getByText("sec...lue")).toBeVisible()
     expect(screen.getByText("Encryption key missing")).toBeVisible()
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled()
   })

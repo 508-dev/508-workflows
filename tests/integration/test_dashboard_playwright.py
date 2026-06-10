@@ -234,7 +234,7 @@ def _configuration_payload() -> dict[str, object]:
                 "configured": True,
                 "restart_required": True,
                 "secret_encryption_configured": True,
-                "masked_value": "espo-...key",
+                "masked_value": "esp...key",
             },
             {
                 "key": "CRM_SYNC_INTERVAL_SECONDS",
@@ -262,7 +262,7 @@ def _configuration_payload() -> dict[str, object]:
                 "configured": True,
                 "restart_required": False,
                 "secret_encryption_configured": True,
-                "masked_value": "sk-te...lue",
+                "masked_value": "sec...lue",
             },
         ]
     }
@@ -788,7 +788,7 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             crm_table = page.get_by_role("table", name="CRM configuration settings")
             expect(crm_table).to_contain_text("EspoCRM base URL")
             expect(crm_table).to_contain_text("EspoCRM API key")
-            expect(page.get_by_text("espo-...key")).to_be_visible()
+            expect(page.get_by_text("esp...key")).to_be_visible()
             expect(
                 page.get_by_text("CRM sync interval", exact=True)
             ).not_to_be_visible()
@@ -798,7 +798,7 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             expect(page.get_by_role("heading", name="CRM")).not_to_be_visible()
             page.get_by_role("heading", name="AI Providers").wait_for()
             expect(page.get_by_text("OpenAI API key")).to_be_visible()
-            expect(page.get_by_text("sk-te...lue")).to_be_visible()
+            expect(page.get_by_text("sec...lue")).to_be_visible()
 
             with page.expect_response(
                 lambda response: (

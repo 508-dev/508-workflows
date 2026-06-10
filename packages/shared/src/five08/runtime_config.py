@@ -514,6 +514,24 @@ _CACHE_TTL_SECONDS = 5.0
 _CACHE: dict[str, tuple[float, dict[str, str]]] = {}
 _ENCRYPTED_PREFIX = "fernet:v1:"
 _ENCRYPTION_KEY_ENV_NAMES = ("CONFIG_SECRET_KEY",)
+_SECRET_MASK_PREFIXES = (
+    "sk-or-v1-",
+    "sk_or_v1_",
+    "sk-or-",
+    "sk_or_",
+    "sk-live-",
+    "sk-test-",
+    "pk-live-",
+    "pk-test-",
+    "sk_live_",
+    "sk_test_",
+    "pk_live_",
+    "pk_test_",
+    "sk-",
+    "sk_",
+    "pk-",
+    "pk_",
+)
 
 
 def mask_runtime_secret(value: object) -> str | None:
@@ -521,9 +539,16 @@ def mask_runtime_secret(value: object) -> str | None:
     text = str(value or "").strip()
     if not text:
         return None
-    if len(text) <= 10:
-        return f"{text[:2]}...{text[-2:]}" if len(text) > 4 else "****"
-    return f"{text[:5]}...{text[-3:]}"
+    meaningful = text
+    for prefix in _SECRET_MASK_PREFIXES:
+        if text.casefold().startswith(prefix):
+            meaningful = text[len(prefix) :]
+            break
+    if len(meaningful) <= 6:
+        return (
+            f"{meaningful[:2]}...{meaningful[-2:]}" if len(meaningful) > 4 else "****"
+        )
+    return f"{meaningful[:3]}...{meaningful[-3:]}"
 
 
 def _runtime_config_secret_key() -> str | None:
