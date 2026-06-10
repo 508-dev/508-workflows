@@ -2595,6 +2595,40 @@ def test_user_accounts_tool_reports_suppressed_newsletter_contact(
     assert fakes.brevo.subscriptions == [{"email": "jane@508.dev", "list_id": 4}]
 
 
+def test_user_accounts_tool_reports_newsletter_sync_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_account_tool_fakes(monkeypatch)
+
+    def _raise_newsletter_error(*args: object, **kwargs: object) -> dict[str, object]:
+        raise RuntimeError("provider exploded")
+
+    monkeypatch.setattr(
+        "five08.agent.tools.sync_newsletter_contacts",
+        _raise_newsletter_error,
+    )
+    registry = ToolRegistry(runtime_config=_account_runtime_config(brevo_api_key="key"))
+
+    result = registry.execute(
+        "account_write.create_user_accounts",
+        {"contact_id": "contact-1", "mailbox_username": "jane@508.dev"},
+        organization_id="org-1",
+        actor_id="123",
+        actor_scopes={
+            "mailbox:create",
+            "user:manage",
+            "integration:manage",
+            "crm:contact:read",
+            "crm:contact:update",
+        },
+    )
+
+    assert result["mailbox"]["newsletter_subscribed"] is False
+    assert result["mailbox"]["newsletter_error"] == (
+        "Newsletter sync failed: provider exploded"
+    )
+
+
 def test_user_accounts_tool_subscribes_mailbox_and_backup_email_to_keila(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

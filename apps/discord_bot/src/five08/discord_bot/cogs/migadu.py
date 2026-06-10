@@ -215,12 +215,20 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
 
     async def _add_emails_to_newsletter(self, emails: list[str]) -> str | None:
         """Best-effort subscribe mailbox and backup addresses to newsletter tools."""
-        result = await asyncio.to_thread(
-            sync_newsletter_contacts,
-            settings,
-            emails,
-            source="discord_create_mailbox",
-        )
+        try:
+            result = await asyncio.to_thread(
+                sync_newsletter_contacts,
+                settings,
+                emails,
+                source="discord_create_mailbox",
+            )
+        except Exception as exc:
+            error_warning = _truncate_discord_text(
+                f"Newsletter sync failed: {exc}",
+                limit=500,
+            )
+            logger.warning("Newsletter sync warning: %s", error_warning, exc_info=True)
+            return error_warning
         warning = format_newsletter_sync_warning(result)
         if warning:
             logger.warning("Newsletter sync warning: %s", warning)

@@ -83,6 +83,8 @@ class BrevoClient:
     def get_contact(self, email: str) -> dict[str, Any] | None:
         """Return one Brevo contact by email, or None when it does not exist."""
         normalized_email = email.strip().lower()
+        if not normalized_email or normalized_email.count("@") != 1:
+            raise ValueError("Brevo contact email must be a full email address.")
         headers = {
             "Accept": "application/json",
             "api-key": self.api_key,

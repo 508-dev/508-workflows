@@ -141,6 +141,22 @@ def test_upsert_active_contact_updates_existing_contact_without_status() -> None
     assert result == {"id": "contact-1"}
 
 
+def test_upsert_active_contact_requires_existing_contact_id() -> None:
+    existing = Mock()
+    existing.status_code = 200
+    existing.content = b'{"data":{"email":"jane@example.com","status":"active"}}'
+    existing.json.return_value = {
+        "data": {"email": "jane@example.com", "status": "active"}
+    }
+
+    with patch("five08.clients.keila.requests.request", return_value=existing):
+        with pytest.raises(KeilaAPIError, match="missing id"):
+            KeilaClient(api_key="keila-key").upsert_active_contact(
+                email="jane@example.com",
+                data={"audiences": ["508_members"]},
+            )
+
+
 def test_keila_client_raises_on_request_error() -> None:
     with patch(
         "five08.clients.keila.requests.request",

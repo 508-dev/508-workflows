@@ -76,6 +76,21 @@ def test_normalize_mailbox_request_rejects_non_508_domain(
 
 
 @pytest.mark.asyncio
+async def test_add_emails_to_newsletter_returns_warning_on_unexpected_error(
+    migadu_cog: MigaduCog,
+) -> None:
+    with patch(
+        "five08.discord_bot.cogs.migadu.sync_newsletter_contacts",
+        side_effect=RuntimeError("provider exploded"),
+    ):
+        warning = await migadu_cog._add_emails_to_newsletter(
+            ["alice@508.dev", "alice@gmail.com"]
+        )
+
+    assert warning == "Newsletter sync failed: provider exploded"
+
+
+@pytest.mark.asyncio
 async def test_create_mailbox_command_success_with_crm_defaults_and_sync(
     migadu_cog: MigaduCog,
     mock_interaction: AsyncMock,

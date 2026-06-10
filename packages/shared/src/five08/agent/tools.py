@@ -1426,11 +1426,15 @@ class ToolRegistry:
         )
 
     def _add_emails_to_newsletter(self, emails: list[str]) -> str | None:
-        result = sync_newsletter_contacts(
-            self.runtime_config,
-            emails,
-            source="agent_account_creation",
-        )
+        try:
+            result = sync_newsletter_contacts(
+                self.runtime_config,
+                emails,
+                source="agent_account_creation",
+            )
+        except Exception as exc:
+            text = " ".join(f"Newsletter sync failed: {exc}".split()).strip()
+            return f"{text[:197]}..." if len(text) > 200 else text
         warning = format_newsletter_sync_warning(result)
         if not warning:
             return None

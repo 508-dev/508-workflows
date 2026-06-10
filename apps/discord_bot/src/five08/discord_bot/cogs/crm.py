@@ -3825,12 +3825,20 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
 
     async def _add_emails_to_newsletter(self, emails: list[str]) -> str | None:
         """Best-effort subscribe mailbox and backup addresses to newsletter tools."""
-        result = await asyncio.to_thread(
-            sync_newsletter_contacts,
-            settings,
-            emails,
-            source="discord_create_user_accounts",
-        )
+        try:
+            result = await asyncio.to_thread(
+                sync_newsletter_contacts,
+                settings,
+                emails,
+                source="discord_create_user_accounts",
+            )
+        except Exception as exc:
+            error_warning = self._sanitize_error_message_for_discord(
+                f"Newsletter sync failed: {exc}",
+                max_length=500,
+            )
+            logger.warning("Newsletter sync warning: %s", error_warning, exc_info=True)
+            return error_warning
         warning = format_newsletter_sync_warning(result)
         if warning:
             logger.warning("Newsletter sync warning: %s", warning)

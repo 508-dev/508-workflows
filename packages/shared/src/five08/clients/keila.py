@@ -68,7 +68,12 @@ class KeilaClient:
                 self._request("POST", "/api/v1/contacts", json={"data": payload}) or {}
             )
 
-        contact_id = str(existing.get("id") or normalized_email)
+        contact_id_value = existing.get("id")
+        if not contact_id_value:
+            raise KeilaAPIError(
+                f"Existing Keila contact {normalized_email} missing id."
+            )
+        contact_id = str(contact_id_value)
         payload.pop("status", None)
         return (
             self._request(

@@ -165,11 +165,33 @@ def sync_projects_from_erpnext_job() -> dict[str, Any]:
     return processor.sync_open_projects()
 
 
+def _mask_newsletter_sync_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Mask email addresses before newsletter sync results are persisted."""
+    crm_failures = result.get("crm_lookup_failures")
+    if isinstance(crm_failures, list):
+        for failure in crm_failures:
+            if isinstance(failure, dict) and failure.get("mailbox"):
+                failure["mailbox"] = mask_email(str(failure["mailbox"]))
+
+    providers = result.get("providers")
+    if isinstance(providers, dict):
+        for provider_result in providers.values():
+            if not isinstance(provider_result, dict):
+                continue
+            failures = provider_result.get("failures")
+            if not isinstance(failures, list):
+                continue
+            for failure in failures:
+                if isinstance(failure, dict) and failure.get("email"):
+                    failure["email"] = mask_email(str(failure["email"]))
+    return result
+
+
 def sync_508_members_newsletters_job() -> dict[str, Any]:
     """Sync Migadu member emails into configured newsletter providers."""
     logger.info("Processing 508 members newsletter sync job")
     processor = NewsletterSyncProcessor(settings)
-    return processor.sync_508_members()
+    return _mask_newsletter_sync_result(processor.sync_508_members())
 
 
 JOB_FUNCTIONS: dict[str, Callable[..., dict[str, Any]]] = {

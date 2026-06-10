@@ -13,6 +13,7 @@ from five08.newsletter_sync import (
     NewsletterSyncProcessor,
     build_newsletter_providers,
     format_newsletter_sync_warning,
+    sync_newsletter_contacts,
 )
 
 
@@ -293,6 +294,24 @@ def test_format_newsletter_sync_warning_reports_suppressed_skips() -> None:
     )
 
     assert warning == "brevo skipped 1 suppressed contact(s)"
+
+
+def test_sync_newsletter_contacts_uses_first_email_as_default_mailbox_pointer() -> None:
+    result = sync_newsletter_contacts(
+        _settings(brevo_api_key=None),
+        ["jane@508.dev", "jane@example.com"],
+        source="test",
+    )
+
+    assert result["providers"]["keila"]["synced"] == 2
+    assert [item["email"] for item in FakeKeilaClient.upserts] == [
+        "jane@508.dev",
+        "jane@example.com",
+    ]
+    assert [item["data"]["mailbox_email"] for item in FakeKeilaClient.upserts] == [
+        "jane@508.dev",
+        "jane@508.dev",
+    ]
 
 
 def test_sync_508_members_skips_mailbox_when_crm_lookup_fails() -> None:

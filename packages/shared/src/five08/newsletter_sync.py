@@ -356,15 +356,18 @@ def sync_newsletter_contacts(
         return result
 
     seen: set[str] = set()
+    default_mailbox_email = (mailbox_email or "").strip().lower()
     for email in emails:
         normalized_email = email.strip().lower()
         if not normalized_email or normalized_email in seen:
             continue
         seen.add(normalized_email)
+        if not default_mailbox_email:
+            default_mailbox_email = normalized_email
         result["contacts_considered"] += 1
         contact = NewsletterContact(
             email=normalized_email,
-            mailbox_email=(mailbox_email or normalized_email).strip().lower(),
+            mailbox_email=default_mailbox_email,
             name=name,
             source=source,
         )
