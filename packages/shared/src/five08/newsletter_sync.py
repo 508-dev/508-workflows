@@ -15,6 +15,10 @@ CRM_BLOCKED_ONBOARDING_STATES = {"rejected", "waitlist"}
 PROVIDER_SUPPRESSED_STATUSES = {"unsubscribed", "unreachable", "blocked"}
 
 
+class CRMContactLookupError(RuntimeError):
+    """Raised when CRM block-state lookup fails during member sync."""
+
+
 @dataclass(frozen=True, slots=True)
 class NewsletterContact:
     """One email address derived from one Migadu mailbox."""
@@ -168,6 +172,7 @@ class NewsletterSyncProcessor:
             "mailboxes_scanned": 0,
             "system_mailboxes_skipped": 0,
             "crm_blocked_skipped": 0,
+            "crm_lookup_failed_skipped": 0,
             "contacts_considered": 0,
             "providers": {
                 provider.name: {"synced": 0, "skipped": 0, "failed": 0}
@@ -184,7 +189,14 @@ class NewsletterSyncProcessor:
                 result["system_mailboxes_skipped"] += 1
                 continue
 
-            crm_contact = self._find_crm_contact(mailbox)
+            try:
+                crm_contact = self._find_crm_contact(mailbox)
+            except CRMContactLookupError as exc:
+                result["crm_lookup_failed_skipped"] += 1
+                failures = result.setdefault("crm_lookup_failures", [])
+                if isinstance(failures, list) and len(failures) < 20:
+                    failures.append({"mailbox": mailbox.address, "error": str(exc)})
+                continue
             if _is_crm_blocked(crm_contact):
                 result["crm_blocked_skipped"] += 1
                 continue
@@ -248,8 +260,10 @@ class NewsletterSyncProcessor:
                     "select": "id,name,emailAddress,c508Email,type,cOnboardingState",
                 }
             )
-        except EspoAPIError:
-            return None
+        except EspoAPIError as exc:
+            raise CRMContactLookupError(
+                f"CRM contact lookup failed for {mailbox.address}: {exc}"
+            ) from exc
         contacts = response.get("list", [])
         if not isinstance(contacts, list) or not contacts:
             return None

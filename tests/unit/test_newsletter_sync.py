@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from five08.clients.migadu import MigaduMailbox
+from five08.clients.espo import EspoAPIError
 from five08.newsletter_sync import NewsletterSyncProcessor
 
 
@@ -94,6 +95,7 @@ class FakeKeilaClient:
 
 class FakeEspoClient:
     contacts: list[dict[str, Any]] = []
+    raise_error = False
 
     def __init__(
         self,
@@ -106,6 +108,8 @@ class FakeEspoClient:
         self.timeout_seconds = timeout_seconds
 
     def list_contacts(self, params: dict[str, Any]) -> dict[str, Any]:
+        if self.raise_error:
+            raise EspoAPIError("CRM unavailable")
         return {"list": [dict(item) for item in self.contacts]}
 
 
@@ -117,6 +121,7 @@ def reset_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
     FakeKeilaClient.contacts = {}
     FakeKeilaClient.upserts = []
     FakeEspoClient.contacts = []
+    FakeEspoClient.raise_error = False
     monkeypatch.setattr("five08.newsletter_sync.MigaduClient", FakeMigaduClient)
     monkeypatch.setattr("five08.newsletter_sync.BrevoClient", FakeBrevoClient)
     monkeypatch.setattr("five08.newsletter_sync.KeilaClient", FakeKeilaClient)
@@ -211,5 +216,31 @@ def test_sync_508_members_skips_crm_blocked_mailboxes() -> None:
 
     assert result["crm_blocked_skipped"] == 1
     assert result["contacts_considered"] == 0
+    assert FakeBrevoClient.subscriptions == []
+    assert FakeKeilaClient.upserts == []
+
+
+def test_sync_508_members_skips_mailbox_when_crm_lookup_fails() -> None:
+    FakeMigaduClient.mailboxes = [
+        MigaduMailbox(
+            address="jane@508.dev",
+            name="Jane Doe",
+            password_recovery_email="jane@example.com",
+        )
+    ]
+    FakeEspoClient.raise_error = True
+
+    result = NewsletterSyncProcessor(
+        _settings(espo_base_url="https://crm.example", espo_api_key="espo-key")
+    ).sync_508_members()
+
+    assert result["crm_lookup_failed_skipped"] == 1
+    assert result["contacts_considered"] == 0
+    assert result["crm_lookup_failures"] == [
+        {
+            "mailbox": "jane@508.dev",
+            "error": "CRM contact lookup failed for jane@508.dev: CRM unavailable",
+        }
+    ]
     assert FakeBrevoClient.subscriptions == []
     assert FakeKeilaClient.upserts == []

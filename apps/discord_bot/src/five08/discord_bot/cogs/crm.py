@@ -8600,9 +8600,17 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     "error": message,
                 },
             )
-            newsletter_line = (
-                f"\nNewsletter: subscription warning: `{exc.newsletter_error}`"
+            newsletter_warning = (
+                self._sanitize_error_message_for_discord(
+                    exc.newsletter_error,
+                    max_length=500,
+                )
                 if exc.newsletter_error
+                else None
+            )
+            newsletter_line = (
+                f"\nNewsletter: subscription warning: `{newsletter_warning}`"
+                if newsletter_warning
                 else "\nNewsletter: added mailbox and backup email."
             )
             if exc.partial_success == "mailbox_created_crm_update_failed":
@@ -8765,9 +8773,12 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             if result.mailbox.newsletter_error is None:
                 message_lines.append("Newsletter: added mailbox and backup email.")
             else:
+                newsletter_warning = self._sanitize_error_message_for_discord(
+                    result.mailbox.newsletter_error,
+                    max_length=500,
+                )
                 message_lines.append(
-                    "Newsletter: subscription warning: "
-                    f"`{result.mailbox.newsletter_error}`"
+                    f"Newsletter: subscription warning: `{newsletter_warning}`"
                 )
             if result.sso.created:
                 if result.sso.recovery_email_error is None:

@@ -162,6 +162,8 @@ current precedence rules.
 - `Required for /create-mailbox and /create-user-accounts`: `MIGADU_API_USER`, `MIGADU_API_KEY`
 - `Optional`: `MIGADU_MAILBOX_DOMAIN` (default: `508.dev`)
 - `Optional for Brevo newsletter sync`: `BREVO_API_KEY`
+- `Optional`: `BREVO_API_BASE_URL` (default: `https://api.brevo.com/v3`)
+- `Optional`: `BREVO_API_TIMEOUT_SECONDS` (default: `20.0`)
 - `Optional for Brevo newsletter sync`: `BREVO_508_MEMBERS_NEWSLETTER_LIST_ID` (explicit production Brevo list ID override; production should set `4` for the 508 members list)
 - `Optional`: `BREVO_508_MEMBERS_NEWSLETTER_LIST_NAME` (default: `508 members`; used to look up the list ID when the explicit ID is unset)
 - `Optional for Keila contact sync`: `KEILA_API_KEY`

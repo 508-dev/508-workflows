@@ -135,6 +135,20 @@ def test_shared_settings_docuseal_template_id_rejects_non_numeric_string() -> No
         SharedSettings(docuseal_member_agreement_template_id="abc")
 
 
+def test_shared_settings_brevo_members_list_id_accepts_blank_string_as_none() -> None:
+    """Blank Brevo list IDs from env should leave list-name lookup enabled."""
+    settings = SharedSettings(brevo_508_members_newsletter_list_id=" ")
+
+    assert settings.brevo_508_members_newsletter_list_id is None
+
+
+def test_shared_settings_brevo_members_list_id_accepts_numeric_string() -> None:
+    """Numeric Brevo list IDs from env should coerce to integers."""
+    settings = SharedSettings(brevo_508_members_newsletter_list_id="4")
+
+    assert settings.brevo_508_members_newsletter_list_id == 4
+
+
 def test_local_service_defaults_target_host_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

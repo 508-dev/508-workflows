@@ -124,6 +124,28 @@ class SharedSettings(BaseSettings):
                 ) from exc
         raise TypeError("DOCUSEAL_MEMBER_AGREEMENT_TEMPLATE_ID must be an integer")
 
+    @field_validator("brevo_508_members_newsletter_list_id", mode="before")
+    @classmethod
+    def _normalize_brevo_508_members_newsletter_list_id(
+        cls,
+        value: object,
+    ) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip()
+            if not normalized:
+                return None
+            try:
+                return int(normalized)
+            except ValueError as exc:
+                raise ValueError(
+                    "BREVO_508_MEMBERS_NEWSLETTER_LIST_ID must be an integer"
+                ) from exc
+        raise TypeError("BREVO_508_MEMBERS_NEWSLETTER_LIST_ID must be an integer")
+
     @classmethod
     def _skip_dotenv(cls) -> bool:
         if os.getenv("ENVIRONMENT", "").strip().lower() == "test":

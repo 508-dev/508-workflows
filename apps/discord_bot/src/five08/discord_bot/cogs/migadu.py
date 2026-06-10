@@ -675,7 +675,10 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
         if outcome.newsletter_error:
             embed.add_field(
                 name="Newsletter",
-                value=f"Newsletter subscription warning: {outcome.newsletter_error}",
+                value=_truncate_discord_text(
+                    f"Newsletter subscription warning: {outcome.newsletter_error}",
+                    limit=1024,
+                ),
                 inline=False,
             )
         else:
