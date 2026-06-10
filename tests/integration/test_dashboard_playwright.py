@@ -209,38 +209,38 @@ def _configuration_payload() -> dict[str, object]:
     return {
         "items": [
             {
-                "key": "ESPO_BASE_URL",
-                "label": "EspoCRM base URL",
-                "category": "CRM",
-                "description": "Base URL used for CRM API calls.",
+                "key": "DOCUSEAL_BASE_URL",
+                "label": "DocuSeal base URL",
+                "category": "Onboarding",
+                "description": "DocuSeal API endpoint used for agreement workflows.",
                 "value_type": "url",
                 "is_secret": False,
                 "env_locked": False,
                 "source": "database",
                 "configured": True,
-                "restart_required": True,
+                "restart_required": False,
                 "secret_encryption_configured": None,
-                "value": "https://crm.example.com",
+                "value": "https://docuseal.example.com",
             },
             {
-                "key": "ESPO_API_KEY",
-                "label": "EspoCRM API key",
-                "category": "CRM",
-                "description": "API key used by CRM clients.",
+                "key": "DOCUSEAL_API_KEY",
+                "label": "DocuSeal API key",
+                "category": "Onboarding",
+                "description": "DocuSeal API key for agreement workflows.",
                 "value_type": "string",
                 "is_secret": True,
                 "env_locked": False,
                 "source": "database",
                 "configured": True,
-                "restart_required": True,
+                "restart_required": False,
                 "secret_encryption_configured": True,
-                "masked_value": "esp...key",
+                "masked_value": "doc...key",
             },
             {
-                "key": "CRM_SYNC_INTERVAL_SECONDS",
-                "label": "CRM sync interval",
-                "category": "CRM",
-                "description": "Background CRM sync interval.",
+                "key": "DOCUSEAL_MEMBER_AGREEMENT_TEMPLATE_ID",
+                "label": "DocuSeal member agreement template",
+                "category": "Onboarding",
+                "description": "Template ID used to filter/sign member agreements.",
                 "value_type": "int",
                 "is_secret": False,
                 "env_locked": False,
@@ -248,7 +248,7 @@ def _configuration_payload() -> dict[str, object]:
                 "configured": True,
                 "restart_required": False,
                 "secret_encryption_configured": None,
-                "value": 900,
+                "value": 123,
             },
             {
                 "key": "OPENAI_API_KEY",
@@ -783,19 +783,23 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
 
             page.get_by_role("link", name="Configuration").click()
             expect(page).to_have_url(f"{dashboard_server}/dashboard/configuration")
-            page.get_by_role("heading", name="CRM").wait_for()
+            page.get_by_role("heading", name="Onboarding").wait_for()
             page.get_by_role("heading", name="AI Providers").wait_for()
-            crm_table = page.get_by_role("table", name="CRM configuration settings")
-            expect(crm_table).to_contain_text("EspoCRM base URL")
-            expect(crm_table).to_contain_text("EspoCRM API key")
-            expect(page.get_by_text("esp...key")).to_be_visible()
+            onboarding_table = page.get_by_role(
+                "table", name="Onboarding configuration settings"
+            )
+            expect(onboarding_table).to_contain_text("DocuSeal base URL")
+            expect(onboarding_table).to_contain_text("DocuSeal API key")
+            expect(page.get_by_text("doc...key")).to_be_visible()
             expect(
-                page.get_by_text("CRM sync interval", exact=True)
+                page.get_by_text("DocuSeal member agreement template", exact=True)
             ).not_to_be_visible()
             page.get_by_text("Advanced").click()
-            expect(page.get_by_text("CRM sync interval", exact=True)).to_be_visible()
+            expect(
+                page.get_by_text("DocuSeal member agreement template", exact=True)
+            ).to_be_visible()
             page.get_by_role("button", name=re.compile("AI Providers")).click()
-            expect(page.get_by_role("heading", name="CRM")).not_to_be_visible()
+            expect(page.get_by_role("heading", name="Onboarding")).not_to_be_visible()
             page.get_by_role("heading", name="AI Providers").wait_for()
             expect(page.get_by_text("OpenAI API key")).to_be_visible()
             expect(page.get_by_text("sec...lue")).to_be_visible()

@@ -110,7 +110,7 @@ const configurationGroups: ConfigurationGroupMetadata[] = [
   {
     category: "Onboarding",
     label: "Onboarding",
-    description: "Provisioning integrations for Authentik, Outline, Migadu, and DocuSeal.",
+    description: "Editable onboarding integrations such as DocuSeal and Outline.",
   },
   {
     category: "AI",
@@ -6876,6 +6876,10 @@ function ConfigurationView({
     const busy = loading[`configuration:${item.key}`]
     const writable = canWrite && !item.env_locked && !busy
     const draft = drafts[item.key] ?? ""
+    const emptyTypedDraft =
+      !item.is_secret &&
+      (item.value_type === "bool" || item.value_type === "int" || item.value_type === "float") &&
+      !draft.trim()
     return (
       <TableRow key={item.key}>
         <TableCell>
@@ -6907,7 +6911,7 @@ function ConfigurationView({
             </Badge>
             {item.is_secret ? (
               <span className="font-mono text-xs text-muted-foreground">
-                {item.masked_value || "No secret"}
+                {item.masked_value || (item.configured ? "Hidden" : "No secret")}
               </span>
             ) : (
               <span className="break-words text-xs text-muted-foreground">
@@ -6929,6 +6933,7 @@ function ConfigurationView({
               disabled={
                 !writable ||
                 (item.is_secret && !draft.trim()) ||
+                emptyTypedDraft ||
                 (item.is_secret && item.secret_encryption_configured === false)
               }
             >

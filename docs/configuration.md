@@ -21,15 +21,18 @@ that most often matter in local development and deployment.
 
 ## Admin Dashboard Configuration
 
-The admin dashboard can store allowlisted integration credentials and business
-knobs in Postgres. Non-empty env or `.env` values always win and appear as
-environment-locked in the dashboard. If no env value is present, the database
-value overrides the code default.
+The admin dashboard can store a small allowlist of movable integration
+credentials and business knobs in Postgres. Non-empty env or `.env` values
+always win and appear as environment-locked in the dashboard. If no env value is
+present, the database value overrides the code default.
 
 Secret values saved from the dashboard are encrypted before storage using
-`CONFIG_SECRET_KEY`. API responses never include full secret values; they
-return only configured state and a short first/last-character mask for
-confirmation.
+`CONFIG_SECRET_KEY`. API responses never include full secret values. Database
+secrets return configured state and a short first/last-character mask for
+confirmation; env and `.env` secrets return only configured state.
+
+Core bootstrap systems such as EspoCRM, Authentik, and Migadu remain env-managed
+and are intentionally not dashboard-configurable.
 
 The Kimai Discord integration is disabled unless both `KIMAI_BASE_URL` and
 `KIMAI_API_TOKEN` are set to non-whitespace values.

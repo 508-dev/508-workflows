@@ -9,7 +9,7 @@ function configItem(overrides: Partial<ConfigurationItem>): ConfigurationItem {
   return {
     key: "TEST_SETTING",
     label: "Test setting",
-    category: "CRM",
+    category: "Onboarding",
     description: "Test setting description.",
     value_type: "string",
     is_secret: false,
@@ -26,31 +26,29 @@ function configItem(overrides: Partial<ConfigurationItem>): ConfigurationItem {
 
 const items: ConfigurationItem[] = [
   configItem({
-    key: "ESPO_BASE_URL",
-    label: "EspoCRM base URL",
-    description: "Base URL used for CRM API calls.",
+    key: "DOCUSEAL_BASE_URL",
+    label: "DocuSeal base URL",
+    description: "DocuSeal API endpoint used for agreement workflows.",
     value_type: "url",
     configured: true,
-    restart_required: true,
-    value: "https://crm.example.com",
+    value: "https://docuseal.example.com",
   }),
   configItem({
-    key: "ESPO_API_KEY",
-    label: "EspoCRM API key",
-    description: "API key used by CRM clients.",
+    key: "DOCUSEAL_API_KEY",
+    label: "DocuSeal API key",
+    description: "DocuSeal API key for agreement workflows.",
     is_secret: true,
     configured: true,
-    restart_required: true,
-    masked_value: "esp...key",
+    masked_value: "doc...key",
     secret_encryption_configured: true,
   }),
   configItem({
-    key: "CRM_SYNC_INTERVAL_SECONDS",
-    label: "CRM sync interval",
-    description: "Background CRM sync interval.",
+    key: "DOCUSEAL_MEMBER_AGREEMENT_TEMPLATE_ID",
+    label: "DocuSeal member agreement template",
+    description: "Template ID used to filter/sign member agreements.",
     value_type: "int",
     configured: true,
-    value: 900,
+    value: 123,
   }),
   configItem({
     key: "OPENAI_API_KEY",
@@ -77,16 +75,18 @@ describe("ConfigurationView", () => {
       />,
     )
 
-    expect(screen.getByRole("heading", { name: "CRM" })).toBeVisible()
+    expect(screen.getByRole("heading", { name: "Onboarding" })).toBeVisible()
     expect(screen.getByRole("heading", { name: "AI Providers" })).toBeVisible()
-    const crmTable = screen.getByRole("table", { name: "CRM configuration settings" })
-    expect(within(crmTable).getByText("EspoCRM base URL")).toBeVisible()
-    expect(within(crmTable).getByText("EspoCRM API key")).toBeVisible()
-    expect(screen.getByText("CRM sync interval")).not.toBeVisible()
+    const onboardingTable = screen.getByRole("table", {
+      name: "Onboarding configuration settings",
+    })
+    expect(within(onboardingTable).getByText("DocuSeal base URL")).toBeVisible()
+    expect(within(onboardingTable).getByText("DocuSeal API key")).toBeVisible()
+    expect(screen.getByText("DocuSeal member agreement template")).not.toBeVisible()
 
     fireEvent.click(screen.getByText("Advanced"))
 
-    expect(screen.getByText("CRM sync interval")).toBeVisible()
+    expect(screen.getByText("DocuSeal member agreement template")).toBeVisible()
   })
 
   it("filters to a selected group and disables impossible secret saves", () => {
@@ -104,11 +104,34 @@ describe("ConfigurationView", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /AI Providers/ }))
 
-    expect(screen.queryByRole("heading", { name: "CRM" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("heading", { name: "Onboarding" })).not.toBeInTheDocument()
     expect(screen.getByRole("heading", { name: "AI Providers" })).toBeVisible()
     expect(screen.getByText("OpenAI API key")).toBeVisible()
     expect(screen.getByText("sec...lue")).toBeVisible()
     expect(screen.getByText("Encryption key missing")).toBeVisible()
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled()
+  })
+
+  it("disables save for empty numeric drafts so clear remains explicit", () => {
+    render(
+      <ConfigurationView
+        items={items.slice(0, 3)}
+        loading={{}}
+        canWrite
+        onRefresh={vi.fn()}
+        onSave={vi.fn()}
+        onClear={vi.fn()}
+      />,
+    )
+
+    fireEvent.click(screen.getByText("Advanced"))
+    fireEvent.change(screen.getByLabelText("DocuSeal member agreement template value"), {
+      target: { value: "" },
+    })
+
+    const advancedTable = screen.getByRole("table", {
+      name: "Onboarding advanced configuration settings",
+    })
+    expect(within(advancedTable).getByRole("button", { name: "Save" })).toBeDisabled()
   })
 })

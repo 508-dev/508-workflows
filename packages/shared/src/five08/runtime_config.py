@@ -36,6 +36,8 @@ class RuntimeConfigDefinition:
     is_secret: bool = False
     env_names: tuple[str, ...] = ()
     restart_required: bool = False
+    min_value: float | None = None
+    max_value: float | None = None
 
     @property
     def primary_env_name(self) -> str:
@@ -43,26 +45,6 @@ class RuntimeConfigDefinition:
 
 
 _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
-    RuntimeConfigDefinition(
-        key="ESPO_BASE_URL",
-        attr="espo_base_url",
-        label="EspoCRM base URL",
-        category="CRM",
-        description="Base URL used for CRM API calls and dashboard profile links.",
-        value_type="url",
-        env_names=("ESPO_BASE_URL",),
-        restart_required=True,
-    ),
-    RuntimeConfigDefinition(
-        key="ESPO_API_KEY",
-        attr="espo_api_key",
-        label="EspoCRM API key",
-        category="CRM",
-        description="API key used by API, worker, and bot CRM clients.",
-        is_secret=True,
-        env_names=("ESPO_API_KEY",),
-        restart_required=True,
-    ),
     RuntimeConfigDefinition(
         key="ERPNEXT_BASE_URL",
         attr="erpnext_base_url",
@@ -82,24 +64,6 @@ _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
         env_names=("ERPNEXT_API_KEY",),
     ),
     RuntimeConfigDefinition(
-        key="AUTHENTIK_API_BASE_URL",
-        attr="authentik_api_base_url",
-        label="Authentik API base URL",
-        category="Onboarding",
-        description="Authentik API endpoint used for SSO account provisioning.",
-        value_type="url",
-        env_names=("AUTHENTIK_API_BASE_URL",),
-    ),
-    RuntimeConfigDefinition(
-        key="AUTHENTIK_API_TOKEN",
-        attr="authentik_api_token",
-        label="Authentik API token",
-        category="Onboarding",
-        description="Token used to create and update Authentik users.",
-        is_secret=True,
-        env_names=("AUTHENTIK_API_TOKEN",),
-    ),
-    RuntimeConfigDefinition(
         key="OUTLINE_BASE_URL",
         attr="outline_base_url",
         label="Outline base URL",
@@ -116,23 +80,6 @@ _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
         description="API key used to add users and read project wiki pages.",
         is_secret=True,
         env_names=("OUTLINE_API_KEY",),
-    ),
-    RuntimeConfigDefinition(
-        key="MIGADU_API_USER",
-        attr="migadu_api_user",
-        label="Migadu API user",
-        category="Onboarding",
-        description="Migadu API username for mailbox provisioning.",
-        env_names=("MIGADU_API_USER",),
-    ),
-    RuntimeConfigDefinition(
-        key="MIGADU_API_KEY",
-        attr="migadu_api_key",
-        label="Migadu API key",
-        category="Onboarding",
-        description="Migadu API key for mailbox provisioning.",
-        is_secret=True,
-        env_names=("MIGADU_API_KEY",),
     ),
     RuntimeConfigDefinition(
         key="DOCUSEAL_BASE_URL",
@@ -160,6 +107,7 @@ _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
         description="Template ID used to filter/sign member agreements.",
         value_type="int",
         env_names=("DOCUSEAL_MEMBER_AGREEMENT_TEMPLATE_ID",),
+        min_value=1,
     ),
     RuntimeConfigDefinition(
         key="OPENAI_API_KEY",
@@ -426,24 +374,6 @@ _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
         env_names=("INTAKE_RESUME_ALLOWED_HOSTS",),
     ),
     RuntimeConfigDefinition(
-        key="CRM_SYNC_INTERVAL_SECONDS",
-        attr="crm_sync_interval_seconds",
-        label="CRM sync interval",
-        category="Operations",
-        description="Seconds between automatic CRM sync runs.",
-        value_type="int",
-        env_names=("CRM_SYNC_INTERVAL_SECONDS",),
-    ),
-    RuntimeConfigDefinition(
-        key="CRM_SYNC_PAGE_SIZE",
-        attr="crm_sync_page_size",
-        label="CRM sync page size",
-        category="Operations",
-        description="Page size for CRM sync pulls.",
-        value_type="int",
-        env_names=("CRM_SYNC_PAGE_SIZE",),
-    ),
-    RuntimeConfigDefinition(
         key="MAX_ATTACHMENTS_PER_CONTACT",
         attr="max_attachments_per_contact",
         label="Max attachments per contact",
@@ -451,6 +381,7 @@ _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
         description="Maximum CRM attachments inspected per contact.",
         value_type="int",
         env_names=("MAX_ATTACHMENTS_PER_CONTACT",),
+        min_value=1,
     ),
     RuntimeConfigDefinition(
         key="MAX_FILE_SIZE_MB",
@@ -460,6 +391,7 @@ _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
         description="Maximum resume attachment size in MiB.",
         value_type="int",
         env_names=("MAX_FILE_SIZE_MB",),
+        min_value=1,
     ),
     RuntimeConfigDefinition(
         key="ALLOWED_FILE_TYPES",
@@ -478,6 +410,7 @@ _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
         description="Days before recruiting gigs are considered stale.",
         value_type="int",
         env_names=("GIG_RECRUITING_STALE_DAYS",),
+        min_value=1,
     ),
     RuntimeConfigDefinition(
         key="GIG_RECRUITING_REMINDER_MAX_AGE_DAYS",
@@ -487,6 +420,7 @@ _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
         description="Maximum age in days for recruiting reminders.",
         value_type="int",
         env_names=("GIG_RECRUITING_REMINDER_MAX_AGE_DAYS",),
+        min_value=1,
     ),
     RuntimeConfigDefinition(
         key="KIMAI_BASE_URL",
@@ -733,14 +667,36 @@ def coerce_runtime_config_value(
         raise ValueError(f"{definition.key} must be a boolean")
     if definition.value_type == "int":
         try:
-            return str(int(text))
+            normalized_int = int(text)
         except ValueError as exc:
             raise ValueError(f"{definition.key} must be an integer") from exc
+        if definition.min_value is not None and normalized_int < definition.min_value:
+            raise ValueError(
+                f"{definition.key} must be greater than or equal to "
+                f"{definition.min_value:g}"
+            )
+        if definition.max_value is not None and normalized_int > definition.max_value:
+            raise ValueError(
+                f"{definition.key} must be less than or equal to "
+                f"{definition.max_value:g}"
+            )
+        return str(normalized_int)
     if definition.value_type == "float":
         try:
-            return str(float(text))
+            normalized_float = float(text)
         except ValueError as exc:
             raise ValueError(f"{definition.key} must be a number") from exc
+        if definition.min_value is not None and normalized_float < definition.min_value:
+            raise ValueError(
+                f"{definition.key} must be greater than or equal to "
+                f"{definition.min_value:g}"
+            )
+        if definition.max_value is not None and normalized_float > definition.max_value:
+            raise ValueError(
+                f"{definition.key} must be less than or equal to "
+                f"{definition.max_value:g}"
+            )
+        return str(normalized_float)
     if definition.value_type == "url" and text:
         if "://" not in text:
             raise ValueError(f"{definition.key} must be a URL")
@@ -822,7 +778,9 @@ def list_runtime_config(settings: Any) -> list[dict[str, object]]:
         if not definition.is_secret:
             item["value"] = effective
         else:
-            item["masked_value"] = mask_runtime_secret(effective)
+            item["masked_value"] = (
+                mask_runtime_secret(effective) if source == "database" else None
+            )
         items.append(item)
     return items
 

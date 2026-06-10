@@ -112,7 +112,7 @@ def test_env_value_locks_matching_runtime_config(
     assert definition_is_env_locked(definition)
 
 
-def test_runtime_config_list_masks_secrets(
+def test_runtime_config_list_does_not_mask_env_secrets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     definition = runtime_config_definition_for_key("OPENAI_API_KEY")
@@ -126,12 +126,35 @@ def test_runtime_config_list_masks_secrets(
 
     assert item["source"] == "env"
     assert item["env_locked"] is True
+    assert item["masked_value"] is None
+    assert "value" not in item
+
+
+def test_runtime_config_list_masks_database_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    definition = runtime_config_definition_for_key("OPENAI_API_KEY")
+    assert definition is not None
+    monkeypatch.setattr(
+        "five08.runtime_config._load_db_values",
+        lambda settings: {definition.key: "sk-test-secret-value"},
+    )
+    monkeypatch.setattr("five08.runtime_config._parse_dotenv_keys", lambda: {})
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("RUNTIME_CONFIG_TEST_ENABLE", "true")
+
+    settings = WorkerSettings(espo_base_url="", espo_api_key="")
+    items = list_runtime_config(settings)
+    item = next(entry for entry in items if entry["key"] == "OPENAI_API_KEY")
+
+    assert item["source"] == "database"
+    assert item["env_locked"] is False
     assert item["masked_value"] == "sec...lue"
     assert "value" not in item
 
 
 def test_runtime_config_value_type_validation() -> None:
-    definition = runtime_config_definition_for_key("CRM_SYNC_INTERVAL_SECONDS")
+    definition = runtime_config_definition_for_key("MAX_FILE_SIZE_MB")
     assert definition is not None
 
     assert coerce_runtime_config_value(definition, "30") == "30"
@@ -139,25 +162,46 @@ def test_runtime_config_value_type_validation() -> None:
         coerce_runtime_config_value(definition, "soon")
 
 
-def test_startup_bound_espo_settings_are_restart_required() -> None:
-    base_url_definition = runtime_config_definition_for_key("ESPO_BASE_URL")
-    api_key_definition = runtime_config_definition_for_key("ESPO_API_KEY")
+@pytest.mark.parametrize(
+    "key",
+    [
+        "DOCUSEAL_MEMBER_AGREEMENT_TEMPLATE_ID",
+        "GIG_RECRUITING_STALE_DAYS",
+        "GIG_RECRUITING_REMINDER_MAX_AGE_DAYS",
+    ],
+)
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_runtime_config_numeric_bounds_are_preserved(
+    key: str,
+    value: str,
+) -> None:
+    definition = runtime_config_definition_for_key(key)
+    assert definition is not None
 
-    assert base_url_definition is not None
-    assert api_key_definition is not None
-    assert base_url_definition.restart_required is True
-    assert api_key_definition.restart_required is True
+    with pytest.raises(ValueError, match="greater than or equal to 1"):
+        coerce_runtime_config_value(definition, value)
 
 
-def test_runtime_config_list_marks_falsy_numeric_values_as_configured(
+def test_core_crm_auth_and_mailbox_settings_are_not_dashboard_configurable() -> None:
+    assert runtime_config_definition_for_key("ESPO_BASE_URL") is None
+    assert runtime_config_definition_for_key("ESPO_API_KEY") is None
+    assert runtime_config_definition_for_key("AUTHENTIK_API_BASE_URL") is None
+    assert runtime_config_definition_for_key("AUTHENTIK_API_TOKEN") is None
+    assert runtime_config_definition_for_key("MIGADU_API_USER") is None
+    assert runtime_config_definition_for_key("MIGADU_API_KEY") is None
+    assert runtime_config_definition_for_key("CRM_SYNC_INTERVAL_SECONDS") is None
+    assert runtime_config_definition_for_key("CRM_SYNC_PAGE_SIZE") is None
+
+
+def test_runtime_config_list_marks_numeric_values_as_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    definition = runtime_config_definition_for_key("CRM_SYNC_INTERVAL_SECONDS")
+    definition = runtime_config_definition_for_key("MAX_FILE_SIZE_MB")
     assert definition is not None
     monkeypatch.setenv("RUNTIME_CONFIG_TEST_ENABLE", "true")
     monkeypatch.setattr(
         "five08.runtime_config._load_db_values",
-        lambda settings: {definition.key: "0"},
+        lambda settings: {definition.key: "1"},
     )
     monkeypatch.setattr("five08.runtime_config._parse_dotenv_keys", lambda: {})
 
@@ -167,7 +211,7 @@ def test_runtime_config_list_marks_falsy_numeric_values_as_configured(
 
     assert item["source"] == "database"
     assert item["configured"] is True
-    assert item["value"] == 0
+    assert item["value"] == 1
 
 
 def test_parse_dotenv_keys_reads_env_file_once(
