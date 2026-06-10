@@ -94,7 +94,7 @@ class SharedSettings(BaseSettings):
             from five08.runtime_config import resolve_runtime_setting_value
 
             return resolve_runtime_setting_value(self, name, value)
-        except Exception:
+        except ImportError:
             return value
 
     @field_validator("docuseal_member_agreement_template_id", mode="before")

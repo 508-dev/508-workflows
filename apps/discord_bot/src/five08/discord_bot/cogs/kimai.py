@@ -577,7 +577,10 @@ class KimaiCog(commands.Cog, name="Kimai"):
 async def setup(bot: commands.Bot) -> None:
     """Setup function to add the cog to the bot."""
     # Avoid breaking the entire bot if Kimai isn't configured
-    if not settings.kimai_base_url or not settings.kimai_api_token:
+    if (
+        not (settings.kimai_base_url or "").strip()
+        or not (settings.kimai_api_token or "").strip()
+    ):
         logger.warning(
             "Kimai cog not loaded: missing KIMAI_BASE_URL and/or KIMAI_API_TOKEN"
         )

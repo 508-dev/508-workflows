@@ -561,16 +561,16 @@ def _encrypt_secret_value(value: str) -> str:
     return f"{_ENCRYPTED_PREFIX}{token}"
 
 
-def _decrypt_secret_value(value: str) -> str:
+def _decrypt_secret_value(value: str) -> str | None:
     if not value.startswith(_ENCRYPTED_PREFIX):
         logger.warning("Ignoring unencrypted runtime secret value")
-        return ""
+        return None
     token = value.removeprefix(_ENCRYPTED_PREFIX)
     try:
         return _runtime_config_fernet().decrypt(token.encode("ascii")).decode("utf-8")
     except (InvalidToken, RuntimeError, UnicodeDecodeError):
         logger.warning("Unable to decrypt runtime secret value")
-        return ""
+        return None
 
 
 def runtime_config_definitions() -> tuple[RuntimeConfigDefinition, ...]:
@@ -659,7 +659,10 @@ def _load_db_values(settings: Any) -> dict[str, str]:
                         continue
                     row_value = str(row["value"])
                     if definition.is_secret:
-                        row_value = _decrypt_secret_value(row_value)
+                        decrypted_value = _decrypt_secret_value(row_value)
+                        if decrypted_value is None:
+                            continue
+                        row_value = decrypted_value
                     values[row_key] = row_value
     except Exception:
         logger.debug("Runtime configuration DB overlay is unavailable", exc_info=True)

@@ -2,7 +2,7 @@
 
 from urllib.parse import urlparse
 
-from pydantic import AliasChoices, Field, PrivateAttr, model_validator
+from pydantic import AliasChoices, Field, PrivateAttr, field_validator, model_validator
 
 from five08.openai_fallback import (
     OpenAICompatibleProvider,
@@ -21,8 +21,8 @@ class WorkerSettings(SharedSettings):
     worker_burst: bool = False
     discord_bot_internal_base_url: str = "http://127.0.0.1:3000"
 
-    espo_base_url: str
-    espo_api_key: str
+    espo_base_url: str = ""
+    espo_api_key: str = ""
     google_forms_allowed_form_ids: str = ""
 
     openai_api_key: str | None = None
@@ -110,6 +110,13 @@ class WorkerSettings(SharedSettings):
     discord_api_timeout_seconds: float = 8.0
     discord_link_ttl_seconds: int = 600
     discord_link_require_oidc_identity_checks: bool = True
+
+    @field_validator("espo_base_url", "espo_api_key", mode="before")
+    @classmethod
+    def _strip_optional_runtime_config_string(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip()
+        return value
 
     @property
     def google_forms_allowed_form_ids_set(self) -> set[str]:

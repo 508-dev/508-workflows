@@ -6687,18 +6687,11 @@ function ConfigurationView({
   )
 
   useEffect(() => {
-    setDrafts((current) => {
-      const next = { ...current }
-      for (const item of items) {
-        if (!(item.key in next)) {
-          next[item.key] = item.is_secret ? "" : String(item.value ?? "")
-        }
-      }
-      for (const key of Object.keys(next)) {
-        if (!items.some((item) => item.key === key)) delete next[key]
-      }
-      return next
-    })
+    setDrafts(
+      Object.fromEntries(
+        items.map((item) => [item.key, item.is_secret ? "" : String(item.value ?? "")]),
+      ),
+    )
   }, [items])
 
   function sourceBadge(item: ConfigurationItem) {
@@ -6841,7 +6834,11 @@ function ConfigurationView({
                         type="button"
                         size="sm"
                         onClick={() => onSave(item.key, draft)}
-                        disabled={!writable || (item.is_secret && !draft.trim())}
+                        disabled={
+                          !writable ||
+                          (item.is_secret && !draft.trim()) ||
+                          (item.is_secret && item.secret_encryption_configured === false)
+                        }
                       >
                         Save
                       </Button>

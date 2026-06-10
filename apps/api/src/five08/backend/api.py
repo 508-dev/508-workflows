@@ -5871,32 +5871,69 @@ async def dashboard_update_configuration_handler(
 
     definition = runtime_config_definition_for_key(key)
     if definition is None:
+        await _audit_dashboard_configuration_change(
+            session,
+            result=AuditResult.ERROR,
+            key=key,
+            action="configuration.update",
+            metadata={
+                "key": key,
+                "category": None,
+                "is_secret": False,
+                "error": "unknown_configuration_key",
+            },
+        )
         return JSONResponse({"error": "unknown_configuration_key"}, status_code=404)
 
-    try:
-        payload = DashboardConfigurationUpdateRequest.model_validate(
-            await request.json()
-        )
-    except ValidationError as exc:
-        return JSONResponse(
-            {"error": "invalid_configuration_payload", "detail": exc.errors()},
-            status_code=400,
-        )
-    except Exception:
-        return JSONResponse({"error": "invalid_json"}, status_code=400)
-
-    actor_provider, actor_subject = _session_audit_actor(session)
-    audit_action = "configuration.clear" if payload.clear else "configuration.update"
     metadata = {
         "key": definition.key,
         "category": definition.category,
         "is_secret": definition.is_secret,
     }
     try:
+        payload = DashboardConfigurationUpdateRequest.model_validate(
+            await request.json()
+        )
+    except ValidationError as exc:
+        await _audit_dashboard_configuration_change(
+            session,
+            result=AuditResult.ERROR,
+            key=definition.key,
+            action="configuration.update",
+            metadata={
+                **metadata,
+                "error": "invalid_configuration_payload",
+                "detail": exc.errors(),
+            },
+        )
+        return JSONResponse(
+            {"error": "invalid_configuration_payload", "detail": exc.errors()},
+            status_code=400,
+        )
+    except Exception as exc:
+        await _audit_dashboard_configuration_change(
+            session,
+            result=AuditResult.ERROR,
+            key=definition.key,
+            action="configuration.update",
+            metadata={**metadata, "error": "invalid_json", "detail": str(exc)},
+        )
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+
+    actor_provider, actor_subject = _session_audit_actor(session)
+    audit_action = "configuration.clear" if payload.clear else "configuration.update"
+    try:
         if payload.clear:
             await asyncio.to_thread(delete_runtime_config_value, settings, definition)
         else:
             if definition.is_secret and not str(payload.value or "").strip():
+                await _audit_dashboard_configuration_change(
+                    session,
+                    result=AuditResult.ERROR,
+                    key=definition.key,
+                    action=audit_action,
+                    metadata={**metadata, "error": "secret_value_required"},
+                )
                 return JSONResponse(
                     {"error": "secret_value_required"},
                     status_code=400,

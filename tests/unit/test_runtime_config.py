@@ -5,8 +5,10 @@ import pytest
 from five08.runtime_config import (
     _decrypt_secret_value,
     _encrypt_secret_value,
+    _load_db_values,
     coerce_runtime_config_value,
     definition_is_env_locked,
+    invalidate_runtime_config_cache,
     list_runtime_config,
     mask_runtime_secret,
     runtime_config_definition_for_key,
@@ -32,6 +34,49 @@ def test_runtime_secret_values_encrypt_and_decrypt(
     assert encrypted.startswith("fernet:v1:")
     assert "sk-test-secret" not in encrypted
     assert _decrypt_secret_value(encrypted) == "sk-test-secret"
+
+
+def test_load_db_values_skips_invalid_secret_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCursor:
+        def __enter__(self) -> "FakeCursor":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def execute(self, query: str) -> None:
+            assert "runtime_config_values" in query
+
+        def fetchall(self) -> list[dict[str, str]]:
+            return [
+                {"key": "OPENAI_API_KEY", "value": "plaintext-secret"},
+                {"key": "OPENAI_MODEL", "value": "gpt-test"},
+            ]
+
+    class FakeConnection:
+        def __enter__(self) -> "FakeConnection":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def cursor(self, **_: object) -> FakeCursor:
+            return FakeCursor()
+
+    monkeypatch.setattr(
+        "five08.runtime_config.psycopg.connect",
+        lambda _: FakeConnection(),
+    )
+
+    settings = WorkerSettings(espo_base_url="", espo_api_key="")
+    invalidate_runtime_config_cache(settings)
+
+    values = _load_db_values(settings)
+
+    assert "OPENAI_API_KEY" not in values
+    assert values["OPENAI_MODEL"] == "gpt-test"
 
 
 def test_saving_secret_requires_encryption_key(

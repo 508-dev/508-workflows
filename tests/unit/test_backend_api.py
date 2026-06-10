@@ -2229,6 +2229,111 @@ def test_dashboard_configuration_requires_admin_permission(
     assert response.json()["items"][0]["masked_value"] == "sk-te...value"
     mock_list.assert_called_once()
 
+    non_admin_session = api.AuthSession(
+        subject="viewer-1",
+        email="viewer@508.dev",
+        display_name="Viewer User",
+        groups=["Members"],
+        is_admin=False,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-2", non_admin_session),
+        ),
+        patch("five08.backend.api.list_runtime_config") as mock_forbidden_list,
+    ):
+        forbidden_response = client.get("/dashboard/api/configuration")
+
+    assert forbidden_response.status_code == 403
+    assert forbidden_response.json()["error"] == "forbidden"
+    mock_forbidden_list.assert_not_called()
+
+
+def test_dashboard_configuration_update_audits_secret_value_required(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.put(
+            "/dashboard/api/configuration/OPENAI_API_KEY",
+            json={"value": ""},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "secret_value_required"
+    mock_audit.assert_awaited_once()
+    audit_kwargs = mock_audit.await_args.kwargs
+    assert audit_kwargs["action"] == "configuration.update"
+    assert audit_kwargs["result"] == api.AuditResult.ERROR
+    assert audit_kwargs["resource_id"] == "OPENAI_API_KEY"
+    assert audit_kwargs["metadata"]["error"] == "secret_value_required"
+
+
+def test_dashboard_configuration_update_audits_unknown_key(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.put(
+            "/dashboard/api/configuration/UNKNOWN_SETTING",
+            json={"value": "ignored"},
+        )
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "unknown_configuration_key"
+    mock_audit.assert_awaited_once()
+    audit_kwargs = mock_audit.await_args.kwargs
+    assert audit_kwargs["action"] == "configuration.update"
+    assert audit_kwargs["result"] == api.AuditResult.ERROR
+    assert audit_kwargs["resource_id"] == "UNKNOWN_SETTING"
+    assert audit_kwargs["metadata"]["error"] == "unknown_configuration_key"
+
 
 def test_dashboard_me_keeps_sensitive_permissions_for_admin_sso_without_token(
     monkeypatch: pytest.MonkeyPatch,

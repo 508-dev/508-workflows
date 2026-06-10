@@ -11,9 +11,10 @@ that most often matter in local development and deployment.
 - `LOG_LEVEL`: defaults to `INFO`.
 - `API_SHARED_SECRET`: required for protected non-dashboard API routes and for
   `./scripts/dev.sh login`.
-- `CONFIG_SECRET_KEY`: env-only key used to encrypt secret values saved from the
-  admin dashboard configuration page. Dashboard-managed secret saves are
-  rejected when this is unset.
+- `CONFIG_SECRET_KEY`: environment or `.env` key used to encrypt secret values
+  saved from the admin dashboard configuration page. This key is not
+  dashboard-managed, and dashboard-managed secret saves are rejected when it is
+  unset.
 - `WEBHOOK_SHARED_SECRET`: optional separate secret for external `/webhooks/*`
   callers such as DocuSeal, Google Forms, and EspoCRM. When unset, webhook
   routes fall back to `API_SHARED_SECRET` for compatibility.
@@ -29,6 +30,9 @@ Secret values saved from the dashboard are encrypted before storage using
 `CONFIG_SECRET_KEY`. API responses never include full secret values; they
 return only configured state and a short first/last-character mask for
 confirmation.
+
+The Kimai Discord integration is disabled unless both `KIMAI_BASE_URL` and
+`KIMAI_API_TOKEN` are set to non-whitespace values.
 
 ## Queue And Jobs
 
