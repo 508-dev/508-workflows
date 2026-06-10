@@ -2187,6 +2187,152 @@ def test_dashboard_me_allows_discord_admin_sensitive_permissions_without_sso(
     assert "jobs:read" in response.json()["permissions"]
     assert "jobs:write" in response.json()["permissions"]
     assert "people:sync" in response.json()["permissions"]
+    assert "configuration:read" in response.json()["permissions"]
+    assert "configuration:write" in response.json()["permissions"]
+
+
+def test_dashboard_configuration_requires_admin_permission(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.list_runtime_config",
+            return_value=[
+                {
+                    "key": "OPENAI_API_KEY",
+                    "label": "OpenAI API key",
+                    "is_secret": True,
+                    "masked_value": "sec...lue",
+                }
+            ],
+        ) as mock_list,
+    ):
+        response = client.get("/dashboard/api/configuration")
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["masked_value"] == "sec...lue"
+    mock_list.assert_called_once()
+
+    non_admin_session = api.AuthSession(
+        subject="viewer-1",
+        email="viewer@508.dev",
+        display_name="Viewer User",
+        groups=["Members"],
+        is_admin=False,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-2", non_admin_session),
+        ),
+        patch("five08.backend.api.list_runtime_config") as mock_forbidden_list,
+    ):
+        forbidden_response = client.get("/dashboard/api/configuration")
+
+    assert forbidden_response.status_code == 403
+    assert forbidden_response.json()["error"] == "forbidden"
+    mock_forbidden_list.assert_not_called()
+
+
+def test_dashboard_configuration_update_audits_secret_value_required(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.put(
+            "/dashboard/api/configuration/OPENAI_API_KEY",
+            json={"value": ""},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "secret_value_required"
+    mock_audit.assert_awaited_once()
+    audit_kwargs = mock_audit.await_args.kwargs
+    assert audit_kwargs["action"] == "configuration.update"
+    assert audit_kwargs["result"] == api.AuditResult.ERROR
+    assert audit_kwargs["resource_id"] == "OPENAI_API_KEY"
+    assert audit_kwargs["metadata"]["error"] == "secret_value_required"
+
+
+def test_dashboard_configuration_update_audits_unknown_key(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.put(
+            "/dashboard/api/configuration/UNKNOWN_SETTING",
+            json={"value": "ignored"},
+        )
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "unknown_configuration_key"
+    mock_audit.assert_awaited_once()
+    audit_kwargs = mock_audit.await_args.kwargs
+    assert audit_kwargs["action"] == "configuration.update"
+    assert audit_kwargs["result"] == api.AuditResult.ERROR
+    assert audit_kwargs["resource_id"] == "UNKNOWN_SETTING"
+    assert audit_kwargs["metadata"]["error"] == "unknown_configuration_key"
 
 
 def test_dashboard_me_keeps_sensitive_permissions_for_admin_sso_without_token(
@@ -2215,6 +2361,7 @@ def test_dashboard_me_keeps_sensitive_permissions_for_admin_sso_without_token(
     assert response.status_code == 200
     assert "audit:read" not in response.json()["permissions"]
     assert "jobs:write" not in response.json()["permissions"]
+    assert "configuration:write" not in response.json()["permissions"]
 
 
 def test_dashboard_me_allows_sensitive_permissions_without_sso_in_dev(
@@ -6203,6 +6350,81 @@ def test_dashboard_onboarding_email_send_returns_sent_when_marker_fails(
     assert audit_kwargs["result"] == api.AuditResult.SUCCESS
     assert audit_kwargs["metadata"]["marker_status"] == "error"
     assert audit_kwargs["metadata"]["marker_error"] == "contact_not_found"
+
+
+def test_dashboard_onboarding_email_draft_sanitizes_crm_errors(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._dashboard_onboarding_contact_for_email",
+            side_effect=api.EspoAPIError("secret-token https://crm.example.com"),
+        ),
+    ):
+        response = client.post(
+            "/dashboard/api/onboarding/contact-prospect-1/email/draft",
+            json={},
+        )
+
+    assert response.status_code == 502
+    assert response.json() == {"error": "crm_lookup_failed"}
+
+
+def test_dashboard_onboarding_email_send_sanitizes_send_failures(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+    espo_client = Mock()
+    espo_client.request.return_value = {
+        "id": "contact-prospect-1",
+        "name": "Jesse Candidate",
+        "emailAddress": "jesse@example.com",
+        "c508Email": "",
+        "cOnboardingState": "selected",
+    }
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._is_dashboard_onboarding_contact_eligible",
+            return_value=True,
+        ),
+        patch("five08.backend.api.EspoClient", return_value=espo_client),
+        patch(
+            "five08.backend.api._dashboard_session_profile_row",
+            return_value={"name": "Michael Wu", "email_508": "michael@508.dev"},
+        ),
+        patch(
+            "five08.backend.api.send_onboarding_email_message",
+            side_effect=OSError("smtp.migadu.com:465 auth failed"),
+        ),
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            "/dashboard/api/onboarding/contact-prospect-1/email/send",
+            json={"markdown_body": "Great talking Jesse,\n\nCheers,\nMichael\n"},
+        )
+
+    assert response.status_code == 502
+    assert response.json() == {"error": "email_send_failed"}
+    audit_kwargs = mock_audit.call_args.kwargs
+    assert audit_kwargs["metadata"]["reason"] == "email_send_failed"
+    assert audit_kwargs["metadata"]["error_type"] == "OSError"
+    assert "error" not in audit_kwargs["metadata"]
 
 
 def test_dashboard_onboarding_email_send_blocks_terminal_state(

@@ -136,14 +136,14 @@ current precedence rules.
 
 ## Onboarding Email Sending
 
-- `Optional`: `ONBOARDING_EMAIL_SMTP_SERVER` (falls back to `SMTP_SERVER`; for Migadu use `smtp.migadu.com`)
-- `Optional`: `ONBOARDING_EMAIL_SMTP_PORT` (falls back to `SMTP_PORT`; default: `465`)
-- `Optional`: `ONBOARDING_EMAIL_SMTP_USE_SSL` (falls back to `SMTP_USE_SSL`; default: `true`)
-- `Optional`: `ONBOARDING_EMAIL_SMTP_STARTTLS` (falls back to `SMTP_STARTTLS`; default: `false`; use only when SSL is disabled)
-- `Optional`: `ONBOARDING_EMAIL_SMTP_USERNAME` (falls back to `SMTP_USERNAME`)
-- `Optional`: `ONBOARDING_EMAIL_SMTP_PASSWORD` (falls back to `SMTP_PASSWORD`)
-- `Optional`: `ONBOARDING_EMAIL_SENDER_EMAIL` (default: `onboarding@508.dev`)
-- `Optional`: `ONBOARDING_EMAIL_SMTP_TIMEOUT_SECONDS` (falls back to `SMTP_TIMEOUT_SECONDS`; default: `20.0`)
+- `Optional`: `ONBOARDING_EMAIL_SMTP_SERVER` (dashboard-configurable; falls back to `SMTP_SERVER`; for Migadu use `smtp.migadu.com`)
+- `Optional`: `ONBOARDING_EMAIL_SMTP_PORT` (dashboard-configurable; falls back to `SMTP_PORT`; default: `465`)
+- `Optional`: `ONBOARDING_EMAIL_SMTP_USE_SSL` (dashboard-configurable; falls back to `SMTP_USE_SSL`; default: `true`)
+- `Optional`: `ONBOARDING_EMAIL_SMTP_STARTTLS` (dashboard-configurable; falls back to `SMTP_STARTTLS`; default: `false`; use only when SSL is disabled)
+- `Optional`: `ONBOARDING_EMAIL_SMTP_USERNAME` (dashboard-configurable; falls back to `SMTP_USERNAME`)
+- `Optional`: `ONBOARDING_EMAIL_SMTP_PASSWORD` (dashboard-configurable; falls back to `SMTP_PASSWORD`)
+- `Optional`: `ONBOARDING_EMAIL_SENDER_EMAIL` (dashboard-configurable; default: `onboarding@508.dev`)
+- `Optional`: `ONBOARDING_EMAIL_SMTP_TIMEOUT_SECONDS` (dashboard-configurable; falls back to `SMTP_TIMEOUT_SECONDS`; default: `20.0`)
 - Note: `/onboarding-email` is limited to Steering Committee+ or the candidate's designated CRM onboarder. The command always creates an editable draft first; when recipient and Reply-To are resolved, the draft includes a `Send Email` button. Sent emails use the configured sender address with the command sender's name as the display name, and set `Reply-To` to the command user's CRM-linked email or the explicit `reply_to_email` option.
 
 ## Discord Bot Core

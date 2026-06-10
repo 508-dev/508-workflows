@@ -148,6 +148,17 @@ class SharedSettings(BaseSettings):
         populate_by_name=True,
     )
 
+    def __getattribute__(self, name: str) -> object:
+        value = super().__getattribute__(name)
+        if name.startswith("_"):
+            return value
+        try:
+            from five08.runtime_config import resolve_runtime_setting_value
+
+            return resolve_runtime_setting_value(self, name, value)
+        except ImportError:
+            return value
+
     @field_validator("docuseal_member_agreement_template_id", mode="before")
     @classmethod
     def _normalize_docuseal_member_agreement_template_id(

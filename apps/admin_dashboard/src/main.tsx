@@ -12,6 +12,7 @@ import {
   RefreshCw,
   Search,
   Send,
+  Settings,
   ShieldCheck,
   UserMinus,
   UserPlus,
@@ -50,7 +51,15 @@ import {
 import { cn } from "@/lib/utils"
 import "./index.css"
 
-type View = "people" | "gigs" | "projects" | "onboarding" | "jobs" | "agent" | "audit"
+type View =
+  | "people"
+  | "gigs"
+  | "projects"
+  | "onboarding"
+  | "jobs"
+  | "agent"
+  | "audit"
+  | "configuration"
 type SortDirection = "asc" | "desc"
 
 type User = {
@@ -61,6 +70,95 @@ type User = {
   crm_contact_id?: string
   crm_base_url?: string
   permissions?: string[]
+}
+
+type ConfigurationItem = {
+  key: string
+  label: string
+  category: string
+  description: string
+  value_type: "string" | "bool" | "int" | "float" | "url" | "csv"
+  is_secret: boolean
+  env_locked: boolean
+  source: "env" | "database" | "default"
+  configured: boolean
+  restart_required: boolean
+  secret_encryption_configured?: boolean | null
+  value?: string | number | boolean | null
+  masked_value?: string | null
+}
+
+type ConfigurationResponse = {
+  items: ConfigurationItem[]
+}
+
+type ConfigurationGroupMetadata = {
+  category: string
+  label: string
+  description: string
+}
+
+const configurationGroups: ConfigurationGroupMetadata[] = [
+  {
+    category: "CRM",
+    label: "CRM",
+    description: "EspoCRM connection settings used by the API, worker, and Discord bot.",
+  },
+  {
+    category: "Projects",
+    label: "Projects",
+    description: "ERPNext credentials and project workflow settings.",
+  },
+  {
+    category: "Onboarding",
+    label: "Onboarding",
+    description:
+      "Editable onboarding integrations such as DocuSeal, Outline, and onboarding email SMTP.",
+  },
+  {
+    category: "AI",
+    label: "AI Providers",
+    description: "Provider credentials, base URLs, and model defaults.",
+  },
+  {
+    category: "Agent",
+    label: "Agent Runtime",
+    description: "Planner, fallback, and tiered model routing for agent workflows.",
+  },
+  {
+    category: "Observability",
+    label: "Observability",
+    description: "Telemetry and request tracing integrations.",
+  },
+  {
+    category: "Intake",
+    label: "Intake",
+    description: "Resume and mailbox intake limits and parser defaults.",
+  },
+  {
+    category: "Operations",
+    label: "Operations",
+    description: "Queue, sync, GitHub, and notification behavior.",
+  },
+  {
+    category: "Legacy",
+    label: "Legacy",
+    description: "Older integrations retained for compatibility.",
+  },
+]
+
+const configurationGroupByCategory = new Map(
+  configurationGroups.map((group, index) => [group.category, { ...group, index }]),
+)
+
+function isPrimaryConfiguration(item: ConfigurationItem) {
+  return (
+    item.is_secret ||
+    item.value_type === "url" ||
+    item.key.endsWith("_MODEL") ||
+    item.key.endsWith("_API_USER") ||
+    item.key.endsWith("_BASE_URL")
+  )
 }
 
 type ProfileStatus = {
@@ -389,6 +487,7 @@ const routes: Record<View, string> = {
   jobs: "/dashboard/jobs",
   agent: "/dashboard/agent",
   audit: "/dashboard/audit",
+  configuration: "/dashboard/configuration",
 }
 
 const routePermissions: Record<View, string> = {
@@ -399,6 +498,7 @@ const routePermissions: Record<View, string> = {
   jobs: "jobs:read",
   agent: "audit:read",
   audit: "audit:read",
+  configuration: "configuration:read",
 }
 
 const peopleFilterDefinitions = {
@@ -826,6 +926,7 @@ function App() {
   const [onboarding, setOnboarding] = useState<Person[]>([])
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([])
   const [agentReport, setAgentReport] = useState<AgentReport | null>(null)
+  const [configurationItems, setConfigurationItems] = useState<ConfigurationItem[]>([])
   const [jobDetail, setJobDetail] = useState<JobDetail | null>(null)
   const [loading, setLoading] = useState<Record<string, boolean>>({})
   const [devErrors, setDevErrors] = useState<DashboardDevError[]>([])
@@ -842,6 +943,7 @@ function App() {
     people: { key: "name", direction: "asc" },
     agent: { key: "occurred_at", direction: "desc" },
     audit: { key: "occurred_at", direction: "desc" },
+    configuration: { key: "category", direction: "asc" },
   })
 
   const [minutes, setMinutes] = useState("60")
@@ -1706,6 +1808,58 @@ function App() {
     }
   }
 
+  async function loadConfiguration() {
+    setBusy("configuration", true)
+    try {
+      const payload = await requestJson<ConfigurationResponse>("/dashboard/api/configuration")
+      setConfigurationItems(payload.items)
+    } catch (error) {
+      showError(error, "Unable to load configuration")
+    } finally {
+      setBusy("configuration", false)
+    }
+  }
+
+  async function updateConfigurationValue(key: string, value: string) {
+    setBusy(`configuration:${key}`, true)
+    try {
+      const payload = await requestJson<ConfigurationResponse>(
+        `/dashboard/api/configuration/${encodeURIComponent(key)}`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ value }),
+        },
+      )
+      setConfigurationItems(payload.items)
+      showToast(`Saved ${key}`, "ok")
+    } catch (error) {
+      showError(error, `Unable to save ${key}`)
+    } finally {
+      setBusy(`configuration:${key}`, false)
+    }
+  }
+
+  async function clearConfigurationValue(key: string) {
+    setBusy(`configuration:${key}`, true)
+    try {
+      const payload = await requestJson<ConfigurationResponse>(
+        `/dashboard/api/configuration/${encodeURIComponent(key)}`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ clear: true }),
+        },
+      )
+      setConfigurationItems(payload.items)
+      showToast(`Cleared ${key}`, "ok")
+    } catch (error) {
+      showError(error, `Unable to clear ${key}`)
+    } finally {
+      setBusy(`configuration:${key}`, false)
+    }
+  }
+
   async function loadJobDetail(jobId: string) {
     setBusy(`detail:${jobId}`, true)
     showToast(`Loading ${jobId}`)
@@ -2004,6 +2158,7 @@ function App() {
     if (view === "jobs") void loadJobs()
     if (view === "agent") void loadAgentReport()
     if (view === "audit") void loadAuditEvents()
+    if (view === "configuration") void loadConfiguration()
   }, [view])
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: permission loading is the first authorized data fetch for the current view.
@@ -2017,6 +2172,7 @@ function App() {
     if (view === "jobs") void loadJobs()
     if (view === "agent") void loadAgentReport()
     if (view === "audit") void loadAuditEvents()
+    if (view === "configuration") void loadConfiguration()
   }, [permissions])
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: jobs reload intentionally follows filter changes only while jobs is active.
@@ -2251,6 +2407,7 @@ function App() {
               ["jobs", "Jobs", BriefcaseBusiness],
               ["agent", "Agent", ShieldCheck],
               ["audit", "Audit", FileClock],
+              ["configuration", "Configuration", Settings],
             ] as const
           )
             .filter(([key]) => canView(key))
@@ -2458,6 +2615,17 @@ function App() {
 
           {view === "agent" ? (
             <AgentView report={agentReport} loading={loading} onRefresh={loadAgentReport} />
+          ) : null}
+
+          {view === "configuration" ? (
+            <ConfigurationView
+              items={configurationItems}
+              loading={loading}
+              canWrite={can("configuration:write")}
+              onRefresh={loadConfiguration}
+              onSave={updateConfigurationValue}
+              onClear={clearConfigurationValue}
+            />
           ) : null}
         </div>
       </main>
@@ -6862,14 +7030,357 @@ function AgentView({
   )
 }
 
+function ConfigurationView({
+  items,
+  loading,
+  canWrite,
+  onRefresh,
+  onSave,
+  onClear,
+}: {
+  items: ConfigurationItem[]
+  loading: Record<string, boolean>
+  canWrite: boolean
+  onRefresh: () => void
+  onSave: (key: string, value: string) => void
+  onClear: (key: string) => void
+}) {
+  const [selectedCategory, setSelectedCategory] = useState("All")
+  const [drafts, setDrafts] = useState<Record<string, string>>({})
+  const categories = useMemo(() => {
+    const present = new Set(items.map((item) => item.category))
+    const known = configurationGroups.filter((group) => present.has(group.category))
+    const unknown = Array.from(present)
+      .filter((category) => !configurationGroupByCategory.has(category))
+      .sort()
+      .map((category) => ({
+        category,
+        label: category,
+        description: "Additional runtime settings.",
+      }))
+    return known.concat(unknown)
+  }, [items])
+  const groupedItems = useMemo(() => {
+    const groups = new Map<string, ConfigurationItem[]>()
+    for (const item of items) {
+      if (selectedCategory !== "All" && item.category !== selectedCategory) continue
+      const current = groups.get(item.category) ?? []
+      current.push(item)
+      groups.set(item.category, current)
+    }
+    return Array.from(groups.entries())
+      .map(([category, groupItems]) => {
+        const known = configurationGroupByCategory.get(category)
+        const sortedItems = groupItems.sort((left, right) => {
+          const priorityOrder =
+            Number(!isPrimaryConfiguration(left)) - Number(!isPrimaryConfiguration(right))
+          return priorityOrder || left.label.localeCompare(right.label)
+        })
+        const primaryItems = sortedItems.filter(isPrimaryConfiguration)
+        const advancedItems = sortedItems.filter((item) => !isPrimaryConfiguration(item))
+        return {
+          category,
+          label: known?.label ?? category,
+          description: known?.description ?? "Additional runtime settings.",
+          order: known?.index ?? configurationGroups.length,
+          primaryItems: primaryItems.length ? primaryItems : sortedItems,
+          advancedItems: primaryItems.length ? advancedItems : [],
+          items: sortedItems,
+        }
+      })
+      .sort((left, right) => left.order - right.order || left.label.localeCompare(right.label))
+  }, [items, selectedCategory])
+  const summary = useMemo(
+    () => ({
+      configured: items.filter((item) => item.configured).length,
+      envLocked: items.filter((item) => item.env_locked).length,
+      missing: items.filter((item) => !item.configured).length,
+    }),
+    [items],
+  )
+  const visibleItemCount = groupedItems.reduce((count, group) => count + group.items.length, 0)
+
+  useEffect(() => {
+    setDrafts(
+      Object.fromEntries(
+        items.map((item) => [item.key, item.is_secret ? "" : String(item.value ?? "")]),
+      ),
+    )
+  }, [items])
+
+  useEffect(() => {
+    if (selectedCategory !== "All" && !items.some((item) => item.category === selectedCategory)) {
+      setSelectedCategory("All")
+    }
+  }, [items, selectedCategory])
+
+  function sourceBadge(item: ConfigurationItem) {
+    if (item.source === "env") return "ENV"
+    if (item.source === "database") return "DB"
+    return "Default"
+  }
+
+  function valueInput(item: ConfigurationItem) {
+    const value = drafts[item.key] ?? ""
+    const disabled = !canWrite || item.env_locked || loading[`configuration:${item.key}`]
+    if (item.value_type === "bool") {
+      return (
+        <Select
+          aria-label={`${item.label} value`}
+          value={value}
+          disabled={disabled}
+          onChange={(event) =>
+            setDrafts((current) => ({ ...current, [item.key]: event.target.value }))
+          }
+        >
+          <option value="">Default</option>
+          <option value="true">True</option>
+          <option value="false">False</option>
+        </Select>
+      )
+    }
+    return (
+      <Input
+        aria-label={`${item.label} value`}
+        value={value}
+        type={item.is_secret ? "password" : item.value_type === "int" ? "number" : "text"}
+        inputMode={item.value_type === "int" || item.value_type === "float" ? "numeric" : "text"}
+        placeholder={item.is_secret ? "Set new value" : ""}
+        autoComplete="off"
+        disabled={disabled}
+        onChange={(event) =>
+          setDrafts((current) => ({ ...current, [item.key]: event.target.value }))
+        }
+      />
+    )
+  }
+
+  function configurationTable(groupLabel: string, tableItems: ConfigurationItem[], suffix: string) {
+    return (
+      <div className="overflow-x-auto">
+        <Table
+          id={`configurationTable-${suffix}`}
+          className="min-w-[980px]"
+          aria-label={`${groupLabel} configuration settings`}
+        >
+          <TableHeader>
+            <TableRow>
+              <TableHead className="w-[26%]">Setting</TableHead>
+              <TableHead className="w-[12%]">Source</TableHead>
+              <TableHead className="w-[18%]">Active</TableHead>
+              <TableHead className="w-[29%]">Value</TableHead>
+              <TableHead className="w-[15%]">Actions</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody id={`configurationBody-${suffix}`}>
+            {tableItems.map((item) => renderConfigurationRow(item))}
+          </TableBody>
+        </Table>
+      </div>
+    )
+  }
+
+  function renderConfigurationRow(item: ConfigurationItem) {
+    const busy = loading[`configuration:${item.key}`]
+    const writable = canWrite && !item.env_locked && !busy
+    const draft = drafts[item.key] ?? ""
+    const emptyNonSecretDraft = !item.is_secret && !draft.trim()
+    return (
+      <TableRow key={item.key}>
+        <TableCell>
+          <div className="grid gap-1">
+            <strong>{item.label}</strong>
+            <span className="font-mono text-xs text-muted-foreground">{item.key}</span>
+            <span className="text-xs text-muted-foreground">{item.description}</span>
+            {item.restart_required ? (
+              <div>
+                <Badge variant="running">Restart</Badge>
+              </div>
+            ) : null}
+          </div>
+        </TableCell>
+        <TableCell>
+          <div className="grid gap-1.5">
+            <Badge variant={item.source === "env" ? "running" : "neutral"}>
+              {sourceBadge(item)}
+            </Badge>
+            {item.env_locked ? (
+              <span className="text-xs text-muted-foreground">Environment locked</span>
+            ) : null}
+          </div>
+        </TableCell>
+        <TableCell>
+          <div className="grid gap-1">
+            <Badge variant={item.configured ? "succeeded" : "missing"}>
+              {item.configured ? "Configured" : "Missing"}
+            </Badge>
+            {item.is_secret ? (
+              <span className="font-mono text-xs text-muted-foreground">
+                {item.masked_value || (item.configured ? "Hidden" : "No secret")}
+              </span>
+            ) : (
+              <span className="break-words text-xs text-muted-foreground">
+                {String(item.value ?? "") || "Default"}
+              </span>
+            )}
+            {item.is_secret && item.secret_encryption_configured === false ? (
+              <span className="text-xs text-red-300">Encryption key missing</span>
+            ) : null}
+          </div>
+        </TableCell>
+        <TableCell>{valueInput(item)}</TableCell>
+        <TableCell>
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => onSave(item.key, draft)}
+              disabled={
+                !writable ||
+                (item.is_secret && !draft.trim()) ||
+                emptyNonSecretDraft ||
+                (item.is_secret && item.secret_encryption_configured === false)
+              }
+            >
+              Save
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => onClear(item.key)}
+              disabled={!writable || item.source !== "database"}
+            >
+              Clear
+            </Button>
+          </div>
+        </TableCell>
+      </TableRow>
+    )
+  }
+
+  return (
+    <div className="grid gap-4">
+      <Card>
+        <CardHeader>
+          <CardTitle>Configuration</CardTitle>
+          <Button
+            id="refreshConfiguration"
+            type="button"
+            variant="outline"
+            onClick={onRefresh}
+            disabled={loading.configuration}
+          >
+            <RefreshCw />
+            Refresh
+          </Button>
+        </CardHeader>
+        <CardContent className="grid gap-4">
+          <section
+            className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"
+            aria-label="Configuration summary"
+          >
+            {[
+              ["Total", items.length],
+              ["Configured", summary.configured],
+              ["Missing", summary.missing],
+              ["Env locked", summary.envLocked],
+            ].map(([label, value]) => (
+              <div key={label} className="rounded-md border bg-background p-3">
+                <span className="text-[11px] font-extrabold uppercase text-muted-foreground">
+                  {label}
+                </span>
+                <strong className="mt-1 block text-xl">{value}</strong>
+              </div>
+            ))}
+          </section>
+          <section className="flex flex-wrap gap-2" aria-label="Configuration groups">
+            <Button
+              type="button"
+              size="sm"
+              variant={selectedCategory === "All" ? "default" : "outline"}
+              aria-pressed={selectedCategory === "All"}
+              onClick={() => setSelectedCategory("All")}
+            >
+              All groups
+              <span className="font-mono text-[11px]">{items.length}</span>
+            </Button>
+            {categories.map((group) => {
+              const count = items.filter((item) => item.category === group.category).length
+              return (
+                <Button
+                  key={group.category}
+                  type="button"
+                  size="sm"
+                  variant={selectedCategory === group.category ? "default" : "outline"}
+                  aria-pressed={selectedCategory === group.category}
+                  onClick={() => setSelectedCategory(group.category)}
+                >
+                  {group.label}
+                  <span className="font-mono text-[11px]">{count}</span>
+                </Button>
+              )
+            })}
+          </section>
+        </CardContent>
+      </Card>
+
+      <Empty hidden={visibleItemCount !== 0}>No configuration entries found.</Empty>
+      {groupedItems.map((group) => {
+        const configured = group.items.filter((item) => item.configured).length
+        const missing = group.items.length - configured
+        const restartRequired = group.items.some((item) => item.restart_required)
+        return (
+          <Card key={group.category}>
+            <CardHeader className="items-start">
+              <div className="grid gap-1">
+                <CardTitle>{group.label}</CardTitle>
+                <span className="text-sm text-muted-foreground">{group.description}</span>
+              </div>
+              <div className="flex flex-wrap justify-end gap-1.5">
+                <Badge variant="neutral">{group.items.length} settings</Badge>
+                <Badge variant={missing ? "missing" : "succeeded"}>{configured} configured</Badge>
+                {restartRequired ? <Badge variant="running">Restart</Badge> : null}
+              </div>
+            </CardHeader>
+            {configurationTable(group.label, group.primaryItems, group.category)}
+            {group.advancedItems.length ? (
+              <details className="border-t bg-background/40">
+                <summary className="flex min-h-11 cursor-pointer items-center justify-between gap-3 px-4 py-3 text-sm font-extrabold">
+                  <span>Advanced</span>
+                  <span className="font-mono text-xs text-muted-foreground">
+                    {group.advancedItems.length} settings
+                  </span>
+                </summary>
+                <div className="border-t">
+                  {configurationTable(
+                    `${group.label} advanced`,
+                    group.advancedItems,
+                    `${group.category}-advanced`,
+                  )}
+                </div>
+              </details>
+            ) : null}
+          </Card>
+        )
+      })}
+    </div>
+  )
+}
+
 const root = document.getElementById("root")
 
 if (!root) {
-  throw new Error("Missing #root container")
+  if (import.meta.env.MODE !== "test") {
+    throw new Error("Missing #root container")
+  }
+} else {
+  createRoot(root).render(
+    <StrictMode>
+      <App />
+    </StrictMode>,
+  )
 }
 
-createRoot(root).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-)
+export type { ConfigurationItem }
+export { ConfigurationView }
