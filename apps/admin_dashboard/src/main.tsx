@@ -117,6 +117,8 @@ type OnboardingEmailDraft = {
   subject: string
   markdown_body: string
   can_send: boolean
+  marker_status?: "saved" | "error" | null
+  marker_error?: string | null
   onboarding_email_sent_at?: string | null
   onboarding_email_sent_by?: string | null
   onboarding_email_recipient?: string | null
@@ -6385,9 +6387,12 @@ function OnboardingRow({
                       <Send />
                       {sendBusy ? "Sending" : "Send"}
                     </Button>
-                    {!emailDraft.can_send ? (
+                    {!emailDraft.can_send && !emailDraft.onboarding_email_sent_at ? (
+                      <span className="text-sm text-muted-foreground">Send unavailable.</span>
+                    ) : null}
+                    {emailDraft.marker_status === "error" ? (
                       <span className="text-sm text-muted-foreground">
-                        Missing recipient or Reply-To.
+                        Marker not saved: {emailDraft.marker_error || "unknown"}
                       </span>
                     ) : null}
                   </div>

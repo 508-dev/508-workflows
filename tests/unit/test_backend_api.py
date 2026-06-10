@@ -6119,6 +6119,9 @@ def test_dashboard_onboarding_email_send_sends_and_marks_local_state(
     assert payload["recipient_email"] == "jesse@example.com"
     assert payload["reply_to_email"] == "steering@508.dev"
     assert payload["onboarding_email_sent_at"] == "2026-06-10T12:01:00+00:00"
+    assert payload["can_send"] is False
+    assert payload["marker_status"] == "saved"
+    assert payload["marker_error"] is None
     mock_send.assert_called_once()
     message = mock_send.call_args.args[0]
     assert message["From"] == "Michael Wu <onboarding@508.dev>"
@@ -6136,6 +6139,70 @@ def test_dashboard_onboarding_email_send_sends_and_marks_local_state(
     assert audit_kwargs["resource_id"] == "contact-prospect-1"
     assert audit_kwargs["metadata"]["source"] == "dashboard"
     assert audit_kwargs["metadata"]["recipient_email"] == "jesse@example.com"
+    assert audit_kwargs["metadata"]["marker_status"] == "saved"
+
+
+def test_dashboard_onboarding_email_send_returns_sent_when_marker_fails(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+    espo_client = Mock()
+    espo_client.request.return_value = {
+        "id": "contact-prospect-1",
+        "name": "Jesse Candidate",
+        "emailAddress": "jesse@example.com",
+        "c508Email": "",
+        "cOnboardingState": "selected",
+    }
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._is_dashboard_onboarding_contact_eligible",
+            return_value=True,
+        ),
+        patch("five08.backend.api.EspoClient", return_value=espo_client),
+        patch(
+            "five08.backend.api._dashboard_session_profile_row",
+            return_value={"name": "Michael Wu", "email_508": "michael@508.dev"},
+        ),
+        patch("five08.backend.api.send_onboarding_email_message") as mock_send,
+        patch(
+            "five08.backend.api._mark_dashboard_onboarding_email_sent",
+            side_effect=api.DashboardOnboardingEmailError(
+                "contact_not_found",
+                status_code=404,
+            ),
+        ),
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            "/dashboard/api/onboarding/contact-prospect-1/email/send",
+            json={"markdown_body": "Great talking Jesse,\n\nCheers,\nMichael\n"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "sent"
+    assert payload["can_send"] is False
+    assert payload["marker_status"] == "error"
+    assert payload["marker_error"] == "contact_not_found"
+    assert payload["onboarding_email_sent_by"] == "steering@508.dev"
+    assert payload["onboarding_email_recipient"] == "jesse@example.com"
+    assert payload["onboarding_email_sent_at"]
+    mock_send.assert_called_once()
+    audit_kwargs = mock_audit.call_args.kwargs
+    assert audit_kwargs["action"] == "onboarding.email"
+    assert audit_kwargs["result"] == api.AuditResult.SUCCESS
+    assert audit_kwargs["metadata"]["marker_status"] == "error"
+    assert audit_kwargs["metadata"]["marker_error"] == "contact_not_found"
 
 
 def test_dashboard_onboarding_email_send_blocks_terminal_state(

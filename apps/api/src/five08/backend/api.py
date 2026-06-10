@@ -6195,12 +6195,43 @@ async def dashboard_onboarding_email_send_handler(
             message,
             config=_dashboard_onboarding_email_smtp_config(),
         )
-        marker = await asyncio.to_thread(
-            _mark_dashboard_onboarding_email_sent,
-            contact_id=contact_id.strip(),
-            recipient_email=recipient_email,
-            actor=_dashboard_onboarding_email_actor(session),
-        )
+        marker_status = "saved"
+        marker_error: str | None = None
+        marker_actor = _dashboard_onboarding_email_actor(session)
+        try:
+            marker = await asyncio.to_thread(
+                _mark_dashboard_onboarding_email_sent,
+                contact_id=contact_id.strip(),
+                recipient_email=recipient_email,
+                actor=marker_actor,
+            )
+        except DashboardOnboardingEmailError as exc:
+            marker_status = "error"
+            marker_error = exc.error
+            marker = {
+                "onboarding_email_sent_at": datetime.now(timezone.utc).isoformat(),
+                "onboarding_email_sent_by": marker_actor,
+                "onboarding_email_recipient": recipient_email,
+            }
+            logger.warning(
+                "Onboarding email sent but marker update failed contact_id=%s reason=%s",
+                contact_id,
+                exc.error,
+            )
+        except Exception as exc:
+            marker_status = "error"
+            marker_error = "marker_update_failed"
+            marker = {
+                "onboarding_email_sent_at": datetime.now(timezone.utc).isoformat(),
+                "onboarding_email_sent_by": marker_actor,
+                "onboarding_email_recipient": recipient_email,
+            }
+            logger.warning(
+                "Onboarding email sent but marker update failed contact_id=%s error=%s",
+                contact_id,
+                exc,
+                exc_info=True,
+            )
     except DashboardOnboardingEmailError as exc:
         await _audit_dashboard_onboarding_email(
             session,
@@ -6256,6 +6287,8 @@ async def dashboard_onboarding_email_send_handler(
             "sender_display_name": sender_display_name,
             "signature_name": signature_name,
             "onboarding_status": onboarding_status,
+            "marker_status": marker_status,
+            "marker_error": marker_error,
         },
     )
     return JSONResponse(
@@ -6269,7 +6302,9 @@ async def dashboard_onboarding_email_send_handler(
             "signature_name": signature_name,
             "subject": "508.dev onboarding",
             "markdown_body": payload.markdown_body,
-            "can_send": True,
+            "can_send": False,
+            "marker_status": marker_status,
+            "marker_error": marker_error,
             **marker,
         }
     )
