@@ -432,26 +432,6 @@ _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
         env_names=("GIG_RECRUITING_REMINDER_MAX_AGE_DAYS",),
         min_value=1,
     ),
-    RuntimeConfigDefinition(
-        key="KIMAI_BASE_URL",
-        attr="kimai_base_url",
-        label="Kimai base URL",
-        category="Legacy",
-        description="Kimai endpoint for legacy time tracking workflows.",
-        value_type="url",
-        env_names=("KIMAI_BASE_URL",),
-        restart_required=True,
-    ),
-    RuntimeConfigDefinition(
-        key="KIMAI_API_TOKEN",
-        attr="kimai_api_token",
-        label="Kimai API token",
-        category="Legacy",
-        description="Kimai API token for legacy time tracking workflows.",
-        is_secret=True,
-        env_names=("KIMAI_API_TOKEN",),
-        restart_required=True,
-    ),
 )
 
 _DEFINITIONS_BY_KEY = {definition.key: definition for definition in _DEFINITIONS}

@@ -7,7 +7,7 @@ and configuration with type validation and default values.
 
 from urllib.parse import urlparse
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field
 
 from five08.openai_fallback import (
     OpenAICompatibleProvider,
@@ -61,23 +61,6 @@ class Settings(SharedSettings):
     resume_ai_base_url: str | None = None
     resume_ai_model: str = "gpt-4.1-mini"
     resume_extractor_max_tokens: int = 2000
-
-    # Kimai time tracking settings
-    kimai_base_url: str = ""
-    kimai_api_token: str = ""
-
-    @field_validator(
-        "espo_api_key",
-        "espo_base_url",
-        "kimai_base_url",
-        "kimai_api_token",
-        mode="before",
-    )
-    @classmethod
-    def _strip_optional_runtime_config_string(cls, value: object) -> object:
-        if isinstance(value, str):
-            return value.strip()
-        return value
 
     @property
     def discord_sendmsg_character_limit(self) -> int:

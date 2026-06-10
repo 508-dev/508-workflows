@@ -297,8 +297,6 @@ def test_runtime_config_numeric_bounds_are_preserved(
     "key",
     [
         "DISCORD_LOGS_WEBHOOK_URL",
-        "KIMAI_BASE_URL",
-        "KIMAI_API_TOKEN",
     ],
 )
 def test_startup_bound_runtime_config_is_restart_required(key: str) -> None:
