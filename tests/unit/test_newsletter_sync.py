@@ -200,6 +200,25 @@ def test_sync_508_members_skips_provider_suppressed_contacts() -> None:
     }
 
 
+def test_sync_508_members_skips_brevo_list_unsubscribed_contacts() -> None:
+    FakeMigaduClient.mailboxes = [
+        MigaduMailbox(
+            address="jane@508.dev",
+            name="Jane Doe",
+            password_recovery_email="jane@example.com",
+        )
+    ]
+    FakeBrevoClient.contacts = {"jane@example.com": {"listUnsubscribed": ["4"]}}
+
+    result = NewsletterSyncProcessor(_settings()).sync_508_members()
+
+    assert FakeBrevoClient.subscriptions == [{"email": "jane@508.dev", "list_id": 4}]
+    assert result["providers"]["brevo"]["statuses"] == {
+        "synced": 1,
+        "skipped_provider_suppressed": 1,
+    }
+
+
 def test_sync_508_members_skips_crm_blocked_mailboxes() -> None:
     FakeMigaduClient.mailboxes = [
         MigaduMailbox(

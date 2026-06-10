@@ -90,6 +90,12 @@ def _is_crm_blocked(contact: dict[str, Any] | None) -> bool:
     )
 
 
+def _contains_list_id(value: object, list_id: int) -> bool:
+    if not isinstance(value, list):
+        return False
+    return any(str(item).strip() == str(list_id) for item in value)
+
+
 class BrevoNewsletterProvider:
     """Brevo implementation for the 508 members newsletter list."""
 
@@ -124,6 +130,9 @@ class BrevoNewsletterProvider:
         list_id = self._list_id()
         if list_id is None:
             return "skipped_list_missing"
+        if existing is not None:
+            if _contains_list_id(existing.get("listUnsubscribed"), list_id):
+                return "skipped_provider_suppressed"
         self.client.add_contact_to_list(email=contact.email, list_id=list_id)
         return "synced"
 
