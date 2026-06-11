@@ -155,6 +155,36 @@ class TestBot508:
 
         assert config.backend_api_base_url == "http://127.0.0.1:8090"
 
+    def test_onboarding_email_smtp_settings_fall_back_to_generic_smtp_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.delenv("ONBOARDING_EMAIL_SMTP_PORT", raising=False)
+        monkeypatch.delenv("ONBOARDING_EMAIL_SMTP_USE_SSL", raising=False)
+        monkeypatch.delenv("ONBOARDING_EMAIL_SMTP_STARTTLS", raising=False)
+        monkeypatch.delenv("ONBOARDING_EMAIL_SMTP_USERNAME", raising=False)
+        monkeypatch.delenv("ONBOARDING_EMAIL_SMTP_PASSWORD", raising=False)
+        monkeypatch.delenv("ONBOARDING_EMAIL_SMTP_TIMEOUT_SECONDS", raising=False)
+        monkeypatch.setenv("SMTP_PORT", "587")
+        monkeypatch.setenv("SMTP_USE_SSL", "false")
+        monkeypatch.setenv("SMTP_STARTTLS", "true")
+        monkeypatch.setenv("SMTP_USERNAME", "onboarding@508.dev")
+        monkeypatch.setenv("SMTP_PASSWORD", "secret")
+        monkeypatch.setenv("SMTP_TIMEOUT_SECONDS", "45")
+
+        config = Settings(
+            discord_bot_token="token",
+            espo_api_key="espo-key",
+            espo_base_url="https://crm.example.com",
+        )
+
+        assert config.onboarding_email_smtp_port == 587
+        assert config.onboarding_email_smtp_use_ssl is False
+        assert config.onboarding_email_smtp_starttls is True
+        assert config.onboarding_email_smtp_username == "onboarding@508.dev"
+        assert config.onboarding_email_smtp_password == "secret"
+        assert config.onboarding_email_smtp_timeout_seconds == 45.0
+
     def test_validate_app_command_descriptions_accepts_valid_lengths(self):
         """Test that valid command descriptions pass validation."""
         tree = Mock()

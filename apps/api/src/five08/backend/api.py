@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import secrets
+import smtplib
 import json
 import threading
 import time
@@ -130,6 +131,17 @@ from five08.engineer_onboarding import (
     add_engineer_to_project,
     setup_engineer,
 )
+from five08.onboarding_email import (
+    OnboardingEmailRequest,
+    OnboardingEmailSmtpConfig,
+    build_onboarding_email,
+    build_onboarding_email_message,
+    markdown_body_to_html,
+    markdown_body_to_text,
+    onboarding_email_smtp_ready,
+    send_onboarding_email_message,
+    validate_plain_email,
+)
 from five08.projects import (
     DEFAULT_WIKI_PROJECT_DOC_ID,
     PROJECT_ROSTER_KIND_HISTORICAL,
@@ -221,6 +233,23 @@ class DashboardOnboardingStatusRequest(BaseModel):
     """Payload for updating one dashboard onboarding status."""
 
     status: str
+
+
+class DashboardOnboardingEmailDraftRequest(BaseModel):
+    """Payload for drafting one dashboard onboarding email."""
+
+    has_contributed: bool = False
+    discord_joined: Literal["yes", "no", "unknown"] = "unknown"
+    agreement_signed: Literal["yes", "no", "unknown"] = "unknown"
+
+
+class DashboardOnboardingEmailSendRequest(BaseModel):
+    """Payload for sending one reviewed dashboard onboarding email."""
+
+    markdown_body: str
+    has_contributed: bool = False
+    discord_joined: Literal["yes", "no", "unknown"] = "unknown"
+    agreement_signed: Literal["yes", "no", "unknown"] = "unknown"
 
 
 class DashboardGigStatusRequest(BaseModel):
@@ -369,6 +398,15 @@ _ONBOARDER_USERNAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789._-")
 
 class DashboardOnboarderAssignmentError(Exception):
     """Expected dashboard onboarder assignment validation error."""
+
+    def __init__(self, error: str, *, status_code: int = 400) -> None:
+        super().__init__(error)
+        self.error = error
+        self.status_code = status_code
+
+
+class DashboardOnboardingEmailError(Exception):
+    """Expected dashboard onboarding email validation/delivery error."""
 
     def __init__(self, error: str, *, status_code: int = 400) -> None:
         super().__init__(error)
@@ -1598,6 +1636,9 @@ _ONBOARDING_STATUS_LABELS = {
     "rejected": "Rejected",
 }
 _DASHBOARD_ONBOARDING_STATUS_VALUES = frozenset(_ONBOARDING_STATUS_LABELS)
+_DASHBOARD_ONBOARDING_TERMINAL_STATUSES = frozenset(
+    {"onboarded", "waitlist", "rejected"}
+)
 
 
 _DASHBOARD_PEOPLE_SEARCH_SQL = """
@@ -1862,6 +1903,9 @@ def _query_dashboard_people(
             onboarding_state,
             onboarder,
             onboarding_updated_at,
+            onboarding_email_sent_at,
+            onboarding_email_sent_by,
+            onboarding_email_recipient,
             sync_status,
             created_at,
             updated_at
@@ -1888,6 +1932,9 @@ def _shape_dashboard_people_rows(rows: list[dict[str, Any]]) -> list[dict[str, A
         person["updated_at"] = _datetime_or_none(row.get("updated_at"))
         person["onboarding_updated_at"] = _datetime_or_none(
             row.get("onboarding_updated_at")
+        )
+        person["onboarding_email_sent_at"] = _datetime_or_none(
+            row.get("onboarding_email_sent_at")
         )
         person["onboarding_status_label"] = _onboarding_status_label(
             row.get("onboarding_state")
@@ -2024,6 +2071,9 @@ def _list_dashboard_onboarding(
             onboarding_state,
             onboarder,
             onboarding_updated_at,
+            onboarding_email_sent_at,
+            onboarding_email_sent_by,
+            onboarding_email_recipient,
             sync_status,
             created_at,
             updated_at
@@ -2065,6 +2115,204 @@ def _is_dashboard_onboarding_contact_eligible(contact_id: str) -> bool:
         with conn.cursor() as cursor:
             cursor.execute(sql, (contact_id, "%prospect%"))
             return cursor.fetchone() is not None
+
+
+def _dashboard_onboarding_email_marker(contact_id: str) -> dict[str, Any]:
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    onboarding_email_sent_at,
+                    onboarding_email_sent_by,
+                    onboarding_email_recipient
+                FROM people
+                WHERE crm_contact_id = %s
+                LIMIT 1
+                """,
+                (contact_id,),
+            )
+            row = cursor.fetchone()
+
+    if not row:
+        return {
+            "onboarding_email_sent_at": None,
+            "onboarding_email_sent_by": None,
+            "onboarding_email_recipient": None,
+        }
+    return {
+        "onboarding_email_sent_at": _datetime_or_none(
+            row.get("onboarding_email_sent_at")
+        ),
+        "onboarding_email_sent_by": row.get("onboarding_email_sent_by"),
+        "onboarding_email_recipient": row.get("onboarding_email_recipient"),
+    }
+
+
+def _mark_dashboard_onboarding_email_sent(
+    *,
+    contact_id: str,
+    recipient_email: str,
+    actor: str,
+) -> dict[str, Any]:
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                UPDATE people
+                SET
+                    onboarding_email_sent_at = NOW(),
+                    onboarding_email_sent_by = %s,
+                    onboarding_email_recipient = %s,
+                    updated_at = NOW()
+                WHERE crm_contact_id = %s
+                RETURNING
+                    onboarding_email_sent_at,
+                    onboarding_email_sent_by,
+                    onboarding_email_recipient
+                """,
+                (actor, recipient_email, contact_id),
+            )
+            row = cursor.fetchone()
+        conn.commit()
+
+    if not row:
+        raise DashboardOnboardingEmailError("contact_not_found", status_code=404)
+    return {
+        "onboarding_email_sent_at": _datetime_or_none(
+            row.get("onboarding_email_sent_at")
+        ),
+        "onboarding_email_sent_by": row.get("onboarding_email_sent_by"),
+        "onboarding_email_recipient": row.get("onboarding_email_recipient"),
+    }
+
+
+def _dashboard_onboarding_contact_for_email(contact_id: str) -> dict[str, Any]:
+    normalized_contact_id = contact_id.strip()
+    if not normalized_contact_id:
+        raise DashboardOnboardingEmailError("contact_id_required")
+    if not _is_dashboard_onboarding_contact_eligible(normalized_contact_id):
+        raise DashboardOnboardingEmailError(
+            "contact_not_onboarding_eligible",
+            status_code=403,
+        )
+
+    client = EspoClient(settings.espo_base_url, settings.espo_api_key)
+    contact = client.request("GET", f"Contact/{normalized_contact_id}")
+    if str(contact.get("id") or "").strip() != normalized_contact_id:
+        raise DashboardOnboardingEmailError("crm_profile_mismatch", status_code=409)
+
+    onboarding_status = _normalize_onboarding_state_key(
+        contact.get(_ONBOARDING_STATUS_FIELD)
+    )
+    if onboarding_status in _DASHBOARD_ONBOARDING_TERMINAL_STATUSES:
+        raise DashboardOnboardingEmailError(
+            "candidate_terminal_onboarding_state",
+            status_code=403,
+        )
+
+    return contact
+
+
+def _dashboard_preferred_contact_email(contact: dict[str, Any]) -> str | None:
+    for field_name in ("emailAddress", "c508Email"):
+        candidate = str(contact.get(field_name) or "").strip()
+        if not candidate:
+            continue
+        try:
+            return validate_plain_email(candidate, field_name)
+        except ValueError:
+            continue
+    return None
+
+
+def _dashboard_contact_display_name(contact: dict[str, Any]) -> str:
+    return str(contact.get("name") or "").strip() or "CRM contact"
+
+
+def _dashboard_session_profile_row(session: AuthSession) -> dict[str, Any] | None:
+    conditions: list[str] = []
+    params: list[Any] = []
+    if session.crm_contact_id:
+        conditions.append("crm_contact_id = %s")
+        params.append(session.crm_contact_id)
+    if _session_actor_provider(session) == ActorProvider.DISCORD and session.subject:
+        conditions.append("discord_user_id = %s")
+        params.append(session.subject)
+    if session.email:
+        normalized_email = session.email.strip().casefold()
+        conditions.append("(LOWER(email) = %s OR LOWER(email_508) = %s)")
+        params.extend([normalized_email, normalized_email])
+    if not conditions:
+        return None
+
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                f"""
+                SELECT name, email, email_508
+                FROM people
+                WHERE sync_status = 'active'
+                  AND ({" OR ".join(conditions)})
+                ORDER BY updated_at DESC NULLS LAST
+                LIMIT 1
+                """,
+                params,
+            )
+            return cursor.fetchone()
+
+
+def _dashboard_sender_names(session: AuthSession) -> tuple[str, str]:
+    profile = _dashboard_session_profile_row(session)
+    profile_name = str(profile.get("name") or "").strip() if profile else ""
+    if profile_name and profile_name != "508.dev":
+        display_name = profile_name
+    else:
+        display_name = str(session.display_name or "").strip()
+    if not display_name and session.email:
+        display_name = session.email.partition("@")[0]
+    if not display_name:
+        display_name = session.subject
+    display_name = " ".join(display_name.split())
+    signature_name = display_name.split()[0] if display_name.split() else display_name
+    return display_name, signature_name
+
+
+def _dashboard_reply_to_email(session: AuthSession) -> str | None:
+    if session.email:
+        try:
+            return validate_plain_email(session.email, "session.email")
+        except ValueError:
+            pass
+
+    profile = _dashboard_session_profile_row(session)
+    if not profile:
+        return None
+    for field_name in ("email_508", "email"):
+        candidate = str(profile.get(field_name) or "").strip()
+        if not candidate:
+            continue
+        try:
+            return validate_plain_email(candidate, field_name)
+        except ValueError:
+            continue
+    return None
+
+
+def _dashboard_onboarding_email_actor(session: AuthSession) -> str:
+    return session.email or session.subject
+
+
+def _dashboard_onboarding_email_smtp_config() -> OnboardingEmailSmtpConfig:
+    return OnboardingEmailSmtpConfig(
+        smtp_server=settings.onboarding_email_smtp_server,
+        smtp_port=settings.onboarding_email_smtp_port,
+        smtp_use_ssl=settings.onboarding_email_smtp_use_ssl,
+        smtp_starttls=settings.onboarding_email_smtp_starttls,
+        smtp_username=settings.onboarding_email_smtp_username,
+        smtp_password=settings.onboarding_email_smtp_password,
+        smtp_timeout_seconds=settings.onboarding_email_smtp_timeout_seconds,
+    )
 
 
 def _list_dashboard_audit_events(limit: int) -> list[dict[str, Any]]:
@@ -2473,6 +2721,30 @@ async def _audit_dashboard_update_onboarding_status(
     audit_metadata.update(metadata or {})
     await _write_auth_audit_event(
         action="crm.update_onboarding_status",
+        result=result,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="crm_contact",
+        resource_id=contact_id,
+        metadata=audit_metadata,
+    )
+
+
+async def _audit_dashboard_onboarding_email(
+    session: AuthSession,
+    *,
+    result: AuditResult,
+    contact_id: str,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    actor_provider, actor_subject = _session_audit_actor(session)
+    audit_metadata = {
+        "source": "dashboard",
+    }
+    audit_metadata.update(metadata or {})
+    await _write_auth_audit_event(
+        action="onboarding.email",
         result=result,
         actor_subject=actor_subject,
         actor_display_name=session.display_name,
@@ -5856,6 +6128,279 @@ async def dashboard_update_onboarding_status_handler(
     return JSONResponse(result, status_code=200)
 
 
+async def dashboard_onboarding_email_draft_handler(
+    request: Request,
+    contact_id: str,
+) -> JSONResponse:
+    """Build a reviewed dashboard onboarding email draft for one candidate."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_ONBOARDING_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    try:
+        body = await request.json()
+        payload = DashboardOnboardingEmailDraftRequest.model_validate(body)
+    except Exception:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    try:
+        contact = await asyncio.to_thread(
+            _dashboard_onboarding_contact_for_email,
+            contact_id,
+        )
+    except DashboardOnboardingEmailError as exc:
+        return JSONResponse({"error": exc.error}, status_code=exc.status_code)
+    except EspoAPIError as exc:
+        logger.warning(
+            "CRM onboarding email draft lookup failed contact_id=%s error=%s",
+            contact_id,
+            exc,
+            exc_info=True,
+        )
+        return JSONResponse({"error": "crm_lookup_failed"}, status_code=502)
+
+    sender_display_name, signature_name = await asyncio.to_thread(
+        _dashboard_sender_names,
+        session,
+    )
+    reply_to_email = await asyncio.to_thread(_dashboard_reply_to_email, session)
+    candidate_name = _dashboard_contact_display_name(contact)
+    recipient_email = _dashboard_preferred_contact_email(contact)
+    draft = build_onboarding_email(
+        OnboardingEmailRequest(
+            candidate_name=candidate_name,
+            sender_name=signature_name,
+            has_contributed=payload.has_contributed,
+            discord_joined=payload.discord_joined,
+            membership_agreement_signed=payload.agreement_signed,
+        )
+    )
+    marker = await asyncio.to_thread(
+        _dashboard_onboarding_email_marker,
+        contact_id.strip(),
+    )
+    smtp_ready = onboarding_email_smtp_ready(_dashboard_onboarding_email_smtp_config())
+
+    return JSONResponse(
+        {
+            "contact_id": contact_id.strip(),
+            "candidate_name": candidate_name,
+            "recipient_email": recipient_email,
+            "reply_to_email": reply_to_email,
+            "sender_display_name": sender_display_name,
+            "signature_name": signature_name,
+            "subject": draft.subject,
+            "markdown_body": draft.markdown_body,
+            "can_send": bool(recipient_email and reply_to_email and smtp_ready),
+            **marker,
+        }
+    )
+
+
+async def dashboard_onboarding_email_send_handler(
+    request: Request,
+    contact_id: str,
+) -> JSONResponse:
+    """Send a reviewed dashboard onboarding email and mark it locally."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_ONBOARDING_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    try:
+        body = await request.json()
+        payload = DashboardOnboardingEmailSendRequest.model_validate(body)
+    except Exception:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    metadata: dict[str, Any] = {
+        "has_contributed": payload.has_contributed,
+        "discord_joined": payload.discord_joined,
+        "agreement_signed": payload.agreement_signed,
+    }
+    try:
+        if not payload.markdown_body.strip():
+            raise DashboardOnboardingEmailError("empty_email_body")
+
+        contact = await asyncio.to_thread(
+            _dashboard_onboarding_contact_for_email,
+            contact_id,
+        )
+        candidate_name = _dashboard_contact_display_name(contact)
+        onboarding_status = _normalize_onboarding_state_key(
+            contact.get(_ONBOARDING_STATUS_FIELD)
+        )
+        sender_display_name, signature_name = await asyncio.to_thread(
+            _dashboard_sender_names,
+            session,
+        )
+        reply_to_email = await asyncio.to_thread(_dashboard_reply_to_email, session)
+        if reply_to_email is None:
+            raise DashboardOnboardingEmailError(
+                "reply_to_email_required",
+                status_code=409,
+            )
+        recipient_email = _dashboard_preferred_contact_email(contact)
+        if recipient_email is None:
+            raise DashboardOnboardingEmailError(
+                "recipient_email_required",
+                status_code=409,
+            )
+        smtp_config = _dashboard_onboarding_email_smtp_config()
+        if not onboarding_email_smtp_ready(smtp_config):
+            raise DashboardOnboardingEmailError(
+                "smtp_not_configured",
+                status_code=409,
+            )
+
+        text_body = markdown_body_to_text(payload.markdown_body)
+        html_body = markdown_body_to_html(payload.markdown_body)
+        message = build_onboarding_email_message(
+            recipient_email=recipient_email,
+            reply_to_email=reply_to_email,
+            sender_name=sender_display_name,
+            sender_email=settings.onboarding_email_sender_email,
+            subject="508.dev onboarding",
+            text_body=text_body,
+            html_body=html_body,
+        )
+        await asyncio.to_thread(
+            send_onboarding_email_message,
+            message,
+            config=smtp_config,
+        )
+        marker_status = "saved"
+        marker_error: str | None = None
+        marker_actor = _dashboard_onboarding_email_actor(session)
+        try:
+            marker = await asyncio.to_thread(
+                _mark_dashboard_onboarding_email_sent,
+                contact_id=contact_id.strip(),
+                recipient_email=recipient_email,
+                actor=marker_actor,
+            )
+        except DashboardOnboardingEmailError as exc:
+            marker_status = "error"
+            marker_error = exc.error
+            marker = {
+                "onboarding_email_sent_at": datetime.now(timezone.utc).isoformat(),
+                "onboarding_email_sent_by": marker_actor,
+                "onboarding_email_recipient": recipient_email,
+            }
+            logger.warning(
+                "Onboarding email sent but marker update failed contact_id=%s reason=%s",
+                contact_id,
+                exc.error,
+            )
+        except Exception as exc:
+            marker_status = "error"
+            marker_error = "marker_update_failed"
+            marker = {
+                "onboarding_email_sent_at": datetime.now(timezone.utc).isoformat(),
+                "onboarding_email_sent_by": marker_actor,
+                "onboarding_email_recipient": recipient_email,
+            }
+            logger.warning(
+                "Onboarding email sent but marker update failed contact_id=%s error=%s",
+                contact_id,
+                exc,
+                exc_info=True,
+            )
+    except DashboardOnboardingEmailError as exc:
+        await _audit_dashboard_onboarding_email(
+            session,
+            result=AuditResult.ERROR,
+            contact_id=contact_id,
+            metadata={**metadata, "reason": exc.error},
+        )
+        return JSONResponse({"error": exc.error}, status_code=exc.status_code)
+    except EspoAPIError as exc:
+        logger.warning(
+            "CRM onboarding email send lookup failed contact_id=%s error=%s",
+            contact_id,
+            exc,
+            exc_info=True,
+        )
+        await _audit_dashboard_onboarding_email(
+            session,
+            result=AuditResult.ERROR,
+            contact_id=contact_id,
+            metadata={
+                **metadata,
+                "reason": "crm_lookup_failed",
+                "error_type": type(exc).__name__,
+            },
+        )
+        return JSONResponse({"error": "crm_lookup_failed"}, status_code=502)
+    except (OSError, ValueError, smtplib.SMTPException) as exc:
+        logger.warning(
+            "Dashboard onboarding email send failed contact_id=%s error=%s",
+            contact_id,
+            exc,
+            exc_info=True,
+        )
+        await _audit_dashboard_onboarding_email(
+            session,
+            result=AuditResult.ERROR,
+            contact_id=contact_id,
+            metadata={
+                **metadata,
+                "reason": "email_send_failed",
+                "error_type": type(exc).__name__,
+            },
+        )
+        return JSONResponse({"error": "email_send_failed"}, status_code=502)
+
+    await _audit_dashboard_onboarding_email(
+        session,
+        result=AuditResult.SUCCESS,
+        contact_id=contact_id.strip(),
+        metadata={
+            **metadata,
+            "candidate_name": candidate_name,
+            "recipient_email": recipient_email,
+            "reply_to_email": reply_to_email,
+            "sender_display_name": sender_display_name,
+            "signature_name": signature_name,
+            "onboarding_status": onboarding_status,
+            "marker_status": marker_status,
+            "marker_error": marker_error,
+        },
+    )
+    return JSONResponse(
+        {
+            "status": "sent",
+            "contact_id": contact_id.strip(),
+            "candidate_name": candidate_name,
+            "recipient_email": recipient_email,
+            "reply_to_email": reply_to_email,
+            "sender_display_name": sender_display_name,
+            "signature_name": signature_name,
+            "subject": "508.dev onboarding",
+            "markdown_body": payload.markdown_body,
+            "can_send": False,
+            "marker_status": marker_status,
+            "marker_error": marker_error,
+            **marker,
+        }
+    )
+
+
 async def dashboard_audit_events_handler(
     request: Request,
     limit: int = Query(default=25, ge=1, le=100),
@@ -7866,6 +8411,16 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
     app.add_api_route(
         "/dashboard/api/onboarding/{contact_id}/status",
         dashboard_update_onboarding_status_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/dashboard/api/onboarding/{contact_id}/email/draft",
+        dashboard_onboarding_email_draft_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/dashboard/api/onboarding/{contact_id}/email/send",
+        dashboard_onboarding_email_send_handler,
         methods=["POST"],
     )
     app.add_api_route(

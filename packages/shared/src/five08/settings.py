@@ -88,6 +88,70 @@ class SharedSettings(BaseSettings):
     newsletter_sync_enabled: bool = True
     newsletter_sync_interval_seconds: int = 604800
     newsletter_sync_excluded_mailboxes: str = ""
+    onboarding_email_smtp_server: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "ONBOARDING_EMAIL_SMTP_SERVER",
+            "SMTP_SERVER",
+            "onboarding_email_smtp_server",
+            "smtp_server",
+        ),
+    )
+    onboarding_email_smtp_port: int = Field(
+        default=465,
+        validation_alias=AliasChoices(
+            "ONBOARDING_EMAIL_SMTP_PORT",
+            "SMTP_PORT",
+            "onboarding_email_smtp_port",
+            "smtp_port",
+        ),
+    )
+    onboarding_email_smtp_use_ssl: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "ONBOARDING_EMAIL_SMTP_USE_SSL",
+            "SMTP_USE_SSL",
+            "onboarding_email_smtp_use_ssl",
+            "smtp_use_ssl",
+        ),
+    )
+    onboarding_email_smtp_starttls: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "ONBOARDING_EMAIL_SMTP_STARTTLS",
+            "SMTP_STARTTLS",
+            "onboarding_email_smtp_starttls",
+            "smtp_starttls",
+        ),
+    )
+    onboarding_email_smtp_username: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "ONBOARDING_EMAIL_SMTP_USERNAME",
+            "SMTP_USERNAME",
+            "onboarding_email_smtp_username",
+            "smtp_username",
+        ),
+    )
+    onboarding_email_smtp_password: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "ONBOARDING_EMAIL_SMTP_PASSWORD",
+            "SMTP_PASSWORD",
+            "onboarding_email_smtp_password",
+            "smtp_password",
+        ),
+    )
+    onboarding_email_sender_email: str = "onboarding@508.dev"
+    onboarding_email_smtp_timeout_seconds: float = Field(
+        default=20.0,
+        validation_alias=AliasChoices(
+            "ONBOARDING_EMAIL_SMTP_TIMEOUT_SECONDS",
+            "SMTP_TIMEOUT_SECONDS",
+            "onboarding_email_smtp_timeout_seconds",
+            "smtp_timeout_seconds",
+        ),
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

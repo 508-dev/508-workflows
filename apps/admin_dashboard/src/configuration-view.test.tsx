@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { type ConfigurationItem, ConfigurationView } from "./main"
@@ -141,5 +141,62 @@ describe("ConfigurationView", () => {
       name: "Onboarding advanced configuration settings",
     })
     expect(within(advancedTable).getByRole("button", { name: "Save" })).toBeDisabled()
+  })
+
+  it("keeps onboarding email SMTP settings in the primary onboarding table", () => {
+    render(
+      <ConfigurationView
+        items={[
+          configItem({
+            key: "ONBOARDING_EMAIL_SMTP_USERNAME",
+            label: "Onboarding email SMTP username",
+            description: "SMTP username used to authenticate onboarding email sends.",
+            configured: true,
+            value: "onboarding@508.dev",
+          }),
+          configItem({
+            key: "ONBOARDING_EMAIL_SMTP_PASSWORD",
+            label: "Onboarding email SMTP password",
+            description: "SMTP password or app password used to send onboarding emails.",
+            is_secret: true,
+            configured: true,
+            masked_value: "sec...ret",
+            secret_encryption_configured: true,
+          }),
+        ]}
+        loading={{}}
+        canWrite
+        onRefresh={vi.fn()}
+        onSave={vi.fn()}
+        onClear={vi.fn()}
+      />,
+    )
+
+    const onboardingTable = screen.getByRole("table", {
+      name: "Onboarding configuration settings",
+    })
+    expect(within(onboardingTable).getByText("Onboarding email SMTP username")).toBeVisible()
+    expect(within(onboardingTable).getByText("Onboarding email SMTP password")).toBeVisible()
+    expect(screen.queryByText("Advanced")).not.toBeInTheDocument()
+  })
+
+  it("focuses the requested configuration category", async () => {
+    render(
+      <ConfigurationView
+        items={items}
+        loading={{}}
+        canWrite
+        focusCategory="Onboarding"
+        focusNonce={1}
+        onRefresh={vi.fn()}
+        onSave={vi.fn()}
+        onClear={vi.fn()}
+      />,
+    )
+
+    await waitFor(() => {
+      expect(screen.queryByRole("heading", { name: "AI Providers" })).not.toBeInTheDocument()
+    })
+    expect(screen.getByRole("heading", { name: "Onboarding" })).toBeVisible()
   })
 })

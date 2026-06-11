@@ -341,6 +341,20 @@ def test_core_crm_auth_and_mailbox_settings_are_not_dashboard_configurable() -> 
     assert runtime_config_definition_for_key("CRM_SYNC_PAGE_SIZE") is None
 
 
+def test_onboarding_email_smtp_settings_are_dashboard_configurable() -> None:
+    assert runtime_config_definition_for_key("ONBOARDING_EMAIL_SMTP_SERVER") is not None
+    assert (
+        runtime_config_definition_for_key("ONBOARDING_EMAIL_SMTP_PASSWORD") is not None
+    )
+    assert (
+        runtime_config_definition_for_key("ONBOARDING_EMAIL_SENDER_EMAIL") is not None
+    )
+    password = runtime_config_definition_for_key("ONBOARDING_EMAIL_SMTP_PASSWORD")
+    assert password is not None
+    assert password.is_secret is True
+    assert password.category == "Onboarding"
+
+
 def test_runtime_config_list_marks_numeric_values_as_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
