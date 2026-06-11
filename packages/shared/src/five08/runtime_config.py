@@ -176,7 +176,10 @@ _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
         attr="onboarding_email_sender_email",
         label="Onboarding email sender address",
         category="Onboarding",
-        description="From address used for onboarding email sends.",
+        description=(
+            "From email address for onboarding sends. The email uses the sender's "
+            "name as the display name and sets Reply-To to the sender's email."
+        ),
         env_names=("ONBOARDING_EMAIL_SENDER_EMAIL",),
     ),
     RuntimeConfigDefinition(
