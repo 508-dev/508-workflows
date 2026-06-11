@@ -7,9 +7,11 @@ import {
   FileClock,
   FolderKanban,
   LogOut,
+  Mail,
   Plus,
   RefreshCw,
   Search,
+  Send,
   Settings,
   ShieldCheck,
   UserMinus,
@@ -110,7 +112,8 @@ const configurationGroups: ConfigurationGroupMetadata[] = [
   {
     category: "Onboarding",
     label: "Onboarding",
-    description: "Editable onboarding integrations such as DocuSeal and Outline.",
+    description:
+      "Editable onboarding integrations such as DocuSeal, Outline, and onboarding email SMTP.",
   },
   {
     category: "AI",
@@ -148,8 +151,13 @@ const configurationGroupByCategory = new Map(
   configurationGroups.map((group, index) => [group.category, { ...group, index }]),
 )
 
+function configurationGroupId(category: string) {
+  return `configurationGroup-${category.replace(/[^a-zA-Z0-9_-]+/g, "-")}`
+}
+
 function isPrimaryConfiguration(item: ConfigurationItem) {
   return (
+    item.key.startsWith("ONBOARDING_EMAIL_") ||
     item.is_secret ||
     item.value_type === "url" ||
     item.key.endsWith("_MODEL") ||
@@ -187,8 +195,36 @@ type Person = {
   onboarding_status_label?: string
   onboarder?: string
   onboarding_updated_at?: string
+  onboarding_email_sent_at?: string
+  onboarding_email_sent_by?: string
+  onboarding_email_recipient?: string
   sync_status?: string
   profile_status?: ProfileStatus
+}
+
+type OnboardingEmailTriState = "yes" | "no" | "unknown"
+
+type OnboardingEmailOptions = {
+  has_contributed: boolean
+  discord_joined: OnboardingEmailTriState
+  agreement_signed: OnboardingEmailTriState
+}
+
+type OnboardingEmailDraft = {
+  contact_id: string
+  candidate_name?: string
+  recipient_email?: string | null
+  reply_to_email?: string | null
+  sender_display_name?: string | null
+  signature_name?: string | null
+  subject: string
+  markdown_body: string
+  can_send: boolean
+  marker_status?: "saved" | "error" | null
+  marker_error?: string | null
+  onboarding_email_sent_at?: string | null
+  onboarding_email_sent_by?: string | null
+  onboarding_email_recipient?: string | null
 }
 
 type Job = {
@@ -896,6 +932,10 @@ function App() {
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([])
   const [agentReport, setAgentReport] = useState<AgentReport | null>(null)
   const [configurationItems, setConfigurationItems] = useState<ConfigurationItem[]>([])
+  const [configurationFocus, setConfigurationFocus] = useState<{
+    category: string
+    nonce: number
+  } | null>(null)
   const [jobDetail, setJobDetail] = useState<JobDetail | null>(null)
   const [loading, setLoading] = useState<Record<string, boolean>>({})
   const [devErrors, setDevErrors] = useState<DashboardDevError[]>([])
@@ -1679,6 +1719,82 @@ function App() {
     }
   }
 
+  async function draftOnboardingEmail(
+    contactId: string | undefined,
+    options: OnboardingEmailOptions,
+  ) {
+    if (!contactId) {
+      showToast("Missing CRM contact", "error")
+      return null
+    }
+    const key = `onboarding-email-draft:${contactId}`
+    setBusy(key, true)
+    try {
+      const payload = await requestJson<OnboardingEmailDraft>(
+        `/dashboard/api/onboarding/${encodeURIComponent(contactId)}/email/draft`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(options),
+        },
+      )
+      showToast("Drafted onboarding email", "ok")
+      return payload
+    } catch (error) {
+      showError(error, "Unable to draft onboarding email")
+      return null
+    } finally {
+      setBusy(key, false)
+    }
+  }
+
+  async function sendOnboardingEmail(
+    contactId: string | undefined,
+    options: OnboardingEmailOptions,
+    markdownBody: string,
+  ) {
+    if (!contactId) {
+      showToast("Missing CRM contact", "error")
+      return null
+    }
+    const key = `onboarding-email-send:${contactId}`
+    setBusy(key, true)
+    try {
+      const payload = await requestJson<OnboardingEmailDraft>(
+        `/dashboard/api/onboarding/${encodeURIComponent(contactId)}/email/send`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...options, markdown_body: markdownBody }),
+        },
+      )
+      setOnboarding((current) =>
+        current.map((person) =>
+          person.crm_contact_id === contactId
+            ? {
+                ...person,
+                onboarding_email_sent_at:
+                  payload.onboarding_email_sent_at || person.onboarding_email_sent_at,
+                onboarding_email_sent_by:
+                  payload.onboarding_email_sent_by || person.onboarding_email_sent_by,
+                onboarding_email_recipient:
+                  payload.onboarding_email_recipient ||
+                  payload.recipient_email ||
+                  person.onboarding_email_recipient,
+              }
+            : person,
+        ),
+      )
+      showToast("Sent onboarding email", "ok")
+      return payload
+    } catch (error) {
+      showError(error, "Unable to send onboarding email")
+      return null
+    } finally {
+      setBusy(key, false)
+    }
+  }
+
   async function loadAuditEvents() {
     setBusy("audit", true)
     try {
@@ -2448,6 +2564,8 @@ function App() {
               onSort={(key) => handleSort("onboarding", key)}
               onAssign={assignOnboarder}
               onStatusChange={updateOnboardingStatus}
+              onDraftEmail={draftOnboardingEmail}
+              onSendEmail={sendOnboardingEmail}
               onSetupEngineer={setupEngineer}
               setOnboardingQuery={setOnboardingQuery}
               setOnboardingState={setOnboardingState}
@@ -2470,6 +2588,11 @@ function App() {
               crmContactUrl={crmContactUrl}
               crmAttachmentUrl={crmAttachmentUrl}
               canWrite={can("onboarding:write")}
+              canConfigure={can("configuration:write")}
+              onOpenConfiguration={() => {
+                setConfigurationFocus({ category: "Onboarding", nonce: Date.now() })
+                navigate("configuration", true)
+              }}
             />
           ) : null}
 
@@ -2513,6 +2636,8 @@ function App() {
               items={configurationItems}
               loading={loading}
               canWrite={can("configuration:write")}
+              focusCategory={configurationFocus?.category}
+              focusNonce={configurationFocus?.nonce}
               onRefresh={loadConfiguration}
               onSave={updateConfigurationValue}
               onClear={clearConfigurationValue}
@@ -5619,7 +5744,18 @@ function OnboardingView(props: {
   onSort: (key: string) => void
   onAssign: (contactId: string | undefined, onboarder: string) => void
   onStatusChange: (contactId: string | undefined, status: string) => void
+  onDraftEmail: (
+    contactId: string | undefined,
+    options: OnboardingEmailOptions,
+  ) => Promise<OnboardingEmailDraft | null>
+  onSendEmail: (
+    contactId: string | undefined,
+    options: OnboardingEmailOptions,
+    markdownBody: string,
+  ) => Promise<OnboardingEmailDraft | null>
   onSetupEngineer: (payload: EngineerSetupRequest) => Promise<EngineerSetupResult | null>
+  canConfigure: boolean
+  onOpenConfiguration: () => void
   setOnboardingQuery: (value: string) => void
   setOnboardingState: (value: string) => void
   setOnboarderFilter: (value: string) => void
@@ -5743,13 +5879,13 @@ function OnboardingView(props: {
         <div className="overflow-x-auto">
           <Table
             id="onboardingTable"
-            className={cn("min-w-[1180px]", props.people.length === 0 && "hidden")}
+            className={cn("min-w-[1340px]", props.people.length === 0 && "hidden")}
             aria-label="Onboarding queue"
           >
             <TableHeader>
               <TableRow>
                 <SortableTableHead
-                  className="w-[20%]"
+                  className="w-[18%]"
                   label="Name"
                   scope="onboarding"
                   sort={props.sort}
@@ -5757,7 +5893,7 @@ function OnboardingView(props: {
                   onSort={(_, key) => props.onSort(key)}
                 />
                 <SortableTableHead
-                  className="w-[13%]"
+                  className="w-[12%]"
                   label="Status"
                   scope="onboarding"
                   sort={props.sort}
@@ -5765,7 +5901,7 @@ function OnboardingView(props: {
                   onSort={(_, key) => props.onSort(key)}
                 />
                 <SortableTableHead
-                  className="w-[22%]"
+                  className="w-[20%]"
                   label="Onboarder"
                   scope="onboarding"
                   sort={props.sort}
@@ -5773,16 +5909,17 @@ function OnboardingView(props: {
                   onSort={(_, key) => props.onSort(key)}
                 />
                 <SortableTableHead
-                  className="w-[13%]"
+                  className="w-[12%]"
                   label="Updated"
                   scope="onboarding"
                   sort={props.sort}
                   sortKey="updated"
                   onSort={(_, key) => props.onSort(key)}
                 />
-                <TableHead className="w-[15%]">Links</TableHead>
+                <TableHead className="w-[15%]">Email</TableHead>
+                <TableHead className="w-[12%]">Links</TableHead>
                 <SortableTableHead
-                  className="w-[17%]"
+                  className="w-[11%]"
                   label="Needs"
                   scope="onboarding"
                   sort={props.sort}
@@ -5800,8 +5937,12 @@ function OnboardingView(props: {
                   canWrite={props.canWrite}
                   onAssign={props.onAssign}
                   onStatusChange={props.onStatusChange}
+                  onDraftEmail={props.onDraftEmail}
+                  onSendEmail={props.onSendEmail}
                   crmContactUrl={props.crmContactUrl}
                   crmAttachmentUrl={props.crmAttachmentUrl}
+                  canConfigure={props.canConfigure}
+                  onOpenConfiguration={props.onOpenConfiguration}
                 />
               ))}
             </TableBody>
@@ -6121,19 +6262,42 @@ function OnboardingRow({
   canWrite,
   onAssign,
   onStatusChange,
+  onDraftEmail,
+  onSendEmail,
   crmContactUrl,
   crmAttachmentUrl,
+  canConfigure,
+  onOpenConfiguration,
 }: {
   person: Person
   loading: Record<string, boolean>
   canWrite: boolean
   onAssign: (contactId: string | undefined, onboarder: string) => void
   onStatusChange: (contactId: string | undefined, status: string) => void
+  onDraftEmail: (
+    contactId: string | undefined,
+    options: OnboardingEmailOptions,
+  ) => Promise<OnboardingEmailDraft | null>
+  onSendEmail: (
+    contactId: string | undefined,
+    options: OnboardingEmailOptions,
+    markdownBody: string,
+  ) => Promise<OnboardingEmailDraft | null>
   crmContactUrl: (contactId?: string) => string
   crmAttachmentUrl: (attachmentId?: string) => string
+  canConfigure: boolean
+  onOpenConfiguration: () => void
 }) {
   const displayName = person.name || person.email_508 || person.email || "CRM contact"
   const [value, setValue] = useState(displayOnboarder(person.onboarder))
+  const [emailOpen, setEmailOpen] = useState(false)
+  const [emailDraft, setEmailDraft] = useState<OnboardingEmailDraft | null>(null)
+  const [emailDraftOptions, setEmailDraftOptions] = useState<OnboardingEmailOptions | null>(null)
+  const [emailOptions, setEmailOptions] = useState<OnboardingEmailOptions>({
+    has_contributed: normalizedOnboardingStatusValue(onboardingStateValue(person)) === "onboarded",
+    discord_joined: person.discord_user_id ? "yes" : "unknown",
+    agreement_signed: "unknown",
+  })
   useEffect(() => setValue(displayOnboarder(person.onboarder)), [person.onboarder])
   const currentStatus = normalizedOnboardingStatusValue(onboardingStateValue(person))
   const status = person.profile_status || {}
@@ -6144,129 +6308,342 @@ function OnboardingRow({
   ].filter(([, ok]) => !ok)
   const contactUrl = crmContactUrl(person.crm_contact_id)
   const resumeUrl = crmAttachmentUrl(person.latest_resume_id)
+  const emailSentAt = emailDraft?.onboarding_email_sent_at || person.onboarding_email_sent_at
+  const emailSentBy = emailDraft?.onboarding_email_sent_by || person.onboarding_email_sent_by
+  const emailSentRecipient =
+    emailDraft?.onboarding_email_recipient || person.onboarding_email_recipient
+  const draftMatchesOptions =
+    !emailDraft ||
+    (emailDraftOptions !== null &&
+      emailDraftOptions.has_contributed === emailOptions.has_contributed &&
+      emailDraftOptions.discord_joined === emailOptions.discord_joined &&
+      emailDraftOptions.agreement_signed === emailOptions.agreement_signed)
+  const sendUnavailableMessage =
+    emailDraft && !emailDraft.onboarding_email_sent_at
+      ? !draftMatchesOptions
+        ? "Send disabled: regenerate after changing draft options."
+        : !emailDraft.can_send
+          ? !emailDraft.recipient_email
+            ? "Send disabled: candidate email is missing."
+            : !emailDraft.reply_to_email
+              ? "Send disabled: your Reply-To email is missing."
+              : "Send disabled: onboarding email SMTP is not configured."
+          : ""
+      : ""
+  const sendUnavailableIsSmtp = sendUnavailableMessage.includes("SMTP")
+  const draftBusy = Boolean(loading[`onboarding-email-draft:${person.crm_contact_id}`])
+  const sendBusy = Boolean(loading[`onboarding-email-send:${person.crm_contact_id}`])
+  const draftBody = emailDraft?.markdown_body || ""
+  async function generateDraft(nextOptions = emailOptions) {
+    const draft = await onDraftEmail(person.crm_contact_id, nextOptions)
+    if (draft) {
+      setEmailDraft(draft)
+      setEmailDraftOptions({ ...nextOptions })
+      setEmailOpen(true)
+    }
+  }
+  async function sendDraft() {
+    if (!emailDraft || !emailDraftOptions || !draftMatchesOptions) return
+    const sent = await onSendEmail(
+      person.crm_contact_id,
+      emailDraftOptions,
+      emailDraft.markdown_body,
+    )
+    if (sent) setEmailDraft(sent)
+  }
   return (
-    <TableRow>
-      <TableCell>
-        {contactUrl ? (
-          <a
-            className="font-extrabold text-primary"
-            href={contactUrl}
-            target="_blank"
-            rel="noreferrer"
-            aria-label={`Open ${displayName} in CRM`}
-          >
-            {displayName}
-          </a>
-        ) : (
-          <strong>{displayName}</strong>
-        )}
-        <div className="text-sm text-muted-foreground">
-          {person.email_508 || person.email || ""}
-        </div>
-      </TableCell>
-      <TableCell>
-        <div className="grid max-w-56 gap-2">
-          <Badge variant={toneForOnboardingState(onboardingStateValue(person))}>
-            {person.onboarding_status_label ||
-              labelForOnboardingState(onboardingStateValue(person))}
-          </Badge>
-          {canWrite ? (
-            <Select
-              aria-label={`Onboarding status for ${displayName}`}
-              value={currentStatus}
-              disabled={loading[`onboarding-status:${person.crm_contact_id}`]}
-              onChange={(event) => onStatusChange(person.crm_contact_id, event.target.value)}
-            >
-              {currentStatus ? null : (
-                <option value="" disabled>
-                  No status
-                </option>
-              )}
-              {onboardingStatusOptions.map(([statusValue, label]) => (
-                <option key={statusValue} value={statusValue}>
-                  {label}
-                </option>
-              ))}
-            </Select>
-          ) : null}
-        </div>
-      </TableCell>
-      <TableCell>
-        <form
-          className="grid max-w-64 grid-cols-[minmax(100px,1fr)_auto] items-center gap-2"
-          onSubmit={(event) => {
-            event.preventDefault()
-            onAssign(person.crm_contact_id, value)
-          }}
-        >
-          <Input
-            aria-label={`Onboarder for ${displayName}`}
-            value={value}
-            placeholder="508 username"
-            onChange={(event) => setValue(event.target.value)}
-          />
-          <Button
-            type="submit"
-            size="sm"
-            aria-label={`Save onboarder for ${displayName}`}
-            disabled={loading[`onboarder:${person.crm_contact_id}`]}
-          >
-            Save
-          </Button>
-        </form>
-      </TableCell>
-      <TableCell>{formatDate(person.onboarding_updated_at)}</TableCell>
-      <TableCell>
-        <div className="flex flex-wrap gap-1.5">
-          {resumeUrl ? (
+    <>
+      <TableRow>
+        <TableCell>
+          {contactUrl ? (
             <a
-              className="inline-flex min-h-7 items-center rounded-md border bg-secondary px-2 text-xs font-extrabold"
-              href={resumeUrl}
+              className="font-extrabold text-primary"
+              href={contactUrl}
               target="_blank"
               rel="noreferrer"
-              aria-label={`Open ${displayName} resume`}
+              aria-label={`Open ${displayName} in CRM`}
             >
-              Resume
+              {displayName}
             </a>
-          ) : null}
-          {linkedinUrl(person.linkedin) ? (
-            <a
-              className="inline-flex min-h-7 items-center rounded-md border bg-secondary px-2 text-xs font-extrabold"
-              href={linkedinUrl(person.linkedin)}
-              target="_blank"
-              rel="noreferrer"
-              aria-label={`Open ${displayName} LinkedIn`}
-            >
-              LinkedIn
-            </a>
-          ) : null}
-          {githubUrl(person.github_username) ? (
-            <a
-              className="inline-flex min-h-7 items-center rounded-md border bg-secondary px-2 text-xs font-extrabold"
-              href={githubUrl(person.github_username)}
-              target="_blank"
-              rel="noreferrer"
-              aria-label={`Open ${displayName} GitHub`}
-            >
-              {person.github_username || "GitHub"}
-            </a>
-          ) : null}
-          {!resumeUrl && !linkedinUrl(person.linkedin) && !githubUrl(person.github_username)
-            ? "None"
-            : null}
-        </div>
-      </TableCell>
-      <TableCell>
-        <div className="flex flex-wrap gap-1.5">
-          {gaps.map(([label]) => (
-            <Badge key={String(label)} variant="missing">
-              Missing {label}
+          ) : (
+            <strong>{displayName}</strong>
+          )}
+          <div className="text-sm text-muted-foreground">
+            {person.email_508 || person.email || ""}
+          </div>
+        </TableCell>
+        <TableCell>
+          <div className="grid max-w-56 gap-2">
+            <Badge variant={toneForOnboardingState(onboardingStateValue(person))}>
+              {person.onboarding_status_label ||
+                labelForOnboardingState(onboardingStateValue(person))}
             </Badge>
-          ))}
-          {gaps.length === 0 ? "None" : null}
-        </div>
-      </TableCell>
-    </TableRow>
+            {canWrite ? (
+              <Select
+                aria-label={`Onboarding status for ${displayName}`}
+                value={currentStatus}
+                disabled={loading[`onboarding-status:${person.crm_contact_id}`]}
+                onChange={(event) => onStatusChange(person.crm_contact_id, event.target.value)}
+              >
+                {currentStatus ? null : (
+                  <option value="" disabled>
+                    No status
+                  </option>
+                )}
+                {onboardingStatusOptions.map(([statusValue, label]) => (
+                  <option key={statusValue} value={statusValue}>
+                    {label}
+                  </option>
+                ))}
+              </Select>
+            ) : null}
+          </div>
+        </TableCell>
+        <TableCell>
+          <form
+            className="grid max-w-64 grid-cols-[minmax(100px,1fr)_auto] items-center gap-2"
+            onSubmit={(event) => {
+              event.preventDefault()
+              onAssign(person.crm_contact_id, value)
+            }}
+          >
+            <Input
+              aria-label={`Onboarder for ${displayName}`}
+              value={value}
+              placeholder="508 username"
+              onChange={(event) => setValue(event.target.value)}
+            />
+            <Button
+              type="submit"
+              size="sm"
+              aria-label={`Save onboarder for ${displayName}`}
+              disabled={loading[`onboarder:${person.crm_contact_id}`]}
+            >
+              Save
+            </Button>
+          </form>
+        </TableCell>
+        <TableCell>{formatDate(person.onboarding_updated_at)}</TableCell>
+        <TableCell>
+          <div className="grid gap-2">
+            {emailSentAt ? (
+              <Badge variant="succeeded">Sent {formatDate(emailSentAt)}</Badge>
+            ) : (
+              <Badge variant="neutral">Not sent</Badge>
+            )}
+            {emailSentRecipient ? (
+              <span className="text-xs text-muted-foreground">{emailSentRecipient}</span>
+            ) : null}
+            {emailSentBy ? (
+              <span className="text-xs text-muted-foreground">By {emailSentBy}</span>
+            ) : null}
+            {canWrite ? (
+              <Button
+                type="button"
+                size="sm"
+                variant={emailOpen ? "outline" : "secondary"}
+                onClick={() => {
+                  if (emailOpen) {
+                    setEmailOpen(false)
+                    return
+                  }
+                  setEmailOpen(true)
+                  if (!emailDraft) void generateDraft()
+                }}
+                disabled={draftBusy}
+              >
+                <Mail />
+                {emailDraft ? "Edit draft" : "Draft email"}
+              </Button>
+            ) : null}
+          </div>
+        </TableCell>
+        <TableCell>
+          <div className="flex flex-wrap gap-1.5">
+            {resumeUrl ? (
+              <a
+                className="inline-flex min-h-7 items-center rounded-md border bg-secondary px-2 text-xs font-extrabold"
+                href={resumeUrl}
+                target="_blank"
+                rel="noreferrer"
+                aria-label={`Open ${displayName} resume`}
+              >
+                Resume
+              </a>
+            ) : null}
+            {linkedinUrl(person.linkedin) ? (
+              <a
+                className="inline-flex min-h-7 items-center rounded-md border bg-secondary px-2 text-xs font-extrabold"
+                href={linkedinUrl(person.linkedin)}
+                target="_blank"
+                rel="noreferrer"
+                aria-label={`Open ${displayName} LinkedIn`}
+              >
+                LinkedIn
+              </a>
+            ) : null}
+            {githubUrl(person.github_username) ? (
+              <a
+                className="inline-flex min-h-7 items-center rounded-md border bg-secondary px-2 text-xs font-extrabold"
+                href={githubUrl(person.github_username)}
+                target="_blank"
+                rel="noreferrer"
+                aria-label={`Open ${displayName} GitHub`}
+              >
+                {person.github_username || "GitHub"}
+              </a>
+            ) : null}
+            {!resumeUrl && !linkedinUrl(person.linkedin) && !githubUrl(person.github_username)
+              ? "None"
+              : null}
+          </div>
+        </TableCell>
+        <TableCell>
+          <div className="flex flex-wrap gap-1.5">
+            {gaps.map(([label]) => (
+              <Badge key={String(label)} variant="missing">
+                Missing {label}
+              </Badge>
+            ))}
+            {gaps.length === 0 ? "None" : null}
+          </div>
+        </TableCell>
+      </TableRow>
+      {emailOpen ? (
+        <TableRow>
+          <TableCell colSpan={7} className="bg-secondary/30">
+            <div className="grid gap-3 rounded-md border bg-background p-4">
+              <div className="grid gap-3 md:grid-cols-[auto_minmax(150px,220px)_minmax(150px,220px)_auto] md:items-end">
+                <label className="flex min-h-9 items-center gap-2 text-sm font-semibold">
+                  <input
+                    type="checkbox"
+                    checked={emailOptions.has_contributed}
+                    onChange={(event) => {
+                      const next = { ...emailOptions, has_contributed: event.target.checked }
+                      setEmailOptions(next)
+                    }}
+                  />
+                  Contribution done
+                </label>
+                <Label>
+                  Discord
+                  <Select
+                    value={emailOptions.discord_joined}
+                    onChange={(event) =>
+                      setEmailOptions({
+                        ...emailOptions,
+                        discord_joined: event.target.value as OnboardingEmailTriState,
+                      })
+                    }
+                  >
+                    <option value="unknown">Unknown</option>
+                    <option value="yes">Joined</option>
+                    <option value="no">Not joined</option>
+                  </Select>
+                </Label>
+                <Label>
+                  Agreement
+                  <Select
+                    value={emailOptions.agreement_signed}
+                    onChange={(event) =>
+                      setEmailOptions({
+                        ...emailOptions,
+                        agreement_signed: event.target.value as OnboardingEmailTriState,
+                      })
+                    }
+                  >
+                    <option value="unknown">Unknown</option>
+                    <option value="yes">Signed</option>
+                    <option value="no">Not signed</option>
+                  </Select>
+                </Label>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => generateDraft()}
+                  disabled={draftBusy}
+                >
+                  <RefreshCw />
+                  Regenerate
+                </Button>
+              </div>
+              {emailDraft ? (
+                <>
+                  <div className="grid gap-2 text-sm md:grid-cols-3">
+                    <span>
+                      <strong>To:</strong> {emailDraft.recipient_email || "Missing"}
+                    </span>
+                    <span>
+                      <strong>Reply-To:</strong> {emailDraft.reply_to_email || "Missing"}
+                    </span>
+                    <span>
+                      <strong>From:</strong> {emailDraft.sender_display_name || "onboarding"}
+                    </span>
+                  </div>
+                  <Label>
+                    Subject
+                    <Input value={emailDraft.subject} readOnly />
+                  </Label>
+                  <Label>
+                    Draft
+                    <textarea
+                      value={draftBody}
+                      className="min-h-64 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm text-foreground shadow-xs transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+                      onChange={(event) =>
+                        setEmailDraft({ ...emailDraft, markdown_body: event.target.value })
+                      }
+                    />
+                  </Label>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="default"
+                      onClick={sendDraft}
+                      disabled={
+                        sendBusy ||
+                        !emailDraft.can_send ||
+                        !draftMatchesOptions ||
+                        !draftBody.trim()
+                      }
+                      title={sendUnavailableMessage || undefined}
+                    >
+                      <Send />
+                      {sendBusy ? "Sending" : "Send"}
+                    </Button>
+                    {sendUnavailableMessage ? (
+                      <span className="text-sm text-muted-foreground">
+                        {sendUnavailableMessage}
+                        {sendUnavailableIsSmtp && canConfigure ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            className="ml-2"
+                            onClick={onOpenConfiguration}
+                          >
+                            <Settings />
+                            Configure
+                          </Button>
+                        ) : null}
+                      </span>
+                    ) : null}
+                    {emailDraft.marker_status === "error" ? (
+                      <span className="text-sm text-muted-foreground">
+                        Marker not saved: {emailDraft.marker_error || "unknown"}
+                      </span>
+                    ) : null}
+                  </div>
+                </>
+              ) : (
+                <span className="text-sm text-muted-foreground">
+                  {draftBusy ? "Drafting email" : "No draft loaded"}
+                </span>
+              )}
+            </div>
+          </TableCell>
+        </TableRow>
+      ) : null}
+    </>
   )
 }
 
@@ -6729,6 +7106,8 @@ function ConfigurationView({
   onRefresh,
   onSave,
   onClear,
+  focusCategory,
+  focusNonce,
 }: {
   items: ConfigurationItem[]
   loading: Record<string, boolean>
@@ -6736,8 +7115,11 @@ function ConfigurationView({
   onRefresh: () => void
   onSave: (key: string, value: string) => void
   onClear: (key: string) => void
+  focusCategory?: string
+  focusNonce?: number
 }) {
   const [selectedCategory, setSelectedCategory] = useState("All")
+  const [highlightedCategory, setHighlightedCategory] = useState("")
   const [drafts, setDrafts] = useState<Record<string, string>>({})
   const categories = useMemo(() => {
     const present = new Set(items.map((item) => item.category))
@@ -6805,6 +7187,24 @@ function ConfigurationView({
       setSelectedCategory("All")
     }
   }, [items, selectedCategory])
+
+  useEffect(() => {
+    if (!focusCategory || !items.some((item) => item.category === focusCategory)) return
+    void focusNonce
+    setSelectedCategory(focusCategory)
+    setHighlightedCategory(focusCategory)
+    const frame = window.requestAnimationFrame?.(() => {
+      document.getElementById(configurationGroupId(focusCategory))?.scrollIntoView({
+        block: "start",
+        behavior: "smooth",
+      })
+    })
+    const timeout = window.setTimeout(() => setHighlightedCategory(""), 4000)
+    return () => {
+      if (frame !== undefined) window.cancelAnimationFrame?.(frame)
+      window.clearTimeout(timeout)
+    }
+  }, [focusCategory, focusNonce, items])
 
   function sourceBadge(item: ConfigurationItem) {
     if (item.source === "env") return "ENV"
@@ -7023,7 +7423,15 @@ function ConfigurationView({
         const missing = group.items.length - configured
         const restartRequired = group.items.some((item) => item.restart_required)
         return (
-          <Card key={group.category}>
+          <Card
+            key={group.category}
+            id={configurationGroupId(group.category)}
+            className={cn(
+              "scroll-mt-4 transition-shadow",
+              highlightedCategory === group.category &&
+                "ring-2 ring-primary ring-offset-2 ring-offset-background",
+            )}
+          >
             <CardHeader className="items-start">
               <div className="grid gap-1">
                 <CardTitle>{group.label}</CardTitle>

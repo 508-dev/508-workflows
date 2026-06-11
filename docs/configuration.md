@@ -32,7 +32,9 @@ secrets return configured state and a short first/last-character mask for
 confirmation; env and `.env` secrets return only configured state.
 
 Core bootstrap systems such as EspoCRM, Authentik, and Migadu remain env-managed
-and are intentionally not dashboard-configurable.
+and are intentionally not dashboard-configurable. Onboarding email SMTP settings
+are dashboard-configurable under the Onboarding category when env overrides are
+not set.
 
 ## Queue And Jobs
 
