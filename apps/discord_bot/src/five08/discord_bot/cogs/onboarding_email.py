@@ -729,7 +729,15 @@ class OnboardingEmailCog(DiscordAuditCogMixin, commands.Cog):
     ) -> None:
         result, error_code, public_message = self._classify_onboarding_email_error(exc)
         if result == "error":
-            logger.warning("Onboarding email command failed: %s", exc, exc_info=True)
+            if isinstance(exc, EspoAPIError):
+                logger.warning(
+                    "Onboarding email command failed due to CRM lookup error_type=%s",
+                    type(exc).__name__,
+                )
+            else:
+                logger.warning(
+                    "Onboarding email command failed: %s", exc, exc_info=True
+                )
 
         contact_id = (
             str(selected_contact.get("id") or "").strip()

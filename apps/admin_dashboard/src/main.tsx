@@ -6278,6 +6278,7 @@ function OnboardingRow({
   const [value, setValue] = useState(displayOnboarder(person.onboarder))
   const [emailOpen, setEmailOpen] = useState(false)
   const [emailDraft, setEmailDraft] = useState<OnboardingEmailDraft | null>(null)
+  const [emailDraftOptions, setEmailDraftOptions] = useState<OnboardingEmailOptions | null>(null)
   const [emailOptions, setEmailOptions] = useState<OnboardingEmailOptions>({
     has_contributed: normalizedOnboardingStatusValue(onboardingStateValue(person)) === "onboarded",
     discord_joined: person.discord_user_id ? "yes" : "unknown",
@@ -6297,13 +6298,23 @@ function OnboardingRow({
   const emailSentBy = emailDraft?.onboarding_email_sent_by || person.onboarding_email_sent_by
   const emailSentRecipient =
     emailDraft?.onboarding_email_recipient || person.onboarding_email_recipient
+  const draftMatchesOptions =
+    !emailDraft ||
+    (emailDraftOptions !== null &&
+      emailDraftOptions.has_contributed === emailOptions.has_contributed &&
+      emailDraftOptions.discord_joined === emailOptions.discord_joined &&
+      emailDraftOptions.agreement_signed === emailOptions.agreement_signed)
   const sendUnavailableMessage =
-    emailDraft && !emailDraft.can_send && !emailDraft.onboarding_email_sent_at
-      ? !emailDraft.recipient_email
-        ? "Send disabled: candidate email is missing."
-        : !emailDraft.reply_to_email
-          ? "Send disabled: your Reply-To email is missing."
-          : "Send disabled: onboarding email SMTP is not configured."
+    emailDraft && !emailDraft.onboarding_email_sent_at
+      ? !draftMatchesOptions
+        ? "Send disabled: regenerate after changing draft options."
+        : !emailDraft.can_send
+          ? !emailDraft.recipient_email
+            ? "Send disabled: candidate email is missing."
+            : !emailDraft.reply_to_email
+              ? "Send disabled: your Reply-To email is missing."
+              : "Send disabled: onboarding email SMTP is not configured."
+          : ""
       : ""
   const sendUnavailableIsSmtp = sendUnavailableMessage.includes("SMTP")
   const draftBusy = Boolean(loading[`onboarding-email-draft:${person.crm_contact_id}`])
@@ -6313,12 +6324,17 @@ function OnboardingRow({
     const draft = await onDraftEmail(person.crm_contact_id, nextOptions)
     if (draft) {
       setEmailDraft(draft)
+      setEmailDraftOptions({ ...nextOptions })
       setEmailOpen(true)
     }
   }
   async function sendDraft() {
-    if (!emailDraft) return
-    const sent = await onSendEmail(person.crm_contact_id, emailOptions, emailDraft.markdown_body)
+    if (!emailDraft || !emailDraftOptions || !draftMatchesOptions) return
+    const sent = await onSendEmail(
+      person.crm_contact_id,
+      emailDraftOptions,
+      emailDraft.markdown_body,
+    )
     if (sent) setEmailDraft(sent)
   }
   return (
@@ -6569,7 +6585,12 @@ function OnboardingRow({
                       type="button"
                       variant="default"
                       onClick={sendDraft}
-                      disabled={sendBusy || !emailDraft.can_send || !draftBody.trim()}
+                      disabled={
+                        sendBusy ||
+                        !emailDraft.can_send ||
+                        !draftMatchesOptions ||
+                        !draftBody.trim()
+                      }
                       title={sendUnavailableMessage || undefined}
                     >
                       <Send />
