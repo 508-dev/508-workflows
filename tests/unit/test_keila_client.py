@@ -182,6 +182,30 @@ def test_upsert_active_contact_preserves_existing_contact_data() -> None:
     assert result == {"id": "contact-1"}
 
 
+def test_upsert_active_contact_uses_supplied_existing_contact_without_lookup() -> None:
+    updated = Mock()
+    updated.status_code = 200
+    updated.content = b'{"data":{"id":"contact-1"}}'
+    updated.json.return_value = {"data": {"id": "contact-1"}}
+
+    with patch(
+        "five08.clients.keila.requests.request",
+        return_value=updated,
+    ) as request:
+        result = KeilaClient(api_key="keila-key").upsert_active_contact(
+            email="jane@example.com",
+            data={"audiences": ["508_members"]},
+            existing_contact={"id": "contact-1", "email": "jane@example.com"},
+        )
+
+    request.assert_called_once()
+    assert request.call_args.args == (
+        "PATCH",
+        "https://app.keila.io/api/v1/contacts/contact-1",
+    )
+    assert result == {"id": "contact-1"}
+
+
 def test_upsert_active_contact_requires_existing_contact_id() -> None:
     existing = Mock()
     existing.status_code = 200

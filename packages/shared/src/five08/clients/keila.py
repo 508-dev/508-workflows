@@ -8,6 +8,7 @@ from urllib.parse import quote
 import requests
 
 KEILA_API_BASE_URL = "https://app.keila.io"
+_EXISTING_CONTACT_UNSET = object()
 
 
 class KeilaAPIError(RuntimeError):
@@ -46,6 +47,7 @@ class KeilaClient:
         first_name: str | None = None,
         last_name: str | None = None,
         data: dict[str, Any] | None = None,
+        existing_contact: dict[str, Any] | None | object = _EXISTING_CONTACT_UNSET,
     ) -> dict[str, Any]:
         """Create or update a Keila contact without changing suppressed statuses."""
         normalized_email = email.strip().lower()
@@ -62,7 +64,12 @@ class KeilaClient:
         if last_name:
             payload["last_name"] = last_name
 
-        existing = self.get_contact_by_email(normalized_email)
+        if existing_contact is _EXISTING_CONTACT_UNSET:
+            existing = self.get_contact_by_email(normalized_email)
+        else:
+            if existing_contact is not None and not isinstance(existing_contact, dict):
+                raise TypeError("existing_contact must be a Keila contact object.")
+            existing = existing_contact
         if existing is None:
             return (
                 self._request("POST", "/api/v1/contacts", json={"data": payload}) or {}

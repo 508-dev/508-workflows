@@ -2123,6 +2123,7 @@ def _install_account_tool_fakes(
             first_name: str | None = None,
             last_name: str | None = None,
             data: dict[str, Any] | None = None,
+            existing_contact: dict[str, Any] | None | object = None,
         ) -> dict[str, Any]:
             self.upserts.append(
                 {
@@ -2130,6 +2131,7 @@ def _install_account_tool_fakes(
                     "first_name": first_name,
                     "last_name": last_name,
                     "data": data,
+                    "existing_contact": existing_contact,
                 }
             )
             return {"id": str(len(self.upserts))}

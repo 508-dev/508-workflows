@@ -38,6 +38,7 @@ class FakeMigaduClient:
 class FakeBrevoClient:
     contacts: dict[str, dict[str, Any]] = {}
     subscriptions: list[dict[str, Any]] = []
+    list_lookup_names: list[str] = []
 
     def __init__(
         self,
@@ -58,12 +59,14 @@ class FakeBrevoClient:
         return {"id": len(self.subscriptions)}
 
     def find_list_id_by_name(self, name: str) -> int | None:
+        self.list_lookup_names.append(name)
         return 4 if name == "508 members" else None
 
 
 class FakeKeilaClient:
     contacts: dict[str, dict[str, Any]] = {}
     upserts: list[dict[str, Any]] = []
+    lookups: list[str] = []
 
     def __init__(
         self,
@@ -77,6 +80,7 @@ class FakeKeilaClient:
         self.timeout_seconds = timeout_seconds
 
     def get_contact_by_email(self, email: str) -> dict[str, Any] | None:
+        self.lookups.append(email)
         return self.contacts.get(email)
 
     def upsert_active_contact(
@@ -86,6 +90,7 @@ class FakeKeilaClient:
         first_name: str | None = None,
         last_name: str | None = None,
         data: dict[str, Any] | None = None,
+        existing_contact: dict[str, Any] | None | object = None,
     ) -> dict[str, Any]:
         self.upserts.append(
             {
@@ -93,6 +98,7 @@ class FakeKeilaClient:
                 "first_name": first_name,
                 "last_name": last_name,
                 "data": data,
+                "existing_contact": existing_contact,
             }
         )
         return {"id": str(len(self.upserts))}
@@ -123,8 +129,10 @@ def reset_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
     FakeMigaduClient.mailboxes = []
     FakeBrevoClient.contacts = {}
     FakeBrevoClient.subscriptions = []
+    FakeBrevoClient.list_lookup_names = []
     FakeKeilaClient.contacts = {}
     FakeKeilaClient.upserts = []
+    FakeKeilaClient.lookups = []
     FakeEspoClient.contacts = []
     FakeEspoClient.raise_error = False
     monkeypatch.setattr("five08.newsletter_sync.MigaduClient", FakeMigaduClient)
@@ -205,6 +213,24 @@ def test_sync_508_members_skips_provider_suppressed_contacts() -> None:
     }
 
 
+def test_sync_508_members_allows_sms_only_brevo_blacklist() -> None:
+    FakeMigaduClient.mailboxes = [
+        MigaduMailbox(
+            address="jane@508.dev",
+            name="Jane Doe",
+            password_recovery_email=None,
+        )
+    ]
+    FakeBrevoClient.contacts = {
+        "jane@508.dev": {"smsBlacklisted": True, "emailBlacklisted": False}
+    }
+
+    result = NewsletterSyncProcessor(_settings(keila_api_key=None)).sync_508_members()
+
+    assert FakeBrevoClient.subscriptions == [{"email": "jane@508.dev", "list_id": 4}]
+    assert result["providers"]["brevo"]["statuses"] == {"synced": 1}
+
+
 def test_sync_508_members_skips_brevo_list_unsubscribed_contacts() -> None:
     FakeMigaduClient.mailboxes = [
         MigaduMailbox(
@@ -222,6 +248,46 @@ def test_sync_508_members_skips_brevo_list_unsubscribed_contacts() -> None:
         "synced": 1,
         "skipped_provider_suppressed": 1,
     }
+
+
+def test_sync_508_members_caches_brevo_list_lookup_by_name() -> None:
+    FakeMigaduClient.mailboxes = [
+        MigaduMailbox(
+            address="jane@508.dev",
+            name="Jane Doe",
+            password_recovery_email="jane@example.com",
+        )
+    ]
+
+    result = NewsletterSyncProcessor(
+        _settings(
+            brevo_508_members_newsletter_list_id=None,
+            brevo_508_members_newsletter_list_name="508 members",
+            keila_api_key=None,
+        )
+    ).sync_508_members()
+
+    assert result["providers"]["brevo"]["synced"] == 2
+    assert FakeBrevoClient.list_lookup_names == ["508 members"]
+
+
+def test_sync_508_members_avoids_duplicate_keila_contact_lookups() -> None:
+    FakeMigaduClient.mailboxes = [
+        MigaduMailbox(
+            address="jane@508.dev",
+            name="Jane Doe",
+            password_recovery_email="jane@example.com",
+        )
+    ]
+
+    result = NewsletterSyncProcessor(_settings(brevo_api_key=None)).sync_508_members()
+
+    assert result["providers"]["keila"]["synced"] == 2
+    assert FakeKeilaClient.lookups == ["jane@508.dev", "jane@example.com"]
+    assert [item["existing_contact"] for item in FakeKeilaClient.upserts] == [
+        None,
+        None,
+    ]
 
 
 def test_sync_508_members_skips_crm_blocked_mailboxes() -> None:

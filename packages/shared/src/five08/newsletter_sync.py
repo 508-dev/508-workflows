@@ -111,17 +111,19 @@ class BrevoNewsletterProvider:
         self.client = client
         self.list_id = list_id
         self.list_name = list_name
+        self._list_id_lookup_completed = list_id is not None
+        self._resolved_list_id = list_id
 
     def _list_id(self) -> int | None:
-        if self.list_id is not None:
-            return self.list_id
-        return self.client.find_list_id_by_name(self.list_name)
+        if not self._list_id_lookup_completed:
+            self._resolved_list_id = self.client.find_list_id_by_name(self.list_name)
+            self._list_id_lookup_completed = True
+        return self._resolved_list_id
 
     def ensure_contact(self, contact: NewsletterContact) -> str:
         existing = self.client.get_contact(contact.email)
         if existing is not None and (
             bool(existing.get("emailBlacklisted"))
-            or bool(existing.get("smsBlacklisted"))
             or str(existing.get("status") or "").strip().casefold()
             in PROVIDER_SUPPRESSED_STATUSES
         ):
@@ -162,6 +164,7 @@ class KeilaNewsletterProvider:
                 "source": contact.source,
                 "mailbox_email": contact.mailbox_email,
             },
+            existing_contact=existing,
         )
         return "synced"
 

@@ -6569,6 +6569,23 @@ def test_dashboard_sync_newsletters_audits_discord_session(client: TestClient) -
     assert audit_payload.metadata["source"] == "dashboard"
 
 
+@pytest.mark.asyncio
+async def test_manual_newsletter_sync_idempotency_keys_are_unique() -> None:
+    with patch(
+        "five08.backend.api.enqueue_job",
+        side_effect=[
+            Mock(id="job-newsletter-1", created=True),
+            Mock(id="job-newsletter-2", created=True),
+        ],
+    ) as mock_enqueue:
+        await api._enqueue_newsletter_sync_job(Mock(), reason="dashboard")
+        await api._enqueue_newsletter_sync_job(Mock(), reason="dashboard")
+
+    keys = [item.kwargs["idempotency_key"] for item in mock_enqueue.call_args_list]
+    assert keys[0] != keys[1]
+    assert all(key.startswith("newsletter-sync:508-members:dashboard:") for key in keys)
+
+
 def test_dashboard_sync_newsletters_workflows_engineer_is_dry_run(
     client: TestClient,
 ) -> None:

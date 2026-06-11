@@ -640,7 +640,10 @@ async def _enqueue_newsletter_sync_job(
     idempotency_key = (
         _newsletter_sync_idempotency_key(now=now)
         if reason == "scheduler"
-        else f"newsletter-sync:508-members:{reason}:{now.strftime('%Y%m%d%H%M%S')}"
+        else (
+            f"newsletter-sync:508-members:{reason}:"
+            f"{now.strftime('%Y%m%d%H%M%S%f')}:{uuid4().hex}"
+        )
     )
     job: EnqueuedJob = await asyncio.to_thread(
         enqueue_job,
