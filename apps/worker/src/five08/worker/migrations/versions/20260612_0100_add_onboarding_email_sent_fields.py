@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlalchemy as sa
 from alembic import op
 
 revision = "20260612_0100"
@@ -13,30 +12,35 @@ depends_on = None
 
 def upgrade() -> None:
     """Track onboarding email sends in the local people cache."""
-    op.add_column(
-        "people",
-        sa.Column(
-            "onboarding_email_sent_at", sa.DateTime(timezone=True), nullable=True
-        ),
+    op.execute(
+        """
+        ALTER TABLE people
+        ADD COLUMN IF NOT EXISTS onboarding_email_sent_at TIMESTAMP WITH TIME ZONE
+        """
     )
-    op.add_column(
-        "people",
-        sa.Column("onboarding_email_sent_by", sa.Text(), nullable=True),
+    op.execute(
+        """
+        ALTER TABLE people
+        ADD COLUMN IF NOT EXISTS onboarding_email_sent_by TEXT
+        """
     )
-    op.add_column(
-        "people",
-        sa.Column("onboarding_email_recipient", sa.Text(), nullable=True),
+    op.execute(
+        """
+        ALTER TABLE people
+        ADD COLUMN IF NOT EXISTS onboarding_email_recipient TEXT
+        """
     )
-    op.create_index(
-        "idx_people_onboarding_email_sent_at",
-        "people",
-        ["onboarding_email_sent_at"],
+    op.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_people_onboarding_email_sent_at
+        ON people (onboarding_email_sent_at)
+        """
     )
 
 
 def downgrade() -> None:
     """Remove local onboarding email sent markers."""
-    op.drop_index("idx_people_onboarding_email_sent_at", table_name="people")
-    op.drop_column("people", "onboarding_email_recipient")
-    op.drop_column("people", "onboarding_email_sent_by")
-    op.drop_column("people", "onboarding_email_sent_at")
+    op.execute("DROP INDEX IF EXISTS idx_people_onboarding_email_sent_at")
+    op.execute("ALTER TABLE people DROP COLUMN IF EXISTS onboarding_email_recipient")
+    op.execute("ALTER TABLE people DROP COLUMN IF EXISTS onboarding_email_sent_by")
+    op.execute("ALTER TABLE people DROP COLUMN IF EXISTS onboarding_email_sent_at")
