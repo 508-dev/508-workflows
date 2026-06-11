@@ -78,6 +78,12 @@ def test_get_contact_by_email_returns_none_for_missing_contact() -> None:
     assert result is None
 
 
+@pytest.mark.parametrize("email", ["", "not-an-email"])
+def test_get_contact_by_email_rejects_invalid_email(email: str) -> None:
+    with pytest.raises(ValueError, match="full email address"):
+        KeilaClient(api_key="keila-key").get_contact_by_email(email)
+
+
 def test_upsert_active_contact_creates_missing_contact() -> None:
     missing = Mock()
     missing.status_code = 404
@@ -229,3 +235,18 @@ def test_keila_client_raises_on_request_error() -> None:
     ):
         with pytest.raises(KeilaAPIError, match="request failed"):
             KeilaClient(api_key="keila-key").get_contact_by_email("jane@example.com")
+
+
+def test_keila_client_truncates_error_response_body() -> None:
+    response = Mock()
+    response.status_code = 500
+    response.text = f"{'x' * 600} jane@example.com"
+    response.content = response.text.encode()
+
+    with patch("five08.clients.keila.requests.request", return_value=response):
+        with pytest.raises(KeilaAPIError) as exc_info:
+            KeilaClient(api_key="keila-key").get_contact_by_email("jane@example.com")
+
+    message = str(exc_info.value)
+    assert "jane@example.com" not in message
+    assert len(message) < 600

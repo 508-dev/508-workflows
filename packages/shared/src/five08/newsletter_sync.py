@@ -133,6 +133,10 @@ class BrevoNewsletterProvider:
         return self._resolved_list_id
 
     def ensure_contact(self, contact: NewsletterContact) -> str:
+        list_id = self._list_id()
+        if list_id is None:
+            return "skipped_list_missing"
+
         existing = self.client.get_contact(contact.email)
         if existing is not None and (
             bool(existing.get("emailBlacklisted"))
@@ -141,9 +145,6 @@ class BrevoNewsletterProvider:
         ):
             return "skipped_provider_suppressed"
 
-        list_id = self._list_id()
-        if list_id is None:
-            return "skipped_list_missing"
         if existing is not None:
             if _contains_list_id(existing.get("listUnsubscribed"), list_id):
                 return "skipped_provider_suppressed"

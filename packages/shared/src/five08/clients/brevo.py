@@ -8,10 +8,19 @@ from urllib.parse import quote
 import requests
 
 BREVO_API_BASE_URL = "https://api.brevo.com/v3"
+ERROR_BODY_MAX_LENGTH = 500
 
 
 class BrevoAPIError(RuntimeError):
     """Raised when the Brevo API request fails or returns invalid data."""
+
+
+def _response_body_excerpt(body: object) -> str:
+    """Return a bounded response-body excerpt for persisted/logged errors."""
+    text = " ".join(str(body or "").split())
+    if len(text) <= ERROR_BODY_MAX_LENGTH:
+        return text
+    return f"{text[:ERROR_BODY_MAX_LENGTH]}..."
 
 
 class BrevoClient:
@@ -65,7 +74,8 @@ class BrevoClient:
         if response.status_code not in {200, 201, 204}:
             raise BrevoAPIError(
                 "Brevo contact subscription failed: "
-                f"status={response.status_code}, body={response.text}"
+                f"status={response.status_code}, "
+                f"body={_response_body_excerpt(response.text)}"
             )
 
         if not response.content:
@@ -103,7 +113,8 @@ class BrevoClient:
         if response.status_code != 200:
             raise BrevoAPIError(
                 "Brevo contact lookup failed: "
-                f"status={response.status_code}, body={response.text}"
+                f"status={response.status_code}, "
+                f"body={_response_body_excerpt(response.text)}"
             )
 
         try:
@@ -170,7 +181,8 @@ class BrevoClient:
         if response.status_code != 200:
             raise BrevoAPIError(
                 "Brevo list lookup failed: "
-                f"status={response.status_code}, body={response.text}"
+                f"status={response.status_code}, "
+                f"body={_response_body_excerpt(response.text)}"
             )
 
         try:

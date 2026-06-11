@@ -63,6 +63,23 @@ def test_add_contact_to_list_raises_on_request_error() -> None:
             )
 
 
+def test_add_contact_to_list_truncates_error_response_body() -> None:
+    response = Mock()
+    response.status_code = 400
+    response.text = f"{'x' * 600} jane@example.com"
+
+    with patch("five08.clients.brevo.requests.post", return_value=response):
+        with pytest.raises(BrevoAPIError) as exc_info:
+            BrevoClient(api_key="brevo-key").add_contact_to_list(
+                email="jane@example.com",
+                list_id=4,
+            )
+
+    message = str(exc_info.value)
+    assert "jane@example.com" not in message
+    assert len(message) < 600
+
+
 def test_get_contact_fetches_contact_by_email() -> None:
     response = Mock()
     response.status_code = 200
@@ -111,6 +128,20 @@ def test_get_contact_rejects_invalid_email(email: str) -> None:
         BrevoClient(api_key="brevo-key").get_contact(email)
 
 
+def test_get_contact_truncates_error_response_body() -> None:
+    response = Mock()
+    response.status_code = 500
+    response.text = f"{'x' * 600} jane@example.com"
+
+    with patch("five08.clients.brevo.requests.get", return_value=response):
+        with pytest.raises(BrevoAPIError) as exc_info:
+            BrevoClient(api_key="brevo-key").get_contact("jane@example.com")
+
+    message = str(exc_info.value)
+    assert "jane@example.com" not in message
+    assert len(message) < 600
+
+
 def test_find_list_id_by_name_gets_matching_list() -> None:
     response = Mock()
     response.status_code = 200
@@ -143,3 +174,17 @@ def test_find_list_id_by_name_returns_none_when_missing() -> None:
         list_id = BrevoClient(api_key="brevo-key").find_list_id_by_name("508 members")
 
     assert list_id is None
+
+
+def test_find_list_id_by_name_truncates_error_response_body() -> None:
+    response = Mock()
+    response.status_code = 503
+    response.text = f"{'x' * 600} jane@example.com"
+
+    with patch("five08.clients.brevo.requests.get", return_value=response):
+        with pytest.raises(BrevoAPIError) as exc_info:
+            BrevoClient(api_key="brevo-key").find_list_id_by_name("508 members")
+
+    message = str(exc_info.value)
+    assert "jane@example.com" not in message
+    assert len(message) < 600

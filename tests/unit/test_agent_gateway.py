@@ -2556,6 +2556,39 @@ def test_user_accounts_tool_subscribes_mailbox_and_backup_email_to_brevo(
     ]
 
 
+def test_user_accounts_tool_reads_dynamic_newsletter_runtime_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fakes = _install_account_tool_fakes(monkeypatch)
+    runtime_values = {"brevo_api_key": None}
+    registry = ToolRegistry(
+        runtime_config_factory=lambda: _account_runtime_config(
+            brevo_api_key=runtime_values["brevo_api_key"]
+        )
+    )
+    runtime_values["brevo_api_key"] = "key"
+
+    result = registry.execute(
+        "account_write.create_user_accounts",
+        {"contact_id": "contact-1", "mailbox_username": "jane@508.dev"},
+        organization_id="org-1",
+        actor_id="123",
+        actor_scopes={
+            "mailbox:create",
+            "user:manage",
+            "integration:manage",
+            "crm:contact:read",
+            "crm:contact:update",
+        },
+    )
+
+    assert result["mailbox"]["newsletter_subscribed"] is True
+    assert fakes.brevo.subscriptions == [
+        {"email": "jane@508.dev", "list_id": 4},
+        {"email": "jane@example.com", "list_id": 4},
+    ]
+
+
 def test_user_accounts_tool_reports_suppressed_newsletter_contact(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

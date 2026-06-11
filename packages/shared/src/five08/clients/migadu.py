@@ -8,10 +8,19 @@ from typing import Any
 import requests
 
 MIGADU_API_BASE_URL = "https://api.migadu.com/v1"
+ERROR_BODY_MAX_LENGTH = 500
 
 
 class MigaduAPIError(RuntimeError):
     """Raised when the Migadu API request fails or returns invalid data."""
+
+
+def _response_body_excerpt(body: object) -> str:
+    """Return a bounded response-body excerpt for persisted/logged errors."""
+    text = " ".join(str(body or "").split())
+    if len(text) <= ERROR_BODY_MAX_LENGTH:
+        return text
+    return f"{text[:ERROR_BODY_MAX_LENGTH]}..."
 
 
 def normalize_migadu_mailbox_domain(domain: str | None) -> str:
@@ -81,7 +90,8 @@ class MigaduClient:
         if response.status_code not in {200, 201}:
             raise MigaduAPIError(
                 "Migadu mailbox creation failed: "
-                f"status={response.status_code}, body={response.text}"
+                f"status={response.status_code}, "
+                f"body={_response_body_excerpt(response.text)}"
             )
 
         try:
@@ -108,7 +118,8 @@ class MigaduClient:
         if response.status_code != 200:
             raise MigaduAPIError(
                 "Migadu mailbox listing failed: "
-                f"status={response.status_code}, body={response.text}"
+                f"status={response.status_code}, "
+                f"body={_response_body_excerpt(response.text)}"
             )
 
         try:

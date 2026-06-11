@@ -39,6 +39,7 @@ class FakeBrevoClient:
     contacts: dict[str, dict[str, Any]] = {}
     subscriptions: list[dict[str, Any]] = []
     list_lookup_names: list[str] = []
+    contact_lookup_emails: list[str] = []
 
     def __init__(
         self,
@@ -52,6 +53,7 @@ class FakeBrevoClient:
         self.timeout_seconds = timeout_seconds
 
     def get_contact(self, email: str) -> dict[str, Any] | None:
+        self.contact_lookup_emails.append(email)
         return self.contacts.get(email)
 
     def add_contact_to_list(self, *, email: str, list_id: int) -> dict[str, Any]:
@@ -130,6 +132,7 @@ def reset_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
     FakeBrevoClient.contacts = {}
     FakeBrevoClient.subscriptions = []
     FakeBrevoClient.list_lookup_names = []
+    FakeBrevoClient.contact_lookup_emails = []
     FakeKeilaClient.contacts = {}
     FakeKeilaClient.upserts = []
     FakeKeilaClient.lookups = []
@@ -269,6 +272,29 @@ def test_sync_508_members_caches_brevo_list_lookup_by_name() -> None:
 
     assert result["providers"]["brevo"]["synced"] == 2
     assert FakeBrevoClient.list_lookup_names == ["508 members"]
+
+
+def test_sync_508_members_skips_missing_brevo_list_before_contact_lookup() -> None:
+    FakeMigaduClient.mailboxes = [
+        MigaduMailbox(
+            address="jane@508.dev",
+            name="Jane Doe",
+            password_recovery_email="jane@example.com",
+        )
+    ]
+
+    result = NewsletterSyncProcessor(
+        _settings(
+            brevo_508_members_newsletter_list_id=None,
+            brevo_508_members_newsletter_list_name="Missing list",
+            keila_api_key=None,
+        )
+    ).sync_508_members()
+
+    assert result["providers"]["brevo"]["synced"] == 0
+    assert result["providers"]["brevo"]["statuses"] == {"skipped_list_missing": 2}
+    assert FakeBrevoClient.list_lookup_names == ["Missing list"]
+    assert FakeBrevoClient.contact_lookup_emails == []
 
 
 def test_sync_508_members_avoids_duplicate_keila_contact_lookups() -> None:

@@ -2,6 +2,7 @@
 
 import base64
 import logging
+import re
 from datetime import datetime, timezone
 from email import message_from_bytes
 from collections.abc import Callable
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 DOCUSEAL_COMPLETED_AT_UTC_FORMAT = "%Y-%m-%d %H:%M:%S"
+EMAIL_PATTERN = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
 
 
 def process_contact_skills_job(contact_id: str) -> dict[str, Any]:
@@ -170,8 +172,12 @@ def _mask_newsletter_sync_result(result: dict[str, Any]) -> dict[str, Any]:
     crm_failures = result.get("crm_lookup_failures")
     if isinstance(crm_failures, list):
         for failure in crm_failures:
-            if isinstance(failure, dict) and failure.get("mailbox"):
+            if not isinstance(failure, dict):
+                continue
+            if failure.get("mailbox"):
                 failure["mailbox"] = mask_email(str(failure["mailbox"]))
+            if failure.get("error"):
+                failure["error"] = _mask_emails_in_text(str(failure["error"]))
 
     providers = result.get("providers")
     if isinstance(providers, dict):
@@ -182,9 +188,18 @@ def _mask_newsletter_sync_result(result: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(failures, list):
                 continue
             for failure in failures:
-                if isinstance(failure, dict) and failure.get("email"):
+                if not isinstance(failure, dict):
+                    continue
+                if failure.get("email"):
                     failure["email"] = mask_email(str(failure["email"]))
+                if failure.get("error"):
+                    failure["error"] = _mask_emails_in_text(str(failure["error"]))
     return result
+
+
+def _mask_emails_in_text(text: str) -> str:
+    """Mask email-like substrings embedded in free-form error text."""
+    return EMAIL_PATTERN.sub(lambda match: mask_email(match.group(0)), text)
 
 
 def sync_508_members_newsletters_job() -> dict[str, Any]:

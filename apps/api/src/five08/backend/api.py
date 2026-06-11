@@ -415,7 +415,9 @@ def _get_agent_orchestrator() -> AgentOrchestrator:
             _AGENT_ORCHESTRATOR = AgentOrchestrator(
                 registry=ToolRegistry(
                     _AGENT_TASK_STORE,
-                    runtime_config=ToolRuntimeConfig.from_settings(settings),
+                    runtime_config_factory=lambda: ToolRuntimeConfig.from_settings(
+                        settings
+                    ),
                 ),
                 model_config=AgentModelConfig.from_settings(settings),
                 intent_normalizer=OpenAICompatibleIntentNormalizer.from_settings(

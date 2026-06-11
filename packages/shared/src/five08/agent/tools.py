@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import re
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any
@@ -308,10 +309,12 @@ class ToolRegistry:
         *,
         memory_store: MemoryStore | None = None,
         runtime_config: ToolRuntimeConfig | None = None,
+        runtime_config_factory: Callable[[], ToolRuntimeConfig] | None = None,
     ) -> None:
         self.task_store = task_store or InMemoryTaskStore()
         self.memory_store = memory_store or InMemoryMemoryStore()
-        self.runtime_config = runtime_config or ToolRuntimeConfig()
+        self._runtime_config = runtime_config or ToolRuntimeConfig()
+        self._runtime_config_factory = runtime_config_factory
         self._manifests = {
             "task_read.search_tasks": ToolManifest(
                 name="task_read.search_tasks",
@@ -471,6 +474,13 @@ class ToolRegistry:
                 write=True,
             ),
         }
+
+    @property
+    def runtime_config(self) -> ToolRuntimeConfig:
+        """Return the current external-tool runtime config."""
+        if self._runtime_config_factory is not None:
+            return self._runtime_config_factory()
+        return self._runtime_config
 
     def get(self, tool_name: str) -> ToolManifest | None:
         return self._manifests.get(tool_name)

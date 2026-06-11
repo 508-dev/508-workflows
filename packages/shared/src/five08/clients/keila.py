@@ -8,11 +8,20 @@ from urllib.parse import quote
 import requests
 
 KEILA_API_BASE_URL = "https://app.keila.io"
+ERROR_BODY_MAX_LENGTH = 500
 _EXISTING_CONTACT_UNSET = object()
 
 
 class KeilaAPIError(RuntimeError):
     """Raised when the Keila API request fails or returns invalid data."""
+
+
+def _response_body_excerpt(body: object) -> str:
+    """Return a bounded response-body excerpt for persisted/logged errors."""
+    text = " ".join(str(body or "").split())
+    if len(text) <= ERROR_BODY_MAX_LENGTH:
+        return text
+    return f"{text[:ERROR_BODY_MAX_LENGTH]}..."
 
 
 class KeilaClient:
@@ -32,6 +41,8 @@ class KeilaClient:
     def get_contact_by_email(self, email: str) -> dict[str, Any] | None:
         """Return one Keila contact by email, or None when it does not exist."""
         normalized_email = email.strip().lower()
+        if not normalized_email or normalized_email.count("@") != 1:
+            raise ValueError("Keila contact email must be a full email address.")
         response = self._request(
             "GET",
             f"/api/v1/contacts/{quote(normalized_email, safe='')}",
@@ -129,7 +140,8 @@ class KeilaClient:
         if not 200 <= response.status_code < 300:
             raise KeilaAPIError(
                 "Keila API request failed: "
-                f"status={response.status_code}, body={response.text}"
+                f"status={response.status_code}, "
+                f"body={_response_body_excerpt(response.text)}"
             )
         if not response.content:
             return {}
