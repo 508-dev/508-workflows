@@ -25,6 +25,7 @@ from five08.onboarding_email import (
     build_onboarding_email_message,
     markdown_body_to_html,
     markdown_body_to_text,
+    onboarding_email_smtp_ready,
     send_onboarding_email_message,
     validate_plain_email,
 )
@@ -235,6 +236,7 @@ class OnboardingEmailDraftEditView(discord.ui.View):
         summary: str,
         markdown_body: str,
         send_payload: OnboardingEmailSendPayload | None = None,
+        send_disabled_reason: str | None = None,
     ) -> None:
         super().__init__(timeout=900)
         self.cog = cog
@@ -242,11 +244,15 @@ class OnboardingEmailDraftEditView(discord.ui.View):
         self.summary = summary
         self.markdown_body = markdown_body
         self.send_payload = send_payload
+        self.send_disabled_reason = send_disabled_reason
         self._send_lock = asyncio.Lock()
         self._sent = False
         self._edit_button.disabled = len(markdown_body) > DISCORD_TEXT_INPUT_MAX_LENGTH
         if send_payload is None:
-            self.remove_item(self._send_button)
+            if send_disabled_reason:
+                self._send_button.disabled = True
+            else:
+                self.remove_item(self._send_button)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.requester_id:
@@ -300,7 +306,8 @@ class OnboardingEmailDraftEditView(discord.ui.View):
         payload = self.send_payload
         if payload is None:
             await interaction.followup.send(
-                "⚠️ This draft was generated in copy-only mode and cannot be sent.",
+                self.send_disabled_reason
+                or "⚠️ This draft was generated in copy-only mode and cannot be sent.",
                 allowed_mentions=NO_MENTIONS,
                 ephemeral=True,
             )
@@ -776,19 +783,22 @@ class OnboardingEmailCog(DiscordAuditCogMixin, commands.Cog):
             html_body=html_body,
         )
 
-    def _send_message(self, message: EmailMessage) -> None:
-        send_onboarding_email_message(
-            message,
-            config=OnboardingEmailSmtpConfig(
-                smtp_server=settings.onboarding_email_smtp_server,
-                smtp_port=settings.onboarding_email_smtp_port,
-                smtp_use_ssl=settings.onboarding_email_smtp_use_ssl,
-                smtp_starttls=settings.onboarding_email_smtp_starttls,
-                smtp_username=settings.onboarding_email_smtp_username,
-                smtp_password=settings.onboarding_email_smtp_password,
-                smtp_timeout_seconds=settings.onboarding_email_smtp_timeout_seconds,
-            ),
+    def _smtp_config(self) -> OnboardingEmailSmtpConfig:
+        return OnboardingEmailSmtpConfig(
+            smtp_server=settings.onboarding_email_smtp_server,
+            smtp_port=settings.onboarding_email_smtp_port,
+            smtp_use_ssl=settings.onboarding_email_smtp_use_ssl,
+            smtp_starttls=settings.onboarding_email_smtp_starttls,
+            smtp_username=settings.onboarding_email_smtp_username,
+            smtp_password=settings.onboarding_email_smtp_password,
+            smtp_timeout_seconds=settings.onboarding_email_smtp_timeout_seconds,
         )
+
+    def _smtp_ready(self) -> bool:
+        return onboarding_email_smtp_ready(self._smtp_config())
+
+    def _send_message(self, message: EmailMessage) -> None:
+        send_onboarding_email_message(message, config=self._smtp_config())
 
     async def _send_reviewed_onboarding_email(
         self,
@@ -799,6 +809,8 @@ class OnboardingEmailCog(DiscordAuditCogMixin, commands.Cog):
     ) -> None:
         if not markdown_body.strip():
             raise ValueError("Cannot send an empty onboarding email draft.")
+        if not self._smtp_ready():
+            raise ValueError("Onboarding email SMTP is not configured.")
 
         recipient_email = payload.recipient_email
         authorization_source = payload.authorization_source
@@ -1060,7 +1072,12 @@ class OnboardingEmailCog(DiscordAuditCogMixin, commands.Cog):
             )
             resolved_reply_to = None
 
-        can_send = normalized_recipient is not None and resolved_reply_to is not None
+        smtp_ready = self._smtp_ready()
+        can_send = (
+            normalized_recipient is not None
+            and resolved_reply_to is not None
+            and smtp_ready
+        )
         email_action = "drafted_for_send" if can_send else "drafted"
         heading = (
             "📝 Onboarding email draft generated. Review, edit, then press Send Email."
@@ -1086,6 +1103,7 @@ class OnboardingEmailCog(DiscordAuditCogMixin, commands.Cog):
                 "authorization_source": authorization_source,
                 "onboarding_status": contact_status or None,
                 "send_available": can_send,
+                "smtp_ready": smtp_ready,
             },
             resource_type="crm_contact" if contact_id else "onboarding_email",
             resource_id=contact_id or normalized_recipient,
@@ -1108,9 +1126,25 @@ class OnboardingEmailCog(DiscordAuditCogMixin, commands.Cog):
                 f"(`{_discord_inline_code(contact_id or 'unknown')}`), "
                 f"status: `{_discord_inline_code(status_line)}`"
             )
+        send_disabled_reason = None
+        if not can_send:
+            if not smtp_ready:
+                send_disabled_reason = (
+                    "⚠️ Send disabled: onboarding email SMTP is not configured."
+                )
+            elif normalized_recipient is None:
+                send_disabled_reason = (
+                    "⚠️ Send disabled: this candidate does not have an email address."
+                )
+            elif resolved_reply_to is None:
+                send_disabled_reason = (
+                    "⚠️ Send disabled: could not resolve your Reply-To email."
+                )
+            if send_disabled_reason:
+                lines.append(send_disabled_reason)
         summary = "\n".join(lines)
         send_payload = None
-        if normalized_recipient and resolved_reply_to:
+        if can_send and normalized_recipient and resolved_reply_to:
             send_payload = OnboardingEmailSendPayload(
                 recipient_email=normalized_recipient,
                 reply_to_email=resolved_reply_to,
@@ -1136,6 +1170,7 @@ class OnboardingEmailCog(DiscordAuditCogMixin, commands.Cog):
             summary=summary,
             markdown_body=draft.markdown_body,
             send_payload=send_payload,
+            send_disabled_reason=send_disabled_reason,
         )
         await self._send_draft_response(
             interaction,

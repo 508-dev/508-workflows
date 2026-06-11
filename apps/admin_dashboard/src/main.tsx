@@ -2579,6 +2579,8 @@ function App() {
               crmContactUrl={crmContactUrl}
               crmAttachmentUrl={crmAttachmentUrl}
               canWrite={can("onboarding:write")}
+              canConfigure={can("configuration:write")}
+              onOpenConfiguration={() => navigate("configuration", true)}
             />
           ) : null}
 
@@ -5738,6 +5740,8 @@ function OnboardingView(props: {
     markdownBody: string,
   ) => Promise<OnboardingEmailDraft | null>
   onSetupEngineer: (payload: EngineerSetupRequest) => Promise<EngineerSetupResult | null>
+  canConfigure: boolean
+  onOpenConfiguration: () => void
   setOnboardingQuery: (value: string) => void
   setOnboardingState: (value: string) => void
   setOnboarderFilter: (value: string) => void
@@ -5923,6 +5927,8 @@ function OnboardingView(props: {
                   onSendEmail={props.onSendEmail}
                   crmContactUrl={props.crmContactUrl}
                   crmAttachmentUrl={props.crmAttachmentUrl}
+                  canConfigure={props.canConfigure}
+                  onOpenConfiguration={props.onOpenConfiguration}
                 />
               ))}
             </TableBody>
@@ -6246,6 +6252,8 @@ function OnboardingRow({
   onSendEmail,
   crmContactUrl,
   crmAttachmentUrl,
+  canConfigure,
+  onOpenConfiguration,
 }: {
   person: Person
   loading: Record<string, boolean>
@@ -6263,6 +6271,8 @@ function OnboardingRow({
   ) => Promise<OnboardingEmailDraft | null>
   crmContactUrl: (contactId?: string) => string
   crmAttachmentUrl: (attachmentId?: string) => string
+  canConfigure: boolean
+  onOpenConfiguration: () => void
 }) {
   const displayName = person.name || person.email_508 || person.email || "CRM contact"
   const [value, setValue] = useState(displayOnboarder(person.onboarder))
@@ -6287,6 +6297,15 @@ function OnboardingRow({
   const emailSentBy = emailDraft?.onboarding_email_sent_by || person.onboarding_email_sent_by
   const emailSentRecipient =
     emailDraft?.onboarding_email_recipient || person.onboarding_email_recipient
+  const sendUnavailableMessage =
+    emailDraft && !emailDraft.can_send && !emailDraft.onboarding_email_sent_at
+      ? !emailDraft.recipient_email
+        ? "Send disabled: candidate email is missing."
+        : !emailDraft.reply_to_email
+          ? "Send disabled: your Reply-To email is missing."
+          : "Send disabled: onboarding email SMTP is not configured."
+      : ""
+  const sendUnavailableIsSmtp = sendUnavailableMessage.includes("SMTP")
   const draftBusy = Boolean(loading[`onboarding-email-draft:${person.crm_contact_id}`])
   const sendBusy = Boolean(loading[`onboarding-email-send:${person.crm_contact_id}`])
   const draftBody = emailDraft?.markdown_body || ""
@@ -6551,12 +6570,27 @@ function OnboardingRow({
                       variant="default"
                       onClick={sendDraft}
                       disabled={sendBusy || !emailDraft.can_send || !draftBody.trim()}
+                      title={sendUnavailableMessage || undefined}
                     >
                       <Send />
                       {sendBusy ? "Sending" : "Send"}
                     </Button>
-                    {!emailDraft.can_send && !emailDraft.onboarding_email_sent_at ? (
-                      <span className="text-sm text-muted-foreground">Send unavailable.</span>
+                    {sendUnavailableMessage ? (
+                      <span className="text-sm text-muted-foreground">
+                        {sendUnavailableMessage}
+                        {sendUnavailableIsSmtp && canConfigure ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            className="ml-2"
+                            onClick={onOpenConfiguration}
+                          >
+                            <Settings />
+                            Configure
+                          </Button>
+                        ) : null}
+                      </span>
                     ) : null}
                     {emailDraft.marker_status === "error" ? (
                       <span className="text-sm text-muted-foreground">

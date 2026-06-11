@@ -6236,6 +6236,7 @@ def test_dashboard_onboarding_email_send_sends_and_marks_local_state(
             "five08.backend.api._dashboard_session_profile_row",
             return_value={"name": "Michael Wu", "email_508": "michael@508.dev"},
         ),
+        patch("five08.backend.api.onboarding_email_smtp_ready", return_value=True),
         patch("five08.backend.api.send_onboarding_email_message") as mock_send,
         patch(
             "five08.backend.api._mark_dashboard_onboarding_email_sent",
@@ -6317,6 +6318,7 @@ def test_dashboard_onboarding_email_send_returns_sent_when_marker_fails(
             "five08.backend.api._dashboard_session_profile_row",
             return_value={"name": "Michael Wu", "email_508": "michael@508.dev"},
         ),
+        patch("five08.backend.api.onboarding_email_smtp_ready", return_value=True),
         patch("five08.backend.api.send_onboarding_email_message") as mock_send,
         patch(
             "five08.backend.api._mark_dashboard_onboarding_email_sent",
@@ -6350,6 +6352,54 @@ def test_dashboard_onboarding_email_send_returns_sent_when_marker_fails(
     assert audit_kwargs["result"] == api.AuditResult.SUCCESS
     assert audit_kwargs["metadata"]["marker_status"] == "error"
     assert audit_kwargs["metadata"]["marker_error"] == "contact_not_found"
+
+
+def test_dashboard_onboarding_email_send_requires_smtp_configuration(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+    espo_client = Mock()
+    espo_client.request.return_value = {
+        "id": "contact-prospect-1",
+        "name": "Jesse Candidate",
+        "emailAddress": "jesse@example.com",
+        "c508Email": "",
+        "cOnboardingState": "selected",
+    }
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._is_dashboard_onboarding_contact_eligible",
+            return_value=True,
+        ),
+        patch("five08.backend.api.EspoClient", return_value=espo_client),
+        patch(
+            "five08.backend.api._dashboard_session_profile_row",
+            return_value={"name": "Michael Wu", "email_508": "michael@508.dev"},
+        ),
+        patch("five08.backend.api.onboarding_email_smtp_ready", return_value=False),
+        patch("five08.backend.api.send_onboarding_email_message") as mock_send,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            "/dashboard/api/onboarding/contact-prospect-1/email/send",
+            json={"markdown_body": "Great talking Jesse,\n\nCheers,\nMichael\n"},
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {"error": "smtp_not_configured"}
+    mock_send.assert_not_called()
+    audit_kwargs = mock_audit.call_args.kwargs
+    assert audit_kwargs["result"] == api.AuditResult.ERROR
+    assert audit_kwargs["metadata"]["reason"] == "smtp_not_configured"
 
 
 def test_dashboard_onboarding_email_draft_sanitizes_crm_errors(
@@ -6405,6 +6455,7 @@ def test_dashboard_onboarding_email_send_sanitizes_send_failures(
             "five08.backend.api._dashboard_session_profile_row",
             return_value={"name": "Michael Wu", "email_508": "michael@508.dev"},
         ),
+        patch("five08.backend.api.onboarding_email_smtp_ready", return_value=True),
         patch(
             "five08.backend.api.send_onboarding_email_message",
             side_effect=OSError("smtp.migadu.com:465 auth failed"),

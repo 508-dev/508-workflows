@@ -226,6 +226,50 @@ async def test_onboarding_email_command_prepares_send_button_when_possible(
 
 
 @pytest.mark.asyncio
+async def test_onboarding_email_command_disables_send_button_without_smtp(
+    onboarding_cog: OnboardingEmailCog,
+    mock_interaction: AsyncMock,
+) -> None:
+    onboarding_cog._audit_command_safe = Mock()
+    onboarding_cog._smtp_ready = Mock(return_value=False)  # type: ignore[method-assign]
+    onboarding_cog.crm.list_contacts.side_effect = _contact_search_response
+    onboarding_cog.crm.get_contact.return_value = {
+        "id": "contact-candidate",
+        "name": "Sam Member",
+        "emailAddress": "sam@example.com",
+        "c508Email": "",
+        "cOnboarder": "michael",
+        "cOnboardingState": "selected",
+    }
+
+    await onboarding_cog.onboarding_email.callback(
+        onboarding_cog,
+        mock_interaction,
+        "Sam Member",
+        True,
+        recipient_email="sam@example.com",
+        discord_joined="yes",
+        agreement_signed="no",
+        sender_name="Michael Wu",
+        reply_to_email="michael@508.dev",
+    )
+
+    send_args, send_kwargs = mock_interaction.followup.send.call_args
+    assert "Send disabled: onboarding email SMTP is not configured." in send_args[0]
+    view = send_kwargs["view"]
+    assert isinstance(view, OnboardingEmailDraftEditView)
+    assert view.send_payload is None
+    assert view.send_disabled_reason == (
+        "⚠️ Send disabled: onboarding email SMTP is not configured."
+    )
+    assert view._send_button.disabled is True
+    audit_kwargs = onboarding_cog._audit_command_safe.call_args.kwargs
+    assert audit_kwargs["metadata"]["email_action"] == "drafted"
+    assert audit_kwargs["metadata"]["send_available"] is False
+    assert audit_kwargs["metadata"]["smtp_ready"] is False
+
+
+@pytest.mark.asyncio
 async def test_review_send_uses_edited_markdown_body(
     onboarding_cog: OnboardingEmailCog,
     mock_interaction: AsyncMock,
@@ -324,6 +368,50 @@ async def test_review_send_refreshes_crm_derived_recipient_before_smtp(
     assert message["To"] == "fresh@example.com"
     audit_kwargs = onboarding_cog._audit_command_safe.call_args.kwargs
     assert audit_kwargs["metadata"]["recipient_email"] == "fresh@example.com"
+
+
+@pytest.mark.asyncio
+async def test_review_send_revalidates_smtp_configuration(
+    onboarding_cog: OnboardingEmailCog,
+    mock_interaction: AsyncMock,
+) -> None:
+    onboarding_cog._audit_command_safe = Mock()
+    onboarding_cog._send_message = Mock()
+    onboarding_cog._smtp_ready = Mock(return_value=False)  # type: ignore[method-assign]
+    payload = OnboardingEmailSendPayload(
+        recipient_email="sam@example.com",
+        reply_to_email="michael@508.dev",
+        sender_display_name="Michael Wu",
+        subject="508.dev onboarding",
+        recipient_from_crm=False,
+        original_markdown_body="Original draft\n",
+        original_text_body="Original draft\n",
+        original_html_body="<p>Original draft</p>",
+        candidate_name="Sam Member",
+        contact_id=None,
+        has_contributed=True,
+        discord_joined="yes",
+        agreement_signed="no",
+        authorization_source="steering_committee",
+        onboarding_status="selected",
+    )
+    view = OnboardingEmailDraftEditView(
+        cog=onboarding_cog,
+        requester_id=mock_interaction.user.id,
+        summary="📝 Onboarding email draft generated.",
+        markdown_body="Original draft\n",
+        send_payload=payload,
+    )
+
+    await view.send_draft(mock_interaction)
+
+    onboarding_cog._send_message.assert_not_called()
+    message = mock_interaction.followup.send.call_args.args[0]
+    assert "Onboarding email SMTP is not configured" in message
+    audit_kwargs = onboarding_cog._audit_command_safe.call_args.kwargs
+    assert audit_kwargs["result"] == "error"
+    assert audit_kwargs["metadata"]["email_action"] == "send_failed"
+    assert audit_kwargs["metadata"]["error"] == "validation_error"
 
 
 @pytest.mark.asyncio

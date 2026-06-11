@@ -6211,6 +6211,12 @@ async def dashboard_onboarding_email_send_handler(
                 "recipient_email_required",
                 status_code=409,
             )
+        smtp_config = _dashboard_onboarding_email_smtp_config()
+        if not onboarding_email_smtp_ready(smtp_config):
+            raise DashboardOnboardingEmailError(
+                "smtp_not_configured",
+                status_code=409,
+            )
 
         text_body = markdown_body_to_text(payload.markdown_body)
         html_body = markdown_body_to_html(payload.markdown_body)
@@ -6226,7 +6232,7 @@ async def dashboard_onboarding_email_send_handler(
         await asyncio.to_thread(
             send_onboarding_email_message,
             message,
-            config=_dashboard_onboarding_email_smtp_config(),
+            config=smtp_config,
         )
         marker_status = "saved"
         marker_error: str | None = None
