@@ -151,8 +151,13 @@ const configurationGroupByCategory = new Map(
   configurationGroups.map((group, index) => [group.category, { ...group, index }]),
 )
 
+function configurationGroupId(category: string) {
+  return `configurationGroup-${category.replace(/[^a-zA-Z0-9_-]+/g, "-")}`
+}
+
 function isPrimaryConfiguration(item: ConfigurationItem) {
   return (
+    item.key.startsWith("ONBOARDING_EMAIL_") ||
     item.is_secret ||
     item.value_type === "url" ||
     item.key.endsWith("_MODEL") ||
@@ -927,6 +932,10 @@ function App() {
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([])
   const [agentReport, setAgentReport] = useState<AgentReport | null>(null)
   const [configurationItems, setConfigurationItems] = useState<ConfigurationItem[]>([])
+  const [configurationFocus, setConfigurationFocus] = useState<{
+    category: string
+    nonce: number
+  } | null>(null)
   const [jobDetail, setJobDetail] = useState<JobDetail | null>(null)
   const [loading, setLoading] = useState<Record<string, boolean>>({})
   const [devErrors, setDevErrors] = useState<DashboardDevError[]>([])
@@ -2580,7 +2589,10 @@ function App() {
               crmAttachmentUrl={crmAttachmentUrl}
               canWrite={can("onboarding:write")}
               canConfigure={can("configuration:write")}
-              onOpenConfiguration={() => navigate("configuration", true)}
+              onOpenConfiguration={() => {
+                setConfigurationFocus({ category: "Onboarding", nonce: Date.now() })
+                navigate("configuration", true)
+              }}
             />
           ) : null}
 
@@ -2624,6 +2636,8 @@ function App() {
               items={configurationItems}
               loading={loading}
               canWrite={can("configuration:write")}
+              focusCategory={configurationFocus?.category}
+              focusNonce={configurationFocus?.nonce}
               onRefresh={loadConfiguration}
               onSave={updateConfigurationValue}
               onClear={clearConfigurationValue}
@@ -7092,6 +7106,8 @@ function ConfigurationView({
   onRefresh,
   onSave,
   onClear,
+  focusCategory,
+  focusNonce,
 }: {
   items: ConfigurationItem[]
   loading: Record<string, boolean>
@@ -7099,8 +7115,11 @@ function ConfigurationView({
   onRefresh: () => void
   onSave: (key: string, value: string) => void
   onClear: (key: string) => void
+  focusCategory?: string
+  focusNonce?: number
 }) {
   const [selectedCategory, setSelectedCategory] = useState("All")
+  const [highlightedCategory, setHighlightedCategory] = useState("")
   const [drafts, setDrafts] = useState<Record<string, string>>({})
   const categories = useMemo(() => {
     const present = new Set(items.map((item) => item.category))
@@ -7168,6 +7187,24 @@ function ConfigurationView({
       setSelectedCategory("All")
     }
   }, [items, selectedCategory])
+
+  useEffect(() => {
+    if (!focusCategory || !items.some((item) => item.category === focusCategory)) return
+    void focusNonce
+    setSelectedCategory(focusCategory)
+    setHighlightedCategory(focusCategory)
+    const frame = window.requestAnimationFrame?.(() => {
+      document.getElementById(configurationGroupId(focusCategory))?.scrollIntoView({
+        block: "start",
+        behavior: "smooth",
+      })
+    })
+    const timeout = window.setTimeout(() => setHighlightedCategory(""), 4000)
+    return () => {
+      if (frame !== undefined) window.cancelAnimationFrame?.(frame)
+      window.clearTimeout(timeout)
+    }
+  }, [focusCategory, focusNonce, items])
 
   function sourceBadge(item: ConfigurationItem) {
     if (item.source === "env") return "ENV"
@@ -7386,7 +7423,15 @@ function ConfigurationView({
         const missing = group.items.length - configured
         const restartRequired = group.items.some((item) => item.restart_required)
         return (
-          <Card key={group.category}>
+          <Card
+            key={group.category}
+            id={configurationGroupId(group.category)}
+            className={cn(
+              "scroll-mt-4 transition-shadow",
+              highlightedCategory === group.category &&
+                "ring-2 ring-primary ring-offset-2 ring-offset-background",
+            )}
+          >
             <CardHeader className="items-start">
               <div className="grid gap-1">
                 <CardTitle>{group.label}</CardTitle>
