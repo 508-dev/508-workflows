@@ -225,10 +225,11 @@ for same-host deployments.
 - `KEILA_API_TIMEOUT_SECONDS`: optional, defaults to `20.0`.
 - `NEWSLETTER_SYNC_ENABLED`: optional, defaults to `true`; dashboard changes require an API restart because the scheduler starts at startup.
 - `NEWSLETTER_SYNC_INTERVAL_SECONDS`: optional, defaults to `604800`; dashboard changes require an API restart because the scheduler sleep interval is startup-bound.
-- `NEWSLETTER_SYNC_EXCLUDED_MAILBOXES`: optional comma-separated system mailboxes to skip during Migadu resync.
+- `NEWSLETTER_SYNC_EXCLUDED_MAILBOXES`: optional comma-separated mailbox local-parts or full addresses to skip during Migadu resync.
 
 Mailbox and backup email subscription to configured newsletter tools is best
 effort. Failures are reported as warnings and do not block mailbox or account
 creation. The periodic sync uses Migadu mailboxes and password recovery emails
-as the source of truth for `@508.dev`, skips configured system mailboxes, and
-does not re-add provider-suppressed contacts.
+as the source of truth for `@508.dev`. When CRM is configured, it only syncs
+mailboxes that match a CRM contact; it also skips configured excluded mailboxes
+and does not re-add provider-suppressed contacts.

@@ -190,7 +190,7 @@ _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
         attr="newsletter_sync_excluded_mailboxes",
         label="Newsletter excluded mailboxes",
         category="Newsletter",
-        description="Comma-separated Migadu mailboxes skipped by the 508 members resync.",
+        description="Comma-separated Migadu mailbox local-parts or full addresses skipped by the 508 members resync.",
         value_type="csv",
         env_names=("NEWSLETTER_SYNC_EXCLUDED_MAILBOXES",),
     ),

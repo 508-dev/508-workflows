@@ -149,7 +149,7 @@ def _settings(**overrides: Any) -> SimpleNamespace:
         "brevo_api_key": "brevo-key",
         "brevo_508_members_newsletter_list_id": 4,
         "keila_api_key": "keila-key",
-        "newsletter_sync_excluded_mailboxes": "system@508.dev",
+        "newsletter_sync_excluded_mailboxes": "system",
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -308,6 +308,47 @@ def test_sync_508_members_skips_crm_blocked_mailboxes() -> None:
     assert result["contacts_considered"] == 0
     assert FakeBrevoClient.subscriptions == []
     assert FakeKeilaClient.upserts == []
+
+
+def test_sync_508_members_skips_crm_unmatched_mailboxes_when_crm_configured() -> None:
+    FakeMigaduClient.mailboxes = [
+        MigaduMailbox(
+            address="service@508.dev",
+            name="Service Account",
+            password_recovery_email="ops@example.com",
+        )
+    ]
+
+    result = NewsletterSyncProcessor(
+        _settings(espo_base_url="https://crm.example", espo_api_key="espo-key")
+    ).sync_508_members()
+
+    assert result["crm_unmatched_skipped"] == 1
+    assert result["contacts_considered"] == 0
+    assert FakeBrevoClient.subscriptions == []
+    assert FakeKeilaClient.upserts == []
+
+
+def test_sync_508_members_syncs_crm_matched_mailboxes_when_crm_configured() -> None:
+    FakeMigaduClient.mailboxes = [
+        MigaduMailbox(
+            address="jane@508.dev",
+            name="Jane Doe",
+            password_recovery_email="jane@example.com",
+        )
+    ]
+    FakeEspoClient.contacts = [{"id": "contact-1", "type": "Member"}]
+
+    result = NewsletterSyncProcessor(
+        _settings(espo_base_url="https://crm.example", espo_api_key="espo-key")
+    ).sync_508_members()
+
+    assert result["crm_unmatched_skipped"] == 0
+    assert result["contacts_considered"] == 2
+    assert FakeBrevoClient.subscriptions == [
+        {"email": "jane@508.dev", "list_id": 4},
+        {"email": "jane@example.com", "list_id": 4},
+    ]
 
 
 def test_sync_508_members_skips_mailbox_when_any_crm_match_is_blocked() -> None:

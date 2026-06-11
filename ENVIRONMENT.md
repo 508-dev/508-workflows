@@ -172,9 +172,9 @@ current precedence rules.
 - `Optional`: `KEILA_API_TIMEOUT_SECONDS` (default: `20.0`)
 - `Optional`: `NEWSLETTER_SYNC_ENABLED` (default: `true`)
 - `Optional`: `NEWSLETTER_SYNC_INTERVAL_SECONDS` (default: `604800`, one week)
-- `Optional`: `NEWSLETTER_SYNC_EXCLUDED_MAILBOXES` (comma-separated system mailboxes to skip during Migadu resync)
+- `Optional`: `NEWSLETTER_SYNC_EXCLUDED_MAILBOXES` (comma-separated mailbox local-parts or full addresses to skip during Migadu resync)
 - Note: mailbox and backup email subscription to configured newsletter tools is best effort. Failures are reported as warnings and do not block mailbox or account creation.
-- Note: the periodic sync uses Migadu mailboxes and password recovery emails as the source of truth for `@508.dev`, skips configured system mailboxes, and does not re-add provider-suppressed contacts.
+- Note: the periodic sync uses Migadu mailboxes and password recovery emails as the source of truth for `@508.dev`. When CRM is configured, it only syncs mailboxes that match a CRM contact; it also skips configured excluded mailboxes and does not re-add provider-suppressed contacts.
 
 ## Authentik SSO Provisioning
 

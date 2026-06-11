@@ -80,6 +80,18 @@ def _normalized_csv_set(value: str) -> set[str]:
     return {item.strip().lower() for item in value.split(",") if item.strip()}
 
 
+def _mailbox_local_part(email: str) -> str:
+    return email.split("@", 1)[0].strip().lower()
+
+
+def _is_mailbox_excluded(email: str, excluded_mailboxes: set[str]) -> bool:
+    normalized_email = email.strip().lower()
+    if normalized_email in excluded_mailboxes:
+        return True
+    local_part = _mailbox_local_part(normalized_email)
+    return bool(local_part and local_part in excluded_mailboxes)
+
+
 def _is_crm_blocked(contact: dict[str, Any] | None) -> bool:
     if contact is None:
         return False
@@ -184,6 +196,7 @@ class NewsletterSyncProcessor:
             "mailboxes_scanned": 0,
             "system_mailboxes_skipped": 0,
             "crm_blocked_skipped": 0,
+            "crm_unmatched_skipped": 0,
             "crm_lookup_failed_skipped": 0,
             "contacts_considered": 0,
             "providers": {
@@ -195,9 +208,10 @@ class NewsletterSyncProcessor:
             result["warning"] = "no_newsletter_providers_configured"
             return result
 
+        crm_lookup_enabled = self._crm_lookup_enabled()
         for mailbox in self._migadu_client().list_mailboxes():
             result["mailboxes_scanned"] += 1
-            if mailbox.address in self.excluded_mailboxes:
+            if _is_mailbox_excluded(mailbox.address, self.excluded_mailboxes):
                 result["system_mailboxes_skipped"] += 1
                 continue
 
@@ -208,6 +222,9 @@ class NewsletterSyncProcessor:
                 failures = result.setdefault("crm_lookup_failures", [])
                 if isinstance(failures, list) and len(failures) < 20:
                     failures.append({"mailbox": mailbox.address, "error": str(exc)})
+                continue
+            if crm_lookup_enabled and not crm_contacts:
+                result["crm_unmatched_skipped"] += 1
                 continue
             if any(_is_crm_blocked(contact) for contact in crm_contacts):
                 result["crm_blocked_skipped"] += 1
@@ -247,6 +264,9 @@ class NewsletterSyncProcessor:
         if not base_url or not api_key:
             return None
         return EspoClient(base_url, api_key)
+
+    def _crm_lookup_enabled(self) -> bool:
+        return self._crm_client() is not None
 
     def _list_crm_contacts(self, mailbox: MigaduMailbox) -> list[dict[str, Any]]:
         client = self._crm_client()
