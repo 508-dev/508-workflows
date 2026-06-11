@@ -7,6 +7,8 @@ from urllib.parse import quote
 
 import requests
 
+from five08.redaction import redact_email_addresses
+
 KEILA_API_BASE_URL = "https://app.keila.io"
 ERROR_BODY_MAX_LENGTH = 500
 _EXISTING_CONTACT_UNSET = object()
@@ -18,7 +20,7 @@ class KeilaAPIError(RuntimeError):
 
 def _response_body_excerpt(body: object) -> str:
     """Return a bounded response-body excerpt for persisted/logged errors."""
-    text = " ".join(str(body or "").split())
+    text = redact_email_addresses(" ".join(str(body or "").split()))
     if len(text) <= ERROR_BODY_MAX_LENGTH:
         return text
     return f"{text[:ERROR_BODY_MAX_LENGTH]}..."

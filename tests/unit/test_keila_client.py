@@ -240,7 +240,7 @@ def test_keila_client_raises_on_request_error() -> None:
 def test_keila_client_truncates_error_response_body() -> None:
     response = Mock()
     response.status_code = 500
-    response.text = f"{'x' * 600} jane@example.com"
+    response.text = f"email=jane@example.com {'x' * 600}"
     response.content = response.text.encode()
 
     with patch("five08.clients.keila.requests.request", return_value=response):
@@ -249,4 +249,5 @@ def test_keila_client_truncates_error_response_body() -> None:
 
     message = str(exc_info.value)
     assert "jane@example.com" not in message
+    assert "[redacted-email]" in message
     assert len(message) < 600

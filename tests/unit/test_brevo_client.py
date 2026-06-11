@@ -66,7 +66,7 @@ def test_add_contact_to_list_raises_on_request_error() -> None:
 def test_add_contact_to_list_truncates_error_response_body() -> None:
     response = Mock()
     response.status_code = 400
-    response.text = f"{'x' * 600} jane@example.com"
+    response.text = f"email=jane@example.com {'x' * 600}"
 
     with patch("five08.clients.brevo.requests.post", return_value=response):
         with pytest.raises(BrevoAPIError) as exc_info:
@@ -77,6 +77,7 @@ def test_add_contact_to_list_truncates_error_response_body() -> None:
 
     message = str(exc_info.value)
     assert "jane@example.com" not in message
+    assert "[redacted-email]" in message
     assert len(message) < 600
 
 
@@ -131,7 +132,7 @@ def test_get_contact_rejects_invalid_email(email: str) -> None:
 def test_get_contact_truncates_error_response_body() -> None:
     response = Mock()
     response.status_code = 500
-    response.text = f"{'x' * 600} jane@example.com"
+    response.text = f"email=jane@example.com {'x' * 600}"
 
     with patch("five08.clients.brevo.requests.get", return_value=response):
         with pytest.raises(BrevoAPIError) as exc_info:
@@ -139,6 +140,7 @@ def test_get_contact_truncates_error_response_body() -> None:
 
     message = str(exc_info.value)
     assert "jane@example.com" not in message
+    assert "[redacted-email]" in message
     assert len(message) < 600
 
 
@@ -179,7 +181,7 @@ def test_find_list_id_by_name_returns_none_when_missing() -> None:
 def test_find_list_id_by_name_truncates_error_response_body() -> None:
     response = Mock()
     response.status_code = 503
-    response.text = f"{'x' * 600} jane@example.com"
+    response.text = f"email=jane@example.com {'x' * 600}"
 
     with patch("five08.clients.brevo.requests.get", return_value=response):
         with pytest.raises(BrevoAPIError) as exc_info:
@@ -187,4 +189,5 @@ def test_find_list_id_by_name_truncates_error_response_body() -> None:
 
     message = str(exc_info.value)
     assert "jane@example.com" not in message
+    assert "[redacted-email]" in message
     assert len(message) < 600
