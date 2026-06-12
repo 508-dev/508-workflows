@@ -36,6 +36,29 @@ and are intentionally not dashboard-configurable. Onboarding email SMTP settings
 are dashboard-configurable under the Onboarding category when env overrides are
 not set.
 
+Onboarding Tally intake settings are dashboard-configurable under Intake. If
+`ONBOARDING_TALLY_API_KEY` or `ONBOARDING_TALLY_WEBHOOK_SIGNING_SECRET` is set
+in `.env` or the process environment, that env value wins and the dashboard
+shows the field as environment-locked. Legacy `TALLY_*` env aliases still work
+for compatibility.
+
+## Tally Intake
+
+- `ONBOARDING_TALLY_API_KEY`: optional Tally API key for future onboarding-form
+  backfills. The webhook intake path does not require it.
+- `ONBOARDING_TALLY_WEBHOOK_SIGNING_SECRET`: secret used to verify
+  `Tally-Signature` on `/webhooks/tally/onboarding`. When unset, the route falls
+  back to `WEBHOOK_SHARED_SECRET` / `API_SHARED_SECRET` using the existing
+  `X-API-Secret` header path.
+- `ONBOARDING_TALLY_ALLOWED_FORM_IDS`: optional comma-separated allowlist of
+  accepted onboarding Tally form IDs.
+- `INTAKE_RESUME_REQUIRE_VIRUS_SCAN`: when true, downloaded resume files are not
+  parsed unless the malware scan command succeeds.
+- `INTAKE_RESUME_VIRUS_SCAN_COMMAND`: command used to scan downloaded resumes.
+  Include `{path}` where the temporary resume filepath should be inserted. When
+  `{path}` is omitted, the filepath is appended as the final argument.
+- `INTAKE_RESUME_VIRUS_SCAN_TIMEOUT_SECONDS`: scan command timeout.
+
 ## Queue And Jobs
 
 - `REDIS_URL`

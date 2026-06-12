@@ -5,13 +5,20 @@ from __future__ import annotations
 import json
 import ipaddress
 import re
+import shlex
 import socket
+import subprocess
+import tempfile
+import contextlib
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlsplit
+from uuid import uuid4
 
 import requests
+from psycopg.types.json import Jsonb
 
 from five08.clients.espo import EspoAPIError, EspoClient
 from five08.crm_normalization import (
@@ -25,6 +32,7 @@ from five08.crm_normalization import (
     normalize_website_url,
 )
 from five08.resume_extractor import ResumeProfileExtractor
+from five08.queue import get_postgres_connection
 from five08.worker.config import settings
 from five08.worker.crm.document_processor import DocumentProcessor
 from five08.worker.crm.skills_extractor import SkillsExtractor
@@ -37,6 +45,8 @@ IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 LINKEDIN_FIELD = "cLinkedIn"
 
 DESCRIPTION_SECTIONS = {
+    "native_name": "Name in native language",
+    "ideal_weekly_hours": "Ideal weekly hours",
     "primary_skills_interests": "Primary skills and interests",
     "top_question_about_508": "Top question about 508.dev",
 }
@@ -101,18 +111,25 @@ class IntakeFormProcessor:
         if not email or not first_name or not last_name:
             return {"success": False, "error": "invalid_payload"}
 
-        allowed_form_ids = settings.google_forms_allowed_form_ids_set
+        source = (self._normalize_text(payload.get("source")) or "").casefold()
+        allowed_form_ids = (
+            settings.onboarding_tally_allowed_form_ids_set
+            if source == "tally"
+            else settings.google_forms_allowed_form_ids_set
+        )
         form_id = self._normalize_text(payload.get("form_id"))
         if allowed_form_ids and not form_id:
             logger.warning(
-                "Google forms submission missing form_id for masked_email=%s",
+                "Intake submission missing form_id source=%s masked_email=%s",
+                source or "unknown",
                 masked_email,
             )
             return {"success": False, "error": "invalid_form_id"}
         if allowed_form_ids and form_id not in allowed_form_ids:
             logger.warning(
-                "Google forms submission with unapproved form_id=%s masked_email=%s",
+                "Intake submission with unapproved form_id=%s source=%s masked_email=%s",
                 form_id,
+                source or "unknown",
                 masked_email,
             )
             return {"success": False, "error": "invalid_form_id"}
@@ -240,6 +257,11 @@ class IntakeFormProcessor:
             contact_id,
             masked_email,
         )
+        self._persist_intake_submission(
+            payload=payload,
+            contact_id=contact_id,
+            email=email,
+        )
         return {
             "success": True,
             "created": True,
@@ -271,6 +293,11 @@ class IntakeFormProcessor:
         )
         if not updates:
             logger.info("No prospect updates needed for contact_id=%s", contact_id)
+            self._persist_intake_submission(
+                payload=payload,
+                contact_id=contact_id,
+                email=email,
+            )
             return {
                 "success": True,
                 "created": False,
@@ -294,6 +321,11 @@ class IntakeFormProcessor:
             contact_id,
             masked_email,
             sorted(updates.keys()),
+        )
+        self._persist_intake_submission(
+            payload=payload,
+            contact_id=contact_id,
+            email=email,
         )
         return {
             "success": True,
@@ -332,6 +364,12 @@ class IntakeFormProcessor:
             if value:
                 updates[crm_field] = value
 
+        website_link = self._normalize_text(payload.get("website_link"))
+        if website_link:
+            normalized_website = normalize_website_url(website_link)
+            if normalized_website:
+                updates["cWebsiteLink"] = [normalized_website]
+
         seniority_level = self._normalize_seniority(payload.get("seniority_level"))
         if seniority_level:
             updates["cSeniority"] = seniority_level
@@ -357,6 +395,88 @@ class IntakeFormProcessor:
                     updates[key] = value
 
         return updates
+
+    def _persist_intake_submission(
+        self,
+        *,
+        payload: Mapping[str, Any],
+        contact_id: str,
+        email: str,
+    ) -> None:
+        """Best-effort storage for source-specific fields that do not belong in CRM."""
+        source = (
+            self._normalize_text(payload.get("source")) or "google_forms"
+        ).casefold()
+        if source not in {"google_forms", "tally"}:
+            source = "google_forms"
+
+        submitted_at = self._parse_submitted_at(payload.get("submitted_at"))
+        raw_tally_fields = payload.get("raw_tally_fields")
+        raw_payload = (
+            {"fields": raw_tally_fields} if isinstance(raw_tally_fields, list) else {}
+        )
+        normalized_payload = dict(payload)
+
+        try:
+            with get_postgres_connection(settings) as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        INSERT INTO onboarding_intake_submissions (
+                            id,
+                            source,
+                            form_id,
+                            submission_id,
+                            crm_contact_id,
+                            email,
+                            submitted_at,
+                            normalized_payload,
+                            raw_payload
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (
+                            source,
+                            form_id,
+                            submission_id
+                        )
+                        DO UPDATE SET
+                            crm_contact_id = EXCLUDED.crm_contact_id,
+                            email = EXCLUDED.email,
+                            submitted_at = EXCLUDED.submitted_at,
+                            normalized_payload = EXCLUDED.normalized_payload,
+                            raw_payload = EXCLUDED.raw_payload
+                        """,
+                        (
+                            uuid4(),
+                            source,
+                            self._normalize_text(payload.get("form_id")),
+                            self._normalize_text(payload.get("submission_id")),
+                            contact_id,
+                            email,
+                            submitted_at,
+                            Jsonb(normalized_payload),
+                            Jsonb(raw_payload),
+                        ),
+                    )
+        except Exception as exc:
+            logger.warning(
+                "Failed to persist intake submission contact_id=%s masked_email=%s error=%s",
+                contact_id,
+                mask_email(email),
+                exc,
+            )
+
+    def _parse_submitted_at(self, value: Any) -> datetime | None:
+        normalized = self._normalize_text(value)
+        if not normalized:
+            return None
+        try:
+            parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed
 
     def _build_form_skill_attrs(
         self, payload: Mapping[str, Any]
@@ -400,6 +520,12 @@ class IntakeFormProcessor:
             content = self._download_resume_content(resume_url)
         except Exception as exc:
             logger.warning("Failed to download resume_url=%s error=%s", resume_url, exc)
+            return {}
+
+        if not self._scan_resume_content(content, resume_name):
+            logger.warning(
+                "Skipping resume processing after failed scan name=%s", resume_name
+            )
             return {}
 
         try:
@@ -551,6 +677,60 @@ class IntakeFormProcessor:
                 return bytes(data)
 
         raise ValueError("Resume URL exceeded max redirect limit")
+
+    def _scan_resume_content(self, content: bytes, filename: str) -> bool:
+        """Run the configured malware scanner before parsing untrusted resumes."""
+        if not settings.intake_resume_require_virus_scan:
+            return True
+
+        command_template = settings.intake_resume_virus_scan_command.strip()
+        if not command_template:
+            logger.warning(
+                "Resume scan required but INTAKE_RESUME_VIRUS_SCAN_COMMAND is unset"
+            )
+            return False
+
+        temp_path: str | None = None
+        try:
+            suffix = Path(filename).suffix
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temp_file:
+                temp_file.write(content)
+                temp_path = temp_file.name
+
+            command = [
+                part.replace("{path}", temp_path)
+                for part in shlex.split(command_template)
+            ]
+            if not any(temp_path in part for part in command):
+                command.append(temp_path)
+
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=settings.intake_resume_virus_scan_timeout_seconds,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Resume malware scan failed filename=%s error=%s", filename, exc
+            )
+            return False
+        finally:
+            if temp_path:
+                with contextlib.suppress(OSError):
+                    Path(temp_path).unlink()
+
+        if result.returncode == 0:
+            return True
+
+        logger.warning(
+            "Resume malware scan rejected filename=%s returncode=%s stderr=%s",
+            filename,
+            result.returncode,
+            result.stderr.strip(),
+        )
+        return False
 
     def _validate_resume_url(self, candidate_url: str) -> str | None:
         """Return validation error string when URL should not be fetched."""

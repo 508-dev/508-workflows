@@ -192,6 +192,7 @@ def test_build_resume_updates_includes_website_links_as_url_multiple() -> None:
             return_value=response,
         ),
         patch.object(processor, "_hostname_resolves_publicly", return_value=True),
+        patch.object(processor, "_scan_resume_content", return_value=True),
     ):
         updates = processor._build_resume_updates(
             {
@@ -241,6 +242,7 @@ def test_build_resume_updates_uses_extracted_profile_fields_for_form_fields() ->
             return_value=response,
         ),
         patch.object(processor, "_hostname_resolves_publicly", return_value=True),
+        patch.object(processor, "_scan_resume_content", return_value=True),
     ):
         updates = processor._build_resume_updates(
             {
@@ -252,6 +254,53 @@ def test_build_resume_updates_uses_extracted_profile_fields_for_form_fields() ->
     assert updates["cRateRange"] == "$80 - $120"
     assert updates["cReferredBy"] == "Referral Source"
     assert updates["addressState"] == "California"
+
+
+def test_build_intake_updates_includes_form_website_and_weekly_hours() -> None:
+    processor = IntakeFormProcessor()
+
+    updates = processor._build_intake_updates(
+        email="new@example.com",
+        first_name="New",
+        last_name="Person",
+        payload={
+            "website_link": "portfolio.example.com",
+            "ideal_weekly_hours": "8-10",
+        },
+        include_email=True,
+    )
+
+    assert updates["cWebsiteLink"] == ["https://portfolio.example.com"]
+    assert "Ideal weekly hours: 8-10" in updates["description"]
+
+
+def test_build_resume_updates_skips_parsing_when_scan_fails() -> None:
+    processor = IntakeFormProcessor()
+    processor.document_processor = Mock()
+    response = Mock()
+    response.status_code = 200
+    response.raise_for_status = Mock()
+    response.headers = {}
+    response.iter_content = Mock(return_value=[b"resume-bytes"])
+    response.__enter__ = Mock(return_value=response)
+    response.__exit__ = Mock(return_value=None)
+
+    with (
+        patch(
+            "five08.worker.crm.intake_form_processor.requests.get",
+            return_value=response,
+        ),
+        patch.object(processor, "_hostname_resolves_publicly", return_value=True),
+        patch.object(processor, "_scan_resume_content", return_value=False),
+    ):
+        updates = processor._build_resume_updates(
+            {
+                "resume_url": "https://example.com/resume.pdf",
+            }
+        )
+
+    assert updates == {}
+    processor.document_processor.extract_text.assert_not_called()
 
 
 def test_build_resume_updates_rejects_non_https_resume_url() -> None:

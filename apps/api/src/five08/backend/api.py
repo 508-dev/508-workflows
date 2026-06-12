@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import hashlib
+import hmac
 import logging
 import os
 import re
@@ -13,7 +15,7 @@ import smtplib
 import json
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -179,6 +181,8 @@ from five08.worker.models import (
     DocusealWebhookPayload,
     EspoCRMWebhookPayload,
     GoogleFormsIntakePayload,
+    TallyWebhookField,
+    TallyWebhookPayload,
 )
 
 logger = logging.getLogger(__name__)
@@ -425,6 +429,30 @@ sync_people_from_crm_job = JOB_FUNCTIONS["sync_people_from_crm_job"]
 sync_person_from_crm_job = JOB_FUNCTIONS["sync_person_from_crm_job"]
 sync_projects_from_erpnext_job = JOB_FUNCTIONS["sync_projects_from_erpnext_job"]
 process_docuseal_agreement_job = JOB_FUNCTIONS["process_docuseal_agreement_job"]
+
+TALLY_INTAKE_FIELD_LABEL_MAP = {
+    "full name": "name",
+    "full name (in english)": "name",
+    "email address": "email",
+    "email": "email",
+    "discord username": "discord_username",
+    "linkedin profile link": "linkedin_url",
+    "github profile link": "github_username",
+    "website link": "website_link",
+    "resume / cv (this is the file upload)": "resume_url",
+    "resume / cv": "resume_url",
+    "current country": "address_country",
+    "primary role": "primary_role",
+    "seniority level": "seniority_level",
+    "name in your native language": "native_name",
+    "if you joined 508.dev, how many working hours per week would be ideal from co-op projects": "ideal_weekly_hours",
+    "what hourly rate range (in usd) do you normally charge for work": "rate_range",
+    "how did you hear about 508.dev": "referred_by",
+    "what's your interest in 508.dev / what is a top question you have about the co-op": "top_question_about_508",
+    "what would be some good times in the following weeks to have a chat with a member (according to your timezone)": "availability",
+    "beyond your resume / linkedin, what would you say your primary skills and interests are": "primary_skills_interests",
+}
+
 # Process-local MVP agent tools stay synchronous for Discord button UX. Both the
 # task store and pending plans are non-durable; production task workflows should
 # swap this registry for a persistent task service before multi-worker use.
@@ -619,6 +647,143 @@ def _validate_google_forms_submission(
         return None
 
     return JSONResponse({"error": "invalid_form_id"}, status_code=403)
+
+
+def _normalize_tally_label(label: str | None) -> str:
+    normalized = re.sub(r"\s+", " ", str(label or "").strip().casefold())
+    while normalized.endswith(("?", "*")):
+        normalized = normalized[:-1].strip()
+    return normalized
+
+
+def _tally_intake_key_for_label(label: str) -> str | None:
+    local_key = TALLY_INTAKE_FIELD_LABEL_MAP.get(label)
+    if local_key:
+        return local_key
+    if label.startswith("primary role"):
+        return "primary_role"
+    if label.startswith("resume / cv"):
+        return "resume_url"
+    return None
+
+
+def _tally_field_display_value(field: TallyWebhookField) -> Any:
+    value = field.value
+    if value is None:
+        return None
+
+    if isinstance(value, list):
+        option_text_by_id = {
+            option.id: option.text
+            for option in field.options
+            if option.text and option.id
+        }
+        values: list[str] = []
+        for item in value:
+            if isinstance(item, str) and item in option_text_by_id:
+                values.append(str(option_text_by_id[item]))
+            elif isinstance(item, str):
+                values.append(item)
+            elif isinstance(item, Mapping):
+                name = item.get("name")
+                url = item.get("url")
+                values.append(str(name or url or item))
+            else:
+                values.append(str(item))
+        return ", ".join(value for value in values if value.strip()) or None
+
+    if isinstance(value, dict):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value).strip() or None
+
+
+def _extract_tally_file_upload(
+    field: TallyWebhookField,
+) -> tuple[str, str | None] | None:
+    if not isinstance(field.value, list) or not field.value:
+        return None
+    first_file = field.value[0]
+    if not isinstance(first_file, Mapping):
+        return None
+    url = str(first_file.get("url") or "").strip()
+    if not url:
+        return None
+    name = str(first_file.get("name") or "").strip() or None
+    return url, name
+
+
+def _tally_webhook_signature_valid(*, body: bytes, signature: str, secret: str) -> bool:
+    expected = base64.b64encode(
+        hmac.new(secret.encode("utf-8"), body, hashlib.sha256).digest()
+    ).decode("ascii")
+    return hmac.compare_digest(signature.strip(), expected)
+
+
+def _is_tally_webhook_authorized(request: Request, body: bytes) -> bool:
+    signing_secret = str(settings.onboarding_tally_webhook_signing_secret or "").strip()
+    if not signing_secret:
+        return _is_webhook_authorized(request)
+
+    signature = request.headers.get("Tally-Signature", "")
+    if not signature:
+        logger.warning("Rejecting Tally webhook: missing Tally-Signature")
+        return False
+    if _tally_webhook_signature_valid(
+        body=body,
+        signature=signature,
+        secret=signing_secret,
+    ):
+        return True
+    logger.warning("Rejecting Tally webhook: invalid Tally-Signature")
+    return False
+
+
+def _validate_tally_submission(payload: TallyWebhookPayload) -> JSONResponse | None:
+    allowed_form_ids = settings.onboarding_tally_allowed_form_ids_set
+    if not allowed_form_ids:
+        return None
+
+    form_id = payload.data.form_id.strip()
+    if form_id and form_id in allowed_form_ids:
+        return None
+
+    return JSONResponse({"error": "invalid_form_id"}, status_code=403)
+
+
+def _tally_to_intake_payload(payload: TallyWebhookPayload) -> dict[str, Any]:
+    mapped: dict[str, Any] = {
+        "source": "tally",
+        "form_id": payload.data.form_id,
+        "submission_id": payload.data.submission_id or payload.data.response_id,
+        "submitted_at": payload.data.created_at or payload.created_at,
+    }
+
+    for field in payload.data.fields:
+        label = field.label or field.key
+        normalized_label = _normalize_tally_label(label)
+        local_key = _tally_intake_key_for_label(normalized_label)
+        if not local_key:
+            continue
+
+        if local_key == "resume_url":
+            upload = _extract_tally_file_upload(field)
+            if upload:
+                mapped["resume_url"] = upload[0]
+                if upload[1]:
+                    mapped["resume_file_name"] = upload[1]
+            continue
+
+        value = _tally_field_display_value(field)
+        if value is not None:
+            mapped[local_key] = value
+
+    mapped["raw_tally_fields"] = [
+        field.model_dump(by_alias=True, exclude_none=True)
+        for field in payload.data.fields
+    ]
+    return mapped
 
 
 async def _enqueue_full_crm_sync_job(queue: QueueClient, *, reason: str) -> EnqueuedJob:
@@ -2024,10 +2189,32 @@ def _list_dashboard_onboarding(
             onboarding_email_sent_at,
             onboarding_email_sent_by,
             onboarding_email_recipient,
+            latest_intake_submission,
             sync_status,
             created_at,
             updated_at
         FROM people
+        LEFT JOIN LATERAL (
+            SELECT jsonb_build_object(
+                'source', onboarding_intake_submissions.source,
+                'form_id', onboarding_intake_submissions.form_id,
+                'submission_id', onboarding_intake_submissions.submission_id,
+                'submitted_at', onboarding_intake_submissions.submitted_at,
+                'normalized_payload', onboarding_intake_submissions.normalized_payload,
+                'raw_payload', onboarding_intake_submissions.raw_payload,
+                'created_at', onboarding_intake_submissions.created_at
+            ) AS latest_intake_submission
+            FROM onboarding_intake_submissions
+            WHERE onboarding_intake_submissions.crm_contact_id = people.crm_contact_id
+               OR (
+                    onboarding_intake_submissions.crm_contact_id IS NULL
+                    AND lower(onboarding_intake_submissions.email) = lower(people.email)
+               )
+            ORDER BY
+                onboarding_intake_submissions.submitted_at DESC NULLS LAST,
+                onboarding_intake_submissions.created_at DESC
+            LIMIT 1
+        ) intake ON true
         WHERE {where_clause}
         ORDER BY
             CASE WHEN COALESCE({_ONBOARDING_STATE_NORMALIZED_SQL}, '') = 'pending'
@@ -6847,6 +7034,104 @@ async def google_forms_intake_webhook_handler(request: Request) -> JSONResponse:
     )
 
 
+async def tally_intake_webhook_handler(request: Request) -> JSONResponse:
+    """Validate a Tally intake submission and enqueue a processing job."""
+    body = await request.body()
+    if not _is_tally_webhook_authorized(request, body):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    try:
+        payload_data = json.loads(body)
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+
+    try:
+        tally_payload = TallyWebhookPayload.model_validate(payload_data)
+    except (ValidationError, TypeError) as exc:
+        return JSONResponse(
+            {"error": "invalid_payload", "detail": str(exc)},
+            status_code=400,
+        )
+
+    if tally_payload.event_type != "FORM_RESPONSE":
+        return JSONResponse(
+            {
+                "status": "ignored",
+                "source": "tally",
+                "event_type": tally_payload.event_type,
+            },
+            status_code=202,
+        )
+
+    form_validation_error = _validate_tally_submission(tally_payload)
+    if form_validation_error is not None:
+        return form_validation_error
+
+    try:
+        payload = GoogleFormsIntakePayload.model_validate(
+            _tally_to_intake_payload(tally_payload)
+        )
+    except (ValidationError, TypeError) as exc:
+        return JSONResponse(
+            {"error": "invalid_payload", "detail": str(exc)},
+            status_code=400,
+        )
+
+    email = (payload.email or "").strip().lower()
+    first_name = (payload.first_name or "").strip()
+    last_name = (payload.last_name or "").strip()
+    if not email or not first_name or not last_name:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    normalized_payload = payload.model_dump(exclude_none=True)
+    normalized_payload.update(
+        {
+            "source": "tally",
+            "email": email,
+            "first_name": first_name,
+            "last_name": last_name,
+            "raw_tally_fields": [
+                field.model_dump(by_alias=True, exclude_none=True)
+                for field in tally_payload.data.fields
+            ],
+        }
+    )
+
+    idempotency_key = _google_forms_intake_idempotency_key(
+        email=email,
+        submission_id=payload.submission_id,
+        submitted_at=payload.submitted_at,
+        payload=normalized_payload,
+    )
+
+    queue = request.app.state.queue
+    try:
+        job = await asyncio.to_thread(
+            enqueue_job,
+            queue=queue,
+            fn=JOB_FUNCTIONS["process_intake_form_job"],
+            args=(normalized_payload,),
+            settings=settings,
+            idempotency_key=f"tally:{idempotency_key}",
+        )
+    except Exception:
+        logger.exception(
+            "Failed enqueueing Tally intake form job masked_email=%s",
+            mask_email(email),
+        )
+        return JSONResponse({"error": "enqueue_failed"}, status_code=503)
+
+    return JSONResponse(
+        {
+            "status": "queued",
+            "source": "tally",
+            "job_id": job.id,
+            "email": email,
+        },
+        status_code=202,
+    )
+
+
 async def audit_event_handler(request: Request) -> JSONResponse:
     """Persist one human audit event."""
     if not _is_authorized(request):
@@ -8360,6 +8645,16 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
     app.add_api_route(
         "/webhooks/google-forms",
         google_forms_intake_webhook_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/webhooks/tally",
+        tally_intake_webhook_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/webhooks/tally/onboarding",
+        tally_intake_webhook_handler,
         methods=["POST"],
     )
     app.add_api_route("/webhooks/{source}", ingest_handler, methods=["POST"])

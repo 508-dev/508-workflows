@@ -1,6 +1,10 @@
 """Unit tests for backend dashboard/ingest API."""
 
 import asyncio
+import base64
+import hashlib
+import hmac
+import json
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -8009,6 +8013,116 @@ _GOOGLE_FORMS_INTAKE_PAYLOAD = {
 }
 
 
+_TALLY_INTAKE_PAYLOAD = {
+    "eventId": "evt-tally-1",
+    "eventType": "FORM_RESPONSE",
+    "createdAt": "2026-06-12T01:02:03.000Z",
+    "data": {
+        "responseId": "resp-42",
+        "submissionId": "tally-sub-42",
+        "respondentId": "respondent-1",
+        "formId": "tally-form-1",
+        "formName": "508.dev onboarding",
+        "createdAt": "2026-06-12T01:02:00.000Z",
+        "fields": [
+            {
+                "key": "question_name",
+                "label": "Full name (in English)",
+                "type": "INPUT_TEXT",
+                "value": "Jane Doe",
+            },
+            {
+                "key": "question_native_name",
+                "label": "Name in your native language",
+                "type": "INPUT_TEXT",
+                "value": "Jane Doe Native",
+            },
+            {
+                "key": "question_email",
+                "label": "Email",
+                "type": "INPUT_EMAIL",
+                "value": " Jane@Example.com ",
+            },
+            {
+                "key": "question_discord",
+                "label": "Discord username",
+                "type": "INPUT_TEXT",
+                "value": "jane508",
+            },
+            {
+                "key": "question_github",
+                "label": "Github profile link",
+                "type": "INPUT_LINK",
+                "value": "https://github.com/janedoe",
+            },
+            {
+                "key": "question_website",
+                "label": "Website link",
+                "type": "INPUT_LINK",
+                "value": "portfolio.example.com",
+            },
+            {
+                "key": "question_resume",
+                "label": "Resume / CV",
+                "type": "FILE_UPLOAD",
+                "value": [
+                    {
+                        "id": "file-1",
+                        "name": "Jane_Doe_Resume.pdf",
+                        "url": "https://storage.googleapis.com/tally/resume.pdf",
+                        "mimeType": "application/pdf",
+                        "size": 1024,
+                    }
+                ],
+            },
+            {
+                "key": "question_country",
+                "label": "Current Country",
+                "type": "INPUT_TEXT",
+                "value": "United States",
+            },
+            {
+                "key": "question_role",
+                "label": "Primary role",
+                "type": "MULTIPLE_CHOICE",
+                "value": ["role-dev"],
+                "options": [{"id": "role-dev", "text": "Developer"}],
+            },
+            {
+                "key": "question_weekly_hours",
+                "label": "If you joined 508.dev, how many working hours per week would be ideal from co-op projects?",
+                "type": "INPUT_TEXT",
+                "value": "8-10",
+            },
+            {
+                "key": "question_rate",
+                "label": "What hourly rate range (in USD) do you normally charge for work?*",
+                "type": "INPUT_TEXT",
+                "value": "$80-120",
+            },
+            {
+                "key": "question_chat_times",
+                "label": "What would be some good times in the following weeks to have a chat with a member (according to your timezone)?",
+                "type": "TEXTAREA",
+                "value": "Weekdays after 5pm Pacific",
+            },
+            {
+                "key": "question_interest",
+                "label": "What's your interest in 508.dev / what is a top question you have about the co-op?",
+                "type": "TEXTAREA",
+                "value": "Interested in cooperative projects",
+            },
+            {
+                "key": "question_primary_skills",
+                "label": "Beyond your resume / LinkedIn, what would you say your primary skills and interests are?",
+                "type": "TEXTAREA",
+                "value": "Backend systems and AI tooling",
+            },
+        ],
+    },
+}
+
+
 def test_docuseal_webhook_rejects_unauthorized(client: TestClient) -> None:
     """Docuseal webhook should reject requests without valid auth."""
     response = client.post("/webhooks/docuseal", json=_DOCUSEAL_PAYLOAD)
@@ -8537,3 +8651,142 @@ def test_google_forms_intake_returns_503_on_enqueue_failure(
         )
     assert response.status_code == 503
     assert response.json()["error"] == "enqueue_failed"
+
+
+# --- Tally intake webhook ---
+
+
+def test_tally_intake_rejects_unauthorized(client: TestClient) -> None:
+    """Tally webhook should reject requests without auth."""
+    response = client.post("/webhooks/tally", json=_TALLY_INTAKE_PAYLOAD)
+    assert response.status_code == 401
+
+
+def test_tally_intake_enqueues_job_from_webhook_fields(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Tally webhook should normalize fields and enqueue intake processing."""
+    with (
+        patch.object(api.settings, "onboarding_tally_webhook_signing_secret", None),
+        patch.object(api.settings, "onboarding_tally_allowed_form_ids", "tally-form-1"),
+        patch("five08.backend.api.enqueue_job") as mock_enqueue,
+    ):
+        mock_enqueue.return_value = Mock(id="job-tally-1")
+        response = client.post(
+            "/webhooks/tally/onboarding",
+            json=_TALLY_INTAKE_PAYLOAD,
+            headers=auth_headers,
+        )
+
+    payload = response.json()
+    assert response.status_code == 202
+    assert payload["status"] == "queued"
+    assert payload["source"] == "tally"
+    assert payload["job_id"] == "job-tally-1"
+    assert payload["email"] == "jane@example.com"
+
+    call_kwargs = mock_enqueue.call_args.kwargs
+    assert (
+        call_kwargs["idempotency_key"] == "tally:intake:jane@example.com:tally-sub-42"
+    )
+    intake_payload = call_kwargs["args"][0]
+    assert intake_payload["source"] == "tally"
+    assert intake_payload["form_id"] == "tally-form-1"
+    assert intake_payload["email"] == "jane@example.com"
+    assert intake_payload["first_name"] == "Jane"
+    assert intake_payload["last_name"] == "Doe"
+    assert intake_payload["native_name"] == "Jane Doe Native"
+    assert intake_payload["discord_username"] == "jane508"
+    assert intake_payload["github_username"] == "https://github.com/janedoe"
+    assert intake_payload["website_link"] == "portfolio.example.com"
+    assert (
+        intake_payload["resume_url"]
+        == "https://storage.googleapis.com/tally/resume.pdf"
+    )
+    assert intake_payload["resume_file_name"] == "Jane_Doe_Resume.pdf"
+    assert intake_payload["primary_role"] == "Developer"
+    assert intake_payload["ideal_weekly_hours"] == "8-10"
+    assert intake_payload["rate_range"] == "$80-120"
+    assert intake_payload["availability"] == "Weekdays after 5pm Pacific"
+    assert len(intake_payload["raw_tally_fields"]) == len(
+        _TALLY_INTAKE_PAYLOAD["data"]["fields"]
+    )
+
+
+def test_tally_intake_accepts_valid_tally_signature(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tally signature auth should work without the generic webhook secret header."""
+    monkeypatch.setattr(
+        api.settings,
+        "onboarding_tally_webhook_signing_secret",
+        "signing-secret",
+    )
+    monkeypatch.setattr(
+        api.settings, "onboarding_tally_allowed_form_ids", "tally-form-1"
+    )
+    body = json.dumps(_TALLY_INTAKE_PAYLOAD, separators=(",", ":")).encode("utf-8")
+    signature = base64.b64encode(
+        hmac.new(b"signing-secret", body, hashlib.sha256).digest()
+    ).decode("ascii")
+
+    with patch("five08.backend.api.enqueue_job") as mock_enqueue:
+        mock_enqueue.return_value = Mock(id="job-tally-1")
+        response = client.post(
+            "/webhooks/tally",
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "Tally-Signature": signature,
+            },
+        )
+
+    assert response.status_code == 202
+    mock_enqueue.assert_called_once()
+
+
+def test_tally_intake_rejects_invalid_tally_signature(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Configured Tally signature auth should reject invalid signatures."""
+    monkeypatch.setattr(
+        api.settings,
+        "onboarding_tally_webhook_signing_secret",
+        "signing-secret",
+    )
+
+    with patch("five08.backend.api.enqueue_job") as mock_enqueue:
+        response = client.post(
+            "/webhooks/tally",
+            json=_TALLY_INTAKE_PAYLOAD,
+            headers={"Tally-Signature": "invalid"},
+        )
+
+    assert response.status_code == 401
+    mock_enqueue.assert_not_called()
+
+
+def test_tally_intake_rejects_unapproved_form_id(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Unapproved Tally form IDs should be rejected."""
+    with (
+        patch.object(api.settings, "onboarding_tally_webhook_signing_secret", None),
+        patch.object(
+            api.settings, "onboarding_tally_allowed_form_ids", "approved-form"
+        ),
+        patch("five08.backend.api.enqueue_job") as mock_enqueue,
+    ):
+        response = client.post(
+            "/webhooks/tally",
+            json=_TALLY_INTAKE_PAYLOAD,
+            headers=auth_headers,
+        )
+
+    assert response.status_code == 403
+    assert response.json()["error"] == "invalid_form_id"
+    mock_enqueue.assert_not_called()

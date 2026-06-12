@@ -175,6 +175,16 @@ type ProfileStatus = {
   skills_count?: number
 }
 
+type IntakeSubmission = {
+  source?: string
+  form_id?: string
+  submission_id?: string
+  submitted_at?: string
+  created_at?: string
+  normalized_payload?: Record<string, unknown>
+  raw_payload?: Record<string, unknown>
+}
+
 type Person = {
   crm_contact_id?: string
   name?: string
@@ -200,6 +210,7 @@ type Person = {
   onboarding_email_recipient?: string
   sync_status?: string
   profile_status?: ProfileStatus
+  latest_intake_submission?: IntakeSubmission
 }
 
 type OnboardingEmailTriState = "yes" | "no" | "unknown"
@@ -1842,8 +1853,10 @@ function App() {
       )
       setConfigurationItems(payload.items)
       showToast(`Saved ${key}`, "ok")
+      return true
     } catch (error) {
       showError(error, `Unable to save ${key}`)
+      return false
     } finally {
       setBusy(`configuration:${key}`, false)
     }
@@ -5989,6 +6002,27 @@ function companyEmailFromPerson(person: Person) {
   return email.toLowerCase().endsWith("@508.dev") ? email : ""
 }
 
+function intakePayloadValue(submission: IntakeSubmission | undefined, key: string): string {
+  const value = submission?.normalized_payload?.[key]
+  if (value === null || value === undefined) return ""
+  if (typeof value === "string") return value.trim()
+  if (typeof value === "number" || typeof value === "boolean") return String(value)
+  if (Array.isArray(value)) return value.map((item) => String(item)).join(", ")
+  return ""
+}
+
+function intakeSummaryItems(submission: IntakeSubmission | undefined) {
+  if (!submission?.normalized_payload) return []
+  return [
+    ["Native name", intakePayloadValue(submission, "native_name")],
+    ["Weekly hours", intakePayloadValue(submission, "ideal_weekly_hours")],
+    ["Chat times", intakePayloadValue(submission, "availability")],
+    ["Rate", intakePayloadValue(submission, "rate_range")],
+    ["Interest", intakePayloadValue(submission, "top_question_about_508")],
+    ["Skills/interests", intakePayloadValue(submission, "primary_skills_interests")],
+  ].filter(([, value]) => value)
+}
+
 function EngineerSetupPanel({
   loading,
   onSetup,
@@ -6308,6 +6342,8 @@ function OnboardingRow({
   ].filter(([, ok]) => !ok)
   const contactUrl = crmContactUrl(person.crm_contact_id)
   const resumeUrl = crmAttachmentUrl(person.latest_resume_id)
+  const intakeSubmission = person.latest_intake_submission
+  const intakeItems = intakeSummaryItems(intakeSubmission)
   const emailSentAt = emailDraft?.onboarding_email_sent_at || person.onboarding_email_sent_at
   const emailSentBy = emailDraft?.onboarding_email_sent_by || person.onboarding_email_sent_by
   const emailSentRecipient =
@@ -6371,6 +6407,31 @@ function OnboardingRow({
           <div className="text-sm text-muted-foreground">
             {person.email_508 || person.email || ""}
           </div>
+          {intakeSubmission ? (
+            <details className="mt-2 rounded-md border bg-secondary/30 px-2 py-1 text-xs">
+              <summary className="cursor-pointer font-extrabold">
+                Application
+                {intakeSubmission.source ? ` via ${intakeSubmission.source}` : ""}
+                {intakeSubmission.submitted_at
+                  ? ` | ${formatDate(intakeSubmission.submitted_at)}`
+                  : ""}
+              </summary>
+              <div className="mt-2 grid gap-1 text-muted-foreground">
+                {intakeItems.length > 0 ? (
+                  intakeItems.map(([label, value]) => (
+                    <span key={label}>
+                      <strong className="text-foreground">{label}:</strong> {value}
+                    </span>
+                  ))
+                ) : (
+                  <span>No extra application fields.</span>
+                )}
+                {intakeSubmission.submission_id ? (
+                  <span>Submission {intakeSubmission.submission_id}</span>
+                ) : null}
+              </div>
+            </details>
+          ) : null}
         </TableCell>
         <TableCell>
           <div className="grid max-w-56 gap-2">
@@ -7113,7 +7174,7 @@ function ConfigurationView({
   loading: Record<string, boolean>
   canWrite: boolean
   onRefresh: () => void
-  onSave: (key: string, value: string) => void
+  onSave: (key: string, value: string) => Promise<boolean>
   onClear: (key: string) => void
   focusCategory?: string
   focusNonce?: number
@@ -7121,6 +7182,7 @@ function ConfigurationView({
   const [selectedCategory, setSelectedCategory] = useState("All")
   const [highlightedCategory, setHighlightedCategory] = useState("")
   const [drafts, setDrafts] = useState<Record<string, string>>({})
+  const [generatedSecrets, setGeneratedSecrets] = useState<Record<string, string>>({})
   const categories = useMemo(() => {
     const present = new Set(items.map((item) => item.category))
     const known = configurationGroups.filter((group) => present.has(group.category))
@@ -7194,10 +7256,13 @@ function ConfigurationView({
     setSelectedCategory(focusCategory)
     setHighlightedCategory(focusCategory)
     const frame = window.requestAnimationFrame?.(() => {
-      document.getElementById(configurationGroupId(focusCategory))?.scrollIntoView({
-        block: "start",
-        behavior: "smooth",
-      })
+      const element = document.getElementById(configurationGroupId(focusCategory))
+      if (typeof element?.scrollIntoView === "function") {
+        element.scrollIntoView({
+          block: "start",
+          behavior: "smooth",
+        })
+      }
     })
     const timeout = window.setTimeout(() => setHighlightedCategory(""), 4000)
     return () => {
@@ -7210,6 +7275,32 @@ function ConfigurationView({
     if (item.source === "env") return "ENV"
     if (item.source === "database") return "DB"
     return "Default"
+  }
+
+  function generateSigningSecret() {
+    const bytes = new Uint8Array(32)
+    window.crypto.getRandomValues(bytes)
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")
+  }
+
+  async function generateTallySigningSecret(item: ConfigurationItem) {
+    const secret = generateSigningSecret()
+    setDrafts((current) => ({ ...current, [item.key]: secret }))
+    const saved = await onSave(item.key, secret)
+    if (saved) {
+      setGeneratedSecrets((current) => ({ ...current, [item.key]: secret }))
+    }
+  }
+
+  async function copyGeneratedSecret(key: string) {
+    const secret = generatedSecrets[key]
+    if (!secret) return
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(secret)
+      return
+    }
+    const element = document.getElementById(`generatedSecret-${key}`) as HTMLInputElement | null
+    element?.select()
   }
 
   function valueInput(item: ConfigurationItem) {
@@ -7277,6 +7368,8 @@ function ConfigurationView({
     const writable = canWrite && !item.env_locked && !busy
     const draft = drafts[item.key] ?? ""
     const emptyNonSecretDraft = !item.is_secret && !draft.trim()
+    const generatedSecret = generatedSecrets[item.key] || ""
+    const showTallySecretGenerator = item.key === "ONBOARDING_TALLY_WEBHOOK_SIGNING_SECRET"
     return (
       <TableRow key={item.key}>
         <TableCell>
@@ -7320,9 +7413,69 @@ function ConfigurationView({
             ) : null}
           </div>
         </TableCell>
-        <TableCell>{valueInput(item)}</TableCell>
+        <TableCell>
+          <div className="grid gap-2">
+            {valueInput(item)}
+            {showTallySecretGenerator && generatedSecret ? (
+              <div className="grid gap-2 rounded-md border bg-secondary/30 p-2 text-xs">
+                <span className="font-extrabold">Copy this secret into Tally now.</span>
+                <Input
+                  id={`generatedSecret-${item.key}`}
+                  value={generatedSecret}
+                  readOnly
+                  className="font-mono"
+                  aria-label="Generated Tally webhook signing secret"
+                />
+                <span className="text-muted-foreground">
+                  It is only shown until this page refreshes or you dismiss it.
+                </span>
+              </div>
+            ) : null}
+          </div>
+        </TableCell>
         <TableCell>
           <div className="flex flex-wrap justify-end gap-2">
+            {showTallySecretGenerator ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => void generateTallySigningSecret(item)}
+                disabled={
+                  !writable ||
+                  item.secret_encryption_configured === false ||
+                  !window.crypto?.getRandomValues
+                }
+              >
+                Generate
+              </Button>
+            ) : null}
+            {showTallySecretGenerator && generatedSecret ? (
+              <>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void copyGeneratedSecret(item.key)}
+                >
+                  Copy
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  onClick={() =>
+                    setGeneratedSecrets((current) => {
+                      const next = { ...current }
+                      delete next[item.key]
+                      return next
+                    })
+                  }
+                >
+                  Hide
+                </Button>
+              </>
+            ) : null}
             <Button
               type="button"
               size="sm"

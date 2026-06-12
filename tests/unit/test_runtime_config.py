@@ -330,6 +330,26 @@ def test_onboarding_email_smtp_settings_are_dashboard_configurable() -> None:
     assert password.category == "Onboarding"
 
 
+def test_tally_settings_are_dashboard_configurable() -> None:
+    api_key = runtime_config_definition_for_key("ONBOARDING_TALLY_API_KEY")
+    signing_secret = runtime_config_definition_for_key(
+        "ONBOARDING_TALLY_WEBHOOK_SIGNING_SECRET"
+    )
+    allowed_forms = runtime_config_definition_for_key(
+        "ONBOARDING_TALLY_ALLOWED_FORM_IDS"
+    )
+
+    assert api_key is not None
+    assert api_key.is_secret is True
+    assert api_key.category == "Intake"
+    assert signing_secret is not None
+    assert signing_secret.is_secret is True
+    assert signing_secret.category == "Intake"
+    assert allowed_forms is not None
+    assert allowed_forms.value_type == "csv"
+    assert allowed_forms.category == "Intake"
+
+
 def test_runtime_config_list_marks_numeric_values_as_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -135,6 +135,39 @@ def test_google_forms_allowed_form_ids_parses_as_set() -> None:
     assert settings.google_forms_allowed_form_ids_set == {"form-1", "form-2", "form-3"}
 
 
+def test_tally_allowed_form_ids_parses_as_set() -> None:
+    """Allowed Tally form IDs should be parsed into a normalized set."""
+    settings = WorkerSettings(
+        espo_base_url="https://crm.test.com",
+        espo_api_key="test-key",
+        onboarding_tally_allowed_form_ids="tally-1, tally-2,,  tally-3 ",
+    )
+
+    assert settings.onboarding_tally_allowed_form_ids_set == {
+        "tally-1",
+        "tally-2",
+        "tally-3",
+    }
+
+
+def test_legacy_tally_env_aliases_still_populate_onboarding_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Existing TALLY_* env values should keep working as compatibility aliases."""
+    monkeypatch.setenv("TALLY_API_KEY", "api-key")
+    monkeypatch.setenv("TALLY_WEBHOOK_SIGNING_SECRET", "signing-secret")
+    monkeypatch.setenv("TALLY_ALLOWED_FORM_IDS", "form-1,form-2")
+
+    settings = WorkerSettings(
+        espo_base_url="https://crm.test.com",
+        espo_api_key="test-key",
+    )
+
+    assert settings.onboarding_tally_api_key == "api-key"
+    assert settings.onboarding_tally_webhook_signing_secret == "signing-secret"
+    assert settings.onboarding_tally_allowed_form_ids_set == {"form-1", "form-2"}
+
+
 def test_oidc_admin_groups_default_matches_authentik_admins() -> None:
     settings = WorkerSettings(
         espo_base_url="https://crm.test.com",
@@ -234,6 +267,15 @@ def test_intake_resume_max_redirects_must_be_non_negative() -> None:
             espo_base_url="https://crm.test.com",
             espo_api_key="test-key",
             intake_resume_max_redirects=-1,
+        )
+
+
+def test_intake_resume_virus_scan_timeout_must_be_positive() -> None:
+    with pytest.raises(ValidationError):
+        WorkerSettings(
+            espo_base_url="https://crm.test.com",
+            espo_api_key="test-key",
+            intake_resume_virus_scan_timeout_seconds=0,
         )
 
 
