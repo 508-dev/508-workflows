@@ -322,11 +322,12 @@ def test_dashboard_engagements_searches_gig_and_candidate_fields(
 
     assert rows == []
     query, params = executed[0]
-    assert "e.title ILIKE %s" in query
-    assert "array_to_string(COALESCE(e.required_skills" in query
+    assert "coalesce(e.title, '') || ' '" in query
+    assert "coalesce(array_to_string(e.required_skills, ' '), '')" in query
     assert "FROM engagement_applications search_a" in query
-    assert "search_p.latest_resume_name" in query
-    assert params == ["poster-1", *(["%Web\\_flow\\%%"] * 15), 10]
+    assert "coalesce(search_a.evaluation->>'llm_summary', '')" in query
+    assert "coalesce(search_p.latest_resume_name, '')" in query
+    assert params == ["poster-1", *(["%Web\\_flow\\%%"] * 5), 10]
 
 
 def test_due_recruiting_reminders_exclude_very_old_gigs(monkeypatch) -> None:

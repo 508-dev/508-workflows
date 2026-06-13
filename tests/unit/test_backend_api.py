@@ -3028,7 +3028,7 @@ def test_dashboard_gigs_passes_search_query(client: TestClient) -> None:
             "five08.backend.api.list_dashboard_engagements", return_value=[]
         ) as mock_gigs,
     ):
-        response = client.get("/dashboard/api/gigs?query=webflow")
+        response = client.get("/dashboard/api/gigs?query=%20webflow%20")
 
     assert response.status_code == 200
     mock_gigs.assert_called_once_with(
@@ -3038,6 +3038,49 @@ def test_dashboard_gigs_passes_search_query(client: TestClient) -> None:
         include_historical=False,
         status=None,
         query="webflow",
+        limit=100,
+    )
+
+
+def test_dashboard_gigs_rejects_oversized_search_query(client: TestClient) -> None:
+    response = client.get(f"/dashboard/api/gigs?query={'x' * 201}")
+
+    assert response.status_code == 422
+
+
+def test_dashboard_gigs_omits_whitespace_search_query(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="member@508.dev",
+        display_name="Member User",
+        groups=["Member"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+        crm_contact_id="contact-member-1",
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.list_dashboard_engagements", return_value=[]
+        ) as mock_gigs,
+    ):
+        response = client.get("/dashboard/api/gigs?query=%20%20")
+
+    assert response.status_code == 200
+    mock_gigs.assert_called_once_with(
+        api.settings,
+        viewer_discord_user_id="123456789",
+        include_all=False,
+        include_historical=False,
+        status=None,
+        query=None,
         limit=100,
     )
 

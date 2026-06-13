@@ -76,6 +76,46 @@ def _ilike_contains_pattern(value: str) -> str:
     return f"%{escaped}%"
 
 
+_DASHBOARD_ENGAGEMENT_TEXT_SEARCH_SQL = """
+(
+    coalesce(e.title, '') || ' ' ||
+    coalesce(e.body_raw, '') || ' ' ||
+    coalesce(e.body_normalized, '') || ' ' ||
+    coalesce(e.discord_channel_name, '') || ' ' ||
+    coalesce(e.posting_type, '')
+)
+"""
+
+_DASHBOARD_APPLICATION_SEARCH_SQL = """
+(
+    coalesce(search_a.crm_contact_id, '') || ' ' ||
+    coalesce(search_a.discord_user_id, '') || ' ' ||
+    coalesce(search_a.evaluation->>'crm_name', '') || ' ' ||
+    coalesce(search_a.evaluation->>'crm_email', '') || ' ' ||
+    coalesce(search_a.evaluation->>'discord_username', '') || ' ' ||
+    coalesce(search_a.evaluation->>'llm_summary', '')
+)
+"""
+
+_DASHBOARD_APPLICATION_PERSON_SEARCH_SQL = """
+(
+    coalesce(search_p.crm_contact_id, '') || ' ' ||
+    coalesce(search_p.name, '') || ' ' ||
+    coalesce(search_p.email, '') || ' ' ||
+    coalesce(search_p.email_508, '') || ' ' ||
+    coalesce(search_p.discord_user_id, '') || ' ' ||
+    coalesce(search_p.discord_username, '') || ' ' ||
+    coalesce(search_p.github_username, '') || ' ' ||
+    coalesce(search_p.contact_type, '') || ' ' ||
+    coalesce(search_p.address_country, '') || ' ' ||
+    coalesce(search_p.address_city, '') || ' ' ||
+    coalesce(search_p.address_state, '') || ' ' ||
+    coalesce(search_p.seniority, '') || ' ' ||
+    coalesce(search_p.latest_resume_name, '')
+)
+"""
+
+
 @dataclass(frozen=True)
 class DiscordEngagementInput:
     """Discord-origin gig data used to create/update an engagement."""
@@ -1052,15 +1092,11 @@ def list_dashboard_engagements(
     if normalized_query:
         like_query = _ilike_contains_pattern(normalized_query)
         conditions.append(
-            """
+            f"""
             (
-                e.title ILIKE %s ESCAPE '\\'
-                OR e.body_raw ILIKE %s ESCAPE '\\'
-                OR e.body_normalized ILIKE %s ESCAPE '\\'
-                OR e.discord_channel_name ILIKE %s ESCAPE '\\'
-                OR e.posting_type ILIKE %s ESCAPE '\\'
-                OR array_to_string(COALESCE(e.required_skills, ARRAY[]::text[]), ' ') ILIKE %s ESCAPE '\\'
-                OR array_to_string(COALESCE(e.preferred_skills, ARRAY[]::text[]), ' ') ILIKE %s ESCAPE '\\'
+                {_DASHBOARD_ENGAGEMENT_TEXT_SEARCH_SQL} ILIKE %s ESCAPE '\\'
+                OR coalesce(array_to_string(e.required_skills, ' '), '') ILIKE %s ESCAPE '\\'
+                OR coalesce(array_to_string(e.preferred_skills, ' '), '') ILIKE %s ESCAPE '\\'
                 OR EXISTS (
                     SELECT 1
                     FROM engagement_applications search_a
@@ -1078,20 +1114,14 @@ def list_dashboard_engagements(
                         )
                     WHERE search_a.engagement_id = e.id
                       AND (
-                          COALESCE(search_p.name, search_a.evaluation->>'crm_name', '') ILIKE %s ESCAPE '\\'
-                          OR COALESCE(search_p.email_508, search_a.evaluation->>'crm_email', '') ILIKE %s ESCAPE '\\'
-                          OR COALESCE(search_p.email, '') ILIKE %s ESCAPE '\\'
-                          OR COALESCE(search_p.discord_username, search_a.evaluation->>'discord_username', '') ILIKE %s ESCAPE '\\'
-                          OR COALESCE(search_p.crm_contact_id, search_a.crm_contact_id, '') ILIKE %s ESCAPE '\\'
-                          OR COALESCE(search_p.discord_user_id, search_a.discord_user_id, '') ILIKE %s ESCAPE '\\'
-                          OR COALESCE(search_p.latest_resume_name, '') ILIKE %s ESCAPE '\\'
-                          OR COALESCE(search_a.evaluation->>'llm_summary', '') ILIKE %s ESCAPE '\\'
+                          {_DASHBOARD_APPLICATION_SEARCH_SQL} ILIKE %s ESCAPE '\\'
+                          OR {_DASHBOARD_APPLICATION_PERSON_SEARCH_SQL} ILIKE %s ESCAPE '\\'
                       )
                 )
             )
             """
         )
-        params.extend([like_query] * 15)
+        params.extend([like_query] * 5)
     params.append(max(1, min(limit, 500)))
     sql = f"""
         SELECT
