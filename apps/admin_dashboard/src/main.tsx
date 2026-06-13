@@ -1,4 +1,5 @@
 import {
+  Activity,
   ArrowLeft,
   Bell,
   BriefcaseBusiness,
@@ -1120,13 +1121,13 @@ function App() {
 
   async function loadJobs() {
     setBusy("jobs", true)
-    showToast("Loading jobs")
+    showToast("Loading background tasks")
     try {
       const payload = await requestJson<Job[]>(jobsUrl())
       setJobs(payload)
-      showToast(`Loaded ${payload.length} jobs`, "ok")
+      showToast(`Loaded ${payload.length} background task${payload.length === 1 ? "" : "s"}`, "ok")
     } catch (error) {
-      showError(error, "Unable to load jobs")
+      showError(error, "Unable to load background tasks")
     } finally {
       setBusy("jobs", false)
     }
@@ -1879,7 +1880,7 @@ function App() {
       setJobDetail(detail)
       showToast(`Loaded ${jobId}`, "ok")
     } catch (error) {
-      showError(error, "Unable to load job detail")
+      showError(error, "Unable to load task detail")
     } finally {
       setBusy(`detail:${jobId}`, false)
     }
@@ -1904,7 +1905,7 @@ function App() {
         await loadJobs()
       }
     } catch (error) {
-      showError(error, "Unable to rerun job")
+      showError(error, "Unable to rerun task")
     } finally {
       setBusy(`rerun:${jobId}`, false)
     }
@@ -2413,7 +2414,7 @@ function App() {
               ["gigs", "Gigs", BriefcaseBusiness],
               ["projects", "Projects", FolderKanban],
               ["onboarding", "Onboarding", ClipboardList],
-              ["jobs", "Jobs", BriefcaseBusiness],
+              ["jobs", "Background tasks", Activity],
               ["agent", "Agent", ShieldCheck],
               ["audit", "Audit", FileClock],
               ["configuration", "Configuration", Settings],
@@ -6715,11 +6716,11 @@ function JobsView(props: {
           disabled={props.loading.jobs}
         >
           <RefreshCw />
-          Refresh jobs
+          Refresh background tasks
         </Button>
       </Card>
 
-      <section className="grid gap-3 md:grid-cols-4" aria-label="Job summary">
+      <section className="grid gap-3 md:grid-cols-4" aria-label="Background task summary">
         <Metric id="metricTotal" label="Total" value={props.jobs.length} />
         <Metric id="metricQueued" label="Queued" value={props.jobCounts.queued || 0} />
         <Metric id="metricRunning" label="Running" value={props.jobCounts.running || 0} />
@@ -6732,20 +6733,20 @@ function JobsView(props: {
 
       <Card>
         <CardHeader>
-          <CardTitle>Recent jobs</CardTitle>
+          <CardTitle>Recent background tasks</CardTitle>
         </CardHeader>
-        <Empty hidden={props.jobs.length !== 0}>No jobs match these filters.</Empty>
+        <Empty hidden={props.jobs.length !== 0}>No background tasks match these filters.</Empty>
         <div className="overflow-x-auto">
           <Table
             id="jobsTable"
             className={cn("min-w-[980px]", props.jobs.length === 0 && "hidden")}
-            aria-label="Recent jobs"
+            aria-label="Recent background tasks"
           >
             <TableHeader>
               <TableRow>
                 <SortableTableHead
                   className="w-[22%]"
-                  label="Job id"
+                  label="Task id"
                   scope="jobs"
                   sort={props.sort}
                   sortKey="job_id"
@@ -6753,7 +6754,7 @@ function JobsView(props: {
                 />
                 <SortableTableHead
                   className="w-[24%]"
-                  label="Type"
+                  label="Task type"
                   scope="jobs"
                   sort={props.sort}
                   sortKey="type"
@@ -6804,7 +6805,7 @@ function JobsView(props: {
                         type="button"
                         size="sm"
                         variant="outline"
-                        aria-label={`View details for ${job.type} job ${job.job_id}`}
+                        aria-label={`View details for ${job.type} task ${job.job_id}`}
                         onClick={() => props.onDetail(job.job_id)}
                         disabled={props.loading[`detail:${job.job_id}`]}
                       >
@@ -6814,7 +6815,7 @@ function JobsView(props: {
                         <Button
                           type="button"
                           size="sm"
-                          aria-label={`Rerun ${job.type} job ${job.job_id}`}
+                          aria-label={`Rerun ${job.type} task ${job.job_id}`}
                           onClick={() => props.onRerun(job.job_id)}
                           disabled={props.loading[`rerun:${job.job_id}`]}
                         >
@@ -6833,13 +6834,13 @@ function JobsView(props: {
       {props.jobDetail ? (
         <Card id="jobDetailPanel">
           <CardHeader>
-            <CardTitle>Job detail</CardTitle>
+            <CardTitle>Task detail</CardTitle>
             <span className="text-sm text-muted-foreground">{props.jobDetail.job_id}</span>
           </CardHeader>
           <CardContent className="grid gap-4">
             <div className="grid gap-3 md:grid-cols-2">
               {[
-                ["Type", props.jobDetail.type],
+                ["Task type", props.jobDetail.type],
                 ["Status", props.jobDetail.status],
                 ["Attempts", `${props.jobDetail.attempts}/${props.jobDetail.max_attempts}`],
                 ["Updated", formatDate(props.jobDetail.updated_at)],
