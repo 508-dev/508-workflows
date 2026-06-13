@@ -4898,7 +4898,7 @@ function GigsView(props: {
           id="gigQuery"
           value={props.query}
           autoComplete="off"
-          placeholder="Title, skill, channel, candidate"
+          placeholder="Title, gig text, #tag, @poster"
           onChange={(event) => props.setQuery(event.target.value)}
           onKeyDown={(event) => event.key === "Enter" && props.onRefresh()}
         />

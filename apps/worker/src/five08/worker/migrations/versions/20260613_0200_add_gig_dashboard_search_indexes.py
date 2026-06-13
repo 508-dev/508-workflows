@@ -30,25 +30,7 @@ def upgrade() -> None:
                 (
                     coalesce(title, '') || ' ' ||
                     coalesce(body_raw, '') || ' ' ||
-                    coalesce(body_normalized, '') || ' ' ||
-                    coalesce(discord_channel_name, '') || ' ' ||
-                    coalesce(posting_type, '')
-                ) gin_trgm_ops
-            )
-            """
-        )
-        op.execute(
-            """
-            CREATE INDEX CONCURRENTLY IF NOT EXISTS
-                idx_engagement_applications_dashboard_search_trgm
-            ON engagement_applications USING gin (
-                (
-                    coalesce(crm_contact_id, '') || ' ' ||
-                    coalesce(discord_user_id, '') || ' ' ||
-                    coalesce(evaluation->>'crm_name', '') || ' ' ||
-                    coalesce(evaluation->>'crm_email', '') || ' ' ||
-                    coalesce(evaluation->>'discord_username', '') || ' ' ||
-                    coalesce(evaluation->>'llm_summary', '')
+                    coalesce(body_normalized, '')
                 ) gin_trgm_ops
             )
             """

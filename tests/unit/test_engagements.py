@@ -274,7 +274,7 @@ def test_dashboard_engagements_can_include_historical_statuses(
     assert params == [10]
 
 
-def test_dashboard_engagements_searches_gig_and_candidate_fields(
+def test_dashboard_engagements_searches_gig_text_tags_and_poster(
     monkeypatch,
 ) -> None:
     executed: list[tuple[str, list[object]]] = []
@@ -323,11 +323,126 @@ def test_dashboard_engagements_searches_gig_and_candidate_fields(
     assert rows == []
     query, params = executed[0]
     assert "coalesce(e.title, '') || ' '" in query
+    assert "coalesce(e.body_raw, '') || ' '" in query
     assert "coalesce(array_to_string(e.required_skills, ' '), '')" in query
-    assert "FROM engagement_applications search_a" in query
-    assert "coalesce(search_a.evaluation->>'llm_summary', '')" in query
-    assert "coalesce(search_p.latest_resume_name, '')" in query
-    assert params == ["poster-1", *(["%Web\\_flow\\%%"] * 5), 10]
+    assert "coalesce(e.posted_by_discord_user_id, '')" in query
+    assert "coalesce(e.discord_channel_name" not in query
+    assert "FROM engagement_applications search_a" not in query
+    assert params == [
+        "poster-1",
+        "%Web\\_flow\\%%",
+        "%Web\\_flow\\%%",
+        "%Web\\_flow\\%%",
+        "%Web\\_flow\\%%",
+        10,
+    ]
+
+
+def test_dashboard_engagements_searches_hash_tags_without_hash(
+    monkeypatch,
+) -> None:
+    executed: list[tuple[str, list[object]]] = []
+
+    class CursorStub:
+        def __enter__(self) -> "CursorStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+        def execute(self, query: str, params: list[object]) -> None:
+            executed.append((query, params))
+
+        def fetchall(self) -> list[dict[str, str]]:
+            return []
+
+    class ConnectionStub:
+        def cursor(self, row_factory=None) -> CursorStub:  # noqa: ARG002
+            return CursorStub()
+
+        def __enter__(self) -> "ConnectionStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+    @contextmanager
+    def connection_stub():
+        yield ConnectionStub()
+
+    monkeypatch.setattr(
+        engagements,
+        "get_postgres_connection",
+        lambda _settings: connection_stub(),
+    )
+
+    rows = list_dashboard_engagements(
+        SharedSettings(),
+        viewer_discord_user_id="poster-1",
+        include_all=False,
+        query="#react",
+        limit=10,
+    )
+
+    assert rows == []
+    assert executed[0][1] == [
+        "poster-1",
+        "%#react%",
+        "%react%",
+        "%react%",
+        "%#react%",
+        10,
+    ]
+
+
+def test_dashboard_engagements_searches_poster_mentions_without_at(
+    monkeypatch,
+) -> None:
+    executed: list[tuple[str, list[object]]] = []
+
+    class CursorStub:
+        def __enter__(self) -> "CursorStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+        def execute(self, query: str, params: list[object]) -> None:
+            executed.append((query, params))
+
+        def fetchall(self) -> list[dict[str, str]]:
+            return []
+
+    class ConnectionStub:
+        def cursor(self, row_factory=None) -> CursorStub:  # noqa: ARG002
+            return CursorStub()
+
+        def __enter__(self) -> "ConnectionStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+    @contextmanager
+    def connection_stub():
+        yield ConnectionStub()
+
+    monkeypatch.setattr(
+        engagements,
+        "get_postgres_connection",
+        lambda _settings: connection_stub(),
+    )
+
+    rows = list_dashboard_engagements(
+        SharedSettings(),
+        viewer_discord_user_id="poster-1",
+        include_all=False,
+        query="@1234",
+        limit=10,
+    )
+
+    assert rows == []
+    assert executed[0][1] == ["poster-1", "%@1234%", "%@1234%", "%@1234%", "%1234%", 10]
 
 
 def test_due_recruiting_reminders_exclude_very_old_gigs(monkeypatch) -> None:

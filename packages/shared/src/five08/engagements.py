@@ -80,38 +80,7 @@ _DASHBOARD_ENGAGEMENT_TEXT_SEARCH_SQL = """
 (
     coalesce(e.title, '') || ' ' ||
     coalesce(e.body_raw, '') || ' ' ||
-    coalesce(e.body_normalized, '') || ' ' ||
-    coalesce(e.discord_channel_name, '') || ' ' ||
-    coalesce(e.posting_type, '')
-)
-"""
-
-_DASHBOARD_APPLICATION_SEARCH_SQL = """
-(
-    coalesce(search_a.crm_contact_id, '') || ' ' ||
-    coalesce(search_a.discord_user_id, '') || ' ' ||
-    coalesce(search_a.evaluation->>'crm_name', '') || ' ' ||
-    coalesce(search_a.evaluation->>'crm_email', '') || ' ' ||
-    coalesce(search_a.evaluation->>'discord_username', '') || ' ' ||
-    coalesce(search_a.evaluation->>'llm_summary', '')
-)
-"""
-
-_DASHBOARD_APPLICATION_PERSON_SEARCH_SQL = """
-(
-    coalesce(search_p.crm_contact_id, '') || ' ' ||
-    coalesce(search_p.name, '') || ' ' ||
-    coalesce(search_p.email, '') || ' ' ||
-    coalesce(search_p.email_508, '') || ' ' ||
-    coalesce(search_p.discord_user_id, '') || ' ' ||
-    coalesce(search_p.discord_username, '') || ' ' ||
-    coalesce(search_p.github_username, '') || ' ' ||
-    coalesce(search_p.contact_type, '') || ' ' ||
-    coalesce(search_p.address_country, '') || ' ' ||
-    coalesce(search_p.address_city, '') || ' ' ||
-    coalesce(search_p.address_state, '') || ' ' ||
-    coalesce(search_p.seniority, '') || ' ' ||
-    coalesce(search_p.latest_resume_name, '')
+    coalesce(e.body_normalized, '')
 )
 """
 
@@ -1091,37 +1060,19 @@ def list_dashboard_engagements(
     normalized_query = query.strip() if query is not None else ""
     if normalized_query:
         like_query = _ilike_contains_pattern(normalized_query)
+        tag_query = _ilike_contains_pattern(normalized_query.removeprefix("#"))
+        poster_query = _ilike_contains_pattern(normalized_query.removeprefix("@"))
         conditions.append(
             f"""
             (
                 {_DASHBOARD_ENGAGEMENT_TEXT_SEARCH_SQL} ILIKE %s ESCAPE '\\'
                 OR coalesce(array_to_string(e.required_skills, ' '), '') ILIKE %s ESCAPE '\\'
                 OR coalesce(array_to_string(e.preferred_skills, ' '), '') ILIKE %s ESCAPE '\\'
-                OR EXISTS (
-                    SELECT 1
-                    FROM engagement_applications search_a
-                    LEFT JOIN people search_p
-                        ON search_p.id = search_a.person_id
-                        OR (
-                            search_a.person_id IS NULL
-                            AND search_a.crm_contact_id IS NOT NULL
-                            AND search_p.crm_contact_id = search_a.crm_contact_id
-                        )
-                        OR (
-                            search_a.person_id IS NULL
-                            AND search_a.discord_user_id IS NOT NULL
-                            AND search_p.discord_user_id = search_a.discord_user_id
-                        )
-                    WHERE search_a.engagement_id = e.id
-                      AND (
-                          {_DASHBOARD_APPLICATION_SEARCH_SQL} ILIKE %s ESCAPE '\\'
-                          OR {_DASHBOARD_APPLICATION_PERSON_SEARCH_SQL} ILIKE %s ESCAPE '\\'
-                      )
-                )
+                OR coalesce(e.posted_by_discord_user_id, '') ILIKE %s ESCAPE '\\'
             )
             """
         )
-        params.extend([like_query] * 5)
+        params.extend([like_query, tag_query, tag_query, poster_query])
     params.append(max(1, min(limit, 500)))
     sql = f"""
         SELECT
