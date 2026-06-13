@@ -298,7 +298,24 @@ def _gigs_payload() -> list[dict[str, object]]:
                     "evaluation": {"llm_summary": "Strong Webflow background."},
                 }
             ],
-        }
+        },
+        {
+            "id": "44444444-4444-4444-8444-444444444444",
+            "status": "recruiting",
+            "status_label": "Recruiting",
+            "title": "React cleanup",
+            "required_skills": ["React", "QA"],
+            "preferred_skills": [],
+            "discord_guild_id": "guild-1",
+            "discord_channel_id": "channel-1",
+            "discord_channel_name": "gigs",
+            "discord_thread_id": "thread-2",
+            "posted_at": "2026-05-09T10:00:00+00:00",
+            "last_activity_at": "2026-05-09T12:00:00+00:00",
+            "application_count": 0,
+            "interested_count": 0,
+            "applications": [],
+        },
     ]
 
 
@@ -451,10 +468,49 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
 
         def gigs_route(route: Any) -> None:
             gig_list_requests.append(route.request.url)
+            query = parse_qs(urlparse(route.request.url).query)
+            search_query = query.get("query", [""])[0].casefold()
+            requested_status = query.get("status", [""])[0]
+            gigs = gigs_list_payload
+            if requested_status:
+                gigs = [gig for gig in gigs if gig.get("status") == requested_status]
+            if search_query:
+                filtered_gigs = []
+                for gig in gigs:
+                    required_skills = gig.get("required_skills", [])
+                    preferred_skills = gig.get("preferred_skills", [])
+                    applications = gig.get("applications", [])
+                    application_names = ""
+                    if isinstance(applications, list):
+                        application_names = " ".join(
+                            str(application.get("name") or "")
+                            for application in applications
+                            if isinstance(application, dict)
+                        )
+                    haystack = " ".join(
+                        [
+                            str(gig.get("title") or ""),
+                            str(gig.get("discord_channel_name") or ""),
+                            " ".join(
+                                str(skill)
+                                for skill in required_skills
+                                if isinstance(skill, str)
+                            ),
+                            " ".join(
+                                str(skill)
+                                for skill in preferred_skills
+                                if isinstance(skill, str)
+                            ),
+                            application_names,
+                        ]
+                    ).casefold()
+                    if search_query in haystack:
+                        filtered_gigs.append(gig)
+                gigs = filtered_gigs
             route.fulfill(
                 status=200,
                 content_type="application/json",
-                body=json.dumps(gigs_list_payload),
+                body=json.dumps(gigs),
             )
 
         def gig_detail_route(route: Any) -> None:
@@ -682,8 +738,13 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             page.get_by_role("link", name="Gigs").click()
             expect(page).to_have_url(f"{dashboard_server}/dashboard/gigs")
             page.get_by_text("Webflow build").wait_for()
+            page.get_by_text("React cleanup").wait_for()
             expect(page.locator("#gigStatus")).to_have_value("recruiting")
             assert any("status=recruiting" in url for url in gig_list_requests)
+            page.locator("#gigQuery").fill("webflow")
+            page.get_by_role("button", name="Search").click()
+            assert any("query=webflow" in url for url in gig_list_requests)
+            expect(page.get_by_text("React cleanup")).not_to_be_visible()
             page.get_by_role("button", name="Manage people").click()
             expect(page).to_have_url(
                 f"{dashboard_server}/dashboard/gigs/11111111-1111-4111-8111-111111111111"

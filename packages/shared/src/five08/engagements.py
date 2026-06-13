@@ -71,6 +71,11 @@ _STATUS_TOKEN_RE = re.compile(r"^\s*([A-Z][A-Z0-9_-]*)\b[:\]\)-]?\s*")
 _BRACKETED_STATUS_RE = re.compile(r"^\s*[\[(]\s*([A-Z][A-Z0-9 _-]{2,})\s*[\])]\s*")
 
 
+def _ilike_contains_pattern(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
 @dataclass(frozen=True)
 class DiscordEngagementInput:
     """Discord-origin gig data used to create/update an engagement."""
@@ -1026,6 +1031,7 @@ def list_dashboard_engagements(
     include_historical: bool = False,
     status: EngagementStatus | None = None,
     engagement_id: str | None = None,
+    query: str | None = None,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
     """Return dashboard-visible gigs with nested application summaries."""
@@ -1042,6 +1048,50 @@ def list_dashboard_engagements(
         params.append(status.value)
     elif engagement_id is None and not include_historical:
         conditions.append("e.status IN ('recruiting', 'filled', 'unknown')")
+    normalized_query = query.strip() if query is not None else ""
+    if normalized_query:
+        like_query = _ilike_contains_pattern(normalized_query)
+        conditions.append(
+            """
+            (
+                e.title ILIKE %s ESCAPE '\\'
+                OR e.body_raw ILIKE %s ESCAPE '\\'
+                OR e.body_normalized ILIKE %s ESCAPE '\\'
+                OR e.discord_channel_name ILIKE %s ESCAPE '\\'
+                OR e.posting_type ILIKE %s ESCAPE '\\'
+                OR array_to_string(COALESCE(e.required_skills, ARRAY[]::text[]), ' ') ILIKE %s ESCAPE '\\'
+                OR array_to_string(COALESCE(e.preferred_skills, ARRAY[]::text[]), ' ') ILIKE %s ESCAPE '\\'
+                OR EXISTS (
+                    SELECT 1
+                    FROM engagement_applications search_a
+                    LEFT JOIN people search_p
+                        ON search_p.id = search_a.person_id
+                        OR (
+                            search_a.person_id IS NULL
+                            AND search_a.crm_contact_id IS NOT NULL
+                            AND search_p.crm_contact_id = search_a.crm_contact_id
+                        )
+                        OR (
+                            search_a.person_id IS NULL
+                            AND search_a.discord_user_id IS NOT NULL
+                            AND search_p.discord_user_id = search_a.discord_user_id
+                        )
+                    WHERE search_a.engagement_id = e.id
+                      AND (
+                          COALESCE(search_p.name, search_a.evaluation->>'crm_name', '') ILIKE %s ESCAPE '\\'
+                          OR COALESCE(search_p.email_508, search_a.evaluation->>'crm_email', '') ILIKE %s ESCAPE '\\'
+                          OR COALESCE(search_p.email, '') ILIKE %s ESCAPE '\\'
+                          OR COALESCE(search_p.discord_username, search_a.evaluation->>'discord_username', '') ILIKE %s ESCAPE '\\'
+                          OR COALESCE(search_p.crm_contact_id, search_a.crm_contact_id, '') ILIKE %s ESCAPE '\\'
+                          OR COALESCE(search_p.discord_user_id, search_a.discord_user_id, '') ILIKE %s ESCAPE '\\'
+                          OR COALESCE(search_p.latest_resume_name, '') ILIKE %s ESCAPE '\\'
+                          OR COALESCE(search_a.evaluation->>'llm_summary', '') ILIKE %s ESCAPE '\\'
+                      )
+                )
+            )
+            """
+        )
+        params.extend([like_query] * 15)
     params.append(max(1, min(limit, 500)))
     sql = f"""
         SELECT

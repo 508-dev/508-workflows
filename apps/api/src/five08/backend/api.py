@@ -3317,6 +3317,7 @@ async def dashboard_people_handler(
 async def dashboard_gigs_handler(
     request: Request,
     status: str | None = Query(default=None),
+    query: str | None = Query(default=None),
     include_historical: bool = Query(default=False),
     limit: int = Query(default=100, ge=1, le=500),
 ) -> JSONResponse:
@@ -3349,6 +3350,7 @@ async def dashboard_gigs_handler(
         include_all=include_all,
         include_historical=include_historical and include_all,
         status=normalized_status,
+        query=query,
         limit=limit,
     )
     return JSONResponse(gigs)
