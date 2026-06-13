@@ -412,10 +412,14 @@ class IntakeFormProcessor:
 
         submitted_at = self._parse_submitted_at(payload.get("submitted_at"))
         raw_tally_fields = payload.get("raw_tally_fields")
-        raw_payload = (
-            {"fields": raw_tally_fields} if isinstance(raw_tally_fields, list) else {}
-        )
         normalized_payload = dict(payload)
+        raw_payload_candidate = normalized_payload.pop("raw_payload", None)
+        if isinstance(raw_payload_candidate, Mapping):
+            raw_payload = dict(raw_payload_candidate)
+        elif isinstance(raw_tally_fields, list):
+            raw_payload = {"fields": raw_tally_fields}
+        else:
+            raw_payload = {}
 
         try:
             with get_postgres_connection(settings) as conn:
@@ -436,8 +440,8 @@ class IntakeFormProcessor:
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (
                             source,
-                            form_id,
-                            submission_id
+                            COALESCE(form_id, ''),
+                            COALESCE(submission_id, '')
                         )
                         DO UPDATE SET
                             crm_contact_id = EXCLUDED.crm_contact_id,

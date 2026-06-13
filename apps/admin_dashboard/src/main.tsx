@@ -7296,8 +7296,12 @@ function ConfigurationView({
     const secret = generatedSecrets[key]
     if (!secret) return
     if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(secret)
-      return
+      try {
+        await navigator.clipboard.writeText(secret)
+        return
+      } catch {
+        // Fall through to selecting the visible field.
+      }
     }
     const element = document.getElementById(`generatedSecret-${key}`) as HTMLInputElement | null
     element?.select()

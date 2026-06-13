@@ -743,7 +743,10 @@ def _is_tally_webhook_authorized(request: Request, body: bytes) -> bool:
 def _validate_tally_submission(payload: TallyWebhookPayload) -> JSONResponse | None:
     allowed_form_ids = settings.onboarding_tally_allowed_form_ids_set
     if not allowed_form_ids:
-        return None
+        logger.error(
+            "Rejecting Tally webhook: onboarding Tally form allowlist is unset"
+        )
+        return JSONResponse({"error": "invalid_form_id"}, status_code=403)
 
     form_id = payload.data.form_id.strip()
     if form_id and form_id in allowed_form_ids:
@@ -2208,7 +2211,7 @@ def _list_dashboard_onboarding(
             WHERE onboarding_intake_submissions.crm_contact_id = people.crm_contact_id
                OR (
                     onboarding_intake_submissions.crm_contact_id IS NULL
-                    AND lower(onboarding_intake_submissions.email) = lower(people.email)
+                    AND onboarding_intake_submissions.email = lower(people.email)
                )
             ORDER BY
                 onboarding_intake_submissions.submitted_at DESC NULLS LAST,
@@ -7090,6 +7093,7 @@ async def tally_intake_webhook_handler(request: Request) -> JSONResponse:
             "email": email,
             "first_name": first_name,
             "last_name": last_name,
+            "raw_payload": payload_data,
             "raw_tally_fields": [
                 field.model_dump(by_alias=True, exclude_none=True)
                 for field in tally_payload.data.fields

@@ -53,12 +53,16 @@ def upgrade() -> None:
             "source IN ('google_forms', 'tally')",
             name="ck_onboarding_intake_submissions_source",
         ),
-        sa.UniqueConstraint(
+    )
+    op.create_index(
+        "uq_onboarding_intake_submissions_source_form_submission",
+        "onboarding_intake_submissions",
+        [
             "source",
-            "form_id",
-            "submission_id",
-            name="uq_onboarding_intake_submissions_source_form_submission",
-        ),
+            sa.text("COALESCE(form_id, '')"),
+            sa.text("COALESCE(submission_id, '')"),
+        ],
+        unique=True,
     )
     op.create_index(
         "idx_onboarding_intake_submissions_contact_created",
@@ -107,6 +111,10 @@ def downgrade() -> None:
     )
     op.drop_index(
         "idx_onboarding_intake_submissions_contact_created",
+        table_name="onboarding_intake_submissions",
+    )
+    op.drop_index(
+        "uq_onboarding_intake_submissions_source_form_submission",
         table_name="onboarding_intake_submissions",
     )
     op.drop_table("onboarding_intake_submissions")

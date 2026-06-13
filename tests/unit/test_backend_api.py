@@ -8709,6 +8709,7 @@ def test_tally_intake_enqueues_job_from_webhook_fields(
     assert intake_payload["ideal_weekly_hours"] == "8-10"
     assert intake_payload["rate_range"] == "$80-120"
     assert intake_payload["availability"] == "Weekdays after 5pm Pacific"
+    assert intake_payload["raw_payload"] == _TALLY_INTAKE_PAYLOAD
     assert len(intake_payload["raw_tally_fields"]) == len(
         _TALLY_INTAKE_PAYLOAD["data"]["fields"]
     )
@@ -8783,6 +8784,27 @@ def test_tally_intake_rejects_unapproved_form_id(
     ):
         response = client.post(
             "/webhooks/tally",
+            json=_TALLY_INTAKE_PAYLOAD,
+            headers=auth_headers,
+        )
+
+    assert response.status_code == 403
+    assert response.json()["error"] == "invalid_form_id"
+    mock_enqueue.assert_not_called()
+
+
+def test_tally_intake_rejects_when_form_allowlist_is_unconfigured(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Tally webhook should fail closed when no onboarding form IDs are allowed."""
+    with (
+        patch.object(api.settings, "onboarding_tally_webhook_signing_secret", None),
+        patch.object(api.settings, "onboarding_tally_allowed_form_ids", ""),
+        patch("five08.backend.api.enqueue_job") as mock_enqueue,
+    ):
+        response = client.post(
+            "/webhooks/tally/onboarding",
             json=_TALLY_INTAKE_PAYLOAD,
             headers=auth_headers,
         )

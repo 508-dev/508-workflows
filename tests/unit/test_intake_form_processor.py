@@ -155,6 +155,41 @@ def test_build_intake_updates_normalizes_primary_role() -> None:
     ]
 
 
+def test_persist_intake_submission_uses_raw_payload_and_nullable_upsert() -> None:
+    """Raw submission bodies should be persisted with the nullable-safe upsert target."""
+    processor = IntakeFormProcessor()
+    cursor = MagicMock()
+    cursor.__enter__.return_value = cursor
+    conn = MagicMock()
+    conn.__enter__.return_value = conn
+    conn.cursor.return_value = cursor
+    raw_payload = {"eventId": "evt-1", "data": {"submissionId": "sub-1"}}
+
+    with patch(
+        "five08.worker.crm.intake_form_processor.get_postgres_connection",
+        return_value=conn,
+    ):
+        processor._persist_intake_submission(
+            payload={
+                "source": "tally",
+                "email": "new@example.com",
+                "form_id": None,
+                "submission_id": None,
+                "raw_payload": raw_payload,
+                "raw_tally_fields": [{"label": "Email", "value": "new@example.com"}],
+            },
+            contact_id="contact-1",
+            email="new@example.com",
+        )
+
+    sql, params = cursor.execute.call_args.args
+    assert "COALESCE(form_id, '')" in sql
+    assert "COALESCE(submission_id, '')" in sql
+    assert params[7].obj["email"] == "new@example.com"
+    assert "raw_payload" not in params[7].obj
+    assert params[8].obj == raw_payload
+
+
 def test_build_resume_updates_includes_website_links_as_url_multiple() -> None:
     """Website links extracted from resume should be set to cWebsiteLink as an array."""
     processor = IntakeFormProcessor()

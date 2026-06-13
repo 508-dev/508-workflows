@@ -154,6 +154,9 @@ def test_legacy_tally_env_aliases_still_populate_onboarding_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Existing TALLY_* env values should keep working as compatibility aliases."""
+    monkeypatch.delenv("ONBOARDING_TALLY_API_KEY", raising=False)
+    monkeypatch.delenv("ONBOARDING_TALLY_WEBHOOK_SIGNING_SECRET", raising=False)
+    monkeypatch.delenv("ONBOARDING_TALLY_ALLOWED_FORM_IDS", raising=False)
     monkeypatch.setenv("TALLY_API_KEY", "api-key")
     monkeypatch.setenv("TALLY_WEBHOOK_SIGNING_SECRET", "signing-secret")
     monkeypatch.setenv("TALLY_ALLOWED_FORM_IDS", "form-1,form-2")

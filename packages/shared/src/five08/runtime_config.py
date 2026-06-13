@@ -483,7 +483,7 @@ _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
         attr="onboarding_tally_allowed_form_ids",
         label="Onboarding Tally allowed form IDs",
         category="Intake",
-        description="Comma-separated allowlist of Tally form IDs accepted by onboarding intake.",
+        description="Required comma-separated allowlist of Tally form IDs accepted by onboarding intake.",
         value_type="csv",
         env_names=("ONBOARDING_TALLY_ALLOWED_FORM_IDS", "TALLY_ALLOWED_FORM_IDS"),
     ),

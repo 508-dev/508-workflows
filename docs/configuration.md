@@ -50,8 +50,8 @@ for compatibility.
   `Tally-Signature` on `/webhooks/tally/onboarding`. When unset, the route falls
   back to `WEBHOOK_SHARED_SECRET` / `API_SHARED_SECRET` using the existing
   `X-API-Secret` header path.
-- `ONBOARDING_TALLY_ALLOWED_FORM_IDS`: optional comma-separated allowlist of
-  accepted onboarding Tally form IDs.
+- `ONBOARDING_TALLY_ALLOWED_FORM_IDS`: comma-separated allowlist of accepted
+  onboarding Tally form IDs. Tally intake fails closed when this is unset.
 - `INTAKE_RESUME_REQUIRE_VIRUS_SCAN`: when true, downloaded resume files are not
   parsed unless the malware scan command succeeds.
 - `INTAKE_RESUME_VIRUS_SCAN_COMMAND`: command used to scan downloaded resumes.
