@@ -6982,10 +6982,11 @@ async def google_forms_intake_webhook_handler(request: Request) -> JSONResponse:
     try:
         payload = GoogleFormsIntakePayload.model_validate(payload_data)
     except (ValidationError, TypeError) as exc:
-        return JSONResponse(
-            {"error": "invalid_payload", "detail": str(exc)},
-            status_code=400,
+        logger.warning(
+            "Rejecting Google Forms intake webhook: invalid payload: %s",
+            exc,
         )
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
 
     form_validation_error = _validate_google_forms_submission(payload)
     if form_validation_error is not None:
@@ -7051,10 +7052,8 @@ async def tally_intake_webhook_handler(request: Request) -> JSONResponse:
     try:
         tally_payload = TallyWebhookPayload.model_validate(payload_data)
     except (ValidationError, TypeError) as exc:
-        return JSONResponse(
-            {"error": "invalid_payload", "detail": str(exc)},
-            status_code=400,
-        )
+        logger.warning("Rejecting Tally webhook: invalid payload: %s", exc)
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
 
     if tally_payload.event_type != "FORM_RESPONSE":
         return JSONResponse(
@@ -7075,10 +7074,11 @@ async def tally_intake_webhook_handler(request: Request) -> JSONResponse:
             _tally_to_intake_payload(tally_payload)
         )
     except (ValidationError, TypeError) as exc:
-        return JSONResponse(
-            {"error": "invalid_payload", "detail": str(exc)},
-            status_code=400,
+        logger.warning(
+            "Rejecting Tally webhook: invalid normalized intake payload: %s",
+            exc,
         )
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
 
     email = (payload.email or "").strip().lower()
     first_name = (payload.first_name or "").strip()

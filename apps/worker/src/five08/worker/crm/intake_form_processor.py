@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlsplit
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import requests
 from psycopg.types.json import Jsonb
@@ -420,6 +420,15 @@ class IntakeFormProcessor:
             raw_payload = {"fields": raw_tally_fields}
         else:
             raw_payload = {}
+        form_id = self._normalize_text(payload.get("form_id"))
+        submission_id = self._normalize_text(
+            payload.get("submission_id")
+        ) or self._fallback_submission_id(
+            source=source,
+            form_id=form_id,
+            normalized_payload=normalized_payload,
+        )
+        normalized_payload["submission_id"] = submission_id
 
         try:
             with get_postgres_connection(settings) as conn:
@@ -453,8 +462,8 @@ class IntakeFormProcessor:
                         (
                             uuid4(),
                             source,
-                            self._normalize_text(payload.get("form_id")),
-                            self._normalize_text(payload.get("submission_id")),
+                            form_id,
+                            submission_id,
                             contact_id,
                             email,
                             submitted_at,
@@ -469,6 +478,25 @@ class IntakeFormProcessor:
                 mask_email(email),
                 exc,
             )
+
+    def _fallback_submission_id(
+        self,
+        *,
+        source: str,
+        form_id: str | None,
+        normalized_payload: Mapping[str, Any],
+    ) -> str:
+        payload_fingerprint = json.dumps(
+            {
+                "source": source,
+                "form_id": form_id or "",
+                "payload": normalized_payload,
+            },
+            default=str,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return f"generated:{uuid5(NAMESPACE_URL, payload_fingerprint)}"
 
     def _parse_submitted_at(self, value: Any) -> datetime | None:
         normalized = self._normalize_text(value)

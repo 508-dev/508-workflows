@@ -282,6 +282,39 @@ def test_intake_resume_virus_scan_timeout_must_be_positive() -> None:
         )
 
 
+def test_intake_resume_virus_scan_is_not_required_by_default() -> None:
+    settings = WorkerSettings(
+        espo_base_url="https://crm.test.com",
+        espo_api_key="test-key",
+    )
+
+    assert settings.intake_resume_require_virus_scan is False
+
+
+def test_intake_resume_virus_scan_requires_command_when_enabled() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="INTAKE_RESUME_VIRUS_SCAN_COMMAND must be set",
+    ):
+        WorkerSettings(
+            espo_base_url="https://crm.test.com",
+            espo_api_key="test-key",
+            intake_resume_require_virus_scan=True,
+            intake_resume_virus_scan_command="",
+        )
+
+
+def test_intake_resume_virus_scan_allows_enabled_with_command() -> None:
+    settings = WorkerSettings(
+        espo_base_url="https://crm.test.com",
+        espo_api_key="test-key",
+        intake_resume_require_virus_scan=True,
+        intake_resume_virus_scan_command="clamdscan --fdpass {path}",
+    )
+
+    assert settings.intake_resume_require_virus_scan is True
+
+
 def test_intake_resume_allowed_hostnames_normalizes_dots_and_empties() -> None:
     settings = WorkerSettings(
         espo_base_url="https://crm.test.com",

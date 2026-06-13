@@ -8566,6 +8566,7 @@ def test_google_forms_intake_rejects_blank_required_fields(
     )
     assert response.status_code == 400
     assert response.json()["error"] == "invalid_payload"
+    assert "detail" not in response.json()
 
 
 def test_google_forms_intake_idempotency_uses_submission_payload_fingerprint_when_submission_id_missing(
@@ -8632,6 +8633,7 @@ def test_google_forms_intake_rejects_invalid_payload(
     )
     assert response.status_code == 400
     assert response.json()["error"] == "invalid_payload"
+    assert "detail" not in response.json()
 
 
 def test_google_forms_intake_returns_503_on_enqueue_failure(
@@ -8660,6 +8662,52 @@ def test_tally_intake_rejects_unauthorized(client: TestClient) -> None:
     """Tally webhook should reject requests without auth."""
     response = client.post("/webhooks/tally", json=_TALLY_INTAKE_PAYLOAD)
     assert response.status_code == 401
+
+
+def test_tally_intake_rejects_invalid_webhook_payload_without_details(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Tally webhook payload validation should not expose exception details."""
+    with patch.object(api.settings, "onboarding_tally_webhook_signing_secret", None):
+        response = client.post(
+            "/webhooks/tally/onboarding",
+            json={"eventId": "evt-1", "eventType": "FORM_RESPONSE", "data": {}},
+            headers=auth_headers,
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "invalid_payload"}
+
+
+def test_tally_intake_rejects_invalid_normalized_payload_without_details(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Tally intake projection validation should not expose exception details."""
+    payload = {
+        **_TALLY_INTAKE_PAYLOAD,
+        "data": {
+            **_TALLY_INTAKE_PAYLOAD["data"],
+            "fields": [
+                field
+                for field in _TALLY_INTAKE_PAYLOAD["data"]["fields"]
+                if field["key"] != "question_email"
+            ],
+        },
+    }
+    with (
+        patch.object(api.settings, "onboarding_tally_webhook_signing_secret", None),
+        patch.object(api.settings, "onboarding_tally_allowed_form_ids", "tally-form-1"),
+    ):
+        response = client.post(
+            "/webhooks/tally/onboarding",
+            json=payload,
+            headers=auth_headers,
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "invalid_payload"}
 
 
 def test_tally_intake_enqueues_job_from_webhook_fields(

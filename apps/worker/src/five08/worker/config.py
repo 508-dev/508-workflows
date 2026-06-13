@@ -107,7 +107,7 @@ class WorkerSettings(SharedSettings):
     intake_resume_fetch_timeout_seconds: float = Field(default=20.0, gt=0)
     intake_resume_max_redirects: int = Field(default=3, ge=0)
     intake_resume_allowed_hosts: str = ""
-    intake_resume_require_virus_scan: bool = True
+    intake_resume_require_virus_scan: bool = False
     intake_resume_virus_scan_command: str = ""
     intake_resume_virus_scan_timeout_seconds: float = Field(default=30.0, gt=0)
     email_resume_allowed_extensions: str = "pdf,docx"
@@ -187,6 +187,19 @@ class WorkerSettings(SharedSettings):
         if not (self.imap_server or "").strip():
             raise ValueError(
                 "IMAP_SERVER must be set when EMAIL_RESUME_INTAKE_ENABLED=true"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_intake_resume_scan_settings(self) -> "WorkerSettings":
+        """Require a scanner command when intake resume scanning is enabled."""
+        if (
+            self.intake_resume_require_virus_scan
+            and not (self.intake_resume_virus_scan_command or "").strip()
+        ):
+            raise ValueError(
+                "INTAKE_RESUME_VIRUS_SCAN_COMMAND must be set when "
+                "INTAKE_RESUME_REQUIRE_VIRUS_SCAN=true"
             )
         return self
 
