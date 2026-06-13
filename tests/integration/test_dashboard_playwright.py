@@ -792,9 +792,9 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             page.get_by_role("heading", name="People").wait_for()
             page.get_by_text("Casey Candidate").wait_for()
 
-            page.get_by_role("link", name="Jobs").click()
+            page.get_by_role("link", name="Background tasks").click()
             expect(page).to_have_url(f"{dashboard_server}/dashboard/jobs")
-            expect(page.get_by_role("link", name="Jobs")).to_have_attribute(
+            expect(page.get_by_role("link", name="Background tasks")).to_have_attribute(
                 "aria-current", "page"
             )
 
@@ -825,16 +825,16 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
 
             page.get_by_role(
                 "button",
-                name="View details for process_docuseal_agreement_job job job-failed",
+                name="View details for process_docuseal_agreement_job task job-failed",
             ).click()
             assert detail_requested.wait(timeout=5)
-            page.get_by_role("heading", name="Job detail").wait_for()
+            page.get_by_role("heading", name="Task detail").wait_for()
             page.get_by_text('"submission_id": "sub-123"').wait_for()
             page.get_by_text('"api_key": "[redacted]"').wait_for()
 
             page.get_by_role(
                 "button",
-                name="Rerun process_docuseal_agreement_job job job-failed",
+                name="Rerun process_docuseal_agreement_job task job-failed",
             ).click()
             assert rerun_requested.wait(timeout=5)
 
