@@ -1125,7 +1125,7 @@ function App() {
     try {
       const payload = await requestJson<Job[]>(jobsUrl())
       setJobs(payload)
-      showToast(`Loaded ${payload.length} background tasks`, "ok")
+      showToast(`Loaded ${payload.length} background task${payload.length === 1 ? "" : "s"}`, "ok")
     } catch (error) {
       showError(error, "Unable to load background tasks")
     } finally {
@@ -6716,7 +6716,7 @@ function JobsView(props: {
           disabled={props.loading.jobs}
         >
           <RefreshCw />
-          Refresh tasks
+          Refresh background tasks
         </Button>
       </Card>
 
