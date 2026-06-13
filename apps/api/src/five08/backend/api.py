@@ -699,6 +699,47 @@ def _tally_field_display_value(field: TallyWebhookField) -> Any:
     return str(value).strip() or None
 
 
+def _normalize_tally_github_username(value: object) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+
+    if text.startswith("@"):
+        text = text[1:].strip()
+
+    parse_candidate = text
+    if re.match(r"^(?:www\.)?github\.com/", text, flags=re.IGNORECASE):
+        parse_candidate = f"https://{text}"
+
+    parsed = urlparse(parse_candidate)
+    host = parsed.netloc.lower()
+    if host in {"github.com", "www.github.com"}:
+        segments = [segment for segment in parsed.path.strip("/").split("/") if segment]
+        if not segments:
+            return None
+        if segments[0].lower() in {"users", "orgs"} and len(segments) >= 2:
+            return segments[1]
+        return segments[0]
+
+    return text or None
+
+
+def _apply_tally_name_parts(mapped: dict[str, Any]) -> None:
+    if mapped.get("first_name") and mapped.get("last_name"):
+        return
+
+    name = str(mapped.get("name") or "").strip()
+    if not name:
+        return
+
+    parts = name.split()
+    if not parts:
+        return
+
+    mapped.setdefault("first_name", parts[0])
+    mapped.setdefault("last_name", " ".join(parts[1:]).strip() or "Unknown")
+
+
 def _extract_tally_file_upload(
     field: TallyWebhookField,
 ) -> tuple[str, str | None] | None:
@@ -780,8 +821,13 @@ def _tally_to_intake_payload(payload: TallyWebhookPayload) -> dict[str, Any]:
 
         value = _tally_field_display_value(field)
         if value is not None:
+            if local_key == "github_username":
+                value = _normalize_tally_github_username(value)
+            if value is None:
+                continue
             mapped[local_key] = value
 
+    _apply_tally_name_parts(mapped)
     mapped["raw_tally_fields"] = [
         field.model_dump(by_alias=True, exclude_none=True)
         for field in payload.data.fields

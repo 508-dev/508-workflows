@@ -8746,7 +8746,7 @@ def test_tally_intake_enqueues_job_from_webhook_fields(
     assert intake_payload["last_name"] == "Doe"
     assert intake_payload["native_name"] == "Jane Doe Native"
     assert intake_payload["discord_username"] == "jane508"
-    assert intake_payload["github_username"] == "https://github.com/janedoe"
+    assert intake_payload["github_username"] == "janedoe"
     assert intake_payload["website_link"] == "portfolio.example.com"
     assert (
         intake_payload["resume_url"]
@@ -8761,6 +8761,38 @@ def test_tally_intake_enqueues_job_from_webhook_fields(
     assert len(intake_payload["raw_tally_fields"]) == len(
         _TALLY_INTAKE_PAYLOAD["data"]["fields"]
     )
+
+
+def test_tally_intake_enqueues_single_token_name_and_schemeless_github(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Tally applicants with one-token names should still be persisted for review."""
+    tally_payload = json.loads(json.dumps(_TALLY_INTAKE_PAYLOAD))
+    for field in tally_payload["data"]["fields"]:
+        if field["key"] == "question_name":
+            field["value"] = "Prince"
+        if field["key"] == "question_github":
+            field["value"] = "github.com/prince"
+
+    with (
+        patch.object(api.settings, "onboarding_tally_webhook_signing_secret", None),
+        patch.object(api.settings, "onboarding_tally_allowed_form_ids", "tally-form-1"),
+        patch("five08.backend.api.enqueue_job") as mock_enqueue,
+    ):
+        mock_enqueue.return_value = Mock(id="job-tally-1")
+        response = client.post(
+            "/webhooks/tally/onboarding",
+            json=tally_payload,
+            headers=auth_headers,
+        )
+
+    assert response.status_code == 202
+    intake_payload = mock_enqueue.call_args.kwargs["args"][0]
+    assert intake_payload["name"] == "Prince"
+    assert intake_payload["first_name"] == "Prince"
+    assert intake_payload["last_name"] == "Unknown"
+    assert intake_payload["github_username"] == "prince"
 
 
 def test_tally_intake_accepts_valid_tally_signature(
