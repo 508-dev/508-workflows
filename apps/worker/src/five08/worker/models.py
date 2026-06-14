@@ -194,6 +194,7 @@ class GoogleFormsIntakePayload(BaseModel):
             "availability", "current_availability", "cAvailableTimes"
         ),
     )
+    chat_availability: str | None = Field(default=None)
     rate_range: str | None = Field(
         default=None, validation_alias=AliasChoices("rate_range", "rate", "cRateRange")
     )
@@ -379,6 +380,7 @@ class GoogleFormsIntakePayload(BaseModel):
         "primary_role",
         "seniority_level",
         "availability",
+        "chat_availability",
         "rate_range",
         "referred_by",
         "primary_skills_interests",
@@ -449,8 +451,8 @@ class GoogleFormsIntakePayload(BaseModel):
             "availability": "availability",
             "if you joined 508.dev, how many working hours per week would be ideal from co-op projects": "ideal_weekly_hours",
             "if you joined 508.dev, how many working hours per week would be ideal from co-op projects?": "ideal_weekly_hours",
-            "what would be some good times in the following weeks to have a chat with a member (according to your timezone)": "availability",
-            "what would be some good times in the following weeks to have a chat with a member (according to your timezone)?": "availability",
+            "what would be some good times in the following weeks to have a chat with a member (according to your timezone)": "chat_availability",
+            "what would be some good times in the following weeks to have a chat with a member (according to your timezone)?": "chat_availability",
             "primary skills and interests": "primary_skills_interests",
             "beyond your resume / linkedin, what would you say your primary skills and interests are": "primary_skills_interests",
             "beyond your resume / linkedin, what would you say your primary skills and interests are?": "primary_skills_interests",

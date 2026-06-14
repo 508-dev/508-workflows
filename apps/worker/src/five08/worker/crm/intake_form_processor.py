@@ -449,8 +449,8 @@ class IntakeFormProcessor:
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (
                             source,
-                            COALESCE(form_id, ''),
-                            COALESCE(submission_id, '')
+                            (COALESCE(form_id, '')),
+                            (COALESCE(submission_id, ''))
                         )
                         DO UPDATE SET
                             crm_contact_id = EXCLUDED.crm_contact_id,
@@ -551,7 +551,9 @@ class IntakeFormProcessor:
         try:
             content = self._download_resume_content(resume_url)
         except Exception as exc:
-            logger.warning("Failed to download resume_url=%s error=%s", resume_url, exc)
+            logger.warning(
+                "Failed to download resume name=%s error=%s", resume_name, exc
+            )
             return {}
 
         if not self._scan_resume_content(content, resume_name):

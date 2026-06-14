@@ -449,7 +449,7 @@ TALLY_INTAKE_FIELD_LABEL_MAP = {
     "what hourly rate range (in usd) do you normally charge for work": "rate_range",
     "how did you hear about 508.dev": "referred_by",
     "what's your interest in 508.dev / what is a top question you have about the co-op": "top_question_about_508",
-    "what would be some good times in the following weeks to have a chat with a member (according to your timezone)": "availability",
+    "what would be some good times in the following weeks to have a chat with a member (according to your timezone)": "chat_availability",
     "beyond your resume / linkedin, what would you say your primary skills and interests are": "primary_skills_interests",
 }
 

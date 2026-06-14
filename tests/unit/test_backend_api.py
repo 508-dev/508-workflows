@@ -8756,7 +8756,8 @@ def test_tally_intake_enqueues_job_from_webhook_fields(
     assert intake_payload["primary_role"] == "Developer"
     assert intake_payload["ideal_weekly_hours"] == "8-10"
     assert intake_payload["rate_range"] == "$80-120"
-    assert intake_payload["availability"] == "Weekdays after 5pm Pacific"
+    assert "availability" not in intake_payload
+    assert intake_payload["chat_availability"] == "Weekdays after 5pm Pacific"
     assert intake_payload["raw_payload"] == _TALLY_INTAKE_PAYLOAD
     assert len(intake_payload["raw_tally_fields"]) == len(
         _TALLY_INTAKE_PAYLOAD["data"]["fields"]

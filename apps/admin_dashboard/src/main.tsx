@@ -6017,7 +6017,11 @@ function intakeSummaryItems(submission: IntakeSubmission | undefined) {
   return [
     ["Native name", intakePayloadValue(submission, "native_name")],
     ["Weekly hours", intakePayloadValue(submission, "ideal_weekly_hours")],
-    ["Chat times", intakePayloadValue(submission, "availability")],
+    [
+      "Chat times",
+      intakePayloadValue(submission, "chat_availability") ||
+        intakePayloadValue(submission, "availability"),
+    ],
     ["Rate", intakePayloadValue(submission, "rate_range")],
     ["Interest", intakePayloadValue(submission, "top_question_about_508")],
     ["Skills/interests", intakePayloadValue(submission, "primary_skills_interests")],

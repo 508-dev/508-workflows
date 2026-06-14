@@ -184,8 +184,8 @@ def test_persist_intake_submission_uses_raw_payload_and_nullable_upsert() -> Non
 
     sql, params = cursor.execute.call_args.args
     first_generated_submission_id = params[3]
-    assert "COALESCE(form_id, '')" in sql
-    assert "COALESCE(submission_id, '')" in sql
+    assert "(COALESCE(form_id, ''))" in sql
+    assert "(COALESCE(submission_id, ''))" in sql
     assert first_generated_submission_id.startswith("generated:")
     assert params[7].obj["email"] == "new@example.com"
     assert params[7].obj["submission_id"] == first_generated_submission_id
