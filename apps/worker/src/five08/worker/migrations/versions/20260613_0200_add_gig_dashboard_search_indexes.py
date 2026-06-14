@@ -40,6 +40,8 @@ def upgrade() -> None:
 def downgrade() -> None:
     """Remove dashboard gig search trigram indexes."""
     with op.get_context().autocommit_block():
+        # Skill tag search remains unindexed here because array_to_string(text[], ...)
+        # cannot be used in an expression index on this Postgres setup.
         op.execute(
             """
             DROP INDEX CONCURRENTLY IF EXISTS
