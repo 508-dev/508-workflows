@@ -429,6 +429,34 @@ def test_format_newsletter_sync_warning_reports_suppressed_skips() -> None:
     assert warning == "brevo skipped 1 suppressed contact(s)"
 
 
+def test_format_newsletter_sync_warning_redacts_failure_emails() -> None:
+    warning = format_newsletter_sync_warning(
+        {
+            "providers": {
+                "keila": {
+                    "failed": 1,
+                    "failures": [
+                        {
+                            "email": "jane@example.com",
+                            "error": (
+                                "lookup failed for jane@example.com at "
+                                "/contacts/jane%40example.com"
+                            ),
+                        }
+                    ],
+                }
+            }
+        }
+    )
+
+    assert warning == (
+        "keila failed for 1 contact(s): lookup failed for [redacted-email] "
+        "at /contacts/[redacted-email]"
+    )
+    assert "jane@example.com" not in warning
+    assert "jane%40example.com" not in warning
+
+
 def test_sync_newsletter_contacts_uses_first_email_as_default_mailbox_pointer() -> None:
     result = sync_newsletter_contacts(
         _settings(brevo_api_key=None),

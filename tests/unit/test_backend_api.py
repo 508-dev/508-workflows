@@ -7039,6 +7039,9 @@ def test_dashboard_sync_newsletters_workflows_engineer_is_dry_run(
     assert response.json()["would_enqueue"]["job_type"] == (
         "sync_508_members_newsletters_job"
     )
+    assert response.json()["would_enqueue"]["idempotency_key_pattern"] == (
+        "newsletter-sync:508-members:dashboard:<timestamp>:<uuid>"
+    )
     mock_enqueue.assert_not_called()
     mock_insert.assert_not_called()
 

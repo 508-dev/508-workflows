@@ -6683,7 +6683,7 @@ async def dashboard_sync_newsletters_handler(request: Request) -> JSONResponse:
                     "queue": settings.redis_queue_name,
                     "job_type": "sync_508_members_newsletters_job",
                     "reason": "dashboard",
-                    "idempotency_key_pattern": "newsletter-sync:508-members:dashboard:<timestamp>",
+                    "idempotency_key_pattern": "newsletter-sync:508-members:dashboard:<timestamp>:<uuid>",
                 },
             }
         )

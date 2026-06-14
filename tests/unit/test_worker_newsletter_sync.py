@@ -25,7 +25,10 @@ def test_sync_508_members_newsletters_job_masks_failure_emails(
                         "failures": [
                             {
                                 "email": "jane@example.com",
-                                "error": "provider unavailable for jane@example.com",
+                                "error": (
+                                    "provider unavailable for /contacts/"
+                                    "jane%40example.com"
+                                ),
                             }
                         ]
                     },
@@ -53,7 +56,7 @@ def test_sync_508_members_newsletters_job_masks_failure_emails(
                 "failures": [
                     {
                         "email": "j***@e****...",
-                        "error": "provider unavailable for j***@e****...",
+                        "error": ("provider unavailable for /contacts/j***@e****..."),
                     }
                 ]
             },

@@ -9,6 +9,7 @@ from five08.clients.brevo import BrevoClient
 from five08.clients.espo import EspoAPIError, EspoClient
 from five08.clients.keila import KeilaClient
 from five08.clients.migadu import MigaduClient, MigaduMailbox
+from five08.redaction import redact_email_addresses
 
 CRM_BLOCKED_TYPES = {"inactive member", "rejected", "blocked"}
 CRM_BLOCKED_ONBOARDING_STATES = {"rejected", "waitlist"}
@@ -432,7 +433,7 @@ def format_newsletter_sync_warning(result: dict[str, Any]) -> str | None:
         failures = provider_result.get("failures")
         if failed and isinstance(failures, list) and failures:
             detail = "; ".join(
-                f"{item.get('email')}: {item.get('error')}"
+                redact_email_addresses(str(item.get("error") or "unknown error"))
                 for item in failures[:3]
                 if isinstance(item, dict)
             )
