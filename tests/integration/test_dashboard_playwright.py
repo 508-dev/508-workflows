@@ -479,18 +479,9 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
                 for gig in gigs:
                     required_skills = gig.get("required_skills", [])
                     preferred_skills = gig.get("preferred_skills", [])
-                    applications = gig.get("applications", [])
-                    application_names = ""
-                    if isinstance(applications, list):
-                        application_names = " ".join(
-                            str(application.get("name") or "")
-                            for application in applications
-                            if isinstance(application, dict)
-                        )
                     haystack = " ".join(
                         [
                             str(gig.get("title") or ""),
-                            str(gig.get("discord_channel_name") or ""),
                             " ".join(
                                 str(skill)
                                 for skill in required_skills
@@ -501,7 +492,6 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
                                 for skill in preferred_skills
                                 if isinstance(skill, str)
                             ),
-                            application_names,
                         ]
                     ).casefold()
                     if search_query in haystack:
@@ -642,7 +632,7 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             ),
             gig_application_add_route,
         )
-        page.route("**/dashboard/api/gigs?*", gigs_route)
+        page.route(re.compile(".*/dashboard/api/gigs(?:\\?.*)?$"), gigs_route)
         page.route("**/dashboard/api/sync/people", sync_route)
 
         try:
