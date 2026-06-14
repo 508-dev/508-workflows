@@ -151,6 +151,7 @@ class GoogleFormsIntakePayload(BaseModel):
         default=None,
         validation_alias=AliasChoices("last_name", "lastName", "last name"),
     )
+    last_name_is_placeholder: bool = False
     name: str | None = Field(
         default=None, validation_alias=AliasChoices("name", "full name", "full_name")
     )

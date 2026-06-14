@@ -737,7 +737,14 @@ def _apply_tally_name_parts(mapped: dict[str, Any]) -> None:
         return
 
     mapped.setdefault("first_name", parts[0])
-    mapped.setdefault("last_name", " ".join(parts[1:]).strip() or "Unknown")
+    last_name = " ".join(parts[1:]).strip()
+    if last_name:
+        mapped.setdefault("last_name", last_name)
+        return
+
+    if "last_name" not in mapped:
+        mapped["last_name"] = "Unknown"
+        mapped["last_name_is_placeholder"] = True
 
 
 def _extract_tally_file_upload(

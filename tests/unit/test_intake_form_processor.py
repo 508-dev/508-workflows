@@ -113,6 +113,83 @@ def test_intake_form_processor_rejects_duplicate_contacts() -> None:
     assert result["error"] == "Multiple contacts found for email"
 
 
+def test_intake_form_processor_does_not_overwrite_last_name_with_placeholder() -> None:
+    """Generated placeholder last names should not be written to matched CRM contacts."""
+    processor = IntakeFormProcessor()
+    processor.api = MagicMock()
+    processor.api.request.side_effect = [
+        {
+            "list": [
+                {
+                    "id": "contact-1",
+                    "type": "Prospect",
+                    "firstName": "Existing",
+                    "lastName": "Real",
+                }
+            ]
+        },
+        {},
+    ]
+
+    with patch.object(processor, "_persist_intake_submission") as mock_persist:
+        result = processor.process_intake(
+            payload={
+                "email": "existing@example.com",
+                "first_name": "Prince",
+                "last_name": "Unknown",
+                "last_name_is_placeholder": True,
+                "github_username": "prince",
+                "form_id": "form-1",
+            }
+        )
+
+    assert result["success"] is True
+    update_payload = processor.api.request.call_args_list[1].args[2]
+    assert update_payload["firstName"] == "Prince"
+    assert update_payload["cGitHubUsername"] == "prince"
+    assert "lastName" not in update_payload
+    mock_persist.assert_called_once()
+
+
+def test_intake_form_processor_persists_placeholder_name_without_crm_create() -> None:
+    """New single-token applicants should be queued for review instead of fake CRM create."""
+    processor = IntakeFormProcessor()
+    processor.api = MagicMock()
+    processor.api.request.return_value = {"list": []}
+
+    with patch.object(processor, "_persist_intake_submission") as mock_persist:
+        result = processor.process_intake(
+            payload={
+                "email": "new@example.com",
+                "first_name": "Prince",
+                "last_name": "Unknown",
+                "last_name_is_placeholder": True,
+                "form_id": "form-1",
+            }
+        )
+
+    assert result == {
+        "success": True,
+        "created": False,
+        "contact_id": None,
+        "updated_fields": [],
+        "pending_review": True,
+        "reason": "placeholder_last_name",
+    }
+    assert processor.api.request.call_count == 1
+    mock_persist.assert_called_once_with(
+        payload={
+            "email": "new@example.com",
+            "first_name": "Prince",
+            "last_name": "Unknown",
+            "last_name_is_placeholder": True,
+            "form_id": "form-1",
+        },
+        contact_id=None,
+        email="new@example.com",
+    )
+
+
 def test_build_intake_updates_normalizes_form_skills_to_lowercase() -> None:
     """Skill tags from form labels should be canonicalized to lowercase list values."""
     processor = IntakeFormProcessor()

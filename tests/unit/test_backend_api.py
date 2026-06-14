@@ -8793,6 +8793,7 @@ def test_tally_intake_enqueues_single_token_name_and_schemeless_github(
     assert intake_payload["name"] == "Prince"
     assert intake_payload["first_name"] == "Prince"
     assert intake_payload["last_name"] == "Unknown"
+    assert intake_payload["last_name_is_placeholder"] is True
     assert intake_payload["github_username"] == "prince"
 
 

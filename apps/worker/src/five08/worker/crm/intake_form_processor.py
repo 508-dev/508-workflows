@@ -106,6 +106,7 @@ class IntakeFormProcessor:
         email = self._normalize_text(payload.get("email"))
         first_name = self._normalize_text(payload.get("first_name"))
         last_name = self._normalize_text(payload.get("last_name"))
+        last_name_is_placeholder = bool(payload.get("last_name_is_placeholder"))
         masked_email = mask_email(email or "")
 
         if not email or not first_name or not last_name:
@@ -163,6 +164,24 @@ class IntakeFormProcessor:
             return {"success": False, "error": "CRM search failed"}
 
         if not contact_list:
+            if last_name_is_placeholder:
+                logger.info(
+                    "Persisting intake without CRM create due to placeholder last name masked_email=%s",
+                    masked_email,
+                )
+                self._persist_intake_submission(
+                    payload=payload,
+                    contact_id=None,
+                    email=email,
+                )
+                return {
+                    "success": True,
+                    "created": False,
+                    "contact_id": None,
+                    "updated_fields": [],
+                    "pending_review": True,
+                    "reason": "placeholder_last_name",
+                }
             return self._create_prospect(
                 email=email,
                 first_name=first_name,
@@ -202,6 +221,7 @@ class IntakeFormProcessor:
             last_name=last_name,
             payload=payload,
             masked_email=masked_email,
+            include_last_name=not last_name_is_placeholder,
         )
 
     def _is_member_contact(self, contact: Mapping[str, Any]) -> bool:
@@ -278,6 +298,7 @@ class IntakeFormProcessor:
         last_name: str,
         payload: Mapping[str, Any],
         masked_email: str,
+        include_last_name: bool = True,
     ) -> dict[str, Any]:
         contact_id = str(contact.get("id", "")).strip()
         if not contact_id:
@@ -290,6 +311,7 @@ class IntakeFormProcessor:
             last_name=last_name,
             payload=payload,
             include_email=False,
+            include_last_name=include_last_name,
         )
         if not updates:
             logger.info("No prospect updates needed for contact_id=%s", contact_id)
@@ -342,11 +364,11 @@ class IntakeFormProcessor:
         last_name: str,
         payload: Mapping[str, Any],
         include_email: bool = True,
+        include_last_name: bool = True,
     ) -> dict[str, Any]:
-        updates: dict[str, Any] = {
-            "firstName": first_name,
-            "lastName": last_name,
-        }
+        updates: dict[str, Any] = {"firstName": first_name}
+        if include_last_name:
+            updates["lastName"] = last_name
         if include_email:
             updates["emailAddress"] = email
 
@@ -400,7 +422,7 @@ class IntakeFormProcessor:
         self,
         *,
         payload: Mapping[str, Any],
-        contact_id: str,
+        contact_id: str | None,
         email: str,
     ) -> None:
         """Best-effort storage for source-specific fields that do not belong in CRM."""
