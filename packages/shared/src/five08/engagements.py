@@ -1060,8 +1060,10 @@ def list_dashboard_engagements(
     normalized_query = query.strip() if query is not None else ""
     if normalized_query:
         like_query = _ilike_contains_pattern(normalized_query)
-        tag_query = _ilike_contains_pattern(normalized_query.removeprefix("#"))
-        poster_query = _ilike_contains_pattern(normalized_query.removeprefix("@"))
+        tag_token = normalized_query.removeprefix("#")
+        poster_token = normalized_query.removeprefix("@")
+        tag_query = _ilike_contains_pattern(tag_token or normalized_query)
+        poster_query = _ilike_contains_pattern(poster_token or normalized_query)
         conditions.append(
             f"""
             (

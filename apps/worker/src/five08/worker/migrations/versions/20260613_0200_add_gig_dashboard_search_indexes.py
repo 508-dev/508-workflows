@@ -1,4 +1,4 @@
-"""Add trigram indexes for dashboard gig search."""
+"""Add a trigram index for dashboard gig search."""
 
 from __future__ import annotations
 
@@ -11,17 +11,11 @@ depends_on = None
 
 
 def upgrade() -> None:
-    """Index the leading-wildcard expressions used by dashboard gig search."""
+    """Index the leading-wildcard expression used by dashboard gig search."""
     op.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
     with op.get_context().autocommit_block():
         op.execute(
             "DROP INDEX CONCURRENTLY IF EXISTS idx_engagements_dashboard_search_trgm"
-        )
-        op.execute(
-            """
-            DROP INDEX CONCURRENTLY IF EXISTS
-                idx_engagement_applications_dashboard_search_trgm
-            """
         )
         op.execute(
             """
@@ -38,16 +32,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Remove dashboard gig search trigram indexes."""
+    """Remove the dashboard gig search trigram index."""
     with op.get_context().autocommit_block():
         # Skill tag search remains unindexed here because array_to_string(text[], ...)
         # cannot be used in an expression index on this Postgres setup.
-        op.execute(
-            """
-            DROP INDEX CONCURRENTLY IF EXISTS
-                idx_engagement_applications_dashboard_search_trgm
-            """
-        )
         op.execute(
             "DROP INDEX CONCURRENTLY IF EXISTS idx_engagements_dashboard_search_trgm"
         )

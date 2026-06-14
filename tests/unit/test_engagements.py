@@ -394,6 +394,17 @@ def test_dashboard_engagements_searches_hash_tags_without_hash(
         10,
     ]
 
+    rows = list_dashboard_engagements(
+        SharedSettings(),
+        viewer_discord_user_id="poster-1",
+        include_all=False,
+        query="#",
+        limit=10,
+    )
+
+    assert rows == []
+    assert executed[1][1] == ["poster-1", "%#%", "%#%", "%#%", "%#%", 10]
+
 
 def test_dashboard_engagements_searches_poster_mentions_without_at(
     monkeypatch,
@@ -443,6 +454,17 @@ def test_dashboard_engagements_searches_poster_mentions_without_at(
 
     assert rows == []
     assert executed[0][1] == ["poster-1", "%@1234%", "%@1234%", "%@1234%", "%1234%", 10]
+
+    rows = list_dashboard_engagements(
+        SharedSettings(),
+        viewer_discord_user_id="poster-1",
+        include_all=False,
+        query="@",
+        limit=10,
+    )
+
+    assert rows == []
+    assert executed[1][1] == ["poster-1", "%@%", "%@%", "%@%", "%@%", 10]
 
 
 def test_due_recruiting_reminders_exclude_very_old_gigs(monkeypatch) -> None:
