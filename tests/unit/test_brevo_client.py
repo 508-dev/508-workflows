@@ -123,10 +123,16 @@ def test_get_contact_returns_none_for_missing_contact() -> None:
     assert result is None
 
 
-@pytest.mark.parametrize("email", ["", "not-an-email"])
+@pytest.mark.parametrize("email", ["", "not-an-email", "a@b", "jane @example.com"])
 def test_get_contact_rejects_invalid_email(email: str) -> None:
     with pytest.raises(ValueError, match="full email address"):
         BrevoClient(api_key="brevo-key").get_contact(email)
+
+
+@pytest.mark.parametrize("email", ["", "not-an-email", "a@b", "jane @example.com"])
+def test_add_contact_to_list_rejects_invalid_email(email: str) -> None:
+    with pytest.raises(ValueError, match="full email address"):
+        BrevoClient(api_key="brevo-key").add_contact_to_list(email=email, list_id=4)
 
 
 def test_get_contact_truncates_error_response_body() -> None:

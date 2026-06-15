@@ -78,10 +78,20 @@ def test_get_contact_by_email_returns_none_for_missing_contact() -> None:
     assert result is None
 
 
-@pytest.mark.parametrize("email", ["", "not-an-email"])
+@pytest.mark.parametrize("email", ["", "not-an-email", "a@b", "jane @example.com"])
 def test_get_contact_by_email_rejects_invalid_email(email: str) -> None:
     with pytest.raises(ValueError, match="full email address"):
         KeilaClient(api_key="keila-key").get_contact_by_email(email)
+
+
+@pytest.mark.parametrize("email", ["", "not-an-email", "a@b", "jane @example.com"])
+def test_upsert_active_contact_rejects_invalid_email(email: str) -> None:
+    with pytest.raises(ValueError, match="full email address"):
+        KeilaClient(api_key="keila-key").upsert_active_contact(
+            email=email,
+            data={"audiences": ["508_members"]},
+            existing_contact=None,
+        )
 
 
 def test_upsert_active_contact_creates_missing_contact() -> None:
@@ -180,7 +190,7 @@ def test_upsert_active_contact_preserves_existing_contact_data() -> None:
             "email": "jane@example.com",
             "data": {
                 "form": "member-intake",
-                "audiences": ["508_members"],
+                "audiences": ["old", "508_members"],
                 "mailbox_email": "jane@example.com",
             },
         }

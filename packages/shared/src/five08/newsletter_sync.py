@@ -36,7 +36,7 @@ class NewsletterProvider(Protocol):
     name: str
 
     def ensure_contact(self, contact: NewsletterContact) -> str:
-        """Ensure contact exists, returning added/updated/already/skipped."""
+        """Ensure contact exists, returning a sync status key."""
 
 
 def _split_name(full_name: str) -> tuple[str | None, str | None]:

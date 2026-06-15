@@ -7,6 +7,7 @@ from urllib.parse import quote
 
 import requests
 
+from five08.clients.contact_email import normalize_provider_contact_email
 from five08.redaction import redact_email_addresses
 
 BREVO_API_BASE_URL = "https://api.brevo.com/v3"
@@ -46,9 +47,7 @@ class BrevoClient:
         list_id: int,
     ) -> dict[str, Any]:
         """Create or update one Brevo contact and add it to a list."""
-        normalized_email = email.strip().lower()
-        if not normalized_email or normalized_email.count("@") != 1:
-            raise ValueError("Brevo contact email must be a full email address.")
+        normalized_email = normalize_provider_contact_email(email, "Brevo")
         if list_id <= 0:
             raise ValueError("Brevo list ID must be a positive integer.")
 
@@ -94,9 +93,7 @@ class BrevoClient:
 
     def get_contact(self, email: str) -> dict[str, Any] | None:
         """Return one Brevo contact by email, or None when it does not exist."""
-        normalized_email = email.strip().lower()
-        if not normalized_email or normalized_email.count("@") != 1:
-            raise ValueError("Brevo contact email must be a full email address.")
+        normalized_email = normalize_provider_contact_email(email, "Brevo")
         headers = {
             "Accept": "application/json",
             "api-key": self.api_key,

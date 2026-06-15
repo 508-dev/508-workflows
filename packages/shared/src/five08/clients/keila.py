@@ -7,6 +7,7 @@ from urllib.parse import quote
 
 import requests
 
+from five08.clients.contact_email import normalize_provider_contact_email
 from five08.redaction import redact_email_addresses
 
 KEILA_API_BASE_URL = "https://app.keila.io"
@@ -42,9 +43,7 @@ class KeilaClient:
 
     def get_contact_by_email(self, email: str) -> dict[str, Any] | None:
         """Return one Keila contact by email, or None when it does not exist."""
-        normalized_email = email.strip().lower()
-        if not normalized_email or normalized_email.count("@") != 1:
-            raise ValueError("Keila contact email must be a full email address.")
+        normalized_email = normalize_provider_contact_email(email, "Keila")
         response = self._request(
             "GET",
             f"/api/v1/contacts/{quote(normalized_email, safe='')}",
@@ -63,9 +62,7 @@ class KeilaClient:
         existing_contact: dict[str, Any] | None | object = _EXISTING_CONTACT_UNSET,
     ) -> dict[str, Any]:
         """Create or update a Keila contact without changing suppressed statuses."""
-        normalized_email = email.strip().lower()
-        if not normalized_email or normalized_email.count("@") != 1:
-            raise ValueError("Keila contact email must be a full email address.")
+        normalized_email = normalize_provider_contact_email(email, "Keila")
 
         payload: dict[str, Any] = {
             "email": normalized_email,
@@ -95,10 +92,7 @@ class KeilaClient:
             )
         contact_id = str(contact_id_value)
         existing_data = existing.get("data")
-        payload["data"] = {
-            **(existing_data if isinstance(existing_data, dict) else {}),
-            **(data or {}),
-        }
+        payload["data"] = _merge_contact_data(existing_data, data or {})
         payload.pop("status", None)
         return (
             self._request(
@@ -157,3 +151,25 @@ class KeilaClient:
         if isinstance(nested, dict):
             return nested
         return data
+
+
+def _merge_contact_data(
+    existing_data: object,
+    new_data: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge Keila contact data while preserving existing audience tags."""
+    existing = existing_data if isinstance(existing_data, dict) else {}
+    merged = {**existing, **new_data}
+    existing_audiences = existing.get("audiences")
+    new_audiences = new_data.get("audiences")
+    if isinstance(existing_audiences, list) and isinstance(new_audiences, list):
+        merged["audiences"] = _unique_values([*existing_audiences, *new_audiences])
+    return merged
+
+
+def _unique_values(values: list[Any]) -> list[Any]:
+    unique: list[Any] = []
+    for value in values:
+        if value not in unique:
+            unique.append(value)
+    return unique
