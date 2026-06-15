@@ -183,10 +183,10 @@ type IntakeSubmission = {
   submitted_at?: string
   created_at?: string
   normalized_payload?: Record<string, unknown>
-  raw_payload?: Record<string, unknown>
 }
 
 type Person = {
+  id?: string
   crm_contact_id?: string
   name?: string
   email?: string
@@ -5945,7 +5945,12 @@ function OnboardingView(props: {
             <TableBody id="onboardingBody">
               {props.people.map((person) => (
                 <OnboardingRow
-                  key={person.crm_contact_id || person.name}
+                  key={
+                    person.crm_contact_id ||
+                    person.latest_intake_submission?.submission_id ||
+                    person.email ||
+                    person.name
+                  }
                   person={person}
                   loading={props.loading}
                   canWrite={props.canWrite}
@@ -6339,6 +6344,7 @@ function OnboardingRow({
   })
   useEffect(() => setValue(displayOnboarder(person.onboarder)), [person.onboarder])
   const currentStatus = normalizedOnboardingStatusValue(onboardingStateValue(person))
+  const hasCrmContact = Boolean(person.crm_contact_id)
   const status = person.profile_status || {}
   const gaps = [
     ["Discord", status.discord_linked],
@@ -6412,6 +6418,11 @@ function OnboardingRow({
           <div className="text-sm text-muted-foreground">
             {person.email_508 || person.email || ""}
           </div>
+          {!hasCrmContact ? (
+            <div className="mt-1">
+              <Badge variant="missing">Application only</Badge>
+            </div>
+          ) : null}
           {intakeSubmission ? (
             <details className="mt-2 rounded-md border bg-secondary/30 px-2 py-1 text-xs">
               <summary className="cursor-pointer font-extrabold">
@@ -6444,7 +6455,7 @@ function OnboardingRow({
               {person.onboarding_status_label ||
                 labelForOnboardingState(onboardingStateValue(person))}
             </Badge>
-            {canWrite ? (
+            {canWrite && hasCrmContact ? (
               <Select
                 aria-label={`Onboarding status for ${displayName}`}
                 value={currentStatus}
@@ -6477,13 +6488,14 @@ function OnboardingRow({
               aria-label={`Onboarder for ${displayName}`}
               value={value}
               placeholder="508 username"
+              disabled={!hasCrmContact}
               onChange={(event) => setValue(event.target.value)}
             />
             <Button
               type="submit"
               size="sm"
               aria-label={`Save onboarder for ${displayName}`}
-              disabled={loading[`onboarder:${person.crm_contact_id}`]}
+              disabled={!hasCrmContact || loading[`onboarder:${person.crm_contact_id}`]}
             >
               Save
             </Button>
@@ -6503,7 +6515,7 @@ function OnboardingRow({
             {emailSentBy ? (
               <span className="text-xs text-muted-foreground">By {emailSentBy}</span>
             ) : null}
-            {canWrite ? (
+            {canWrite && hasCrmContact ? (
               <Button
                 type="button"
                 size="sm"

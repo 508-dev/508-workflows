@@ -433,8 +433,8 @@ class IntakeFormProcessor:
             source = "google_forms"
 
         submitted_at = self._parse_submitted_at(payload.get("submitted_at"))
-        raw_tally_fields = payload.get("raw_tally_fields")
         normalized_payload = dict(payload)
+        raw_tally_fields = normalized_payload.pop("raw_tally_fields", None)
         raw_payload_candidate = normalized_payload.pop("raw_payload", None)
         if isinstance(raw_payload_candidate, Mapping):
             raw_payload = dict(raw_payload_candidate)

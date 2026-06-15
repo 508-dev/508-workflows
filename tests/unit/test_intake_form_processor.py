@@ -267,6 +267,7 @@ def test_persist_intake_submission_uses_raw_payload_and_nullable_upsert() -> Non
     assert params[7].obj["email"] == "new@example.com"
     assert params[7].obj["submission_id"] == first_generated_submission_id
     assert "raw_payload" not in params[7].obj
+    assert "raw_tally_fields" not in params[7].obj
     assert params[8].obj == raw_payload
 
     with patch(

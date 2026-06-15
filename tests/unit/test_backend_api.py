@@ -2963,6 +2963,92 @@ def test_dashboard_onboarding_returns_filtered_queue(client: TestClient) -> None
     )
 
 
+def test_list_dashboard_onboarding_includes_orphan_intake_without_raw_payload() -> None:
+    created_at = datetime(2026, 6, 15, 10, 0, tzinfo=timezone.utc)
+    cursor = Mock()
+    cursor.__enter__ = Mock(return_value=cursor)
+    cursor.__exit__ = Mock(return_value=None)
+    cursor.fetchall.side_effect = [
+        [],
+        [
+            {
+                "id": "intake-1",
+                "crm_contact_id": None,
+                "name": "Prince",
+                "email": "prince@example.com",
+                "email_508": None,
+                "discord_user_id": None,
+                "discord_username": "prince#1234",
+                "discord_roles": [],
+                "github_username": "prince",
+                "contact_type": "Prospect",
+                "is_member": False,
+                "address_country": "US",
+                "address_city": None,
+                "address_state": None,
+                "timezone": None,
+                "seniority": None,
+                "linkedin": None,
+                "skills": ["application"],
+                "latest_resume_id": None,
+                "latest_resume_name": "resume.pdf",
+                "onboarding_state": "pending",
+                "onboarder": None,
+                "onboarding_updated_at": created_at,
+                "onboarding_email_sent_at": None,
+                "onboarding_email_sent_by": None,
+                "onboarding_email_recipient": None,
+                "latest_intake_submission": {
+                    "source": "tally",
+                    "form_id": "form-1",
+                    "submission_id": "sub-1",
+                    "submitted_at": created_at,
+                    "normalized_payload": {
+                        "name": "Prince",
+                        "email": "prince@example.com",
+                    },
+                    "raw_payload": {"secret": "should-not-return"},
+                    "created_at": created_at,
+                },
+                "sync_status": "intake",
+                "created_at": created_at,
+                "updated_at": created_at,
+            }
+        ],
+    ]
+    conn = Mock()
+    conn.__enter__ = Mock(return_value=conn)
+    conn.__exit__ = Mock(return_value=None)
+    conn.cursor.return_value = cursor
+
+    with patch("five08.backend.api.get_postgres_connection", return_value=conn):
+        queue = api._list_dashboard_onboarding(
+            query=None,
+            limit=10,
+            onboarding_state=None,
+            onboarder=None,
+            discord=None,
+            email_508=None,
+            resume=None,
+            skills=None,
+        )
+
+    assert len(queue) == 1
+    orphan = queue[0]
+    assert orphan["crm_contact_id"] is None
+    assert orphan["name"] == "Prince"
+    assert orphan["onboarding_status_label"] == "Needs review"
+    assert orphan["profile_status"]["crm_active"] is False
+    assert orphan["profile_status"]["latest_resume"] is True
+    assert orphan["latest_intake_submission"]["normalized_payload"] == {
+        "name": "Prince",
+        "email": "prince@example.com",
+    }
+    assert "raw_payload" not in orphan["latest_intake_submission"]
+    people_sql = cursor.execute.call_args_list[0].args[0]
+    assert "raw_payload" not in people_sql
+
+
 def test_dashboard_gigs_filters_member_to_own_gigs(client: TestClient) -> None:
     session = api.AuthSession(
         subject="123456789",

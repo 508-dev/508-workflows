@@ -2099,6 +2099,9 @@ def _shape_dashboard_people_rows(rows: list[dict[str, Any]]) -> list[dict[str, A
         roles = row.get("discord_roles") or []
         skills = row.get("skills") or []
         person = dict(row)
+        latest_intake_submission = person.get("latest_intake_submission")
+        if isinstance(latest_intake_submission, dict):
+            latest_intake_submission.pop("raw_payload", None)
         person["created_at"] = _datetime_or_none(row.get("created_at"))
         person["updated_at"] = _datetime_or_none(row.get("updated_at"))
         person["onboarding_updated_at"] = _datetime_or_none(
@@ -2122,6 +2125,157 @@ def _shape_dashboard_people_rows(rows: list[dict[str, Any]]) -> list[dict[str, A
         }
         people.append(person)
     return people
+
+
+_ORPHAN_INTAKE_SEARCH_SQL = """
+(
+    coalesce(email, '') || ' ' ||
+    coalesce(normalized_payload->>'name', '') || ' ' ||
+    coalesce(normalized_payload->>'first_name', '') || ' ' ||
+    coalesce(normalized_payload->>'last_name', '') || ' ' ||
+    coalesce(normalized_payload->>'github_username', '') || ' ' ||
+    coalesce(normalized_payload->>'linkedin_url', '')
+)
+"""
+
+_ORPHAN_INTAKE_RESUME_SQL = """
+coalesce(
+    nullif(btrim(normalized_payload->>'resume_file_name'), ''),
+    nullif(btrim(normalized_payload->>'resume_url'), '')
+)
+"""
+
+_ORPHAN_INTAKE_SKILLS_SQL = """
+coalesce(
+    nullif(btrim(normalized_payload->>'primary_skills_interests'), ''),
+    nullif(btrim(normalized_payload->>'skill_proficiency_next_js'), ''),
+    nullif(btrim(normalized_payload->>'skill_proficiency_react_native_expo'), ''),
+    nullif(btrim(normalized_payload->>'skill_proficiency_supabase'), ''),
+    nullif(btrim(normalized_payload->>'skill_proficiency_ai_ml_engineering'), ''),
+    nullif(btrim(normalized_payload->>'skill_proficiency_python_django_fastapi'), ''),
+    nullif(btrim(normalized_payload->>'skill_proficiency_wordpress'), ''),
+    nullif(btrim(normalized_payload->>'skill_proficiency_devops'), ''),
+    nullif(btrim(normalized_payload->>'skill_proficiency_crypto_blockchain'), ''),
+    nullif(btrim(normalized_payload->>'skill_proficiency_chat_bots'), ''),
+    nullif(btrim(normalized_payload->>'skill_proficiency_unity_video_game'), ''),
+    nullif(btrim(normalized_payload->>'skill_proficiency_project_management'), ''),
+    nullif(btrim(normalized_payload->>'skill_proficiency_client_management'), ''),
+    nullif(btrim(normalized_payload->>'skill_proficiency_sales_marketing'), ''),
+    nullif(
+        btrim(normalized_payload->>'skill_proficiency_internal_business_development'),
+        ''
+    )
+)
+"""
+
+
+def _list_dashboard_orphan_intake_submissions(
+    *,
+    query: str | None,
+    limit: int,
+    onboarding_state: str | None,
+    onboarder: str | None,
+    discord: str | None,
+    email_508: str | None,
+    resume: str | None,
+    skills: str | None,
+) -> list[dict[str, Any]]:
+    normalized_query = (query or "").strip()
+    if onboarding_state not in (None, "pending"):
+        return []
+    if onboarder or discord == "linked" or email_508 == "present":
+        return []
+
+    conditions: list[str] = [
+        "crm_contact_id IS NULL",
+        """
+        NOT EXISTS (
+            SELECT 1
+            FROM people
+            WHERE lower(people.email) = onboarding_intake_submissions.email
+        )
+        """,
+    ]
+    params: list[Any] = []
+
+    if normalized_query:
+        conditions.append(f"{_ORPHAN_INTAKE_SEARCH_SQL} ILIKE %s")
+        params.append(f"%{normalized_query}%")
+    if resume == "present":
+        conditions.append(f"{_ORPHAN_INTAKE_RESUME_SQL} IS NOT NULL")
+    elif resume == "missing":
+        conditions.append(f"{_ORPHAN_INTAKE_RESUME_SQL} IS NULL")
+    if skills == "present":
+        conditions.append(f"{_ORPHAN_INTAKE_SKILLS_SQL} IS NOT NULL")
+    elif skills == "missing":
+        conditions.append(f"{_ORPHAN_INTAKE_SKILLS_SQL} IS NULL")
+
+    params.append(limit)
+    where_clause = " AND ".join(conditions)
+    sql = f"""
+        SELECT
+            id::text,
+            NULL::text AS crm_contact_id,
+            coalesce(
+                nullif(btrim(normalized_payload->>'name'), ''),
+                nullif(
+                    btrim(
+                        concat_ws(
+                            ' ',
+                            normalized_payload->>'first_name',
+                            nullif(normalized_payload->>'last_name', 'Unknown')
+                        )
+                    ),
+                    ''
+                ),
+                email
+            ) AS name,
+            email,
+            NULL::text AS email_508,
+            NULL::text AS discord_user_id,
+            normalized_payload->>'discord_username' AS discord_username,
+            ARRAY[]::text[] AS discord_roles,
+            normalized_payload->>'github_username' AS github_username,
+            'Prospect' AS contact_type,
+            false AS is_member,
+            normalized_payload->>'address_country' AS address_country,
+            normalized_payload->>'address_city' AS address_city,
+            normalized_payload->>'address_state' AS address_state,
+            normalized_payload->>'timezone' AS timezone,
+            normalized_payload->>'seniority_level' AS seniority,
+            normalized_payload->>'linkedin_url' AS linkedin,
+            CASE WHEN {_ORPHAN_INTAKE_SKILLS_SQL} IS NULL
+                THEN ARRAY[]::text[]
+                ELSE ARRAY['application']::text[]
+            END AS skills,
+            NULL::text AS latest_resume_id,
+            normalized_payload->>'resume_file_name' AS latest_resume_name,
+            'pending' AS onboarding_state,
+            NULL::text AS onboarder,
+            created_at AS onboarding_updated_at,
+            NULL::timestamptz AS onboarding_email_sent_at,
+            NULL::text AS onboarding_email_sent_by,
+            NULL::text AS onboarding_email_recipient,
+            jsonb_build_object(
+                'source', source,
+                'form_id', form_id,
+                'submission_id', submission_id,
+                'submitted_at', submitted_at,
+                'normalized_payload', normalized_payload,
+                'created_at', created_at
+            ) AS latest_intake_submission,
+            'intake' AS sync_status,
+            created_at,
+            updated_at
+        FROM onboarding_intake_submissions
+        WHERE {where_clause}
+        ORDER BY submitted_at DESC NULLS LAST, created_at DESC
+        LIMIT %s
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(sql, params)
+            return cursor.fetchall()
 
 
 def _list_dashboard_onboarding(
@@ -2257,7 +2411,6 @@ def _list_dashboard_onboarding(
                 'submission_id', onboarding_intake_submissions.submission_id,
                 'submitted_at', onboarding_intake_submissions.submitted_at,
                 'normalized_payload', onboarding_intake_submissions.normalized_payload,
-                'raw_payload', onboarding_intake_submissions.raw_payload,
                 'created_at', onboarding_intake_submissions.created_at
             ) AS latest_intake_submission
             FROM onboarding_intake_submissions
@@ -2285,7 +2438,17 @@ def _list_dashboard_onboarding(
             cursor.execute(sql, params)
             rows = cursor.fetchall()
 
-    return _shape_dashboard_people_rows(rows)
+    orphan_rows = _list_dashboard_orphan_intake_submissions(
+        query=query,
+        limit=limit,
+        onboarding_state=onboarding_state,
+        onboarder=onboarder,
+        discord=discord,
+        email_508=email_508,
+        resume=resume,
+        skills=skills,
+    )
+    return _shape_dashboard_people_rows(orphan_rows + rows)[:limit]
 
 
 def _is_dashboard_onboarding_contact_eligible(contact_id: str) -> bool:
