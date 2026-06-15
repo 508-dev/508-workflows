@@ -13,6 +13,8 @@ def test_non_local_worker_requires_espo_config() -> None:
             minio_root_password="secret",
             espo_base_url="",
             espo_api_key="test-key",
+            intake_resume_require_virus_scan=True,
+            intake_resume_virus_scan_command="clamdscan --fdpass {path}",
         )
 
 
@@ -291,6 +293,19 @@ def test_intake_resume_virus_scan_is_not_required_by_default() -> None:
     assert settings.intake_resume_require_virus_scan is False
 
 
+def test_intake_resume_virus_scan_is_required_in_non_local_environments() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="INTAKE_RESUME_REQUIRE_VIRUS_SCAN must be true",
+    ):
+        WorkerSettings(
+            environment="production",
+            minio_root_password="secret",
+            espo_base_url="https://crm.test.com",
+            espo_api_key="test-key",
+        )
+
+
 def test_intake_resume_virus_scan_requires_command_when_enabled() -> None:
     with pytest.raises(
         ValidationError,
@@ -388,6 +403,8 @@ def test_auth_cookie_secure_is_true_for_non_local_even_if_legacy_env_is_false(
         espo_base_url="https://crm.test.com",
         espo_api_key="test-key",
         minio_root_password="secret",
+        intake_resume_require_virus_scan=True,
+        intake_resume_virus_scan_command="clamdscan --fdpass {path}",
     )
 
     assert settings.auth_cookie_secure is True

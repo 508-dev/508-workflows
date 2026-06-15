@@ -3046,7 +3046,10 @@ def test_list_dashboard_onboarding_includes_orphan_intake_without_raw_payload() 
     }
     assert "raw_payload" not in orphan["latest_intake_submission"]
     people_sql = cursor.execute.call_args_list[0].args[0]
+    orphan_sql = cursor.execute.call_args_list[1].args[0]
     assert "raw_payload" not in people_sql
+    assert "people.sync_status = 'active'" in orphan_sql
+    assert "people.contact_type ILIKE '%prospect%'" in orphan_sql
 
 
 def test_dashboard_gigs_filters_member_to_own_gigs(client: TestClient) -> None:

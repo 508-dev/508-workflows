@@ -290,6 +290,35 @@ def test_persist_intake_submission_uses_raw_payload_and_nullable_upsert() -> Non
     assert retry_params[3] == first_generated_submission_id
 
 
+def test_persist_intake_submission_raises_for_orphan_persistence_failure() -> None:
+    """Orphan intakes have no CRM mutation, so DB persistence failures must retry."""
+    processor = IntakeFormProcessor()
+    cursor = MagicMock()
+    cursor.__enter__.return_value = cursor
+    cursor.execute.side_effect = RuntimeError("db unavailable")
+    conn = MagicMock()
+    conn.__enter__.return_value = conn
+    conn.cursor.return_value = cursor
+
+    with (
+        patch(
+            "five08.worker.crm.intake_form_processor.get_postgres_connection",
+            return_value=conn,
+        ),
+        pytest.raises(RuntimeError, match="db unavailable"),
+    ):
+        processor._persist_intake_submission(
+            payload={
+                "source": "tally",
+                "email": "new@example.com",
+                "form_id": "form-1",
+                "submission_id": "sub-1",
+            },
+            contact_id=None,
+            email="new@example.com",
+        )
+
+
 def test_build_resume_updates_includes_website_links_as_url_multiple() -> None:
     """Website links extracted from resume should be set to cWebsiteLink as an array."""
     processor = IntakeFormProcessor()

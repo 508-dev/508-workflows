@@ -193,6 +193,13 @@ class WorkerSettings(SharedSettings):
     @model_validator(mode="after")
     def validate_intake_resume_scan_settings(self) -> "WorkerSettings":
         """Require a scanner command when intake resume scanning is enabled."""
+        env = self.environment.strip().lower()
+        if env not in {"local", "dev", "development", "test"} and not (
+            self.intake_resume_require_virus_scan
+        ):
+            raise ValueError(
+                "INTAKE_RESUME_REQUIRE_VIRUS_SCAN must be true when ENVIRONMENT is non-local"
+            )
         if (
             self.intake_resume_require_virus_scan
             and not (self.intake_resume_virus_scan_command or "").strip()

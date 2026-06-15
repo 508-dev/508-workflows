@@ -500,6 +500,8 @@ class IntakeFormProcessor:
                 mask_email(email),
                 exc,
             )
+            if contact_id is None:
+                raise
 
     def _fallback_submission_id(
         self,

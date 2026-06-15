@@ -2193,6 +2193,21 @@ def _list_dashboard_orphan_intake_submissions(
             SELECT 1
             FROM people
             WHERE lower(people.email) = onboarding_intake_submissions.email
+                AND people.sync_status = 'active'
+                AND people.is_member = false
+                AND people.contact_type ILIKE '%prospect%'
+                AND (
+                    people.onboarding_state IS NULL
+                    OR replace(
+                        replace(
+                            replace(lower(btrim(people.onboarding_state)), '_', ''),
+                            '-',
+                            ''
+                        ),
+                        ' ',
+                        ''
+                    ) NOT IN ('onboarded', 'waitlist', 'rejected')
+                )
         )
         """,
     ]
