@@ -6039,6 +6039,25 @@ function intakePayloadValue(submission: IntakeSubmission | undefined, key: strin
   return ""
 }
 
+function intakeResumeUrl(submission: IntakeSubmission | undefined) {
+  const value = intakePayloadValue(submission, "resume_url")
+  if (!/^https?:\/\//i.test(value)) return ""
+  return value
+}
+
+function intakeResumeName(submission: IntakeSubmission | undefined) {
+  const fileName = intakePayloadValue(submission, "resume_file_name")
+  if (fileName) return fileName
+  const value = intakeResumeUrl(submission)
+  if (!value) return ""
+  try {
+    const pathName = new URL(value).pathname
+    return decodeURIComponent(pathName.split("/").filter(Boolean).pop() || "Resume")
+  } catch {
+    return "Resume"
+  }
+}
+
 function intakeSummaryItems(submission: IntakeSubmission | undefined) {
   if (!submission?.normalized_payload) return []
   return [
@@ -6376,6 +6395,11 @@ function OnboardingRow({
   const contactUrl = crmContactUrl(person.crm_contact_id)
   const resumeUrl = crmAttachmentUrl(person.latest_resume_id)
   const intakeSubmission = person.latest_intake_submission
+  const intakeResumeHref = intakeResumeUrl(intakeSubmission)
+  const resumeHref = resumeUrl || intakeResumeHref
+  const resumeLabel = resumeUrl
+    ? "Resume"
+    : intakeResumeName(intakeSubmission) || person.latest_resume_name || "Resume"
   const intakeItems = intakeSummaryItems(intakeSubmission)
   const emailSentAt = emailDraft?.onboarding_email_sent_at || person.onboarding_email_sent_at
   const emailSentBy = emailDraft?.onboarding_email_sent_by || person.onboarding_email_sent_by
@@ -6560,15 +6584,16 @@ function OnboardingRow({
         </TableCell>
         <TableCell>
           <div className="flex flex-wrap gap-1.5">
-            {resumeUrl ? (
+            {resumeHref ? (
               <a
-                className="inline-flex min-h-7 items-center rounded-md border bg-secondary px-2 text-xs font-extrabold"
-                href={resumeUrl}
+                className="inline-flex min-h-7 max-w-40 items-center truncate rounded-md border bg-secondary px-2 text-xs font-extrabold"
+                href={resumeHref}
                 target="_blank"
                 rel="noreferrer"
                 aria-label={`Open ${displayName} resume`}
+                title={resumeLabel}
               >
-                Resume
+                {resumeLabel}
               </a>
             ) : null}
             {linkedinUrl(person.linkedin) ? (
@@ -6593,7 +6618,7 @@ function OnboardingRow({
                 {person.github_username || "GitHub"}
               </a>
             ) : null}
-            {!resumeUrl && !linkedinUrl(person.linkedin) && !githubUrl(person.github_username)
+            {!resumeHref && !linkedinUrl(person.linkedin) && !githubUrl(person.github_username)
               ? "None"
               : null}
           </div>

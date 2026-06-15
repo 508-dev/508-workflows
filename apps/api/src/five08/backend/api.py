@@ -1913,6 +1913,29 @@ def _is_present(value: Any) -> bool:
     return bool(value)
 
 
+def _intake_resume_present(latest_intake_submission: Any) -> bool:
+    if not isinstance(latest_intake_submission, dict):
+        return False
+    normalized_payload = latest_intake_submission.get("normalized_payload")
+    if not isinstance(normalized_payload, dict):
+        return False
+    return _is_present(normalized_payload.get("resume_file_name")) or _is_present(
+        normalized_payload.get("resume_url")
+    )
+
+
+def _intake_resume_file_name(latest_intake_submission: Any) -> str | None:
+    if not isinstance(latest_intake_submission, dict):
+        return None
+    normalized_payload = latest_intake_submission.get("normalized_payload")
+    if not isinstance(normalized_payload, dict):
+        return None
+    resume_file_name = normalized_payload.get("resume_file_name")
+    if isinstance(resume_file_name, str) and resume_file_name.strip():
+        return resume_file_name.strip()
+    return None
+
+
 def _normalize_508_username(value: str | None) -> str | None:
     """Normalize a dashboard onboarder value into a 508 username."""
     if not value:
@@ -1935,6 +1958,25 @@ def _normalize_508_username(value: str | None) -> str | None:
     ):
         return None
     return normalized
+
+
+_DASHBOARD_INTAKE_RESUME_EXISTS_SQL = """
+EXISTS (
+    SELECT 1
+    FROM onboarding_intake_submissions resume_intake
+    WHERE (
+        resume_intake.crm_contact_id = people.crm_contact_id
+        OR (
+            resume_intake.crm_contact_id IS NULL
+            AND resume_intake.email = lower(people.email)
+        )
+    )
+    AND coalesce(
+        nullif(btrim(resume_intake.normalized_payload->>'resume_file_name'), ''),
+        nullif(btrim(resume_intake.normalized_payload->>'resume_url'), '')
+    ) IS NOT NULL
+)
+"""
 
 
 def _limit_dashboard_count(value: int) -> int:
@@ -2016,7 +2058,7 @@ def _query_dashboard_people(
         conditions.append("(email_508 IS NULL OR btrim(email_508) = '')")
     if resume == "present":
         conditions.append(
-            """
+            f"""
             (
             (
                 latest_resume_id IS NOT NULL
@@ -2026,12 +2068,13 @@ def _query_dashboard_people(
                 latest_resume_name IS NOT NULL
                 AND btrim(latest_resume_name) <> ''
             )
+            OR {_DASHBOARD_INTAKE_RESUME_EXISTS_SQL}
             )
         """
         )
     elif resume == "missing":
         conditions.append(
-            """
+            f"""
             (
                 latest_resume_id IS NULL
                 OR btrim(latest_resume_id) = ''
@@ -2040,6 +2083,7 @@ def _query_dashboard_people(
                 latest_resume_name IS NULL
                 OR btrim(latest_resume_name) = ''
             )
+            AND NOT {_DASHBOARD_INTAKE_RESUME_EXISTS_SQL}
         """
         )
     if skills == "present":
@@ -2102,6 +2146,11 @@ def _shape_dashboard_people_rows(rows: list[dict[str, Any]]) -> list[dict[str, A
         latest_intake_submission = person.get("latest_intake_submission")
         if isinstance(latest_intake_submission, dict):
             latest_intake_submission.pop("raw_payload", None)
+        intake_resume_present = _intake_resume_present(latest_intake_submission)
+        if not _is_present(person.get("latest_resume_name")):
+            intake_resume_file_name = _intake_resume_file_name(latest_intake_submission)
+            if intake_resume_file_name:
+                person["latest_resume_name"] = intake_resume_file_name
         person["created_at"] = _datetime_or_none(row.get("created_at"))
         person["updated_at"] = _datetime_or_none(row.get("updated_at"))
         person["onboarding_updated_at"] = _datetime_or_none(
@@ -2119,7 +2168,8 @@ def _shape_dashboard_people_rows(rows: list[dict[str, Any]]) -> list[dict[str, A
             "discord_linked": _is_present(row.get("discord_user_id")),
             "email_508": _is_present(row.get("email_508")),
             "latest_resume": _is_present(row.get("latest_resume_id"))
-            or _is_present(row.get("latest_resume_name")),
+            or _is_present(row.get("latest_resume_name"))
+            or intake_resume_present,
             "roles_count": len(roles) if isinstance(roles, list) else 0,
             "skills_count": len(skills) if isinstance(skills, list) else 0,
         }
@@ -2354,7 +2404,7 @@ def _list_dashboard_onboarding(
         conditions.append("(email_508 IS NULL OR btrim(email_508) = '')")
     if resume == "present":
         conditions.append(
-            """
+            f"""
             (
             (
                 latest_resume_id IS NOT NULL
@@ -2364,12 +2414,13 @@ def _list_dashboard_onboarding(
                 latest_resume_name IS NOT NULL
                 AND btrim(latest_resume_name) <> ''
             )
+            OR {_DASHBOARD_INTAKE_RESUME_EXISTS_SQL}
             )
         """
         )
     elif resume == "missing":
         conditions.append(
-            """
+            f"""
             (
                 latest_resume_id IS NULL
                 OR btrim(latest_resume_id) = ''
@@ -2378,6 +2429,7 @@ def _list_dashboard_onboarding(
                 latest_resume_name IS NULL
                 OR btrim(latest_resume_name) = ''
             )
+            AND NOT {_DASHBOARD_INTAKE_RESUME_EXISTS_SQL}
         """
         )
     if skills == "present":
@@ -2453,17 +2505,20 @@ def _list_dashboard_onboarding(
             cursor.execute(sql, params)
             rows = cursor.fetchall()
 
-    orphan_rows = _list_dashboard_orphan_intake_submissions(
-        query=query,
-        limit=limit,
-        onboarding_state=onboarding_state,
-        onboarder=onboarder,
-        discord=discord,
-        email_508=email_508,
-        resume=resume,
-        skills=skills,
-    )
-    return _shape_dashboard_people_rows(orphan_rows + rows)[:limit]
+    orphan_rows: list[dict[str, Any]] = []
+    remaining = limit - len(rows)
+    if remaining > 0:
+        orphan_rows = _list_dashboard_orphan_intake_submissions(
+            query=query,
+            limit=remaining,
+            onboarding_state=onboarding_state,
+            onboarder=onboarder,
+            discord=discord,
+            email_508=email_508,
+            resume=resume,
+            skills=skills,
+        )
+    return _shape_dashboard_people_rows(rows + orphan_rows)
 
 
 def _is_dashboard_onboarding_contact_eligible(contact_id: str) -> bool:

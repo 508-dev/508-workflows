@@ -2963,6 +2963,91 @@ def test_dashboard_onboarding_returns_filtered_queue(client: TestClient) -> None
     )
 
 
+def test_shape_dashboard_people_rows_uses_latest_intake_resume_payload() -> None:
+    created_at = datetime(2026, 6, 15, 10, 0, tzinfo=timezone.utc)
+    rows = [
+        {
+            "id": "person-1",
+            "crm_contact_id": "contact-1",
+            "name": "Alice Prospect",
+            "email": "alice@example.com",
+            "email_508": None,
+            "discord_user_id": None,
+            "discord_username": None,
+            "discord_roles": [],
+            "github_username": None,
+            "contact_type": "Prospect",
+            "is_member": False,
+            "address_country": None,
+            "address_city": None,
+            "address_state": None,
+            "timezone": None,
+            "seniority": None,
+            "linkedin": None,
+            "skills": [],
+            "latest_resume_id": None,
+            "latest_resume_name": None,
+            "onboarding_state": "pending",
+            "onboarder": None,
+            "onboarding_updated_at": created_at,
+            "onboarding_email_sent_at": None,
+            "onboarding_email_sent_by": None,
+            "onboarding_email_recipient": None,
+            "latest_intake_submission": {
+                "source": "tally",
+                "form_id": "form-1",
+                "submission_id": "sub-1",
+                "submitted_at": created_at,
+                "normalized_payload": {
+                    "resume_file_name": "alice-resume.pdf",
+                    "resume_url": "https://tally.so/r/alice-resume.pdf",
+                },
+                "raw_payload": {"token": "redacted"},
+                "created_at": created_at,
+            },
+            "sync_status": "active",
+            "created_at": created_at,
+            "updated_at": created_at,
+        }
+    ]
+
+    people = api._shape_dashboard_people_rows(rows)
+
+    assert people[0]["profile_status"]["latest_resume"] is True
+    assert people[0]["latest_resume_name"] == "alice-resume.pdf"
+    assert "raw_payload" not in people[0]["latest_intake_submission"]
+
+
+def test_list_dashboard_onboarding_resume_filter_includes_intake_resume_payload() -> (
+    None
+):
+    cursor = Mock()
+    cursor.__enter__ = Mock(return_value=cursor)
+    cursor.__exit__ = Mock(return_value=None)
+    cursor.fetchall.return_value = []
+    conn = Mock()
+    conn.__enter__ = Mock(return_value=conn)
+    conn.__exit__ = Mock(return_value=None)
+    conn.cursor.return_value = cursor
+
+    with patch("five08.backend.api.get_postgres_connection", return_value=conn):
+        api._list_dashboard_onboarding(
+            query=None,
+            limit=10,
+            onboarding_state=None,
+            onboarder=None,
+            discord=None,
+            email_508=None,
+            resume="present",
+            skills=None,
+        )
+
+    people_sql = cursor.execute.call_args_list[0].args[0]
+    assert "FROM onboarding_intake_submissions resume_intake" in people_sql
+    assert "resume_intake.normalized_payload->>'resume_file_name'" in people_sql
+    assert "resume_intake.normalized_payload->>'resume_url'" in people_sql
+
+
 def test_list_dashboard_onboarding_includes_orphan_intake_without_raw_payload() -> None:
     created_at = datetime(2026, 6, 15, 10, 0, tzinfo=timezone.utc)
     cursor = Mock()
@@ -3050,6 +3135,66 @@ def test_list_dashboard_onboarding_includes_orphan_intake_without_raw_payload() 
     assert "raw_payload" not in people_sql
     assert "people.sync_status = 'active'" in orphan_sql
     assert "people.contact_type ILIKE '%prospect%'" in orphan_sql
+
+
+def test_list_dashboard_onboarding_skips_orphans_when_people_fill_limit() -> None:
+    created_at = datetime(2026, 6, 15, 10, 0, tzinfo=timezone.utc)
+    cursor = Mock()
+    cursor.__enter__ = Mock(return_value=cursor)
+    cursor.__exit__ = Mock(return_value=None)
+    cursor.fetchall.return_value = [
+        {
+            "id": "person-1",
+            "crm_contact_id": "contact-1",
+            "name": "Bea Prospect",
+            "email": "bea@example.com",
+            "email_508": None,
+            "discord_user_id": None,
+            "discord_username": None,
+            "discord_roles": [],
+            "github_username": None,
+            "contact_type": "Prospect",
+            "is_member": False,
+            "address_country": None,
+            "address_city": None,
+            "address_state": None,
+            "timezone": None,
+            "seniority": None,
+            "linkedin": None,
+            "skills": [],
+            "latest_resume_id": None,
+            "latest_resume_name": None,
+            "onboarding_state": "pending",
+            "onboarder": None,
+            "onboarding_updated_at": created_at,
+            "onboarding_email_sent_at": None,
+            "onboarding_email_sent_by": None,
+            "onboarding_email_recipient": None,
+            "latest_intake_submission": None,
+            "sync_status": "active",
+            "created_at": created_at,
+            "updated_at": created_at,
+        }
+    ]
+    conn = Mock()
+    conn.__enter__ = Mock(return_value=conn)
+    conn.__exit__ = Mock(return_value=None)
+    conn.cursor.return_value = cursor
+
+    with patch("five08.backend.api.get_postgres_connection", return_value=conn):
+        queue = api._list_dashboard_onboarding(
+            query=None,
+            limit=1,
+            onboarding_state=None,
+            onboarder=None,
+            discord=None,
+            email_508=None,
+            resume=None,
+            skills=None,
+        )
+
+    assert [person["crm_contact_id"] for person in queue] == ["contact-1"]
+    cursor.execute.assert_called_once()
 
 
 def test_dashboard_gigs_filters_member_to_own_gigs(client: TestClient) -> None:
