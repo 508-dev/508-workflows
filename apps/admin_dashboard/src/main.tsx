@@ -971,6 +971,7 @@ function App() {
   const [status, setStatus] = useState("")
   const [jobType, setJobType] = useState("")
   const [gigStatus, setGigStatus] = useState("recruiting")
+  const [gigQuery, setGigQuery] = useState("")
   const [gigIncludeHistorical, setGigIncludeHistorical] = useState(false)
   const [gigLimit, setGigLimit] = useState(100)
   const [projectQuery, setProjectQuery] = useState("")
@@ -1120,6 +1121,7 @@ function App() {
   function gigsUrl() {
     const params = new URLSearchParams({ limit: String(gigLimit) })
     if (gigStatus) params.set("status", gigStatus)
+    if (gigQuery.trim()) params.set("query", gigQuery.trim())
     if (gigIncludeHistorical) params.set("include_historical", "true")
     return `/dashboard/api/gigs?${params.toString()}`
   }
@@ -2505,6 +2507,7 @@ function App() {
               sort={sort.gigs}
               loading={loading}
               status={gigStatus}
+              query={gigQuery}
               includeHistorical={gigIncludeHistorical}
               limit={gigLimit}
               staleDays={staleRecruitingDays}
@@ -2513,6 +2516,7 @@ function App() {
               crmContactUrl={crmContactUrl}
               crmAttachmentUrl={crmAttachmentUrl}
               setStatus={setGigStatus}
+              setQuery={setGigQuery}
               setIncludeHistorical={setGigIncludeHistorical}
               setLimit={setGigLimit}
               onRefresh={refreshGigsView}
@@ -4854,6 +4858,7 @@ function GigsView(props: {
   sort: { key: string; direction: SortDirection }
   loading: Record<string, boolean>
   status: string
+  query: string
   includeHistorical: boolean
   limit: number
   staleDays: number
@@ -4862,6 +4867,7 @@ function GigsView(props: {
   crmContactUrl: (contactId?: string) => string
   crmAttachmentUrl: (attachmentId?: string) => string
   setStatus: (value: string) => void
+  setQuery: (value: string) => void
   setIncludeHistorical: (value: boolean) => void
   setLimit: (value: number) => void
   onRefresh: () => void
@@ -4883,7 +4889,7 @@ function GigsView(props: {
     { total: 0, applications: 0, interested: 0, stale: 0 },
   )
   const filterBar = (
-    <Card className="grid gap-3 p-4 md:grid-cols-[minmax(160px,1fr)_auto_auto_auto] md:items-end">
+    <Card className="grid gap-3 p-4 md:grid-cols-[minmax(140px,.75fr)_minmax(220px,1.25fr)_auto_auto_auto] md:items-end">
       <Label>
         Status
         <Select
@@ -4899,6 +4905,17 @@ function GigsView(props: {
           ))}
         </Select>
       </Label>
+      <Label>
+        Search gigs
+        <Input
+          id="gigQuery"
+          value={props.query}
+          autoComplete="off"
+          placeholder="Title, gig text, #tag, @poster"
+          onChange={(event) => props.setQuery(event.target.value)}
+          onKeyDown={(event) => event.key === "Enter" && props.onRefresh()}
+        />
+      </Label>
       {props.canIncludeHistorical ? (
         <label className="flex min-h-9 items-center gap-2 text-xs font-bold text-muted-foreground">
           <input
@@ -4909,14 +4926,19 @@ function GigsView(props: {
           Include historical
         </label>
       ) : null}
+      <Button id="searchGigs" type="button" onClick={props.onRefresh} disabled={props.loading.gigs}>
+        <Search />
+        Search
+      </Button>
       <Button
         id="refreshGigs"
         type="button"
+        variant="outline"
         onClick={props.onRefresh}
         disabled={props.loading.gigs}
       >
         <RefreshCw />
-        Refresh gigs
+        Refresh
       </Button>
       {props.gigs.length >= props.limit ? (
         <Button
