@@ -3317,6 +3317,7 @@ async def dashboard_people_handler(
 async def dashboard_gigs_handler(
     request: Request,
     status: str | None = Query(default=None),
+    query: str | None = Query(default=None, max_length=200),
     include_historical: bool = Query(default=False),
     limit: int = Query(default=100, ge=1, le=500),
 ) -> JSONResponse:
@@ -3341,6 +3342,7 @@ async def dashboard_gigs_handler(
         ):
             return JSONResponse({"error": "invalid_status"}, status_code=400)
 
+    normalized_query = query.strip() if query is not None else ""
     include_all = _session_has_steering_access(session)
     gigs = await asyncio.to_thread(
         list_dashboard_engagements,
@@ -3349,6 +3351,7 @@ async def dashboard_gigs_handler(
         include_all=include_all,
         include_historical=include_historical and include_all,
         status=normalized_status,
+        query=normalized_query or None,
         limit=limit,
     )
     return JSONResponse(gigs)
