@@ -71,6 +71,20 @@ _STATUS_TOKEN_RE = re.compile(r"^\s*([A-Z][A-Z0-9_-]*)\b[:\]\)-]?\s*")
 _BRACKETED_STATUS_RE = re.compile(r"^\s*[\[(]\s*([A-Z][A-Z0-9 _-]{2,})\s*[\])]\s*")
 
 
+def _ilike_contains_pattern(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+_DASHBOARD_ENGAGEMENT_TEXT_SEARCH_SQL = """
+(
+    coalesce(e.title, '') || ' ' ||
+    coalesce(e.body_raw, '') || ' ' ||
+    coalesce(e.body_normalized, '')
+)
+"""
+
+
 @dataclass(frozen=True)
 class DiscordEngagementInput:
     """Discord-origin gig data used to create/update an engagement."""
@@ -1026,6 +1040,7 @@ def list_dashboard_engagements(
     include_historical: bool = False,
     status: EngagementStatus | None = None,
     engagement_id: str | None = None,
+    query: str | None = None,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
     """Return dashboard-visible gigs with nested application summaries."""
@@ -1042,6 +1057,24 @@ def list_dashboard_engagements(
         params.append(status.value)
     elif engagement_id is None and not include_historical:
         conditions.append("e.status IN ('recruiting', 'filled', 'unknown')")
+    normalized_query = query.strip() if query is not None else ""
+    if normalized_query:
+        like_query = _ilike_contains_pattern(normalized_query)
+        tag_token = normalized_query.removeprefix("#")
+        poster_token = normalized_query.removeprefix("@")
+        tag_query = _ilike_contains_pattern(tag_token or normalized_query)
+        poster_query = _ilike_contains_pattern(poster_token or normalized_query)
+        conditions.append(
+            f"""
+            (
+                {_DASHBOARD_ENGAGEMENT_TEXT_SEARCH_SQL} ILIKE %s ESCAPE '\\'
+                OR coalesce(array_to_string(e.required_skills, ' '), '') ILIKE %s ESCAPE '\\'
+                OR coalesce(array_to_string(e.preferred_skills, ' '), '') ILIKE %s ESCAPE '\\'
+                OR coalesce(e.posted_by_discord_user_id, '') ILIKE %s ESCAPE '\\'
+            )
+            """
+        )
+        params.extend([like_query, tag_query, tag_query, poster_query])
     params.append(max(1, min(limit, 500)))
     sql = f"""
         SELECT
