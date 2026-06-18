@@ -2121,10 +2121,31 @@ def _query_dashboard_people(
             onboarding_email_sent_at,
             onboarding_email_sent_by,
             onboarding_email_recipient,
+            latest_intake_submission,
             sync_status,
             created_at,
             updated_at
         FROM people
+        LEFT JOIN LATERAL (
+            SELECT jsonb_build_object(
+                'source', onboarding_intake_submissions.source,
+                'form_id', onboarding_intake_submissions.form_id,
+                'submission_id', onboarding_intake_submissions.submission_id,
+                'submitted_at', onboarding_intake_submissions.submitted_at,
+                'normalized_payload', onboarding_intake_submissions.normalized_payload,
+                'created_at', onboarding_intake_submissions.created_at
+            ) AS latest_intake_submission
+            FROM onboarding_intake_submissions
+            WHERE onboarding_intake_submissions.crm_contact_id = people.crm_contact_id
+               OR (
+                    onboarding_intake_submissions.crm_contact_id IS NULL
+                    AND onboarding_intake_submissions.email = lower(people.email)
+               )
+            ORDER BY
+                onboarding_intake_submissions.submitted_at DESC NULLS LAST,
+                onboarding_intake_submissions.created_at DESC
+            LIMIT 1
+        ) intake ON true
         {where_clause}
         ORDER BY updated_at DESC
         LIMIT %s

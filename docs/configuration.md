@@ -53,8 +53,8 @@ for compatibility.
 - `ONBOARDING_TALLY_ALLOWED_FORM_IDS`: comma-separated allowlist of accepted
   onboarding Tally form IDs. Tally intake fails closed when this is unset.
 - `INTAKE_RESUME_REQUIRE_VIRUS_SCAN`: when true, downloaded resume files are not
-  parsed unless the malware scan command succeeds. Defaults to false until a
-  scanner command is configured.
+  parsed unless the malware scan command succeeds. Defaults to false for
+  local/dev/test. Non-local deployments must set this to true.
 - `INTAKE_RESUME_VIRUS_SCAN_COMMAND`: command used to scan downloaded resumes.
   Required when `INTAKE_RESUME_REQUIRE_VIRUS_SCAN=true`. Include `{path}` where
   the temporary resume filepath should be inserted. When `{path}` is omitted,

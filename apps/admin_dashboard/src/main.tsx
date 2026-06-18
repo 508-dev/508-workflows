@@ -5686,6 +5686,12 @@ function PeopleView(props: {
               const status = person.profile_status || {}
               const skillsCount = Number(status.skills_count || 0)
               const resumeUrl = props.crmAttachmentUrl(person.latest_resume_id)
+              const intakeSubmission = person.latest_intake_submission
+              const intakeResumeHref = intakeResumeUrl(intakeSubmission)
+              const resumeHref = resumeUrl || intakeResumeHref
+              const resumeLabel = resumeUrl
+                ? "Resume"
+                : intakeResumeName(intakeSubmission) || person.latest_resume_name || "Resume"
               return (
                 <TableRow key={person.crm_contact_id || displayName}>
                   <TableCell>
@@ -5734,15 +5740,16 @@ function PeopleView(props: {
                   </TableCell>
                   <TableCell>
                     <div className="flex flex-wrap items-center gap-1.5">
-                      {resumeUrl ? (
+                      {resumeHref ? (
                         <a
-                          className="inline-flex min-h-7 items-center rounded-md border bg-secondary px-2 text-xs font-extrabold"
-                          href={resumeUrl}
+                          className="inline-flex min-h-7 max-w-40 items-center truncate rounded-md border bg-secondary px-2 text-xs font-extrabold"
+                          href={resumeHref}
                           target="_blank"
                           rel="noreferrer"
                           aria-label={`Open ${displayName} resume`}
+                          title={resumeLabel}
                         >
-                          Resume
+                          {resumeLabel}
                         </a>
                       ) : (
                         <span>
@@ -6041,7 +6048,7 @@ function intakePayloadValue(submission: IntakeSubmission | undefined, key: strin
 
 function intakeResumeUrl(submission: IntakeSubmission | undefined) {
   const value = intakePayloadValue(submission, "resume_url")
-  if (!/^https?:\/\//i.test(value)) return ""
+  if (!/^https:\/\//i.test(value)) return ""
   return value
 }
 

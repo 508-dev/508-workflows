@@ -119,6 +119,12 @@ class IntakeFormProcessor:
             else settings.google_forms_allowed_form_ids_set
         )
         form_id = self._normalize_text(payload.get("form_id"))
+        if source == "tally" and not allowed_form_ids:
+            logger.warning(
+                "Tally intake rejected because allowed form IDs are unset masked_email=%s",
+                masked_email,
+            )
+            return {"success": False, "error": "invalid_form_id"}
         if allowed_form_ids and not form_id:
             logger.warning(
                 "Intake submission missing form_id source=%s masked_email=%s",

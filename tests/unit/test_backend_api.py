@@ -2911,6 +2911,86 @@ def test_dashboard_people_forbids_member_gig_session(client: TestClient) -> None
     assert response.status_code == 403
 
 
+def test_query_dashboard_people_returns_latest_intake_resume_payload() -> None:
+    created_at = datetime(2026, 6, 15, 10, 0, tzinfo=timezone.utc)
+    cursor = Mock()
+    cursor.__enter__ = Mock(return_value=cursor)
+    cursor.__exit__ = Mock(return_value=None)
+    cursor.fetchall.return_value = [
+        {
+            "id": "person-1",
+            "crm_contact_id": "contact-1",
+            "name": "Alice Prospect",
+            "email": "alice@example.com",
+            "email_508": None,
+            "discord_user_id": None,
+            "discord_username": None,
+            "discord_roles": [],
+            "github_username": None,
+            "contact_type": "Prospect",
+            "is_member": False,
+            "address_country": None,
+            "address_city": None,
+            "address_state": None,
+            "timezone": None,
+            "seniority": None,
+            "linkedin": None,
+            "skills": [],
+            "latest_resume_id": None,
+            "latest_resume_name": None,
+            "onboarding_state": "pending",
+            "onboarder": None,
+            "onboarding_updated_at": created_at,
+            "onboarding_email_sent_at": None,
+            "onboarding_email_sent_by": None,
+            "onboarding_email_recipient": None,
+            "latest_intake_submission": {
+                "source": "tally",
+                "form_id": "form-1",
+                "submission_id": "sub-1",
+                "submitted_at": created_at,
+                "normalized_payload": {
+                    "resume_file_name": "alice-resume.pdf",
+                    "resume_url": "https://tally.so/r/alice-resume.pdf",
+                },
+                "raw_payload": {"secret": "should-not-return"},
+                "created_at": created_at,
+            },
+            "sync_status": "active",
+            "created_at": created_at,
+            "updated_at": created_at,
+        }
+    ]
+    conn = Mock()
+    conn.__enter__ = Mock(return_value=conn)
+    conn.__exit__ = Mock(return_value=None)
+    conn.cursor.return_value = cursor
+
+    with patch("five08.backend.api.get_postgres_connection", return_value=conn):
+        people = api._query_dashboard_people(
+            normalized_query="",
+            limit=10,
+            sync_status=None,
+            is_member=None,
+            discord=None,
+            email_508=None,
+            resume="present",
+            skills=None,
+        )
+
+    assert people[0]["profile_status"]["latest_resume"] is True
+    assert people[0]["latest_resume_name"] == "alice-resume.pdf"
+    assert people[0]["latest_intake_submission"]["normalized_payload"] == {
+        "resume_file_name": "alice-resume.pdf",
+        "resume_url": "https://tally.so/r/alice-resume.pdf",
+    }
+    assert "raw_payload" not in people[0]["latest_intake_submission"]
+    people_sql = cursor.execute.call_args.args[0]
+    assert "LEFT JOIN LATERAL" in people_sql
+    assert "normalized_payload" in people_sql
+    assert "raw_payload" not in people_sql
+
+
 def test_dashboard_onboarding_returns_filtered_queue(client: TestClient) -> None:
     session = api.AuthSession(
         subject="admin-1",

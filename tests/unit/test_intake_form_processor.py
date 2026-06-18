@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 
 from five08.resume_extractor import ResumeExtractedProfile
+from five08.worker.crm import intake_form_processor as intake_module
 from five08.worker.crm.intake_form_processor import IntakeFormProcessor
 
 
@@ -36,6 +37,26 @@ def test_intake_form_processor_creates_prospect_when_not_found() -> None:
     create_call = processor.api.request.call_args_list[1]
     create_payload = create_call.args[2]
     assert create_payload["cGitHubUsername"] == "newdev"
+
+
+def test_intake_form_processor_rejects_tally_when_allowed_forms_unset() -> None:
+    """Worker-side Tally intake should fail closed if jobs bypass the webhook."""
+    processor = IntakeFormProcessor()
+    processor.api = MagicMock()
+
+    with patch.object(intake_module.settings, "onboarding_tally_allowed_form_ids", ""):
+        result = processor.process_intake(
+            payload={
+                "source": "tally",
+                "email": "new@example.com",
+                "first_name": "New",
+                "last_name": "Person",
+                "form_id": "unexpected-form",
+            }
+        )
+
+    assert result == {"success": False, "error": "invalid_form_id"}
+    processor.api.request.assert_not_called()
 
 
 def test_intake_form_processor_rejects_member_updates() -> None:
