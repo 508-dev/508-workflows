@@ -6663,6 +6663,19 @@ async def dashboard_sync_people_handler(request: Request) -> JSONResponse:
     )
 
 
+def _redact_newsletter_sync_preview(value: object) -> object:
+    """Recursively redact emails from dashboard newsletter dry-run previews."""
+    if isinstance(value, str):
+        return redact_email_addresses(value)
+    if isinstance(value, list):
+        return [_redact_newsletter_sync_preview(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _redact_newsletter_sync_preview(item) for key, item in value.items()
+        }
+    return value
+
+
 async def dashboard_sync_newsletters_handler(request: Request) -> JSONResponse:
     """Queue a 508 members newsletter sync from the authenticated dashboard."""
     session, error_response, dry_run = await _dashboard_write_session_or_dry_run(
@@ -6684,13 +6697,14 @@ async def dashboard_sync_newsletters_handler(request: Request) -> JSONResponse:
                 NewsletterSyncProcessor(settings).sync_508_members,
                 dry_run=True,
             )
-        except Exception as exc:
+        except Exception:
+            logger.exception("Newsletter sync dry run failed")
             return JSONResponse(
                 {
                     "status": "dry_run_failed",
                     "dry_run": True,
                     "source": "dashboard",
-                    "error": redact_email_addresses(str(exc)),
+                    "error": "newsletter_dry_run_failed",
                 },
                 status_code=502,
             )
@@ -6699,7 +6713,7 @@ async def dashboard_sync_newsletters_handler(request: Request) -> JSONResponse:
                 "status": "dry_run",
                 "dry_run": True,
                 "source": "dashboard",
-                "preview": preview,
+                "preview": _redact_newsletter_sync_preview(preview),
                 "would_enqueue": {
                     "queue": settings.redis_queue_name,
                     "job_type": "sync_508_members_newsletters_job",

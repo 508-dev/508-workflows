@@ -388,7 +388,7 @@ class ToolRegistry:
             "mail_write.create_mailbox": ToolManifest(
                 name="mail_write.create_mailbox",
                 risk="high",
-                required_scopes=("mailbox:create",),
+                required_scopes=("mailbox:create", "integration:manage"),
                 requires_confirmation=True,
                 tenant_scoped=True,
                 idempotent=False,

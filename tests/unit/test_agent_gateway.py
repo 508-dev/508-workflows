@@ -1663,6 +1663,7 @@ def test_mailbox_create_uses_explicit_backup_email_not_mailbox_address() -> None
     assert response.plan is not None
     action = response.plan.actions[0]
     assert action.tool_name == "mail_write.create_mailbox"
+    assert action.required_scopes == ["mailbox:create", "integration:manage"]
     assert action.arguments == {
         "local_part": "john",
         "backup_email": "john@gmail.com",
@@ -2493,7 +2494,7 @@ def test_mailbox_create_tool_validates_backup_email(
             },
             organization_id="org-1",
             actor_id="123",
-            actor_scopes={"mailbox:create"},
+            actor_scopes={"mailbox:create", "integration:manage"},
         )
 
     assert fakes.migadu.created_mailboxes == []

@@ -7121,12 +7121,21 @@ def test_dashboard_sync_newsletters_workflows_engineer_is_dry_run(
             "mailboxes_scanned": 2,
             "contacts_considered": 3,
             "providers": {"brevo": {"would_sync": 3, "skipped": 0, "failed": 0}},
+            "crm_lookup_failures": [
+                {
+                    "mailbox": "jane@508.dev",
+                    "error": "CRM failed for jane@example.com",
+                }
+            ],
         }
         response = client.post("/dashboard/api/sync/newsletters")
 
     assert response.status_code == 200
     assert response.json()["status"] == "dry_run"
     assert response.json()["preview"]["providers"]["brevo"]["would_sync"] == 3
+    preview_failure = response.json()["preview"]["crm_lookup_failures"][0]
+    assert preview_failure["mailbox"] == "[redacted-email]"
+    assert preview_failure["error"] == "CRM failed for [redacted-email]"
     assert response.json()["would_enqueue"]["job_type"] == (
         "sync_508_members_newsletters_job"
     )
@@ -7138,6 +7147,40 @@ def test_dashboard_sync_newsletters_workflows_engineer_is_dry_run(
     )
     mock_enqueue.assert_not_called()
     mock_insert.assert_not_called()
+
+
+def test_dashboard_sync_newsletters_dry_run_hides_exception_details(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="workflows-1",
+        email="workflows@508.dev",
+        display_name="Workflows Engineer",
+        groups=["Workflows Engineer"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.NewsletterSyncProcessor",
+        ) as mock_processor_cls,
+    ):
+        mock_processor_cls.return_value.sync_508_members.side_effect = RuntimeError(
+            "failed for jane@example.com"
+        )
+        response = client.post("/dashboard/api/sync/newsletters")
+
+    assert response.status_code == 502
+    assert response.json()["error"] == "newsletter_dry_run_failed"
+    assert "jane@example.com" not in response.text
 
 
 def test_dashboard_sync_projects_workflows_engineer_is_dry_run(
