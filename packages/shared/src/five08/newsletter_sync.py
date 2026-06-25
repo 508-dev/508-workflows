@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any, Iterable, Protocol
 
 from five08.clients.brevo import BrevoClient
@@ -14,6 +16,9 @@ from five08.redaction import redact_email_addresses
 CRM_BLOCKED_TYPES = {"inactive member", "rejected", "blocked"}
 CRM_BLOCKED_ONBOARDING_STATES = {"rejected", "waitlist"}
 PROVIDER_SUPPRESSED_STATUSES = {"unsubscribed", "unreachable", "blocked"}
+CRM_LOOKUP_BATCH_SIZE = 10
+CRM_LOOKUP_BATCH_MAX_SIZE = 200
+DRY_RUN_PROVIDER_PREVIEW_MAX_WORKERS = 8
 
 
 class CRMContactLookupError(RuntimeError):
@@ -112,6 +117,57 @@ def _contains_list_id(value: object, list_id: int) -> bool:
     return any(str(item).strip() == str(list_id) for item in value)
 
 
+def _chunks[T](items: list[T], size: int) -> Iterable[list[T]]:
+    for index in range(0, len(items), size):
+        yield items[index : index + size]
+
+
+def _mailbox_crm_lookup_values(mailbox: MigaduMailbox) -> set[str]:
+    values = {mailbox.address.strip().lower()}
+    if mailbox.password_recovery_email:
+        values.add(mailbox.password_recovery_email.strip().lower())
+    return {value for value in values if value}
+
+
+def _crm_filters_for_mailboxes(mailboxes: list[MigaduMailbox]) -> list[dict[str, str]]:
+    filters: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for mailbox in mailboxes:
+        for attribute, value in (
+            ("c508Email", mailbox.address),
+            ("emailAddress", mailbox.address),
+        ):
+            normalized = value.strip().lower()
+            key = (attribute, normalized)
+            if normalized and key not in seen:
+                filters.append(
+                    {"type": "equals", "attribute": attribute, "value": normalized}
+                )
+                seen.add(key)
+        if mailbox.password_recovery_email:
+            normalized = mailbox.password_recovery_email.strip().lower()
+            key = ("emailAddress", normalized)
+            if normalized and key not in seen:
+                filters.append(
+                    {
+                        "type": "equals",
+                        "attribute": "emailAddress",
+                        "value": normalized,
+                    }
+                )
+                seen.add(key)
+    return filters
+
+
+def _contact_matches_mailbox(contact: dict[str, Any], mailbox: MigaduMailbox) -> bool:
+    mailbox_values = _mailbox_crm_lookup_values(mailbox)
+    contact_values = {
+        str(contact.get("c508Email") or "").strip().lower(),
+        str(contact.get("emailAddress") or "").strip().lower(),
+    }
+    return bool(mailbox_values.intersection(value for value in contact_values if value))
+
+
 class BrevoNewsletterProvider:
     """Brevo implementation for the 508 members newsletter list."""
 
@@ -129,11 +185,16 @@ class BrevoNewsletterProvider:
         self.list_name = list_name
         self._list_id_lookup_completed = list_id is not None
         self._resolved_list_id = list_id
+        self._list_id_lookup_lock = Lock()
 
     def _list_id(self) -> int | None:
         if not self._list_id_lookup_completed:
-            self._resolved_list_id = self.client.find_list_id_by_name(self.list_name)
-            self._list_id_lookup_completed = True
+            with self._list_id_lookup_lock:
+                if not self._list_id_lookup_completed:
+                    self._resolved_list_id = self.client.find_list_id_by_name(
+                        self.list_name
+                    )
+                    self._list_id_lookup_completed = True
         return self._resolved_list_id
 
     def ensure_contact(self, contact: NewsletterContact) -> str:
@@ -233,20 +294,30 @@ class NewsletterSyncProcessor:
             return result
 
         crm_lookup_enabled = self._crm_lookup_enabled()
+        eligible_mailboxes: list[MigaduMailbox] = []
         for mailbox in self._migadu_client().list_mailboxes():
             result["mailboxes_scanned"] += 1
             if _is_mailbox_excluded(mailbox.address, self.excluded_mailboxes):
                 result["system_mailboxes_skipped"] += 1
                 continue
+            eligible_mailboxes.append(mailbox)
 
-            try:
-                crm_contacts = self._list_crm_contacts(mailbox)
-            except CRMContactLookupError as exc:
+        crm_contacts_by_mailbox, crm_lookup_failures = self._list_crm_contacts_batch(
+            eligible_mailboxes
+        )
+        dry_run_contacts: list[NewsletterContact] = []
+        for mailbox in eligible_mailboxes:
+            mailbox_key = mailbox.address.strip().lower()
+            crm_lookup_error = crm_lookup_failures.get(mailbox_key)
+            if crm_lookup_error is not None:
                 result["crm_lookup_failed_skipped"] += 1
                 failures = result.setdefault("crm_lookup_failures", [])
                 if isinstance(failures, list) and len(failures) < 20:
-                    failures.append({"mailbox": mailbox.address, "error": str(exc)})
+                    failures.append(
+                        {"mailbox": mailbox.address, "error": str(crm_lookup_error)}
+                    )
                 continue
+            crm_contacts = crm_contacts_by_mailbox.get(mailbox_key, [])
             if crm_lookup_enabled and not crm_contacts:
                 result["crm_unmatched_skipped"] += 1
                 continue
@@ -256,28 +327,100 @@ class NewsletterSyncProcessor:
 
             for contact in _normalized_emails_for_mailbox(mailbox):
                 result["contacts_considered"] += 1
+                if dry_run:
+                    dry_run_contacts.append(contact)
+                    continue
                 for provider in providers:
-                    provider_result = result["providers"][provider.name]
                     try:
-                        status = (
-                            provider.preview_contact(contact)
-                            if dry_run
-                            else provider.ensure_contact(contact)
-                        )
+                        status = provider.ensure_contact(contact)
                     except Exception as exc:
-                        provider_result["failed"] += 1
-                        failures = provider_result.setdefault("failures", [])
-                        if isinstance(failures, list) and len(failures) < 20:
-                            failures.append({"email": contact.email, "error": str(exc)})
+                        self._apply_provider_status(
+                            result,
+                            provider.name,
+                            contact.email,
+                            synced_key,
+                            error=exc,
+                        )
                         continue
-                    if status in {"synced", "would_sync"}:
-                        provider_result[synced_key] += 1
-                    else:
-                        provider_result["skipped"] += 1
-                    statuses = provider_result.setdefault("statuses", {})
-                    if isinstance(statuses, dict):
-                        statuses[status] = int(statuses.get(status, 0)) + 1
+                    self._apply_provider_status(
+                        result,
+                        provider.name,
+                        contact.email,
+                        synced_key,
+                        status=status,
+                    )
+        if dry_run and dry_run_contacts:
+            self._preview_provider_contacts(
+                contacts=dry_run_contacts,
+                providers=providers,
+                result=result,
+                synced_key=synced_key,
+            )
         return result
+
+    def _apply_provider_status(
+        self,
+        result: dict[str, Any],
+        provider_name: str,
+        email: str,
+        synced_key: str,
+        status: str | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        provider_result = result["providers"][provider_name]
+        if error is not None:
+            provider_result["failed"] += 1
+            failures = provider_result.setdefault("failures", [])
+            if isinstance(failures, list) and len(failures) < 20:
+                failures.append({"email": email, "error": str(error)})
+            return
+        if status in {"synced", "would_sync"}:
+            provider_result[synced_key] += 1
+        else:
+            provider_result["skipped"] += 1
+        statuses = provider_result.setdefault("statuses", {})
+        if isinstance(statuses, dict) and status is not None:
+            statuses[status] = int(statuses.get(status, 0)) + 1
+
+    def _preview_provider_contacts(
+        self,
+        *,
+        contacts: list[NewsletterContact],
+        providers: list[NewsletterProvider],
+        result: dict[str, Any],
+        synced_key: str,
+    ) -> None:
+        work_count = len(contacts) * len(providers)
+        max_workers = max(1, min(DRY_RUN_PROVIDER_PREVIEW_MAX_WORKERS, work_count))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(provider.preview_contact, contact): (
+                    provider.name,
+                    contact.email,
+                )
+                for contact in contacts
+                for provider in providers
+            }
+            for future in as_completed(futures):
+                provider_name, email = futures[future]
+                try:
+                    status = future.result()
+                except Exception as exc:
+                    self._apply_provider_status(
+                        result,
+                        provider_name,
+                        email,
+                        synced_key,
+                        error=exc,
+                    )
+                    continue
+                self._apply_provider_status(
+                    result,
+                    provider_name,
+                    email,
+                    synced_key,
+                    status=status,
+                )
 
     def _migadu_client(self) -> MigaduClient:
         return MigaduClient(
@@ -300,6 +443,13 @@ class NewsletterSyncProcessor:
         client = self._crm_client()
         if client is None:
             return []
+        return self._list_crm_contacts_for_mailbox(client, mailbox)
+
+    def _list_crm_contacts_for_mailbox(
+        self,
+        client: EspoClient,
+        mailbox: MigaduMailbox,
+    ) -> list[dict[str, Any]]:
         filters: list[dict[str, Any]] = [
             {"type": "equals", "attribute": "c508Email", "value": mailbox.address},
             {"type": "equals", "attribute": "emailAddress", "value": mailbox.address},
@@ -323,6 +473,65 @@ class NewsletterSyncProcessor:
         except EspoAPIError as exc:
             raise CRMContactLookupError(
                 f"CRM contact lookup failed for {mailbox.address}: {exc}"
+            ) from exc
+        contacts = response.get("list", [])
+        if not isinstance(contacts, list):
+            return []
+        return [contact for contact in contacts if isinstance(contact, dict)]
+
+    def _list_crm_contacts_batch(
+        self,
+        mailboxes: list[MigaduMailbox],
+    ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, CRMContactLookupError]]:
+        client = self._crm_client()
+        if client is None or not mailboxes:
+            return {}, {}
+
+        contacts_by_mailbox: dict[str, list[dict[str, Any]]] = {
+            mailbox.address.strip().lower(): [] for mailbox in mailboxes
+        }
+        failures: dict[str, CRMContactLookupError] = {}
+        for chunk in _chunks(mailboxes, CRM_LOOKUP_BATCH_SIZE):
+            try:
+                contacts = self._list_crm_contacts_for_mailboxes(client, chunk)
+            except CRMContactLookupError:
+                for mailbox in chunk:
+                    mailbox_key = mailbox.address.strip().lower()
+                    try:
+                        contacts_by_mailbox[mailbox_key] = (
+                            self._list_crm_contacts_for_mailbox(client, mailbox)
+                        )
+                    except CRMContactLookupError as exc:
+                        failures[mailbox_key] = exc
+                continue
+            for mailbox in chunk:
+                mailbox_key = mailbox.address.strip().lower()
+                contacts_by_mailbox[mailbox_key] = [
+                    contact
+                    for contact in contacts
+                    if _contact_matches_mailbox(contact, mailbox)
+                ]
+        return contacts_by_mailbox, failures
+
+    def _list_crm_contacts_for_mailboxes(
+        self,
+        client: EspoClient,
+        mailboxes: list[MigaduMailbox],
+    ) -> list[dict[str, Any]]:
+        filters = _crm_filters_for_mailboxes(mailboxes)
+        if not filters:
+            return []
+        try:
+            response = client.list_contacts(
+                {
+                    "where": [{"type": "or", "value": filters}],
+                    "maxSize": CRM_LOOKUP_BATCH_MAX_SIZE,
+                    "select": "id,name,emailAddress,c508Email,type,cOnboardingState",
+                }
+            )
+        except EspoAPIError as exc:
+            raise CRMContactLookupError(
+                f"CRM contact batch lookup failed: {exc}"
             ) from exc
         contacts = response.get("list", [])
         if not isinstance(contacts, list):

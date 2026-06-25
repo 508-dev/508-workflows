@@ -109,6 +109,7 @@ class FakeKeilaClient:
 class FakeEspoClient:
     contacts: list[dict[str, Any]] = []
     raise_error = False
+    calls: list[dict[str, Any]] = []
 
     def __init__(
         self,
@@ -121,9 +122,30 @@ class FakeEspoClient:
         self.timeout_seconds = timeout_seconds
 
     def list_contacts(self, params: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append(params)
         if self.raise_error:
             raise EspoAPIError("CRM unavailable")
-        return {"list": [dict(item) for item in self.contacts]}
+        filter_values = {
+            str(item.get("value") or "").strip().lower()
+            for clause in params.get("where", [])
+            if isinstance(clause, dict)
+            for item in clause.get("value", [])
+            if isinstance(item, dict)
+        }
+        if not filter_values:
+            return {"list": [dict(item) for item in self.contacts]}
+        matches: list[dict[str, Any]] = []
+        for contact in self.contacts:
+            contact_values = {
+                str(contact.get("c508Email") or "").strip().lower(),
+                str(contact.get("emailAddress") or "").strip().lower(),
+            }
+            if not any(contact_values):
+                matches.append(dict(contact))
+                continue
+            if filter_values.intersection(value for value in contact_values if value):
+                matches.append(dict(contact))
+        return {"list": matches}
 
 
 @pytest.fixture(autouse=True)
@@ -138,6 +160,7 @@ def reset_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
     FakeKeilaClient.lookups = []
     FakeEspoClient.contacts = []
     FakeEspoClient.raise_error = False
+    FakeEspoClient.calls = []
     monkeypatch.setattr("five08.newsletter_sync.MigaduClient", FakeMigaduClient)
     monkeypatch.setattr("five08.newsletter_sync.BrevoClient", FakeBrevoClient)
     monkeypatch.setattr("five08.newsletter_sync.KeilaClient", FakeKeilaClient)
@@ -205,8 +228,11 @@ def test_sync_508_members_dry_run_reports_provider_actions_without_writes() -> N
     assert result["dry_run"] is True
     assert result["mailboxes_scanned"] == 1
     assert result["contacts_considered"] == 2
-    assert FakeBrevoClient.contact_lookup_emails == ["jane@508.dev", "jane@example.com"]
-    assert FakeKeilaClient.lookups == ["jane@508.dev", "jane@example.com"]
+    assert sorted(FakeBrevoClient.contact_lookup_emails) == [
+        "jane@508.dev",
+        "jane@example.com",
+    ]
+    assert sorted(FakeKeilaClient.lookups) == ["jane@508.dev", "jane@example.com"]
     assert FakeBrevoClient.subscriptions == []
     assert FakeKeilaClient.upserts == []
     assert result["providers"]["brevo"]["would_sync"] == 2
@@ -346,7 +372,9 @@ def test_sync_508_members_skips_crm_blocked_mailboxes() -> None:
             password_recovery_email="jane@example.com",
         )
     ]
-    FakeEspoClient.contacts = [{"id": "contact-1", "type": "Inactive Member"}]
+    FakeEspoClient.contacts = [
+        {"id": "contact-1", "type": "Inactive Member", "c508Email": "jane@508.dev"}
+    ]
 
     result = NewsletterSyncProcessor(
         _settings(espo_base_url="https://crm.example", espo_api_key="espo-key")
@@ -385,7 +413,9 @@ def test_sync_508_members_syncs_crm_matched_mailboxes_when_crm_configured() -> N
             password_recovery_email="jane@example.com",
         )
     ]
-    FakeEspoClient.contacts = [{"id": "contact-1", "type": "Member"}]
+    FakeEspoClient.contacts = [
+        {"id": "contact-1", "type": "Member", "c508Email": "jane@508.dev"}
+    ]
 
     result = NewsletterSyncProcessor(
         _settings(espo_base_url="https://crm.example", espo_api_key="espo-key")
@@ -399,6 +429,42 @@ def test_sync_508_members_syncs_crm_matched_mailboxes_when_crm_configured() -> N
     ]
 
 
+def test_sync_508_members_batches_crm_lookup_for_multiple_mailboxes() -> None:
+    FakeMigaduClient.mailboxes = [
+        MigaduMailbox(
+            address="jane@508.dev",
+            name="Jane Doe",
+            password_recovery_email=None,
+        ),
+        MigaduMailbox(
+            address="john@508.dev",
+            name="John Doe",
+            password_recovery_email="john@example.com",
+        ),
+    ]
+    FakeEspoClient.contacts = [
+        {"id": "contact-1", "type": "Member", "c508Email": "jane@508.dev"},
+        {"id": "contact-2", "type": "Member", "emailAddress": "john@example.com"},
+    ]
+
+    result = NewsletterSyncProcessor(
+        _settings(espo_base_url="https://crm.example", espo_api_key="espo-key")
+    ).sync_508_members()
+
+    assert result["crm_unmatched_skipped"] == 0
+    assert result["contacts_considered"] == 3
+    assert len(FakeEspoClient.calls) == 1
+    crm_filters = FakeEspoClient.calls[0]["where"][0]["value"]
+    assert {"type": "equals", "attribute": "c508Email", "value": "jane@508.dev"} in (
+        crm_filters
+    )
+    assert {
+        "type": "equals",
+        "attribute": "emailAddress",
+        "value": "john@example.com",
+    } in crm_filters
+
+
 def test_sync_508_members_skips_mailbox_when_any_crm_match_is_blocked() -> None:
     FakeMigaduClient.mailboxes = [
         MigaduMailbox(
@@ -408,8 +474,8 @@ def test_sync_508_members_skips_mailbox_when_any_crm_match_is_blocked() -> None:
         )
     ]
     FakeEspoClient.contacts = [
-        {"id": "contact-1", "type": "Member"},
-        {"id": "contact-2", "type": "Inactive Member"},
+        {"id": "contact-1", "type": "Member", "c508Email": "jane@508.dev"},
+        {"id": "contact-2", "type": "Inactive Member", "c508Email": "jane@508.dev"},
     ]
 
     result = NewsletterSyncProcessor(
