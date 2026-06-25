@@ -2624,7 +2624,7 @@ def test_user_accounts_tool_reports_newsletter_sync_exceptions(
     _install_account_tool_fakes(monkeypatch)
 
     def _raise_newsletter_error(*args: object, **kwargs: object) -> dict[str, object]:
-        raise RuntimeError("provider exploded")
+        raise RuntimeError("provider exploded for jane@example.com")
 
     monkeypatch.setattr(
         "five08.agent.tools.sync_newsletter_contacts",
@@ -2648,7 +2648,7 @@ def test_user_accounts_tool_reports_newsletter_sync_exceptions(
 
     assert result["mailbox"]["newsletter_subscribed"] is False
     assert result["mailbox"]["newsletter_error"] == (
-        "Newsletter sync failed: provider exploded"
+        "Newsletter sync failed: provider exploded for [redacted-email]"
     )
 
 

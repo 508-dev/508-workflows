@@ -50,13 +50,13 @@ async def test_add_emails_to_newsletter_returns_warning_on_unexpected_error(
 ) -> None:
     with patch(
         "five08.discord_bot.cogs.crm.sync_newsletter_contacts",
-        side_effect=RuntimeError("provider `exploded`"),
+        side_effect=RuntimeError("provider `exploded` for jane@example.com"),
     ):
         warning = await cog._add_emails_to_newsletter(
             ["jane@508.dev", "jane@example.com"]
         )
 
-    assert warning == "Newsletter sync failed: provider 'exploded'"
+    assert warning == "Newsletter sync failed: provider 'exploded' for [redacted-email]"
 
 
 @pytest.mark.asyncio

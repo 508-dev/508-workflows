@@ -32,6 +32,7 @@ from five08.newsletter_sync import (
     format_newsletter_sync_warning,
     sync_newsletter_contacts,
 )
+from five08.redaction import redact_email_addresses
 
 SSO_ID_FIELD = "cSsoID"
 
@@ -1443,7 +1444,9 @@ class ToolRegistry:
                 source="agent_account_creation",
             )
         except Exception as exc:
-            text = " ".join(f"Newsletter sync failed: {exc}".split()).strip()
+            text = " ".join(
+                redact_email_addresses(f"Newsletter sync failed: {exc}").split()
+            ).strip()
             return f"{text[:197]}..." if len(text) > 200 else text
         warning = format_newsletter_sync_warning(result)
         if not warning:

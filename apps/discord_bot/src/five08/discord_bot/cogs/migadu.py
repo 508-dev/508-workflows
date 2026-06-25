@@ -30,6 +30,7 @@ from five08.newsletter_sync import (
     format_newsletter_sync_warning,
     sync_newsletter_contacts,
 )
+from five08.redaction import redact_email_addresses
 
 logger = logging.getLogger(__name__)
 
@@ -224,7 +225,7 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
             )
         except Exception as exc:
             error_warning = _truncate_discord_text(
-                f"Newsletter sync failed: {exc}",
+                redact_email_addresses(f"Newsletter sync failed: {exc}"),
                 limit=500,
             )
             logger.warning("Newsletter sync warning: %s", error_warning, exc_info=True)

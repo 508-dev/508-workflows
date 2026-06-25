@@ -129,10 +129,14 @@ class MigaduClient:
         except ValueError as exc:
             raise MigaduAPIError("Migadu response payload must be valid JSON.") from exc
 
-        if not isinstance(data, dict):
-            raise MigaduAPIError("Migadu response payload must be a JSON object.")
-
-        raw_mailboxes = data.get("mailboxes", [])
+        if isinstance(data, list):
+            raw_mailboxes = data
+        elif isinstance(data, dict):
+            raw_mailboxes = data.get("mailboxes", [])
+        else:
+            raise MigaduAPIError(
+                "Migadu response payload must be a JSON object or array."
+            )
         if not isinstance(raw_mailboxes, list):
             raise MigaduAPIError("Migadu response payload must include mailboxes list.")
 

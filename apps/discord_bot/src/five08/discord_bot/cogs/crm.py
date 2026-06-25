@@ -55,6 +55,7 @@ from five08.newsletter_sync import (
     format_newsletter_sync_warning,
     sync_newsletter_contacts,
 )
+from five08.redaction import redact_email_addresses
 from five08.skills import normalize_skill, normalize_skill_list
 from five08.discord_bot.utils.audit import DiscordAuditCogMixin
 from five08.discord_bot.utils.role_decorators import (
@@ -3834,7 +3835,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
         except Exception as exc:
             error_warning = self._sanitize_error_message_for_discord(
-                f"Newsletter sync failed: {exc}",
+                redact_email_addresses(f"Newsletter sync failed: {exc}"),
                 max_length=500,
             )
             logger.warning("Newsletter sync warning: %s", error_warning, exc_info=True)
