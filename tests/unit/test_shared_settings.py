@@ -119,6 +119,20 @@ def test_shared_settings_expose_agent_external_tool_credentials() -> None:
     assert runtime_config.keila_api_base_url == "https://keila.example"
 
 
+def test_shared_settings_accept_newsletter_sync_env_aliases() -> None:
+    settings = SharedSettings(
+        **{
+            "MIGADU_USER": "michael@508.dev",
+            "MIGADU_DOMAIN": "508.dev",
+            "KEILA_BASE_URL": "https://keila.508.dev/",
+        }
+    )
+
+    assert settings.migadu_api_user == "michael@508.dev"
+    assert settings.migadu_mailbox_domain == "508.dev"
+    assert settings.keila_api_base_url == "https://keila.508.dev/"
+
+
 def test_shared_settings_docuseal_template_id_accepts_numeric_string() -> None:
     """Shared settings should coerce DocuSeal template ids from env-like strings."""
     settings = SharedSettings(docuseal_member_agreement_template_id="1000001")

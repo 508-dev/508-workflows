@@ -7113,17 +7113,28 @@ def test_dashboard_sync_newsletters_workflows_engineer_is_dry_run(
             "five08.backend.api._enqueue_newsletter_sync_job",
             new_callable=AsyncMock,
         ) as mock_enqueue,
+        patch("five08.backend.api.NewsletterSyncProcessor") as mock_processor_cls,
         patch("five08.backend.api.insert_audit_event") as mock_insert,
     ):
+        mock_processor_cls.return_value.sync_508_members.return_value = {
+            "dry_run": True,
+            "mailboxes_scanned": 2,
+            "contacts_considered": 3,
+            "providers": {"brevo": {"would_sync": 3, "skipped": 0, "failed": 0}},
+        }
         response = client.post("/dashboard/api/sync/newsletters")
 
     assert response.status_code == 200
     assert response.json()["status"] == "dry_run"
+    assert response.json()["preview"]["providers"]["brevo"]["would_sync"] == 3
     assert response.json()["would_enqueue"]["job_type"] == (
         "sync_508_members_newsletters_job"
     )
     assert response.json()["would_enqueue"]["idempotency_key_pattern"] == (
         "newsletter-sync:508-members:dashboard:<timestamp>:<uuid>"
+    )
+    mock_processor_cls.return_value.sync_508_members.assert_called_once_with(
+        dry_run=True
     )
     mock_enqueue.assert_not_called()
     mock_insert.assert_not_called()

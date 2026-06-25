@@ -38,6 +38,9 @@ class NewsletterProvider(Protocol):
     def ensure_contact(self, contact: NewsletterContact) -> str:
         """Ensure contact exists, returning a sync status key."""
 
+    def preview_contact(self, contact: NewsletterContact) -> str:
+        """Return the sync status key that would be produced without writing."""
+
 
 def _split_name(full_name: str) -> tuple[str | None, str | None]:
     normalized = full_name.strip()
@@ -134,6 +137,12 @@ class BrevoNewsletterProvider:
         return self._resolved_list_id
 
     def ensure_contact(self, contact: NewsletterContact) -> str:
+        return self._sync_contact(contact, write=True)
+
+    def preview_contact(self, contact: NewsletterContact) -> str:
+        return self._sync_contact(contact, write=False)
+
+    def _sync_contact(self, contact: NewsletterContact, *, write: bool) -> str:
         list_id = self._list_id()
         if list_id is None:
             return "skipped_list_missing"
@@ -149,6 +158,8 @@ class BrevoNewsletterProvider:
         if existing is not None:
             if _contains_list_id(existing.get("listUnsubscribed"), list_id):
                 return "skipped_provider_suppressed"
+        if not write:
+            return "would_sync"
         self.client.add_contact_to_list(email=contact.email, list_id=list_id)
         return "synced"
 
@@ -162,6 +173,12 @@ class KeilaNewsletterProvider:
         self.client = client
 
     def ensure_contact(self, contact: NewsletterContact) -> str:
+        return self._sync_contact(contact, write=True)
+
+    def preview_contact(self, contact: NewsletterContact) -> str:
+        return self._sync_contact(contact, write=False)
+
+    def _sync_contact(self, contact: NewsletterContact, *, write: bool) -> str:
         existing = self.client.get_contact_by_email(contact.email)
         if existing is not None:
             status = str(existing.get("status") or "").strip().casefold()
@@ -169,6 +186,8 @@ class KeilaNewsletterProvider:
                 return "skipped_provider_suppressed"
 
         first_name, last_name = _split_name(contact.name)
+        if not write:
+            return "would_sync"
         self.client.upsert_active_contact(
             email=contact.email,
             first_name=first_name,
@@ -192,8 +211,9 @@ class NewsletterSyncProcessor:
             settings.newsletter_sync_excluded_mailboxes
         )
 
-    def sync_508_members(self) -> dict[str, Any]:
+    def sync_508_members(self, *, dry_run: bool = False) -> dict[str, Any]:
         providers = build_newsletter_providers(self.settings)
+        synced_key = "would_sync" if dry_run else "synced"
         result: dict[str, Any] = {
             "mailboxes_scanned": 0,
             "system_mailboxes_skipped": 0,
@@ -202,10 +222,12 @@ class NewsletterSyncProcessor:
             "crm_lookup_failed_skipped": 0,
             "contacts_considered": 0,
             "providers": {
-                provider.name: {"synced": 0, "skipped": 0, "failed": 0}
+                provider.name: {synced_key: 0, "skipped": 0, "failed": 0}
                 for provider in providers
             },
         }
+        if dry_run:
+            result["dry_run"] = True
         if not providers:
             result["warning"] = "no_newsletter_providers_configured"
             return result
@@ -237,15 +259,19 @@ class NewsletterSyncProcessor:
                 for provider in providers:
                     provider_result = result["providers"][provider.name]
                     try:
-                        status = provider.ensure_contact(contact)
+                        status = (
+                            provider.preview_contact(contact)
+                            if dry_run
+                            else provider.ensure_contact(contact)
+                        )
                     except Exception as exc:
                         provider_result["failed"] += 1
                         failures = provider_result.setdefault("failures", [])
                         if isinstance(failures, list) and len(failures) < 20:
                             failures.append({"email": contact.email, "error": str(exc)})
                         continue
-                    if status == "synced":
-                        provider_result["synced"] += 1
+                    if status in {"synced", "would_sync"}:
+                        provider_result[synced_key] += 1
                     else:
                         provider_result["skipped"] += 1
                     statuses = provider_result.setdefault("statuses", {})

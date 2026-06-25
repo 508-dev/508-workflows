@@ -427,6 +427,20 @@ type WikiMatchPreview = {
   }>
 }
 
+type NewsletterSyncPreview = {
+  mailboxes_scanned?: number
+  contacts_considered?: number
+  providers?: Record<
+    string,
+    {
+      would_sync?: number
+      synced?: number
+      skipped?: number
+      failed?: number
+    }
+  >
+}
+
 type AuditEvent = {
   id?: string
   occurred_at?: string
@@ -643,6 +657,21 @@ function messageFromUnknown(error: unknown, fallback: string) {
   if (typeof error === "string" && error.trim()) return error
   if (error instanceof Error && error.message.trim()) return error.message
   return fallback
+}
+
+function newsletterPreviewSummary(preview: NewsletterSyncPreview | undefined) {
+  if (!preview) return null
+  const providerSummaries = Object.entries(preview.providers || {}).map(([name, result]) => {
+    const wouldSync = result.would_sync ?? result.synced ?? 0
+    return `${name}: ${wouldSync} would sync, ${result.skipped || 0} skipped, ${result.failed || 0} failed`
+  })
+  const scanned = preview.mailboxes_scanned ?? 0
+  const contacts = preview.contacts_considered ?? 0
+  return [
+    `${scanned} mailbox${scanned === 1 ? "" : "es"}`,
+    `${contacts} contact${contacts === 1 ? "" : "s"}`,
+    ...providerSummaries,
+  ].join("; ")
 }
 
 function devErrorFromUnknown(error: unknown, fallback: string): DashboardDevError {
@@ -1951,15 +1980,14 @@ function App() {
       const payload = await requestJson<{
         job_id?: string
         dry_run?: boolean
+        preview?: NewsletterSyncPreview
         would_enqueue?: { job_type?: string }
       }>("/dashboard/api/sync/newsletters", {
         method: "POST",
       })
       if (payload.dry_run) {
-        showToast(
-          `Dry run only: would queue ${payload.would_enqueue?.job_type || "newsletter sync"}`,
-          "warning",
-        )
+        const summary = newsletterPreviewSummary(payload.preview)
+        showToast(summary ? `Dry run only: ${summary}` : "Dry run completed", "warning")
       } else {
         showToast(`Queued newsletter sync ${payload.job_id}`, "ok")
       }

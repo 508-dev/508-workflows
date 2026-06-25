@@ -142,6 +142,7 @@ from five08.onboarding_email import (
     send_onboarding_email_message,
     validate_plain_email,
 )
+from five08.newsletter_sync import NewsletterSyncProcessor
 from five08.projects import (
     DEFAULT_WIKI_PROJECT_DOC_ID,
     PROJECT_ROSTER_KIND_HISTORICAL,
@@ -166,6 +167,7 @@ from five08.runtime_config import (
     runtime_config_definition_for_key,
     set_runtime_config_value,
 )
+from five08.redaction import redact_email_addresses
 from five08.worker.config import settings
 from five08.worker.db_migrations import run_job_migrations
 from five08.worker.dispatcher import build_queue_client
@@ -6677,11 +6679,27 @@ async def dashboard_sync_newsletters_handler(request: Request) -> JSONResponse:
         return csrf_error
 
     if dry_run:
+        try:
+            preview = await asyncio.to_thread(
+                NewsletterSyncProcessor(settings).sync_508_members,
+                dry_run=True,
+            )
+        except Exception as exc:
+            return JSONResponse(
+                {
+                    "status": "dry_run_failed",
+                    "dry_run": True,
+                    "source": "dashboard",
+                    "error": redact_email_addresses(str(exc)),
+                },
+                status_code=502,
+            )
         return JSONResponse(
             {
                 "status": "dry_run",
                 "dry_run": True,
                 "source": "dashboard",
+                "preview": preview,
                 "would_enqueue": {
                     "queue": settings.redis_queue_name,
                     "job_type": "sync_508_members_newsletters_job",

@@ -315,6 +315,9 @@ def test_startup_bound_runtime_config_is_restart_required(key: str) -> None:
         "BREVO_API_TIMEOUT_SECONDS",
         "BREVO_508_MEMBERS_NEWSLETTER_LIST_ID",
         "BREVO_508_MEMBERS_NEWSLETTER_LIST_NAME",
+        "MIGADU_API_USER",
+        "MIGADU_API_KEY",
+        "MIGADU_MAILBOX_DOMAIN",
         "KEILA_API_KEY",
         "KEILA_API_BASE_URL",
         "KEILA_API_TIMEOUT_SECONDS",
@@ -327,7 +330,7 @@ def test_newsletter_settings_are_dashboard_configurable(key: str) -> None:
     definition = runtime_config_definition_for_key(key)
 
     assert definition is not None
-    assert definition.category == "Newsletter"
+    assert definition.category in {"Newsletter", "Mailbox"}
 
 
 def test_core_crm_auth_and_mailbox_settings_are_not_dashboard_configurable() -> None:
@@ -335,10 +338,21 @@ def test_core_crm_auth_and_mailbox_settings_are_not_dashboard_configurable() -> 
     assert runtime_config_definition_for_key("ESPO_API_KEY") is None
     assert runtime_config_definition_for_key("AUTHENTIK_API_BASE_URL") is None
     assert runtime_config_definition_for_key("AUTHENTIK_API_TOKEN") is None
-    assert runtime_config_definition_for_key("MIGADU_API_USER") is None
-    assert runtime_config_definition_for_key("MIGADU_API_KEY") is None
     assert runtime_config_definition_for_key("CRM_SYNC_INTERVAL_SECONDS") is None
     assert runtime_config_definition_for_key("CRM_SYNC_PAGE_SIZE") is None
+
+
+def test_migadu_runtime_config_accepts_short_env_aliases() -> None:
+    migadu_user = runtime_config_definition_for_key("MIGADU_API_USER")
+    migadu_domain = runtime_config_definition_for_key("MIGADU_MAILBOX_DOMAIN")
+    keila_base_url = runtime_config_definition_for_key("KEILA_API_BASE_URL")
+
+    assert migadu_user is not None
+    assert "MIGADU_USER" in migadu_user.env_names
+    assert migadu_domain is not None
+    assert "MIGADU_DOMAIN" in migadu_domain.env_names
+    assert keila_base_url is not None
+    assert "KEILA_BASE_URL" in keila_base_url.env_names
 
 
 def test_onboarding_email_smtp_settings_are_dashboard_configurable() -> None:

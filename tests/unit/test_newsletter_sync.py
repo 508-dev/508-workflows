@@ -191,6 +191,28 @@ def test_sync_508_members_adds_mailbox_and_backup_email_to_configured_providers(
     assert result["providers"]["keila"]["synced"] == 2
 
 
+def test_sync_508_members_dry_run_reports_provider_actions_without_writes() -> None:
+    FakeMigaduClient.mailboxes = [
+        MigaduMailbox(
+            address="jane@508.dev",
+            name="Jane Doe",
+            password_recovery_email="jane@example.com",
+        )
+    ]
+
+    result = NewsletterSyncProcessor(_settings()).sync_508_members(dry_run=True)
+
+    assert result["dry_run"] is True
+    assert result["mailboxes_scanned"] == 1
+    assert result["contacts_considered"] == 2
+    assert FakeBrevoClient.contact_lookup_emails == ["jane@508.dev", "jane@example.com"]
+    assert FakeKeilaClient.lookups == ["jane@508.dev", "jane@example.com"]
+    assert FakeBrevoClient.subscriptions == []
+    assert FakeKeilaClient.upserts == []
+    assert result["providers"]["brevo"]["would_sync"] == 2
+    assert result["providers"]["keila"]["would_sync"] == 2
+
+
 def test_sync_508_members_skips_provider_suppressed_contacts() -> None:
     FakeMigaduClient.mailboxes = [
         MigaduMailbox(
