@@ -355,7 +355,6 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
         assign_onboarder_requested = threading.Event()
         update_onboarding_status_requested = threading.Event()
         detail_requested = threading.Event()
-        gig_application_requested = threading.Event()
         gig_application_add_requested = threading.Event()
         gig_list_requests: list[str] = []
         gig_detail_requests: list[str] = []
@@ -540,7 +539,6 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             )
 
         def gig_application_status_route(route: Any) -> None:
-            gig_application_requested.set()
             body = route.request.post_data_json
             assert body["status"] == "unavailable"
             casey_application_id = "22222222-2222-4222-8222-222222222222"
@@ -761,19 +759,19 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             casey_status = page.get_by_label("Candidate status for Casey Candidate")
             expect(casey_status).to_be_enabled()
             expect(casey_status).to_have_value("suggested")
-            with page.expect_request(
-                lambda request: (
-                    request.method == "POST"
-                    and request.url.endswith(
+            with page.expect_response(
+                lambda response: (
+                    response.request.method == "POST"
+                    and response.url.endswith(
                         "/dashboard/api/gigs/"
                         "11111111-1111-4111-8111-111111111111"
                         "/applications/"
                         "22222222-2222-4222-8222-222222222222/status"
                     )
+                    and response.status == 200
                 )
             ):
                 casey_status.select_option("unavailable")
-            assert gig_application_requested.wait(timeout=5)
             expect(casey_status).to_have_value("unavailable")
             assert gig_detail_requests
 

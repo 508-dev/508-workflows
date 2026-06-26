@@ -107,7 +107,7 @@ class SharedSettings(BaseSettings):
     )
     keila_api_timeout_seconds: float = 20.0
     newsletter_sync_enabled: bool = True
-    newsletter_sync_interval_seconds: int = 604800
+    newsletter_sync_interval_seconds: int = Field(default=604800, ge=60)
     newsletter_sync_excluded_mailboxes: str = ""
     onboarding_email_smtp_server: str | None = Field(
         default=None,

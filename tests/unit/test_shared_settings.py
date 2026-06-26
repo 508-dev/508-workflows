@@ -168,6 +168,16 @@ def test_shared_settings_brevo_members_list_id_accepts_numeric_string() -> None:
     assert settings.brevo_508_members_newsletter_list_id == 4
 
 
+def test_shared_settings_newsletter_sync_interval_requires_one_minute() -> None:
+    """Newsletter scheduler intervals should match dashboard runtime-config limits."""
+    with pytest.raises(ValidationError):
+        SharedSettings(newsletter_sync_interval_seconds=59)
+
+    settings = SharedSettings(newsletter_sync_interval_seconds=60)
+
+    assert settings.newsletter_sync_interval_seconds == 60
+
+
 def test_local_service_defaults_target_host_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
