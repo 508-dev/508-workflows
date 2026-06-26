@@ -264,6 +264,50 @@ def test_sync_508_members_skips_provider_suppressed_contacts() -> None:
     }
 
 
+def test_sync_508_members_applies_brevo_suppression_to_all_providers() -> None:
+    FakeMigaduClient.mailboxes = [
+        MigaduMailbox(
+            address="jane@508.dev",
+            name="Jane Doe",
+            password_recovery_email="jane@example.com",
+        )
+    ]
+    FakeBrevoClient.contacts = {"jane@example.com": {"emailBlacklisted": True}}
+
+    result = NewsletterSyncProcessor(_settings()).sync_508_members()
+
+    assert FakeBrevoClient.subscriptions == [{"email": "jane@508.dev", "list_id": 4}]
+    assert [item["email"] for item in FakeKeilaClient.upserts] == ["jane@508.dev"]
+    assert result["suppressed_contacts_skipped"] == 1
+    assert result["providers"]["brevo"]["statuses"] == {
+        "synced": 1,
+        "skipped_provider_suppressed": 1,
+    }
+    assert result["providers"]["keila"]["statuses"] == {
+        "synced": 1,
+        "skipped_provider_suppressed": 1,
+    }
+
+
+def test_sync_508_members_does_not_treat_unreachable_as_suppressed() -> None:
+    FakeMigaduClient.mailboxes = [
+        MigaduMailbox(
+            address="jane@508.dev",
+            name="Jane Doe",
+            password_recovery_email=None,
+        )
+    ]
+    FakeKeilaClient.contacts = {
+        "jane@508.dev": {"id": "contact-1", "status": "unreachable"}
+    }
+
+    result = NewsletterSyncProcessor(_settings(brevo_api_key=None)).sync_508_members()
+
+    assert result["suppressed_contacts_skipped"] == 0
+    assert result["providers"]["keila"]["statuses"] == {"synced": 1}
+    assert [item["email"] for item in FakeKeilaClient.upserts] == ["jane@508.dev"]
+
+
 def test_sync_508_members_allows_sms_only_brevo_blacklist() -> None:
     FakeMigaduClient.mailboxes = [
         MigaduMailbox(
@@ -357,11 +401,51 @@ def test_sync_508_members_avoids_duplicate_keila_contact_lookups() -> None:
     result = NewsletterSyncProcessor(_settings(brevo_api_key=None)).sync_508_members()
 
     assert result["providers"]["keila"]["synced"] == 2
-    assert FakeKeilaClient.lookups == ["jane@508.dev", "jane@example.com"]
+    assert FakeKeilaClient.lookups == [
+        "jane@508.dev",
+        "jane@508.dev",
+        "jane@example.com",
+        "jane@example.com",
+    ]
     assert [item["existing_contact"] for item in FakeKeilaClient.upserts] == [
         None,
         None,
     ]
+
+
+def test_sync_508_members_skips_internal_suppression_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeMigaduClient.mailboxes = [
+        MigaduMailbox(
+            address="jane@508.dev",
+            name="Jane Doe",
+            password_recovery_email="jane@example.com",
+        )
+    ]
+
+    def fake_load_suppressions(
+        settings: Any, emails: list[str]
+    ) -> dict[str, list[Any]]:
+        assert sorted(emails) == ["jane@508.dev", "jane@example.com"]
+        return {"jane@example.com": [object()]}
+
+    monkeypatch.setattr(
+        "five08.newsletter_sync.load_active_newsletter_suppressions_by_email",
+        fake_load_suppressions,
+    )
+
+    result = NewsletterSyncProcessor(
+        _settings(postgres_url="postgresql://example/db")
+    ).sync_508_members()
+
+    assert result["suppressed_contacts_skipped"] == 1
+    assert FakeBrevoClient.subscriptions == [{"email": "jane@508.dev", "list_id": 4}]
+    assert [item["email"] for item in FakeKeilaClient.upserts] == ["jane@508.dev"]
+    assert result["providers"]["brevo"]["statuses"] == {
+        "synced": 1,
+        "skipped_internal_suppression": 1,
+    }
 
 
 def test_sync_508_members_skips_crm_blocked_mailboxes() -> None:

@@ -143,6 +143,7 @@ from five08.onboarding_email import (
     validate_plain_email,
 )
 from five08.newsletter_sync import NewsletterSyncProcessor
+from five08.newsletter_suppressions import list_newsletter_suppressions
 from five08.projects import (
     DEFAULT_WIKI_PROJECT_DOC_ID,
     PROJECT_ROSTER_KIND_HISTORICAL,
@@ -6451,6 +6452,43 @@ async def dashboard_configuration_handler(request: Request) -> JSONResponse:
     return JSONResponse({"items": items})
 
 
+async def dashboard_newsletter_suppressions_handler(
+    request: Request,
+    limit: int = Query(default=200, ge=1, le=1000),
+) -> JSONResponse:
+    """Return active newsletter suppressions for admin dashboard visibility."""
+    _, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_PEOPLE_SYNC,
+    )
+    if error_response is not None:
+        return error_response
+
+    records = await asyncio.to_thread(
+        list_newsletter_suppressions,
+        settings,
+        limit=limit,
+        active_only=True,
+    )
+    return JSONResponse(
+        {
+            "suppressions": [
+                {
+                    "email": record.email,
+                    "source_provider": record.source_provider,
+                    "reason": record.reason,
+                    "active": record.active,
+                    "metadata": record.metadata,
+                    "first_seen_at": record.first_seen_at.isoformat(),
+                    "last_seen_at": record.last_seen_at.isoformat(),
+                    "updated_at": record.updated_at.isoformat(),
+                }
+                for record in records
+            ]
+        }
+    )
+
+
 async def dashboard_update_configuration_handler(
     request: Request,
     key: str,
@@ -8477,6 +8515,11 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
         "/dashboard/api/configuration/{key}",
         dashboard_update_configuration_handler,
         methods=["PUT"],
+    )
+    app.add_api_route(
+        "/dashboard/api/newsletter/suppressions",
+        dashboard_newsletter_suppressions_handler,
+        methods=["GET"],
     )
     app.add_api_route(
         "/dashboard/api/sync/people",

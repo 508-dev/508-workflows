@@ -441,6 +441,17 @@ type NewsletterSyncPreview = {
   >
 }
 
+type NewsletterSuppression = {
+  email: string
+  source_provider: string
+  reason: string
+  active?: boolean
+  first_seen_at?: string
+  last_seen_at?: string
+  updated_at?: string
+  metadata?: Record<string, unknown>
+}
+
 type AuditEvent = {
   id?: string
   occurred_at?: string
@@ -963,6 +974,7 @@ function App() {
   const [notifications, setNotifications] = useState<DashboardNotification[]>([])
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [people, setPeople] = useState<Person[]>([])
+  const [newsletterSuppressions, setNewsletterSuppressions] = useState<NewsletterSuppression[]>([])
   const [onboarding, setOnboarding] = useState<Person[]>([])
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([])
   const [agentReport, setAgentReport] = useState<AgentReport | null>(null)
@@ -1726,10 +1738,25 @@ function App() {
     try {
       const payload = await requestJson<Person[]>(peopleUrl())
       setPeople(payload)
+      if (canUse("people:sync")) void loadNewsletterSuppressions()
     } catch (error) {
       showError(error, "Unable to load people")
     } finally {
       setBusy("people", false)
+    }
+  }
+
+  async function loadNewsletterSuppressions() {
+    setBusy("newsletterSuppressions", true)
+    try {
+      const payload = await requestJson<{ suppressions: NewsletterSuppression[] }>(
+        "/dashboard/api/newsletter/suppressions?limit=200",
+      )
+      setNewsletterSuppressions(payload.suppressions || [])
+    } catch (error) {
+      showError(error, "Unable to load newsletter suppressions")
+    } finally {
+      setBusy("newsletterSuppressions", false)
     }
   }
 
@@ -1990,6 +2017,7 @@ function App() {
         showToast(summary ? `Dry run only: ${summary}` : "Dry run completed", "warning")
       } else {
         showToast(`Queued newsletter sync ${payload.job_id}`, "ok")
+        void loadNewsletterSuppressions()
       }
     } catch (error) {
       showError(error, "Unable to queue newsletter sync")
@@ -2511,6 +2539,7 @@ function App() {
             <PeopleView
               crmBaseUrl={crmBaseUrl}
               people={sortedPeople}
+              newsletterSuppressions={newsletterSuppressions}
               sort={sort.people}
               canSync={canUse("people:sync")}
               canSyncNewsletters={canUse("people:sync")}
@@ -2522,6 +2551,7 @@ function App() {
               peopleFilterValue={peopleFilterValue}
               peopleFilterKeys={peopleFilterKeys}
               onSearch={loadPeople}
+              onRefreshNewsletterSuppressions={loadNewsletterSuppressions}
               onSync={syncPeople}
               onSyncNewsletters={syncNewsletters}
               onSort={(key) => handleSort("people", key)}
@@ -5551,6 +5581,7 @@ function GigApplicationRow({
 function PeopleView(props: {
   crmBaseUrl: string
   people: Person[]
+  newsletterSuppressions: NewsletterSuppression[]
   sort: { key: string; direction: SortDirection }
   canSync: boolean
   canSyncNewsletters: boolean
@@ -5562,6 +5593,7 @@ function PeopleView(props: {
   peopleFilterValue: string
   peopleFilterKeys: PeopleFilterKey[]
   onSearch: () => void
+  onRefreshNewsletterSuppressions: () => void
   onSync: () => void
   onSyncNewsletters: () => void
   onSort: (key: string) => void
@@ -5576,254 +5608,306 @@ function PeopleView(props: {
 }) {
   const filterOptions = peopleFilterDefinitions[props.peopleFilterKind]?.options || []
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>People lookup</CardTitle>
-        <div className="flex flex-wrap items-center justify-end gap-2">
-          {props.canSync ? (
-            <Button
-              id="syncPeople"
-              data-permission="people:sync"
-              type="button"
-              onClick={props.onSync}
-              disabled={props.loading.syncPeople}
-            >
-              <RefreshCw />
-              Sync people
-            </Button>
-          ) : null}
-          {props.canSyncNewsletters ? (
-            <Button
-              id="syncNewsletters"
-              data-permission="people:sync"
-              type="button"
-              variant="secondary"
-              onClick={props.onSyncNewsletters}
-              disabled={props.loading.syncNewsletters}
-            >
-              <RefreshCw />
-              Sync newsletters
-            </Button>
-          ) : null}
-          {props.crmBaseUrl ? (
-            <a
-              id="crmHomeLink"
-              className="text-sm font-extrabold text-primary"
-              href={props.crmBaseUrl}
-              target="_blank"
-              rel="noreferrer"
-            >
-              Open CRM
-            </a>
-          ) : null}
-          <span id="peopleStatus" className="text-sm text-muted-foreground">
-            {props.loading.people ? "Loading" : `${props.people.length} shown`}
-          </span>
-        </div>
-      </CardHeader>
-      <div className="grid gap-3 border-b p-4 md:grid-cols-[minmax(0,1fr)_auto]">
-        <Label>
-          Search CRM people cache
-          <Input
-            id="peopleQuery"
-            value={props.peopleQuery}
-            autoComplete="off"
-            placeholder="Name, email, CRM id, Discord, resume"
-            onChange={(event) => props.setPeopleQuery(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") props.onSearch()
-            }}
-          />
-        </Label>
-        <Button
-          id="searchPeople"
-          type="button"
-          onClick={props.onSearch}
-          disabled={props.loading.people}
-        >
-          <Search />
-          Search
-        </Button>
-      </div>
-      <div className="grid gap-3 border-b bg-background p-4 md:grid-cols-[minmax(120px,.7fr)_minmax(150px,1fr)_minmax(150px,1fr)_auto]">
-        <Label>
-          Member
-          <Select
-            id="peopleMember"
-            value={props.peopleMember}
-            onChange={(event) => props.setPeopleMember(event.target.value)}
+    <>
+      <Card>
+        <CardHeader>
+          <CardTitle>People lookup</CardTitle>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {props.canSync ? (
+              <Button
+                id="syncPeople"
+                data-permission="people:sync"
+                type="button"
+                onClick={props.onSync}
+                disabled={props.loading.syncPeople}
+              >
+                <RefreshCw />
+                Sync people
+              </Button>
+            ) : null}
+            {props.canSyncNewsletters ? (
+              <Button
+                id="syncNewsletters"
+                data-permission="people:sync"
+                type="button"
+                variant="secondary"
+                onClick={props.onSyncNewsletters}
+                disabled={props.loading.syncNewsletters}
+              >
+                <RefreshCw />
+                Sync newsletters
+              </Button>
+            ) : null}
+            {props.crmBaseUrl ? (
+              <a
+                id="crmHomeLink"
+                className="text-sm font-extrabold text-primary"
+                href={props.crmBaseUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Open CRM
+              </a>
+            ) : null}
+            <span id="peopleStatus" className="text-sm text-muted-foreground">
+              {props.loading.people ? "Loading" : `${props.people.length} shown`}
+            </span>
+          </div>
+        </CardHeader>
+        <div className="grid gap-3 border-b p-4 md:grid-cols-[minmax(0,1fr)_auto]">
+          <Label>
+            Search CRM people cache
+            <Input
+              id="peopleQuery"
+              value={props.peopleQuery}
+              autoComplete="off"
+              placeholder="Name, email, CRM id, Discord, resume"
+              onChange={(event) => props.setPeopleQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") props.onSearch()
+              }}
+            />
+          </Label>
+          <Button
+            id="searchPeople"
+            type="button"
+            onClick={props.onSearch}
+            disabled={props.loading.people}
           >
-            <option value="">Any</option>
-            <option value="true">Member</option>
-            <option value="false">Not member</option>
-          </Select>
-        </Label>
-        <Label>
-          Add filter
-          <Select
-            id="peopleFilterKind"
-            value={props.peopleFilterKind}
+            <Search />
+            Search
+          </Button>
+        </div>
+        <div className="grid gap-3 border-b bg-background p-4 md:grid-cols-[minmax(120px,.7fr)_minmax(150px,1fr)_minmax(150px,1fr)_auto]">
+          <Label>
+            Member
+            <Select
+              id="peopleMember"
+              value={props.peopleMember}
+              onChange={(event) => props.setPeopleMember(event.target.value)}
+            >
+              <option value="">Any</option>
+              <option value="true">Member</option>
+              <option value="false">Not member</option>
+            </Select>
+          </Label>
+          <Label>
+            Add filter
+            <Select
+              id="peopleFilterKind"
+              value={props.peopleFilterKind}
+              disabled={props.peopleFilterKeys.length === 0}
+              onChange={(event) => props.setPeopleFilterKind(event.target.value as PeopleFilterKey)}
+            >
+              {props.peopleFilterKeys.map((key) => (
+                <option key={key} value={key}>
+                  {peopleFilterDefinitions[key].label}
+                </option>
+              ))}
+            </Select>
+          </Label>
+          <Label>
+            Value
+            <Select
+              id="peopleFilterValue"
+              value={props.peopleFilterValue}
+              onChange={(event) => props.setPeopleFilterValue(event.target.value)}
+            >
+              {filterOptions.map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </Select>
+          </Label>
+          <Button
+            id="addPeopleFilter"
+            type="button"
+            onClick={props.addFilter}
             disabled={props.peopleFilterKeys.length === 0}
-            onChange={(event) => props.setPeopleFilterKind(event.target.value as PeopleFilterKey)}
           >
-            {props.peopleFilterKeys.map((key) => (
-              <option key={key} value={key}>
-                {peopleFilterDefinitions[key].label}
-              </option>
-            ))}
-          </Select>
-        </Label>
-        <Label>
-          Value
-          <Select
-            id="peopleFilterValue"
-            value={props.peopleFilterValue}
-            onChange={(event) => props.setPeopleFilterValue(event.target.value)}
-          >
-            {filterOptions.map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </Select>
-        </Label>
-        <Button
-          id="addPeopleFilter"
-          type="button"
-          onClick={props.addFilter}
-          disabled={props.peopleFilterKeys.length === 0}
-        >
-          Add filter
-        </Button>
-        <div id="activePeopleFilters" className="md:col-span-4">
-          <FilterChips filters={props.peopleFilters} onRemove={props.removeFilter} />
+            Add filter
+          </Button>
+          <div id="activePeopleFilters" className="md:col-span-4">
+            <FilterChips filters={props.peopleFilters} onRemove={props.removeFilter} />
+          </div>
         </div>
-      </div>
-      <Empty hidden={props.people.length !== 0}>No people match this lookup.</Empty>
-      <div className="overflow-x-auto">
-        <Table
-          id="peopleTable"
-          className={cn("min-w-[900px]", props.people.length === 0 && "hidden")}
-          aria-label="People lookup results"
-        >
-          <TableHeader>
-            <TableRow>
-              <SortableTableHead
-                className="w-[27%]"
-                label="Name"
-                scope="people"
-                sort={props.sort}
-                sortKey="name"
-                onSort={(_, key) => props.onSort(key)}
-              />
-              <SortableTableHead
-                className="w-[28%]"
-                label="Status"
-                scope="people"
-                sort={props.sort}
-                sortKey="status"
-                onSort={(_, key) => props.onSort(key)}
-              />
-              <SortableTableHead
-                className="w-[20%]"
-                label="Discord"
-                scope="people"
-                sort={props.sort}
-                sortKey="discord"
-                onSort={(_, key) => props.onSort(key)}
-              />
-              <SortableTableHead
-                className="w-[25%]"
-                label="Resume / skills"
-                scope="people"
-                sort={props.sort}
-                sortKey="resume"
-                onSort={(_, key) => props.onSort(key)}
-              />
-            </TableRow>
-          </TableHeader>
-          <TableBody id="peopleBody">
-            {props.people.map((person) => {
-              const displayName = person.name || person.email_508 || person.email || "CRM contact"
-              const contactUrl = props.crmContactUrl(person.crm_contact_id)
-              const status = person.profile_status || {}
-              const skillsCount = Number(status.skills_count || 0)
-              const resumeUrl = props.crmAttachmentUrl(person.latest_resume_id)
-              return (
-                <TableRow key={person.crm_contact_id || displayName}>
-                  <TableCell>
-                    {contactUrl ? (
-                      <a
-                        className="font-extrabold text-primary"
-                        href={contactUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        aria-label={`Open ${displayName} in CRM`}
-                      >
-                        {displayName}
-                      </a>
-                    ) : (
-                      <strong>{displayName}</strong>
-                    )}
-                    <div className="text-sm text-muted-foreground">
-                      {[person.email_508 || person.email, person.contact_type]
-                        .filter(Boolean)
-                        .join(" | ")}
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex flex-wrap gap-1.5">
-                      {!status.crm_active ? (
-                        <Badge variant="missing">{person.sync_status || "CRM sync issue"}</Badge>
-                      ) : null}
-                      <Badge variant={status.is_member ? "succeeded" : "missing"}>
-                        {status.is_member ? "Member" : "Missing Member"}
-                      </Badge>
-                      <Badge variant={status.discord_linked ? "succeeded" : "missing"}>
-                        {status.discord_linked ? "Discord" : "Missing Discord"}
-                      </Badge>
-                      <Badge variant={status.email_508 ? "succeeded" : "missing"}>
-                        {status.email_508 ? "508 email" : "Missing 508 email"}
-                      </Badge>
-                      {!status.latest_resume ? (
-                        <Badge variant="missing">Missing Resume</Badge>
-                      ) : null}
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    {[person.discord_username, person.discord_user_id]
-                      .filter(Boolean)
-                      .join(" | ") || "Not linked"}
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      {resumeUrl ? (
+        <Empty hidden={props.people.length !== 0}>No people match this lookup.</Empty>
+        <div className="overflow-x-auto">
+          <Table
+            id="peopleTable"
+            className={cn("min-w-[900px]", props.people.length === 0 && "hidden")}
+            aria-label="People lookup results"
+          >
+            <TableHeader>
+              <TableRow>
+                <SortableTableHead
+                  className="w-[27%]"
+                  label="Name"
+                  scope="people"
+                  sort={props.sort}
+                  sortKey="name"
+                  onSort={(_, key) => props.onSort(key)}
+                />
+                <SortableTableHead
+                  className="w-[28%]"
+                  label="Status"
+                  scope="people"
+                  sort={props.sort}
+                  sortKey="status"
+                  onSort={(_, key) => props.onSort(key)}
+                />
+                <SortableTableHead
+                  className="w-[20%]"
+                  label="Discord"
+                  scope="people"
+                  sort={props.sort}
+                  sortKey="discord"
+                  onSort={(_, key) => props.onSort(key)}
+                />
+                <SortableTableHead
+                  className="w-[25%]"
+                  label="Resume / skills"
+                  scope="people"
+                  sort={props.sort}
+                  sortKey="resume"
+                  onSort={(_, key) => props.onSort(key)}
+                />
+              </TableRow>
+            </TableHeader>
+            <TableBody id="peopleBody">
+              {props.people.map((person) => {
+                const displayName = person.name || person.email_508 || person.email || "CRM contact"
+                const contactUrl = props.crmContactUrl(person.crm_contact_id)
+                const status = person.profile_status || {}
+                const skillsCount = Number(status.skills_count || 0)
+                const resumeUrl = props.crmAttachmentUrl(person.latest_resume_id)
+                return (
+                  <TableRow key={person.crm_contact_id || displayName}>
+                    <TableCell>
+                      {contactUrl ? (
                         <a
-                          className="inline-flex min-h-7 items-center rounded-md border bg-secondary px-2 text-xs font-extrabold"
-                          href={resumeUrl}
+                          className="font-extrabold text-primary"
+                          href={contactUrl}
                           target="_blank"
                           rel="noreferrer"
-                          aria-label={`Open ${displayName} resume`}
+                          aria-label={`Open ${displayName} in CRM`}
                         >
-                          Resume
+                          {displayName}
                         </a>
                       ) : (
-                        <span>
-                          {person.latest_resume_name || person.latest_resume_id || "No resume"}
-                        </span>
+                        <strong>{displayName}</strong>
                       )}
-                      <Badge variant={skillsCount > 0 ? "succeeded" : "missing"}>
-                        {skillsCount > 0 ? "Skills parsed" : "Skills not parsed"}
-                      </Badge>
-                    </div>
-                  </TableCell>
+                      <div className="text-sm text-muted-foreground">
+                        {[person.email_508 || person.email, person.contact_type]
+                          .filter(Boolean)
+                          .join(" | ")}
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex flex-wrap gap-1.5">
+                        {!status.crm_active ? (
+                          <Badge variant="missing">{person.sync_status || "CRM sync issue"}</Badge>
+                        ) : null}
+                        <Badge variant={status.is_member ? "succeeded" : "missing"}>
+                          {status.is_member ? "Member" : "Missing Member"}
+                        </Badge>
+                        <Badge variant={status.discord_linked ? "succeeded" : "missing"}>
+                          {status.discord_linked ? "Discord" : "Missing Discord"}
+                        </Badge>
+                        <Badge variant={status.email_508 ? "succeeded" : "missing"}>
+                          {status.email_508 ? "508 email" : "Missing 508 email"}
+                        </Badge>
+                        {!status.latest_resume ? (
+                          <Badge variant="missing">Missing Resume</Badge>
+                        ) : null}
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      {[person.discord_username, person.discord_user_id]
+                        .filter(Boolean)
+                        .join(" | ") || "Not linked"}
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {resumeUrl ? (
+                          <a
+                            className="inline-flex min-h-7 items-center rounded-md border bg-secondary px-2 text-xs font-extrabold"
+                            href={resumeUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            aria-label={`Open ${displayName} resume`}
+                          >
+                            Resume
+                          </a>
+                        ) : (
+                          <span>
+                            {person.latest_resume_name || person.latest_resume_id || "No resume"}
+                          </span>
+                        )}
+                        <Badge variant={skillsCount > 0 ? "succeeded" : "missing"}>
+                          {skillsCount > 0 ? "Skills parsed" : "Skills not parsed"}
+                        </Badge>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                )
+              })}
+            </TableBody>
+          </Table>
+        </div>
+      </Card>
+      {props.canSyncNewsletters ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Newsletter suppressions</CardTitle>
+            <Button
+              id="refreshNewsletterSuppressions"
+              type="button"
+              variant="outline"
+              onClick={props.onRefreshNewsletterSuppressions}
+              disabled={props.loading.newsletterSuppressions}
+            >
+              <RefreshCw />
+              Refresh
+            </Button>
+          </CardHeader>
+          <Empty hidden={props.newsletterSuppressions.length !== 0}>
+            No active newsletter suppressions recorded.
+          </Empty>
+          <div className="overflow-x-auto">
+            <Table
+              id="newsletterSuppressionsTable"
+              className={cn("min-w-[820px]", props.newsletterSuppressions.length === 0 && "hidden")}
+              aria-label="Newsletter suppressions"
+            >
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-[34%]">Email</TableHead>
+                  <TableHead className="w-[14%]">Source</TableHead>
+                  <TableHead className="w-[22%]">Reason</TableHead>
+                  <TableHead className="w-[15%]">First seen</TableHead>
+                  <TableHead className="w-[15%]">Last seen</TableHead>
                 </TableRow>
-              )
-            })}
-          </TableBody>
-        </Table>
-      </div>
-    </Card>
+              </TableHeader>
+              <TableBody id="newsletterSuppressionsBody">
+                {props.newsletterSuppressions.map((record) => (
+                  <TableRow key={`${record.email}-${record.source_provider}`}>
+                    <TableCell className="font-mono text-sm">{record.email}</TableCell>
+                    <TableCell>
+                      <Badge variant="neutral">{record.source_provider}</Badge>
+                    </TableCell>
+                    <TableCell>{record.reason.replaceAll("_", " ")}</TableCell>
+                    <TableCell>{formatDate(record.first_seen_at)}</TableCell>
+                    <TableCell>{formatDate(record.last_seen_at || record.updated_at)}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        </Card>
+      ) : null}
+    </>
   )
 }
 
