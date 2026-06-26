@@ -1,0 +1,194 @@
+"""Brevo API client helpers shared across services."""
+
+from __future__ import annotations
+
+from typing import Any
+from urllib.parse import quote
+
+import requests
+
+from five08.clients.contact_email import normalize_provider_contact_email
+from five08.redaction import redact_email_addresses
+
+BREVO_API_BASE_URL = "https://api.brevo.com/v3"
+ERROR_BODY_MAX_LENGTH = 500
+
+
+class BrevoAPIError(RuntimeError):
+    """Raised when the Brevo API request fails or returns invalid data."""
+
+
+def _response_body_excerpt(body: object) -> str:
+    """Return a bounded response-body excerpt for persisted/logged errors."""
+    text = redact_email_addresses(" ".join(str(body or "").split()))
+    if len(text) <= ERROR_BODY_MAX_LENGTH:
+        return text
+    return f"{text[:ERROR_BODY_MAX_LENGTH]}..."
+
+
+class BrevoClient:
+    """Small Brevo API wrapper for newsletter contact subscriptions."""
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        base_url: str = BREVO_API_BASE_URL,
+        timeout_seconds: float = 20.0,
+    ) -> None:
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.timeout_seconds = timeout_seconds
+
+    def add_contact_to_list(
+        self,
+        *,
+        email: str,
+        list_id: int,
+    ) -> dict[str, Any]:
+        """Create or update one Brevo contact and add it to a list."""
+        normalized_email = normalize_provider_contact_email(email, "Brevo")
+        if list_id <= 0:
+            raise ValueError("Brevo list ID must be a positive integer.")
+
+        payload = {
+            "email": normalized_email,
+            "listIds": [list_id],
+            "updateEnabled": True,
+        }
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "api-key": self.api_key,
+        }
+
+        try:
+            response = requests.post(
+                f"{self.base_url}/contacts",
+                headers=headers,
+                json=payload,
+                timeout=self.timeout_seconds,
+            )
+        except requests.RequestException as exc:
+            raise BrevoAPIError(f"Brevo API request failed: {exc}") from exc
+
+        if response.status_code not in {200, 201, 204}:
+            raise BrevoAPIError(
+                "Brevo contact subscription failed: "
+                f"status={response.status_code}, "
+                f"body={_response_body_excerpt(response.text)}"
+            )
+
+        if not response.content:
+            return {}
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise BrevoAPIError("Brevo response payload must be valid JSON.") from exc
+
+        if not isinstance(data, dict):
+            raise BrevoAPIError("Brevo response payload must be a JSON object.")
+        return data
+
+    def get_contact(self, email: str) -> dict[str, Any] | None:
+        """Return one Brevo contact by email, or None when it does not exist."""
+        normalized_email = normalize_provider_contact_email(email, "Brevo")
+        headers = {
+            "Accept": "application/json",
+            "api-key": self.api_key,
+        }
+        try:
+            response = requests.get(
+                f"{self.base_url}/contacts/{quote(normalized_email, safe='')}",
+                headers=headers,
+                timeout=self.timeout_seconds,
+            )
+        except requests.RequestException as exc:
+            raise BrevoAPIError(f"Brevo API request failed: {exc}") from exc
+
+        if response.status_code == 404:
+            return None
+        if response.status_code != 200:
+            raise BrevoAPIError(
+                "Brevo contact lookup failed: "
+                f"status={response.status_code}, "
+                f"body={_response_body_excerpt(response.text)}"
+            )
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise BrevoAPIError("Brevo response payload must be valid JSON.") from exc
+
+        if not isinstance(data, dict):
+            raise BrevoAPIError("Brevo response payload must be a JSON object.")
+        return data
+
+    def find_list_id_by_name(self, name: str) -> int | None:
+        """Find a Brevo contact list ID by exact case-insensitive name."""
+        normalized_name = name.strip().casefold()
+        if not normalized_name:
+            raise ValueError("Brevo list name must be non-empty.")
+
+        limit = 50
+        offset = 0
+        while True:
+            payload = self._get_lists_page(limit=limit, offset=offset)
+            lists = payload.get("lists", [])
+            if not isinstance(lists, list):
+                raise BrevoAPIError("Brevo lists payload must include a list array.")
+
+            for item in lists:
+                if not isinstance(item, dict):
+                    continue
+                item_name = str(item.get("name") or "").strip().casefold()
+                if item_name != normalized_name:
+                    continue
+                list_id = item.get("id")
+                if not isinstance(list_id, int):
+                    raise BrevoAPIError("Brevo list ID must be an integer.")
+                return list_id
+
+            count = payload.get("count")
+            offset += limit
+            if isinstance(count, int) and offset >= count:
+                return None
+            if len(lists) < limit:
+                return None
+
+    def _get_lists_page(self, *, limit: int, offset: int) -> dict[str, Any]:
+        headers = {
+            "Accept": "application/json",
+            "api-key": self.api_key,
+        }
+        params: dict[str, str | int] = {
+            "limit": limit,
+            "offset": offset,
+            "sort": "asc",
+        }
+        try:
+            response = requests.get(
+                f"{self.base_url}/contacts/lists",
+                headers=headers,
+                params=params,
+                timeout=self.timeout_seconds,
+            )
+        except requests.RequestException as exc:
+            raise BrevoAPIError(f"Brevo API request failed: {exc}") from exc
+
+        if response.status_code != 200:
+            raise BrevoAPIError(
+                "Brevo list lookup failed: "
+                f"status={response.status_code}, "
+                f"body={_response_body_excerpt(response.text)}"
+            )
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise BrevoAPIError("Brevo response payload must be valid JSON.") from exc
+
+        if not isinstance(data, dict):
+            raise BrevoAPIError("Brevo response payload must be a JSON object.")
+        return data

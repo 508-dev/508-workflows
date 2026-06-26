@@ -45,6 +45,21 @@ def cog(mock_espo_api: Mock) -> CRMCog:
 
 
 @pytest.mark.asyncio
+async def test_add_emails_to_newsletter_returns_warning_on_unexpected_error(
+    cog: CRMCog,
+) -> None:
+    with patch(
+        "five08.discord_bot.cogs.crm.sync_newsletter_contacts",
+        side_effect=RuntimeError("provider `exploded` for jane@example.com"),
+    ):
+        warning = await cog._add_emails_to_newsletter(
+            ["jane@508.dev", "jane@example.com"]
+        )
+
+    assert warning == "Newsletter sync failed: provider 'exploded' for [redacted-email]"
+
+
+@pytest.mark.asyncio
 async def test_create_sso_user_creates_links_and_sends_recovery_email(
     cog: CRMCog, mock_interaction: AsyncMock, mock_espo_api: Mock
 ) -> None:
@@ -521,6 +536,11 @@ async def test_create_user_accounts_creates_mailbox_sso_and_outline_invite(
         patch.object(cog, "_migadu_client", return_value=migadu_client),
         patch.object(cog, "_authentik_client", return_value=authentik_client),
         patch.object(cog, "_outline_client", return_value=outline_client),
+        patch.object(
+            cog,
+            "_add_emails_to_newsletter",
+            new=AsyncMock(return_value=None),
+        ) as mock_newsletter,
         patch.object(cog, "_audit_command_safe") as mock_audit,
     ):
         mock_espo_api.request.return_value = {"id": "crm-123"}
@@ -546,6 +566,9 @@ async def test_create_user_accounts_creates_mailbox_sso_and_outline_invite(
         name="Jane Doe",
         role="member",
     )
+    mock_newsletter.assert_awaited_once_with(
+        ["jane@508.dev", "jane.personal@example.com"]
+    )
     assert mock_espo_api.request.call_args_list[0].args == (
         "PUT",
         "Contact/crm-123",
@@ -560,6 +583,7 @@ async def test_create_user_accounts_creates_mailbox_sso_and_outline_invite(
     assert "User accounts are ready" in message
     assert "Email: `jane@508.dev`" in message
     assert "Outline invite: sent." in message
+    assert "Newsletter: added mailbox and backup email." in message
     assert mock_interaction.followup.send.call_args.kwargs["ephemeral"] is True
     assert mock_audit.call_args.kwargs["metadata"]["outline_invited"] is True
 

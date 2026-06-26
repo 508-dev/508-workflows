@@ -6,7 +6,12 @@ from datetime import datetime, timezone
 from email import message_from_bytes
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import unquote
 
+from five08.redaction import (
+    EMAIL_ADDRESS_PATTERN,
+    PERCENT_ENCODED_EMAIL_ADDRESS_PATTERN,
+)
 from five08.worker.config import settings
 from five08.worker.crm.docuseal_processor import DocusealAgreementProcessor
 from five08.worker.crm.intake_form_processor import IntakeFormProcessor
@@ -16,6 +21,7 @@ from five08.worker.crm.resume_profile_processor import ResumeProfileProcessor
 from five08.worker.erpnext_project_sync import ERPNextProjectSyncProcessor
 from five08.worker.mailbox_resume_ingest import ResumeMailboxProcessor
 from five08.worker.masking import mask_email
+from five08.newsletter_sync import NewsletterSyncProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +170,52 @@ def sync_projects_from_erpnext_job() -> dict[str, Any]:
     return processor.sync_open_projects()
 
 
+def _mask_newsletter_sync_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Mask email addresses before newsletter sync results are persisted."""
+    crm_failures = result.get("crm_lookup_failures")
+    if isinstance(crm_failures, list):
+        for failure in crm_failures:
+            if not isinstance(failure, dict):
+                continue
+            if failure.get("mailbox"):
+                failure["mailbox"] = mask_email(str(failure["mailbox"]))
+            if failure.get("error"):
+                failure["error"] = _mask_emails_in_text(str(failure["error"]))
+
+    providers = result.get("providers")
+    if isinstance(providers, dict):
+        for provider_result in providers.values():
+            if not isinstance(provider_result, dict):
+                continue
+            failures = provider_result.get("failures")
+            if not isinstance(failures, list):
+                continue
+            for failure in failures:
+                if not isinstance(failure, dict):
+                    continue
+                if failure.get("email"):
+                    failure["email"] = mask_email(str(failure["email"]))
+                if failure.get("error"):
+                    failure["error"] = _mask_emails_in_text(str(failure["error"]))
+    return result
+
+
+def _mask_emails_in_text(text: str) -> str:
+    """Mask email-like substrings embedded in free-form error text."""
+    text = PERCENT_ENCODED_EMAIL_ADDRESS_PATTERN.sub(
+        lambda match: mask_email(unquote(match.group(0))),
+        text,
+    )
+    return EMAIL_ADDRESS_PATTERN.sub(lambda match: mask_email(match.group(0)), text)
+
+
+def sync_508_members_newsletters_job() -> dict[str, Any]:
+    """Sync Migadu member emails into configured newsletter providers."""
+    logger.info("Processing 508 members newsletter sync job")
+    processor = NewsletterSyncProcessor(settings)
+    return _mask_newsletter_sync_result(processor.sync_508_members())
+
+
 JOB_FUNCTIONS: dict[str, Callable[..., dict[str, Any]]] = {
     process_webhook_event.__name__: process_webhook_event,
     process_contact_skills_job.__name__: process_contact_skills_job,
@@ -174,5 +226,6 @@ JOB_FUNCTIONS: dict[str, Callable[..., dict[str, Any]]] = {
     sync_people_from_crm_job.__name__: sync_people_from_crm_job,
     sync_person_from_crm_job.__name__: sync_person_from_crm_job,
     sync_projects_from_erpnext_job.__name__: sync_projects_from_erpnext_job,
+    sync_508_members_newsletters_job.__name__: sync_508_members_newsletters_job,
     process_docuseal_agreement_job.__name__: process_docuseal_agreement_job,
 }

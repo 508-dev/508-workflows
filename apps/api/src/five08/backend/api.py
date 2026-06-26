@@ -144,6 +144,8 @@ from five08.onboarding_email import (
     send_onboarding_email_message,
     validate_plain_email,
 )
+from five08.newsletter_sync import NewsletterSyncProcessor
+from five08.newsletter_suppressions import list_newsletter_suppressions
 from five08.projects import (
     DEFAULT_WIKI_PROJECT_DOC_ID,
     PROJECT_ROSTER_KIND_HISTORICAL,
@@ -168,6 +170,7 @@ from five08.runtime_config import (
     runtime_config_definition_for_key,
     set_runtime_config_value,
 )
+from five08.redaction import redact_email_addresses
 from five08.worker.config import settings
 from five08.worker.db_migrations import run_job_migrations
 from five08.worker.dispatcher import build_queue_client
@@ -481,7 +484,9 @@ def _get_agent_orchestrator() -> AgentOrchestrator:
             _AGENT_ORCHESTRATOR = AgentOrchestrator(
                 registry=ToolRegistry(
                     _AGENT_TASK_STORE,
-                    runtime_config=ToolRuntimeConfig.from_settings(settings),
+                    runtime_config_factory=lambda: ToolRuntimeConfig.from_settings(
+                        settings
+                    ),
                 ),
                 model_config=AgentModelConfig.from_settings(settings),
                 intent_normalizer=OpenAICompatibleIntentNormalizer.from_settings(
@@ -606,6 +611,12 @@ def _crm_sync_idempotency_key(*, now: datetime) -> str:
     interval_seconds = max(1, settings.crm_sync_interval_seconds)
     bucket = int(now.timestamp()) // interval_seconds
     return f"crm-sync:{bucket}"
+
+
+def _newsletter_sync_idempotency_key(*, now: datetime) -> str:
+    interval_seconds = max(60, settings.newsletter_sync_interval_seconds)
+    bucket = int(now.timestamp()) // interval_seconds
+    return f"newsletter-sync:508-members:{bucket}"
 
 
 def _normalize_google_forms_input(value: str | None) -> str | None:
@@ -884,6 +895,37 @@ async def _enqueue_erpnext_project_sync_job(
     return job
 
 
+async def _enqueue_newsletter_sync_job(
+    queue: QueueClient,
+    *,
+    reason: str,
+) -> EnqueuedJob:
+    now = datetime.now(tz=timezone.utc)
+    idempotency_key = (
+        _newsletter_sync_idempotency_key(now=now)
+        if reason == "scheduler"
+        else (
+            f"newsletter-sync:508-members:{reason}:"
+            f"{now.strftime('%Y%m%d%H%M%S%f')}:{uuid4().hex}"
+        )
+    )
+    job: EnqueuedJob = await asyncio.to_thread(
+        enqueue_job,
+        queue=queue,
+        fn=JOB_FUNCTIONS["sync_508_members_newsletters_job"],
+        args=(),
+        settings=settings,
+        idempotency_key=idempotency_key,
+    )
+    logger.info(
+        "Enqueued 508 members newsletter sync job id=%s created=%s reason=%s",
+        job.id,
+        job.created,
+        reason,
+    )
+    return job
+
+
 async def _crm_sync_scheduler(app: FastAPI) -> None:
     queue = app.state.queue
     interval_seconds = max(1, settings.crm_sync_interval_seconds)
@@ -892,6 +934,17 @@ async def _crm_sync_scheduler(app: FastAPI) -> None:
             await _enqueue_full_crm_sync_job(queue, reason="scheduler")
         except Exception:
             logger.exception("Failed scheduling CRM full-sync job")
+        await asyncio.sleep(interval_seconds)
+
+
+async def _newsletter_sync_scheduler(app: FastAPI) -> None:
+    queue = app.state.queue
+    interval_seconds = max(60, settings.newsletter_sync_interval_seconds)
+    while True:
+        try:
+            await _enqueue_newsletter_sync_job(queue, reason="scheduler")
+        except Exception:
+            logger.exception("Failed scheduling 508 members newsletter sync job")
         await asyncio.sleep(interval_seconds)
 
 
@@ -2744,6 +2797,25 @@ def _dashboard_reply_to_email(session: AuthSession) -> str | None:
         except ValueError:
             continue
     return None
+
+
+def _dashboard_sender_cc_email(session: AuthSession) -> str | None:
+    if session.email and session.email.lower().endswith("@508.dev"):
+        try:
+            return validate_plain_email(session.email, "session.email")
+        except ValueError:
+            pass
+
+    profile = _dashboard_session_profile_row(session)
+    if not profile:
+        return None
+    candidate = str(profile.get("email_508") or "").strip()
+    if not candidate or not candidate.lower().endswith("@508.dev"):
+        return None
+    try:
+        return validate_plain_email(candidate, "email_508")
+    except ValueError:
+        return None
 
 
 def _dashboard_onboarding_email_actor(session: AuthSession) -> str:
@@ -6622,6 +6694,7 @@ async def dashboard_onboarding_email_draft_handler(
         session,
     )
     reply_to_email = await asyncio.to_thread(_dashboard_reply_to_email, session)
+    cc_email = await asyncio.to_thread(_dashboard_sender_cc_email, session)
     candidate_name = _dashboard_contact_display_name(contact)
     recipient_email = _dashboard_preferred_contact_email(contact)
     draft = build_onboarding_email(
@@ -6645,6 +6718,7 @@ async def dashboard_onboarding_email_draft_handler(
             "candidate_name": candidate_name,
             "recipient_email": recipient_email,
             "reply_to_email": reply_to_email,
+            "cc_email": cc_email,
             "sender_display_name": sender_display_name,
             "signature_name": signature_name,
             "subject": draft.subject,
@@ -6705,6 +6779,7 @@ async def dashboard_onboarding_email_send_handler(
                 "reply_to_email_required",
                 status_code=409,
             )
+        cc_email = await asyncio.to_thread(_dashboard_sender_cc_email, session)
         recipient_email = _dashboard_preferred_contact_email(contact)
         if recipient_email is None:
             raise DashboardOnboardingEmailError(
@@ -6725,6 +6800,7 @@ async def dashboard_onboarding_email_send_handler(
             reply_to_email=reply_to_email,
             sender_name=sender_display_name,
             sender_email=settings.onboarding_email_sender_email,
+            cc_email=cc_email,
             subject="508.dev onboarding",
             text_body=text_body,
             html_body=html_body,
@@ -6825,6 +6901,7 @@ async def dashboard_onboarding_email_send_handler(
             "candidate_name": candidate_name,
             "recipient_email": recipient_email,
             "reply_to_email": reply_to_email,
+            "cc_email": cc_email,
             "sender_display_name": sender_display_name,
             "signature_name": signature_name,
             "onboarding_status": onboarding_status,
@@ -6839,6 +6916,7 @@ async def dashboard_onboarding_email_send_handler(
             "candidate_name": candidate_name,
             "recipient_email": recipient_email,
             "reply_to_email": reply_to_email,
+            "cc_email": cc_email,
             "sender_display_name": sender_display_name,
             "signature_name": signature_name,
             "subject": "508.dev onboarding",
@@ -6894,6 +6972,80 @@ async def dashboard_configuration_handler(request: Request) -> JSONResponse:
 
     items = await asyncio.to_thread(list_runtime_config, settings)
     return JSONResponse({"items": items})
+
+
+async def dashboard_newsletter_suppressions_handler(
+    request: Request,
+    limit: int = Query(default=200, ge=1, le=1000),
+) -> JSONResponse:
+    """Return active newsletter suppressions for admin dashboard visibility."""
+    _, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_PEOPLE_SYNC,
+    )
+    if error_response is not None:
+        return error_response
+
+    records = await asyncio.to_thread(
+        list_newsletter_suppressions,
+        settings,
+        limit=limit,
+        active_only=True,
+    )
+    return JSONResponse(
+        {
+            "suppressions": [
+                {
+                    "email": record.email,
+                    "source_provider": record.source_provider,
+                    "reason": record.reason,
+                    "active": record.active,
+                    "metadata": record.metadata,
+                    "first_seen_at": record.first_seen_at.isoformat(),
+                    "last_seen_at": record.last_seen_at.isoformat(),
+                    "updated_at": record.updated_at.isoformat(),
+                }
+                for record in records
+            ]
+        }
+    )
+
+
+async def dashboard_newsletter_status_handler(request: Request) -> JSONResponse:
+    """Return current dashboard status for the 508 members newsletter sync."""
+    _, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_PEOPLE_SYNC,
+    )
+    if error_response is not None:
+        return error_response
+
+    recent_jobs = await asyncio.to_thread(
+        list_jobs,
+        settings,
+        created_after=datetime.now(tz=timezone.utc) - timedelta(days=90),
+        limit=1,
+        job_type=JOB_FUNCTIONS["sync_508_members_newsletters_job"].__name__,
+    )
+    latest_job = recent_jobs[0] if recent_jobs else None
+    suppressions = await asyncio.to_thread(
+        list_newsletter_suppressions,
+        settings,
+        limit=1000,
+        active_only=True,
+    )
+    suppressed_emails = {record.email for record in suppressions}
+    return JSONResponse(
+        {
+            "scheduler_enabled": settings.newsletter_sync_enabled,
+            "interval_seconds": settings.newsletter_sync_interval_seconds,
+            "active_suppression_count": len(suppressions),
+            "active_suppressed_email_count": len(suppressed_emails),
+            "latest_job": _dashboard_job_payload(latest_job)
+            if latest_job is not None
+            else None,
+        }
+    )
 
 
 async def dashboard_update_configuration_handler(
@@ -7091,6 +7243,97 @@ async def dashboard_sync_people_handler(request: Request) -> JSONResponse:
         actor_display_name=session.display_name,
         actor_provider=actor_provider,
         resource_type="crm_people_sync",
+        resource_id=job.id,
+        metadata={
+            "source": "dashboard",
+            "queue": settings.redis_queue_name,
+        },
+    )
+    return JSONResponse(
+        {
+            "status": "queued",
+            "source": "dashboard",
+            "job_id": job.id,
+            "created": job.created,
+        },
+        status_code=202,
+    )
+
+
+def _redact_newsletter_sync_preview(value: object) -> object:
+    """Recursively redact emails from dashboard newsletter dry-run previews."""
+    if isinstance(value, str):
+        return redact_email_addresses(value)
+    if isinstance(value, list):
+        return [_redact_newsletter_sync_preview(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _redact_newsletter_sync_preview(item) for key, item in value.items()
+        }
+    return value
+
+
+async def dashboard_sync_newsletters_handler(request: Request) -> JSONResponse:
+    """Queue a 508 members newsletter sync from the authenticated dashboard."""
+    session, error_response, dry_run = await _dashboard_write_session_or_dry_run(
+        request,
+        required_permission=DASHBOARD_PERMISSION_PEOPLE_SYNC,
+        dry_run_permission=DASHBOARD_PERMISSION_PEOPLE_SYNC_DRY_RUN,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    if dry_run:
+        try:
+            preview = await asyncio.to_thread(
+                NewsletterSyncProcessor(settings).sync_508_members,
+                dry_run=True,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Newsletter sync dry run failed: %s",
+                type(exc).__name__,
+            )
+            return JSONResponse(
+                {
+                    "status": "dry_run_failed",
+                    "dry_run": True,
+                    "source": "dashboard",
+                    "error": "newsletter_dry_run_failed",
+                },
+                status_code=502,
+            )
+        return JSONResponse(
+            {
+                "status": "dry_run",
+                "dry_run": True,
+                "source": "dashboard",
+                "preview": _redact_newsletter_sync_preview(preview),
+                "would_enqueue": {
+                    "queue": settings.redis_queue_name,
+                    "job_type": "sync_508_members_newsletters_job",
+                    "reason": "dashboard",
+                    "idempotency_key_pattern": "newsletter-sync:508-members:dashboard:<timestamp>:<uuid>",
+                },
+            }
+        )
+
+    job = await _enqueue_newsletter_sync_job(
+        request.app.state.queue, reason="dashboard"
+    )
+    actor_provider, actor_subject = _session_audit_actor(session)
+    await _write_auth_audit_event(
+        action="newsletter.508_members_sync",
+        result=AuditResult.SUCCESS,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="newsletter_sync",
         resource_id=job.id,
         metadata={
             "source": "dashboard",
@@ -8681,6 +8924,13 @@ async def _lifespan(app: FastAPI) -> Any:
     else:
         logger.info("CRM sync scheduler disabled by config")
 
+    if settings.newsletter_sync_enabled:
+        app.state.newsletter_sync_task = asyncio.create_task(
+            _newsletter_sync_scheduler(app)
+        )
+    else:
+        logger.info("508 members newsletter sync scheduler disabled by config")
+
     if settings.email_resume_intake_enabled:
         app.state.email_resume_task = asyncio.create_task(_email_resume_scheduler())
     else:
@@ -8697,6 +8947,12 @@ async def _lifespan(app: FastAPI) -> Any:
 
         if hasattr(app.state, "email_resume_task"):
             task = app.state.email_resume_task
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        if hasattr(app.state, "newsletter_sync_task"):
+            task = app.state.newsletter_sync_task
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
@@ -8922,8 +9178,23 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
         methods=["PUT"],
     )
     app.add_api_route(
+        "/dashboard/api/newsletter/suppressions",
+        dashboard_newsletter_suppressions_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/newsletter/status",
+        dashboard_newsletter_status_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
         "/dashboard/api/sync/people",
         dashboard_sync_people_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/dashboard/api/sync/newsletters",
+        dashboard_sync_newsletters_handler,
         methods=["POST"],
     )
     app.add_api_route(

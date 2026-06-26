@@ -57,6 +57,7 @@ type View =
   | "gigs"
   | "projects"
   | "onboarding"
+  | "newsletter"
   | "jobs"
   | "agent"
   | "audit"
@@ -115,6 +116,11 @@ const configurationGroups: ConfigurationGroupMetadata[] = [
     label: "Onboarding",
     description:
       "Editable onboarding integrations such as DocuSeal, Outline, and onboarding email SMTP.",
+  },
+  {
+    category: "Newsletter",
+    label: "Newsletter",
+    description: "Brevo, Keila, and recurring 508 members audience sync settings.",
   },
   {
     category: "AI",
@@ -227,6 +233,7 @@ type OnboardingEmailDraft = {
   candidate_name?: string
   recipient_email?: string | null
   reply_to_email?: string | null
+  cc_email?: string | null
   sender_display_name?: string | null
   signature_name?: string | null
   subject: string
@@ -433,6 +440,47 @@ type WikiMatchPreview = {
   }>
 }
 
+type NewsletterSyncPreview = {
+  mailboxes_scanned?: number
+  contacts_considered?: number
+  providers?: Record<
+    string,
+    {
+      would_sync?: number
+      synced?: number
+      skipped?: number
+      failed?: number
+    }
+  >
+}
+
+type NewsletterSuppression = {
+  email: string
+  source_provider: string
+  reason: string
+  active?: boolean
+  first_seen_at?: string
+  last_seen_at?: string
+  updated_at?: string
+  metadata?: Record<string, unknown>
+}
+
+type NewsletterStatus = {
+  scheduler_enabled?: boolean
+  interval_seconds?: number
+  active_suppression_count?: number
+  active_suppressed_email_count?: number
+  latest_job?: JobDetail | null
+}
+
+type NewsletterProviderResult = {
+  synced?: number
+  would_sync?: number
+  skipped?: number
+  failed?: number
+  statuses?: Record<string, number>
+}
+
 type AuditEvent = {
   id?: string
   occurred_at?: string
@@ -501,6 +549,7 @@ const routes: Record<View, string> = {
   gigs: "/dashboard/gigs",
   projects: "/dashboard/projects",
   onboarding: "/dashboard/onboarding",
+  newsletter: "/dashboard/newsletter",
   jobs: "/dashboard/jobs",
   agent: "/dashboard/agent",
   audit: "/dashboard/audit",
@@ -512,6 +561,7 @@ const routePermissions: Record<View, string> = {
   gigs: "gigs:read",
   projects: "projects:read",
   onboarding: "onboarding:read",
+  newsletter: "people:sync",
   jobs: "jobs:read",
   agent: "audit:read",
   audit: "audit:read",
@@ -651,6 +701,52 @@ function messageFromUnknown(error: unknown, fallback: string) {
   return fallback
 }
 
+function newsletterPreviewSummary(preview: NewsletterSyncPreview | undefined) {
+  if (!preview) return null
+  const providerSummaries = Object.entries(preview.providers || {}).map(([name, result]) => {
+    const wouldSync = result.would_sync ?? result.synced ?? 0
+    return `${name}: ${wouldSync} would sync, ${result.skipped || 0} skipped, ${result.failed || 0} failed`
+  })
+  const scanned = preview.mailboxes_scanned ?? 0
+  const contacts = preview.contacts_considered ?? 0
+  return [
+    `${scanned} mailbox${scanned === 1 ? "" : "es"}`,
+    `${contacts} contact${contacts === 1 ? "" : "s"}`,
+    ...providerSummaries,
+  ].join("; ")
+}
+
+function newsletterIntervalLabel(seconds?: number) {
+  const normalized = Number(seconds || 0)
+  if (!Number.isFinite(normalized) || normalized <= 0) return "Not configured"
+  if (normalized % 86400 === 0) {
+    const days = normalized / 86400
+    return `${days} day${days === 1 ? "" : "s"}`
+  }
+  if (normalized % 3600 === 0) {
+    const hours = normalized / 3600
+    return `${hours} hour${hours === 1 ? "" : "s"}`
+  }
+  if (normalized % 60 === 0) {
+    const minutes = normalized / 60
+    return `${minutes} minute${minutes === 1 ? "" : "s"}`
+  }
+  return `${normalized} second${normalized === 1 ? "" : "s"}`
+}
+
+function newsletterProviderResults(job?: JobDetail | null) {
+  const result = job?.result
+  if (!result || typeof result !== "object" || Array.isArray(result)) return []
+  const providers = (result as { providers?: unknown }).providers
+  if (!providers || typeof providers !== "object" || Array.isArray(providers)) return []
+  return Object.entries(providers)
+    .filter((entry): entry is [string, NewsletterProviderResult] => {
+      const [, value] = entry
+      return Boolean(value && typeof value === "object" && !Array.isArray(value))
+    })
+    .sort(([left], [right]) => left.localeCompare(right))
+}
+
 function devErrorFromUnknown(error: unknown, fallback: string): DashboardDevError {
   const message = messageFromUnknown(error, fallback)
   const apiError = error instanceof ApiRequestError ? error : null
@@ -748,7 +844,9 @@ async function requestJson<T>(url: string, options: RequestInit = {}): Promise<T
   return response.json() as Promise<T>
 }
 
-function sortValue(scope: View, item: Job | Person | Gig | Project | AuditEvent, key: string) {
+type SortableItem = Job | Person | Gig | Project | AuditEvent | NewsletterSuppression
+
+function sortValue(scope: View, item: SortableItem, key: string) {
   if (scope === "gigs") {
     const gig = item as Gig
     if (key === "title") return gig.title || ""
@@ -803,10 +901,18 @@ function sortValue(scope: View, item: Job | Person | Gig | Project | AuditEvent,
     if (key === "actor")
       return event.actor_display_name || event.actor_subject || event.actor_provider || ""
   }
+  if (scope === "newsletter") {
+    const record = item as NewsletterSuppression
+    if (key === "email") return record.email || ""
+    if (key === "source_provider") return record.source_provider || ""
+    if (key === "reason") return record.reason || ""
+    if (key === "first_seen_at") return record.first_seen_at || ""
+    if (key === "last_seen_at") return record.last_seen_at || record.updated_at || ""
+  }
   return (item as Record<string, unknown>)[key] ?? ""
 }
 
-function sortItems<T extends Job | Person | Gig | Project | AuditEvent>(
+function sortItems<T extends SortableItem>(
   scope: View,
   items: T[],
   sort: { key: string; direction: SortDirection },
@@ -940,6 +1046,8 @@ function App() {
   const [notifications, setNotifications] = useState<DashboardNotification[]>([])
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [people, setPeople] = useState<Person[]>([])
+  const [newsletterSuppressions, setNewsletterSuppressions] = useState<NewsletterSuppression[]>([])
+  const [newsletterStatus, setNewsletterStatus] = useState<NewsletterStatus | null>(null)
   const [onboarding, setOnboarding] = useState<Person[]>([])
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([])
   const [agentReport, setAgentReport] = useState<AgentReport | null>(null)
@@ -960,6 +1068,7 @@ function App() {
     onboarding: { key: "onboarding_state", direction: "asc" },
     gigs: { key: "activity", direction: "desc" },
     projects: { key: "display_name", direction: "asc" },
+    newsletter: { key: "last_seen_at", direction: "desc" },
     jobs: { key: "updated_at", direction: "desc" },
     people: { key: "name", direction: "asc" },
     agent: { key: "occurred_at", direction: "desc" },
@@ -982,6 +1091,7 @@ function App() {
   const [peopleFilters, setPeopleFilters] = useState<FilterState>({})
   const [peopleFilterKind, setPeopleFilterKind] = useState<PeopleFilterKey>("discord")
   const [peopleFilterValue, setPeopleFilterValue] = useState("linked")
+  const [newsletterProviderFilter, setNewsletterProviderFilter] = useState("")
   const [onboardingQuery, setOnboardingQuery] = useState("")
   const [onboardingState, setOnboardingState] = useState("")
   const [onboarderFilter, setOnboarderFilter] = useState("")
@@ -1710,6 +1820,36 @@ function App() {
     }
   }
 
+  async function loadNewsletterStatus() {
+    setBusy("newsletterStatus", true)
+    try {
+      const payload = await requestJson<NewsletterStatus>("/dashboard/api/newsletter/status")
+      setNewsletterStatus(payload)
+    } catch (error) {
+      showError(error, "Unable to load newsletter sync status")
+    } finally {
+      setBusy("newsletterStatus", false)
+    }
+  }
+
+  async function loadNewsletterSuppressions() {
+    setBusy("newsletterSuppressions", true)
+    try {
+      const payload = await requestJson<{ suppressions: NewsletterSuppression[] }>(
+        "/dashboard/api/newsletter/suppressions?limit=200",
+      )
+      setNewsletterSuppressions(payload.suppressions || [])
+    } catch (error) {
+      showError(error, "Unable to load newsletter suppressions")
+    } finally {
+      setBusy("newsletterSuppressions", false)
+    }
+  }
+
+  async function loadNewsletterDashboard() {
+    await Promise.all([loadNewsletterStatus(), loadNewsletterSuppressions()])
+  }
+
   function onboardingUrl() {
     const params = new URLSearchParams({ limit: "25" })
     if (onboardingQuery.trim()) params.set("query", onboardingQuery.trim())
@@ -1952,6 +2092,32 @@ function App() {
     }
   }
 
+  async function syncNewsletters() {
+    setBusy("syncNewsletters", true)
+    showToast("Queueing newsletter sync")
+    try {
+      const payload = await requestJson<{
+        job_id?: string
+        dry_run?: boolean
+        preview?: NewsletterSyncPreview
+        would_enqueue?: { job_type?: string }
+      }>("/dashboard/api/sync/newsletters", {
+        method: "POST",
+      })
+      if (payload.dry_run) {
+        const summary = newsletterPreviewSummary(payload.preview)
+        showToast(summary ? `Dry run only: ${summary}` : "Dry run completed", "warning")
+      } else {
+        showToast(`Queued newsletter sync ${payload.job_id}`, "ok")
+      }
+      void loadNewsletterDashboard()
+    } catch (error) {
+      showError(error, "Unable to queue newsletter sync")
+    } finally {
+      setBusy("syncNewsletters", false)
+    }
+  }
+
   async function assignOnboarder(contactId: string | undefined, onboarder: string) {
     const normalizedContactId = String(contactId || "").trim()
     const normalizedOnboarder = onboarder.trim()
@@ -2180,6 +2346,7 @@ function App() {
     if (view === "gigs") void loadGigs()
     if (view === "projects") void loadProjects()
     if (view === "onboarding") void loadOnboarding()
+    if (view === "newsletter") void loadNewsletterDashboard()
     if (view === "jobs") void loadJobs()
     if (view === "agent") void loadAgentReport()
     if (view === "audit") void loadAuditEvents()
@@ -2194,6 +2361,7 @@ function App() {
     if (view === "gigs") void loadGigs()
     if (view === "projects") void loadProjects()
     if (view === "onboarding") void loadOnboarding()
+    if (view === "newsletter") void loadNewsletterDashboard()
     if (view === "jobs") void loadJobs()
     if (view === "agent") void loadAgentReport()
     if (view === "audit") void loadAuditEvents()
@@ -2255,6 +2423,29 @@ function App() {
   const sortedProjects = useMemo(
     () => sortItems("projects", projects, sort.projects),
     [projects, sort.projects],
+  )
+  const newsletterProviderOptions = useMemo(() => {
+    const providerNames = new Set<string>()
+    for (const record of newsletterSuppressions) {
+      if (record.source_provider) providerNames.add(record.source_provider)
+    }
+    for (const [providerName] of newsletterProviderResults(newsletterStatus?.latest_job)) {
+      providerNames.add(providerName)
+    }
+    return [...providerNames].sort((left, right) => left.localeCompare(right))
+  }, [newsletterSuppressions, newsletterStatus])
+  const sortedNewsletterSuppressions = useMemo(
+    () =>
+      sortItems(
+        "newsletter",
+        newsletterProviderFilter
+          ? newsletterSuppressions.filter(
+              (record) => record.source_provider === newsletterProviderFilter,
+            )
+          : newsletterSuppressions,
+        sort.newsletter,
+      ),
+    [newsletterProviderFilter, newsletterSuppressions, sort.newsletter],
   )
   const selectedGig = useMemo(() => {
     if (gigDetail?.id === selectedGigId) return gigDetail
@@ -2429,6 +2620,7 @@ function App() {
               ["gigs", "Gigs", BriefcaseBusiness],
               ["projects", "Projects", FolderKanban],
               ["onboarding", "Onboarding", ClipboardList],
+              ["newsletter", "Newsletter", Mail],
               ["jobs", "Background tasks", Activity],
               ["agent", "Agent", ShieldCheck],
               ["audit", "Audit", FileClock],
@@ -2496,6 +2688,22 @@ function App() {
               }}
               crmContactUrl={crmContactUrl}
               crmAttachmentUrl={crmAttachmentUrl}
+            />
+          ) : null}
+
+          {view === "newsletter" ? (
+            <NewsletterView
+              status={newsletterStatus}
+              suppressions={sortedNewsletterSuppressions}
+              providerOptions={newsletterProviderOptions}
+              providerFilter={newsletterProviderFilter}
+              sort={sort.newsletter}
+              loading={loading}
+              canSync={canUse("people:sync")}
+              onRefresh={loadNewsletterDashboard}
+              onSync={syncNewsletters}
+              onProviderFilterChange={setNewsletterProviderFilter}
+              onSort={(key) => handleSort("newsletter", key)}
             />
           ) : null}
 
@@ -5771,6 +5979,283 @@ function PeopleView(props: {
   )
 }
 
+function NewsletterView(props: {
+  status: NewsletterStatus | null
+  suppressions: NewsletterSuppression[]
+  providerOptions: string[]
+  providerFilter: string
+  sort: { key: string; direction: SortDirection }
+  loading: Record<string, boolean>
+  canSync: boolean
+  onRefresh: () => void
+  onSync: () => void
+  onProviderFilterChange: (value: string) => void
+  onSort: (key: string) => void
+}) {
+  const latestJob = props.status?.latest_job || null
+  const uniqueSuppressed = props.status?.active_suppressed_email_count
+  const suppressionRows = props.status?.active_suppression_count
+  const providerResults = newsletterProviderResults(latestJob)
+  const providerOptions = props.providerFilter
+    ? [...new Set([...props.providerOptions, props.providerFilter])].sort((left, right) =>
+        left.localeCompare(right),
+      )
+    : props.providerOptions
+  const suppressionsByProvider = props.suppressions.reduce<Record<string, NewsletterSuppression[]>>(
+    (groups, record) => {
+      const provider = record.source_provider || "unknown"
+      groups[provider] = [...(groups[provider] || []), record]
+      return groups
+    },
+    {},
+  )
+  const suppressionGroups = Object.entries(suppressionsByProvider).sort(([left], [right]) =>
+    left.localeCompare(right),
+  )
+  return (
+    <>
+      <Card>
+        <CardHeader>
+          <CardTitle>Newsletter sync</CardTitle>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <Button
+              id="refreshNewsletter"
+              type="button"
+              variant="outline"
+              onClick={props.onRefresh}
+              disabled={props.loading.newsletterStatus || props.loading.newsletterSuppressions}
+            >
+              <RefreshCw />
+              Refresh
+            </Button>
+            {props.canSync ? (
+              <Button
+                id="syncNewsletters"
+                data-permission="people:sync"
+                type="button"
+                onClick={props.onSync}
+                disabled={props.loading.syncNewsletters}
+              >
+                <RefreshCw />
+                Sync now
+              </Button>
+            ) : null}
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-3 md:grid-cols-4">
+            <div className="rounded-md border bg-background p-4">
+              <span className="text-xs font-bold text-muted-foreground">Scheduler</span>
+              <strong id="newsletterScheduler" className="block text-2xl">
+                {props.status?.scheduler_enabled ? "Enabled" : "Disabled"}
+              </strong>
+            </div>
+            <div className="rounded-md border bg-background p-4">
+              <span className="text-xs font-bold text-muted-foreground">Interval</span>
+              <strong id="newsletterInterval" className="block text-2xl">
+                {newsletterIntervalLabel(props.status?.interval_seconds)}
+              </strong>
+            </div>
+            <div className="rounded-md border bg-background p-4">
+              <span className="text-xs font-bold text-muted-foreground">Suppressed emails</span>
+              <strong id="newsletterSuppressedEmails" className="block text-2xl">
+                {uniqueSuppressed ?? "Loading"}
+              </strong>
+            </div>
+            <div className="rounded-md border bg-background p-4">
+              <span className="text-xs font-bold text-muted-foreground">Suppression rows</span>
+              <strong id="newsletterSuppressionRows" className="block text-2xl">
+                {suppressionRows ?? "Loading"}
+              </strong>
+            </div>
+          </div>
+          <div className="mt-4 grid gap-2 rounded-md border bg-secondary p-3 text-sm">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-extrabold">Latest sync</span>
+              {latestJob ? (
+                <Badge variant={(latestJob.status as Tone) || "neutral"}>{latestJob.status}</Badge>
+              ) : (
+                <Badge variant="neutral">No job found</Badge>
+              )}
+            </div>
+            {latestJob ? (
+              <>
+                <div className="text-muted-foreground">
+                  {latestJob.type} | updated {formatDate(latestJob.updated_at)} | attempts{" "}
+                  {latestJob.attempts}/{latestJob.max_attempts}
+                </div>
+                {latestJob.last_error ? (
+                  <div className="text-red-700 dark:text-red-300">{latestJob.last_error}</div>
+                ) : null}
+                <div className="grid gap-2 md:grid-cols-2">
+                  {providerResults.length ? (
+                    providerResults.map(([providerName, providerResult]) => {
+                      const statuses = providerResult.statuses || {}
+                      const statusEntries = Object.entries(statuses).sort(([left], [right]) =>
+                        left.localeCompare(right),
+                      )
+                      const synced = providerResult.synced ?? providerResult.would_sync ?? 0
+                      return (
+                        <div
+                          key={providerName}
+                          className="grid gap-2 rounded-md border bg-background p-3"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <strong>{providerName}</strong>
+                            <div className="flex flex-wrap gap-1">
+                              <Badge variant="succeeded">{synced} synced</Badge>
+                              <Badge variant="neutral">{providerResult.skipped || 0} skipped</Badge>
+                              {providerResult.failed ? (
+                                <Badge variant="failed">{providerResult.failed} failed</Badge>
+                              ) : null}
+                            </div>
+                          </div>
+                          {statusEntries.length ? (
+                            <div className="flex flex-wrap gap-1">
+                              {statusEntries.map(([status, count]) => (
+                                <Badge key={status} variant="neutral">
+                                  {status.replaceAll("_", " ")}: {count}
+                                </Badge>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+                      )
+                    })
+                  ) : (
+                    <div className="rounded-md border bg-background p-3 text-muted-foreground">
+                      No provider status details recorded for the latest sync.
+                    </div>
+                  )}
+                </div>
+                {latestJob.result ? (
+                  <pre className="max-h-40 overflow-auto rounded-md bg-background p-3 text-xs">
+                    {jsonPreview(latestJob.result)}
+                  </pre>
+                ) : null}
+              </>
+            ) : (
+              <div className="text-muted-foreground">
+                No 508 members newsletter sync job was found in the last 90 days.
+              </div>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Newsletter suppressions</CardTitle>
+          <div className="flex flex-wrap items-center justify-end gap-3">
+            <Label className="min-w-44">
+              Provider
+              <Select
+                id="newsletterProviderFilter"
+                value={props.providerFilter}
+                onChange={(event) => props.onProviderFilterChange(event.target.value)}
+              >
+                <option value="">All providers</option>
+                {providerOptions.map((provider) => (
+                  <option key={provider} value={provider}>
+                    {provider}
+                  </option>
+                ))}
+              </Select>
+            </Label>
+            <span id="newsletterSuppressionsStatus" className="text-sm text-muted-foreground">
+              {props.loading.newsletterSuppressions
+                ? "Loading"
+                : `${props.suppressions.length} shown`}
+            </span>
+          </div>
+        </CardHeader>
+        <Empty hidden={props.suppressions.length !== 0}>
+          No active newsletter suppressions recorded.
+        </Empty>
+        <div className={cn("grid gap-4", props.suppressions.length === 0 && "hidden")}>
+          {suppressionGroups.map(([provider, records]) => (
+            <section key={provider} className="grid gap-2" aria-label={`${provider} suppressions`}>
+              <div className="flex flex-wrap items-center gap-2 px-4 pt-4">
+                <Badge variant="neutral">{provider}</Badge>
+                <span className="text-sm text-muted-foreground">
+                  {records.length} suppression{records.length === 1 ? "" : "s"}
+                </span>
+              </div>
+              <div className="overflow-x-auto">
+                <Table
+                  id={`newsletterSuppressionsTable-${provider}`}
+                  className="min-w-[900px]"
+                  aria-label={`${provider} newsletter suppressions`}
+                >
+                  <TableHeader>
+                    <TableRow>
+                      <SortableTableHead
+                        className="w-[34%]"
+                        label="Email"
+                        scope="newsletter"
+                        sort={props.sort}
+                        sortKey="email"
+                        onSort={(_, key) => props.onSort(key)}
+                      />
+                      <SortableTableHead
+                        className="w-[14%]"
+                        label="Source"
+                        scope="newsletter"
+                        sort={props.sort}
+                        sortKey="source_provider"
+                        onSort={(_, key) => props.onSort(key)}
+                      />
+                      <SortableTableHead
+                        className="w-[22%]"
+                        label="Reason"
+                        scope="newsletter"
+                        sort={props.sort}
+                        sortKey="reason"
+                        onSort={(_, key) => props.onSort(key)}
+                      />
+                      <SortableTableHead
+                        className="w-[15%]"
+                        label="First seen"
+                        scope="newsletter"
+                        sort={props.sort}
+                        sortKey="first_seen_at"
+                        onSort={(_, key) => props.onSort(key)}
+                      />
+                      <SortableTableHead
+                        className="w-[15%]"
+                        label="Last seen"
+                        scope="newsletter"
+                        sort={props.sort}
+                        sortKey="last_seen_at"
+                        onSort={(_, key) => props.onSort(key)}
+                      />
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody id={`newsletterSuppressionsBody-${provider}`}>
+                    {records.map((record) => (
+                      <TableRow key={`${record.email}-${record.source_provider}`}>
+                        <TableCell className="font-mono text-sm">{record.email}</TableCell>
+                        <TableCell>
+                          <Badge variant="neutral">{record.source_provider}</Badge>
+                        </TableCell>
+                        <TableCell>{record.reason.replaceAll("_", " ")}</TableCell>
+                        <TableCell>{formatDate(record.first_seen_at)}</TableCell>
+                        <TableCell>
+                          {formatDate(record.last_seen_at || record.updated_at)}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </section>
+          ))}
+        </div>
+      </Card>
+    </>
+  )
+}
+
 function OnboardingView(props: {
   people: Person[]
   sort: { key: string; direction: SortDirection }
@@ -6701,12 +7186,15 @@ function OnboardingRow({
               </div>
               {emailDraft ? (
                 <>
-                  <div className="grid gap-2 text-sm md:grid-cols-3">
+                  <div className="grid gap-2 text-sm md:grid-cols-4">
                     <span>
                       <strong>To:</strong> {emailDraft.recipient_email || "Missing"}
                     </span>
                     <span>
                       <strong>Reply-To:</strong> {emailDraft.reply_to_email || "Missing"}
+                    </span>
+                    <span>
+                      <strong>Cc:</strong> {emailDraft.cc_email || "Missing"}
                     </span>
                     <span>
                       <strong>From:</strong> {emailDraft.sender_display_name || "onboarding"}

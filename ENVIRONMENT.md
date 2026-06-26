@@ -144,7 +144,7 @@ current precedence rules.
 - `Optional`: `ONBOARDING_EMAIL_SMTP_PASSWORD` (dashboard-configurable; falls back to `SMTP_PASSWORD`)
 - `Optional`: `ONBOARDING_EMAIL_SENDER_EMAIL` (dashboard-configurable; default: `onboarding@508.dev`)
 - `Optional`: `ONBOARDING_EMAIL_SMTP_TIMEOUT_SECONDS` (dashboard-configurable; falls back to `SMTP_TIMEOUT_SECONDS`; default: `20.0`)
-- Note: `/onboarding-email` is limited to Steering Committee+ or the candidate's designated CRM onboarder. The command always creates an editable draft first; when recipient and Reply-To are resolved, the draft includes a `Send Email` button. Sent emails use the configured sender address with the command sender's name as the display name, and set `Reply-To` to the command user's CRM-linked email or the explicit `reply_to_email` option.
+- Note: `/onboarding-email` is limited to Steering Committee+ or the candidate's designated CRM onboarder. The command always creates an editable draft first; when recipient and Reply-To are resolved, the draft includes a `Send Email` button. Sent emails use the configured sender address with the command sender's name as the display name, set `Reply-To` to the command user's CRM-linked email or the explicit `reply_to_email` option, and CC the sender's 508.dev email when it can be resolved.
 
 ## Discord Bot Core
 
@@ -173,6 +173,20 @@ current precedence rules.
 
 - `Required for /create-mailbox and /create-user-accounts`: `MIGADU_API_USER`, `MIGADU_API_KEY`
 - `Optional`: `MIGADU_MAILBOX_DOMAIN` (default: `508.dev`)
+- Newsletter sync settings are normally set from the admin dashboard configuration page. A non-empty env or `.env` value locks the matching dashboard field.
+- `Optional for Brevo newsletter sync`: `BREVO_API_KEY`
+- `Optional`: `BREVO_API_BASE_URL` (default: `https://api.brevo.com/v3`)
+- `Optional`: `BREVO_API_TIMEOUT_SECONDS` (default: `20.0`)
+- `Optional for Brevo newsletter sync`: `BREVO_508_MEMBERS_NEWSLETTER_LIST_ID` (explicit Brevo list ID override; use `4` for the 508 members list when setting it directly)
+- `Optional`: `BREVO_508_MEMBERS_NEWSLETTER_LIST_NAME` (default: `508 members`; used to look up the list ID when the explicit ID is unset)
+- `Optional for Keila contact sync`: `KEILA_API_KEY`
+- `Optional`: `KEILA_API_BASE_URL` (default: `https://app.keila.io`)
+- `Optional`: `KEILA_API_TIMEOUT_SECONDS` (default: `20.0`)
+- `Optional`: `NEWSLETTER_SYNC_ENABLED` (default: `true`)
+- `Optional`: `NEWSLETTER_SYNC_INTERVAL_SECONDS` (default: `604800`, one week)
+- `Optional`: `NEWSLETTER_SYNC_EXCLUDED_MAILBOXES` (comma-separated mailbox local-parts or full addresses to skip during Migadu resync)
+- Note: mailbox and backup email subscription to configured newsletter tools is best effort. Failures are reported as warnings and do not block mailbox or account creation.
+- Note: the periodic sync uses Migadu mailboxes and password recovery emails as the source of truth for `@508.dev`. When CRM is configured, it only syncs mailboxes that match a CRM contact; it also skips configured excluded mailboxes and does not re-add provider-suppressed contacts.
 
 ## Authentik SSO Provisioning
 

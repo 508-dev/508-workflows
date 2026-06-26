@@ -6528,7 +6528,7 @@ def test_dashboard_onboarding_email_draft_uses_crm_contact_and_local_marker(
         patch("five08.backend.api.EspoClient", return_value=espo_client),
         patch(
             "five08.backend.api._dashboard_session_profile_row",
-            return_value={"name": "Michael Wu", "email_508": "michael@508.dev"},
+            return_value={"name": "Avery Sender", "email_508": "avery.sender@508.dev"},
         ),
         patch(
             "five08.backend.api._dashboard_onboarding_email_marker",
@@ -6555,8 +6555,8 @@ def test_dashboard_onboarding_email_draft_uses_crm_contact_and_local_marker(
     assert payload["candidate_name"] == "Jesse Candidate"
     assert payload["recipient_email"] == "jesse@example.com"
     assert payload["reply_to_email"] == "steering@508.dev"
-    assert payload["sender_display_name"] == "Michael Wu"
-    assert payload["signature_name"] == "Michael"
+    assert payload["sender_display_name"] == "Avery Sender"
+    assert payload["signature_name"] == "Avery"
     assert payload["subject"] == "508.dev onboarding"
     assert payload["can_send"] is True
     assert payload["markdown_body"].startswith("Great talking Jesse,")
@@ -6588,7 +6588,7 @@ def test_dashboard_onboarding_email_draft_marks_not_sendable_without_smtp(
         patch("five08.backend.api.EspoClient", return_value=espo_client),
         patch(
             "five08.backend.api._dashboard_session_profile_row",
-            return_value={"name": "Michael Wu", "email_508": "michael@508.dev"},
+            return_value={"name": "Avery Sender", "email_508": "avery.sender@508.dev"},
         ),
         patch(
             "five08.backend.api._dashboard_onboarding_email_marker",
@@ -6635,7 +6635,7 @@ def test_dashboard_onboarding_email_send_sends_and_marks_local_state(
         patch("five08.backend.api.EspoClient", return_value=espo_client),
         patch(
             "five08.backend.api._dashboard_session_profile_row",
-            return_value={"name": "Michael Wu", "email_508": "michael@508.dev"},
+            return_value={"name": "Avery Sender", "email_508": "avery.sender@508.dev"},
         ),
         patch("five08.backend.api.onboarding_email_smtp_ready", return_value=True),
         patch("five08.backend.api.send_onboarding_email_message") as mock_send,
@@ -6673,8 +6673,9 @@ def test_dashboard_onboarding_email_send_sends_and_marks_local_state(
     assert payload["marker_error"] is None
     mock_send.assert_called_once()
     message = mock_send.call_args.args[0]
-    assert message["From"] == "Michael Wu <onboarding@508.dev>"
-    assert message["Reply-To"] == "Michael Wu <steering@508.dev>"
+    assert message["From"] == "Avery Sender <onboarding@508.dev>"
+    assert message["Reply-To"] == "Avery Sender <steering@508.dev>"
+    assert message["Cc"] == "steering@508.dev"
     assert message["To"] == "jesse@example.com"
     assert message["Subject"] == "508.dev onboarding"
     mock_mark.assert_called_once_with(
@@ -6717,7 +6718,7 @@ def test_dashboard_onboarding_email_send_returns_sent_when_marker_fails(
         patch("five08.backend.api.EspoClient", return_value=espo_client),
         patch(
             "five08.backend.api._dashboard_session_profile_row",
-            return_value={"name": "Michael Wu", "email_508": "michael@508.dev"},
+            return_value={"name": "Avery Sender", "email_508": "avery.sender@508.dev"},
         ),
         patch("five08.backend.api.onboarding_email_smtp_ready", return_value=True),
         patch("five08.backend.api.send_onboarding_email_message") as mock_send,
@@ -6781,7 +6782,7 @@ def test_dashboard_onboarding_email_send_requires_smtp_configuration(
         patch("five08.backend.api.EspoClient", return_value=espo_client),
         patch(
             "five08.backend.api._dashboard_session_profile_row",
-            return_value={"name": "Michael Wu", "email_508": "michael@508.dev"},
+            return_value={"name": "Avery Sender", "email_508": "avery.sender@508.dev"},
         ),
         patch("five08.backend.api.onboarding_email_smtp_ready", return_value=False),
         patch("five08.backend.api.send_onboarding_email_message") as mock_send,
@@ -6854,7 +6855,7 @@ def test_dashboard_onboarding_email_send_sanitizes_send_failures(
         patch("five08.backend.api.EspoClient", return_value=espo_client),
         patch(
             "five08.backend.api._dashboard_session_profile_row",
-            return_value={"name": "Michael Wu", "email_508": "michael@508.dev"},
+            return_value={"name": "Avery Sender", "email_508": "avery.sender@508.dev"},
         ),
         patch("five08.backend.api.onboarding_email_smtp_ready", return_value=True),
         patch(
@@ -7346,6 +7347,237 @@ def test_dashboard_sync_people_workflows_engineer_is_dry_run(
     assert response.json()["would_enqueue"]["job_type"] == "sync_people_from_crm_job"
     mock_enqueue.assert_not_called()
     mock_insert.assert_not_called()
+
+
+def test_dashboard_sync_newsletters_audits_discord_session(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="admin@508.dev",
+        display_name="Discord Admin",
+        groups=["discord_admin"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+        crm_contact_id="contact-123",
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._enqueue_newsletter_sync_job",
+            new_callable=AsyncMock,
+            return_value=Mock(id="job-newsletter-1", created=True),
+        ),
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
+    ):
+        response = client.post("/dashboard/api/sync/newsletters")
+
+    assert response.status_code == 202
+    assert response.json()["job_id"] == "job-newsletter-1"
+    audit_payload = mock_insert.call_args.args[1]
+    assert audit_payload.source == api.AuditSource.ADMIN_DASHBOARD
+    assert audit_payload.action == "newsletter.508_members_sync"
+    assert audit_payload.result == api.AuditResult.SUCCESS
+    assert audit_payload.actor_provider == api.ActorProvider.DISCORD
+    assert audit_payload.actor_subject == "123456789"
+    assert audit_payload.resource_type == "newsletter_sync"
+    assert audit_payload.resource_id == "job-newsletter-1"
+    assert audit_payload.metadata is not None
+    assert audit_payload.metadata["source"] == "dashboard"
+
+
+@pytest.mark.asyncio
+async def test_manual_newsletter_sync_idempotency_keys_are_unique() -> None:
+    with patch(
+        "five08.backend.api.enqueue_job",
+        side_effect=[
+            Mock(id="job-newsletter-1", created=True),
+            Mock(id="job-newsletter-2", created=True),
+        ],
+    ) as mock_enqueue:
+        await api._enqueue_newsletter_sync_job(Mock(), reason="dashboard")
+        await api._enqueue_newsletter_sync_job(Mock(), reason="dashboard")
+
+    keys = [item.kwargs["idempotency_key"] for item in mock_enqueue.call_args_list]
+    assert keys[0] != keys[1]
+    assert all(key.startswith("newsletter-sync:508-members:dashboard:") for key in keys)
+
+
+def test_newsletter_sync_idempotency_key_clamps_interval_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scheduler idempotency buckets should keep the same one-minute floor as settings."""
+    monkeypatch.setattr(api.settings, "newsletter_sync_interval_seconds", 1)
+
+    key = api._newsletter_sync_idempotency_key(
+        now=datetime(1970, 1, 1, 0, 1, 30, tzinfo=timezone.utc),
+    )
+
+    assert key == "newsletter-sync:508-members:1"
+
+
+def test_dashboard_sync_newsletters_workflows_engineer_is_dry_run(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="workflows-1",
+        email="workflows@508.dev",
+        display_name="Workflows Engineer",
+        groups=["Workflows Engineer"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._enqueue_newsletter_sync_job",
+            new_callable=AsyncMock,
+        ) as mock_enqueue,
+        patch("five08.backend.api.NewsletterSyncProcessor") as mock_processor_cls,
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
+    ):
+        mock_processor_cls.return_value.sync_508_members.return_value = {
+            "dry_run": True,
+            "mailboxes_scanned": 2,
+            "contacts_considered": 3,
+            "providers": {"brevo": {"would_sync": 3, "skipped": 0, "failed": 0}},
+            "crm_lookup_failures": [
+                {
+                    "mailbox": "jane@508.dev",
+                    "error": "CRM failed for jane@example.com",
+                }
+            ],
+        }
+        response = client.post("/dashboard/api/sync/newsletters")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "dry_run"
+    assert response.json()["preview"]["providers"]["brevo"]["would_sync"] == 3
+    preview_failure = response.json()["preview"]["crm_lookup_failures"][0]
+    assert preview_failure["mailbox"] == "[redacted-email]"
+    assert preview_failure["error"] == "CRM failed for [redacted-email]"
+    assert response.json()["would_enqueue"]["job_type"] == (
+        "sync_508_members_newsletters_job"
+    )
+    assert response.json()["would_enqueue"]["idempotency_key_pattern"] == (
+        "newsletter-sync:508-members:dashboard:<timestamp>:<uuid>"
+    )
+    mock_processor_cls.return_value.sync_508_members.assert_called_once_with(
+        dry_run=True
+    )
+    mock_enqueue.assert_not_called()
+    mock_insert.assert_not_called()
+
+
+def test_dashboard_sync_newsletters_dry_run_hides_exception_details(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="workflows-1",
+        email="workflows@508.dev",
+        display_name="Workflows Engineer",
+        groups=["Workflows Engineer"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.NewsletterSyncProcessor",
+        ) as mock_processor_cls,
+    ):
+        mock_processor_cls.return_value.sync_508_members.side_effect = RuntimeError(
+            "failed for jane@example.com"
+        )
+        response = client.post("/dashboard/api/sync/newsletters")
+
+    assert response.status_code == 502
+    assert response.json()["error"] == "newsletter_dry_run_failed"
+    assert "jane@example.com" not in response.text
+
+
+def test_dashboard_newsletter_status_reports_latest_job_and_suppressions(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="admin@508.dev",
+        display_name="Discord Admin",
+        groups=["discord_admin"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    now = datetime(2026, 6, 26, 12, 0, tzinfo=timezone.utc)
+    latest_job = Mock(
+        id="job-newsletter-1",
+        type="sync_508_members_newsletters_job",
+        status=Mock(value="succeeded"),
+        attempts=1,
+        max_attempts=3,
+        run_after=None,
+        locked_at=None,
+        locked_by=None,
+        last_error=None,
+        idempotency_key="newsletter-sync:508-members:dashboard:20260626:test",
+        created_at=now - timedelta(minutes=1),
+        updated_at=now,
+        payload={"result": {"contacts_considered": 12}},
+    )
+    suppressions = [
+        Mock(email="one@example.com"),
+        Mock(email="one@example.com"),
+        Mock(email="two@example.com"),
+    ]
+    monkeypatch.setattr(api.settings, "newsletter_sync_enabled", True)
+    monkeypatch.setattr(api.settings, "newsletter_sync_interval_seconds", 604800)
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.list_jobs", return_value=[latest_job]) as mock_jobs,
+        patch(
+            "five08.backend.api.list_newsletter_suppressions",
+            return_value=suppressions,
+        ) as mock_suppressions,
+    ):
+        response = client.get("/dashboard/api/newsletter/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["scheduler_enabled"] is True
+    assert payload["interval_seconds"] == 604800
+    assert payload["active_suppression_count"] == 3
+    assert payload["active_suppressed_email_count"] == 2
+    assert payload["latest_job"]["job_id"] == "job-newsletter-1"
+    assert payload["latest_job"]["status"] == "succeeded"
+    assert payload["latest_job"]["result"] == {"contacts_considered": 12}
+    assert mock_jobs.call_args.kwargs["job_type"] == "sync_508_members_newsletters_job"
+    assert mock_suppressions.call_args.kwargs["active_only"] is True
 
 
 def test_dashboard_sync_projects_workflows_engineer_is_dry_run(

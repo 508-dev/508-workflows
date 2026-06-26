@@ -150,6 +150,7 @@ Relevant configuration:
 - `/create-mailbox`
   - Description: Create a Migadu mailbox for a 508 user, optionally link it to a CRM contact, and sync `c508Email`.
   - Prerequisites: `MIGADU_API_USER` and `MIGADU_API_KEY` must be configured (configured in env; command will fail if missing).
+  - Newsletter sync: if Brevo and/or Keila are configured, the new 508 mailbox and backup email are added to the configured 508 members audience. Brevo uses `BREVO_508_MEMBERS_NEWSLETTER_LIST_ID`, or the list named by `BREVO_508_MEMBERS_NEWSLETTER_LIST_NAME` (default `508 members`) when the explicit ID is unset. Newsletter failures are shown as warnings and do not block mailbox creation.
   - Required role: Admin
   - Args:
     - `mailbox_username` (required): 508 mailbox username or address. If the domain is omitted, `@508.dev` is added automatically.
