@@ -218,6 +218,7 @@ type Person = {
   sync_status?: string
   profile_status?: ProfileStatus
   latest_intake_submission?: IntakeSubmission
+  latest_resume_intake_submission?: IntakeSubmission
 }
 
 type OnboardingEmailTriState = "yes" | "no" | "unknown"
@@ -5895,11 +5896,13 @@ function PeopleView(props: {
               const skillsCount = Number(status.skills_count || 0)
               const resumeUrl = props.crmAttachmentUrl(person.latest_resume_id)
               const intakeSubmission = person.latest_intake_submission
-              const intakeResumeHref = intakeResumeUrl(intakeSubmission)
+              const resumeIntakeSubmission =
+                person.latest_resume_intake_submission || intakeSubmission
+              const intakeResumeHref = intakeResumeUrl(resumeIntakeSubmission)
               const resumeHref = resumeUrl || intakeResumeHref
               const resumeLabel = resumeUrl
                 ? "Resume"
-                : intakeResumeName(intakeSubmission) || person.latest_resume_name || "Resume"
+                : intakeResumeName(resumeIntakeSubmission) || person.latest_resume_name || "Resume"
               return (
                 <TableRow key={person.crm_contact_id || displayName}>
                   <TableCell>
@@ -6887,11 +6890,12 @@ function OnboardingRow({
   const contactUrl = crmContactUrl(person.crm_contact_id)
   const resumeUrl = crmAttachmentUrl(person.latest_resume_id)
   const intakeSubmission = person.latest_intake_submission
-  const intakeResumeHref = intakeResumeUrl(intakeSubmission)
+  const resumeIntakeSubmission = person.latest_resume_intake_submission || intakeSubmission
+  const intakeResumeHref = intakeResumeUrl(resumeIntakeSubmission)
   const resumeHref = resumeUrl || intakeResumeHref
   const resumeLabel = resumeUrl
     ? "Resume"
-    : intakeResumeName(intakeSubmission) || person.latest_resume_name || "Resume"
+    : intakeResumeName(resumeIntakeSubmission) || person.latest_resume_name || "Resume"
   const intakeItems = intakeSummaryItems(intakeSubmission)
   const emailSentAt = emailDraft?.onboarding_email_sent_at || person.onboarding_email_sent_at
   const emailSentBy = emailDraft?.onboarding_email_sent_by || person.onboarding_email_sent_by

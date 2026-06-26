@@ -1977,6 +1977,12 @@ def _intake_resume_present(latest_intake_submission: Any) -> bool:
     )
 
 
+def _preferred_intake_resume_submission(person: dict[str, Any]) -> Any:
+    return person.get("latest_resume_intake_submission") or person.get(
+        "latest_intake_submission"
+    )
+
+
 def _intake_resume_file_name(latest_intake_submission: Any) -> str | None:
     if not isinstance(latest_intake_submission, dict):
         return None
@@ -2175,6 +2181,7 @@ def _query_dashboard_people(
             onboarding_email_sent_by,
             onboarding_email_recipient,
             latest_intake_submission,
+            latest_resume_intake_submission,
             sync_status,
             created_at,
             updated_at
@@ -2199,6 +2206,32 @@ def _query_dashboard_people(
                 onboarding_intake_submissions.created_at DESC
             LIMIT 1
         ) intake ON true
+        LEFT JOIN LATERAL (
+            SELECT jsonb_build_object(
+                'source', onboarding_intake_submissions.source,
+                'form_id', onboarding_intake_submissions.form_id,
+                'submission_id', onboarding_intake_submissions.submission_id,
+                'submitted_at', onboarding_intake_submissions.submitted_at,
+                'normalized_payload', onboarding_intake_submissions.normalized_payload,
+                'created_at', onboarding_intake_submissions.created_at
+            ) AS latest_resume_intake_submission
+            FROM onboarding_intake_submissions
+            WHERE (
+                onboarding_intake_submissions.crm_contact_id = people.crm_contact_id
+                OR (
+                    onboarding_intake_submissions.crm_contact_id IS NULL
+                    AND onboarding_intake_submissions.email = lower(people.email)
+                )
+            )
+            AND coalesce(
+                nullif(btrim(onboarding_intake_submissions.normalized_payload->>'resume_file_name'), ''),
+                nullif(btrim(onboarding_intake_submissions.normalized_payload->>'resume_url'), '')
+            ) IS NOT NULL
+            ORDER BY
+                onboarding_intake_submissions.submitted_at DESC NULLS LAST,
+                onboarding_intake_submissions.created_at DESC
+            LIMIT 1
+        ) latest_resume_intake ON true
         {where_clause}
         ORDER BY updated_at DESC
         LIMIT %s
@@ -2220,9 +2253,13 @@ def _shape_dashboard_people_rows(rows: list[dict[str, Any]]) -> list[dict[str, A
         latest_intake_submission = person.get("latest_intake_submission")
         if isinstance(latest_intake_submission, dict):
             latest_intake_submission.pop("raw_payload", None)
-        intake_resume_present = _intake_resume_present(latest_intake_submission)
+        latest_resume_intake_submission = person.get("latest_resume_intake_submission")
+        if isinstance(latest_resume_intake_submission, dict):
+            latest_resume_intake_submission.pop("raw_payload", None)
+        intake_resume_submission = _preferred_intake_resume_submission(person)
+        intake_resume_present = _intake_resume_present(intake_resume_submission)
         if not _is_present(person.get("latest_resume_name")):
-            intake_resume_file_name = _intake_resume_file_name(latest_intake_submission)
+            intake_resume_file_name = _intake_resume_file_name(intake_resume_submission)
             if intake_resume_file_name:
                 person["latest_resume_name"] = intake_resume_file_name
         person["created_at"] = _datetime_or_none(row.get("created_at"))
@@ -2403,6 +2440,17 @@ def _list_dashboard_orphan_intake_submissions(
                 'normalized_payload', normalized_payload,
                 'created_at', created_at
             ) AS latest_intake_submission,
+            CASE WHEN {_ORPHAN_INTAKE_RESUME_SQL} IS NULL
+                THEN NULL::jsonb
+                ELSE jsonb_build_object(
+                    'source', source,
+                    'form_id', form_id,
+                    'submission_id', submission_id,
+                    'submitted_at', submitted_at,
+                    'normalized_payload', normalized_payload,
+                    'created_at', created_at
+                )
+            END AS latest_resume_intake_submission,
             'intake' AS sync_status,
             created_at,
             updated_at
@@ -2541,6 +2589,7 @@ def _list_dashboard_onboarding(
             onboarding_email_sent_by,
             onboarding_email_recipient,
             latest_intake_submission,
+            latest_resume_intake_submission,
             sync_status,
             created_at,
             updated_at
@@ -2565,6 +2614,32 @@ def _list_dashboard_onboarding(
                 onboarding_intake_submissions.created_at DESC
             LIMIT 1
         ) intake ON true
+        LEFT JOIN LATERAL (
+            SELECT jsonb_build_object(
+                'source', onboarding_intake_submissions.source,
+                'form_id', onboarding_intake_submissions.form_id,
+                'submission_id', onboarding_intake_submissions.submission_id,
+                'submitted_at', onboarding_intake_submissions.submitted_at,
+                'normalized_payload', onboarding_intake_submissions.normalized_payload,
+                'created_at', onboarding_intake_submissions.created_at
+            ) AS latest_resume_intake_submission
+            FROM onboarding_intake_submissions
+            WHERE (
+                onboarding_intake_submissions.crm_contact_id = people.crm_contact_id
+                OR (
+                    onboarding_intake_submissions.crm_contact_id IS NULL
+                    AND onboarding_intake_submissions.email = lower(people.email)
+                )
+            )
+            AND coalesce(
+                nullif(btrim(onboarding_intake_submissions.normalized_payload->>'resume_file_name'), ''),
+                nullif(btrim(onboarding_intake_submissions.normalized_payload->>'resume_url'), '')
+            ) IS NOT NULL
+            ORDER BY
+                onboarding_intake_submissions.submitted_at DESC NULLS LAST,
+                onboarding_intake_submissions.created_at DESC
+            LIMIT 1
+        ) latest_resume_intake ON true
         WHERE {where_clause}
         ORDER BY
             CASE WHEN COALESCE({_ONBOARDING_STATE_NORMALIZED_SQL}, '') = 'pending'
