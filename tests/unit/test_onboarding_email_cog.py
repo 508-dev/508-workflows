@@ -155,6 +155,7 @@ async def test_onboarding_email_command_generates_draft(
     args, kwargs = mock_interaction.followup.send.call_args
     assert "Onboarding email draft generated" in args[0]
     assert "Reply-To: `michael@508.dev`" in args[0]
+    assert "Cc: `michael@508.dev`" in args[0]
     assert "From: `Michael Wu <onboarding@508.dev>`" in args[0]
     assert "CRM contact: `Jane Example`" in args[0]
     assert "**Copy/paste draft:**" in args[0]
@@ -217,6 +218,7 @@ async def test_onboarding_email_command_prepares_send_button_when_possible(
     message = onboarding_cog._send_message.call_args.args[0]
     assert message["From"] == "Michael Wu <onboarding@508.dev>"
     assert message["Reply-To"] == "Michael Wu <michael@508.dev>"
+    assert message["Cc"] == "michael@508.dev"
     assert message["To"] == "sam@example.com"
     assert message["Subject"] == "508.dev onboarding"
     assert "Onboarding email sent" in mock_interaction.followup.send.call_args.args[0]

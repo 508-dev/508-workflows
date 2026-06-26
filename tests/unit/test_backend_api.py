@@ -6357,6 +6357,7 @@ def test_dashboard_onboarding_email_send_sends_and_marks_local_state(
     message = mock_send.call_args.args[0]
     assert message["From"] == "Michael Wu <onboarding@508.dev>"
     assert message["Reply-To"] == "Michael Wu <steering@508.dev>"
+    assert message["Cc"] == "steering@508.dev"
     assert message["To"] == "jesse@example.com"
     assert message["Subject"] == "508.dev onboarding"
     mock_mark.assert_called_once_with(

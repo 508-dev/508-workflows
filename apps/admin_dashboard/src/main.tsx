@@ -216,6 +216,7 @@ type OnboardingEmailDraft = {
   candidate_name?: string
   recipient_email?: string | null
   reply_to_email?: string | null
+  cc_email?: string | null
   sender_display_name?: string | null
   signature_name?: string | null
   subject: string
@@ -6592,12 +6593,15 @@ function OnboardingRow({
               </div>
               {emailDraft ? (
                 <>
-                  <div className="grid gap-2 text-sm md:grid-cols-3">
+                  <div className="grid gap-2 text-sm md:grid-cols-4">
                     <span>
                       <strong>To:</strong> {emailDraft.recipient_email || "Missing"}
                     </span>
                     <span>
                       <strong>Reply-To:</strong> {emailDraft.reply_to_email || "Missing"}
+                    </span>
+                    <span>
+                      <strong>Cc:</strong> {emailDraft.cc_email || "Missing"}
                     </span>
                     <span>
                       <strong>From:</strong> {emailDraft.sender_display_name || "onboarding"}
