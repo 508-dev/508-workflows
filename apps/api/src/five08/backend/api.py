@@ -2302,6 +2302,25 @@ def _dashboard_reply_to_email(session: AuthSession) -> str | None:
     return None
 
 
+def _dashboard_sender_cc_email(session: AuthSession) -> str | None:
+    if session.email and session.email.lower().endswith("@508.dev"):
+        try:
+            return validate_plain_email(session.email, "session.email")
+        except ValueError:
+            pass
+
+    profile = _dashboard_session_profile_row(session)
+    if not profile:
+        return None
+    candidate = str(profile.get("email_508") or "").strip()
+    if not candidate or not candidate.lower().endswith("@508.dev"):
+        return None
+    try:
+        return validate_plain_email(candidate, "email_508")
+    except ValueError:
+        return None
+
+
 def _dashboard_onboarding_email_actor(session: AuthSession) -> str:
     return session.email or session.subject
 
@@ -6178,6 +6197,7 @@ async def dashboard_onboarding_email_draft_handler(
         session,
     )
     reply_to_email = await asyncio.to_thread(_dashboard_reply_to_email, session)
+    cc_email = await asyncio.to_thread(_dashboard_sender_cc_email, session)
     candidate_name = _dashboard_contact_display_name(contact)
     recipient_email = _dashboard_preferred_contact_email(contact)
     draft = build_onboarding_email(
@@ -6201,6 +6221,7 @@ async def dashboard_onboarding_email_draft_handler(
             "candidate_name": candidate_name,
             "recipient_email": recipient_email,
             "reply_to_email": reply_to_email,
+            "cc_email": cc_email,
             "sender_display_name": sender_display_name,
             "signature_name": signature_name,
             "subject": draft.subject,
@@ -6261,6 +6282,7 @@ async def dashboard_onboarding_email_send_handler(
                 "reply_to_email_required",
                 status_code=409,
             )
+        cc_email = await asyncio.to_thread(_dashboard_sender_cc_email, session)
         recipient_email = _dashboard_preferred_contact_email(contact)
         if recipient_email is None:
             raise DashboardOnboardingEmailError(
@@ -6281,6 +6303,7 @@ async def dashboard_onboarding_email_send_handler(
             reply_to_email=reply_to_email,
             sender_name=sender_display_name,
             sender_email=settings.onboarding_email_sender_email,
+            cc_email=cc_email,
             subject="508.dev onboarding",
             text_body=text_body,
             html_body=html_body,
@@ -6381,6 +6404,7 @@ async def dashboard_onboarding_email_send_handler(
             "candidate_name": candidate_name,
             "recipient_email": recipient_email,
             "reply_to_email": reply_to_email,
+            "cc_email": cc_email,
             "sender_display_name": sender_display_name,
             "signature_name": signature_name,
             "onboarding_status": onboarding_status,
@@ -6395,6 +6419,7 @@ async def dashboard_onboarding_email_send_handler(
             "candidate_name": candidate_name,
             "recipient_email": recipient_email,
             "reply_to_email": reply_to_email,
+            "cc_email": cc_email,
             "sender_display_name": sender_display_name,
             "signature_name": signature_name,
             "subject": "508.dev onboarding",

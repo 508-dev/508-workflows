@@ -57,6 +57,14 @@ class OnboardingEmailCommandState:
 
 
 @dataclass(frozen=True, slots=True)
+class OnboardingEmailSenderEmails:
+    """Email addresses resolved for the command sender."""
+
+    reply_to_email: str | None
+    cc_email: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class OnboardingEmailSendPayload:
     """Validated send inputs carried by the draft review controls."""
 
@@ -75,6 +83,7 @@ class OnboardingEmailSendPayload:
     agreement_signed: str
     authorization_source: str
     onboarding_status: str | None
+    cc_email: str | None = None
 
 
 def _truncate_component_text(value: str, *, limit: int) -> str:
@@ -385,27 +394,63 @@ class OnboardingEmailCog(DiscordAuditCogMixin, commands.Cog):
     def _validate_email(value: str, field_name: str) -> str:
         return validate_plain_email(value, field_name)
 
-    def _reply_to_email_for_user(
+    def _sender_emails_for_user(
         self,
         *,
         interaction: discord.Interaction,
         override: str | None,
-    ) -> str | None:
-        if override:
-            return self._validate_email(override, "reply_to_email")
-
-        contacts = self._contacts_for_discord_user_id(
-            interaction,
-            select="id,name,emailAddress,c508Email,cDiscordUserID",
+    ) -> OnboardingEmailSenderEmails:
+        reply_to_email = (
+            self._validate_email(override, "reply_to_email") if override else None
         )
+
+        try:
+            contacts = self._contacts_for_discord_user_id(
+                interaction,
+                select="id,name,emailAddress,c508Email,cDiscordUserID",
+            )
+        except EspoAPIError:
+            if reply_to_email is None:
+                raise
+            logger.warning(
+                "Unable to resolve onboarding email CC from CRM",
+                exc_info=True,
+            )
+            return OnboardingEmailSenderEmails(
+                reply_to_email=reply_to_email,
+                cc_email=None,
+            )
+
         if not contacts:
-            return None
+            return OnboardingEmailSenderEmails(
+                reply_to_email=reply_to_email,
+                cc_email=None,
+            )
         contact = contacts[0]
+        if override:
+            return OnboardingEmailSenderEmails(
+                reply_to_email=reply_to_email,
+                cc_email=self._cc_email_from_contact(contact),
+            )
 
         for field_name in ("c508Email", "emailAddress"):
             candidate = str(contact.get(field_name) or "").strip()
             if candidate and EMAIL_RE.fullmatch(candidate):
-                return candidate
+                reply_to_email = candidate
+                break
+        return OnboardingEmailSenderEmails(
+            reply_to_email=reply_to_email,
+            cc_email=self._cc_email_from_contact(contact),
+        )
+
+    def _cc_email_from_contact(self, contact: dict[str, Any]) -> str | None:
+        candidate = str(contact.get("c508Email") or "").strip()
+        if not candidate or not candidate.lower().endswith("@508.dev"):
+            return None
+        try:
+            return self._validate_email(candidate, "cc_email")
+        except ValueError:
+            logger.warning("Ignoring invalid onboarding email CC address from CRM")
         return None
 
     def _contacts_for_discord_user_id(
@@ -777,6 +822,7 @@ class OnboardingEmailCog(DiscordAuditCogMixin, commands.Cog):
         recipient_email: str,
         reply_to_email: str,
         sender_name: str,
+        cc_email: str | None = None,
         subject: str,
         text_body: str,
         html_body: str,
@@ -786,6 +832,7 @@ class OnboardingEmailCog(DiscordAuditCogMixin, commands.Cog):
             reply_to_email=reply_to_email,
             sender_name=sender_name,
             sender_email=settings.onboarding_email_sender_email,
+            cc_email=cc_email,
             subject=subject,
             text_body=text_body,
             html_body=html_body,
@@ -864,6 +911,7 @@ class OnboardingEmailCog(DiscordAuditCogMixin, commands.Cog):
             recipient_email=recipient_email,
             reply_to_email=payload.reply_to_email,
             sender_name=payload.sender_display_name,
+            cc_email=payload.cc_email,
             subject=payload.subject,
             text_body=text_body,
             html_body=html_body,
@@ -883,6 +931,7 @@ class OnboardingEmailCog(DiscordAuditCogMixin, commands.Cog):
                 "agreement_signed": payload.agreement_signed,
                 "sender_display_name": payload.sender_display_name,
                 "reply_to_email": payload.reply_to_email,
+                "cc_email": payload.cc_email,
                 "authorization_source": authorization_source,
                 "onboarding_status": onboarding_status,
                 "edited": markdown_body != payload.original_markdown_body,
@@ -920,6 +969,7 @@ class OnboardingEmailCog(DiscordAuditCogMixin, commands.Cog):
                 "agreement_signed": payload.agreement_signed,
                 "sender_display_name": payload.sender_display_name,
                 "reply_to_email": payload.reply_to_email,
+                "cc_email": payload.cc_email,
                 "authorization_source": payload.authorization_source,
                 "onboarding_status": payload.onboarding_status,
                 "error": error_code,
@@ -1068,17 +1118,22 @@ class OnboardingEmailCog(DiscordAuditCogMixin, commands.Cog):
             )
         )
         try:
-            resolved_reply_to = await asyncio.to_thread(
-                self._reply_to_email_for_user,
+            sender_emails = await asyncio.to_thread(
+                self._sender_emails_for_user,
                 interaction=interaction,
                 override=state.reply_to_email,
             )
         except EspoAPIError:
             logger.warning(
-                "Unable to resolve onboarding email Reply-To from CRM",
+                "Unable to resolve onboarding email sender addresses from CRM",
                 exc_info=True,
             )
-            resolved_reply_to = None
+            sender_emails = OnboardingEmailSenderEmails(
+                reply_to_email=None,
+                cc_email=None,
+            )
+        resolved_reply_to = sender_emails.reply_to_email
+        sender_cc_email = sender_emails.cc_email
 
         smtp_ready = self._smtp_ready()
         can_send = (
@@ -1108,6 +1163,7 @@ class OnboardingEmailCog(DiscordAuditCogMixin, commands.Cog):
                 "sender_display_name": state.sender_display_name,
                 "signature_name": state.signature_name,
                 "reply_to_email": resolved_reply_to,
+                "cc_email": sender_cc_email,
                 "authorization_source": authorization_source,
                 "onboarding_status": contact_status or None,
                 "send_available": can_send,
@@ -1127,6 +1183,8 @@ class OnboardingEmailCog(DiscordAuditCogMixin, commands.Cog):
             ),
             f"Reply-To: `{_discord_inline_code(reply_to_line)}`",
         ]
+        if sender_cc_email:
+            lines.append(f"Cc: `{_discord_inline_code(sender_cc_email)}`")
         if selected_contact is not None:
             status_line = contact_status or "unknown"
             lines.append(
@@ -1171,6 +1229,7 @@ class OnboardingEmailCog(DiscordAuditCogMixin, commands.Cog):
                 agreement_signed=state.agreement_signed,
                 authorization_source=authorization_source,
                 onboarding_status=contact_status or None,
+                cc_email=sender_cc_email,
             )
         view = OnboardingEmailDraftEditView(
             cog=self,

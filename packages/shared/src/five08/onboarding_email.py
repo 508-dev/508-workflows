@@ -112,6 +112,7 @@ def build_onboarding_email_message(
     reply_to_email: str,
     sender_name: str,
     sender_email: str,
+    cc_email: str | None = None,
     subject: str,
     text_body: str,
     html_body: str,
@@ -128,6 +129,8 @@ def build_onboarding_email_message(
     message["Reply-To"] = formataddr(
         (sender_name, validate_plain_email(reply_to_email, "reply_to_email"))
     )
+    if cc_email:
+        message["Cc"] = validate_plain_email(cc_email, "cc_email")
     message.set_content(text_body)
     message.add_alternative(html_body, subtype="html")
     return message
