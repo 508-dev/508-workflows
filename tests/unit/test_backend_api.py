@@ -7089,6 +7089,19 @@ async def test_manual_newsletter_sync_idempotency_keys_are_unique() -> None:
     assert all(key.startswith("newsletter-sync:508-members:dashboard:") for key in keys)
 
 
+def test_newsletter_sync_idempotency_key_clamps_interval_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scheduler idempotency buckets should keep the same one-minute floor as settings."""
+    monkeypatch.setattr(api.settings, "newsletter_sync_interval_seconds", 1)
+
+    key = api._newsletter_sync_idempotency_key(
+        now=datetime(1970, 1, 1, 0, 1, 30, tzinfo=timezone.utc),
+    )
+
+    assert key == "newsletter-sync:508-members:1"
+
+
 def test_dashboard_sync_newsletters_workflows_engineer_is_dry_run(
     client: TestClient,
 ) -> None:

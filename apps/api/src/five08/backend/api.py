@@ -586,7 +586,7 @@ def _crm_sync_idempotency_key(*, now: datetime) -> str:
 
 
 def _newsletter_sync_idempotency_key(*, now: datetime) -> str:
-    interval_seconds = max(1, settings.newsletter_sync_interval_seconds)
+    interval_seconds = max(60, settings.newsletter_sync_interval_seconds)
     bucket = int(now.timestamp()) // interval_seconds
     return f"newsletter-sync:508-members:{bucket}"
 
@@ -718,7 +718,7 @@ async def _crm_sync_scheduler(app: FastAPI) -> None:
 
 async def _newsletter_sync_scheduler(app: FastAPI) -> None:
     queue = app.state.queue
-    interval_seconds = max(1, settings.newsletter_sync_interval_seconds)
+    interval_seconds = max(60, settings.newsletter_sync_interval_seconds)
     while True:
         try:
             await _enqueue_newsletter_sync_job(queue, reason="scheduler")
