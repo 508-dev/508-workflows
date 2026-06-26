@@ -104,6 +104,7 @@ def test_shared_settings_expose_agent_external_tool_credentials() -> None:
         brevo_508_members_newsletter_list_name="508 members",
         keila_api_key="keila-key",
         keila_api_base_url="https://keila.example",
+        postgres_url="postgresql://postgres:postgres@db.example/workflows",
     )
 
     runtime_config = ToolRuntimeConfig.from_settings(settings)
@@ -117,6 +118,10 @@ def test_shared_settings_expose_agent_external_tool_credentials() -> None:
     assert runtime_config.brevo_508_members_newsletter_list_name == "508 members"
     assert runtime_config.keila_api_key == "keila-key"
     assert runtime_config.keila_api_base_url == "https://keila.example"
+    assert (
+        runtime_config.postgres_url
+        == "postgresql://postgres:postgres@db.example/workflows"
+    )
 
 
 def test_shared_settings_accept_newsletter_sync_env_aliases() -> None:

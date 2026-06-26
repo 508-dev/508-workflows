@@ -89,6 +89,7 @@ class ToolRuntimeConfig:
     keila_api_key: str | None = None
     keila_api_base_url: str = "https://app.keila.io"
     keila_api_timeout_seconds: float = 20.0
+    postgres_url: str | None = None
 
     @classmethod
     def from_settings(cls, settings: Any) -> "ToolRuntimeConfig":
@@ -165,6 +166,7 @@ class ToolRuntimeConfig:
             keila_api_timeout_seconds=getattr(
                 settings, "keila_api_timeout_seconds", 20.0
             ),
+            postgres_url=getattr(settings, "postgres_url", None),
         )
 
 

@@ -6772,8 +6772,11 @@ async def dashboard_sync_newsletters_handler(request: Request) -> JSONResponse:
                 NewsletterSyncProcessor(settings).sync_508_members,
                 dry_run=True,
             )
-        except Exception:
-            logger.exception("Newsletter sync dry run failed")
+        except Exception as exc:
+            logger.warning(
+                "Newsletter sync dry run failed: %s",
+                type(exc).__name__,
+            )
             return JSONResponse(
                 {
                     "status": "dry_run_failed",

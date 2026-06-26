@@ -461,6 +461,14 @@ type NewsletterStatus = {
   latest_job?: JobDetail | null
 }
 
+type NewsletterProviderResult = {
+  synced?: number
+  would_sync?: number
+  skipped?: number
+  failed?: number
+  statuses?: Record<string, number>
+}
+
 type AuditEvent = {
   id?: string
   occurred_at?: string
@@ -712,6 +720,19 @@ function newsletterIntervalLabel(seconds?: number) {
     return `${minutes} minute${minutes === 1 ? "" : "s"}`
   }
   return `${normalized} second${normalized === 1 ? "" : "s"}`
+}
+
+function newsletterProviderResults(job?: JobDetail | null) {
+  const result = job?.result
+  if (!result || typeof result !== "object" || Array.isArray(result)) return []
+  const providers = (result as { providers?: unknown }).providers
+  if (!providers || typeof providers !== "object" || Array.isArray(providers)) return []
+  return Object.entries(providers)
+    .filter((entry): entry is [string, NewsletterProviderResult] => {
+      const [, value] = entry
+      return Boolean(value && typeof value === "object" && !Array.isArray(value))
+    })
+    .sort(([left], [right]) => left.localeCompare(right))
 }
 
 function devErrorFromUnknown(error: unknown, fallback: string): DashboardDevError {
@@ -1058,6 +1079,7 @@ function App() {
   const [peopleFilters, setPeopleFilters] = useState<FilterState>({})
   const [peopleFilterKind, setPeopleFilterKind] = useState<PeopleFilterKey>("discord")
   const [peopleFilterValue, setPeopleFilterValue] = useState("linked")
+  const [newsletterProviderFilter, setNewsletterProviderFilter] = useState("")
   const [onboardingQuery, setOnboardingQuery] = useState("")
   const [onboardingState, setOnboardingState] = useState("")
   const [onboarderFilter, setOnboarderFilter] = useState("")
@@ -2388,9 +2410,28 @@ function App() {
     () => sortItems("projects", projects, sort.projects),
     [projects, sort.projects],
   )
+  const newsletterProviderOptions = useMemo(() => {
+    const providerNames = new Set<string>()
+    for (const record of newsletterSuppressions) {
+      if (record.source_provider) providerNames.add(record.source_provider)
+    }
+    for (const [providerName] of newsletterProviderResults(newsletterStatus?.latest_job)) {
+      providerNames.add(providerName)
+    }
+    return [...providerNames].sort((left, right) => left.localeCompare(right))
+  }, [newsletterSuppressions, newsletterStatus])
   const sortedNewsletterSuppressions = useMemo(
-    () => sortItems("newsletter", newsletterSuppressions, sort.newsletter),
-    [newsletterSuppressions, sort.newsletter],
+    () =>
+      sortItems(
+        "newsletter",
+        newsletterProviderFilter
+          ? newsletterSuppressions.filter(
+              (record) => record.source_provider === newsletterProviderFilter,
+            )
+          : newsletterSuppressions,
+        sort.newsletter,
+      ),
+    [newsletterProviderFilter, newsletterSuppressions, sort.newsletter],
   )
   const selectedGig = useMemo(() => {
     if (gigDetail?.id === selectedGigId) return gigDetail
@@ -2640,11 +2681,14 @@ function App() {
             <NewsletterView
               status={newsletterStatus}
               suppressions={sortedNewsletterSuppressions}
+              providerOptions={newsletterProviderOptions}
+              providerFilter={newsletterProviderFilter}
               sort={sort.newsletter}
               loading={loading}
               canSync={canUse("people:sync")}
               onRefresh={loadNewsletterDashboard}
               onSync={syncNewsletters}
+              onProviderFilterChange={setNewsletterProviderFilter}
               onSort={(key) => handleSort("newsletter", key)}
             />
           ) : null}
@@ -5917,16 +5961,36 @@ function PeopleView(props: {
 function NewsletterView(props: {
   status: NewsletterStatus | null
   suppressions: NewsletterSuppression[]
+  providerOptions: string[]
+  providerFilter: string
   sort: { key: string; direction: SortDirection }
   loading: Record<string, boolean>
   canSync: boolean
   onRefresh: () => void
   onSync: () => void
+  onProviderFilterChange: (value: string) => void
   onSort: (key: string) => void
 }) {
   const latestJob = props.status?.latest_job || null
   const uniqueSuppressed = props.status?.active_suppressed_email_count
   const suppressionRows = props.status?.active_suppression_count
+  const providerResults = newsletterProviderResults(latestJob)
+  const providerOptions = props.providerFilter
+    ? [...new Set([...props.providerOptions, props.providerFilter])].sort((left, right) =>
+        left.localeCompare(right),
+      )
+    : props.providerOptions
+  const suppressionsByProvider = props.suppressions.reduce<Record<string, NewsletterSuppression[]>>(
+    (groups, record) => {
+      const provider = record.source_provider || "unknown"
+      groups[provider] = [...(groups[provider] || []), record]
+      return groups
+    },
+    {},
+  )
+  const suppressionGroups = Object.entries(suppressionsByProvider).sort(([left], [right]) =>
+    left.localeCompare(right),
+  )
   return (
     <>
       <Card>
@@ -6002,6 +6066,47 @@ function NewsletterView(props: {
                 {latestJob.last_error ? (
                   <div className="text-red-700 dark:text-red-300">{latestJob.last_error}</div>
                 ) : null}
+                <div className="grid gap-2 md:grid-cols-2">
+                  {providerResults.length ? (
+                    providerResults.map(([providerName, providerResult]) => {
+                      const statuses = providerResult.statuses || {}
+                      const statusEntries = Object.entries(statuses).sort(([left], [right]) =>
+                        left.localeCompare(right),
+                      )
+                      const synced = providerResult.synced ?? providerResult.would_sync ?? 0
+                      return (
+                        <div
+                          key={providerName}
+                          className="grid gap-2 rounded-md border bg-background p-3"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <strong>{providerName}</strong>
+                            <div className="flex flex-wrap gap-1">
+                              <Badge variant="succeeded">{synced} synced</Badge>
+                              <Badge variant="neutral">{providerResult.skipped || 0} skipped</Badge>
+                              {providerResult.failed ? (
+                                <Badge variant="failed">{providerResult.failed} failed</Badge>
+                              ) : null}
+                            </div>
+                          </div>
+                          {statusEntries.length ? (
+                            <div className="flex flex-wrap gap-1">
+                              {statusEntries.map(([status, count]) => (
+                                <Badge key={status} variant="neutral">
+                                  {status.replaceAll("_", " ")}: {count}
+                                </Badge>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+                      )
+                    })
+                  ) : (
+                    <div className="rounded-md border bg-background p-3 text-muted-foreground">
+                      No provider status details recorded for the latest sync.
+                    </div>
+                  )}
+                </div>
                 {latestJob.result ? (
                   <pre className="max-h-40 overflow-auto rounded-md bg-background p-3 text-xs">
                     {jsonPreview(latestJob.result)}
@@ -6020,79 +6125,110 @@ function NewsletterView(props: {
       <Card>
         <CardHeader>
           <CardTitle>Newsletter suppressions</CardTitle>
-          <span id="newsletterSuppressionsStatus" className="text-sm text-muted-foreground">
-            {props.loading.newsletterSuppressions
-              ? "Loading"
-              : `${props.suppressions.length} shown`}
-          </span>
+          <div className="flex flex-wrap items-center justify-end gap-3">
+            <Label className="min-w-44">
+              Provider
+              <Select
+                id="newsletterProviderFilter"
+                value={props.providerFilter}
+                onChange={(event) => props.onProviderFilterChange(event.target.value)}
+              >
+                <option value="">All providers</option>
+                {providerOptions.map((provider) => (
+                  <option key={provider} value={provider}>
+                    {provider}
+                  </option>
+                ))}
+              </Select>
+            </Label>
+            <span id="newsletterSuppressionsStatus" className="text-sm text-muted-foreground">
+              {props.loading.newsletterSuppressions
+                ? "Loading"
+                : `${props.suppressions.length} shown`}
+            </span>
+          </div>
         </CardHeader>
         <Empty hidden={props.suppressions.length !== 0}>
           No active newsletter suppressions recorded.
         </Empty>
-        <div className="overflow-x-auto">
-          <Table
-            id="newsletterSuppressionsTable"
-            className={cn("min-w-[900px]", props.suppressions.length === 0 && "hidden")}
-            aria-label="Newsletter suppressions"
-          >
-            <TableHeader>
-              <TableRow>
-                <SortableTableHead
-                  className="w-[34%]"
-                  label="Email"
-                  scope="newsletter"
-                  sort={props.sort}
-                  sortKey="email"
-                  onSort={(_, key) => props.onSort(key)}
-                />
-                <SortableTableHead
-                  className="w-[14%]"
-                  label="Source"
-                  scope="newsletter"
-                  sort={props.sort}
-                  sortKey="source_provider"
-                  onSort={(_, key) => props.onSort(key)}
-                />
-                <SortableTableHead
-                  className="w-[22%]"
-                  label="Reason"
-                  scope="newsletter"
-                  sort={props.sort}
-                  sortKey="reason"
-                  onSort={(_, key) => props.onSort(key)}
-                />
-                <SortableTableHead
-                  className="w-[15%]"
-                  label="First seen"
-                  scope="newsletter"
-                  sort={props.sort}
-                  sortKey="first_seen_at"
-                  onSort={(_, key) => props.onSort(key)}
-                />
-                <SortableTableHead
-                  className="w-[15%]"
-                  label="Last seen"
-                  scope="newsletter"
-                  sort={props.sort}
-                  sortKey="last_seen_at"
-                  onSort={(_, key) => props.onSort(key)}
-                />
-              </TableRow>
-            </TableHeader>
-            <TableBody id="newsletterSuppressionsBody">
-              {props.suppressions.map((record) => (
-                <TableRow key={`${record.email}-${record.source_provider}`}>
-                  <TableCell className="font-mono text-sm">{record.email}</TableCell>
-                  <TableCell>
-                    <Badge variant="neutral">{record.source_provider}</Badge>
-                  </TableCell>
-                  <TableCell>{record.reason.replaceAll("_", " ")}</TableCell>
-                  <TableCell>{formatDate(record.first_seen_at)}</TableCell>
-                  <TableCell>{formatDate(record.last_seen_at || record.updated_at)}</TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+        <div className={cn("grid gap-4", props.suppressions.length === 0 && "hidden")}>
+          {suppressionGroups.map(([provider, records]) => (
+            <section key={provider} className="grid gap-2" aria-label={`${provider} suppressions`}>
+              <div className="flex flex-wrap items-center gap-2 px-4 pt-4">
+                <Badge variant="neutral">{provider}</Badge>
+                <span className="text-sm text-muted-foreground">
+                  {records.length} suppression{records.length === 1 ? "" : "s"}
+                </span>
+              </div>
+              <div className="overflow-x-auto">
+                <Table
+                  id={`newsletterSuppressionsTable-${provider}`}
+                  className="min-w-[900px]"
+                  aria-label={`${provider} newsletter suppressions`}
+                >
+                  <TableHeader>
+                    <TableRow>
+                      <SortableTableHead
+                        className="w-[34%]"
+                        label="Email"
+                        scope="newsletter"
+                        sort={props.sort}
+                        sortKey="email"
+                        onSort={(_, key) => props.onSort(key)}
+                      />
+                      <SortableTableHead
+                        className="w-[14%]"
+                        label="Source"
+                        scope="newsletter"
+                        sort={props.sort}
+                        sortKey="source_provider"
+                        onSort={(_, key) => props.onSort(key)}
+                      />
+                      <SortableTableHead
+                        className="w-[22%]"
+                        label="Reason"
+                        scope="newsletter"
+                        sort={props.sort}
+                        sortKey="reason"
+                        onSort={(_, key) => props.onSort(key)}
+                      />
+                      <SortableTableHead
+                        className="w-[15%]"
+                        label="First seen"
+                        scope="newsletter"
+                        sort={props.sort}
+                        sortKey="first_seen_at"
+                        onSort={(_, key) => props.onSort(key)}
+                      />
+                      <SortableTableHead
+                        className="w-[15%]"
+                        label="Last seen"
+                        scope="newsletter"
+                        sort={props.sort}
+                        sortKey="last_seen_at"
+                        onSort={(_, key) => props.onSort(key)}
+                      />
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody id={`newsletterSuppressionsBody-${provider}`}>
+                    {records.map((record) => (
+                      <TableRow key={`${record.email}-${record.source_provider}`}>
+                        <TableCell className="font-mono text-sm">{record.email}</TableCell>
+                        <TableCell>
+                          <Badge variant="neutral">{record.source_provider}</Badge>
+                        </TableCell>
+                        <TableCell>{record.reason.replaceAll("_", " ")}</TableCell>
+                        <TableCell>{formatDate(record.first_seen_at)}</TableCell>
+                        <TableCell>
+                          {formatDate(record.last_seen_at || record.updated_at)}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </section>
+          ))}
         </div>
       </Card>
     </>

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -15,6 +16,7 @@ from five08.newsletter_sync import (
     format_newsletter_sync_warning,
     sync_newsletter_contacts,
 )
+from five08.newsletter_suppressions import NewsletterSuppressionRecord
 
 
 class FakeMigaduClient:
@@ -40,6 +42,7 @@ class FakeBrevoClient:
     subscriptions: list[dict[str, Any]] = []
     list_lookup_names: list[str] = []
     contact_lookup_emails: list[str] = []
+    lookup_errors: set[str] = set()
 
     def __init__(
         self,
@@ -54,6 +57,8 @@ class FakeBrevoClient:
 
     def get_contact(self, email: str) -> dict[str, Any] | None:
         self.contact_lookup_emails.append(email)
+        if email in self.lookup_errors:
+            raise RuntimeError(f"Brevo lookup failed for {email}")
         return self.contacts.get(email)
 
     def add_contact_to_list(self, *, email: str, list_id: int) -> dict[str, Any]:
@@ -69,6 +74,7 @@ class FakeKeilaClient:
     contacts: dict[str, dict[str, Any]] = {}
     upserts: list[dict[str, Any]] = []
     lookups: list[str] = []
+    lookup_errors: set[str] = set()
 
     def __init__(
         self,
@@ -83,6 +89,8 @@ class FakeKeilaClient:
 
     def get_contact_by_email(self, email: str) -> dict[str, Any] | None:
         self.lookups.append(email)
+        if email in self.lookup_errors:
+            raise RuntimeError(f"Keila lookup failed for {email}")
         return self.contacts.get(email)
 
     def upsert_active_contact(
@@ -140,9 +148,6 @@ class FakeEspoClient:
                 str(contact.get("c508Email") or "").strip().lower(),
                 str(contact.get("emailAddress") or "").strip().lower(),
             }
-            if not any(contact_values):
-                matches.append(dict(contact))
-                continue
             if filter_values.intersection(value for value in contact_values if value):
                 matches.append(dict(contact))
         return {"list": matches}
@@ -155,9 +160,11 @@ def reset_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
     FakeBrevoClient.subscriptions = []
     FakeBrevoClient.list_lookup_names = []
     FakeBrevoClient.contact_lookup_emails = []
+    FakeBrevoClient.lookup_errors = set()
     FakeKeilaClient.contacts = {}
     FakeKeilaClient.upserts = []
     FakeKeilaClient.lookups = []
+    FakeKeilaClient.lookup_errors = set()
     FakeEspoClient.contacts = []
     FakeEspoClient.raise_error = False
     FakeEspoClient.calls = []
@@ -401,12 +408,7 @@ def test_sync_508_members_avoids_duplicate_keila_contact_lookups() -> None:
     result = NewsletterSyncProcessor(_settings(brevo_api_key=None)).sync_508_members()
 
     assert result["providers"]["keila"]["synced"] == 2
-    assert FakeKeilaClient.lookups == [
-        "jane@508.dev",
-        "jane@508.dev",
-        "jane@example.com",
-        "jane@example.com",
-    ]
+    assert FakeKeilaClient.lookups == ["jane@508.dev", "jane@example.com"]
     assert [item["existing_contact"] for item in FakeKeilaClient.upserts] == [
         None,
         None,
@@ -423,12 +425,24 @@ def test_sync_508_members_skips_internal_suppression_registry(
             password_recovery_email="jane@example.com",
         )
     ]
+    now = datetime(2026, 6, 26, tzinfo=timezone.utc)
+    suppression = NewsletterSuppressionRecord(
+        email="jane@example.com",
+        source_provider="manual",
+        reason="manual",
+        active=True,
+        metadata={},
+        first_seen_at=now,
+        last_seen_at=now,
+        created_at=now,
+        updated_at=now,
+    )
 
     def fake_load_suppressions(
         settings: Any, emails: list[str]
     ) -> dict[str, list[Any]]:
         assert sorted(emails) == ["jane@508.dev", "jane@example.com"]
-        return {"jane@example.com": [object()]}
+        return {"jane@example.com": [suppression]}
 
     monkeypatch.setattr(
         "five08.newsletter_sync.load_active_newsletter_suppressions_by_email",
@@ -446,6 +460,82 @@ def test_sync_508_members_skips_internal_suppression_registry(
         "synced": 1,
         "skipped_internal_suppression": 1,
     }
+
+
+def test_sync_508_members_fails_closed_when_suppression_lookup_fails() -> None:
+    FakeMigaduClient.mailboxes = [
+        MigaduMailbox(
+            address="jane@508.dev",
+            name="Jane Doe",
+            password_recovery_email="jane@example.com",
+        )
+    ]
+    FakeBrevoClient.lookup_errors = {"jane@example.com"}
+
+    result = NewsletterSyncProcessor(_settings()).sync_508_members()
+
+    assert result["suppression_lookup_failed_skipped"] == 1
+    assert FakeBrevoClient.subscriptions == [{"email": "jane@508.dev", "list_id": 4}]
+    assert [item["email"] for item in FakeKeilaClient.upserts] == ["jane@508.dev"]
+    assert result["providers"]["brevo"]["failed"] == 1
+    assert result["providers"]["keila"]["statuses"] == {
+        "synced": 1,
+        "skipped_suppression_lookup_failed": 1,
+    }
+
+
+def test_sync_508_members_deactivates_stale_provider_suppression(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeMigaduClient.mailboxes = [
+        MigaduMailbox(
+            address="jane@508.dev",
+            name="Jane Doe",
+            password_recovery_email=None,
+        )
+    ]
+    now = datetime(2026, 6, 26, tzinfo=timezone.utc)
+    stale_record = NewsletterSuppressionRecord(
+        email="jane@508.dev",
+        source_provider="brevo",
+        reason="email_blacklisted",
+        active=True,
+        metadata={},
+        first_seen_at=now,
+        last_seen_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    deactivated: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        "five08.newsletter_sync.load_active_newsletter_suppressions_by_email",
+        lambda settings, emails: {"jane@508.dev": [stale_record]},
+    )
+
+    def fake_deactivate(
+        settings: Any,
+        *,
+        email: str,
+        source_provider: str,
+    ) -> bool:
+        deactivated.append((email, source_provider))
+        return True
+
+    monkeypatch.setattr(
+        "five08.newsletter_sync.deactivate_newsletter_suppression",
+        fake_deactivate,
+    )
+
+    result = NewsletterSyncProcessor(
+        _settings(postgres_url="postgresql://example/db")
+    ).sync_508_members()
+
+    assert result["suppression_registry_deactivated"] == 1
+    assert deactivated == [("jane@508.dev", "brevo")]
+    assert result["suppressed_contacts_skipped"] == 0
+    assert FakeBrevoClient.subscriptions == [{"email": "jane@508.dev", "list_id": 4}]
+    assert [item["email"] for item in FakeKeilaClient.upserts] == ["jane@508.dev"]
 
 
 def test_sync_508_members_skips_crm_blocked_mailboxes() -> None:
@@ -645,6 +735,24 @@ def test_sync_newsletter_contacts_uses_first_email_as_default_mailbox_pointer() 
         "jane@508.dev",
         "jane@508.dev",
     ]
+
+
+def test_sync_newsletter_contacts_fails_closed_when_suppression_lookup_fails() -> None:
+    FakeBrevoClient.lookup_errors = {"jane@example.com"}
+
+    result = sync_newsletter_contacts(
+        _settings(),
+        ["jane@example.com"],
+        source="test",
+    )
+
+    assert result["suppression_lookup_failed_skipped"] == 1
+    assert FakeBrevoClient.subscriptions == []
+    assert FakeKeilaClient.upserts == []
+    assert result["providers"]["brevo"]["failed"] == 1
+    assert result["providers"]["keila"]["statuses"] == {
+        "skipped_suppression_lookup_failed": 1
+    }
 
 
 def test_sync_508_members_skips_mailbox_when_crm_lookup_fails() -> None:

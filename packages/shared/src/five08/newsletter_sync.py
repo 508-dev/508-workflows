@@ -13,6 +13,7 @@ from five08.clients.keila import KeilaClient
 from five08.clients.migadu import MigaduClient, MigaduMailbox
 from five08.newsletter_suppressions import (
     NewsletterSuppressionRecord,
+    deactivate_newsletter_suppression,
     load_active_newsletter_suppressions_by_email,
     upsert_newsletter_suppression,
 )
@@ -141,6 +142,56 @@ def _joined_reason(reasons: list[str]) -> str:
     return "+".join(sorted(set(reasons)))
 
 
+def _provider_suppression_sources(
+    suppressions: list[NewsletterSuppressionSignal],
+) -> set[str]:
+    return {suppression.source_provider for suppression in suppressions}
+
+
+def _reconcile_registry_suppressions(
+    settings: Any,
+    *,
+    contact: NewsletterContact,
+    active_suppressions: list[NewsletterSuppressionRecord],
+    provider_suppressions: list[NewsletterSuppressionSignal],
+    checked_provider_names: set[str],
+    result: dict[str, Any],
+) -> list[NewsletterSuppressionRecord]:
+    """Clear stale provider-observed suppressions after a clean provider check."""
+    if not active_suppressions:
+        return []
+    if not bool(str(getattr(settings, "postgres_url", "") or "").strip()):
+        return active_suppressions
+
+    provider_sources = _provider_suppression_sources(provider_suppressions)
+    remaining: list[NewsletterSuppressionRecord] = []
+    for record in active_suppressions:
+        if record.source_provider == "manual":
+            remaining.append(record)
+            continue
+        if record.source_provider not in checked_provider_names:
+            remaining.append(record)
+            continue
+        if record.source_provider in provider_sources:
+            remaining.append(record)
+            continue
+        try:
+            changed = deactivate_newsletter_suppression(
+                settings,
+                email=contact.email,
+                source_provider=record.source_provider,
+            )
+        except Exception as exc:
+            result["suppression_registry_warning"] = redact_email_addresses(str(exc))
+            remaining.append(record)
+            continue
+        if changed:
+            result["suppression_registry_deactivated"] = (
+                int(result.get("suppression_registry_deactivated") or 0) + 1
+            )
+    return remaining
+
+
 def _chunks[T](items: list[T], size: int) -> Iterable[list[T]]:
     for index in range(0, len(items), size):
         yield items[index : index + size]
@@ -210,6 +261,8 @@ class BrevoNewsletterProvider:
         self._list_id_lookup_completed = list_id is not None
         self._resolved_list_id = list_id
         self._list_id_lookup_lock = Lock()
+        self._contact_lookup_lock = Lock()
+        self._contact_cache: dict[str, dict[str, Any] | None] = {}
 
     def _list_id(self) -> int | None:
         if not self._list_id_lookup_completed:
@@ -233,8 +286,18 @@ class BrevoNewsletterProvider:
         list_id = self._list_id()
         if list_id is None:
             return None
-        existing = self.client.get_contact(contact.email)
+        existing = self._get_existing_contact(contact.email)
         return self._suppression_from_existing(contact, existing, list_id)
+
+    def _get_existing_contact(self, email: str) -> dict[str, Any] | None:
+        normalized_email = email.strip().lower()
+        with self._contact_lookup_lock:
+            if normalized_email in self._contact_cache:
+                return self._contact_cache[normalized_email]
+        existing = self.client.get_contact(normalized_email)
+        with self._contact_lookup_lock:
+            self._contact_cache[normalized_email] = existing
+        return existing
 
     def _suppression_from_existing(
         self,
@@ -266,7 +329,7 @@ class BrevoNewsletterProvider:
         if list_id is None:
             return "skipped_list_missing"
 
-        existing = self.client.get_contact(contact.email)
+        existing = self._get_existing_contact(contact.email)
         if self._suppression_from_existing(contact, existing, list_id) is not None:
             return "skipped_provider_suppressed"
         if not write:
@@ -282,6 +345,8 @@ class KeilaNewsletterProvider:
 
     def __init__(self, client: KeilaClient) -> None:
         self.client = client
+        self._contact_lookup_lock = Lock()
+        self._contact_cache: dict[str, dict[str, Any] | None] = {}
 
     def ensure_contact(self, contact: NewsletterContact) -> str:
         return self._sync_contact(contact, write=True)
@@ -292,8 +357,18 @@ class KeilaNewsletterProvider:
     def get_suppression(
         self, contact: NewsletterContact
     ) -> NewsletterSuppressionSignal | None:
-        existing = self.client.get_contact_by_email(contact.email)
+        existing = self._get_existing_contact(contact.email)
         return self._suppression_from_existing(contact, existing)
+
+    def _get_existing_contact(self, email: str) -> dict[str, Any] | None:
+        normalized_email = email.strip().lower()
+        with self._contact_lookup_lock:
+            if normalized_email in self._contact_cache:
+                return self._contact_cache[normalized_email]
+        existing = self.client.get_contact_by_email(normalized_email)
+        with self._contact_lookup_lock:
+            self._contact_cache[normalized_email] = existing
+        return existing
 
     def _suppression_from_existing(
         self,
@@ -313,7 +388,7 @@ class KeilaNewsletterProvider:
         )
 
     def _sync_contact(self, contact: NewsletterContact, *, write: bool) -> str:
-        existing = self.client.get_contact_by_email(contact.email)
+        existing = self._get_existing_contact(contact.email)
         if self._suppression_from_existing(contact, existing) is not None:
             return "skipped_provider_suppressed"
 
@@ -354,6 +429,7 @@ class NewsletterSyncProcessor:
             "crm_lookup_failed_skipped": 0,
             "contacts_considered": 0,
             "suppressed_contacts_skipped": 0,
+            "suppression_lookup_failed_skipped": 0,
             "providers": {
                 provider.name: {synced_key: 0, "skipped": 0, "failed": 0}
                 for provider in providers
@@ -414,13 +490,38 @@ class NewsletterSyncProcessor:
             active_suppressions = list(
                 registry_suppressions.get(contact.email.strip().lower(), [])
             )
-            provider_suppressions = self._provider_suppressions(
+            (
+                provider_suppressions,
+                failed_provider_names,
+                checked_provider_names,
+            ) = self._provider_suppressions(
                 contact,
                 providers,
                 result,
                 synced_key,
             )
+            if failed_provider_names:
+                result["suppression_lookup_failed_skipped"] += 1
+                for provider in providers:
+                    if provider.name in failed_provider_names:
+                        continue
+                    self._apply_provider_status(
+                        result,
+                        provider.name,
+                        contact.email,
+                        synced_key,
+                        status="skipped_suppression_lookup_failed",
+                    )
+                continue
             self._record_provider_suppressions(provider_suppressions, result)
+            active_suppressions = _reconcile_registry_suppressions(
+                self.settings,
+                contact=contact,
+                active_suppressions=active_suppressions,
+                provider_suppressions=provider_suppressions,
+                checked_provider_names=checked_provider_names,
+                result=result,
+            )
             if active_suppressions or provider_suppressions:
                 result["suppressed_contacts_skipped"] += 1
                 status = (
@@ -483,12 +584,15 @@ class NewsletterSyncProcessor:
         providers: list[NewsletterProvider],
         result: dict[str, Any],
         synced_key: str,
-    ) -> list[NewsletterSuppressionSignal]:
+    ) -> tuple[list[NewsletterSuppressionSignal], set[str], set[str]]:
         suppressions: list[NewsletterSuppressionSignal] = []
+        failed_provider_names: set[str] = set()
+        checked_provider_names: set[str] = set()
         for provider in providers:
             try:
                 suppression = provider.get_suppression(contact)
             except Exception as exc:
+                failed_provider_names.add(provider.name)
                 self._apply_provider_status(
                     result,
                     provider.name,
@@ -497,9 +601,10 @@ class NewsletterSyncProcessor:
                     error=exc,
                 )
                 continue
+            checked_provider_names.add(provider.name)
             if suppression is not None:
                 suppressions.append(suppression)
-        return suppressions
+        return suppressions, failed_provider_names, checked_provider_names
 
     def _record_provider_suppressions(
         self,
@@ -782,6 +887,7 @@ def sync_newsletter_contacts(
     providers = build_newsletter_providers(settings)
     result: dict[str, Any] = {
         "contacts_considered": 0,
+        "suppression_lookup_failed_skipped": 0,
         "providers": {
             provider.name: {"synced": 0, "skipped": 0, "failed": 0}
             for provider in providers
@@ -823,18 +929,36 @@ def sync_newsletter_contacts(
 
     for contact in contacts:
         provider_suppressions: list[NewsletterSuppressionSignal] = []
+        failed_provider_names: set[str] = set()
+        checked_provider_names: set[str] = set()
         for provider in providers:
             provider_result = result["providers"][provider.name]
             try:
                 suppression = provider.get_suppression(contact)
             except Exception as exc:
+                failed_provider_names.add(provider.name)
                 provider_result["failed"] += 1
                 failures = provider_result.setdefault("failures", [])
                 if isinstance(failures, list) and len(failures) < 20:
                     failures.append({"email": contact.email, "error": str(exc)})
                 continue
+            checked_provider_names.add(provider.name)
             if suppression is not None:
                 provider_suppressions.append(suppression)
+        if failed_provider_names:
+            result["suppression_lookup_failed_skipped"] = (
+                int(result.get("suppression_lookup_failed_skipped") or 0) + 1
+            )
+            for provider in providers:
+                if provider.name in failed_provider_names:
+                    continue
+                _apply_direct_provider_status(
+                    result,
+                    provider.name,
+                    contact.email,
+                    status="skipped_suppression_lookup_failed",
+                )
+            continue
         if provider_suppressions:
             for suppression in provider_suppressions:
                 if bool(str(getattr(settings, "postgres_url", "") or "").strip()):
@@ -853,6 +977,14 @@ def sync_newsletter_contacts(
 
         active_suppressions = registry_suppressions.get(
             contact.email.strip().lower(), []
+        )
+        active_suppressions = _reconcile_registry_suppressions(
+            settings,
+            contact=contact,
+            active_suppressions=list(active_suppressions),
+            provider_suppressions=provider_suppressions,
+            checked_provider_names=checked_provider_names,
+            result=result,
         )
         if provider_suppressions or active_suppressions:
             result["suppressed_contacts_skipped"] = (
@@ -949,6 +1081,12 @@ def format_newsletter_sync_warning(result: dict[str, Any]) -> str | None:
             if suppressed:
                 messages.append(
                     f"{provider_name} skipped {suppressed} suppressed contact(s)"
+                )
+            lookup_failed = int(statuses.get("skipped_suppression_lookup_failed") or 0)
+            if lookup_failed:
+                messages.append(
+                    f"{provider_name} skipped {lookup_failed} contact(s) "
+                    "because suppression lookup failed"
                 )
 
     return "; ".join(messages) if messages else None

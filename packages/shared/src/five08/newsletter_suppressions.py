@@ -97,6 +97,35 @@ def upsert_newsletter_suppression(
             )
 
 
+def deactivate_newsletter_suppression(
+    settings: SharedSettings,
+    *,
+    email: str,
+    source_provider: str,
+) -> bool:
+    """Deactivate one provider suppression row, returning whether it changed."""
+    normalized_email = _normalize_email(email)
+    normalized_source = source_provider.strip().lower()
+    if not normalized_email:
+        raise ValueError("email is required")
+    if normalized_source not in NEWSLETTER_SUPPRESSION_SOURCE_PROVIDERS:
+        raise ValueError("unknown newsletter suppression source provider")
+
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE newsletter_suppressions
+                SET active = false
+                WHERE email = %s
+                  AND source_provider = %s
+                  AND active = true
+                """,
+                (normalized_email, normalized_source),
+            )
+            return cursor.rowcount > 0
+
+
 def load_active_newsletter_suppressions_by_email(
     settings: SharedSettings,
     emails: Iterable[str],
