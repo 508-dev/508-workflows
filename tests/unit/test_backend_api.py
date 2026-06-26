@@ -6210,7 +6210,7 @@ def test_dashboard_onboarding_email_draft_uses_crm_contact_and_local_marker(
         patch("five08.backend.api.EspoClient", return_value=espo_client),
         patch(
             "five08.backend.api._dashboard_session_profile_row",
-            return_value={"name": "Michael Wu", "email_508": "michael@508.dev"},
+            return_value={"name": "Avery Sender", "email_508": "avery.sender@508.dev"},
         ),
         patch(
             "five08.backend.api._dashboard_onboarding_email_marker",
@@ -6237,8 +6237,8 @@ def test_dashboard_onboarding_email_draft_uses_crm_contact_and_local_marker(
     assert payload["candidate_name"] == "Jesse Candidate"
     assert payload["recipient_email"] == "jesse@example.com"
     assert payload["reply_to_email"] == "steering@508.dev"
-    assert payload["sender_display_name"] == "Michael Wu"
-    assert payload["signature_name"] == "Michael"
+    assert payload["sender_display_name"] == "Avery Sender"
+    assert payload["signature_name"] == "Avery"
     assert payload["subject"] == "508.dev onboarding"
     assert payload["can_send"] is True
     assert payload["markdown_body"].startswith("Great talking Jesse,")
@@ -6270,7 +6270,7 @@ def test_dashboard_onboarding_email_draft_marks_not_sendable_without_smtp(
         patch("five08.backend.api.EspoClient", return_value=espo_client),
         patch(
             "five08.backend.api._dashboard_session_profile_row",
-            return_value={"name": "Michael Wu", "email_508": "michael@508.dev"},
+            return_value={"name": "Avery Sender", "email_508": "avery.sender@508.dev"},
         ),
         patch(
             "five08.backend.api._dashboard_onboarding_email_marker",
@@ -6317,7 +6317,7 @@ def test_dashboard_onboarding_email_send_sends_and_marks_local_state(
         patch("five08.backend.api.EspoClient", return_value=espo_client),
         patch(
             "five08.backend.api._dashboard_session_profile_row",
-            return_value={"name": "Michael Wu", "email_508": "michael@508.dev"},
+            return_value={"name": "Avery Sender", "email_508": "avery.sender@508.dev"},
         ),
         patch("five08.backend.api.onboarding_email_smtp_ready", return_value=True),
         patch("five08.backend.api.send_onboarding_email_message") as mock_send,
@@ -6355,8 +6355,8 @@ def test_dashboard_onboarding_email_send_sends_and_marks_local_state(
     assert payload["marker_error"] is None
     mock_send.assert_called_once()
     message = mock_send.call_args.args[0]
-    assert message["From"] == "Michael Wu <onboarding@508.dev>"
-    assert message["Reply-To"] == "Michael Wu <steering@508.dev>"
+    assert message["From"] == "Avery Sender <onboarding@508.dev>"
+    assert message["Reply-To"] == "Avery Sender <steering@508.dev>"
     assert message["Cc"] == "steering@508.dev"
     assert message["To"] == "jesse@example.com"
     assert message["Subject"] == "508.dev onboarding"
@@ -6400,7 +6400,7 @@ def test_dashboard_onboarding_email_send_returns_sent_when_marker_fails(
         patch("five08.backend.api.EspoClient", return_value=espo_client),
         patch(
             "five08.backend.api._dashboard_session_profile_row",
-            return_value={"name": "Michael Wu", "email_508": "michael@508.dev"},
+            return_value={"name": "Avery Sender", "email_508": "avery.sender@508.dev"},
         ),
         patch("five08.backend.api.onboarding_email_smtp_ready", return_value=True),
         patch("five08.backend.api.send_onboarding_email_message") as mock_send,
@@ -6464,7 +6464,7 @@ def test_dashboard_onboarding_email_send_requires_smtp_configuration(
         patch("five08.backend.api.EspoClient", return_value=espo_client),
         patch(
             "five08.backend.api._dashboard_session_profile_row",
-            return_value={"name": "Michael Wu", "email_508": "michael@508.dev"},
+            return_value={"name": "Avery Sender", "email_508": "avery.sender@508.dev"},
         ),
         patch("five08.backend.api.onboarding_email_smtp_ready", return_value=False),
         patch("five08.backend.api.send_onboarding_email_message") as mock_send,
@@ -6537,7 +6537,7 @@ def test_dashboard_onboarding_email_send_sanitizes_send_failures(
         patch("five08.backend.api.EspoClient", return_value=espo_client),
         patch(
             "five08.backend.api._dashboard_session_profile_row",
-            return_value={"name": "Michael Wu", "email_508": "michael@508.dev"},
+            return_value={"name": "Avery Sender", "email_508": "avery.sender@508.dev"},
         ),
         patch("five08.backend.api.onboarding_email_smtp_ready", return_value=True),
         patch(

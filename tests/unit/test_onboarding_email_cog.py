@@ -58,8 +58,8 @@ def mock_interaction() -> AsyncMock:
     interaction.followup.send = AsyncMock()
     interaction.user = Mock()
     interaction.user.id = 123
-    interaction.user.name = "michaelmwu"
-    interaction.user.display_name = "Michael Wu"
+    interaction.user.name = "averysender"
+    interaction.user.display_name = "Avery Sender"
     admin_role = Mock()
     admin_role.name = "Admin"
     interaction.user.roles = [admin_role]
@@ -74,11 +74,11 @@ def _contact_search_response(params: dict[str, object]) -> dict[str, object]:
             "list": [
                 {
                     "id": "contact-user",
-                    "name": "Michael Wu",
-                    "c508Email": "michael@508.dev",
-                    "emailAddress": "michael@example.com",
+                    "name": "Avery Sender",
+                    "c508Email": "avery.sender@508.dev",
+                    "emailAddress": "avery.sender@example.com",
                     "cDiscordUserID": "123",
-                    "cDiscordUsername": "michaelmwu",
+                    "cDiscordUsername": "averysender",
                 }
             ]
         }
@@ -90,7 +90,7 @@ def _contact_search_response(params: dict[str, object]) -> dict[str, object]:
                     "name": "Jane Example",
                     "emailAddress": "jane@example.com",
                     "c508Email": "",
-                    "cOnboarder": "michael",
+                    "cOnboarder": "avery.sender",
                     "cOnboardingState": "selected",
                 }
             ]
@@ -108,7 +108,7 @@ def test_candidate_lookup_keeps_name_filter_when_recipient_is_overridden(
                 "name": "Jane Example",
                 "emailAddress": "jane@example.com",
                 "c508Email": "",
-                "cOnboarder": "michael",
+                "cOnboarder": "avery.sender",
                 "cOnboardingState": "selected",
             }
         ]
@@ -134,6 +134,57 @@ def test_candidate_lookup_keeps_name_filter_when_recipient_is_overridden(
     } in filters
 
 
+def test_sender_emails_for_user_uses_one_lookup_for_reply_to_and_cc(
+    onboarding_cog: OnboardingEmailCog,
+    mock_interaction: AsyncMock,
+) -> None:
+    onboarding_cog.crm.list_contacts.return_value = {
+        "list": [
+            {
+                "id": "contact-user",
+                "name": "Avery Sender",
+                "c508Email": "avery.sender@508.dev",
+                "emailAddress": "avery.sender@example.com",
+                "cDiscordUserID": "123",
+            }
+        ]
+    }
+
+    sender_emails = onboarding_cog._sender_emails_for_user(
+        interaction=mock_interaction,
+        override=None,
+    )
+
+    assert sender_emails.reply_to_email == "avery.sender@508.dev"
+    assert sender_emails.cc_email == "avery.sender@508.dev"
+    onboarding_cog.crm.list_contacts.assert_called_once()
+
+
+def test_sender_emails_for_user_ignores_invalid_optional_cc(
+    onboarding_cog: OnboardingEmailCog,
+    mock_interaction: AsyncMock,
+) -> None:
+    onboarding_cog.crm.list_contacts.return_value = {
+        "list": [
+            {
+                "id": "contact-user",
+                "name": "Avery Sender",
+                "c508Email": "avery sender@508.dev",
+                "emailAddress": "avery.sender@example.com",
+                "cDiscordUserID": "123",
+            }
+        ]
+    }
+
+    sender_emails = onboarding_cog._sender_emails_for_user(
+        interaction=mock_interaction,
+        override=None,
+    )
+
+    assert sender_emails.reply_to_email == "avery.sender@example.com"
+    assert sender_emails.cc_email is None
+
+
 @pytest.mark.asyncio
 async def test_onboarding_email_command_generates_draft(
     onboarding_cog: OnboardingEmailCog,
@@ -141,7 +192,7 @@ async def test_onboarding_email_command_generates_draft(
 ) -> None:
     onboarding_cog._audit_command_safe = Mock()
     onboarding_cog.crm.list_contacts.side_effect = _contact_search_response
-    mock_interaction.user.display_name = "michaelmwu"
+    mock_interaction.user.display_name = "averysender"
 
     await onboarding_cog.onboarding_email.callback(
         onboarding_cog,
@@ -154,12 +205,12 @@ async def test_onboarding_email_command_generates_draft(
 
     args, kwargs = mock_interaction.followup.send.call_args
     assert "Onboarding email draft generated" in args[0]
-    assert "Reply-To: `michael@508.dev`" in args[0]
-    assert "Cc: `michael@508.dev`" in args[0]
-    assert "From: `Michael Wu <onboarding@508.dev>`" in args[0]
+    assert "Reply-To: `avery.sender@508.dev`" in args[0]
+    assert "Cc: `avery.sender@508.dev`" in args[0]
+    assert "From: `Avery Sender <onboarding@508.dev>`" in args[0]
     assert "CRM contact: `Jane Example`" in args[0]
     assert "**Copy/paste draft:**" in args[0]
-    assert "Cheers,\nMichael" in args[0]
+    assert "Cheers,\nAvery" in args[0]
     assert "[508 Discord server](https://discord.gg/9zAKxmUZJf)" in args[0]
     assert kwargs["ephemeral"] is True
     assert isinstance(kwargs["view"], OnboardingEmailDraftEditView)
@@ -169,8 +220,8 @@ async def test_onboarding_email_command_generates_draft(
     assert audit_kwargs["result"] == "success"
     assert audit_kwargs["metadata"]["email_action"] == "drafted_for_send"
     assert audit_kwargs["metadata"]["send_available"] is True
-    assert audit_kwargs["metadata"]["sender_display_name"] == "Michael Wu"
-    assert audit_kwargs["metadata"]["signature_name"] == "Michael"
+    assert audit_kwargs["metadata"]["sender_display_name"] == "Avery Sender"
+    assert audit_kwargs["metadata"]["signature_name"] == "Avery"
 
 
 @pytest.mark.asyncio
@@ -185,7 +236,7 @@ async def test_onboarding_email_command_prepares_send_button_when_possible(
         "name": "Sam Member",
         "emailAddress": "sam@example.com",
         "c508Email": "",
-        "cOnboarder": "michael",
+        "cOnboarder": "avery.sender",
         "cOnboardingState": "selected",
     }
     onboarding_cog._send_message = Mock()
@@ -198,8 +249,8 @@ async def test_onboarding_email_command_prepares_send_button_when_possible(
         recipient_email="sam@example.com",
         discord_joined="yes",
         agreement_signed="no",
-        sender_name="Michael Wu",
-        reply_to_email="michael@508.dev",
+        sender_name="Avery Sender",
+        reply_to_email="avery.sender@508.dev",
     )
 
     onboarding_cog._send_message.assert_not_called()
@@ -216,9 +267,9 @@ async def test_onboarding_email_command_prepares_send_button_when_possible(
 
     onboarding_cog._send_message.assert_called_once()
     message = onboarding_cog._send_message.call_args.args[0]
-    assert message["From"] == "Michael Wu <onboarding@508.dev>"
-    assert message["Reply-To"] == "Michael Wu <michael@508.dev>"
-    assert message["Cc"] == "michael@508.dev"
+    assert message["From"] == "Avery Sender <onboarding@508.dev>"
+    assert message["Reply-To"] == "Avery Sender <avery.sender@508.dev>"
+    assert message["Cc"] == "avery.sender@508.dev"
     assert message["To"] == "sam@example.com"
     assert message["Subject"] == "508.dev onboarding"
     assert "Onboarding email sent" in mock_interaction.followup.send.call_args.args[0]
@@ -240,7 +291,7 @@ async def test_onboarding_email_command_disables_send_button_without_smtp(
         "name": "Sam Member",
         "emailAddress": "sam@example.com",
         "c508Email": "",
-        "cOnboarder": "michael",
+        "cOnboarder": "avery.sender",
         "cOnboardingState": "selected",
     }
 
@@ -252,8 +303,8 @@ async def test_onboarding_email_command_disables_send_button_without_smtp(
         recipient_email="sam@example.com",
         discord_joined="yes",
         agreement_signed="no",
-        sender_name="Michael Wu",
-        reply_to_email="michael@508.dev",
+        sender_name="Avery Sender",
+        reply_to_email="avery.sender@508.dev",
     )
 
     send_args, send_kwargs = mock_interaction.followup.send.call_args
@@ -280,8 +331,8 @@ async def test_review_send_uses_edited_markdown_body(
     onboarding_cog._send_message = Mock()
     payload = OnboardingEmailSendPayload(
         recipient_email="sam@example.com",
-        reply_to_email="michael@508.dev",
-        sender_display_name="Michael Wu",
+        reply_to_email="avery.sender@508.dev",
+        sender_display_name="Avery Sender",
         subject="508.dev onboarding",
         recipient_from_crm=False,
         original_markdown_body="Original draft\n",
@@ -335,13 +386,13 @@ async def test_review_send_refreshes_crm_derived_recipient_before_smtp(
         "name": "Sam Member",
         "emailAddress": "fresh@example.com",
         "c508Email": "",
-        "cOnboarder": "michael",
+        "cOnboarder": "avery.sender",
         "cOnboardingState": "selected",
     }
     payload = OnboardingEmailSendPayload(
         recipient_email="stale@example.com",
-        reply_to_email="michael@508.dev",
-        sender_display_name="Michael Wu",
+        reply_to_email="avery.sender@508.dev",
+        sender_display_name="Avery Sender",
         subject="508.dev onboarding",
         recipient_from_crm=True,
         original_markdown_body="Original draft\n",
@@ -382,8 +433,8 @@ async def test_review_send_revalidates_smtp_configuration(
     onboarding_cog._smtp_ready = Mock(return_value=False)  # type: ignore[method-assign]
     payload = OnboardingEmailSendPayload(
         recipient_email="sam@example.com",
-        reply_to_email="michael@508.dev",
-        sender_display_name="Michael Wu",
+        reply_to_email="avery.sender@508.dev",
+        sender_display_name="Avery Sender",
         subject="508.dev onboarding",
         recipient_from_crm=False,
         original_markdown_body="Original draft\n",
@@ -438,16 +489,16 @@ async def test_review_send_revalidates_designated_onboarder_assignment(
         "list": [
             {
                 "id": "contact-user",
-                "name": "Michael Wu",
-                "c508Email": "michael@508.dev",
+                "name": "Avery Sender",
+                "c508Email": "avery.sender@508.dev",
                 "cDiscordUserID": "123",
             }
         ]
     }
     payload = OnboardingEmailSendPayload(
         recipient_email="stale@example.com",
-        reply_to_email="michael@508.dev",
-        sender_display_name="Michael Wu",
+        reply_to_email="avery.sender@508.dev",
+        sender_display_name="Avery Sender",
         subject="508.dev onboarding",
         recipient_from_crm=True,
         original_markdown_body="Original draft\n",
@@ -491,13 +542,13 @@ async def test_review_send_blocks_terminal_onboarding_state(
         "name": "Sam Member",
         "emailAddress": "fresh@example.com",
         "c508Email": "",
-        "cOnboarder": "michael",
+        "cOnboarder": "avery.sender",
         "cOnboardingState": "rejected",
     }
     payload = OnboardingEmailSendPayload(
         recipient_email="stale@example.com",
-        reply_to_email="michael@508.dev",
-        sender_display_name="Michael Wu",
+        reply_to_email="avery.sender@508.dev",
+        sender_display_name="Avery Sender",
         subject="508.dev onboarding",
         recipient_from_crm=True,
         original_markdown_body="Original draft\n",
@@ -564,15 +615,15 @@ async def test_onboarding_email_summary_escapes_inline_code_values(
         recipient_email="jane@example.com",
         discord_joined="unknown",
         agreement_signed="unknown",
-        sender_display_name="Michael `Wu`",
-        signature_name="Michael",
-        reply_to_email="michael@508.dev",
+        sender_display_name="Avery `Sender`",
+        signature_name="Avery",
+        reply_to_email="avery.sender@508.dev",
     )
     selected_contact = {
         "id": "contact-`jane`",
         "name": "Jane `Tick`",
         "emailAddress": "jane@example.com",
-        "cOnboarder": "michael",
+        "cOnboarder": "avery.sender",
         "cOnboardingState": "selected`now",
     }
 
@@ -583,7 +634,7 @@ async def test_onboarding_email_summary_escapes_inline_code_values(
     )
 
     message = mock_interaction.followup.send.call_args.args[0]
-    assert "From: `Michael 'Wu' <onboarding@508.dev>`" in message
+    assert "From: `Avery 'Sender' <onboarding@508.dev>`" in message
     assert "CRM contact: `Jane 'Tick'` (`contact-'jane'`)" in message
     assert "status: `selected'now`" in message
 
@@ -601,7 +652,7 @@ async def test_multiple_candidate_matches_show_selector(
                 "name": "Jane Example",
                 "emailAddress": "jane@example.com",
                 "c508Email": "",
-                "cOnboarder": "michael",
+                "cOnboarder": "avery.sender",
                 "cOnboardingState": "selected",
             },
             {
@@ -646,8 +697,8 @@ async def test_multiple_candidate_matches_are_filtered_for_designated_onboarder(
                 "list": [
                     {
                         "id": "contact-user",
-                        "name": "Michael Wu",
-                        "c508Email": "michael@508.dev",
+                        "name": "Avery Sender",
+                        "c508Email": "avery.sender@508.dev",
                         "cDiscordUserID": "123",
                     }
                 ]
@@ -659,14 +710,14 @@ async def test_multiple_candidate_matches_are_filtered_for_designated_onboarder(
                         "id": "contact-1",
                         "name": "Jane Assigned",
                         "emailAddress": "jane@example.com",
-                        "cOnboarder": "michael",
+                        "cOnboarder": "avery.sender",
                         "cOnboardingState": "selected",
                     },
                     {
                         "id": "contact-2",
                         "name": "Jane Also Assigned",
                         "emailAddress": "jane2@example.com",
-                        "cOnboarder": "michael@508.dev",
+                        "cOnboarder": "avery.sender@508.dev",
                         "cOnboardingState": "selected",
                     },
                     {
@@ -713,7 +764,7 @@ async def test_terminal_onboarding_state_is_reported_without_draft(
                 "name": "Jane Onboarded",
                 "emailAddress": "jane@example.com",
                 "c508Email": "jane@508.dev",
-                "cOnboarder": "michael",
+                "cOnboarder": "avery.sender",
                 "cOnboardingState": status,
             }
         ]
@@ -806,8 +857,8 @@ async def test_designated_onboarder_authorization_requires_discord_user_id_link(
     member_role.name = "Member"
     mock_interaction.user.roles = [member_role]
     mock_interaction.user.id = 999
-    mock_interaction.user.name = "michaelmwu"
-    mock_interaction.user.display_name = "Michael Wu"
+    mock_interaction.user.name = "averysender"
+    mock_interaction.user.display_name = "Avery Sender"
 
     def list_contacts(params: dict[str, object]) -> dict[str, object]:
         select = str(params.get("select") or "")
@@ -819,9 +870,9 @@ async def test_designated_onboarder_authorization_requires_discord_user_id_link(
                 "list": [
                     {
                         "id": "contact-user",
-                        "name": "Michael Wu",
-                        "c508Email": "michael@508.dev",
-                        "cDiscordUsername": "michaelmwu",
+                        "name": "Avery Sender",
+                        "c508Email": "avery.sender@508.dev",
+                        "cDiscordUsername": "averysender",
                     }
                 ]
             }
@@ -832,7 +883,7 @@ async def test_designated_onboarder_authorization_requires_discord_user_id_link(
                         "id": "contact-candidate",
                         "name": "Jane Example",
                         "emailAddress": "jane@example.com",
-                        "cOnboarder": "michael",
+                        "cOnboarder": "avery.sender",
                         "cOnboardingState": "selected",
                     }
                 ]
@@ -870,8 +921,8 @@ async def test_unauthorized_selection_authorizes_before_draft_and_reply_to_looku
         recipient_email="jane@example.com",
         discord_joined="unknown",
         agreement_signed="unknown",
-        sender_display_name="Michael Wu",
-        signature_name="Michael",
+        sender_display_name="Avery Sender",
+        signature_name="Avery",
         reply_to_email=None,
     )
     selected_contact = {
@@ -885,8 +936,8 @@ async def test_unauthorized_selection_authorizes_before_draft_and_reply_to_looku
         "list": [
             {
                 "id": "contact-user",
-                "name": "Michael Wu",
-                "c508Email": "michael@508.dev",
+                "name": "Avery Sender",
+                "c508Email": "avery.sender@508.dev",
                 "cDiscordUserID": "123",
             }
         ]
@@ -896,7 +947,7 @@ async def test_unauthorized_selection_authorizes_before_draft_and_reply_to_looku
         patch(
             "five08.discord_bot.cogs.onboarding_email.build_onboarding_email"
         ) as build_mock,
-        patch.object(onboarding_cog, "_reply_to_email_for_user") as reply_to_mock,
+        patch.object(onboarding_cog, "_sender_emails_for_user") as sender_emails_mock,
     ):
         await onboarding_cog._run_onboarding_email_flow(
             mock_interaction,
@@ -905,7 +956,7 @@ async def test_unauthorized_selection_authorizes_before_draft_and_reply_to_looku
         )
 
     build_mock.assert_not_called()
-    reply_to_mock.assert_not_called()
+    sender_emails_mock.assert_not_called()
     audit_kwargs = onboarding_cog._audit_command_safe.call_args.kwargs
     assert audit_kwargs["result"] == "denied"
     assert audit_kwargs["metadata"]["error"] == "permission_denied"
@@ -928,7 +979,7 @@ async def test_onboarding_email_without_reply_to_generates_copy_only_draft(
                         "name": "Sam Member",
                         "emailAddress": "sam@example.com",
                         "c508Email": "",
-                        "cOnboarder": "michael",
+                        "cOnboarder": "avery.sender",
                         "cOnboardingState": "selected",
                     }
                 ]
@@ -975,9 +1026,9 @@ async def test_sender_identity_falls_back_to_crm_discord_username(
                 "list": [
                     {
                         "id": "contact-user",
-                        "name": "Michael Wu",
-                        "c508Email": "michael@508.dev",
-                        "cDiscordUsername": "michaelmwu",
+                        "name": "Avery Sender",
+                        "c508Email": "avery.sender@508.dev",
+                        "cDiscordUsername": "averysender",
                     }
                 ]
             }
@@ -988,7 +1039,7 @@ async def test_sender_identity_falls_back_to_crm_discord_username(
                         "id": "contact-candidate",
                         "name": "Jane Example",
                         "emailAddress": "jane@example.com",
-                        "cOnboarder": "michael",
+                        "cOnboarder": "avery.sender",
                         "cOnboardingState": "selected",
                     }
                 ]
@@ -1005,8 +1056,8 @@ async def test_sender_identity_falls_back_to_crm_discord_username(
     )
 
     message = mock_interaction.followup.send.call_args.args[0]
-    assert "From: `Michael Wu <onboarding@508.dev>`" in message
-    assert "Cheers,\nMichael" in message
+    assert "From: `Avery Sender <onboarding@508.dev>`" in message
+    assert "Cheers,\nAvery" in message
 
 
 @pytest.mark.asyncio
@@ -1021,8 +1072,8 @@ async def test_onboarding_email_flow_sanitizes_crm_errors(
         recipient_email="jane@example.com",
         discord_joined="unknown",
         agreement_signed="unknown",
-        sender_display_name="Michael Wu",
-        signature_name="Michael",
+        sender_display_name="Avery Sender",
+        signature_name="Avery",
         reply_to_email=None,
     )
     onboarding_cog._complete_onboarding_email = AsyncMock(
@@ -1055,8 +1106,8 @@ async def test_onboarding_email_flow_handles_unexpected_errors(
         recipient_email="jane@example.com",
         discord_joined="unknown",
         agreement_signed="unknown",
-        sender_display_name="Michael Wu",
-        signature_name="Michael",
+        sender_display_name="Avery Sender",
+        signature_name="Avery",
         reply_to_email=None,
     )
     onboarding_cog._complete_onboarding_email = AsyncMock(
@@ -1090,15 +1141,15 @@ async def test_selected_contact_flow_refetches_contact_snapshot(
         recipient_email=None,
         discord_joined="unknown",
         agreement_signed="unknown",
-        sender_display_name="Michael Wu",
-        signature_name="Michael",
+        sender_display_name="Avery Sender",
+        signature_name="Avery",
         reply_to_email=None,
     )
     stale_contact = {
         "id": "contact-candidate",
         "name": "Jane Example",
         "emailAddress": "old@example.com",
-        "cOnboarder": "michael",
+        "cOnboarder": "avery.sender",
         "cOnboardingState": "selected",
     }
     fresh_contact = {
@@ -1137,15 +1188,15 @@ async def test_selected_contact_flow_handles_refetch_errors(
         recipient_email=None,
         discord_joined="unknown",
         agreement_signed="unknown",
-        sender_display_name="Michael Wu",
-        signature_name="Michael",
+        sender_display_name="Avery Sender",
+        signature_name="Avery",
         reply_to_email=None,
     )
     stale_contact = {
         "id": "contact-candidate",
         "name": "Jane Example",
         "emailAddress": "old@example.com",
-        "cOnboarder": "michael",
+        "cOnboarder": "avery.sender",
         "cOnboardingState": "selected",
     }
     onboarding_cog.crm.get_contact.side_effect = EspoAPIError("CRM detail")
