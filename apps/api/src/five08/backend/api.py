@@ -6489,6 +6489,43 @@ async def dashboard_newsletter_suppressions_handler(
     )
 
 
+async def dashboard_newsletter_status_handler(request: Request) -> JSONResponse:
+    """Return current dashboard status for the 508 members newsletter sync."""
+    _, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_PEOPLE_SYNC,
+    )
+    if error_response is not None:
+        return error_response
+
+    recent_jobs = await asyncio.to_thread(
+        list_jobs,
+        settings,
+        created_after=datetime.now(tz=timezone.utc) - timedelta(days=90),
+        limit=1,
+        job_type=JOB_FUNCTIONS["sync_508_members_newsletters_job"].__name__,
+    )
+    latest_job = recent_jobs[0] if recent_jobs else None
+    suppressions = await asyncio.to_thread(
+        list_newsletter_suppressions,
+        settings,
+        limit=1000,
+        active_only=True,
+    )
+    suppressed_emails = {record.email for record in suppressions}
+    return JSONResponse(
+        {
+            "scheduler_enabled": settings.newsletter_sync_enabled,
+            "interval_seconds": settings.newsletter_sync_interval_seconds,
+            "active_suppression_count": len(suppressions),
+            "active_suppressed_email_count": len(suppressed_emails),
+            "latest_job": _dashboard_job_payload(latest_job)
+            if latest_job is not None
+            else None,
+        }
+    )
+
+
 async def dashboard_update_configuration_handler(
     request: Request,
     key: str,
@@ -8519,6 +8556,11 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
     app.add_api_route(
         "/dashboard/api/newsletter/suppressions",
         dashboard_newsletter_suppressions_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/newsletter/status",
+        dashboard_newsletter_status_handler,
         methods=["GET"],
     )
     app.add_api_route(

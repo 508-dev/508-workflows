@@ -7183,6 +7183,71 @@ def test_dashboard_sync_newsletters_dry_run_hides_exception_details(
     assert "jane@example.com" not in response.text
 
 
+def test_dashboard_newsletter_status_reports_latest_job_and_suppressions(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="admin@508.dev",
+        display_name="Discord Admin",
+        groups=["discord_admin"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    now = datetime(2026, 6, 26, 12, 0, tzinfo=timezone.utc)
+    latest_job = Mock(
+        id="job-newsletter-1",
+        type="sync_508_members_newsletters_job",
+        status=Mock(value="succeeded"),
+        attempts=1,
+        max_attempts=3,
+        run_after=None,
+        locked_at=None,
+        locked_by=None,
+        last_error=None,
+        idempotency_key="newsletter-sync:508-members:dashboard:20260626:test",
+        created_at=now - timedelta(minutes=1),
+        updated_at=now,
+        payload={"result": {"contacts_considered": 12}},
+    )
+    suppressions = [
+        Mock(email="one@example.com"),
+        Mock(email="one@example.com"),
+        Mock(email="two@example.com"),
+    ]
+    monkeypatch.setattr(api.settings, "newsletter_sync_enabled", True)
+    monkeypatch.setattr(api.settings, "newsletter_sync_interval_seconds", 604800)
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.list_jobs", return_value=[latest_job]) as mock_jobs,
+        patch(
+            "five08.backend.api.list_newsletter_suppressions",
+            return_value=suppressions,
+        ) as mock_suppressions,
+    ):
+        response = client.get("/dashboard/api/newsletter/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["scheduler_enabled"] is True
+    assert payload["interval_seconds"] == 604800
+    assert payload["active_suppression_count"] == 3
+    assert payload["active_suppressed_email_count"] == 2
+    assert payload["latest_job"]["job_id"] == "job-newsletter-1"
+    assert payload["latest_job"]["status"] == "succeeded"
+    assert payload["latest_job"]["result"] == {"contacts_considered": 12}
+    assert mock_jobs.call_args.kwargs["job_type"] == "sync_508_members_newsletters_job"
+    assert mock_suppressions.call_args.kwargs["active_only"] is True
+
+
 def test_dashboard_sync_projects_workflows_engineer_is_dry_run(
     client: TestClient,
 ) -> None:
