@@ -36,6 +36,10 @@ and are intentionally not dashboard-configurable. Onboarding email SMTP settings
 are dashboard-configurable under the Onboarding category when env overrides are
 not set.
 
+Newsletter sync settings are normally set from the admin dashboard
+configuration page. A non-empty env or `.env` value locks the matching
+dashboard field.
+
 ## Queue And Jobs
 
 - `REDIS_URL`
@@ -208,3 +212,26 @@ Agent gateway:
 Agent model base URLs must be HTTPS endpoints on allowed provider hosts, except
 the internal Docker-network Bifrost URL `http://bifrost:8080/openai` is allowed
 for same-host deployments.
+
+## Migadu Mailbox And Newsletter Sync
+
+- `MIGADU_API_USER`, `MIGADU_API_KEY`: required for `/create-mailbox` and `/create-user-accounts`.
+- `MIGADU_MAILBOX_DOMAIN`: optional, defaults to `508.dev`.
+- `BREVO_API_KEY`: optional for Brevo newsletter sync.
+- `BREVO_API_BASE_URL`: optional, defaults to `https://api.brevo.com/v3`.
+- `BREVO_API_TIMEOUT_SECONDS`: optional, defaults to `20.0`.
+- `BREVO_508_MEMBERS_NEWSLETTER_LIST_ID`: optional explicit Brevo list ID override; use `4` for the 508 members list when setting it directly.
+- `BREVO_508_MEMBERS_NEWSLETTER_LIST_NAME`: optional, defaults to `508 members` and is used to look up the list ID when the explicit ID is unset.
+- `KEILA_API_KEY`: optional for Keila contact sync.
+- `KEILA_API_BASE_URL`: optional, defaults to `https://app.keila.io`.
+- `KEILA_API_TIMEOUT_SECONDS`: optional, defaults to `20.0`.
+- `NEWSLETTER_SYNC_ENABLED`: optional, defaults to `true`; dashboard changes require an API restart because the scheduler starts at startup.
+- `NEWSLETTER_SYNC_INTERVAL_SECONDS`: optional, defaults to `604800`; dashboard changes require an API restart because the scheduler sleep interval is startup-bound.
+- `NEWSLETTER_SYNC_EXCLUDED_MAILBOXES`: optional comma-separated mailbox local-parts or full addresses to skip during Migadu resync.
+
+Mailbox and backup email subscription to configured newsletter tools is best
+effort. Failures are reported as warnings and do not block mailbox or account
+creation. The periodic sync uses Migadu mailboxes and password recovery emails
+as the source of truth for `@508.dev`. When CRM is configured, it only syncs
+mailboxes that match a CRM contact; it also skips configured excluded mailboxes
+and does not re-add provider-suppressed contacts.

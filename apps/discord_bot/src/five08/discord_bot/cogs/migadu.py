@@ -26,6 +26,11 @@ from five08.clients.migadu import (
 from five08.discord_bot.config import settings
 from five08.discord_bot.utils.audit import DiscordAuditCogMixin
 from five08.discord_bot.utils.role_decorators import require_role
+from five08.newsletter_sync import (
+    format_newsletter_sync_warning,
+    sync_newsletter_contacts,
+)
+from five08.redaction import redact_email_addresses
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +60,7 @@ class MailboxCreationOutcome:
     mailbox_name: str
     crm_contact: dict[str, Any] | None
     sync_error: str | None = None
+    newsletter_error: str | None = None
 
 
 def _truncate_discord_text(value: str, *, limit: int) -> str:
@@ -207,6 +213,27 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
             api_key=token,
             domain=self._migadu_mailbox_domain(),
         )
+
+    async def _add_emails_to_newsletter(self, emails: list[str]) -> str | None:
+        """Best-effort subscribe mailbox and backup addresses to newsletter tools."""
+        try:
+            result = await asyncio.to_thread(
+                sync_newsletter_contacts,
+                settings,
+                emails,
+                source="discord_create_mailbox",
+            )
+        except Exception as exc:
+            error_warning = _truncate_discord_text(
+                redact_email_addresses(f"Newsletter sync failed: {exc}"),
+                limit=500,
+            )
+            logger.warning("Newsletter sync warning: %s", error_warning, exc_info=True)
+            return error_warning
+        warning = format_newsletter_sync_warning(result)
+        if warning:
+            logger.warning("Newsletter sync warning: %s", warning)
+        return warning
 
     def _normalize_mailbox_request(self, mailbox_username: str) -> tuple[str, str]:
         """
@@ -580,6 +607,9 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
             name=mailbox_name,
         )
         created_address = str(mailbox.get("address") or context.mailbox_email)
+        newsletter_error = await self._add_emails_to_newsletter(
+            [created_address, backup_email]
+        )
 
         contact_to_update = pre_resolved_contact
         sync_error: str | None = None
@@ -617,6 +647,7 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
             mailbox_name=mailbox_name,
             crm_contact=contact_to_update,
             sync_error=sync_error,
+            newsletter_error=newsletter_error,
         )
 
     def _build_mailbox_embed(
@@ -648,6 +679,21 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
             embed.add_field(
                 name="CRM Sync",
                 value=outcome.sync_error,
+                inline=False,
+            )
+        if outcome.newsletter_error:
+            embed.add_field(
+                name="Newsletter",
+                value=_truncate_discord_text(
+                    f"Newsletter subscription warning: {outcome.newsletter_error}",
+                    limit=1024,
+                ),
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="Newsletter",
+                value="Added mailbox and backup email to newsletter tools.",
                 inline=False,
             )
 
@@ -754,6 +800,7 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
                         else None
                     ),
                     "crm_sync_error": outcome.sync_error,
+                    "newsletter_error": outcome.newsletter_error,
                     "mailbox_created": True,
                 },
                 resource_type="discord_command",
@@ -789,6 +836,8 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
                     else None
                 ),
                 "forwarded_to": outcome.backup_email,
+                "newsletter_subscribed": outcome.newsletter_error is None,
+                "newsletter_error": outcome.newsletter_error,
             },
             resource_type="discord_command",
         )

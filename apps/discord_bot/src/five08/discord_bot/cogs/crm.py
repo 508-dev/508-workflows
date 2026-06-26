@@ -51,6 +51,11 @@ from five08.resume_profile_processor import (
     ResumeProcessorConfig,
     ResumeProfileProcessor,
 )
+from five08.newsletter_sync import (
+    format_newsletter_sync_warning,
+    sync_newsletter_contacts,
+)
+from five08.redaction import redact_email_addresses
 from five08.skills import normalize_skill, normalize_skill_list
 from five08.discord_bot.utils.audit import DiscordAuditCogMixin
 from five08.discord_bot.utils.role_decorators import (
@@ -133,10 +138,12 @@ class MailboxProvisioningPartialError(RuntimeError):
         *,
         mailbox_email: str,
         partial_success: str,
+        newsletter_error: str | None = None,
     ) -> None:
         super().__init__(message)
         self.mailbox_email = mailbox_email
         self.partial_success = partial_success
+        self.newsletter_error = newsletter_error
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +154,7 @@ class MailboxProvisioningResult:
     created: bool
     crm_updated: bool
     backup_email: str
+    newsletter_error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -3815,6 +3823,27 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             api_key=api_key,
             domain=self._migadu_mailbox_domain(),
         )
+
+    async def _add_emails_to_newsletter(self, emails: list[str]) -> str | None:
+        """Best-effort subscribe mailbox and backup addresses to newsletter tools."""
+        try:
+            result = await asyncio.to_thread(
+                sync_newsletter_contacts,
+                settings,
+                emails,
+                source="discord_create_user_accounts",
+            )
+        except Exception as exc:
+            error_warning = self._sanitize_error_message_for_discord(
+                redact_email_addresses(f"Newsletter sync failed: {exc}"),
+                max_length=500,
+            )
+            logger.warning("Newsletter sync warning: %s", error_warning, exc_info=True)
+            return error_warning
+        warning = format_newsletter_sync_warning(result)
+        if warning:
+            logger.warning("Newsletter sync warning: %s", warning)
+        return warning
 
     def _normalize_mailbox_request(self, mailbox_username: str) -> tuple[str, str]:
         """Normalize a bare or full 508 mailbox request to email and local-part."""
@@ -8284,6 +8313,12 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 created=False,
                 crm_updated=False,
                 backup_email="",
+                newsletter_error=await self._add_emails_to_newsletter(
+                    [
+                        existing_email,
+                        self._contact_text_value(contact.get("emailAddress")) or "",
+                    ]
+                ),
             )
 
         backup_email = self._normalize_full_email(
@@ -8307,6 +8342,10 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 partial_success="mailbox_created_address_mismatch",
             )
 
+        newsletter_error = await self._add_emails_to_newsletter(
+            [target_email, backup_email]
+        )
+
         try:
             await asyncio.to_thread(
                 self.espo_api.request,
@@ -8319,6 +8358,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 str(exc),
                 mailbox_email=target_email,
                 partial_success="mailbox_created_crm_update_failed",
+                newsletter_error=newsletter_error,
             ) from exc
         contact["c508Email"] = target_email
 
@@ -8327,6 +8367,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             created=True,
             crm_updated=True,
             backup_email=backup_email,
+            newsletter_error=newsletter_error,
         )
 
     async def _invite_outline_user_for_contact(
@@ -8564,22 +8605,38 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     "mailbox_username": mailbox_username,
                     "mailbox_email": exc.mailbox_email,
                     "partial_success": exc.partial_success,
+                    "newsletter_error": exc.newsletter_error,
                     "error": message,
                 },
+            )
+            newsletter_warning = (
+                self._sanitize_error_message_for_discord(
+                    exc.newsletter_error,
+                    max_length=500,
+                )
+                if exc.newsletter_error
+                else None
+            )
+            newsletter_line = (
+                f"\nNewsletter: subscription warning: `{newsletter_warning}`"
+                if newsletter_warning
+                else "\nNewsletter: added mailbox and backup email."
             )
             if exc.partial_success == "mailbox_created_crm_update_failed":
                 await interaction.followup.send(
                     "⚠️ Created the mailbox, but failed to update CRM `c508Email`.\n"
                     f"Email: `{exc.mailbox_email}`\n"
                     f"Error: `{message}`\n"
-                    "SSO provisioning and Outline invite were not started.",
+                    "SSO provisioning and Outline invite were not started."
+                    f"{newsletter_line}",
                     ephemeral=True,
                 )
             else:
                 await interaction.followup.send(
                     f"⚠️ {message}\n"
                     f"Created mailbox: `{exc.mailbox_email}`\n"
-                    "SSO provisioning and Outline invite were not started.",
+                    "SSO provisioning and Outline invite were not started."
+                    f"{newsletter_line}",
                     ephemeral=True,
                 )
         except SSOProvisioningPartialError as exc:
@@ -8704,6 +8761,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     "sso_created": result.sso.created,
                     "sso_crm_updated": result.sso.crm_updated,
                     "outline_invited": result.outline_invited,
+                    "newsletter_subscribed": result.mailbox.newsletter_error is None,
+                    "newsletter_error": result.mailbox.newsletter_error,
                     "recovery_email_error": result.sso.recovery_email_error,
                 },
                 resource_type="crm_contact",
@@ -8720,6 +8779,16 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 f"(user ID `{result.sso.user_id}`).",
                 "Outline invite: sent.",
             ]
+            if result.mailbox.newsletter_error is None:
+                message_lines.append("Newsletter: added mailbox and backup email.")
+            else:
+                newsletter_warning = self._sanitize_error_message_for_discord(
+                    result.mailbox.newsletter_error,
+                    max_length=500,
+                )
+                message_lines.append(
+                    f"Newsletter: subscription warning: `{newsletter_warning}`"
+                )
             if result.sso.created:
                 if result.sso.recovery_email_error is None:
                     message_lines.append("SSO recovery email: sent.")

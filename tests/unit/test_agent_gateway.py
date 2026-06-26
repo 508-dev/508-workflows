@@ -1663,6 +1663,7 @@ def test_mailbox_create_uses_explicit_backup_email_not_mailbox_address() -> None
     assert response.plan is not None
     action = response.plan.actions[0]
     assert action.tool_name == "mail_write.create_mailbox"
+    assert action.required_scopes == ["mailbox:create", "integration:manage"]
     assert action.arguments == {
         "local_part": "john",
         "backup_email": "john@gmail.com",
@@ -1866,6 +1867,8 @@ def test_user_accounts_create_is_admin_only() -> None:
 def _account_runtime_config(
     *,
     outline_api_key: str | None = "outline-key",
+    brevo_api_key: str | None = None,
+    keila_api_key: str | None = None,
 ) -> ToolRuntimeConfig:
     return ToolRuntimeConfig(
         espo_base_url="https://crm.example",
@@ -1876,6 +1879,9 @@ def _account_runtime_config(
         authentik_api_token="authentik-token",
         authentik_recovery_email_stage_id="stage-1",
         outline_api_key=outline_api_key,
+        brevo_api_key=brevo_api_key,
+        brevo_508_members_newsletter_list_id=4,
+        keila_api_key=keila_api_key,
     )
 
 
@@ -2068,15 +2074,87 @@ def _install_account_tool_fakes(
             self.invites.append(invite)
             return invite
 
+    class FakeBrevoClient:
+        contacts: dict[str, dict[str, Any]] = {}
+        subscriptions: list[dict[str, Any]] = []
+
+        def __init__(
+            self,
+            *,
+            api_key: str,
+            base_url: str = "https://api.brevo.com/v3",
+            timeout_seconds: float = 20.0,
+        ) -> None:
+            self.api_key = api_key
+            self.base_url = base_url
+            self.timeout_seconds = timeout_seconds
+
+        def add_contact_to_list(self, *, email: str, list_id: int) -> dict[str, Any]:
+            self.subscriptions.append({"email": email, "list_id": list_id})
+            return {"id": len(self.subscriptions)}
+
+        def get_contact(self, email: str) -> dict[str, Any] | None:
+            return self.contacts.get(email)
+
+        def find_list_id_by_name(self, name: str) -> int | None:
+            return 4 if name == "508 members" else None
+
+    class FakeKeilaClient:
+        contacts: dict[str, dict[str, Any]] = {}
+        upserts: list[dict[str, Any]] = []
+
+        def __init__(
+            self,
+            *,
+            api_key: str,
+            base_url: str = "https://app.keila.io",
+            timeout_seconds: float = 20.0,
+        ) -> None:
+            self.api_key = api_key
+            self.base_url = base_url
+            self.timeout_seconds = timeout_seconds
+
+        def get_contact_by_email(self, email: str) -> dict[str, Any] | None:
+            return self.contacts.get(email)
+
+        def upsert_active_contact(
+            self,
+            *,
+            email: str,
+            first_name: str | None = None,
+            last_name: str | None = None,
+            data: dict[str, Any] | None = None,
+            existing_contact: dict[str, Any] | None | object = None,
+        ) -> dict[str, Any]:
+            self.upserts.append(
+                {
+                    "email": email,
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "data": data,
+                    "existing_contact": existing_contact,
+                }
+            )
+            return {"id": str(len(self.upserts))}
+
+    FakeBrevoClient.contacts = {}
+    FakeBrevoClient.subscriptions = []
+    FakeKeilaClient.contacts = {}
+    FakeKeilaClient.upserts = []
+
     monkeypatch.setattr("five08.agent.tools.EspoClient", FakeEspoClient)
     monkeypatch.setattr("five08.agent.tools.AuthentikClient", FakeAuthentikClient)
     monkeypatch.setattr("five08.agent.tools.MigaduClient", FakeMigaduClient)
     monkeypatch.setattr("five08.agent.tools.OutlineClient", FakeOutlineClient)
+    monkeypatch.setattr("five08.newsletter_sync.BrevoClient", FakeBrevoClient)
+    monkeypatch.setattr("five08.newsletter_sync.KeilaClient", FakeKeilaClient)
     return SimpleNamespace(
         espo=FakeEspoClient,
         authentik=FakeAuthentikClient,
         migadu=FakeMigaduClient,
         outline=FakeOutlineClient,
+        brevo=FakeBrevoClient,
+        keila=FakeKeilaClient,
         events=events,
     )
 
@@ -2416,7 +2494,7 @@ def test_mailbox_create_tool_validates_backup_email(
             },
             organization_id="org-1",
             actor_id="123",
-            actor_scopes={"mailbox:create"},
+            actor_scopes={"mailbox:create", "integration:manage"},
         )
 
     assert fakes.migadu.created_mailboxes == []
@@ -2449,6 +2527,162 @@ def test_user_accounts_tool_executes_all_steps(
     assert fakes.migadu.created_mailboxes == [{"address": "jane@508.dev"}]
     assert ("contact-1", {"c508Email": "jane@508.dev"}) in fakes.espo.updates
     assert ("contact-1", {"cSsoID": "42"}) in fakes.espo.updates
+
+
+def test_user_accounts_tool_subscribes_mailbox_and_backup_email_to_brevo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fakes = _install_account_tool_fakes(monkeypatch)
+    registry = ToolRegistry(runtime_config=_account_runtime_config(brevo_api_key="key"))
+
+    result = registry.execute(
+        "account_write.create_user_accounts",
+        {"contact_id": "contact-1", "mailbox_username": "jane@508.dev"},
+        organization_id="org-1",
+        actor_id="123",
+        actor_scopes={
+            "mailbox:create",
+            "user:manage",
+            "integration:manage",
+            "crm:contact:read",
+            "crm:contact:update",
+        },
+    )
+
+    assert result["mailbox"]["newsletter_subscribed"] is True
+    assert result["mailbox"]["newsletter_error"] is None
+    assert fakes.brevo.subscriptions == [
+        {"email": "jane@508.dev", "list_id": 4},
+        {"email": "jane@example.com", "list_id": 4},
+    ]
+
+
+def test_user_accounts_tool_reads_dynamic_newsletter_runtime_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fakes = _install_account_tool_fakes(monkeypatch)
+    runtime_values = {"brevo_api_key": None}
+    registry = ToolRegistry(
+        runtime_config_factory=lambda: _account_runtime_config(
+            brevo_api_key=runtime_values["brevo_api_key"]
+        )
+    )
+    runtime_values["brevo_api_key"] = "key"
+
+    result = registry.execute(
+        "account_write.create_user_accounts",
+        {"contact_id": "contact-1", "mailbox_username": "jane@508.dev"},
+        organization_id="org-1",
+        actor_id="123",
+        actor_scopes={
+            "mailbox:create",
+            "user:manage",
+            "integration:manage",
+            "crm:contact:read",
+            "crm:contact:update",
+        },
+    )
+
+    assert result["mailbox"]["newsletter_subscribed"] is True
+    assert fakes.brevo.subscriptions == [
+        {"email": "jane@508.dev", "list_id": 4},
+        {"email": "jane@example.com", "list_id": 4},
+    ]
+
+
+def test_user_accounts_tool_reports_suppressed_newsletter_contact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fakes = _install_account_tool_fakes(monkeypatch)
+    fakes.brevo.contacts = {"jane@example.com": {"emailBlacklisted": True}}
+    registry = ToolRegistry(runtime_config=_account_runtime_config(brevo_api_key="key"))
+
+    result = registry.execute(
+        "account_write.create_user_accounts",
+        {"contact_id": "contact-1", "mailbox_username": "jane@508.dev"},
+        organization_id="org-1",
+        actor_id="123",
+        actor_scopes={
+            "mailbox:create",
+            "user:manage",
+            "integration:manage",
+            "crm:contact:read",
+            "crm:contact:update",
+        },
+    )
+
+    assert result["mailbox"]["newsletter_subscribed"] is False
+    assert result["mailbox"]["newsletter_error"] == (
+        "brevo skipped 1 suppressed contact(s)"
+    )
+    assert fakes.brevo.subscriptions == [{"email": "jane@508.dev", "list_id": 4}]
+
+
+def test_user_accounts_tool_reports_newsletter_sync_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_account_tool_fakes(monkeypatch)
+
+    def _raise_newsletter_error(*args: object, **kwargs: object) -> dict[str, object]:
+        raise RuntimeError("provider exploded for jane@example.com")
+
+    monkeypatch.setattr(
+        "five08.agent.tools.sync_newsletter_contacts",
+        _raise_newsletter_error,
+    )
+    registry = ToolRegistry(runtime_config=_account_runtime_config(brevo_api_key="key"))
+
+    result = registry.execute(
+        "account_write.create_user_accounts",
+        {"contact_id": "contact-1", "mailbox_username": "jane@508.dev"},
+        organization_id="org-1",
+        actor_id="123",
+        actor_scopes={
+            "mailbox:create",
+            "user:manage",
+            "integration:manage",
+            "crm:contact:read",
+            "crm:contact:update",
+        },
+    )
+
+    assert result["mailbox"]["newsletter_subscribed"] is False
+    assert result["mailbox"]["newsletter_error"] == (
+        "Newsletter sync failed: provider exploded for [redacted-email]"
+    )
+
+
+def test_user_accounts_tool_subscribes_mailbox_and_backup_email_to_keila(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fakes = _install_account_tool_fakes(monkeypatch)
+    registry = ToolRegistry(runtime_config=_account_runtime_config(keila_api_key="key"))
+
+    result = registry.execute(
+        "account_write.create_user_accounts",
+        {"contact_id": "contact-1", "mailbox_username": "jane@508.dev"},
+        organization_id="org-1",
+        actor_id="123",
+        actor_scopes={
+            "mailbox:create",
+            "user:manage",
+            "integration:manage",
+            "crm:contact:read",
+            "crm:contact:update",
+        },
+    )
+
+    assert result["mailbox"]["newsletter_subscribed"] is True
+    assert result["mailbox"]["newsletter_error"] is None
+    assert [item["email"] for item in fakes.keila.upserts] == [
+        "jane@508.dev",
+        "jane@example.com",
+    ]
+    assert fakes.keila.upserts[0]["data"] == {
+        "audiences": ["508_members"],
+        "source": "agent_account_creation",
+        "mailbox_email": "jane@508.dev",
+    }
 
 
 def test_user_accounts_tool_preflights_before_mailbox_creation(

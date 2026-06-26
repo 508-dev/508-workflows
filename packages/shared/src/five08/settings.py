@@ -66,9 +66,23 @@ class SharedSettings(BaseSettings):
     erpnext_base_url: str | None = None
     erpnext_api_key: str | None = None
     erpnext_api_timeout_seconds: float = 20.0
-    migadu_api_user: str | None = None
+    migadu_api_user: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "MIGADU_API_USER",
+            "MIGADU_USER",
+            "migadu_api_user",
+        ),
+    )
     migadu_api_key: str | None = None
-    migadu_mailbox_domain: str = "508.dev"
+    migadu_mailbox_domain: str = Field(
+        default="508.dev",
+        validation_alias=AliasChoices(
+            "MIGADU_MAILBOX_DOMAIN",
+            "MIGADU_DOMAIN",
+            "migadu_mailbox_domain",
+        ),
+    )
     authentik_api_base_url: str | None = None
     authentik_api_token: str | None = None
     authentik_api_timeout_seconds: float = 20.0
@@ -77,6 +91,24 @@ class SharedSettings(BaseSettings):
     outline_base_url: str = "https://app.getoutline.com"
     outline_api_key: str | None = None
     outline_api_timeout_seconds: float = 20.0
+    brevo_api_key: str | None = None
+    brevo_api_base_url: str = "https://api.brevo.com/v3"
+    brevo_api_timeout_seconds: float = 20.0
+    brevo_508_members_newsletter_list_id: int | None = Field(default=None, ge=1)
+    brevo_508_members_newsletter_list_name: str = "508 members"
+    keila_api_key: str | None = None
+    keila_api_base_url: str = Field(
+        default="https://app.keila.io",
+        validation_alias=AliasChoices(
+            "KEILA_API_BASE_URL",
+            "KEILA_BASE_URL",
+            "keila_api_base_url",
+        ),
+    )
+    keila_api_timeout_seconds: float = 20.0
+    newsletter_sync_enabled: bool = True
+    newsletter_sync_interval_seconds: int = 604800
+    newsletter_sync_excluded_mailboxes: str = ""
     onboarding_email_smtp_server: str | None = Field(
         default=None,
         validation_alias=AliasChoices(
@@ -180,6 +212,28 @@ class SharedSettings(BaseSettings):
                     "DOCUSEAL_MEMBER_AGREEMENT_TEMPLATE_ID must be an integer"
                 ) from exc
         raise TypeError("DOCUSEAL_MEMBER_AGREEMENT_TEMPLATE_ID must be an integer")
+
+    @field_validator("brevo_508_members_newsletter_list_id", mode="before")
+    @classmethod
+    def _normalize_brevo_508_members_newsletter_list_id(
+        cls,
+        value: object,
+    ) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip()
+            if not normalized:
+                return None
+            try:
+                return int(normalized)
+            except ValueError as exc:
+                raise ValueError(
+                    "BREVO_508_MEMBERS_NEWSLETTER_LIST_ID must be an integer"
+                ) from exc
+        raise TypeError("BREVO_508_MEMBERS_NEWSLETTER_LIST_ID must be an integer")
 
     @classmethod
     def _skip_dotenv(cls) -> bool:

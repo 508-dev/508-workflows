@@ -25,7 +25,7 @@
       {
         "tool_name": "mail_write.create_mailbox",
         "requires_confirmation": true,
-        "required_scopes": ["mailbox:create"],
+        "required_scopes": ["mailbox:create", "integration:manage"],
         "arguments": {
           "local_part": "john",
           "backup_email": "john@gmail.com",

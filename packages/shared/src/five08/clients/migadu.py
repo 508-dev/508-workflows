@@ -7,11 +7,22 @@ from typing import Any
 
 import requests
 
+from five08.redaction import redact_email_addresses
+
 MIGADU_API_BASE_URL = "https://api.migadu.com/v1"
+ERROR_BODY_MAX_LENGTH = 500
 
 
 class MigaduAPIError(RuntimeError):
     """Raised when the Migadu API request fails or returns invalid data."""
+
+
+def _response_body_excerpt(body: object) -> str:
+    """Return a bounded response-body excerpt for persisted/logged errors."""
+    text = redact_email_addresses(" ".join(str(body or "").split()))
+    if len(text) <= ERROR_BODY_MAX_LENGTH:
+        return text
+    return f"{text[:ERROR_BODY_MAX_LENGTH]}..."
 
 
 def normalize_migadu_mailbox_domain(domain: str | None) -> str:
@@ -29,6 +40,15 @@ class MigaduMailboxCreateRequest:
     local_part: str
     backup_email: str
     name: str
+
+
+@dataclass(frozen=True, slots=True)
+class MigaduMailbox:
+    """Mailbox fields needed for member audience sync."""
+
+    address: str
+    name: str
+    password_recovery_email: str | None
 
 
 class MigaduClient:
@@ -72,7 +92,8 @@ class MigaduClient:
         if response.status_code not in {200, 201}:
             raise MigaduAPIError(
                 "Migadu mailbox creation failed: "
-                f"status={response.status_code}, body={response.text}"
+                f"status={response.status_code}, "
+                f"body={_response_body_excerpt(response.text)}"
             )
 
         try:
@@ -84,3 +105,54 @@ class MigaduClient:
             raise MigaduAPIError("Migadu response payload must be a JSON object.")
 
         return data
+
+    def list_mailboxes(self) -> list[MigaduMailbox]:
+        """List mailboxes for the configured domain."""
+        try:
+            response = requests.get(
+                f"{self.base_url}/domains/{self.domain}/mailboxes",
+                auth=(self.username, self.api_key),
+                timeout=self.timeout_seconds,
+            )
+        except requests.RequestException as exc:
+            raise MigaduAPIError(f"Migadu API request failed: {exc}") from exc
+
+        if response.status_code != 200:
+            raise MigaduAPIError(
+                "Migadu mailbox listing failed: "
+                f"status={response.status_code}, "
+                f"body={_response_body_excerpt(response.text)}"
+            )
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise MigaduAPIError("Migadu response payload must be valid JSON.") from exc
+
+        if isinstance(data, list):
+            raw_mailboxes = data
+        elif isinstance(data, dict):
+            raw_mailboxes = data.get("mailboxes", [])
+        else:
+            raise MigaduAPIError(
+                "Migadu response payload must be a JSON object or array."
+            )
+        if not isinstance(raw_mailboxes, list):
+            raise MigaduAPIError("Migadu response payload must include mailboxes list.")
+
+        mailboxes: list[MigaduMailbox] = []
+        for item in raw_mailboxes:
+            if not isinstance(item, dict):
+                continue
+            address = str(item.get("address") or "").strip().lower()
+            if not address:
+                continue
+            recovery = str(item.get("password_recovery_email") or "").strip().lower()
+            mailboxes.append(
+                MigaduMailbox(
+                    address=address,
+                    name=str(item.get("name") or "").strip(),
+                    password_recovery_email=recovery or None,
+                )
+            )
+        return mailboxes

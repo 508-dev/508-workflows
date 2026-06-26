@@ -32,6 +32,11 @@ def migadu_cog(mock_bot: Mock) -> MigaduCog:
         mock_settings.migadu_api_user = "migadu-user"
         mock_settings.migadu_api_key = "migadu-key"
         mock_settings.migadu_mailbox_domain = "508.dev"
+        mock_settings.brevo_api_key = None
+        mock_settings.brevo_api_base_url = "https://api.brevo.com/v3"
+        mock_settings.brevo_api_timeout_seconds = 20.0
+        mock_settings.brevo_508_members_newsletter_list_id = None
+        mock_settings.brevo_508_members_newsletter_list_name = "508 members"
         cog = MigaduCog(mock_bot)
     cog.espo_api = Mock()
     return cog
@@ -71,6 +76,21 @@ def test_normalize_mailbox_request_rejects_non_508_domain(
 
 
 @pytest.mark.asyncio
+async def test_add_emails_to_newsletter_returns_warning_on_unexpected_error(
+    migadu_cog: MigaduCog,
+) -> None:
+    with patch(
+        "five08.discord_bot.cogs.migadu.sync_newsletter_contacts",
+        side_effect=RuntimeError("provider exploded for alice@example.com"),
+    ):
+        warning = await migadu_cog._add_emails_to_newsletter(
+            ["alice@508.dev", "alice@gmail.com"]
+        )
+
+    assert warning == "Newsletter sync failed: provider exploded for [redacted-email]"
+
+
+@pytest.mark.asyncio
 async def test_create_mailbox_command_success_with_crm_defaults_and_sync(
     migadu_cog: MigaduCog,
     mock_interaction: AsyncMock,
@@ -90,6 +110,7 @@ async def test_create_mailbox_command_success_with_crm_defaults_and_sync(
     migadu_cog._create_migadu_mailbox = AsyncMock(
         return_value={"address": "alice@508.dev"}
     )
+    migadu_cog._add_emails_to_newsletter = AsyncMock(return_value=None)
 
     await migadu_cog.create_mailbox.callback(
         migadu_cog,
@@ -106,6 +127,9 @@ async def test_create_mailbox_command_success_with_crm_defaults_and_sync(
     migadu_cog.espo_api.update_contact.assert_called_once_with(
         "contact-1",
         {"c508Email": "alice@508.dev"},
+    )
+    migadu_cog._add_emails_to_newsletter.assert_awaited_once_with(
+        ["alice@508.dev", "alice@gmail.com"]
     )
 
     _args, kwargs = mock_interaction.followup.send.call_args

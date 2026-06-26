@@ -99,6 +99,12 @@ def test_shared_settings_expose_agent_external_tool_credentials() -> None:
         migadu_api_user="migadu-user",
         migadu_api_key="migadu-key",
         migadu_mailbox_domain="mail.example.com",
+        brevo_api_key="brevo-key",
+        brevo_508_members_newsletter_list_id=4,
+        brevo_508_members_newsletter_list_name="508 members",
+        keila_api_key="keila-key",
+        keila_api_base_url="https://keila.example",
+        postgres_url="postgresql://postgres:postgres@db.example/workflows",
     )
 
     runtime_config = ToolRuntimeConfig.from_settings(settings)
@@ -107,6 +113,29 @@ def test_shared_settings_expose_agent_external_tool_credentials() -> None:
     assert runtime_config.migadu_api_user == "migadu-user"
     assert runtime_config.migadu_api_key == "migadu-key"
     assert runtime_config.migadu_mailbox_domain == "mail.example.com"
+    assert runtime_config.brevo_api_key == "brevo-key"
+    assert runtime_config.brevo_508_members_newsletter_list_id == 4
+    assert runtime_config.brevo_508_members_newsletter_list_name == "508 members"
+    assert runtime_config.keila_api_key == "keila-key"
+    assert runtime_config.keila_api_base_url == "https://keila.example"
+    assert (
+        runtime_config.postgres_url
+        == "postgresql://postgres:postgres@db.example/workflows"
+    )
+
+
+def test_shared_settings_accept_newsletter_sync_env_aliases() -> None:
+    settings = SharedSettings(
+        **{
+            "MIGADU_USER": "michael@508.dev",
+            "MIGADU_DOMAIN": "508.dev",
+            "KEILA_BASE_URL": "https://keila.508.dev/",
+        }
+    )
+
+    assert settings.migadu_api_user == "michael@508.dev"
+    assert settings.migadu_mailbox_domain == "508.dev"
+    assert settings.keila_api_base_url == "https://keila.508.dev/"
 
 
 def test_shared_settings_docuseal_template_id_accepts_numeric_string() -> None:
@@ -123,6 +152,20 @@ def test_shared_settings_docuseal_template_id_rejects_non_numeric_string() -> No
         match="DOCUSEAL_MEMBER_AGREEMENT_TEMPLATE_ID must be an integer",
     ):
         SharedSettings(docuseal_member_agreement_template_id="abc")
+
+
+def test_shared_settings_brevo_members_list_id_accepts_blank_string_as_none() -> None:
+    """Blank Brevo list IDs from env should leave list-name lookup enabled."""
+    settings = SharedSettings(brevo_508_members_newsletter_list_id=" ")
+
+    assert settings.brevo_508_members_newsletter_list_id is None
+
+
+def test_shared_settings_brevo_members_list_id_accepts_numeric_string() -> None:
+    """Numeric Brevo list IDs from env should coerce to integers."""
+    settings = SharedSettings(brevo_508_members_newsletter_list_id="4")
+
+    assert settings.brevo_508_members_newsletter_list_id == 4
 
 
 def test_local_service_defaults_target_host_runtime(
