@@ -21,9 +21,9 @@ from five08.settings import SharedSettings
 logger = logging.getLogger(__name__)
 
 
-def trusted_sql(query: str) -> SQL:
+def trusted_sql(query: LiteralString) -> SQL:
     """Wrap SQL assembled from fixed internal fragments for psycopg typing."""
-    return SQL(cast(LiteralString, query))
+    return SQL(query)
 
 
 class JobStatus(StrEnum):
@@ -231,13 +231,16 @@ def list_jobs(
                 params.append(job_type)
 
             where_clause = " AND ".join(conditions)
-            query = f"""
+            query = cast(
+                LiteralString,
+                f"""
                 SELECT *
                 FROM jobs
                 WHERE {where_clause}
                 ORDER BY created_at DESC
                 LIMIT %s
-            """
+            """,
+            )
             cursor.execute(
                 trusted_sql(query),
                 (*params, limit),
@@ -288,11 +291,14 @@ def _mark_job(
     updates.append("updated_at = NOW()")
     params.append(job_id)
 
-    query = f"""
+    query = cast(
+        LiteralString,
+        f"""
         UPDATE jobs
         SET {", ".join(updates)}
         WHERE id = %s;
-    """
+    """,
+    )
     with get_postgres_connection(settings) as conn:
         with conn.cursor() as cursor:
             cursor.execute(trusted_sql(query), params)

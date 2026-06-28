@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from difflib import SequenceMatcher
-from typing import Any
+from typing import Any, LiteralString, cast
 from urllib.parse import quote
 from uuid import uuid4
 
@@ -402,50 +402,49 @@ def list_dashboard_projects(
         params.extend([normalized_viewer_emails, normalized_viewer_emails])
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
     params.append(max(1, min(limit, 500)))
+    query = cast(
+        LiteralString,
+        f"""
+        SELECT
+            p.id::text,
+            p.display_name,
+            p.customer,
+            p.source_status,
+            p.project_type,
+            p.priority,
+            p.percent_complete,
+            p.expected_start_date,
+            p.expected_end_date,
+            p.actual_start_date,
+            p.actual_end_date,
+            p.source_modified_at,
+            p.last_synced_at,
+            pei.external_id AS erpnext_project_id,
+            COALESCE(ec.linked_engagement_count, 0) AS linked_engagement_count
+        FROM projects p
+        LEFT JOIN project_external_ids pei
+          ON pei.project_id = p.id
+         AND pei.source = 'erpnext'
+         AND pei.active IS TRUE
+        LEFT JOIN (
+            SELECT erpnext_project_id, COUNT(*)::int AS linked_engagement_count
+            FROM engagements
+            WHERE erpnext_project_id IS NOT NULL
+            GROUP BY erpnext_project_id
+        ) ec
+          ON ec.erpnext_project_id = pei.external_id
+        {where_sql}
+        ORDER BY
+            LOWER(COALESCE(p.source_status, '')) = 'open' DESC,
+            p.source_modified_at DESC NULLS LAST,
+            LOWER(p.display_name) ASC
+        LIMIT %s
+        """,
+    )
 
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
-            cursor.execute(
-                trusted_sql(
-                    f"""
-                SELECT
-                    p.id::text,
-                    p.display_name,
-                    p.customer,
-                    p.source_status,
-                    p.project_type,
-                    p.priority,
-                    p.percent_complete,
-                    p.expected_start_date,
-                    p.expected_end_date,
-                    p.actual_start_date,
-                    p.actual_end_date,
-                    p.source_modified_at,
-                    p.last_synced_at,
-                    pei.external_id AS erpnext_project_id,
-                    COALESCE(ec.linked_engagement_count, 0) AS linked_engagement_count
-                FROM projects p
-                LEFT JOIN project_external_ids pei
-                  ON pei.project_id = p.id
-                 AND pei.source = 'erpnext'
-                 AND pei.active IS TRUE
-                LEFT JOIN (
-                    SELECT erpnext_project_id, COUNT(*)::int AS linked_engagement_count
-                    FROM engagements
-                    WHERE erpnext_project_id IS NOT NULL
-                    GROUP BY erpnext_project_id
-                ) ec
-                  ON ec.erpnext_project_id = pei.external_id
-                {where_sql}
-                ORDER BY
-                    LOWER(COALESCE(p.source_status, '')) = 'open' DESC,
-                    p.source_modified_at DESC NULLS LAST,
-                    LOWER(p.display_name) ASC
-                LIMIT %s
-                """
-                ),
-                params,
-            )
+            cursor.execute(trusted_sql(query), params)
             project_rows = [dict(row) for row in cursor.fetchall()]
             project_ids = [row["id"] for row in project_rows]
             members_by_project: dict[str, list[dict[str, Any]]] = {

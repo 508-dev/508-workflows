@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Iterable
+from typing import Any, Iterable, LiteralString, cast
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -169,20 +169,19 @@ def list_newsletter_suppressions(
         conditions.append("active = true")
     where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     params.append(limit)
+    query = cast(
+        LiteralString,
+        f"""
+        SELECT *
+        FROM newsletter_suppressions
+        {where_clause}
+        ORDER BY last_seen_at DESC, email ASC, source_provider ASC
+        LIMIT %s
+        """,
+    )
 
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
-            cursor.execute(
-                trusted_sql(
-                    f"""
-                SELECT *
-                FROM newsletter_suppressions
-                {where_clause}
-                ORDER BY last_seen_at DESC, email ASC, source_provider ASC
-                LIMIT %s
-                """
-                ),
-                params,
-            )
+            cursor.execute(trusted_sql(query), params)
             rows = cursor.fetchall()
     return [_as_record(row) for row in rows]
