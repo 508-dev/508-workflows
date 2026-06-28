@@ -6,7 +6,10 @@ import pytest
 
 from five08.resume_extractor import ResumeExtractedProfile
 from five08.worker.crm import intake_form_processor as intake_module
-from five08.worker.crm.intake_form_processor import IntakeFormProcessor
+from five08.worker.crm.intake_form_processor import (
+    IntakeFormProcessor,
+    IntakeResumeFile,
+)
 
 
 def test_intake_form_processor_creates_prospect_when_not_found() -> None:
@@ -96,6 +99,43 @@ def test_intake_form_processor_dry_run_create_does_not_write_crm_or_db() -> None
     mock_persist.assert_not_called()
 
 
+def test_intake_form_processor_dry_run_create_reports_resume_upload_plan() -> None:
+    """Dry-run create should report that a scanned resume would be uploaded."""
+    processor = IntakeFormProcessor()
+    processor.api = MagicMock()
+    processor.api.request.return_value = {"list": []}
+    resume_file = IntakeResumeFile(
+        filename="resume.pdf",
+        content=b"resume-bytes",
+        source_url="https://tally.so/resume.pdf",
+    )
+
+    with (
+        patch.object(processor, "_prepare_resume_file", return_value=resume_file),
+        patch.object(processor, "_build_resume_updates", return_value={}),
+        patch.object(processor, "_persist_intake_submission") as mock_persist,
+    ):
+        result = processor.process_intake(
+            payload={
+                "dry_run": True,
+                "email": "new@example.com",
+                "first_name": "New",
+                "last_name": "Person",
+                "resume_url": "https://tally.so/resume.pdf",
+                "form_id": "form-1",
+            }
+        )
+
+    assert result["success"] is True
+    assert result["dry_run"] is True
+    assert result["would_upload_resume"] is True
+    assert result["resume_file_name"] == "resume.pdf"
+    assert result["resume_file_size_bytes"] == len(b"resume-bytes")
+    assert processor.api.request.call_count == 1
+    processor.api.upload_file.assert_not_called()
+    mock_persist.assert_not_called()
+
+
 def test_intake_form_processor_dry_run_update_does_not_write_crm_or_db() -> None:
     """Dry-run update should return planned updates without PUT or persistence."""
     processor = IntakeFormProcessor()
@@ -131,6 +171,57 @@ def test_intake_form_processor_dry_run_update_does_not_write_crm_or_db() -> None
     assert result["planned_updates"]["cGitHubUsername"] == "existingdev"
     assert processor.api.request.call_count == 1
     mock_persist.assert_not_called()
+
+
+def test_intake_form_processor_uploads_resume_after_create() -> None:
+    """Created prospects should receive the downloaded Tally resume attachment."""
+    processor = IntakeFormProcessor()
+    processor.api = MagicMock()
+    processor.api.request.side_effect = [
+        {"list": []},
+        {"id": "contact-1"},
+        {"resumeIds": ["existing-att"]},
+        {},
+    ]
+    processor.api.upload_file.return_value = {"id": "resume-att-1"}
+    resume_file = IntakeResumeFile(
+        filename="resume.pdf",
+        content=b"resume-bytes",
+        source_url="https://tally.so/resume.pdf",
+    )
+
+    with (
+        patch.object(processor, "_prepare_resume_file", return_value=resume_file),
+        patch.object(processor, "_build_resume_updates", return_value={}),
+        patch.object(processor, "_persist_intake_submission") as mock_persist,
+    ):
+        result = processor.process_intake(
+            payload={
+                "email": "new@example.com",
+                "first_name": "New",
+                "last_name": "Person",
+                "resume_url": "https://tally.so/resume.pdf",
+                "form_id": "form-1",
+            }
+        )
+
+    assert result["success"] is True
+    assert result["resume_uploaded"] is True
+    assert result["resume_attachment_id"] == "resume-att-1"
+    processor.api.upload_file.assert_called_once_with(
+        file_content=b"resume-bytes",
+        filename="resume.pdf",
+        related_type="Contact",
+        related_id="contact-1",
+        field="resume",
+    )
+    assert processor.api.request.call_args_list[2].args == ("GET", "Contact/contact-1")
+    assert processor.api.request.call_args_list[3].args == (
+        "PUT",
+        "Contact/contact-1",
+        {"resumeIds": ["existing-att", "resume-att-1"]},
+    )
+    mock_persist.assert_called_once()
 
 
 def test_intake_form_processor_rejects_tally_when_allowed_forms_unset() -> None:

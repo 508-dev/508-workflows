@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import contextlib
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -84,6 +85,13 @@ SKILL_PROFICIENCY_TO_LABEL = {
 }
 
 ROLE_NORMALIZATION_MAP: dict[str, str] = dict(DEFAULT_ROLE_NORMALIZATION_MAP)
+
+
+@dataclass(frozen=True)
+class IntakeResumeFile:
+    filename: str
+    content: bytes
+    source_url: str
 
 
 class IntakeFormProcessor:
@@ -265,11 +273,13 @@ class IntakeFormProcessor:
         masked_email: str,
         dry_run: bool = False,
     ) -> dict[str, Any]:
+        resume_file = self._prepare_resume_file(payload)
         base_updates = self._build_intake_updates(
             email=email,
             first_name=first_name,
             last_name=last_name,
             payload=payload,
+            resume_file=resume_file,
         )
         if not base_updates:
             logger.warning(
@@ -290,6 +300,7 @@ class IntakeFormProcessor:
                 "contact_id": None,
                 "updated_fields": sorted(base_updates.keys()),
                 "planned_updates": base_updates,
+                **self._dry_run_resume_upload_result(resume_file),
             }
 
         try:
@@ -312,6 +323,11 @@ class IntakeFormProcessor:
             contact_id,
             masked_email,
         )
+        resume_attachment_id = self._upload_intake_resume(
+            contact_id=contact_id,
+            resume_file=resume_file,
+            masked_email=masked_email,
+        )
         self._persist_intake_submission(
             payload=payload,
             contact_id=contact_id,
@@ -322,6 +338,8 @@ class IntakeFormProcessor:
             "created": True,
             "contact_id": contact_id,
             "updated_fields": sorted(base_updates.keys()),
+            "resume_uploaded": bool(resume_attachment_id),
+            "resume_attachment_id": resume_attachment_id,
         }
 
     def _update_prospect(
@@ -341,6 +359,7 @@ class IntakeFormProcessor:
             logger.error("CRM contact missing id masked_email=%s", masked_email)
             return {"success": False, "error": "CRM search failed"}
 
+        resume_file = self._prepare_resume_file(payload)
         updates = self._build_intake_updates(
             email=email,
             first_name=first_name,
@@ -348,6 +367,7 @@ class IntakeFormProcessor:
             payload=payload,
             include_email=False,
             include_last_name=include_last_name,
+            resume_file=resume_file,
         )
         if not updates:
             logger.info("No prospect updates needed for contact_id=%s", contact_id)
@@ -360,7 +380,13 @@ class IntakeFormProcessor:
                     "contact_id": contact_id,
                     "updated_fields": [],
                     "planned_updates": {},
+                    **self._dry_run_resume_upload_result(resume_file),
                 }
+            resume_attachment_id = self._upload_intake_resume(
+                contact_id=contact_id,
+                resume_file=resume_file,
+                masked_email=masked_email,
+            )
             self._persist_intake_submission(
                 payload=payload,
                 contact_id=contact_id,
@@ -371,6 +397,8 @@ class IntakeFormProcessor:
                 "created": False,
                 "contact_id": contact_id,
                 "updated_fields": [],
+                "resume_uploaded": bool(resume_attachment_id),
+                "resume_attachment_id": resume_attachment_id,
             }
 
         if dry_run:
@@ -388,6 +416,7 @@ class IntakeFormProcessor:
                 "contact_id": contact_id,
                 "updated_fields": sorted(updates.keys()),
                 "planned_updates": updates,
+                **self._dry_run_resume_upload_result(resume_file),
             }
 
         try:
@@ -407,6 +436,11 @@ class IntakeFormProcessor:
             masked_email,
             sorted(updates.keys()),
         )
+        resume_attachment_id = self._upload_intake_resume(
+            contact_id=contact_id,
+            resume_file=resume_file,
+            masked_email=masked_email,
+        )
         self._persist_intake_submission(
             payload=payload,
             contact_id=contact_id,
@@ -417,6 +451,8 @@ class IntakeFormProcessor:
             "created": False,
             "contact_id": contact_id,
             "updated_fields": sorted(updates.keys()),
+            "resume_uploaded": bool(resume_attachment_id),
+            "resume_attachment_id": resume_attachment_id,
         }
 
     def _build_intake_updates(
@@ -428,6 +464,7 @@ class IntakeFormProcessor:
         payload: Mapping[str, Any],
         include_email: bool = True,
         include_last_name: bool = True,
+        resume_file: IntakeResumeFile | None = None,
     ) -> dict[str, Any]:
         updates: dict[str, Any] = {"firstName": first_name}
         if include_last_name:
@@ -473,7 +510,7 @@ class IntakeFormProcessor:
         if submitted_at and completed_field:
             updates[completed_field] = submitted_at
 
-        resume_updates = self._build_resume_updates(payload)
+        resume_updates = self._build_resume_updates(payload, resume_file=resume_file)
         if resume_updates:
             for key, value in resume_updates.items():
                 if key not in updates:
@@ -623,17 +660,19 @@ class IntakeFormProcessor:
             return None
         return " | ".join(description_parts)
 
-    def _build_resume_updates(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def _prepare_resume_file(
+        self, payload: Mapping[str, Any]
+    ) -> IntakeResumeFile | None:
         resume_url = self._normalize_text(payload.get("resume_url"))
         if not resume_url:
-            return {}
+            return None
 
         resume_file_name = self._normalize_text(payload.get("resume_file_name"))
         resume_name = (
             resume_file_name or self._filename_from_url(resume_url) or "resume"
         )
         if not resume_name:
-            return {}
+            return None
 
         try:
             content = self._download_resume_content(resume_url)
@@ -641,19 +680,41 @@ class IntakeFormProcessor:
             logger.warning(
                 "Failed to download resume name=%s error=%s", resume_name, exc
             )
-            return {}
+            return None
 
         if not self._scan_resume_content(content, resume_name):
             logger.warning(
                 "Skipping resume processing after failed scan name=%s", resume_name
             )
+            return None
+
+        return IntakeResumeFile(
+            filename=resume_name,
+            content=content,
+            source_url=resume_url,
+        )
+
+    def _build_resume_updates(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        resume_file: IntakeResumeFile | None = None,
+    ) -> dict[str, Any]:
+        if resume_file is None:
+            resume_file = self._prepare_resume_file(payload)
+        if resume_file is None:
             return {}
 
         try:
-            resume_text = self.document_processor.extract_text(content, resume_name)
+            resume_text = self.document_processor.extract_text(
+                resume_file.content,
+                resume_file.filename,
+            )
         except Exception as exc:
             logger.warning(
-                "Failed to parse resume masked_url=%s error=%s", resume_url, exc
+                "Failed to parse resume masked_url=%s error=%s",
+                resume_file.source_url,
+                exc,
             )
             return {}
 
@@ -742,6 +803,91 @@ class IntakeFormProcessor:
         except Exception as exc:
             logger.warning("Resume profile extraction failed: %s", exc)
         return updates
+
+    def _dry_run_resume_upload_result(
+        self,
+        resume_file: IntakeResumeFile | None,
+    ) -> dict[str, Any]:
+        if resume_file is None:
+            return {
+                "would_upload_resume": False,
+                "resume_file_name": None,
+                "resume_file_size_bytes": None,
+            }
+        return {
+            "would_upload_resume": True,
+            "resume_file_name": resume_file.filename,
+            "resume_file_size_bytes": len(resume_file.content),
+        }
+
+    def _upload_intake_resume(
+        self,
+        *,
+        contact_id: str,
+        resume_file: IntakeResumeFile | None,
+        masked_email: str,
+    ) -> str | None:
+        if resume_file is None:
+            return None
+
+        try:
+            uploaded = self.api.upload_file(
+                file_content=resume_file.content,
+                filename=resume_file.filename,
+                related_type="Contact",
+                related_id=contact_id,
+                field="resume",
+            )
+        except EspoAPIError as exc:
+            logger.warning(
+                "Failed uploading intake resume contact_id=%s masked_email=%s filename=%s error=%s",
+                contact_id,
+                masked_email,
+                resume_file.filename,
+                exc,
+            )
+            return None
+
+        attachment_id = (
+            str(uploaded.get("id", "")).strip() if isinstance(uploaded, Mapping) else ""
+        )
+        if not attachment_id:
+            logger.warning(
+                "Intake resume upload returned no attachment id contact_id=%s masked_email=%s filename=%s",
+                contact_id,
+                masked_email,
+                resume_file.filename,
+            )
+            return None
+
+        if not self._append_contact_resume(contact_id, attachment_id):
+            return None
+        return attachment_id
+
+    def _append_contact_resume(self, contact_id: str, attachment_id: str) -> bool:
+        try:
+            contact = self.api.request("GET", f"Contact/{contact_id}")
+            current_resume_ids = contact.get("resumeIds", [])
+            if not isinstance(current_resume_ids, list):
+                current_resume_ids = []
+
+            if attachment_id not in current_resume_ids:
+                current_resume_ids.append(attachment_id)
+
+            self.api.request(
+                "PUT",
+                f"Contact/{contact_id}",
+                {"resumeIds": current_resume_ids},
+            )
+            return True
+        except EspoAPIError as exc:
+            logger.warning(
+                "Failed linking intake resume attachment contact_id=%s attachment_id=%s error=%s",
+                contact_id,
+                attachment_id,
+                exc,
+            )
+            return False
 
     def _download_resume_content(self, resume_url: str) -> bytes:
         """Fetch a resume URL with SSRF guardrails and bounded redirect handling."""
