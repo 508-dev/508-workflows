@@ -175,7 +175,7 @@ def ensure_user(
         if not _is_not_found_error(client, exc):
             raise
         # ERPNext operator convention: put the engineer's full name in User.first_name.
-        fields = {
+        fields: dict[str, Any] = {
             "email": normalized_email,
             "first_name": normalized_full_name,
             "last_name": "",

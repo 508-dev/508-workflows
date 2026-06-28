@@ -10,9 +10,9 @@ repos:
 
   - repo: local
     hooks:
-      - id: mypy
-        name: mypy
-        entry: ./scripts/mypy.sh
+      - id: pyrefly
+        name: Pyrefly
+        entry: ./scripts/pyrefly.sh
         language: system
         pass_filenames: false
-        files: ^(apps/discord_bot/src/five08/|apps/worker/src/five08/|packages/shared/src/five08/)
+        files: ^(apps/api/src/five08/|apps/discord_bot/src/five08/|apps/worker/src/five08/|packages/shared/src/five08/)

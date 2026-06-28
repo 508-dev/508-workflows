@@ -63,6 +63,7 @@ from five08.queue import (
     get_postgres_connection,
     get_redis_connection,
     is_postgres_healthy,
+    trusted_sql,
 )
 from five08.backend.auth import (
     AuthSession,
@@ -1313,18 +1314,16 @@ def _dashboard_project_viewer_emails(session: AuthSession) -> list[str]:
     if not conditions:
         return sorted(email for email in candidates if email)
 
+    query = f"""
+        SELECT email, email_508
+        FROM people
+        WHERE sync_status = 'active'
+          AND ({" OR ".join(conditions)})
+        LIMIT 5
+        """
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
-            cursor.execute(
-                f"""
-                SELECT email, email_508
-                FROM people
-                WHERE sync_status = 'active'
-                  AND ({" OR ".join(conditions)})
-                LIMIT 5
-                """,
-                params,
-            )
+            cursor.execute(trusted_sql(query), params)
             for row in cursor.fetchall():
                 for key in ("email", "email_508"):
                     value = row.get(key)
@@ -1919,7 +1918,7 @@ def _query_dashboard_people(
     """
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
-            cursor.execute(sql, params)
+            cursor.execute(trusted_sql(sql), params)
             rows = cursor.fetchall()
 
     return _shape_dashboard_people_rows(rows)
@@ -2092,7 +2091,7 @@ def _list_dashboard_onboarding(
     params.append(limit)
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
-            cursor.execute(sql, params)
+            cursor.execute(trusted_sql(sql), params)
             rows = cursor.fetchall()
 
     return _shape_dashboard_people_rows(rows)
@@ -2249,19 +2248,17 @@ def _dashboard_session_profile_row(session: AuthSession) -> dict[str, Any] | Non
     if not conditions:
         return None
 
+    query = f"""
+        SELECT name, email, email_508
+        FROM people
+        WHERE sync_status = 'active'
+          AND ({" OR ".join(conditions)})
+        ORDER BY updated_at DESC NULLS LAST
+        LIMIT 1
+        """
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
-            cursor.execute(
-                f"""
-                SELECT name, email, email_508
-                FROM people
-                WHERE sync_status = 'active'
-                  AND ({" OR ".join(conditions)})
-                ORDER BY updated_at DESC NULLS LAST
-                LIMIT 1
-                """,
-                params,
-            )
+            cursor.execute(trusted_sql(query), params)
             return cursor.fetchone()
 
 

@@ -7,7 +7,7 @@ import difflib
 import logging
 import re
 import time
-from typing import Any, Literal
+from typing import Any, Awaitable, Callable, Literal, cast
 from uuid import uuid4
 
 import discord
@@ -705,6 +705,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         create_thread = getattr(message, "create_thread", None)
         if not callable(create_thread):
             return None
+        create_thread = cast(Callable[..., Awaitable[Any]], create_thread)
         try:
             return await create_thread(
                 name=self._mention_thread_name(request),

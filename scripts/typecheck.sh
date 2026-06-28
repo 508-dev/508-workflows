@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-./scripts/mypy.sh
+./scripts/pyrefly.sh
 
 echo
 echo "Running admin dashboard typecheck..."

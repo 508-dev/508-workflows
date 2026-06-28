@@ -112,15 +112,15 @@ jobs:
 
     - name: Run ruff linter
       run: |
-        uv run ruff check apps/discord_bot/src/five08/ apps/worker/src/five08/ packages/shared/src/five08/ tests/
+        uv run ruff check apps/api/src/five08/ apps/discord_bot/src/five08/ apps/worker/src/five08/ packages/shared/src/five08/ tests/
 
     - name: Run ruff formatter
       run: |
-        uv run ruff format --check apps/discord_bot/src/five08/ apps/worker/src/five08/ packages/shared/src/five08/ tests/
+        uv run ruff format --check apps/api/src/five08/ apps/discord_bot/src/five08/ apps/worker/src/five08/ packages/shared/src/five08/ tests/
 
-    - name: Run mypy type checker
+    - name: Run Pyrefly type checker
       run: |
-        uv run mypy apps/discord_bot/src/five08/ apps/worker/src/five08/ packages/shared/src/five08/ --ignore-missing-imports --explicit-package-bases
+        ./scripts/pyrefly.sh --output-format=github
 
   discord-agent-evals:
     runs-on: ubuntu-latest
