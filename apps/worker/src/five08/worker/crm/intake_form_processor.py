@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import requests
@@ -713,7 +713,7 @@ class IntakeFormProcessor:
         except Exception as exc:
             logger.warning(
                 "Failed to parse resume masked_url=%s error=%s",
-                resume_file.source_url,
+                self._mask_resume_url_for_log(resume_file.source_url),
                 exc,
             )
             return {}
@@ -1270,6 +1270,12 @@ class IntakeFormProcessor:
             return None
         name = Path(path).name.strip()
         return name or None
+
+    def _mask_resume_url_for_log(self, url: str) -> str:
+        parsed = urlsplit(url)
+        if not parsed.scheme or not parsed.netloc:
+            return "<invalid-url>"
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
 
     def _collect_contact_ids(self, contact_list: list[Any]) -> list[str]:
         ids: list[str] = []

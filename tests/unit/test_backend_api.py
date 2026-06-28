@@ -3215,6 +3215,36 @@ def test_list_dashboard_onboarding_resume_filter_includes_intake_resume_payload(
     assert "resume_intake.normalized_payload->>'resume_url'" in people_sql
 
 
+def test_list_dashboard_onboarding_orders_by_latest_intake_before_limit() -> None:
+    cursor = Mock()
+    cursor.__enter__ = Mock(return_value=cursor)
+    cursor.__exit__ = Mock(return_value=None)
+    cursor.fetchall.return_value = []
+    conn = Mock()
+    conn.__enter__ = Mock(return_value=conn)
+    conn.__exit__ = Mock(return_value=None)
+    conn.cursor.return_value = cursor
+
+    with patch("five08.backend.api.get_postgres_connection", return_value=conn):
+        api._list_dashboard_onboarding(
+            query=None,
+            limit=25,
+            onboarding_state=None,
+            onboarder=None,
+            discord=None,
+            email_508=None,
+            resume=None,
+            skills=None,
+        )
+
+    people_sql = cursor.execute.call_args_list[0].args[0]
+    assert "latest_intake_sort_at" in people_sql
+    assert "THEN 0 ELSE 1 END" in people_sql
+    assert "coalesce(latest_intake_sort_at, onboarding_updated_at) DESC NULLS LAST" in (
+        people_sql
+    )
+
+
 def test_list_dashboard_onboarding_includes_orphan_intake_without_raw_payload() -> None:
     created_at = datetime(2026, 6, 15, 10, 0, tzinfo=timezone.utc)
     cursor = Mock()

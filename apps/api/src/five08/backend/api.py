@@ -2281,6 +2281,7 @@ def _shape_dashboard_people_rows(rows: list[dict[str, Any]]) -> list[dict[str, A
         roles = row.get("discord_roles") or []
         skills = row.get("skills") or []
         person = dict(row)
+        person.pop("latest_intake_sort_at", None)
         latest_intake_submission = person.get("latest_intake_submission")
         if isinstance(latest_intake_submission, dict):
             latest_intake_submission.pop("raw_payload", None)
@@ -2504,12 +2505,24 @@ def _dashboard_onboarding_row_sort_key(
         if _normalize_onboarding_state_key(row.get("onboarding_state")) == "pending"
         else 1
     )
-    updated_at = row.get("onboarding_updated_at")
+    updated_at = _dashboard_onboarding_row_activity_at(row)
     updated_rank = (
         -updated_at.timestamp() if isinstance(updated_at, datetime) else float("inf")
     )
     name = str(row.get("name") or "").casefold()
     return (state_rank, updated_rank, name or "\uffff")
+
+
+def _dashboard_onboarding_row_activity_at(row: Mapping[str, Any]) -> Any:
+    latest_intake_submission = row.get("latest_intake_submission")
+    if isinstance(latest_intake_submission, Mapping):
+        submitted_at = latest_intake_submission.get("submitted_at")
+        if isinstance(submitted_at, datetime):
+            return submitted_at
+        created_at = latest_intake_submission.get("created_at")
+        if isinstance(created_at, datetime):
+            return created_at
+    return row.get("onboarding_updated_at")
 
 
 def _list_dashboard_onboarding(
@@ -2636,20 +2649,26 @@ def _list_dashboard_onboarding(
             onboarding_email_sent_by,
             onboarding_email_recipient,
             latest_intake_submission,
+            latest_intake_sort_at,
             latest_resume_intake_submission,
             sync_status,
             created_at,
             updated_at
         FROM people
         LEFT JOIN LATERAL (
-            SELECT jsonb_build_object(
-                'source', onboarding_intake_submissions.source,
-                'form_id', onboarding_intake_submissions.form_id,
-                'submission_id', onboarding_intake_submissions.submission_id,
-                'submitted_at', onboarding_intake_submissions.submitted_at,
-                'normalized_payload', onboarding_intake_submissions.normalized_payload,
-                'created_at', onboarding_intake_submissions.created_at
-            ) AS latest_intake_submission
+            SELECT
+                jsonb_build_object(
+                    'source', onboarding_intake_submissions.source,
+                    'form_id', onboarding_intake_submissions.form_id,
+                    'submission_id', onboarding_intake_submissions.submission_id,
+                    'submitted_at', onboarding_intake_submissions.submitted_at,
+                    'normalized_payload', onboarding_intake_submissions.normalized_payload,
+                    'created_at', onboarding_intake_submissions.created_at
+                ) AS latest_intake_submission,
+                coalesce(
+                    onboarding_intake_submissions.submitted_at,
+                    onboarding_intake_submissions.created_at
+                ) AS latest_intake_sort_at
             FROM onboarding_intake_submissions
             WHERE onboarding_intake_submissions.crm_contact_id = people.crm_contact_id
                OR (
@@ -2690,8 +2709,8 @@ def _list_dashboard_onboarding(
         WHERE {where_clause}
         ORDER BY
             CASE WHEN COALESCE({_ONBOARDING_STATE_NORMALIZED_SQL}, '') = 'pending'
-                THEN 1 ELSE 0 END,
-            onboarding_updated_at DESC NULLS LAST,
+                THEN 0 ELSE 1 END,
+            coalesce(latest_intake_sort_at, onboarding_updated_at) DESC NULLS LAST,
             name ASC NULLS LAST
         LIMIT %s
     """

@@ -673,6 +673,16 @@ def test_build_resume_updates_skips_parsing_when_scan_fails() -> None:
     processor.document_processor.extract_text.assert_not_called()
 
 
+def test_resume_url_log_mask_strips_signed_query_parameters() -> None:
+    processor = IntakeFormProcessor()
+
+    masked = processor._mask_resume_url_for_log(
+        "https://storage.googleapis.com/tally/resume.pdf?signature=secret&token=hidden"
+    )
+
+    assert masked == "https://storage.googleapis.com/tally/resume.pdf"
+
+
 def test_build_resume_updates_rejects_non_https_resume_url() -> None:
     processor = IntakeFormProcessor()
 
