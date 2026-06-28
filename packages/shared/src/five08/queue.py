@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any, LiteralString, Protocol, cast
+from typing import Any, Protocol, cast
 from uuid import uuid4
 
 from psycopg import Connection, connect
@@ -21,9 +21,14 @@ from five08.settings import SharedSettings
 logger = logging.getLogger(__name__)
 
 
-def trusted_sql(query: LiteralString) -> SQL:
-    """Wrap SQL assembled from fixed internal fragments for psycopg typing."""
-    return SQL(query)
+def trusted_sql(query: str) -> SQL:
+    """Type SQL assembled only from internal fragments plus placeholders.
+
+    Do not pass user input through this helper. Dynamic values must stay in
+    psycopg parameter tuples; dynamic identifiers need psycopg.sql composition.
+    The runtime value remains a plain str so tests can inspect executed SQL.
+    """
+    return cast(SQL, query)
 
 
 class JobStatus(StrEnum):
@@ -231,16 +236,13 @@ def list_jobs(
                 params.append(job_type)
 
             where_clause = " AND ".join(conditions)
-            query = cast(
-                LiteralString,
-                f"""
+            query = f"""
                 SELECT *
                 FROM jobs
                 WHERE {where_clause}
                 ORDER BY created_at DESC
                 LIMIT %s
-            """,
-            )
+            """
             cursor.execute(
                 trusted_sql(query),
                 (*params, limit),
@@ -291,14 +293,11 @@ def _mark_job(
     updates.append("updated_at = NOW()")
     params.append(job_id)
 
-    query = cast(
-        LiteralString,
-        f"""
+    query = f"""
         UPDATE jobs
         SET {", ".join(updates)}
         WHERE id = %s;
-    """,
-    )
+    """
     with get_postgres_connection(settings) as conn:
         with conn.cursor() as cursor:
             cursor.execute(trusted_sql(query), params)

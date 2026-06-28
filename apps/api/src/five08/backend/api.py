@@ -17,7 +17,7 @@ from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Literal, LiteralString, cast
+from typing import Any, Literal, cast
 from urllib.parse import quote, unquote, urlencode, urlparse
 from uuid import UUID, uuid4
 
@@ -1314,16 +1314,13 @@ def _dashboard_project_viewer_emails(session: AuthSession) -> list[str]:
     if not conditions:
         return sorted(email for email in candidates if email)
 
-    query = cast(
-        LiteralString,
-        f"""
+    query = f"""
         SELECT email, email_508
         FROM people
         WHERE sync_status = 'active'
           AND ({" OR ".join(conditions)})
         LIMIT 5
-        """,
-    )
+        """
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(trusted_sql(query), params)
@@ -1883,9 +1880,7 @@ def _query_dashboard_people(
 
     params.append(limit)
     where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-    sql = cast(
-        LiteralString,
-        f"""
+    sql = f"""
         SELECT
             id::text,
             crm_contact_id,
@@ -1920,8 +1915,7 @@ def _query_dashboard_people(
         {where_clause}
         ORDER BY updated_at DESC
         LIMIT %s
-    """,
-    )
+    """
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(trusted_sql(sql), params)
@@ -2054,9 +2048,7 @@ def _list_dashboard_onboarding(
         conditions.append("COALESCE(cardinality(skills), 0) = 0")
 
     where_clause = " AND ".join(conditions)
-    sql = cast(
-        LiteralString,
-        f"""
+    sql = f"""
         SELECT
             id::text,
             crm_contact_id,
@@ -2095,8 +2087,7 @@ def _list_dashboard_onboarding(
             onboarding_updated_at DESC NULLS LAST,
             name ASC NULLS LAST
         LIMIT %s
-    """,
-    )
+    """
     params.append(limit)
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
@@ -2257,17 +2248,14 @@ def _dashboard_session_profile_row(session: AuthSession) -> dict[str, Any] | Non
     if not conditions:
         return None
 
-    query = cast(
-        LiteralString,
-        f"""
+    query = f"""
         SELECT name, email, email_508
         FROM people
         WHERE sync_status = 'active'
           AND ({" OR ".join(conditions)})
         ORDER BY updated_at DESC NULLS LAST
         LIMIT 1
-        """,
-    )
+        """
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(trusted_sql(query), params)

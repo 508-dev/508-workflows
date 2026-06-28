@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from difflib import SequenceMatcher
-from typing import Any, LiteralString, cast
+from typing import Any
 from urllib.parse import quote
 from uuid import uuid4
 
@@ -402,9 +402,7 @@ def list_dashboard_projects(
         params.extend([normalized_viewer_emails, normalized_viewer_emails])
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
     params.append(max(1, min(limit, 500)))
-    query = cast(
-        LiteralString,
-        f"""
+    query = f"""
         SELECT
             p.id::text,
             p.display_name,
@@ -439,8 +437,7 @@ def list_dashboard_projects(
             p.source_modified_at DESC NULLS LAST,
             LOWER(p.display_name) ASC
         LIMIT %s
-        """,
-    )
+        """
 
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:

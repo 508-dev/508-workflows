@@ -6,7 +6,7 @@ import re
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any, LiteralString, cast
+from typing import Any, cast
 from uuid import uuid4
 
 from psycopg.rows import dict_row
@@ -624,9 +624,7 @@ def upsert_suggested_applications(
                         fit_score = EXCLUDED.fit_score,
                         evaluation = EXCLUDED.evaluation
                     """
-                insert_query = cast(
-                    LiteralString,
-                    f"""
+                insert_query = f"""
                     INSERT INTO engagement_applications (
                         id,
                         engagement_id,
@@ -641,8 +639,7 @@ def upsert_suggested_applications(
                     ) VALUES (%s, %s, %s, %s, %s, 'suggested', %s, %s, %s, %s)
                     {conflict_clause}
                     RETURNING id
-                    """,
-                )
+                    """
                 cursor.execute(
                     trusted_sql(insert_query),
                     (
@@ -1080,9 +1077,7 @@ def list_dashboard_engagements(
         )
         params.extend([like_query, tag_query, tag_query, poster_query])
     params.append(max(1, min(limit, 500)))
-    sql = cast(
-        LiteralString,
-        f"""
+    sql = f"""
         SELECT
             e.id::text,
             e.lifecycle_stage,
@@ -1169,8 +1164,7 @@ def list_dashboard_engagements(
             e.last_activity_at DESC NULLS LAST,
             e.created_at DESC
         LIMIT %s
-    """,
-    )
+    """
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(trusted_sql(sql), params)
@@ -1208,9 +1202,7 @@ def list_dashboard_notifications(
         conditions.append("e.posted_by_discord_user_id = %s")
         params.append(viewer_discord_user_id or "")
     params.append(max(1, min(limit, 50)))
-    sql = cast(
-        LiteralString,
-        f"""
+    sql = f"""
         SELECT
             e.id::text,
             e.title,
@@ -1240,8 +1232,7 @@ def list_dashboard_notifications(
         WHERE {" AND ".join(conditions)}
         ORDER BY age_days DESC, e.created_at ASC
         LIMIT %s
-    """,
-    )
+    """
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(trusted_sql(sql), params)
