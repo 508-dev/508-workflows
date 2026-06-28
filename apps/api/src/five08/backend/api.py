@@ -812,11 +812,13 @@ def _tally_intake_dry_run_mode(
     return "none"
 
 
-def _strip_url_query(value: str) -> str:
+def _strip_url_query_and_fragment(value: str) -> str:
     parsed = urlsplit(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.query:
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return value
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", parsed.fragment))
+    if not parsed.query and not parsed.fragment:
+        return value
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
 
 
 def _sanitize_intake_raw_payload(value: Any) -> Any:
@@ -827,7 +829,7 @@ def _sanitize_intake_raw_payload(value: Any) -> Any:
     if isinstance(value, list):
         return [_sanitize_intake_raw_payload(item) for item in value]
     if isinstance(value, str):
-        return _strip_url_query(value)
+        return _strip_url_query_and_fragment(value)
     return value
 
 

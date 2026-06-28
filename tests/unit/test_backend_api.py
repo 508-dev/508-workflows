@@ -9286,7 +9286,10 @@ def test_google_forms_intake_enqueues_job(
                     "first_name": "  Jane  ",
                     "last_name": "  Doe  ",
                     "form_id": "form-1",
-                    "resume_url": "https://drive.google.com/resume.pdf?signature=secret",
+                    "resume_url": (
+                        "https://drive.google.com/resume.pdf?signature=secret"
+                        "#token=fragment-secret"
+                    ),
                 },
                 headers=auth_headers,
             )
@@ -9304,7 +9307,7 @@ def test_google_forms_intake_enqueues_job(
     assert call_kwargs["args"][0]["first_name"] == "Jane"
     assert call_kwargs["args"][0]["last_name"] == "Doe"
     assert call_kwargs["args"][0]["resume_url"] == (
-        "https://drive.google.com/resume.pdf?signature=secret"
+        "https://drive.google.com/resume.pdf?signature=secret#token=fragment-secret"
     )
     assert call_kwargs["args"][0]["raw_payload"] == {
         **_GOOGLE_FORMS_INTAKE_PAYLOAD,
@@ -9649,15 +9652,16 @@ def test_tally_intake_strips_signed_urls_from_raw_payload_before_enqueue(
     """Queued raw Tally payloads should not retain signed URL query tokens."""
     tally_payload = json.loads(json.dumps(_TALLY_INTAKE_PAYLOAD))
     tally_payload["data"]["submissionPdfUrl"] = (
-        "https://tally.so/r/abc.pdf?accessToken=secret&signature=sig"
+        "https://tally.so/r/abc.pdf?accessToken=secret&signature=sig#token=frag"
     )
     tally_payload["data"]["submissionPreviewUrl"] = (
-        "https://tally.so/r/abc?accessToken=secret&signature=sig"
+        "https://tally.so/r/abc?accessToken=secret&signature=sig#token=frag"
     )
     for field in tally_payload["data"]["fields"]:
         if field["key"] == "question_resume":
             field["value"][0]["url"] = (
                 "https://storage.googleapis.com/tally/resume.pdf?signature=sig"
+                "#token=frag"
             )
 
     with (
@@ -9676,7 +9680,7 @@ def test_tally_intake_strips_signed_urls_from_raw_payload_before_enqueue(
     intake_payload = mock_enqueue.call_args.kwargs["args"][0]
     assert (
         intake_payload["resume_url"]
-        == "https://storage.googleapis.com/tally/resume.pdf?signature=sig"
+        == "https://storage.googleapis.com/tally/resume.pdf?signature=sig#token=frag"
     )
     raw_payload = intake_payload["raw_payload"]
     assert raw_payload["data"]["submissionPdfUrl"] == "https://tally.so/r/abc.pdf"

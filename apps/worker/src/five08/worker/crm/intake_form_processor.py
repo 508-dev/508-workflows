@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
@@ -712,10 +712,10 @@ class IntakeFormProcessor:
         ),
     ) -> dict[str, Any]:
         prepared_resume_file: IntakeResumeFile | None
-        if isinstance(resume_file, _ResumeFileNotProvided):
+        if resume_file is _RESUME_FILE_NOT_PROVIDED:
             prepared_resume_file = self._prepare_resume_file(payload)
         else:
-            prepared_resume_file = resume_file
+            prepared_resume_file = cast(IntakeResumeFile | None, resume_file)
         if prepared_resume_file is None:
             return {}
 
