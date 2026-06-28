@@ -260,6 +260,10 @@ class MatchResumeSelect(discord.ui.Select):
                     ephemeral=True,
                 )
                 return
+            download_method = cast(
+                Callable[[discord.Interaction, str, str], Awaitable[bool]],
+                download_method,
+            )
 
             resume_id = self.values[0]
             contact_name = self._resume_lookup.get(resume_id, "Unknown")

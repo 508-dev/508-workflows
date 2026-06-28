@@ -13,7 +13,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from five08.job_channels import normalize_job_posting_type
-from five08.queue import get_postgres_connection
+from five08.queue import get_postgres_connection, trusted_sql
 from five08.settings import SharedSettings
 
 _GIG_THREAD_INTEREST_BACKFILLED_EVENT_TYPE = "gig_thread_interest_backfilled"
@@ -625,7 +625,8 @@ def upsert_suggested_applications(
                         evaluation = EXCLUDED.evaluation
                     """
                 cursor.execute(
-                    f"""
+                    trusted_sql(
+                        f"""
                     INSERT INTO engagement_applications (
                         id,
                         engagement_id,
@@ -640,7 +641,8 @@ def upsert_suggested_applications(
                     ) VALUES (%s, %s, %s, %s, %s, 'suggested', %s, %s, %s, %s)
                     {conflict_clause}
                     RETURNING id
-                    """,
+                    """
+                    ),
                     (
                         str(uuid4()),
                         engagement_id,
@@ -1166,7 +1168,7 @@ def list_dashboard_engagements(
     """
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
-            cursor.execute(sql, params)
+            cursor.execute(trusted_sql(sql), params)
             rows = cursor.fetchall()
     return [_shape_engagement_row(row) for row in rows]
 
@@ -1234,7 +1236,7 @@ def list_dashboard_notifications(
     """
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
-            cursor.execute(sql, params)
+            cursor.execute(trusted_sql(sql), params)
             rows = cursor.fetchall()
     return [_shape_stale_recruiting_notification(row, days) for row in rows]
 

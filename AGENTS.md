@@ -49,7 +49,7 @@ uv sync
 ./scripts/test.sh
 ./scripts/lint.sh
 ./scripts/format.sh
-./scripts/mypy.sh
+./scripts/pyrefly.sh
 ```
 
 Run services directly:

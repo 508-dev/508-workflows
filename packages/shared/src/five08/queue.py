@@ -7,17 +7,23 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any, LiteralString, Protocol, cast
 from uuid import uuid4
 
 from psycopg import Connection, connect
 from psycopg.rows import dict_row
+from psycopg.sql import SQL
 from psycopg.types.json import Jsonb
 from redis import Redis
 
 from five08.settings import SharedSettings
 
 logger = logging.getLogger(__name__)
+
+
+def trusted_sql(query: str) -> SQL:
+    """Wrap SQL assembled from fixed internal fragments for psycopg typing."""
+    return SQL(cast(LiteralString, query))
 
 
 class JobStatus(StrEnum):
@@ -233,7 +239,7 @@ def list_jobs(
                 LIMIT %s
             """
             cursor.execute(
-                query,
+                trusted_sql(query),
                 (*params, limit),
             )
             rows = cursor.fetchall()
@@ -289,7 +295,7 @@ def _mark_job(
     """
     with get_postgres_connection(settings) as conn:
         with conn.cursor() as cursor:
-            cursor.execute(query, params)
+            cursor.execute(trusted_sql(query), params)
 
 
 def mark_job_running(

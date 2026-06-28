@@ -9,7 +9,7 @@ from typing import Any, Iterable
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from five08.queue import get_postgres_connection
+from five08.queue import get_postgres_connection, trusted_sql
 from five08.settings import SharedSettings
 
 NEWSLETTER_SUPPRESSION_SOURCE_PROVIDERS = {"brevo", "keila", "manual"}
@@ -173,13 +173,15 @@ def list_newsletter_suppressions(
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
-                f"""
+                trusted_sql(
+                    f"""
                 SELECT *
                 FROM newsletter_suppressions
                 {where_clause}
                 ORDER BY last_seen_at DESC, email ASC, source_provider ASC
                 LIMIT %s
-                """,
+                """
+                ),
                 params,
             )
             rows = cursor.fetchall()

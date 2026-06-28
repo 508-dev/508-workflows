@@ -17,7 +17,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from five08.clients.erpnext import ERPNextAPIError, ERPNextClient
-from five08.queue import get_postgres_connection
+from five08.queue import get_postgres_connection, trusted_sql
 from five08.settings import SharedSettings
 from five08.tls import default_ca_bundle_path
 
@@ -406,7 +406,8 @@ def list_dashboard_projects(
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
-                f"""
+                trusted_sql(
+                    f"""
                 SELECT
                     p.id::text,
                     p.display_name,
@@ -441,7 +442,8 @@ def list_dashboard_projects(
                     p.source_modified_at DESC NULLS LAST,
                     LOWER(p.display_name) ASC
                 LIMIT %s
-                """,
+                """
+                ),
                 params,
             )
             project_rows = [dict(row) for row in cursor.fetchall()]

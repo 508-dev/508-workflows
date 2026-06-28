@@ -179,7 +179,7 @@ _LINKEDIN_SECTION_HEADINGS = (
     "Honors & Awards",
     "Languages",
 )
-_LINKEDIN_SECTION_HEADINGS_BY_CASEFOLD = {
+_LINKEDIN_SECTION_HEADINGS_BY_CASEFOLD: dict[str, str] = {
     heading.casefold(): heading for heading in _LINKEDIN_SECTION_HEADINGS
 }
 _LINKEDIN_LOCATION_NEGATIVE_TERMS = (
