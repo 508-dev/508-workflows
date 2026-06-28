@@ -2492,7 +2492,7 @@ def _list_dashboard_orphan_intake_submissions(
     """
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
-            cursor.execute(sql, params)
+            cursor.execute(trusted_sql(sql), params)
             return cursor.fetchall()
 
 
