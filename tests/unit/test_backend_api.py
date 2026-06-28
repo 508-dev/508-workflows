@@ -9286,6 +9286,7 @@ def test_google_forms_intake_enqueues_job(
                     "first_name": "  Jane  ",
                     "last_name": "  Doe  ",
                     "form_id": "form-1",
+                    "resume_url": "https://drive.google.com/resume.pdf?signature=secret",
                 },
                 headers=auth_headers,
             )
@@ -9302,6 +9303,17 @@ def test_google_forms_intake_enqueues_job(
     assert call_kwargs["args"][0]["email"] == "member@example.com"
     assert call_kwargs["args"][0]["first_name"] == "Jane"
     assert call_kwargs["args"][0]["last_name"] == "Doe"
+    assert call_kwargs["args"][0]["resume_url"] == (
+        "https://drive.google.com/resume.pdf?signature=secret"
+    )
+    assert call_kwargs["args"][0]["raw_payload"] == {
+        **_GOOGLE_FORMS_INTAKE_PAYLOAD,
+        "email": "  member@example.com  ",
+        "first_name": "  Jane  ",
+        "last_name": "  Doe  ",
+        "form_id": "form-1",
+        "resume_url": "https://drive.google.com/resume.pdf",
+    }
 
 
 def test_google_forms_intake_rejects_unapproved_form_id(

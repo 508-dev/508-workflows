@@ -819,13 +819,13 @@ def _strip_url_query(value: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", parsed.fragment))
 
 
-def _sanitize_tally_raw_payload(value: Any) -> Any:
+def _sanitize_intake_raw_payload(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {
-            str(key): _sanitize_tally_raw_payload(item) for key, item in value.items()
+            str(key): _sanitize_intake_raw_payload(item) for key, item in value.items()
         }
     if isinstance(value, list):
-        return [_sanitize_tally_raw_payload(item) for item in value]
+        return [_sanitize_intake_raw_payload(item) for item in value]
     if isinstance(value, str):
         return _strip_url_query(value)
     return value
@@ -7701,6 +7701,7 @@ async def google_forms_intake_webhook_handler(request: Request) -> JSONResponse:
         submitted_at=payload.submitted_at,
         payload=normalized_payload,
     )
+    normalized_payload["raw_payload"] = _sanitize_intake_raw_payload(payload_data)
 
     queue = request.app.state.queue
     try:
@@ -7789,8 +7790,8 @@ async def tally_intake_webhook_handler(request: Request) -> JSONResponse:
             "email": email,
             "first_name": first_name,
             "last_name": last_name,
-            "raw_payload": _sanitize_tally_raw_payload(payload_data),
-            "raw_tally_fields": _sanitize_tally_raw_payload(raw_tally_fields),
+            "raw_payload": _sanitize_intake_raw_payload(payload_data),
+            "raw_tally_fields": _sanitize_intake_raw_payload(raw_tally_fields),
         }
     )
 
