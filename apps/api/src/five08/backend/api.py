@@ -2500,9 +2500,9 @@ def _dashboard_onboarding_row_sort_key(
     row: Mapping[str, Any],
 ) -> tuple[int, float, str]:
     state_rank = (
-        1
+        0
         if _normalize_onboarding_state_key(row.get("onboarding_state")) == "pending"
-        else 0
+        else 1
     )
     updated_at = row.get("onboarding_updated_at")
     updated_rank = (

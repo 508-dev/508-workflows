@@ -3333,7 +3333,7 @@ def test_list_dashboard_onboarding_merges_orphans_before_applying_limit() -> Non
                 "skills": [],
                 "latest_resume_id": None,
                 "latest_resume_name": None,
-                "onboarding_state": "pending",
+                "onboarding_state": "selected",
                 "onboarder": None,
                 "onboarding_updated_at": people_created_at,
                 "onboarding_email_sent_at": None,
