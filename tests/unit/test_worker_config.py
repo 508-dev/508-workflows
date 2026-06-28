@@ -13,6 +13,8 @@ def test_non_local_worker_requires_espo_config() -> None:
             minio_root_password="secret",
             espo_base_url="",
             espo_api_key="test-key",
+            intake_resume_require_virus_scan=True,
+            intake_resume_virus_scan_command="clamdscan --fdpass {path}",
         )
 
 
@@ -135,6 +137,42 @@ def test_google_forms_allowed_form_ids_parses_as_set() -> None:
     assert settings.google_forms_allowed_form_ids_set == {"form-1", "form-2", "form-3"}
 
 
+def test_tally_allowed_form_ids_parses_as_set() -> None:
+    """Allowed Tally form IDs should be parsed into a normalized set."""
+    settings = WorkerSettings(
+        espo_base_url="https://crm.test.com",
+        espo_api_key="test-key",
+        onboarding_tally_allowed_form_ids="tally-1, tally-2,,  tally-3 ",
+    )
+
+    assert settings.onboarding_tally_allowed_form_ids_set == {
+        "tally-1",
+        "tally-2",
+        "tally-3",
+    }
+
+
+def test_legacy_tally_env_aliases_still_populate_onboarding_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Existing TALLY_* env values should keep working as compatibility aliases."""
+    monkeypatch.delenv("ONBOARDING_TALLY_API_KEY", raising=False)
+    monkeypatch.delenv("ONBOARDING_TALLY_WEBHOOK_SIGNING_SECRET", raising=False)
+    monkeypatch.delenv("ONBOARDING_TALLY_ALLOWED_FORM_IDS", raising=False)
+    monkeypatch.setenv("TALLY_API_KEY", "api-key")
+    monkeypatch.setenv("TALLY_WEBHOOK_SIGNING_SECRET", "signing-secret")
+    monkeypatch.setenv("TALLY_ALLOWED_FORM_IDS", "form-1,form-2")
+
+    settings = WorkerSettings(
+        espo_base_url="https://crm.test.com",
+        espo_api_key="test-key",
+    )
+
+    assert settings.onboarding_tally_api_key == "api-key"
+    assert settings.onboarding_tally_webhook_signing_secret == "signing-secret"
+    assert settings.onboarding_tally_allowed_form_ids_set == {"form-1", "form-2"}
+
+
 def test_oidc_admin_groups_default_matches_authentik_admins() -> None:
     settings = WorkerSettings(
         espo_base_url="https://crm.test.com",
@@ -237,6 +275,61 @@ def test_intake_resume_max_redirects_must_be_non_negative() -> None:
         )
 
 
+def test_intake_resume_virus_scan_timeout_must_be_positive() -> None:
+    with pytest.raises(ValidationError):
+        WorkerSettings(
+            espo_base_url="https://crm.test.com",
+            espo_api_key="test-key",
+            intake_resume_virus_scan_timeout_seconds=0,
+        )
+
+
+def test_intake_resume_virus_scan_is_not_required_by_default() -> None:
+    settings = WorkerSettings(
+        espo_base_url="https://crm.test.com",
+        espo_api_key="test-key",
+    )
+
+    assert settings.intake_resume_require_virus_scan is False
+
+
+def test_intake_resume_virus_scan_is_required_in_non_local_environments() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="INTAKE_RESUME_REQUIRE_VIRUS_SCAN must be true",
+    ):
+        WorkerSettings(
+            environment="production",
+            minio_root_password="secret",
+            espo_base_url="https://crm.test.com",
+            espo_api_key="test-key",
+        )
+
+
+def test_intake_resume_virus_scan_requires_command_when_enabled() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="INTAKE_RESUME_VIRUS_SCAN_COMMAND must be set",
+    ):
+        WorkerSettings(
+            espo_base_url="https://crm.test.com",
+            espo_api_key="test-key",
+            intake_resume_require_virus_scan=True,
+            intake_resume_virus_scan_command="",
+        )
+
+
+def test_intake_resume_virus_scan_allows_enabled_with_command() -> None:
+    settings = WorkerSettings(
+        espo_base_url="https://crm.test.com",
+        espo_api_key="test-key",
+        intake_resume_require_virus_scan=True,
+        intake_resume_virus_scan_command="clamdscan --fdpass {path}",
+    )
+
+    assert settings.intake_resume_require_virus_scan is True
+
+
 def test_intake_resume_allowed_hostnames_normalizes_dots_and_empties() -> None:
     settings = WorkerSettings(
         espo_base_url="https://crm.test.com",
@@ -310,6 +403,8 @@ def test_auth_cookie_secure_is_true_for_non_local_even_if_legacy_env_is_false(
         espo_base_url="https://crm.test.com",
         espo_api_key="test-key",
         minio_root_password="secret",
+        intake_resume_require_virus_scan=True,
+        intake_resume_virus_scan_command="clamdscan --fdpass {path}",
     )
 
     assert settings.auth_cookie_secure is True

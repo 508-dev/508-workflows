@@ -5,13 +5,21 @@ from __future__ import annotations
 import json
 import ipaddress
 import re
+import shlex
 import socket
+import subprocess
+import tempfile
+import contextlib
 from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import requests
+from psycopg.types.json import Jsonb
 
 from five08.clients.espo import EspoAPIError, EspoClient
 from five08.crm_normalization import (
@@ -25,6 +33,7 @@ from five08.crm_normalization import (
     normalize_website_url,
 )
 from five08.resume_extractor import ResumeProfileExtractor
+from five08.queue import get_postgres_connection
 from five08.worker.config import settings
 from five08.worker.crm.document_processor import DocumentProcessor
 from five08.worker.crm.skills_extractor import SkillsExtractor
@@ -37,6 +46,8 @@ IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 LINKEDIN_FIELD = "cLinkedIn"
 
 DESCRIPTION_SECTIONS = {
+    "native_name": "Name in native language",
+    "ideal_weekly_hours": "Ideal weekly hours",
     "primary_skills_interests": "Primary skills and interests",
     "top_question_about_508": "Top question about 508.dev",
 }
@@ -76,6 +87,13 @@ SKILL_PROFICIENCY_TO_LABEL = {
 ROLE_NORMALIZATION_MAP: dict[str, str] = dict(DEFAULT_ROLE_NORMALIZATION_MAP)
 
 
+@dataclass(frozen=True)
+class IntakeResumeFile:
+    filename: str
+    content: bytes
+    source_url: str
+
+
 class IntakeFormProcessor:
     """Process a Google Forms member intake submission against CRM."""
 
@@ -93,26 +111,41 @@ class IntakeFormProcessor:
 
     def process_intake(self, *, payload: Mapping[str, Any]) -> dict[str, Any]:
         """Look up CRM contact by email and update/create prospect records."""
-        email = self._normalize_text(payload.get("email"))
+        email = self._normalize_email(payload.get("email"))
         first_name = self._normalize_text(payload.get("first_name"))
         last_name = self._normalize_text(payload.get("last_name"))
+        last_name_is_placeholder = bool(payload.get("last_name_is_placeholder"))
+        dry_run = self._parse_bool(payload.get("dry_run"))
         masked_email = mask_email(email or "")
 
         if not email or not first_name or not last_name:
             return {"success": False, "error": "invalid_payload"}
 
-        allowed_form_ids = settings.google_forms_allowed_form_ids_set
+        source = (self._normalize_text(payload.get("source")) or "").casefold()
+        allowed_form_ids = (
+            settings.onboarding_tally_allowed_form_ids_set
+            if source == "tally"
+            else settings.google_forms_allowed_form_ids_set
+        )
         form_id = self._normalize_text(payload.get("form_id"))
+        if source == "tally" and not allowed_form_ids:
+            logger.warning(
+                "Tally intake rejected because allowed form IDs are unset masked_email=%s",
+                masked_email,
+            )
+            return {"success": False, "error": "invalid_form_id"}
         if allowed_form_ids and not form_id:
             logger.warning(
-                "Google forms submission missing form_id for masked_email=%s",
+                "Intake submission missing form_id source=%s masked_email=%s",
+                source or "unknown",
                 masked_email,
             )
             return {"success": False, "error": "invalid_form_id"}
         if allowed_form_ids and form_id not in allowed_form_ids:
             logger.warning(
-                "Google forms submission with unapproved form_id=%s masked_email=%s",
+                "Intake submission with unapproved form_id=%s source=%s masked_email=%s",
                 form_id,
+                source or "unknown",
                 masked_email,
             )
             return {"success": False, "error": "invalid_form_id"}
@@ -146,12 +179,42 @@ class IntakeFormProcessor:
             return {"success": False, "error": "CRM search failed"}
 
         if not contact_list:
+            if last_name_is_placeholder:
+                logger.info(
+                    "Persisting intake without CRM create due to placeholder last name masked_email=%s",
+                    masked_email,
+                )
+                if dry_run:
+                    return {
+                        "success": True,
+                        "dry_run": True,
+                        "action": "persist_orphan",
+                        "created": False,
+                        "contact_id": None,
+                        "updated_fields": [],
+                        "pending_review": True,
+                        "reason": "placeholder_last_name",
+                    }
+                self._persist_intake_submission(
+                    payload=payload,
+                    contact_id=None,
+                    email=email,
+                )
+                return {
+                    "success": True,
+                    "created": False,
+                    "contact_id": None,
+                    "updated_fields": [],
+                    "pending_review": True,
+                    "reason": "placeholder_last_name",
+                }
             return self._create_prospect(
                 email=email,
                 first_name=first_name,
                 last_name=last_name,
                 payload=payload,
                 masked_email=masked_email,
+                dry_run=dry_run,
             )
 
         if len(contact_list) > 1:
@@ -185,6 +248,8 @@ class IntakeFormProcessor:
             last_name=last_name,
             payload=payload,
             masked_email=masked_email,
+            include_last_name=not last_name_is_placeholder,
+            dry_run=dry_run,
         )
 
     def _is_member_contact(self, contact: Mapping[str, Any]) -> bool:
@@ -206,12 +271,15 @@ class IntakeFormProcessor:
         last_name: str,
         payload: Mapping[str, Any],
         masked_email: str,
+        dry_run: bool = False,
     ) -> dict[str, Any]:
+        resume_file = self._prepare_resume_file(payload)
         base_updates = self._build_intake_updates(
             email=email,
             first_name=first_name,
             last_name=last_name,
             payload=payload,
+            resume_file=resume_file,
         )
         if not base_updates:
             logger.warning(
@@ -219,6 +287,21 @@ class IntakeFormProcessor:
                 masked_email,
             )
             return {"success": False, "error": "No updates available"}
+
+        if dry_run:
+            logger.info(
+                "Dry-run intake would create prospect masked_email=%s", masked_email
+            )
+            return {
+                "success": True,
+                "dry_run": True,
+                "action": "create_prospect",
+                "created": True,
+                "contact_id": None,
+                "updated_fields": sorted(base_updates.keys()),
+                "planned_updates": base_updates,
+                **self._dry_run_resume_upload_result(resume_file),
+            }
 
         try:
             created = self.api.request("POST", "Contact", base_updates)
@@ -240,11 +323,23 @@ class IntakeFormProcessor:
             contact_id,
             masked_email,
         )
+        resume_attachment_id = self._upload_intake_resume(
+            contact_id=contact_id,
+            resume_file=resume_file,
+            masked_email=masked_email,
+        )
+        self._persist_intake_submission(
+            payload=payload,
+            contact_id=contact_id,
+            email=email,
+        )
         return {
             "success": True,
             "created": True,
             "contact_id": contact_id,
             "updated_fields": sorted(base_updates.keys()),
+            "resume_uploaded": bool(resume_attachment_id),
+            "resume_attachment_id": resume_attachment_id,
         }
 
     def _update_prospect(
@@ -256,26 +351,72 @@ class IntakeFormProcessor:
         last_name: str,
         payload: Mapping[str, Any],
         masked_email: str,
+        include_last_name: bool = True,
+        dry_run: bool = False,
     ) -> dict[str, Any]:
         contact_id = str(contact.get("id", "")).strip()
         if not contact_id:
             logger.error("CRM contact missing id masked_email=%s", masked_email)
             return {"success": False, "error": "CRM search failed"}
 
+        resume_file = self._prepare_resume_file(payload)
         updates = self._build_intake_updates(
             email=email,
             first_name=first_name,
             last_name=last_name,
             payload=payload,
             include_email=False,
+            include_last_name=include_last_name,
+            resume_file=resume_file,
         )
         if not updates:
             logger.info("No prospect updates needed for contact_id=%s", contact_id)
+            if dry_run:
+                return {
+                    "success": True,
+                    "dry_run": True,
+                    "action": "no_updates",
+                    "created": False,
+                    "contact_id": contact_id,
+                    "updated_fields": [],
+                    "planned_updates": {},
+                    **self._dry_run_resume_upload_result(resume_file),
+                }
+            resume_attachment_id = self._upload_intake_resume(
+                contact_id=contact_id,
+                resume_file=resume_file,
+                masked_email=masked_email,
+            )
+            self._persist_intake_submission(
+                payload=payload,
+                contact_id=contact_id,
+                email=email,
+            )
             return {
                 "success": True,
                 "created": False,
                 "contact_id": contact_id,
                 "updated_fields": [],
+                "resume_uploaded": bool(resume_attachment_id),
+                "resume_attachment_id": resume_attachment_id,
+            }
+
+        if dry_run:
+            logger.info(
+                "Dry-run intake would update prospect contact_id=%s masked_email=%s fields=%s",
+                contact_id,
+                masked_email,
+                sorted(updates.keys()),
+            )
+            return {
+                "success": True,
+                "dry_run": True,
+                "action": "update_prospect",
+                "created": False,
+                "contact_id": contact_id,
+                "updated_fields": sorted(updates.keys()),
+                "planned_updates": updates,
+                **self._dry_run_resume_upload_result(resume_file),
             }
 
         try:
@@ -295,11 +436,23 @@ class IntakeFormProcessor:
             masked_email,
             sorted(updates.keys()),
         )
+        resume_attachment_id = self._upload_intake_resume(
+            contact_id=contact_id,
+            resume_file=resume_file,
+            masked_email=masked_email,
+        )
+        self._persist_intake_submission(
+            payload=payload,
+            contact_id=contact_id,
+            email=email,
+        )
         return {
             "success": True,
             "created": False,
             "contact_id": contact_id,
             "updated_fields": sorted(updates.keys()),
+            "resume_uploaded": bool(resume_attachment_id),
+            "resume_attachment_id": resume_attachment_id,
         }
 
     def _build_intake_updates(
@@ -310,11 +463,12 @@ class IntakeFormProcessor:
         last_name: str,
         payload: Mapping[str, Any],
         include_email: bool = True,
+        include_last_name: bool = True,
+        resume_file: IntakeResumeFile | None = None,
     ) -> dict[str, Any]:
-        updates: dict[str, Any] = {
-            "firstName": first_name,
-            "lastName": last_name,
-        }
+        updates: dict[str, Any] = {"firstName": first_name}
+        if include_last_name:
+            updates["lastName"] = last_name
         if include_email:
             updates["emailAddress"] = email
 
@@ -331,6 +485,12 @@ class IntakeFormProcessor:
                 value = self._normalize_text(payload.get(local_key))
             if value:
                 updates[crm_field] = value
+
+        website_link = self._normalize_text(payload.get("website_link"))
+        if website_link:
+            normalized_website = normalize_website_url(website_link)
+            if normalized_website:
+                updates["cWebsiteLink"] = [normalized_website]
 
         seniority_level = self._normalize_seniority(payload.get("seniority_level"))
         if seniority_level:
@@ -350,13 +510,129 @@ class IntakeFormProcessor:
         if submitted_at and completed_field:
             updates[completed_field] = submitted_at
 
-        resume_updates = self._build_resume_updates(payload)
+        resume_updates = self._build_resume_updates(payload, resume_file=resume_file)
         if resume_updates:
             for key, value in resume_updates.items():
                 if key not in updates:
                     updates[key] = value
 
         return updates
+
+    def _persist_intake_submission(
+        self,
+        *,
+        payload: Mapping[str, Any],
+        contact_id: str | None,
+        email: str,
+    ) -> None:
+        """Best-effort storage for source-specific fields that do not belong in CRM."""
+        source = (
+            self._normalize_text(payload.get("source")) or "google_forms"
+        ).casefold()
+        if source not in {"google_forms", "tally"}:
+            source = "google_forms"
+
+        submitted_at = self._parse_submitted_at(payload.get("submitted_at"))
+        normalized_payload = dict(payload)
+        raw_tally_fields = normalized_payload.pop("raw_tally_fields", None)
+        raw_payload_candidate = normalized_payload.pop("raw_payload", None)
+        if isinstance(raw_payload_candidate, Mapping):
+            raw_payload = dict(raw_payload_candidate)
+        elif isinstance(raw_tally_fields, list):
+            raw_payload = {"fields": raw_tally_fields}
+        else:
+            raw_payload = {}
+        form_id = self._normalize_text(payload.get("form_id"))
+        submission_id = self._normalize_text(
+            payload.get("submission_id")
+        ) or self._fallback_submission_id(
+            source=source,
+            form_id=form_id,
+            normalized_payload=normalized_payload,
+        )
+        normalized_payload["submission_id"] = submission_id
+
+        try:
+            with get_postgres_connection(settings) as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        INSERT INTO onboarding_intake_submissions (
+                            id,
+                            source,
+                            form_id,
+                            submission_id,
+                            crm_contact_id,
+                            email,
+                            submitted_at,
+                            normalized_payload,
+                            raw_payload
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (
+                            source,
+                            (COALESCE(form_id, '')),
+                            (COALESCE(submission_id, ''))
+                        )
+                        DO UPDATE SET
+                            crm_contact_id = EXCLUDED.crm_contact_id,
+                            email = EXCLUDED.email,
+                            submitted_at = EXCLUDED.submitted_at,
+                            normalized_payload = EXCLUDED.normalized_payload,
+                            raw_payload = EXCLUDED.raw_payload
+                        """,
+                        (
+                            uuid4(),
+                            source,
+                            form_id,
+                            submission_id,
+                            contact_id,
+                            email,
+                            submitted_at,
+                            Jsonb(normalized_payload),
+                            Jsonb(raw_payload),
+                        ),
+                    )
+        except Exception as exc:
+            logger.warning(
+                "Failed to persist intake submission contact_id=%s masked_email=%s error=%s",
+                contact_id,
+                mask_email(email),
+                exc,
+            )
+            if contact_id is None:
+                raise
+
+    def _fallback_submission_id(
+        self,
+        *,
+        source: str,
+        form_id: str | None,
+        normalized_payload: Mapping[str, Any],
+    ) -> str:
+        payload_fingerprint = json.dumps(
+            {
+                "source": source,
+                "form_id": form_id or "",
+                "payload": normalized_payload,
+            },
+            default=str,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return f"generated:{uuid5(NAMESPACE_URL, payload_fingerprint)}"
+
+    def _parse_submitted_at(self, value: Any) -> datetime | None:
+        normalized = self._normalize_text(value)
+        if not normalized:
+            return None
+        try:
+            parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed
 
     def _build_form_skill_attrs(
         self, payload: Mapping[str, Any]
@@ -384,29 +660,61 @@ class IntakeFormProcessor:
             return None
         return " | ".join(description_parts)
 
-    def _build_resume_updates(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def _prepare_resume_file(
+        self, payload: Mapping[str, Any]
+    ) -> IntakeResumeFile | None:
         resume_url = self._normalize_text(payload.get("resume_url"))
         if not resume_url:
-            return {}
+            return None
 
         resume_file_name = self._normalize_text(payload.get("resume_file_name"))
         resume_name = (
             resume_file_name or self._filename_from_url(resume_url) or "resume"
         )
         if not resume_name:
-            return {}
+            return None
 
         try:
             content = self._download_resume_content(resume_url)
         except Exception as exc:
-            logger.warning("Failed to download resume_url=%s error=%s", resume_url, exc)
+            logger.warning(
+                "Failed to download resume name=%s error=%s", resume_name, exc
+            )
+            return None
+
+        if not self._scan_resume_content(content, resume_name):
+            logger.warning(
+                "Skipping resume processing after failed scan name=%s", resume_name
+            )
+            return None
+
+        return IntakeResumeFile(
+            filename=resume_name,
+            content=content,
+            source_url=resume_url,
+        )
+
+    def _build_resume_updates(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        resume_file: IntakeResumeFile | None = None,
+    ) -> dict[str, Any]:
+        if resume_file is None:
+            resume_file = self._prepare_resume_file(payload)
+        if resume_file is None:
             return {}
 
         try:
-            resume_text = self.document_processor.extract_text(content, resume_name)
+            resume_text = self.document_processor.extract_text(
+                resume_file.content,
+                resume_file.filename,
+            )
         except Exception as exc:
             logger.warning(
-                "Failed to parse resume masked_url=%s error=%s", resume_url, exc
+                "Failed to parse resume masked_url=%s error=%s",
+                self._mask_resume_url_for_log(resume_file.source_url),
+                exc,
             )
             return {}
 
@@ -496,6 +804,91 @@ class IntakeFormProcessor:
             logger.warning("Resume profile extraction failed: %s", exc)
         return updates
 
+    def _dry_run_resume_upload_result(
+        self,
+        resume_file: IntakeResumeFile | None,
+    ) -> dict[str, Any]:
+        if resume_file is None:
+            return {
+                "would_upload_resume": False,
+                "resume_file_name": None,
+                "resume_file_size_bytes": None,
+            }
+        return {
+            "would_upload_resume": True,
+            "resume_file_name": resume_file.filename,
+            "resume_file_size_bytes": len(resume_file.content),
+        }
+
+    def _upload_intake_resume(
+        self,
+        *,
+        contact_id: str,
+        resume_file: IntakeResumeFile | None,
+        masked_email: str,
+    ) -> str | None:
+        if resume_file is None:
+            return None
+
+        try:
+            uploaded = self.api.upload_file(
+                file_content=resume_file.content,
+                filename=resume_file.filename,
+                related_type="Contact",
+                related_id=contact_id,
+                field="resume",
+            )
+        except EspoAPIError as exc:
+            logger.warning(
+                "Failed uploading intake resume contact_id=%s masked_email=%s filename=%s error=%s",
+                contact_id,
+                masked_email,
+                resume_file.filename,
+                exc,
+            )
+            return None
+
+        attachment_id = (
+            str(uploaded.get("id", "")).strip() if isinstance(uploaded, Mapping) else ""
+        )
+        if not attachment_id:
+            logger.warning(
+                "Intake resume upload returned no attachment id contact_id=%s masked_email=%s filename=%s",
+                contact_id,
+                masked_email,
+                resume_file.filename,
+            )
+            return None
+
+        if not self._append_contact_resume(contact_id, attachment_id):
+            return None
+        return attachment_id
+
+    def _append_contact_resume(self, contact_id: str, attachment_id: str) -> bool:
+        try:
+            contact = self.api.request("GET", f"Contact/{contact_id}")
+            current_resume_ids = contact.get("resumeIds", [])
+            if not isinstance(current_resume_ids, list):
+                current_resume_ids = []
+
+            if attachment_id not in current_resume_ids:
+                current_resume_ids.append(attachment_id)
+
+            self.api.request(
+                "PUT",
+                f"Contact/{contact_id}",
+                {"resumeIds": current_resume_ids},
+            )
+            return True
+        except EspoAPIError as exc:
+            logger.warning(
+                "Failed linking intake resume attachment contact_id=%s attachment_id=%s error=%s",
+                contact_id,
+                attachment_id,
+                exc,
+            )
+            return False
+
     def _download_resume_content(self, resume_url: str) -> bytes:
         """Fetch a resume URL with SSRF guardrails and bounded redirect handling."""
         current_url = resume_url
@@ -551,6 +944,60 @@ class IntakeFormProcessor:
                 return bytes(data)
 
         raise ValueError("Resume URL exceeded max redirect limit")
+
+    def _scan_resume_content(self, content: bytes, filename: str) -> bool:
+        """Run the configured malware scanner before parsing untrusted resumes."""
+        if not settings.intake_resume_require_virus_scan:
+            return True
+
+        command_template = settings.intake_resume_virus_scan_command.strip()
+        if not command_template:
+            logger.warning(
+                "Resume scan required but INTAKE_RESUME_VIRUS_SCAN_COMMAND is unset"
+            )
+            return False
+
+        temp_path: str | None = None
+        try:
+            suffix = Path(filename).suffix
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temp_file:
+                temp_file.write(content)
+                temp_path = temp_file.name
+
+            command = [
+                part.replace("{path}", temp_path)
+                for part in shlex.split(command_template)
+            ]
+            if not any(temp_path in part for part in command):
+                command.append(temp_path)
+
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=settings.intake_resume_virus_scan_timeout_seconds,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Resume malware scan failed filename=%s error=%s", filename, exc
+            )
+            return False
+        finally:
+            if temp_path:
+                with contextlib.suppress(OSError):
+                    Path(temp_path).unlink()
+
+        if result.returncode == 0:
+            return True
+
+        logger.warning(
+            "Resume malware scan rejected filename=%s returncode=%s stderr=%s",
+            filename,
+            result.returncode,
+            result.stderr.strip(),
+        )
+        return False
 
     def _validate_resume_url(self, candidate_url: str) -> str | None:
         """Return validation error string when URL should not be fetched."""
@@ -740,6 +1187,17 @@ class IntakeFormProcessor:
         normalized = value.strip()
         return normalized or None
 
+    def _normalize_email(self, value: object) -> str | None:
+        normalized = self._normalize_text(value)
+        return normalized.lower() if normalized else None
+
+    def _parse_bool(self, value: object) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().casefold() in {"1", "true", "yes", "on"}
+        return False
+
     def _normalize_timezone(self, value: object) -> str | None:
         return normalize_timezone(value)
 
@@ -812,6 +1270,12 @@ class IntakeFormProcessor:
             return None
         name = Path(path).name.strip()
         return name or None
+
+    def _mask_resume_url_for_log(self, url: str) -> str:
+        parsed = urlsplit(url)
+        if not parsed.scheme or not parsed.netloc:
+            return "<invalid-url>"
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
 
     def _collect_contact_ids(self, contact_list: list[Any]) -> list[str]:
         ids: list[str] = []

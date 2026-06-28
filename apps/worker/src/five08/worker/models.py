@@ -94,6 +94,49 @@ class DocusealWebhookPayload(BaseModel):
     data: DocusealSubmitter
 
 
+class TallyWebhookFieldOption(BaseModel):
+    """Single select/matrix option metadata from a Tally webhook field."""
+
+    id: str
+    text: str | None = None
+
+
+class TallyWebhookField(BaseModel):
+    """Single form field from a Tally webhook payload."""
+
+    key: str
+    label: str | None = None
+    type: str
+    value: Any = None
+    options: list[TallyWebhookFieldOption] = Field(default_factory=list)
+
+
+class TallyWebhookData(BaseModel):
+    """Tally form response data attached to FORM_RESPONSE webhook events."""
+
+    response_id: str | None = Field(default=None, alias="responseId")
+    submission_id: str | None = Field(default=None, alias="submissionId")
+    respondent_id: str | None = Field(default=None, alias="respondentId")
+    form_id: str = Field(..., alias="formId")
+    form_name: str | None = Field(default=None, alias="formName")
+    created_at: str | None = Field(default=None, alias="createdAt")
+    submission_pdf_url: str | None = Field(default=None, alias="submissionPdfUrl")
+    submission_preview_url: str | None = Field(
+        default=None,
+        alias="submissionPreviewUrl",
+    )
+    fields: list[TallyWebhookField] = Field(default_factory=list)
+
+
+class TallyWebhookPayload(BaseModel):
+    """Tally FORM_RESPONSE webhook payload."""
+
+    event_id: str = Field(..., alias="eventId")
+    event_type: str = Field(..., alias="eventType")
+    created_at: str | None = Field(default=None, alias="createdAt")
+    data: TallyWebhookData
+
+
 class GoogleFormsIntakePayload(BaseModel):
     """Google Forms member intake webhook payload (sent via Apps Script)."""
 
@@ -108,6 +151,7 @@ class GoogleFormsIntakePayload(BaseModel):
         default=None,
         validation_alias=AliasChoices("last_name", "lastName", "last name"),
     )
+    last_name_is_placeholder: bool = False
     name: str | None = Field(
         default=None, validation_alias=AliasChoices("name", "full name", "full_name")
     )
@@ -151,6 +195,7 @@ class GoogleFormsIntakePayload(BaseModel):
             "availability", "current_availability", "cAvailableTimes"
         ),
     )
+    chat_availability: str | None = Field(default=None)
     rate_range: str | None = Field(
         default=None, validation_alias=AliasChoices("rate_range", "rate", "cRateRange")
     )
@@ -160,7 +205,9 @@ class GoogleFormsIntakePayload(BaseModel):
     primary_skills_interests: str | None = Field(
         default=None,
         validation_alias=AliasChoices(
-            "primary_skills_interests", "primary_skills_and_interests"
+            "primary_skills_interests",
+            "primary_skills_and_interests",
+            "Beyond your resume / LinkedIn, what would you say your primary skills and interests are?",
         ),
     )
     top_question_about_508: str | None = Field(
@@ -169,12 +216,25 @@ class GoogleFormsIntakePayload(BaseModel):
             "top_question_about_508",
             "top_question",
             "top_question_about_508_dev",
+            "What's your interest in 508.dev / what is a top question you have about the co-op?",
         ),
     )
+    native_name: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "native_name",
+            "Name in your native language",
+        ),
+    )
+    ideal_weekly_hours: str | None = Field(default=None)
     resume_url: str | None = Field(
         default=None,
         validation_alias=AliasChoices(
-            "resume_url", "resume", "resumeLink", "resumeUrl"
+            "resume_url",
+            "resume",
+            "resumeLink",
+            "resumeUrl",
+            "Resume / CV (this is the file upload)",
         ),
     )
     resume_file_name: str | None = Field(
@@ -321,10 +381,13 @@ class GoogleFormsIntakePayload(BaseModel):
         "primary_role",
         "seniority_level",
         "availability",
+        "chat_availability",
         "rate_range",
         "referred_by",
         "primary_skills_interests",
         "top_question_about_508",
+        "native_name",
+        "ideal_weekly_hours",
         "resume_url",
         "resume_file_name",
         "form_id",
@@ -372,6 +435,8 @@ class GoogleFormsIntakePayload(BaseModel):
             "last name": "last_name",
             "last": "last_name",
             "lastname": "last_name",
+            "full name (in english)": "name",
+            "name in your native language": "native_name",
             "email address": "email",
             "emailaddress": "email",
             "current country": "address_country",
@@ -385,17 +450,27 @@ class GoogleFormsIntakePayload(BaseModel):
             "current availability for co-op projects": "availability",
             "current availability for co-op projects (in weekly hours)": "availability",
             "availability": "availability",
+            "if you joined 508.dev, how many working hours per week would be ideal from co-op projects": "ideal_weekly_hours",
+            "if you joined 508.dev, how many working hours per week would be ideal from co-op projects?": "ideal_weekly_hours",
+            "what would be some good times in the following weeks to have a chat with a member (according to your timezone)": "chat_availability",
+            "what would be some good times in the following weeks to have a chat with a member (according to your timezone)?": "chat_availability",
             "primary skills and interests": "primary_skills_interests",
+            "beyond your resume / linkedin, what would you say your primary skills and interests are": "primary_skills_interests",
+            "beyond your resume / linkedin, what would you say your primary skills and interests are?": "primary_skills_interests",
             "primary_skills_and_interests": "primary_skills_interests",
             "top question about 508": "top_question_about_508",
             "top question": "top_question_about_508",
             "what is your top question about 508": "top_question_about_508",
+            "what's your interest in 508.dev / what is a top question you have about the co-op": "top_question_about_508",
+            "what's your interest in 508.dev / what is a top question you have about the co-op?": "top_question_about_508",
             "top_question_about_508_dev": "top_question_about_508",
             "top_question": "top_question_about_508",
             "how did you hear about 508.dev": "referred_by",
             "how did you hear about 508.dev?": "referred_by",
             "how did you hear about 508": "referred_by",
             "referred by": "referred_by",
+            "what hourly rate range (in usd) do you normally charge for work": "rate_range",
+            "what hourly rate range (in usd) do you normally charge for work?": "rate_range",
             "discord_username": "discord_username",
             "linkedin_url": "linkedin_url",
             "github_username": "github_username",

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import hashlib
+import hmac
 import logging
 import os
 import re
@@ -13,12 +15,12 @@ import smtplib
 import json
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, cast
-from urllib.parse import quote, unquote, urlencode, urlparse
+from urllib.parse import quote, unquote, urlencode, urlparse, urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
 import httpx
@@ -183,6 +185,8 @@ from five08.worker.models import (
     DocusealWebhookPayload,
     EspoCRMWebhookPayload,
     GoogleFormsIntakePayload,
+    TallyWebhookField,
+    TallyWebhookPayload,
 )
 
 logger = logging.getLogger(__name__)
@@ -429,6 +433,30 @@ sync_people_from_crm_job = JOB_FUNCTIONS["sync_people_from_crm_job"]
 sync_person_from_crm_job = JOB_FUNCTIONS["sync_person_from_crm_job"]
 sync_projects_from_erpnext_job = JOB_FUNCTIONS["sync_projects_from_erpnext_job"]
 process_docuseal_agreement_job = JOB_FUNCTIONS["process_docuseal_agreement_job"]
+
+TALLY_INTAKE_FIELD_LABEL_MAP = {
+    "full name": "name",
+    "full name (in english)": "name",
+    "email address": "email",
+    "email": "email",
+    "discord username": "discord_username",
+    "linkedin profile link": "linkedin_url",
+    "github profile link": "github_username",
+    "website link": "website_link",
+    "resume / cv (this is the file upload)": "resume_url",
+    "resume / cv": "resume_url",
+    "current country": "address_country",
+    "primary role": "primary_role",
+    "seniority level": "seniority_level",
+    "name in your native language": "native_name",
+    "if you joined 508.dev, how many working hours per week would be ideal from co-op projects": "ideal_weekly_hours",
+    "what hourly rate range (in usd) do you normally charge for work": "rate_range",
+    "how did you hear about 508.dev": "referred_by",
+    "what's your interest in 508.dev / what is a top question you have about the co-op": "top_question_about_508",
+    "what would be some good times in the following weeks to have a chat with a member (according to your timezone)": "chat_availability",
+    "beyond your resume / linkedin, what would you say your primary skills and interests are": "primary_skills_interests",
+}
+
 # Process-local MVP agent tools stay synchronous for Discord button UX. Both the
 # task store and pending plans are non-durable; production task workflows should
 # swap this registry for a persistent task service before multi-worker use.
@@ -631,6 +659,230 @@ def _validate_google_forms_submission(
         return None
 
     return JSONResponse({"error": "invalid_form_id"}, status_code=403)
+
+
+def _normalize_tally_label(label: str | None) -> str:
+    normalized = re.sub(r"\s+", " ", str(label or "").strip().casefold())
+    while normalized.endswith(("?", "*")):
+        normalized = normalized[:-1].strip()
+    return normalized
+
+
+def _tally_intake_key_for_label(label: str) -> str | None:
+    local_key = TALLY_INTAKE_FIELD_LABEL_MAP.get(label)
+    if local_key:
+        return local_key
+    if label.startswith("primary role"):
+        return "primary_role"
+    if label.startswith("resume / cv"):
+        return "resume_url"
+    return None
+
+
+def _tally_field_display_value(field: TallyWebhookField) -> Any:
+    value = field.value
+    if value is None:
+        return None
+
+    if isinstance(value, list):
+        option_text_by_id = {
+            option.id: option.text
+            for option in field.options
+            if option.text and option.id
+        }
+        values: list[str] = []
+        for item in value:
+            if isinstance(item, str) and item in option_text_by_id:
+                values.append(str(option_text_by_id[item]))
+            elif isinstance(item, str):
+                values.append(item)
+            elif isinstance(item, Mapping):
+                name = item.get("name")
+                url = item.get("url")
+                values.append(str(name or url or item))
+            else:
+                values.append(str(item))
+        return ", ".join(value for value in values if value.strip()) or None
+
+    if isinstance(value, dict):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value).strip() or None
+
+
+def _normalize_tally_github_username(value: object) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+
+    if text.startswith("@"):
+        text = text[1:].strip()
+
+    parse_candidate = text
+    if re.match(r"^(?:www\.)?github\.com/", text, flags=re.IGNORECASE):
+        parse_candidate = f"https://{text}"
+
+    parsed = urlparse(parse_candidate)
+    host = parsed.netloc.lower()
+    if host in {"github.com", "www.github.com"}:
+        segments = [segment for segment in parsed.path.strip("/").split("/") if segment]
+        if not segments:
+            return None
+        if segments[0].lower() in {"users", "orgs"} and len(segments) >= 2:
+            return segments[1]
+        return segments[0]
+
+    return text or None
+
+
+def _apply_tally_name_parts(mapped: dict[str, Any]) -> None:
+    if mapped.get("first_name") and mapped.get("last_name"):
+        return
+
+    name = str(mapped.get("name") or "").strip()
+    if not name:
+        return
+
+    parts = name.split()
+    if not parts:
+        return
+
+    mapped.setdefault("first_name", parts[0])
+    last_name = " ".join(parts[1:]).strip()
+    if last_name:
+        mapped.setdefault("last_name", last_name)
+        return
+
+    if "last_name" not in mapped:
+        mapped["last_name"] = "Unknown"
+        mapped["last_name_is_placeholder"] = True
+
+
+def _extract_tally_file_upload(
+    field: TallyWebhookField,
+) -> tuple[str, str | None] | None:
+    if not isinstance(field.value, list) or not field.value:
+        return None
+    first_file = field.value[0]
+    if not isinstance(first_file, Mapping):
+        return None
+    url = str(first_file.get("url") or "").strip()
+    if not url:
+        return None
+    name = str(first_file.get("name") or "").strip() or None
+    return url, name
+
+
+def _tally_webhook_signature_valid(*, body: bytes, signature: str, secret: str) -> bool:
+    expected = base64.b64encode(
+        hmac.new(secret.encode("utf-8"), body, hashlib.sha256).digest()
+    ).decode("ascii")
+    return hmac.compare_digest(signature.strip(), expected)
+
+
+def _is_tally_webhook_authorized(request: Request, body: bytes) -> bool:
+    signing_secret = str(settings.onboarding_tally_webhook_signing_secret or "").strip()
+    if not signing_secret:
+        return _is_webhook_authorized(request)
+
+    signature = request.headers.get("Tally-Signature", "")
+    if not signature:
+        logger.warning("Rejecting Tally webhook: missing Tally-Signature")
+        return False
+    if _tally_webhook_signature_valid(
+        body=body,
+        signature=signature,
+        secret=signing_secret,
+    ):
+        return True
+    logger.warning("Rejecting Tally webhook: invalid Tally-Signature")
+    return False
+
+
+def _tally_intake_dry_run_mode(
+    request: Request,
+) -> Literal["none", "webhook", "worker"]:
+    value = request.query_params.get("dry_run") or request.headers.get("X-Dry-Run")
+    normalized = str(value or "").strip().casefold()
+    if normalized in {"worker", "job", "enqueue"}:
+        return "worker"
+    if normalized in {"1", "true", "yes", "on", "webhook"}:
+        return "webhook"
+    return "none"
+
+
+def _strip_url_query(value: str) -> str:
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.query:
+        return value
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", parsed.fragment))
+
+
+def _sanitize_tally_raw_payload(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _sanitize_tally_raw_payload(item) for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_tally_raw_payload(item) for item in value]
+    if isinstance(value, str):
+        return _strip_url_query(value)
+    return value
+
+
+def _validate_tally_submission(payload: TallyWebhookPayload) -> JSONResponse | None:
+    allowed_form_ids = settings.onboarding_tally_allowed_form_ids_set
+    if not allowed_form_ids:
+        logger.error(
+            "Rejecting Tally webhook: onboarding Tally form allowlist is unset"
+        )
+        return JSONResponse({"error": "invalid_form_id"}, status_code=403)
+
+    form_id = payload.data.form_id.strip()
+    if form_id and form_id in allowed_form_ids:
+        return None
+
+    return JSONResponse({"error": "invalid_form_id"}, status_code=403)
+
+
+def _tally_to_intake_payload(payload: TallyWebhookPayload) -> dict[str, Any]:
+    mapped: dict[str, Any] = {
+        "source": "tally",
+        "form_id": payload.data.form_id,
+        "submission_id": payload.data.submission_id or payload.data.response_id,
+        "submitted_at": payload.data.created_at or payload.created_at,
+    }
+
+    for field in payload.data.fields:
+        label = field.label or field.key
+        normalized_label = _normalize_tally_label(label)
+        local_key = _tally_intake_key_for_label(normalized_label)
+        if not local_key:
+            continue
+
+        if local_key == "resume_url":
+            upload = _extract_tally_file_upload(field)
+            if upload:
+                mapped["resume_url"] = upload[0]
+                if upload[1]:
+                    mapped["resume_file_name"] = upload[1]
+            continue
+
+        value = _tally_field_display_value(field)
+        if value is not None:
+            if local_key == "github_username":
+                value = _normalize_tally_github_username(value)
+            if value is None:
+                continue
+            mapped[local_key] = value
+
+    _apply_tally_name_parts(mapped)
+    mapped["raw_tally_fields"] = [
+        field.model_dump(by_alias=True, exclude_none=True)
+        for field in payload.data.fields
+    ]
+    return mapped
 
 
 async def _enqueue_full_crm_sync_job(queue: QueueClient, *, reason: str) -> EnqueuedJob:
@@ -1744,6 +1996,35 @@ def _is_present(value: Any) -> bool:
     return bool(value)
 
 
+def _intake_resume_present(latest_intake_submission: Any) -> bool:
+    if not isinstance(latest_intake_submission, dict):
+        return False
+    normalized_payload = latest_intake_submission.get("normalized_payload")
+    if not isinstance(normalized_payload, dict):
+        return False
+    return _is_present(normalized_payload.get("resume_file_name")) or _is_present(
+        normalized_payload.get("resume_url")
+    )
+
+
+def _preferred_intake_resume_submission(person: dict[str, Any]) -> Any:
+    return person.get("latest_resume_intake_submission") or person.get(
+        "latest_intake_submission"
+    )
+
+
+def _intake_resume_file_name(latest_intake_submission: Any) -> str | None:
+    if not isinstance(latest_intake_submission, dict):
+        return None
+    normalized_payload = latest_intake_submission.get("normalized_payload")
+    if not isinstance(normalized_payload, dict):
+        return None
+    resume_file_name = normalized_payload.get("resume_file_name")
+    if isinstance(resume_file_name, str) and resume_file_name.strip():
+        return resume_file_name.strip()
+    return None
+
+
 def _normalize_508_username(value: str | None) -> str | None:
     """Normalize a dashboard onboarder value into a 508 username."""
     if not value:
@@ -1766,6 +2047,25 @@ def _normalize_508_username(value: str | None) -> str | None:
     ):
         return None
     return normalized
+
+
+_DASHBOARD_INTAKE_RESUME_EXISTS_SQL = """
+EXISTS (
+    SELECT 1
+    FROM onboarding_intake_submissions resume_intake
+    WHERE (
+        resume_intake.crm_contact_id = people.crm_contact_id
+        OR (
+            resume_intake.crm_contact_id IS NULL
+            AND resume_intake.email = lower(people.email)
+        )
+    )
+    AND coalesce(
+        nullif(btrim(resume_intake.normalized_payload->>'resume_file_name'), ''),
+        nullif(btrim(resume_intake.normalized_payload->>'resume_url'), '')
+    ) IS NOT NULL
+)
+"""
 
 
 def _limit_dashboard_count(value: int) -> int:
@@ -1847,7 +2147,7 @@ def _query_dashboard_people(
         conditions.append("(email_508 IS NULL OR btrim(email_508) = '')")
     if resume == "present":
         conditions.append(
-            """
+            f"""
             (
             (
                 latest_resume_id IS NOT NULL
@@ -1857,12 +2157,13 @@ def _query_dashboard_people(
                 latest_resume_name IS NOT NULL
                 AND btrim(latest_resume_name) <> ''
             )
+            OR {_DASHBOARD_INTAKE_RESUME_EXISTS_SQL}
             )
         """
         )
     elif resume == "missing":
         conditions.append(
-            """
+            f"""
             (
                 latest_resume_id IS NULL
                 OR btrim(latest_resume_id) = ''
@@ -1871,6 +2172,7 @@ def _query_dashboard_people(
                 latest_resume_name IS NULL
                 OR btrim(latest_resume_name) = ''
             )
+            AND NOT {_DASHBOARD_INTAKE_RESUME_EXISTS_SQL}
         """
         )
     if skills == "present":
@@ -1908,10 +2210,58 @@ def _query_dashboard_people(
             onboarding_email_sent_at,
             onboarding_email_sent_by,
             onboarding_email_recipient,
+            latest_intake_submission,
+            latest_resume_intake_submission,
             sync_status,
             created_at,
             updated_at
         FROM people
+        LEFT JOIN LATERAL (
+            SELECT jsonb_build_object(
+                'source', onboarding_intake_submissions.source,
+                'form_id', onboarding_intake_submissions.form_id,
+                'submission_id', onboarding_intake_submissions.submission_id,
+                'submitted_at', onboarding_intake_submissions.submitted_at,
+                'normalized_payload', onboarding_intake_submissions.normalized_payload,
+                'created_at', onboarding_intake_submissions.created_at
+            ) AS latest_intake_submission
+            FROM onboarding_intake_submissions
+            WHERE onboarding_intake_submissions.crm_contact_id = people.crm_contact_id
+               OR (
+                    onboarding_intake_submissions.crm_contact_id IS NULL
+                    AND onboarding_intake_submissions.email = lower(people.email)
+               )
+            ORDER BY
+                onboarding_intake_submissions.submitted_at DESC NULLS LAST,
+                onboarding_intake_submissions.created_at DESC
+            LIMIT 1
+        ) intake ON true
+        LEFT JOIN LATERAL (
+            SELECT jsonb_build_object(
+                'source', onboarding_intake_submissions.source,
+                'form_id', onboarding_intake_submissions.form_id,
+                'submission_id', onboarding_intake_submissions.submission_id,
+                'submitted_at', onboarding_intake_submissions.submitted_at,
+                'normalized_payload', onboarding_intake_submissions.normalized_payload,
+                'created_at', onboarding_intake_submissions.created_at
+            ) AS latest_resume_intake_submission
+            FROM onboarding_intake_submissions
+            WHERE (
+                onboarding_intake_submissions.crm_contact_id = people.crm_contact_id
+                OR (
+                    onboarding_intake_submissions.crm_contact_id IS NULL
+                    AND onboarding_intake_submissions.email = lower(people.email)
+                )
+            )
+            AND coalesce(
+                nullif(btrim(onboarding_intake_submissions.normalized_payload->>'resume_file_name'), ''),
+                nullif(btrim(onboarding_intake_submissions.normalized_payload->>'resume_url'), '')
+            ) IS NOT NULL
+            ORDER BY
+                onboarding_intake_submissions.submitted_at DESC NULLS LAST,
+                onboarding_intake_submissions.created_at DESC
+            LIMIT 1
+        ) latest_resume_intake ON true
         {where_clause}
         ORDER BY updated_at DESC
         LIMIT %s
@@ -1930,6 +2280,19 @@ def _shape_dashboard_people_rows(rows: list[dict[str, Any]]) -> list[dict[str, A
         roles = row.get("discord_roles") or []
         skills = row.get("skills") or []
         person = dict(row)
+        person.pop("latest_intake_sort_at", None)
+        latest_intake_submission = person.get("latest_intake_submission")
+        if isinstance(latest_intake_submission, dict):
+            latest_intake_submission.pop("raw_payload", None)
+        latest_resume_intake_submission = person.get("latest_resume_intake_submission")
+        if isinstance(latest_resume_intake_submission, dict):
+            latest_resume_intake_submission.pop("raw_payload", None)
+        intake_resume_submission = _preferred_intake_resume_submission(person)
+        intake_resume_present = _intake_resume_present(intake_resume_submission)
+        if not _is_present(person.get("latest_resume_name")):
+            intake_resume_file_name = _intake_resume_file_name(intake_resume_submission)
+            if intake_resume_file_name:
+                person["latest_resume_name"] = intake_resume_file_name
         person["created_at"] = _datetime_or_none(row.get("created_at"))
         person["updated_at"] = _datetime_or_none(row.get("updated_at"))
         person["onboarding_updated_at"] = _datetime_or_none(
@@ -1947,12 +2310,218 @@ def _shape_dashboard_people_rows(rows: list[dict[str, Any]]) -> list[dict[str, A
             "discord_linked": _is_present(row.get("discord_user_id")),
             "email_508": _is_present(row.get("email_508")),
             "latest_resume": _is_present(row.get("latest_resume_id"))
-            or _is_present(row.get("latest_resume_name")),
+            or _is_present(row.get("latest_resume_name"))
+            or intake_resume_present,
             "roles_count": len(roles) if isinstance(roles, list) else 0,
             "skills_count": len(skills) if isinstance(skills, list) else 0,
         }
         people.append(person)
     return people
+
+
+_ORPHAN_INTAKE_SEARCH_SQL = """
+(
+    coalesce(email, '') || ' ' ||
+    coalesce(normalized_payload->>'name', '') || ' ' ||
+    coalesce(normalized_payload->>'first_name', '') || ' ' ||
+    coalesce(normalized_payload->>'last_name', '') || ' ' ||
+    coalesce(normalized_payload->>'github_username', '') || ' ' ||
+    coalesce(normalized_payload->>'linkedin_url', '')
+)
+"""
+
+_ORPHAN_INTAKE_RESUME_SQL = """
+coalesce(
+    nullif(btrim(normalized_payload->>'resume_file_name'), ''),
+    nullif(btrim(normalized_payload->>'resume_url'), '')
+)
+"""
+
+_ORPHAN_INTAKE_SKILLS_SQL = """
+coalesce(
+    nullif(btrim(normalized_payload->>'primary_skills_interests'), ''),
+    nullif(btrim(normalized_payload->>'skill_proficiency_next_js'), ''),
+    nullif(btrim(normalized_payload->>'skill_proficiency_react_native_expo'), ''),
+    nullif(btrim(normalized_payload->>'skill_proficiency_supabase'), ''),
+    nullif(btrim(normalized_payload->>'skill_proficiency_ai_ml_engineering'), ''),
+    nullif(btrim(normalized_payload->>'skill_proficiency_python_django_fastapi'), ''),
+    nullif(btrim(normalized_payload->>'skill_proficiency_wordpress'), ''),
+    nullif(btrim(normalized_payload->>'skill_proficiency_devops'), ''),
+    nullif(btrim(normalized_payload->>'skill_proficiency_crypto_blockchain'), ''),
+    nullif(btrim(normalized_payload->>'skill_proficiency_chat_bots'), ''),
+    nullif(btrim(normalized_payload->>'skill_proficiency_unity_video_game'), ''),
+    nullif(btrim(normalized_payload->>'skill_proficiency_project_management'), ''),
+    nullif(btrim(normalized_payload->>'skill_proficiency_client_management'), ''),
+    nullif(btrim(normalized_payload->>'skill_proficiency_sales_marketing'), ''),
+    nullif(
+        btrim(normalized_payload->>'skill_proficiency_internal_business_development'),
+        ''
+    )
+)
+"""
+
+
+def _list_dashboard_orphan_intake_submissions(
+    *,
+    query: str | None,
+    limit: int,
+    onboarding_state: str | None,
+    onboarder: str | None,
+    discord: str | None,
+    email_508: str | None,
+    resume: str | None,
+    skills: str | None,
+) -> list[dict[str, Any]]:
+    normalized_query = (query or "").strip()
+    if onboarding_state not in (None, "pending"):
+        return []
+    if onboarder or discord == "linked" or email_508 == "present":
+        return []
+
+    conditions: list[str] = [
+        "crm_contact_id IS NULL",
+        """
+        NOT EXISTS (
+            SELECT 1
+            FROM people
+            WHERE lower(people.email) = onboarding_intake_submissions.email
+                AND people.sync_status = 'active'
+                AND people.is_member = false
+                AND people.contact_type ILIKE '%prospect%'
+                AND (
+                    people.onboarding_state IS NULL
+                    OR replace(
+                        replace(
+                            replace(lower(btrim(people.onboarding_state)), '_', ''),
+                            '-',
+                            ''
+                        ),
+                        ' ',
+                        ''
+                    ) NOT IN ('onboarded', 'waitlist', 'rejected')
+                )
+        )
+        """,
+    ]
+    params: list[Any] = []
+
+    if normalized_query:
+        conditions.append(f"{_ORPHAN_INTAKE_SEARCH_SQL} ILIKE %s")
+        params.append(f"%{normalized_query}%")
+    if resume == "present":
+        conditions.append(f"{_ORPHAN_INTAKE_RESUME_SQL} IS NOT NULL")
+    elif resume == "missing":
+        conditions.append(f"{_ORPHAN_INTAKE_RESUME_SQL} IS NULL")
+    if skills == "present":
+        conditions.append(f"{_ORPHAN_INTAKE_SKILLS_SQL} IS NOT NULL")
+    elif skills == "missing":
+        conditions.append(f"{_ORPHAN_INTAKE_SKILLS_SQL} IS NULL")
+
+    params.append(limit)
+    where_clause = " AND ".join(conditions)
+    sql = f"""
+        SELECT
+            id::text,
+            NULL::text AS crm_contact_id,
+            coalesce(
+                nullif(btrim(normalized_payload->>'name'), ''),
+                nullif(
+                    btrim(
+                        concat_ws(
+                            ' ',
+                            normalized_payload->>'first_name',
+                            nullif(normalized_payload->>'last_name', 'Unknown')
+                        )
+                    ),
+                    ''
+                ),
+                email
+            ) AS name,
+            email,
+            NULL::text AS email_508,
+            NULL::text AS discord_user_id,
+            normalized_payload->>'discord_username' AS discord_username,
+            ARRAY[]::text[] AS discord_roles,
+            normalized_payload->>'github_username' AS github_username,
+            'Prospect' AS contact_type,
+            false AS is_member,
+            normalized_payload->>'address_country' AS address_country,
+            normalized_payload->>'address_city' AS address_city,
+            normalized_payload->>'address_state' AS address_state,
+            normalized_payload->>'timezone' AS timezone,
+            normalized_payload->>'seniority_level' AS seniority,
+            normalized_payload->>'linkedin_url' AS linkedin,
+            CASE WHEN {_ORPHAN_INTAKE_SKILLS_SQL} IS NULL
+                THEN ARRAY[]::text[]
+                ELSE ARRAY['application']::text[]
+            END AS skills,
+            NULL::text AS latest_resume_id,
+            normalized_payload->>'resume_file_name' AS latest_resume_name,
+            'pending' AS onboarding_state,
+            NULL::text AS onboarder,
+            created_at AS onboarding_updated_at,
+            NULL::timestamptz AS onboarding_email_sent_at,
+            NULL::text AS onboarding_email_sent_by,
+            NULL::text AS onboarding_email_recipient,
+            jsonb_build_object(
+                'source', source,
+                'form_id', form_id,
+                'submission_id', submission_id,
+                'submitted_at', submitted_at,
+                'normalized_payload', normalized_payload,
+                'created_at', created_at
+            ) AS latest_intake_submission,
+            CASE WHEN {_ORPHAN_INTAKE_RESUME_SQL} IS NULL
+                THEN NULL::jsonb
+                ELSE jsonb_build_object(
+                    'source', source,
+                    'form_id', form_id,
+                    'submission_id', submission_id,
+                    'submitted_at', submitted_at,
+                    'normalized_payload', normalized_payload,
+                    'created_at', created_at
+                )
+            END AS latest_resume_intake_submission,
+            'intake' AS sync_status,
+            created_at,
+            updated_at
+        FROM onboarding_intake_submissions
+        WHERE {where_clause}
+        ORDER BY submitted_at DESC NULLS LAST, created_at DESC
+        LIMIT %s
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(trusted_sql(sql), params)
+            return cursor.fetchall()
+
+
+def _dashboard_onboarding_row_sort_key(
+    row: Mapping[str, Any],
+) -> tuple[int, float, str]:
+    state_rank = (
+        0
+        if _normalize_onboarding_state_key(row.get("onboarding_state")) == "pending"
+        else 1
+    )
+    updated_at = _dashboard_onboarding_row_activity_at(row)
+    updated_rank = (
+        -updated_at.timestamp() if isinstance(updated_at, datetime) else float("inf")
+    )
+    name = str(row.get("name") or "").casefold()
+    return (state_rank, updated_rank, name or "\uffff")
+
+
+def _dashboard_onboarding_row_activity_at(row: Mapping[str, Any]) -> Any:
+    latest_intake_submission = row.get("latest_intake_submission")
+    if isinstance(latest_intake_submission, Mapping):
+        submitted_at = latest_intake_submission.get("submitted_at")
+        if isinstance(submitted_at, datetime):
+            return submitted_at
+        created_at = latest_intake_submission.get("created_at")
+        if isinstance(created_at, datetime):
+            return created_at
+    return row.get("onboarding_updated_at")
 
 
 def _list_dashboard_onboarding(
@@ -2016,7 +2585,7 @@ def _list_dashboard_onboarding(
         conditions.append("(email_508 IS NULL OR btrim(email_508) = '')")
     if resume == "present":
         conditions.append(
-            """
+            f"""
             (
             (
                 latest_resume_id IS NOT NULL
@@ -2026,12 +2595,13 @@ def _list_dashboard_onboarding(
                 latest_resume_name IS NOT NULL
                 AND btrim(latest_resume_name) <> ''
             )
+            OR {_DASHBOARD_INTAKE_RESUME_EXISTS_SQL}
             )
         """
         )
     elif resume == "missing":
         conditions.append(
-            """
+            f"""
             (
                 latest_resume_id IS NULL
                 OR btrim(latest_resume_id) = ''
@@ -2040,6 +2610,7 @@ def _list_dashboard_onboarding(
                 latest_resume_name IS NULL
                 OR btrim(latest_resume_name) = ''
             )
+            AND NOT {_DASHBOARD_INTAKE_RESUME_EXISTS_SQL}
         """
         )
     if skills == "present":
@@ -2076,15 +2647,69 @@ def _list_dashboard_onboarding(
             onboarding_email_sent_at,
             onboarding_email_sent_by,
             onboarding_email_recipient,
+            latest_intake_submission,
+            latest_intake_sort_at,
+            latest_resume_intake_submission,
             sync_status,
             created_at,
             updated_at
         FROM people
+        LEFT JOIN LATERAL (
+            SELECT
+                jsonb_build_object(
+                    'source', onboarding_intake_submissions.source,
+                    'form_id', onboarding_intake_submissions.form_id,
+                    'submission_id', onboarding_intake_submissions.submission_id,
+                    'submitted_at', onboarding_intake_submissions.submitted_at,
+                    'normalized_payload', onboarding_intake_submissions.normalized_payload,
+                    'created_at', onboarding_intake_submissions.created_at
+                ) AS latest_intake_submission,
+                coalesce(
+                    onboarding_intake_submissions.submitted_at,
+                    onboarding_intake_submissions.created_at
+                ) AS latest_intake_sort_at
+            FROM onboarding_intake_submissions
+            WHERE onboarding_intake_submissions.crm_contact_id = people.crm_contact_id
+               OR (
+                    onboarding_intake_submissions.crm_contact_id IS NULL
+                    AND onboarding_intake_submissions.email = lower(people.email)
+               )
+            ORDER BY
+                onboarding_intake_submissions.submitted_at DESC NULLS LAST,
+                onboarding_intake_submissions.created_at DESC
+            LIMIT 1
+        ) intake ON true
+        LEFT JOIN LATERAL (
+            SELECT jsonb_build_object(
+                'source', onboarding_intake_submissions.source,
+                'form_id', onboarding_intake_submissions.form_id,
+                'submission_id', onboarding_intake_submissions.submission_id,
+                'submitted_at', onboarding_intake_submissions.submitted_at,
+                'normalized_payload', onboarding_intake_submissions.normalized_payload,
+                'created_at', onboarding_intake_submissions.created_at
+            ) AS latest_resume_intake_submission
+            FROM onboarding_intake_submissions
+            WHERE (
+                onboarding_intake_submissions.crm_contact_id = people.crm_contact_id
+                OR (
+                    onboarding_intake_submissions.crm_contact_id IS NULL
+                    AND onboarding_intake_submissions.email = lower(people.email)
+                )
+            )
+            AND coalesce(
+                nullif(btrim(onboarding_intake_submissions.normalized_payload->>'resume_file_name'), ''),
+                nullif(btrim(onboarding_intake_submissions.normalized_payload->>'resume_url'), '')
+            ) IS NOT NULL
+            ORDER BY
+                onboarding_intake_submissions.submitted_at DESC NULLS LAST,
+                onboarding_intake_submissions.created_at DESC
+            LIMIT 1
+        ) latest_resume_intake ON true
         WHERE {where_clause}
         ORDER BY
             CASE WHEN COALESCE({_ONBOARDING_STATE_NORMALIZED_SQL}, '') = 'pending'
-                THEN 1 ELSE 0 END,
-            onboarding_updated_at DESC NULLS LAST,
+                THEN 0 ELSE 1 END,
+            coalesce(latest_intake_sort_at, onboarding_updated_at) DESC NULLS LAST,
             name ASC NULLS LAST
         LIMIT %s
     """
@@ -2094,7 +2719,21 @@ def _list_dashboard_onboarding(
             cursor.execute(trusted_sql(sql), params)
             rows = cursor.fetchall()
 
-    return _shape_dashboard_people_rows(rows)
+    orphan_rows = _list_dashboard_orphan_intake_submissions(
+        query=query,
+        limit=limit,
+        onboarding_state=onboarding_state,
+        onboarder=onboarder,
+        discord=discord,
+        email_508=email_508,
+        resume=resume,
+        skills=skills,
+    )
+    combined_rows = sorted(
+        rows + orphan_rows,
+        key=_dashboard_onboarding_row_sort_key,
+    )[:limit]
+    return _shape_dashboard_people_rows(combined_rows)
 
 
 def _is_dashboard_onboarding_contact_eligible(contact_id: str) -> bool:
@@ -7035,10 +7674,11 @@ async def google_forms_intake_webhook_handler(request: Request) -> JSONResponse:
     try:
         payload = GoogleFormsIntakePayload.model_validate(payload_data)
     except (ValidationError, TypeError) as exc:
-        return JSONResponse(
-            {"error": "invalid_payload", "detail": str(exc)},
-            status_code=400,
+        logger.warning(
+            "Rejecting Google Forms intake webhook: invalid payload: %s",
+            exc,
         )
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
 
     form_validation_error = _validate_google_forms_submission(payload)
     if form_validation_error is not None:
@@ -7083,6 +7723,135 @@ async def google_forms_intake_webhook_handler(request: Request) -> JSONResponse:
         {
             "status": "queued",
             "source": "google_forms",
+            "job_id": job.id,
+            "email": email,
+        },
+        status_code=202,
+    )
+
+
+async def tally_intake_webhook_handler(request: Request) -> JSONResponse:
+    """Validate a Tally intake submission and enqueue a processing job."""
+    body = await request.body()
+    if not _is_tally_webhook_authorized(request, body):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    try:
+        payload_data = json.loads(body)
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+
+    try:
+        tally_payload = TallyWebhookPayload.model_validate(payload_data)
+    except (ValidationError, TypeError) as exc:
+        logger.warning("Rejecting Tally webhook: invalid payload: %s", exc)
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    if tally_payload.event_type != "FORM_RESPONSE":
+        return JSONResponse(
+            {
+                "status": "ignored",
+                "source": "tally",
+                "event_type": tally_payload.event_type,
+            },
+            status_code=202,
+        )
+
+    form_validation_error = _validate_tally_submission(tally_payload)
+    if form_validation_error is not None:
+        return form_validation_error
+
+    try:
+        payload = GoogleFormsIntakePayload.model_validate(
+            _tally_to_intake_payload(tally_payload)
+        )
+    except (ValidationError, TypeError) as exc:
+        logger.warning(
+            "Rejecting Tally webhook: invalid normalized intake payload: %s",
+            exc,
+        )
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    email = (payload.email or "").strip().lower()
+    first_name = (payload.first_name or "").strip()
+    last_name = (payload.last_name or "").strip()
+    if not email or not first_name or not last_name:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    normalized_payload = payload.model_dump(exclude_none=True)
+    raw_tally_fields = [
+        field.model_dump(by_alias=True, exclude_none=True)
+        for field in tally_payload.data.fields
+    ]
+    normalized_payload.update(
+        {
+            "source": "tally",
+            "email": email,
+            "first_name": first_name,
+            "last_name": last_name,
+            "raw_payload": _sanitize_tally_raw_payload(payload_data),
+            "raw_tally_fields": _sanitize_tally_raw_payload(raw_tally_fields),
+        }
+    )
+
+    idempotency_key = _google_forms_intake_idempotency_key(
+        email=email,
+        submission_id=payload.submission_id,
+        submitted_at=payload.submitted_at,
+        payload=normalized_payload,
+    )
+    tally_idempotency_key = f"tally:{idempotency_key}"
+    dry_run_mode = _tally_intake_dry_run_mode(request)
+
+    if dry_run_mode == "webhook":
+        preview_payload = {
+            key: value
+            for key, value in normalized_payload.items()
+            if key not in {"raw_payload", "raw_tally_fields"}
+        }
+        return JSONResponse(
+            {
+                "status": "dry_run",
+                "source": "tally",
+                "dry_run": True,
+                "email": email,
+                "normalized_payload": preview_payload,
+                "raw_tally_field_count": len(tally_payload.data.fields),
+                "would_enqueue": {
+                    "job_type": "process_intake_form_job",
+                    "idempotency_key": tally_idempotency_key,
+                    "queue": settings.redis_queue_name,
+                },
+            },
+            status_code=200,
+        )
+
+    if dry_run_mode == "worker":
+        normalized_payload["dry_run"] = True
+        tally_idempotency_key = f"tally:dry-run:{idempotency_key}"
+
+    queue = request.app.state.queue
+    try:
+        job = await asyncio.to_thread(
+            enqueue_job,
+            queue=queue,
+            fn=JOB_FUNCTIONS["process_intake_form_job"],
+            args=(normalized_payload,),
+            settings=settings,
+            idempotency_key=tally_idempotency_key,
+        )
+    except Exception:
+        logger.exception(
+            "Failed enqueueing Tally intake form job masked_email=%s",
+            mask_email(email),
+        )
+        return JSONResponse({"error": "enqueue_failed"}, status_code=503)
+
+    return JSONResponse(
+        {
+            "status": "queued",
+            "source": "tally",
+            "dry_run": dry_run_mode == "worker",
             "job_id": job.id,
             "email": email,
         },
@@ -8631,6 +9400,16 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
     app.add_api_route(
         "/webhooks/google-forms",
         google_forms_intake_webhook_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/webhooks/tally",
+        tally_intake_webhook_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/webhooks/tally/onboarding",
+        tally_intake_webhook_handler,
         methods=["POST"],
     )
     app.add_api_route("/webhooks/{source}", ingest_handler, methods=["POST"])

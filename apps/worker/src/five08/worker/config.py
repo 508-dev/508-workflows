@@ -24,6 +24,24 @@ class WorkerSettings(SharedSettings):
     espo_base_url: str = ""
     espo_api_key: str = ""
     google_forms_allowed_form_ids: str = ""
+    onboarding_tally_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("ONBOARDING_TALLY_API_KEY", "TALLY_API_KEY"),
+    )
+    onboarding_tally_allowed_form_ids: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "ONBOARDING_TALLY_ALLOWED_FORM_IDS",
+            "TALLY_ALLOWED_FORM_IDS",
+        ),
+    )
+    onboarding_tally_webhook_signing_secret: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "ONBOARDING_TALLY_WEBHOOK_SIGNING_SECRET",
+            "TALLY_WEBHOOK_SIGNING_SECRET",
+        ),
+    )
 
     openai_api_key: str | None = None
     openai_base_url: str | None = None
@@ -89,6 +107,9 @@ class WorkerSettings(SharedSettings):
     intake_resume_fetch_timeout_seconds: float = Field(default=20.0, gt=0)
     intake_resume_max_redirects: int = Field(default=3, ge=0)
     intake_resume_allowed_hosts: str = ""
+    intake_resume_require_virus_scan: bool = False
+    intake_resume_virus_scan_command: str = ""
+    intake_resume_virus_scan_timeout_seconds: float = Field(default=30.0, gt=0)
     email_resume_allowed_extensions: str = "pdf,docx"
     email_resume_max_file_size_mb: int = 10
     email_require_sender_auth_headers: bool = True
@@ -140,6 +161,15 @@ class WorkerSettings(SharedSettings):
             if form_id.strip()
         }
 
+    @property
+    def onboarding_tally_allowed_form_ids_set(self) -> set[str]:
+        """Allowed Tally form IDs used by onboarding intake webhook validation."""
+        return {
+            form_id.strip()
+            for form_id in self.onboarding_tally_allowed_form_ids.split(",")
+            if form_id.strip()
+        }
+
     @model_validator(mode="after")
     def validate_email_resume_intake_settings(self) -> "WorkerSettings":
         """Require mailbox settings when worker-side email intake is enabled."""
@@ -157,6 +187,26 @@ class WorkerSettings(SharedSettings):
         if not (self.imap_server or "").strip():
             raise ValueError(
                 "IMAP_SERVER must be set when EMAIL_RESUME_INTAKE_ENABLED=true"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_intake_resume_scan_settings(self) -> "WorkerSettings":
+        """Require a scanner command when intake resume scanning is enabled."""
+        env = self.environment.strip().lower()
+        if env not in {"local", "dev", "development", "test"} and not (
+            self.intake_resume_require_virus_scan
+        ):
+            raise ValueError(
+                "INTAKE_RESUME_REQUIRE_VIRUS_SCAN must be true when ENVIRONMENT is non-local"
+            )
+        if (
+            self.intake_resume_require_virus_scan
+            and not (self.intake_resume_virus_scan_command or "").strip()
+        ):
+            raise ValueError(
+                "INTAKE_RESUME_VIRUS_SCAN_COMMAND must be set when "
+                "INTAKE_RESUME_REQUIRE_VIRUS_SCAN=true"
             )
         return self
 

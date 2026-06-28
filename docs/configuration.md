@@ -36,9 +36,42 @@ and are intentionally not dashboard-configurable. Onboarding email SMTP settings
 are dashboard-configurable under the Onboarding category when env overrides are
 not set.
 
+Onboarding Tally intake settings are dashboard-configurable under Intake. If
+`ONBOARDING_TALLY_API_KEY` or `ONBOARDING_TALLY_WEBHOOK_SIGNING_SECRET` is set
+in `.env` or the process environment, that env value wins and the dashboard
+shows the field as environment-locked. Legacy `TALLY_*` env aliases still work
+for compatibility.
+
 Newsletter sync settings are normally set from the admin dashboard
 configuration page. A non-empty env or `.env` value locks the matching
 dashboard field.
+
+## Tally Intake
+
+- `ONBOARDING_TALLY_API_KEY`: optional Tally API key for future onboarding-form
+  backfills. The webhook intake path does not require it.
+- `ONBOARDING_TALLY_WEBHOOK_SIGNING_SECRET`: secret used to verify
+  `Tally-Signature` on `/webhooks/tally/onboarding`. When unset, the route falls
+  back to `WEBHOOK_SHARED_SECRET` / `API_SHARED_SECRET` using the existing
+  `X-API-Secret` header path.
+- `ONBOARDING_TALLY_ALLOWED_FORM_IDS`: comma-separated allowlist of accepted
+  onboarding Tally form IDs. Tally intake fails closed when this is unset.
+- `POST /webhooks/tally/onboarding?dry_run=true`: validates auth/signature,
+  checks the form allowlist, and returns the normalized intake payload plus the
+  job metadata it would enqueue without queueing work, writing to the CRM,
+  writing to the DB, or fetching uploaded resumes.
+- `POST /webhooks/tally/onboarding?dry_run=worker`: validates and maps the
+  webhook, then enqueues an intake worker job with `dry_run=true`. The worker
+  performs CRM lookup and builds planned CRM updates, but skips CRM writes and
+  intake DB persistence.
+- `INTAKE_RESUME_REQUIRE_VIRUS_SCAN`: when true, downloaded resume files are not
+  parsed unless the malware scan command succeeds. Defaults to false for
+  local/dev/test. Non-local deployments must set this to true.
+- `INTAKE_RESUME_VIRUS_SCAN_COMMAND`: command used to scan downloaded resumes.
+  Required when `INTAKE_RESUME_REQUIRE_VIRUS_SCAN=true`. Include `{path}` where
+  the temporary resume filepath should be inserted. When `{path}` is omitted,
+  the filepath is appended as the final argument.
+- `INTAKE_RESUME_VIRUS_SCAN_TIMEOUT_SECONDS`: scan command timeout.
 
 ## Queue And Jobs
 
