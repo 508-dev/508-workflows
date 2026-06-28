@@ -103,10 +103,11 @@ class IntakeFormProcessor:
 
     def process_intake(self, *, payload: Mapping[str, Any]) -> dict[str, Any]:
         """Look up CRM contact by email and update/create prospect records."""
-        email = self._normalize_text(payload.get("email"))
+        email = self._normalize_email(payload.get("email"))
         first_name = self._normalize_text(payload.get("first_name"))
         last_name = self._normalize_text(payload.get("last_name"))
         last_name_is_placeholder = bool(payload.get("last_name_is_placeholder"))
+        dry_run = self._parse_bool(payload.get("dry_run"))
         masked_email = mask_email(email or "")
 
         if not email or not first_name or not last_name:
@@ -175,6 +176,17 @@ class IntakeFormProcessor:
                     "Persisting intake without CRM create due to placeholder last name masked_email=%s",
                     masked_email,
                 )
+                if dry_run:
+                    return {
+                        "success": True,
+                        "dry_run": True,
+                        "action": "persist_orphan",
+                        "created": False,
+                        "contact_id": None,
+                        "updated_fields": [],
+                        "pending_review": True,
+                        "reason": "placeholder_last_name",
+                    }
                 self._persist_intake_submission(
                     payload=payload,
                     contact_id=None,
@@ -194,6 +206,7 @@ class IntakeFormProcessor:
                 last_name=last_name,
                 payload=payload,
                 masked_email=masked_email,
+                dry_run=dry_run,
             )
 
         if len(contact_list) > 1:
@@ -228,6 +241,7 @@ class IntakeFormProcessor:
             payload=payload,
             masked_email=masked_email,
             include_last_name=not last_name_is_placeholder,
+            dry_run=dry_run,
         )
 
     def _is_member_contact(self, contact: Mapping[str, Any]) -> bool:
@@ -249,6 +263,7 @@ class IntakeFormProcessor:
         last_name: str,
         payload: Mapping[str, Any],
         masked_email: str,
+        dry_run: bool = False,
     ) -> dict[str, Any]:
         base_updates = self._build_intake_updates(
             email=email,
@@ -262,6 +277,20 @@ class IntakeFormProcessor:
                 masked_email,
             )
             return {"success": False, "error": "No updates available"}
+
+        if dry_run:
+            logger.info(
+                "Dry-run intake would create prospect masked_email=%s", masked_email
+            )
+            return {
+                "success": True,
+                "dry_run": True,
+                "action": "create_prospect",
+                "created": True,
+                "contact_id": None,
+                "updated_fields": sorted(base_updates.keys()),
+                "planned_updates": base_updates,
+            }
 
         try:
             created = self.api.request("POST", "Contact", base_updates)
@@ -305,6 +334,7 @@ class IntakeFormProcessor:
         payload: Mapping[str, Any],
         masked_email: str,
         include_last_name: bool = True,
+        dry_run: bool = False,
     ) -> dict[str, Any]:
         contact_id = str(contact.get("id", "")).strip()
         if not contact_id:
@@ -321,6 +351,16 @@ class IntakeFormProcessor:
         )
         if not updates:
             logger.info("No prospect updates needed for contact_id=%s", contact_id)
+            if dry_run:
+                return {
+                    "success": True,
+                    "dry_run": True,
+                    "action": "no_updates",
+                    "created": False,
+                    "contact_id": contact_id,
+                    "updated_fields": [],
+                    "planned_updates": {},
+                }
             self._persist_intake_submission(
                 payload=payload,
                 contact_id=contact_id,
@@ -331,6 +371,23 @@ class IntakeFormProcessor:
                 "created": False,
                 "contact_id": contact_id,
                 "updated_fields": [],
+            }
+
+        if dry_run:
+            logger.info(
+                "Dry-run intake would update prospect contact_id=%s masked_email=%s fields=%s",
+                contact_id,
+                masked_email,
+                sorted(updates.keys()),
+            )
+            return {
+                "success": True,
+                "dry_run": True,
+                "action": "update_prospect",
+                "created": False,
+                "contact_id": contact_id,
+                "updated_fields": sorted(updates.keys()),
+                "planned_updates": updates,
             }
 
         try:
@@ -983,6 +1040,17 @@ class IntakeFormProcessor:
             return None
         normalized = value.strip()
         return normalized or None
+
+    def _normalize_email(self, value: object) -> str | None:
+        normalized = self._normalize_text(value)
+        return normalized.lower() if normalized else None
+
+    def _parse_bool(self, value: object) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().casefold() in {"1", "true", "yes", "on"}
+        return False
 
     def _normalize_timezone(self, value: object) -> str | None:
         return normalize_timezone(value)

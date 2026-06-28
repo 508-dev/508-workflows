@@ -20,7 +20,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, cast
-from urllib.parse import quote, unquote, urlencode, urlparse
+from urllib.parse import quote, unquote, urlencode, urlparse, urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
 import httpx
@@ -797,6 +797,37 @@ def _is_tally_webhook_authorized(request: Request, body: bytes) -> bool:
         return True
     logger.warning("Rejecting Tally webhook: invalid Tally-Signature")
     return False
+
+
+def _tally_intake_dry_run_mode(
+    request: Request,
+) -> Literal["none", "webhook", "worker"]:
+    value = request.query_params.get("dry_run") or request.headers.get("X-Dry-Run")
+    normalized = str(value or "").strip().casefold()
+    if normalized in {"worker", "job", "enqueue"}:
+        return "worker"
+    if normalized in {"1", "true", "yes", "on", "webhook"}:
+        return "webhook"
+    return "none"
+
+
+def _strip_url_query(value: str) -> str:
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.query:
+        return value
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", parsed.fragment))
+
+
+def _sanitize_tally_raw_payload(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _sanitize_tally_raw_payload(item) for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_tally_raw_payload(item) for item in value]
+    if isinstance(value, str):
+        return _strip_url_query(value)
+    return value
 
 
 def _validate_tally_submission(payload: TallyWebhookPayload) -> JSONResponse | None:
@@ -2465,6 +2496,22 @@ def _list_dashboard_orphan_intake_submissions(
             return cursor.fetchall()
 
 
+def _dashboard_onboarding_row_sort_key(
+    row: Mapping[str, Any],
+) -> tuple[int, float, str]:
+    state_rank = (
+        1
+        if _normalize_onboarding_state_key(row.get("onboarding_state")) == "pending"
+        else 0
+    )
+    updated_at = row.get("onboarding_updated_at")
+    updated_rank = (
+        -updated_at.timestamp() if isinstance(updated_at, datetime) else float("inf")
+    )
+    name = str(row.get("name") or "").casefold()
+    return (state_rank, updated_rank, name or "\uffff")
+
+
 def _list_dashboard_onboarding(
     *,
     query: str | None,
@@ -2654,20 +2701,21 @@ def _list_dashboard_onboarding(
             cursor.execute(sql, params)
             rows = cursor.fetchall()
 
-    orphan_rows: list[dict[str, Any]] = []
-    remaining = limit - len(rows)
-    if remaining > 0:
-        orphan_rows = _list_dashboard_orphan_intake_submissions(
-            query=query,
-            limit=remaining,
-            onboarding_state=onboarding_state,
-            onboarder=onboarder,
-            discord=discord,
-            email_508=email_508,
-            resume=resume,
-            skills=skills,
-        )
-    return _shape_dashboard_people_rows(rows + orphan_rows)
+    orphan_rows = _list_dashboard_orphan_intake_submissions(
+        query=query,
+        limit=limit,
+        onboarding_state=onboarding_state,
+        onboarder=onboarder,
+        discord=discord,
+        email_508=email_508,
+        resume=resume,
+        skills=skills,
+    )
+    combined_rows = sorted(
+        rows + orphan_rows,
+        key=_dashboard_onboarding_row_sort_key,
+    )[:limit]
+    return _shape_dashboard_people_rows(combined_rows)
 
 
 def _is_dashboard_onboarding_contact_eligible(contact_id: str) -> bool:
@@ -7715,17 +7763,18 @@ async def tally_intake_webhook_handler(request: Request) -> JSONResponse:
         return JSONResponse({"error": "invalid_payload"}, status_code=400)
 
     normalized_payload = payload.model_dump(exclude_none=True)
+    raw_tally_fields = [
+        field.model_dump(by_alias=True, exclude_none=True)
+        for field in tally_payload.data.fields
+    ]
     normalized_payload.update(
         {
             "source": "tally",
             "email": email,
             "first_name": first_name,
             "last_name": last_name,
-            "raw_payload": payload_data,
-            "raw_tally_fields": [
-                field.model_dump(by_alias=True, exclude_none=True)
-                for field in tally_payload.data.fields
-            ],
+            "raw_payload": _sanitize_tally_raw_payload(payload_data),
+            "raw_tally_fields": _sanitize_tally_raw_payload(raw_tally_fields),
         }
     )
 
@@ -7735,6 +7784,35 @@ async def tally_intake_webhook_handler(request: Request) -> JSONResponse:
         submitted_at=payload.submitted_at,
         payload=normalized_payload,
     )
+    tally_idempotency_key = f"tally:{idempotency_key}"
+    dry_run_mode = _tally_intake_dry_run_mode(request)
+
+    if dry_run_mode == "webhook":
+        preview_payload = {
+            key: value
+            for key, value in normalized_payload.items()
+            if key not in {"raw_payload", "raw_tally_fields"}
+        }
+        return JSONResponse(
+            {
+                "status": "dry_run",
+                "source": "tally",
+                "dry_run": True,
+                "email": email,
+                "normalized_payload": preview_payload,
+                "raw_tally_field_count": len(tally_payload.data.fields),
+                "would_enqueue": {
+                    "job_type": "process_intake_form_job",
+                    "idempotency_key": tally_idempotency_key,
+                    "queue": settings.redis_queue_name,
+                },
+            },
+            status_code=200,
+        )
+
+    if dry_run_mode == "worker":
+        normalized_payload["dry_run"] = True
+        tally_idempotency_key = f"tally:dry-run:{idempotency_key}"
 
     queue = request.app.state.queue
     try:
@@ -7744,7 +7822,7 @@ async def tally_intake_webhook_handler(request: Request) -> JSONResponse:
             fn=JOB_FUNCTIONS["process_intake_form_job"],
             args=(normalized_payload,),
             settings=settings,
-            idempotency_key=f"tally:{idempotency_key}",
+            idempotency_key=tally_idempotency_key,
         )
     except Exception:
         logger.exception(
@@ -7757,6 +7835,7 @@ async def tally_intake_webhook_handler(request: Request) -> JSONResponse:
         {
             "status": "queued",
             "source": "tally",
+            "dry_run": dry_run_mode == "worker",
             "job_id": job.id,
             "email": email,
         },

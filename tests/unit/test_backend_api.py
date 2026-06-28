@@ -3304,44 +3304,81 @@ def test_list_dashboard_onboarding_includes_orphan_intake_without_raw_payload() 
     assert "people.contact_type ILIKE '%prospect%'" in orphan_sql
 
 
-def test_list_dashboard_onboarding_skips_orphans_when_people_fill_limit() -> None:
-    created_at = datetime(2026, 6, 15, 10, 0, tzinfo=timezone.utc)
+def test_list_dashboard_onboarding_merges_orphans_before_applying_limit() -> None:
+    people_created_at = datetime(2026, 6, 15, 10, 0, tzinfo=timezone.utc)
+    orphan_created_at = datetime(2026, 6, 15, 11, 0, tzinfo=timezone.utc)
     cursor = Mock()
     cursor.__enter__ = Mock(return_value=cursor)
     cursor.__exit__ = Mock(return_value=None)
-    cursor.fetchall.return_value = [
-        {
-            "id": "person-1",
-            "crm_contact_id": "contact-1",
-            "name": "Bea Prospect",
-            "email": "bea@example.com",
-            "email_508": None,
-            "discord_user_id": None,
-            "discord_username": None,
-            "discord_roles": [],
-            "github_username": None,
-            "contact_type": "Prospect",
-            "is_member": False,
-            "address_country": None,
-            "address_city": None,
-            "address_state": None,
-            "timezone": None,
-            "seniority": None,
-            "linkedin": None,
-            "skills": [],
-            "latest_resume_id": None,
-            "latest_resume_name": None,
-            "onboarding_state": "pending",
-            "onboarder": None,
-            "onboarding_updated_at": created_at,
-            "onboarding_email_sent_at": None,
-            "onboarding_email_sent_by": None,
-            "onboarding_email_recipient": None,
-            "latest_intake_submission": None,
-            "sync_status": "active",
-            "created_at": created_at,
-            "updated_at": created_at,
-        }
+    cursor.fetchall.side_effect = [
+        [
+            {
+                "id": "person-1",
+                "crm_contact_id": "contact-1",
+                "name": "Bea Prospect",
+                "email": "bea@example.com",
+                "email_508": None,
+                "discord_user_id": None,
+                "discord_username": None,
+                "discord_roles": [],
+                "github_username": None,
+                "contact_type": "Prospect",
+                "is_member": False,
+                "address_country": None,
+                "address_city": None,
+                "address_state": None,
+                "timezone": None,
+                "seniority": None,
+                "linkedin": None,
+                "skills": [],
+                "latest_resume_id": None,
+                "latest_resume_name": None,
+                "onboarding_state": "pending",
+                "onboarder": None,
+                "onboarding_updated_at": people_created_at,
+                "onboarding_email_sent_at": None,
+                "onboarding_email_sent_by": None,
+                "onboarding_email_recipient": None,
+                "latest_intake_submission": None,
+                "sync_status": "active",
+                "created_at": people_created_at,
+                "updated_at": people_created_at,
+            }
+        ],
+        [
+            {
+                "id": "intake-1",
+                "crm_contact_id": None,
+                "name": "New Applicant",
+                "email": "new@example.com",
+                "email_508": None,
+                "discord_user_id": None,
+                "discord_username": None,
+                "discord_roles": [],
+                "github_username": None,
+                "contact_type": "Prospect",
+                "is_member": False,
+                "address_country": None,
+                "address_city": None,
+                "address_state": None,
+                "timezone": None,
+                "seniority": None,
+                "linkedin": None,
+                "skills": [],
+                "latest_resume_id": None,
+                "latest_resume_name": None,
+                "onboarding_state": "pending",
+                "onboarder": None,
+                "onboarding_updated_at": orphan_created_at,
+                "onboarding_email_sent_at": None,
+                "onboarding_email_sent_by": None,
+                "onboarding_email_recipient": None,
+                "latest_intake_submission": None,
+                "sync_status": "intake",
+                "created_at": orphan_created_at,
+                "updated_at": orphan_created_at,
+            }
+        ],
     ]
     conn = Mock()
     conn.__enter__ = Mock(return_value=conn)
@@ -3360,8 +3397,8 @@ def test_list_dashboard_onboarding_skips_orphans_when_people_fill_limit() -> Non
             skills=None,
         )
 
-    assert [person["crm_contact_id"] for person in queue] == ["contact-1"]
-    cursor.execute.assert_called_once()
+    assert [person["email"] for person in queue] == ["new@example.com"]
+    assert cursor.execute.call_count == 2
 
 
 def test_dashboard_gigs_filters_member_to_own_gigs(client: TestClient) -> None:
@@ -9478,6 +9515,134 @@ def test_tally_intake_enqueues_job_from_webhook_fields(
     assert len(intake_payload["raw_tally_fields"]) == len(
         _TALLY_INTAKE_PAYLOAD["data"]["fields"]
     )
+
+
+def test_tally_intake_dry_run_returns_projection_without_enqueueing(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Dry-run Tally webhooks should validate and map without queue side effects."""
+    with (
+        patch.object(api.settings, "onboarding_tally_webhook_signing_secret", None),
+        patch.object(api.settings, "onboarding_tally_allowed_form_ids", "tally-form-1"),
+        patch("five08.backend.api.enqueue_job") as mock_enqueue,
+    ):
+        response = client.post(
+            "/webhooks/tally/onboarding?dry_run=true",
+            json=_TALLY_INTAKE_PAYLOAD,
+            headers=auth_headers,
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["status"] == "dry_run"
+    assert payload["source"] == "tally"
+    assert payload["dry_run"] is True
+    assert payload["email"] == "jane@example.com"
+    assert payload["raw_tally_field_count"] == len(
+        _TALLY_INTAKE_PAYLOAD["data"]["fields"]
+    )
+    assert payload["would_enqueue"] == {
+        "job_type": "process_intake_form_job",
+        "idempotency_key": "tally:intake:jane@example.com:tally-sub-42",
+        "queue": api.settings.redis_queue_name,
+    }
+
+    normalized_payload = payload["normalized_payload"]
+    assert normalized_payload["source"] == "tally"
+    assert normalized_payload["form_id"] == "tally-form-1"
+    assert normalized_payload["email"] == "jane@example.com"
+    assert normalized_payload["first_name"] == "Jane"
+    assert normalized_payload["last_name"] == "Doe"
+    assert normalized_payload["github_username"] == "janedoe"
+    assert (
+        normalized_payload["resume_url"]
+        == "https://storage.googleapis.com/tally/resume.pdf"
+    )
+    assert normalized_payload["resume_file_name"] == "Jane_Doe_Resume.pdf"
+    assert "raw_payload" not in normalized_payload
+    assert "raw_tally_fields" not in normalized_payload
+    mock_enqueue.assert_not_called()
+
+
+def test_tally_intake_worker_dry_run_enqueues_no_write_job(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Worker dry-run Tally webhooks should enqueue with a dry-run payload flag."""
+    with (
+        patch.object(api.settings, "onboarding_tally_webhook_signing_secret", None),
+        patch.object(api.settings, "onboarding_tally_allowed_form_ids", "tally-form-1"),
+        patch("five08.backend.api.enqueue_job") as mock_enqueue,
+    ):
+        mock_enqueue.return_value = Mock(id="job-tally-dry-run-1")
+        response = client.post(
+            "/webhooks/tally/onboarding?dry_run=worker",
+            json=_TALLY_INTAKE_PAYLOAD,
+            headers=auth_headers,
+        )
+
+    payload = response.json()
+    assert response.status_code == 202
+    assert payload["status"] == "queued"
+    assert payload["source"] == "tally"
+    assert payload["dry_run"] is True
+    assert payload["job_id"] == "job-tally-dry-run-1"
+    assert payload["email"] == "jane@example.com"
+
+    call_kwargs = mock_enqueue.call_args.kwargs
+    assert (
+        call_kwargs["idempotency_key"]
+        == "tally:dry-run:intake:jane@example.com:tally-sub-42"
+    )
+    intake_payload = call_kwargs["args"][0]
+    assert intake_payload["dry_run"] is True
+    assert intake_payload["email"] == "jane@example.com"
+
+
+def test_tally_intake_strips_signed_urls_from_raw_payload_before_enqueue(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """Queued raw Tally payloads should not retain signed URL query tokens."""
+    tally_payload = json.loads(json.dumps(_TALLY_INTAKE_PAYLOAD))
+    tally_payload["data"]["submissionPdfUrl"] = (
+        "https://tally.so/r/abc.pdf?accessToken=secret&signature=sig"
+    )
+    tally_payload["data"]["submissionPreviewUrl"] = (
+        "https://tally.so/r/abc?accessToken=secret&signature=sig"
+    )
+    for field in tally_payload["data"]["fields"]:
+        if field["key"] == "question_resume":
+            field["value"][0]["url"] = (
+                "https://storage.googleapis.com/tally/resume.pdf?signature=sig"
+            )
+
+    with (
+        patch.object(api.settings, "onboarding_tally_webhook_signing_secret", None),
+        patch.object(api.settings, "onboarding_tally_allowed_form_ids", "tally-form-1"),
+        patch("five08.backend.api.enqueue_job") as mock_enqueue,
+    ):
+        mock_enqueue.return_value = Mock(id="job-tally-1")
+        response = client.post(
+            "/webhooks/tally/onboarding",
+            json=tally_payload,
+            headers=auth_headers,
+        )
+
+    assert response.status_code == 202
+    intake_payload = mock_enqueue.call_args.kwargs["args"][0]
+    assert (
+        intake_payload["resume_url"]
+        == "https://storage.googleapis.com/tally/resume.pdf?signature=sig"
+    )
+    raw_payload = intake_payload["raw_payload"]
+    assert raw_payload["data"]["submissionPdfUrl"] == "https://tally.so/r/abc.pdf"
+    assert raw_payload["data"]["submissionPreviewUrl"] == "https://tally.so/r/abc"
+    raw_resume_url = raw_payload["data"]["fields"][6]["value"][0]["url"]
+    assert raw_resume_url == "https://storage.googleapis.com/tally/resume.pdf"
+    raw_tally_resume_url = intake_payload["raw_tally_fields"][6]["value"][0]["url"]
+    assert raw_tally_resume_url == "https://storage.googleapis.com/tally/resume.pdf"
 
 
 def test_tally_intake_enqueues_single_token_name_and_schemeless_github(

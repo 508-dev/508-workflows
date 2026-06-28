@@ -56,6 +56,14 @@ dashboard field.
   `X-API-Secret` header path.
 - `ONBOARDING_TALLY_ALLOWED_FORM_IDS`: comma-separated allowlist of accepted
   onboarding Tally form IDs. Tally intake fails closed when this is unset.
+- `POST /webhooks/tally/onboarding?dry_run=true`: validates auth/signature,
+  checks the form allowlist, and returns the normalized intake payload plus the
+  job metadata it would enqueue without queueing work, writing to the CRM,
+  writing to the DB, or fetching uploaded resumes.
+- `POST /webhooks/tally/onboarding?dry_run=worker`: validates and maps the
+  webhook, then enqueues an intake worker job with `dry_run=true`. The worker
+  performs CRM lookup and builds planned CRM updates, but skips CRM writes and
+  intake DB persistence.
 - `INTAKE_RESUME_REQUIRE_VIRUS_SCAN`: when true, downloaded resume files are not
   parsed unless the malware scan command succeeds. Defaults to false for
   local/dev/test. Non-local deployments must set this to true.

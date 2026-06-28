@@ -39,6 +39,100 @@ def test_intake_form_processor_creates_prospect_when_not_found() -> None:
     assert create_payload["cGitHubUsername"] == "newdev"
 
 
+def test_intake_form_processor_lowercases_email_for_lookup_and_persistence() -> None:
+    """Intake processing should use lowercase email for CRM lookup and DB joins."""
+    processor = IntakeFormProcessor()
+    processor.api = MagicMock()
+    processor.api.request.side_effect = [
+        {"list": []},
+        {"id": "contact-1"},
+    ]
+
+    with patch.object(processor, "_persist_intake_submission") as mock_persist:
+        result = processor.process_intake(
+            payload={
+                "email": " New@Example.COM ",
+                "first_name": "New",
+                "last_name": "Person",
+                "form_id": "form-1",
+            }
+        )
+
+    assert result["success"] is True
+    lookup_params = processor.api.request.call_args_list[0].args[2]
+    create_payload = processor.api.request.call_args_list[1].args[2]
+    assert lookup_params["where[0][value]"] == "new@example.com"
+    assert create_payload["emailAddress"] == "new@example.com"
+    mock_persist.assert_called_once()
+    assert mock_persist.call_args.kwargs["email"] == "new@example.com"
+
+
+def test_intake_form_processor_dry_run_create_does_not_write_crm_or_db() -> None:
+    """Dry-run create should search CRM and return planned fields without writes."""
+    processor = IntakeFormProcessor()
+    processor.api = MagicMock()
+    processor.api.request.return_value = {"list": []}
+
+    with patch.object(processor, "_persist_intake_submission") as mock_persist:
+        result = processor.process_intake(
+            payload={
+                "dry_run": True,
+                "email": "new@example.com",
+                "first_name": "New",
+                "last_name": "Person",
+                "github_username": "https://github.com/newdev",
+                "form_id": "form-1",
+            }
+        )
+
+    assert result["success"] is True
+    assert result["dry_run"] is True
+    assert result["action"] == "create_prospect"
+    assert result["created"] is True
+    assert result["contact_id"] is None
+    assert result["planned_updates"]["emailAddress"] == "new@example.com"
+    assert result["planned_updates"]["cGitHubUsername"] == "newdev"
+    assert processor.api.request.call_count == 1
+    mock_persist.assert_not_called()
+
+
+def test_intake_form_processor_dry_run_update_does_not_write_crm_or_db() -> None:
+    """Dry-run update should return planned updates without PUT or persistence."""
+    processor = IntakeFormProcessor()
+    processor.api = MagicMock()
+    processor.api.request.return_value = {
+        "list": [
+            {
+                "id": "contact-1",
+                "type": "Prospect",
+                "firstName": "Existing",
+                "lastName": "Person",
+            }
+        ]
+    }
+
+    with patch.object(processor, "_persist_intake_submission") as mock_persist:
+        result = processor.process_intake(
+            payload={
+                "dry_run": "true",
+                "email": "existing@example.com",
+                "first_name": "Existing",
+                "last_name": "Person",
+                "github_username": "existingdev",
+                "form_id": "form-1",
+            }
+        )
+
+    assert result["success"] is True
+    assert result["dry_run"] is True
+    assert result["action"] == "update_prospect"
+    assert result["created"] is False
+    assert result["contact_id"] == "contact-1"
+    assert result["planned_updates"]["cGitHubUsername"] == "existingdev"
+    assert processor.api.request.call_count == 1
+    mock_persist.assert_not_called()
+
+
 def test_intake_form_processor_rejects_tally_when_allowed_forms_unset() -> None:
     """Worker-side Tally intake should fail closed if jobs bypass the webhook."""
     processor = IntakeFormProcessor()
