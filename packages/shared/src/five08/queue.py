@@ -7,17 +7,28 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from uuid import uuid4
 
 from psycopg import Connection, connect
 from psycopg.rows import dict_row
+from psycopg.sql import SQL
 from psycopg.types.json import Jsonb
 from redis import Redis
 
 from five08.settings import SharedSettings
 
 logger = logging.getLogger(__name__)
+
+
+def trusted_sql(query: str) -> SQL:
+    """Type SQL assembled only from internal fragments plus placeholders.
+
+    Do not pass user input through this helper. Dynamic values must stay in
+    psycopg parameter tuples; dynamic identifiers need psycopg.sql composition.
+    The runtime value remains a plain str so tests can inspect executed SQL.
+    """
+    return cast(SQL, query)
 
 
 class JobStatus(StrEnum):
@@ -233,7 +244,7 @@ def list_jobs(
                 LIMIT %s
             """
             cursor.execute(
-                query,
+                trusted_sql(query),
                 (*params, limit),
             )
             rows = cursor.fetchall()
@@ -289,7 +300,7 @@ def _mark_job(
     """
     with get_postgres_connection(settings) as conn:
         with conn.cursor() as cursor:
-            cursor.execute(query, params)
+            cursor.execute(trusted_sql(query), params)
 
 
 def mark_job_running(

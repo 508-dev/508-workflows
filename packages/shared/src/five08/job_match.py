@@ -6,7 +6,10 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from openai.types.chat import ChatCompletion
 
 from five08.discord_webhook import DiscordWebhookLogger
 from five08.llm import ProviderModel
@@ -775,22 +778,25 @@ def rerank_shortlisted_candidates(
     prompt = _build_rerank_prompt(posting_text, requirements, candidates)
 
     try:
-        response = client.chat.completions.create(
-            **provider_model.chat_completion_kwargs(
-                temperature=0.1,
-                response_format={"type": "json_object"},
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a senior recruiting coordinator. Rerank a shortlist "
-                            "using only the provided evidence. Return only valid JSON."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=2500,
-            )
+        response = cast(
+            "ChatCompletion",
+            client.chat.completions.create(
+                **provider_model.chat_completion_kwargs(
+                    temperature=0.1,
+                    response_format={"type": "json_object"},
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a senior recruiting coordinator. Rerank a shortlist "
+                                "using only the provided evidence. Return only valid JSON."
+                            ),
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    max_tokens=2500,
+                )
+            ),
         )
     except Exception as exc:
         logger.error("OpenAI candidate rerank call failed: %s", exc)
@@ -885,22 +891,25 @@ def extract_job_requirements(
     prompt = _build_prompt(posting_text, hints)
 
     try:
-        response = client.chat.completions.create(
-            **provider_model.chat_completion_kwargs(
-                temperature=0.1,
-                response_format={"type": "json_object"},
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a recruiting assistant. Extract structured hiring requirements "
-                            "from job postings. Return only valid JSON."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=2048,
-            )
+        response = cast(
+            "ChatCompletion",
+            client.chat.completions.create(
+                **provider_model.chat_completion_kwargs(
+                    temperature=0.1,
+                    response_format={"type": "json_object"},
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a recruiting assistant. Extract structured hiring requirements "
+                                "from job postings. Return only valid JSON."
+                            ),
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    max_tokens=2048,
+                )
+            ),
         )
     except Exception as exc:
         logger.error("OpenAI job extraction call failed: %s", exc)

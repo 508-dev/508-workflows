@@ -20,6 +20,18 @@ dependencies = [
 five08 = { workspace = true }
 worker = { workspace = true }
 
+[tool.pyrefly]
+project-includes = ["src/five08"]
+search-path = [
+    "src",
+    "../discord_bot/src",
+    "../worker/src",
+    "../../packages/shared/src",
+]
+python-version = "3.12"
+preset = "legacy"
+ignore-missing-imports = [".*"]
+
 [project.scripts]
 backend-api = "five08.backend.api:run"
 

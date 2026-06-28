@@ -19,6 +19,18 @@ dependencies = [
     "langfuse==4.6.1",
 ]
 
+[tool.pyrefly]
+project-includes = ["src/five08"]
+search-path = [
+    "src",
+    "../../apps/api/src",
+    "../../apps/discord_bot/src",
+    "../../apps/worker/src",
+]
+python-version = "3.12"
+preset = "legacy"
+ignore-missing-imports = [".*"]
+
 [project.scripts]
 crmctl = "five08.crm_cli:run"
 agent-eval = "five08.agent.evals:main"
