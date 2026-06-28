@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
@@ -92,6 +92,13 @@ class IntakeResumeFile:
     filename: str
     content: bytes
     source_url: str
+
+
+class _ResumeFileNotProvided:
+    pass
+
+
+_RESUME_FILE_NOT_PROVIDED = _ResumeFileNotProvided()
 
 
 class IntakeFormProcessor:
@@ -464,7 +471,9 @@ class IntakeFormProcessor:
         payload: Mapping[str, Any],
         include_email: bool = True,
         include_last_name: bool = True,
-        resume_file: IntakeResumeFile | None = None,
+        resume_file: IntakeResumeFile | None | _ResumeFileNotProvided = (
+            _RESUME_FILE_NOT_PROVIDED
+        ),
     ) -> dict[str, Any]:
         updates: dict[str, Any] = {"firstName": first_name}
         if include_last_name:
@@ -698,22 +707,27 @@ class IntakeFormProcessor:
         self,
         payload: Mapping[str, Any],
         *,
-        resume_file: IntakeResumeFile | None = None,
+        resume_file: IntakeResumeFile | None | _ResumeFileNotProvided = (
+            _RESUME_FILE_NOT_PROVIDED
+        ),
     ) -> dict[str, Any]:
-        if resume_file is None:
-            resume_file = self._prepare_resume_file(payload)
-        if resume_file is None:
+        prepared_resume_file: IntakeResumeFile | None
+        if resume_file is _RESUME_FILE_NOT_PROVIDED:
+            prepared_resume_file = self._prepare_resume_file(payload)
+        else:
+            prepared_resume_file = cast(IntakeResumeFile | None, resume_file)
+        if prepared_resume_file is None:
             return {}
 
         try:
             resume_text = self.document_processor.extract_text(
-                resume_file.content,
-                resume_file.filename,
+                prepared_resume_file.content,
+                prepared_resume_file.filename,
             )
         except Exception as exc:
             logger.warning(
                 "Failed to parse resume masked_url=%s error=%s",
-                self._mask_resume_url_for_log(resume_file.source_url),
+                self._mask_resume_url_for_log(prepared_resume_file.source_url),
                 exc,
             )
             return {}

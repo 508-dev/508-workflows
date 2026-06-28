@@ -136,6 +136,33 @@ def test_intake_form_processor_dry_run_create_reports_resume_upload_plan() -> No
     mock_persist.assert_not_called()
 
 
+def test_create_prospect_does_not_retry_failed_resume_prepare() -> None:
+    """Create flow should not download/scan a failed resume more than once."""
+    processor = IntakeFormProcessor()
+    processor.api = MagicMock()
+    processor.api.request.side_effect = [
+        {"list": []},
+        {"id": "contact-1"},
+    ]
+
+    with (
+        patch.object(processor, "_prepare_resume_file", return_value=None) as prepare,
+        patch.object(processor, "_persist_intake_submission"),
+    ):
+        result = processor.process_intake(
+            payload={
+                "email": "new@example.com",
+                "first_name": "New",
+                "last_name": "Person",
+                "resume_url": "https://tally.so/resume.pdf",
+                "form_id": "form-1",
+            }
+        )
+
+    assert result["success"] is True
+    prepare.assert_called_once()
+
+
 def test_intake_form_processor_dry_run_update_does_not_write_crm_or_db() -> None:
     """Dry-run update should return planned updates without PUT or persistence."""
     processor = IntakeFormProcessor()
@@ -171,6 +198,34 @@ def test_intake_form_processor_dry_run_update_does_not_write_crm_or_db() -> None
     assert result["planned_updates"]["cGitHubUsername"] == "existingdev"
     assert processor.api.request.call_count == 1
     mock_persist.assert_not_called()
+
+
+def test_update_prospect_does_not_retry_failed_resume_prepare() -> None:
+    """Update flow should not download/scan a failed resume more than once."""
+    processor = IntakeFormProcessor()
+    processor.api = MagicMock()
+    processor.api.request.side_effect = [
+        {"list": [{"id": "contact-1", "type": "Prospect"}]},
+        {},
+    ]
+
+    with (
+        patch.object(processor, "_prepare_resume_file", return_value=None) as prepare,
+        patch.object(processor, "_persist_intake_submission"),
+    ):
+        result = processor.process_intake(
+            payload={
+                "email": "existing@example.com",
+                "first_name": "Existing",
+                "last_name": "Person",
+                "github_username": "existing-dev",
+                "resume_url": "https://tally.so/resume.pdf",
+                "form_id": "form-1",
+            }
+        )
+
+    assert result["success"] is True
+    prepare.assert_called_once()
 
 
 def test_intake_form_processor_uploads_resume_after_create() -> None:
