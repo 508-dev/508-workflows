@@ -3,6 +3,8 @@ multi-ecosystem-groups:
   dependency-updates:
     schedule:
       interval: daily
+    commit-message:
+      prefix: ⬆
 updates:
   # GitHub Actions
   - package-ecosystem: github-actions
@@ -11,8 +13,6 @@ updates:
     multi-ecosystem-group: dependency-updates
     cooldown:
       default-days: 7
-    commit-message:
-      prefix: ⬆
   # Python
   - package-ecosystem: uv
     directory: /
@@ -20,8 +20,6 @@ updates:
     multi-ecosystem-group: dependency-updates
     cooldown:
       default-days: 7
-    commit-message:
-      prefix: ⬆
   # Admin dashboard
   - package-ecosystem: bun
     directory: /apps/admin_dashboard
@@ -29,5 +27,3 @@ updates:
     multi-ecosystem-group: dependency-updates
     cooldown:
       default-days: 7
-    commit-message:
-      prefix: ⬆

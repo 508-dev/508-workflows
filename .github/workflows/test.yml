@@ -13,6 +13,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
 
     - name: Install uv
       uses: astral-sh/setup-uv@v8.1.0
@@ -61,6 +63,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
 
     - name: Install uv
       uses: astral-sh/setup-uv@v8.1.0
@@ -97,6 +101,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
 
     - name: Install uv
       uses: astral-sh/setup-uv@v8.1.0
@@ -129,6 +135,7 @@ jobs:
     - uses: actions/checkout@v7
       with:
         fetch-depth: 0
+        persist-credentials: false
 
     - name: Detect agent eval relevant changes
       id: agent-eval-changes
@@ -228,6 +235,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
 
     - name: Install uv
       uses: astral-sh/setup-uv@v8.1.0
