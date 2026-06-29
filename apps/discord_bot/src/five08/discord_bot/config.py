@@ -25,7 +25,7 @@ class Settings(SharedSettings):
     Required settings must be provided via environment variables or .env file.
     """
 
-    discord_bot_token: str
+    discord_bot_token: str = ""
 
     discord_admin_roles: str = "Admin,Owner"
     discord_default_job_forum_channels: str = "gigs:part_time,fulltime-roles:full_time"

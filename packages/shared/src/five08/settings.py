@@ -3,7 +3,7 @@
 import os
 import sys
 
-from pydantic import AliasChoices, Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,6 +12,9 @@ def normalize_sqlalchemy_postgres_url(url: str) -> str:
     if url.startswith("postgresql://"):
         return url.replace("postgresql://", "postgresql+psycopg://", 1)
     return url
+
+
+DEFAULT_POSTGRES_URL = "postgresql://postgres:postgres@127.0.0.1:5432/workflows"
 
 
 class SharedSettings(BaseSettings):
@@ -32,7 +35,7 @@ class SharedSettings(BaseSettings):
     redis_key_prefix: str = "jobs"
     redis_socket_connect_timeout: float | None = 5.0
     redis_socket_timeout: float | None = 5.0
-    postgres_url: str = "postgresql://postgres:postgres@127.0.0.1:5432/workflows"
+    postgres_url: str = DEFAULT_POSTGRES_URL
     job_max_attempts: int = 8
     job_retry_base_seconds: int = 5
     job_retry_max_seconds: int = 300
@@ -106,7 +109,7 @@ class SharedSettings(BaseSettings):
         ),
     )
     keila_api_timeout_seconds: float = 20.0
-    newsletter_sync_enabled: bool = True
+    newsletter_sync_enabled: bool = False
     newsletter_sync_interval_seconds: int = Field(default=604800, ge=60)
     newsletter_sync_excluded_mailboxes: str = ""
     onboarding_email_smtp_server: str | None = Field(
@@ -253,21 +256,6 @@ class SharedSettings(BaseSettings):
         if cls._skip_dotenv():
             return (init_settings, env_settings, file_secret_settings)
         return (init_settings, env_settings, dotenv_settings, file_secret_settings)
-
-    @model_validator(mode="after")
-    def validate_required_secrets(self) -> "SharedSettings":
-        """Require non-empty runtime secrets in non-local runtime environments."""
-        env = self.environment.strip().lower()
-        if env in {"local", "dev", "development", "test"}:
-            return self
-
-        if not self.postgres_url.strip():
-            raise ValueError("POSTGRES_URL must be set when ENVIRONMENT is non-local.")
-        if not self.minio_root_password.strip():
-            raise ValueError(
-                "MINIO_ROOT_PASSWORD must be set when ENVIRONMENT is non-local."
-            )
-        return self
 
     @property
     def sentry_environment_name(self) -> str:

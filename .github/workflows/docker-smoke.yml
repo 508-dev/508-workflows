@@ -1,0 +1,14 @@
+name: Docker Smoke
+
+on:
+  merge_group:
+  workflow_dispatch:
+
+jobs:
+  docker-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run Docker smoke check
+        run: ./scripts/docker-smoke.sh

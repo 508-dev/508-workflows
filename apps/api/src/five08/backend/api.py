@@ -971,6 +971,17 @@ async def _crm_sync_scheduler(app: FastAPI) -> None:
         await asyncio.sleep(interval_seconds)
 
 
+def _should_start_crm_sync_scheduler() -> bool:
+    if not settings.crm_sync_enabled:
+        return False
+    if settings.espo_configured:
+        return True
+    logger.warning(
+        "CRM sync scheduler enabled but ESPO_BASE_URL/ESPO_API_KEY are not configured; skipping scheduler startup"
+    )
+    return False
+
+
 async def _newsletter_sync_scheduler(app: FastAPI) -> None:
     queue = app.state.queue
     interval_seconds = max(60, settings.newsletter_sync_interval_seconds)
@@ -1015,7 +1026,9 @@ async def _email_resume_scheduler() -> None:
         await asyncio.sleep(interval_seconds)
 
 
-def _check_postgres_connection(connection: Connection) -> bool:
+def _check_postgres_connection(connection: Connection | None) -> bool:
+    if connection is None:
+        return False
     try:
         with connection.cursor() as cursor:
             cursor.execute("SELECT 1")
@@ -9080,19 +9093,28 @@ async def auth_discord_link_consume_handler(
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> Any:
-    await asyncio.to_thread(run_job_migrations)
-
     redis_conn = get_redis_connection(settings)
     app.state.redis_conn = redis_conn
     app.state.postgres_conn_lock = asyncio.Lock()
-    app.state.postgres_conn = await asyncio.to_thread(get_postgres_connection, settings)
+    try:
+        await asyncio.to_thread(run_job_migrations)
+    except Exception:
+        logger.exception("Failed to run job migrations during startup")
+    try:
+        app.state.postgres_conn = await asyncio.to_thread(
+            get_postgres_connection,
+            settings,
+        )
+    except Exception:
+        logger.exception("Failed to open startup Postgres connection")
+        app.state.postgres_conn = None
     app.state.queue = build_queue_client()
     app.state.auth_store = RedisAuthStore(redis_conn)
     app.state.oidc_client = OIDCProviderClient(settings)
     app.state.discord_admin_verifier = DiscordAdminVerifier(settings)
     app.state.http_client = httpx.AsyncClient(follow_redirects=False)
 
-    if settings.crm_sync_enabled:
+    if _should_start_crm_sync_scheduler():
         app.state.crm_sync_task = asyncio.create_task(_crm_sync_scheduler(app))
     else:
         logger.info("CRM sync scheduler disabled by config")

@@ -142,6 +142,7 @@ Use Compose when you need container parity with deployment:
 ./scripts/docker-compose.sh up --build
 ./scripts/docker-compose.sh down
 ./scripts/docker-compose.sh print-ports
+./scripts/docker-smoke.sh
 ```
 
 `compose.yaml` is the canonical Coolify/base stack. `compose.local.yaml` adds
@@ -162,6 +163,10 @@ docker network create 508-infra
 
 BuildKit-capable Docker / `docker compose build` support is required because the
 service Dockerfiles use BuildKit cache mounts.
+
+Use `./scripts/docker-smoke.sh` when you need a deployment-style startup check.
+It builds the API image, starts an isolated Redis/Postgres/web stack with only
+the core env vars, and verifies `GET /health` reaches a healthy response.
 
 ## Testing And Quality
 

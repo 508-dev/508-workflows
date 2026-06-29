@@ -65,8 +65,7 @@ dashboard field.
   performs CRM lookup and builds planned CRM updates, but skips CRM writes and
   intake DB persistence.
 - `INTAKE_RESUME_REQUIRE_VIRUS_SCAN`: when true, downloaded resume files are not
-  parsed unless the malware scan command succeeds. Defaults to false for
-  local/dev/test. Non-local deployments must set this to true.
+  parsed unless the malware scan command succeeds. Defaults to false.
 - `INTAKE_RESUME_VIRUS_SCAN_COMMAND`: command used to scan downloaded resumes.
   Required when `INTAKE_RESUME_REQUIRE_VIRUS_SCAN=true`. Include `{path}` where
   the temporary resume filepath should be inserted. When `{path}` is omitted,
@@ -184,7 +183,8 @@ if true multi-queue routing is introduced later.
 
 - `ESPO_BASE_URL`
 - `ESPO_API_KEY`
-- `CRM_SYNC_ENABLED`
+- `CRM_SYNC_ENABLED`: optional, defaults to `true`; the scheduler starts only
+  when ESPO credentials are configured.
 - `CRM_SYNC_INTERVAL_SECONDS`
 - `CRM_SYNC_PAGE_SIZE`
 - `CHECK_EMAIL_WAIT`
@@ -258,7 +258,7 @@ for same-host deployments.
 - `KEILA_API_KEY`: optional for Keila contact sync.
 - `KEILA_API_BASE_URL`: optional, defaults to `https://app.keila.io`.
 - `KEILA_API_TIMEOUT_SECONDS`: optional, defaults to `20.0`.
-- `NEWSLETTER_SYNC_ENABLED`: optional, defaults to `true`; dashboard changes require an API restart because the scheduler starts at startup.
+- `NEWSLETTER_SYNC_ENABLED`: optional, defaults to `false`; dashboard changes require an API restart because the scheduler starts at startup.
 - `NEWSLETTER_SYNC_INTERVAL_SECONDS`: optional, defaults to `604800`; dashboard changes require an API restart because the scheduler sleep interval is startup-bound.
 - `NEWSLETTER_SYNC_EXCLUDED_MAILBOXES`: optional comma-separated mailbox local-parts or full addresses to skip during Migadu resync.
 

@@ -34,6 +34,47 @@ class _FailingRedis:
         raise RuntimeError("redis unavailable")
 
 
+def test_crm_sync_scheduler_skips_start_without_espo_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api.settings, "crm_sync_enabled", True)
+    monkeypatch.setattr(api.settings, "espo_base_url", "")
+    monkeypatch.setattr(api.settings, "espo_api_key", "")
+
+    assert api._should_start_crm_sync_scheduler() is False
+
+
+def test_crm_sync_scheduler_starts_when_espo_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api.settings, "crm_sync_enabled", True)
+    monkeypatch.setattr(api.settings, "espo_base_url", "https://crm.example.com")
+    monkeypatch.setattr(api.settings, "espo_api_key", "secret")
+
+    assert api._should_start_crm_sync_scheduler() is True
+
+
+def test_lifespan_serves_degraded_health_when_postgres_startup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_postgres(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("postgres unavailable")
+
+    monkeypatch.setattr(api, "get_redis_connection", lambda _settings: _HealthyRedis())
+    monkeypatch.setattr(api, "run_job_migrations", fail_postgres)
+    monkeypatch.setattr(api, "get_postgres_connection", fail_postgres)
+    monkeypatch.setattr(api, "build_queue_client", Mock(return_value=Mock()))
+    monkeypatch.setattr(api.settings, "crm_sync_enabled", False)
+    monkeypatch.setattr(api.settings, "newsletter_sync_enabled", False)
+    monkeypatch.setattr(api.settings, "email_resume_intake_enabled", False)
+
+    with TestClient(api.create_app(run_lifespan=True)) as degraded_client:
+        response = degraded_client.get("/health")
+
+    assert response.status_code == 503
+    assert response.json()["postgres_connected"] is False
+
+
 class _FakeAuthStore(api.RedisAuthStore):
     def __init__(self) -> None:
         self.saved_links: dict[str, object] = {}

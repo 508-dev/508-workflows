@@ -16,6 +16,7 @@ from five08.discord_bot.bot import (
     validate_app_command_descriptions,
 )
 from five08.discord_bot.config import Settings
+from five08.discord_bot import main as bot_main
 
 
 class TestBot508:
@@ -140,6 +141,24 @@ class TestBot508:
         config = Settings()
 
         assert config.discord_sendmsg_character_limit == 2000
+
+    def test_discord_bot_token_defaults_blank_for_config_imports(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
+
+        config = Settings()
+
+        assert config.discord_bot_token == ""
+
+    @pytest.mark.asyncio
+    async def test_discord_bot_token_is_required_to_start(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(bot_main.settings, "discord_bot_token", " ")
+
+        with pytest.raises(RuntimeError, match="DISCORD_BOT_TOKEN is required"):
+            await bot_main.main()
 
     def test_backend_api_base_url_defaults_to_host_runtime(
         self,

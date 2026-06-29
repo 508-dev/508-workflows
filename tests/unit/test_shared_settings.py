@@ -22,14 +22,20 @@ def test_non_local_settings_accept_explicit_values() -> None:
     assert settings.environment == "production"
 
 
-def test_non_local_settings_require_non_empty_secrets() -> None:
-    """Non-local settings should reject empty runtime secret values."""
-    with pytest.raises(ValidationError, match="MINIO_ROOT_PASSWORD must be set"):
-        SharedSettings(
-            environment="production",
-            postgres_url="postgresql://user:pass@db.example.com:5432/workflows",
-            minio_root_password=" ",
-        )
+def test_non_local_settings_do_not_eagerly_reject_missing_runtime_dependencies() -> (
+    None
+):
+    """Non-local settings should construct so health/runtime checks can report issues."""
+    settings = SharedSettings(
+        environment="production",
+        minio_root_password=" ",
+    )
+
+    assert settings.environment == "production"
+    assert (
+        settings.postgres_url
+        == "postgresql://postgres:postgres@127.0.0.1:5432/workflows"
+    )
 
 
 def test_sentry_environment_and_sampling_are_not_env_configurable(
@@ -176,6 +182,12 @@ def test_shared_settings_newsletter_sync_interval_requires_one_minute() -> None:
     settings = SharedSettings(newsletter_sync_interval_seconds=60)
 
     assert settings.newsletter_sync_interval_seconds == 60
+
+
+def test_shared_settings_newsletter_sync_defaults_disabled() -> None:
+    settings = SharedSettings()
+
+    assert settings.newsletter_sync_enabled is False
 
 
 def test_local_service_defaults_target_host_runtime(

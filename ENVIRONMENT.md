@@ -10,9 +10,8 @@ current precedence rules.
 
 ## Required
 
-- `ESPO_BASE_URL`
-- `ESPO_API_KEY`
 - `API_SHARED_SECRET` (required for protected endpoints)
+- `POSTGRES_URL` (required in non-local environments)
 - `MINIO_ROOT_PASSWORD` (required in non-local environments)
 - `DISCORD_BOT_TOKEN` (Discord bot runtime)
 
@@ -40,7 +39,7 @@ current precedence rules.
 
 ## Postgres + Compose Exposure
 
-- `Optional`: `POSTGRES_URL` (default: `postgresql://postgres:postgres@127.0.0.1:5432/workflows`; `./scripts/dev.sh` overrides it to a deterministic per-worktree localhost port, Compose injects a Docker-network URL)
+- `Required in non-local environments`: `POSTGRES_URL` (local default: `postgresql://postgres:postgres@127.0.0.1:5432/workflows`; `./scripts/dev.sh` overrides it to a deterministic per-worktree localhost port, Compose injects a Docker-network URL)
 - `Optional` (Compose DB container): `POSTGRES_DB` (default: `workflows`)
 - `Optional` (Compose DB container): `POSTGRES_USER` (default: `postgres`)
 - `Optional` (Compose DB container): `POSTGRES_PASSWORD` (default: `postgres`)
@@ -106,7 +105,8 @@ current precedence rules.
 
 ## Worker CRM Sync + Skills Extraction
 
-- `Optional`: `CRM_SYNC_ENABLED` (default: `true`)
+- `Optional`: `CRM_SYNC_ENABLED` (default: `true`; scheduler starts only when `ESPO_BASE_URL` and `ESPO_API_KEY` are configured)
+- `Required for CRM-backed jobs and sync`: `ESPO_BASE_URL`, `ESPO_API_KEY`
 - `Optional`: `CRM_SYNC_INTERVAL_SECONDS` (default: `900`)
 - `Optional`: `CRM_SYNC_PAGE_SIZE` (default: `200`)
 - `Optional`: `CHECK_EMAIL_WAIT` (default: `2`; minutes between mailbox polls)
@@ -182,7 +182,7 @@ current precedence rules.
 - `Optional for Keila contact sync`: `KEILA_API_KEY`
 - `Optional`: `KEILA_API_BASE_URL` (default: `https://app.keila.io`)
 - `Optional`: `KEILA_API_TIMEOUT_SECONDS` (default: `20.0`)
-- `Optional`: `NEWSLETTER_SYNC_ENABLED` (default: `true`)
+- `Optional`: `NEWSLETTER_SYNC_ENABLED` (default: `false`)
 - `Optional`: `NEWSLETTER_SYNC_INTERVAL_SECONDS` (default: `604800`, one week)
 - `Optional`: `NEWSLETTER_SYNC_EXCLUDED_MAILBOXES` (comma-separated mailbox local-parts or full addresses to skip during Migadu resync)
 - Note: mailbox and backup email subscription to configured newsletter tools is best effort. Failures are reported as warnings and do not block mailbox or account creation.
