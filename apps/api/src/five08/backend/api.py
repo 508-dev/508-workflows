@@ -971,6 +971,18 @@ async def _crm_sync_scheduler(app: FastAPI) -> None:
         await asyncio.sleep(interval_seconds)
 
 
+def _should_start_crm_sync_scheduler() -> bool:
+    return _crm_sync_scheduler_skip_reason() is None
+
+
+def _crm_sync_scheduler_skip_reason() -> str | None:
+    if not settings.crm_sync_enabled:
+        return "disabled"
+    if settings.espo_configured:
+        return None
+    return "missing_espo"
+
+
 async def _newsletter_sync_scheduler(app: FastAPI) -> None:
     queue = app.state.queue
     interval_seconds = max(60, settings.newsletter_sync_interval_seconds)
@@ -1015,7 +1027,9 @@ async def _email_resume_scheduler() -> None:
         await asyncio.sleep(interval_seconds)
 
 
-def _check_postgres_connection(connection: Connection) -> bool:
+def _check_postgres_connection(connection: Connection | None) -> bool:
+    if connection is None:
+        return False
     try:
         with connection.cursor() as cursor:
             cursor.execute("SELECT 1")
@@ -1032,8 +1046,9 @@ async def _is_postgres_connection_healthy(app: FastAPI) -> bool:
         if healthy:
             return True
 
-        with contextlib.suppress(Exception):
-            await asyncio.to_thread(connection.close)
+        if connection is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(connection.close)
 
         try:
             refreshed = await asyncio.to_thread(get_postgres_connection, settings)
@@ -3424,18 +3439,30 @@ async def health_handler(request: Request) -> JSONResponse:
     except Exception:
         redis_ok = False
 
+    postgres_migrations_ok = getattr(request.app.state, "postgres_migrations_ok", True)
     if hasattr(request.app.state, "postgres_conn"):
         postgres_ok = await _is_postgres_connection_healthy(request.app)
     else:
         postgres_ok = await asyncio.to_thread(is_postgres_healthy, settings)
 
+    intake_resume_scan_required = settings.effective_intake_resume_require_virus_scan
+    intake_resume_scan_configured = settings.intake_resume_virus_scan_configured
+    healthy = (
+        redis_ok
+        and postgres_ok
+        and postgres_migrations_ok
+        and intake_resume_scan_configured
+    )
     payload = {
-        "status": "healthy" if redis_ok and postgres_ok else "degraded",
+        "status": "healthy" if healthy else "degraded",
         "redis_connected": redis_ok,
         "postgres_connected": postgres_ok,
+        "postgres_migrations_ok": postgres_migrations_ok,
+        "intake_resume_scan_required": intake_resume_scan_required,
+        "intake_resume_scan_configured": intake_resume_scan_configured,
         "queue_name": settings.redis_queue_name,
     }
-    return JSONResponse(payload, status_code=200 if redis_ok and postgres_ok else 503)
+    return JSONResponse(payload, status_code=200 if healthy else 503)
 
 
 async def ingest_handler(request: Request, source: str) -> JSONResponse:
@@ -9080,20 +9107,36 @@ async def auth_discord_link_consume_handler(
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> Any:
-    await asyncio.to_thread(run_job_migrations)
-
     redis_conn = get_redis_connection(settings)
     app.state.redis_conn = redis_conn
     app.state.postgres_conn_lock = asyncio.Lock()
-    app.state.postgres_conn = await asyncio.to_thread(get_postgres_connection, settings)
+    app.state.postgres_migrations_ok = True
+    try:
+        await asyncio.to_thread(run_job_migrations)
+    except Exception:
+        logger.exception("Failed to run job migrations during startup")
+        app.state.postgres_migrations_ok = False
+    try:
+        app.state.postgres_conn = await asyncio.to_thread(
+            get_postgres_connection,
+            settings,
+        )
+    except Exception:
+        logger.exception("Failed to open startup Postgres connection")
+        app.state.postgres_conn = None
     app.state.queue = build_queue_client()
     app.state.auth_store = RedisAuthStore(redis_conn)
     app.state.oidc_client = OIDCProviderClient(settings)
     app.state.discord_admin_verifier = DiscordAdminVerifier(settings)
     app.state.http_client = httpx.AsyncClient(follow_redirects=False)
 
-    if settings.crm_sync_enabled:
+    crm_sync_skip_reason = _crm_sync_scheduler_skip_reason()
+    if crm_sync_skip_reason is None:
         app.state.crm_sync_task = asyncio.create_task(_crm_sync_scheduler(app))
+    elif crm_sync_skip_reason == "missing_espo":
+        logger.warning(
+            "CRM sync scheduler enabled but ESPO_BASE_URL/ESPO_API_KEY are not configured; skipping scheduler startup"
+        )
     else:
         logger.info("CRM sync scheduler disabled by config")
 

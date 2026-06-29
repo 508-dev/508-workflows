@@ -34,6 +34,117 @@ class _FailingRedis:
         raise RuntimeError("redis unavailable")
 
 
+class _FakePostgresConnection:
+    def cursor(self) -> "_FakePostgresConnection":
+        return self
+
+    def __enter__(self) -> "_FakePostgresConnection":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def execute(self, _query: str) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+def test_crm_sync_scheduler_skips_start_without_espo_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api.settings, "crm_sync_enabled", True)
+    monkeypatch.setattr(api.settings, "espo_base_url", "")
+    monkeypatch.setattr(api.settings, "espo_api_key", "")
+
+    assert api._should_start_crm_sync_scheduler() is False
+
+
+def test_crm_sync_scheduler_starts_when_espo_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api.settings, "crm_sync_enabled", True)
+    monkeypatch.setattr(api.settings, "espo_base_url", "https://crm.example.com")
+    monkeypatch.setattr(api.settings, "espo_api_key", "secret")
+
+    assert api._should_start_crm_sync_scheduler() is True
+
+
+def test_crm_sync_scheduler_skips_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api.settings, "crm_sync_enabled", False)
+    monkeypatch.setattr(api.settings, "espo_base_url", "https://crm.example.com")
+    monkeypatch.setattr(api.settings, "espo_api_key", "secret")
+
+    assert api._should_start_crm_sync_scheduler() is False
+    assert api._crm_sync_scheduler_skip_reason() == "disabled"
+
+
+def test_lifespan_serves_degraded_health_when_postgres_startup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_postgres(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("postgres unavailable")
+
+    monkeypatch.setattr(api, "get_redis_connection", lambda _settings: _HealthyRedis())
+    monkeypatch.setattr(api, "run_job_migrations", fail_postgres)
+    monkeypatch.setattr(api, "get_postgres_connection", fail_postgres)
+    monkeypatch.setattr(api, "build_queue_client", Mock(return_value=Mock()))
+    monkeypatch.setattr(api.settings, "crm_sync_enabled", False)
+    monkeypatch.setattr(api.settings, "newsletter_sync_enabled", False)
+    monkeypatch.setattr(api.settings, "email_resume_intake_enabled", False)
+
+    with TestClient(api.create_app(run_lifespan=True)) as degraded_client:
+        response = degraded_client.get("/health")
+
+    assert response.status_code == 503
+    assert response.json()["postgres_connected"] is False
+
+
+def test_lifespan_keeps_health_degraded_when_migrations_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_migrations() -> None:
+        raise RuntimeError("migration failed")
+
+    monkeypatch.setattr(api, "get_redis_connection", lambda _settings: _HealthyRedis())
+    monkeypatch.setattr(api, "run_job_migrations", fail_migrations)
+    monkeypatch.setattr(
+        api,
+        "get_postgres_connection",
+        lambda _settings: _FakePostgresConnection(),
+    )
+    monkeypatch.setattr(api, "build_queue_client", Mock(return_value=Mock()))
+    monkeypatch.setattr(api.settings, "crm_sync_enabled", False)
+    monkeypatch.setattr(api.settings, "newsletter_sync_enabled", False)
+    monkeypatch.setattr(api.settings, "email_resume_intake_enabled", False)
+
+    with TestClient(api.create_app(run_lifespan=True)) as degraded_client:
+        response = degraded_client.get("/health")
+
+    payload = response.json()
+    assert response.status_code == 503
+    assert payload["postgres_connected"] is True
+    assert payload["postgres_migrations_ok"] is False
+
+
+async def test_postgres_health_handles_missing_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = api.create_app(run_lifespan=False)
+    app.state.postgres_conn_lock = asyncio.Lock()
+    app.state.postgres_conn = None
+
+    def fail_postgres(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("postgres unavailable")
+
+    monkeypatch.setattr(api, "get_postgres_connection", fail_postgres)
+
+    assert await api._is_postgres_connection_healthy(app) is False
+
+
 class _FakeAuthStore(api.RedisAuthStore):
     def __init__(self) -> None:
         self.saved_links: dict[str, object] = {}
@@ -133,6 +244,8 @@ def test_health_handler_healthy(client: TestClient) -> None:
     payload = response.json()
     assert response.status_code == 200
     assert payload["status"] == "healthy"
+    assert payload["postgres_migrations_ok"] is True
+    assert payload["intake_resume_scan_configured"] is True
 
 
 def test_health_handler_degraded(app: api.FastAPI) -> None:
@@ -145,6 +258,25 @@ def test_health_handler_degraded(app: api.FastAPI) -> None:
     payload = response.json()
     assert response.status_code == 503
     assert payload["status"] == "degraded"
+
+
+def test_health_handler_degraded_when_production_resume_scan_unconfigured(
+    app: api.FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api.settings, "environment", "production")
+    monkeypatch.setattr(api.settings, "intake_resume_require_virus_scan", False)
+    monkeypatch.setattr(api.settings, "intake_resume_virus_scan_command", "")
+    client = TestClient(app)
+
+    with patch("five08.backend.api.is_postgres_healthy", return_value=True):
+        response = client.get("/health")
+
+    payload = response.json()
+    assert response.status_code == 503
+    assert payload["status"] == "degraded"
+    assert payload["intake_resume_scan_required"] is True
+    assert payload["intake_resume_scan_configured"] is False
 
 
 def test_ingest_handler_enqueues_job(

@@ -101,6 +101,14 @@ class _ResumeFileNotProvided:
 _RESUME_FILE_NOT_PROVIDED = _ResumeFileNotProvided()
 
 
+class IntakeResumeScanConfigError(RuntimeError):
+    """Raised when resume processing requires malware scanning but lacks config."""
+
+
+class IntakeResumeScanExecutionError(RuntimeError):
+    """Raised when the malware scanner cannot complete a required scan."""
+
+
 class IntakeFormProcessor:
     """Process a Google Forms member intake submission against CRM."""
 
@@ -675,6 +683,11 @@ class IntakeFormProcessor:
         resume_url = self._normalize_text(payload.get("resume_url"))
         if not resume_url:
             return None
+        if not settings.intake_resume_virus_scan_configured:
+            raise IntakeResumeScanConfigError(
+                "INTAKE_RESUME_VIRUS_SCAN_COMMAND must be configured before "
+                "processing intake resumes in this environment"
+            )
 
         resume_file_name = self._normalize_text(payload.get("resume_file_name"))
         resume_name = (
@@ -961,7 +974,7 @@ class IntakeFormProcessor:
 
     def _scan_resume_content(self, content: bytes, filename: str) -> bool:
         """Run the configured malware scanner before parsing untrusted resumes."""
-        if not settings.intake_resume_require_virus_scan:
+        if not settings.effective_intake_resume_require_virus_scan:
             return True
 
         command_template = settings.intake_resume_virus_scan_command.strip()
@@ -996,7 +1009,9 @@ class IntakeFormProcessor:
             logger.warning(
                 "Resume malware scan failed filename=%s error=%s", filename, exc
             )
-            return False
+            raise IntakeResumeScanExecutionError(
+                f"Resume malware scan failed for {filename}"
+            ) from exc
         finally:
             if temp_path:
                 with contextlib.suppress(OSError):
@@ -1004,6 +1019,17 @@ class IntakeFormProcessor:
 
         if result.returncode == 0:
             return True
+
+        if result.returncode > 1:
+            logger.warning(
+                "Resume malware scan errored filename=%s returncode=%s stderr=%s",
+                filename,
+                result.returncode,
+                result.stderr.strip(),
+            )
+            raise IntakeResumeScanExecutionError(
+                f"Resume malware scan errored for {filename}"
+            )
 
         logger.warning(
             "Resume malware scan rejected filename=%s returncode=%s stderr=%s",

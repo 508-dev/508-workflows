@@ -7,6 +7,11 @@ COPY --from=uv /uv /uvx /usr/local/bin/
 WORKDIR /app
 ENV UV_LINK_MODE=copy
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends clamdscan \
+    && rm -rf /var/lib/apt/lists/* \
+    && printf 'TCPSocket 3310\nTCPAddr clamav\n' >/etc/clamav/clamdscan.conf
+
 COPY pyproject.toml uv.lock ./
 COPY apps/discord_bot/pyproject.toml apps/discord_bot/pyproject.toml
 COPY apps/worker/pyproject.toml apps/worker/pyproject.toml

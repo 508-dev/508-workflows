@@ -22,10 +22,14 @@ logger = logging.getLogger(__name__)
 
 async def main() -> None:
     """Main entry point for the bot."""
+    token = settings.discord_bot_token.strip()
+    if not token:
+        raise RuntimeError("DISCORD_BOT_TOKEN is required to start the Discord bot.")
+
     bot = create_bot()
 
     try:
-        await bot.start(settings.discord_bot_token)
+        await bot.start(token)
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
     finally:

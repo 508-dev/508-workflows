@@ -139,18 +139,25 @@ class WorkerSettings(SharedSettings):
             return value.strip()
         return value
 
-    @model_validator(mode="after")
-    def validate_required_crm_settings(self) -> "WorkerSettings":
-        """Require EspoCRM settings outside local/test runtime environments."""
+    @property
+    def espo_configured(self) -> bool:
+        """Return true when EspoCRM credentials are available."""
+        return bool(self.espo_base_url.strip() and self.espo_api_key.strip())
+
+    @property
+    def effective_intake_resume_require_virus_scan(self) -> bool:
+        """Return whether resume parsing must be preceded by malware scanning."""
         env = self.environment.strip().lower()
-        if env in {"local", "dev", "development", "test"}:
-            return self
-        if not self.espo_base_url or not self.espo_api_key:
-            raise ValueError(
-                "ESPO_BASE_URL and ESPO_API_KEY must be set when ENVIRONMENT "
-                "is non-local."
-            )
-        return self
+        if env not in {"local", "dev", "development", "test"}:
+            return True
+        return self.intake_resume_require_virus_scan
+
+    @property
+    def intake_resume_virus_scan_configured(self) -> bool:
+        """Return whether the effective resume scan requirement has a command."""
+        if not self.effective_intake_resume_require_virus_scan:
+            return True
+        return bool((self.intake_resume_virus_scan_command or "").strip())
 
     @property
     def google_forms_allowed_form_ids_set(self) -> set[str]:
@@ -193,13 +200,6 @@ class WorkerSettings(SharedSettings):
     @model_validator(mode="after")
     def validate_intake_resume_scan_settings(self) -> "WorkerSettings":
         """Require a scanner command when intake resume scanning is enabled."""
-        env = self.environment.strip().lower()
-        if env not in {"local", "dev", "development", "test"} and not (
-            self.intake_resume_require_virus_scan
-        ):
-            raise ValueError(
-                "INTAKE_RESUME_REQUIRE_VIRUS_SCAN must be true when ENVIRONMENT is non-local"
-            )
         if (
             self.intake_resume_require_virus_scan
             and not (self.intake_resume_virus_scan_command or "").strip()

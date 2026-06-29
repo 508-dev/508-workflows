@@ -8,6 +8,8 @@ from five08.resume_extractor import ResumeExtractedProfile
 from five08.worker.crm import intake_form_processor as intake_module
 from five08.worker.crm.intake_form_processor import (
     IntakeFormProcessor,
+    IntakeResumeScanConfigError,
+    IntakeResumeScanExecutionError,
     IntakeResumeFile,
 )
 
@@ -161,6 +163,34 @@ def test_create_prospect_does_not_retry_failed_resume_prepare() -> None:
 
     assert result["success"] is True
     prepare.assert_called_once()
+
+
+def test_process_intake_fails_when_production_resume_scan_unconfigured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processor = IntakeFormProcessor()
+    processor.api = MagicMock()
+    processor.api.request.return_value = {"list": []}
+    monkeypatch.setattr(intake_module.settings, "environment", "production")
+    monkeypatch.setattr(
+        intake_module.settings,
+        "intake_resume_require_virus_scan",
+        False,
+    )
+    monkeypatch.setattr(intake_module.settings, "intake_resume_virus_scan_command", "")
+
+    with pytest.raises(IntakeResumeScanConfigError):
+        processor.process_intake(
+            payload={
+                "email": "new@example.com",
+                "first_name": "New",
+                "last_name": "Person",
+                "resume_url": "https://tally.so/resume.pdf",
+                "form_id": "form-1",
+            }
+        )
+
+    processor.api.upload_file.assert_not_called()
 
 
 def test_intake_form_processor_dry_run_update_does_not_write_crm_or_db() -> None:
@@ -725,6 +755,75 @@ def test_build_resume_updates_skips_parsing_when_scan_fails() -> None:
         )
 
     assert updates == {}
+    processor.document_processor.extract_text.assert_not_called()
+
+
+def test_scan_resume_content_raises_when_scanner_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processor = IntakeFormProcessor()
+    result = Mock(returncode=2, stderr="clamd unavailable")
+    monkeypatch.setattr(intake_module.settings, "environment", "production")
+    monkeypatch.setattr(
+        intake_module.settings,
+        "intake_resume_virus_scan_command",
+        "clamdscan --stream --no-summary {path}",
+    )
+    mock_run = Mock(return_value=result)
+    monkeypatch.setattr(intake_module.subprocess, "run", mock_run)
+
+    with pytest.raises(IntakeResumeScanExecutionError):
+        processor._scan_resume_content(b"resume-bytes", "resume.pdf")
+
+    mock_run.assert_called_once()
+
+
+def test_scan_resume_content_appends_path_when_placeholder_omitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processor = IntakeFormProcessor()
+    result = Mock(returncode=0, stderr="")
+    monkeypatch.setattr(intake_module.settings, "environment", "production")
+    monkeypatch.setattr(
+        intake_module.settings,
+        "intake_resume_virus_scan_command",
+        "clamdscan --stream --no-summary --config-file=/etc/clamav/clamdscan.conf",
+    )
+    mock_run = Mock(return_value=result)
+    monkeypatch.setattr(intake_module.subprocess, "run", mock_run)
+
+    assert processor._scan_resume_content(b"resume-bytes", "resume.pdf") is True
+
+    command = mock_run.call_args.args[0]
+    assert command[:4] == [
+        "clamdscan",
+        "--stream",
+        "--no-summary",
+        "--config-file=/etc/clamav/clamdscan.conf",
+    ]
+    assert command[-1].endswith(".pdf")
+
+
+def test_build_resume_updates_requires_scan_before_production_parsing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processor = IntakeFormProcessor()
+    processor.document_processor = Mock()
+    monkeypatch.setattr(intake_module.settings, "environment", "production")
+    monkeypatch.setattr(
+        intake_module.settings,
+        "intake_resume_require_virus_scan",
+        False,
+    )
+    monkeypatch.setattr(intake_module.settings, "intake_resume_virus_scan_command", "")
+
+    with pytest.raises(IntakeResumeScanConfigError):
+        processor._build_resume_updates(
+            {
+                "resume_url": "https://example.com/resume.pdf",
+            }
+        )
+
     processor.document_processor.extract_text.assert_not_called()
 
 

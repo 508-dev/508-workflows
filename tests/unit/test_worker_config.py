@@ -6,16 +6,19 @@ from pydantic import ValidationError
 from five08.worker.config import WorkerSettings
 
 
-def test_non_local_worker_requires_espo_config() -> None:
-    with pytest.raises(ValidationError, match="ESPO_BASE_URL and ESPO_API_KEY"):
-        WorkerSettings(
-            environment="production",
-            minio_root_password="secret",
-            espo_base_url="",
-            espo_api_key="test-key",
-            intake_resume_require_virus_scan=True,
-            intake_resume_virus_scan_command="clamdscan --fdpass {path}",
-        )
+def test_non_local_worker_allows_missing_espo_config() -> None:
+    settings = WorkerSettings(
+        environment="production",
+        postgres_url="postgresql://user:pass@db.example.com:5432/workflows",
+        minio_root_password="secret",
+        espo_base_url="",
+        espo_api_key="",
+    )
+
+    assert settings.espo_base_url == ""
+    assert settings.espo_api_key == ""
+    assert settings.crm_sync_enabled is True
+    assert settings.espo_configured is False
 
 
 def test_local_worker_allows_missing_espo_config() -> None:
@@ -27,6 +30,7 @@ def test_local_worker_allows_missing_espo_config() -> None:
 
     assert settings.espo_base_url == ""
     assert settings.espo_api_key == ""
+    assert settings.espo_configured is False
 
 
 def test_email_intake_requires_mailbox_credentials() -> None:
@@ -291,19 +295,24 @@ def test_intake_resume_virus_scan_is_not_required_by_default() -> None:
     )
 
     assert settings.intake_resume_require_virus_scan is False
+    assert settings.effective_intake_resume_require_virus_scan is False
+    assert settings.intake_resume_virus_scan_configured is True
 
 
-def test_intake_resume_virus_scan_is_required_in_non_local_environments() -> None:
-    with pytest.raises(
-        ValidationError,
-        match="INTAKE_RESUME_REQUIRE_VIRUS_SCAN must be true",
-    ):
-        WorkerSettings(
-            environment="production",
-            minio_root_password="secret",
-            espo_base_url="https://crm.test.com",
-            espo_api_key="test-key",
-        )
+def test_intake_resume_virus_scan_is_runtime_required_in_non_local_environments() -> (
+    None
+):
+    settings = WorkerSettings(
+        environment="production",
+        postgres_url="postgresql://user:pass@db.example.com:5432/workflows",
+        minio_root_password="secret",
+        espo_base_url="https://crm.test.com",
+        espo_api_key="test-key",
+    )
+
+    assert settings.intake_resume_require_virus_scan is False
+    assert settings.effective_intake_resume_require_virus_scan is True
+    assert settings.intake_resume_virus_scan_configured is False
 
 
 def test_intake_resume_virus_scan_requires_command_when_enabled() -> None:
@@ -328,6 +337,7 @@ def test_intake_resume_virus_scan_allows_enabled_with_command() -> None:
     )
 
     assert settings.intake_resume_require_virus_scan is True
+    assert settings.intake_resume_virus_scan_configured is True
 
 
 def test_intake_resume_allowed_hostnames_normalizes_dots_and_empties() -> None:
@@ -400,6 +410,7 @@ def test_auth_cookie_secure_is_true_for_non_local_even_if_legacy_env_is_false(
 
     settings = WorkerSettings(
         environment="production",
+        postgres_url="postgresql://user:pass@db.example.com:5432/workflows",
         espo_base_url="https://crm.test.com",
         espo_api_key="test-key",
         minio_root_password="secret",

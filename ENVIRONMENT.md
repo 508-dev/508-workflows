@@ -8,17 +8,21 @@ Postgres `+1`, Compose web `+2`, MinIO API `+3`, MinIO console `+4`, host-run
 web/API `+5`, and bot health `+6`. Explicit service port overrides keep their
 current precedence rules.
 
-## Required
+## Required For A Healthy Non-Local Runtime
 
-- `ESPO_BASE_URL`
-- `ESPO_API_KEY`
 - `API_SHARED_SECRET` (required for protected endpoints)
-- `MINIO_ROOT_PASSWORD` (required in non-local environments)
+- `POSTGRES_URL` (required for database-backed API and worker health)
+- `MINIO_ROOT_PASSWORD` (required for internal transfer storage)
 - `DISCORD_BOT_TOKEN` (Discord bot runtime)
+
+The app avoids eager settings-construction failures where possible so failed
+deployments can still expose logs and health responses. Missing runtime
+dependencies should surface as degraded health or route/job failures rather than
+Pydantic import errors.
 
 ## Core Runtime (Bot + Worker)
 
-- `Optional` (non-local): `ENVIRONMENT` (default: `local`; non-local environments must set explicit `POSTGRES_URL` and `MINIO_ROOT_PASSWORD`)
+- `Optional` (non-local): `ENVIRONMENT` (default: `local`; non-local environments should set explicit `POSTGRES_URL` and `MINIO_ROOT_PASSWORD`)
 - `Optional`: `SENTRY_DSN` (default: unset; set to enable Sentry event capture)
 - `Optional`: `SENTRY_SEND_DEFAULT_PII` (default: `false`)
 - `Optional`: `SENTRY_DEBUG` (default: `false`)
@@ -40,7 +44,7 @@ current precedence rules.
 
 ## Postgres + Compose Exposure
 
-- `Optional`: `POSTGRES_URL` (default: `postgresql://postgres:postgres@127.0.0.1:5432/workflows`; `./scripts/dev.sh` overrides it to a deterministic per-worktree localhost port, Compose injects a Docker-network URL)
+- `Required for healthy non-local runtime`: `POSTGRES_URL` (local default: `postgresql://postgres:postgres@127.0.0.1:5432/workflows`; `./scripts/dev.sh` overrides it to a deterministic per-worktree localhost port, Compose injects a Docker-network URL)
 - `Optional` (Compose DB container): `POSTGRES_DB` (default: `workflows`)
 - `Optional` (Compose DB container): `POSTGRES_USER` (default: `postgres`)
 - `Optional` (Compose DB container): `POSTGRES_PASSWORD` (default: `postgres`)
@@ -106,7 +110,8 @@ current precedence rules.
 
 ## Worker CRM Sync + Skills Extraction
 
-- `Optional`: `CRM_SYNC_ENABLED` (default: `true`)
+- `Optional`: `CRM_SYNC_ENABLED` (default: `true`; scheduler starts only when `ESPO_BASE_URL` and `ESPO_API_KEY` are configured)
+- `Required for CRM-backed jobs and sync`: `ESPO_BASE_URL`, `ESPO_API_KEY`
 - `Optional`: `CRM_SYNC_INTERVAL_SECONDS` (default: `900`)
 - `Optional`: `CRM_SYNC_PAGE_SIZE` (default: `200`)
 - `Optional`: `CHECK_EMAIL_WAIT` (default: `2`; minutes between mailbox polls)
@@ -127,6 +132,9 @@ current precedence rules.
 - `Optional`: `INTAKE_RESUME_FETCH_TIMEOUT_SECONDS` (default: `20.0`; timeout for intake resume URL downloads)
 - `Optional`: `INTAKE_RESUME_MAX_REDIRECTS` (default: `3`; max redirects followed for intake resume URL downloads)
 - `Optional`: `INTAKE_RESUME_ALLOWED_HOSTS` (default: empty; optional comma-separated host allowlist for intake resume URL downloads)
+- `Optional`: `INTAKE_RESUME_REQUIRE_VIRUS_SCAN` (default: `false` locally; resume parsing requires scanning automatically outside local/dev/test)
+- `Required for non-local resume parsing`: `INTAKE_RESUME_VIRUS_SCAN_COMMAND` (Compose default: `clamdscan --stream --no-summary --config-file=/etc/clamav/clamdscan.conf {path}` against the ClamAV sidecar)
+- `Optional`: `INTAKE_RESUME_VIRUS_SCAN_TIMEOUT_SECONDS` (default: `30.0`; timeout for the configured scan command)
 - `Optional`: `EMAIL_RESUME_INTAKE_ENABLED` (default: `false`; enables worker-side mailbox resume processing loop)
 - `Optional`: `EMAIL_RESUME_ALLOWED_EXTENSIONS` (default: `pdf,doc,docx`)
 - `Optional`: `EMAIL_RESUME_MAX_FILE_SIZE_MB` (default: `10`)
@@ -182,7 +190,7 @@ current precedence rules.
 - `Optional for Keila contact sync`: `KEILA_API_KEY`
 - `Optional`: `KEILA_API_BASE_URL` (default: `https://app.keila.io`)
 - `Optional`: `KEILA_API_TIMEOUT_SECONDS` (default: `20.0`)
-- `Optional`: `NEWSLETTER_SYNC_ENABLED` (default: `true`)
+- `Optional`: `NEWSLETTER_SYNC_ENABLED` (default: `false`)
 - `Optional`: `NEWSLETTER_SYNC_INTERVAL_SECONDS` (default: `604800`, one week)
 - `Optional`: `NEWSLETTER_SYNC_EXCLUDED_MAILBOXES` (comma-separated mailbox local-parts or full addresses to skip during Migadu resync)
 - Note: mailbox and backup email subscription to configured newsletter tools is best effort. Failures are reported as warnings and do not block mailbox or account creation.
