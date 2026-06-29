@@ -778,6 +778,32 @@ def test_scan_resume_content_raises_when_scanner_errors(
     mock_run.assert_called_once()
 
 
+def test_scan_resume_content_appends_path_when_placeholder_omitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processor = IntakeFormProcessor()
+    result = Mock(returncode=0, stderr="")
+    monkeypatch.setattr(intake_module.settings, "environment", "production")
+    monkeypatch.setattr(
+        intake_module.settings,
+        "intake_resume_virus_scan_command",
+        "clamdscan --stream --no-summary --config-file=/etc/clamav/clamdscan.conf",
+    )
+    mock_run = Mock(return_value=result)
+    monkeypatch.setattr(intake_module.subprocess, "run", mock_run)
+
+    assert processor._scan_resume_content(b"resume-bytes", "resume.pdf") is True
+
+    command = mock_run.call_args.args[0]
+    assert command[:4] == [
+        "clamdscan",
+        "--stream",
+        "--no-summary",
+        "--config-file=/etc/clamav/clamdscan.conf",
+    ]
+    assert command[-1].endswith(".pdf")
+
+
 def test_build_resume_updates_requires_scan_before_production_parsing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

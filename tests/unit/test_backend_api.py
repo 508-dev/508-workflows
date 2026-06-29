@@ -126,7 +126,7 @@ def test_lifespan_keeps_health_degraded_when_migrations_fail(
 
     payload = response.json()
     assert response.status_code == 503
-    assert payload["postgres_connected"] is False
+    assert payload["postgres_connected"] is True
     assert payload["postgres_migrations_ok"] is False
 
 

@@ -3440,16 +3440,19 @@ async def health_handler(request: Request) -> JSONResponse:
         redis_ok = False
 
     postgres_migrations_ok = getattr(request.app.state, "postgres_migrations_ok", True)
-    if not postgres_migrations_ok:
-        postgres_ok = False
-    elif hasattr(request.app.state, "postgres_conn"):
+    if hasattr(request.app.state, "postgres_conn"):
         postgres_ok = await _is_postgres_connection_healthy(request.app)
     else:
         postgres_ok = await asyncio.to_thread(is_postgres_healthy, settings)
 
     intake_resume_scan_required = settings.effective_intake_resume_require_virus_scan
     intake_resume_scan_configured = settings.intake_resume_virus_scan_configured
-    healthy = redis_ok and postgres_ok and intake_resume_scan_configured
+    healthy = (
+        redis_ok
+        and postgres_ok
+        and postgres_migrations_ok
+        and intake_resume_scan_configured
+    )
     payload = {
         "status": "healthy" if healthy else "degraded",
         "redis_connected": redis_ok,
