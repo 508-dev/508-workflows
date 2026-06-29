@@ -2,6 +2,8 @@ name: Docker Smoke
 
 on:
   merge_group:
+  pull_request:
+    types: [labeled]
   workflow_dispatch:
 
 permissions:
@@ -9,6 +11,7 @@ permissions:
 
 jobs:
   docker-smoke:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'docker-smoke')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
