@@ -961,7 +961,7 @@ class IntakeFormProcessor:
 
     def _scan_resume_content(self, content: bytes, filename: str) -> bool:
         """Run the configured malware scanner before parsing untrusted resumes."""
-        if not settings.intake_resume_require_virus_scan:
+        if not settings.effective_intake_resume_require_virus_scan:
             return True
 
         command_template = settings.intake_resume_virus_scan_command.strip()

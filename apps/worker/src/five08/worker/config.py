@@ -145,6 +145,14 @@ class WorkerSettings(SharedSettings):
         return bool(self.espo_base_url.strip() and self.espo_api_key.strip())
 
     @property
+    def effective_intake_resume_require_virus_scan(self) -> bool:
+        """Return whether resume parsing must be preceded by malware scanning."""
+        env = self.environment.strip().lower()
+        if env not in {"local", "dev", "development", "test"}:
+            return True
+        return self.intake_resume_require_virus_scan
+
+    @property
     def google_forms_allowed_form_ids_set(self) -> set[str]:
         """Allowed Google Forms IDs used by intake webhook validation."""
         return {

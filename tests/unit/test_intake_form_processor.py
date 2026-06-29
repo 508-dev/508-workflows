@@ -728,6 +728,43 @@ def test_build_resume_updates_skips_parsing_when_scan_fails() -> None:
     processor.document_processor.extract_text.assert_not_called()
 
 
+def test_build_resume_updates_requires_scan_before_production_parsing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processor = IntakeFormProcessor()
+    processor.document_processor = Mock()
+    response = Mock()
+    response.status_code = 200
+    response.raise_for_status = Mock()
+    response.headers = {}
+    response.iter_content = Mock(return_value=[b"resume-bytes"])
+    response.__enter__ = Mock(return_value=response)
+    response.__exit__ = Mock(return_value=None)
+    monkeypatch.setattr(intake_module.settings, "environment", "production")
+    monkeypatch.setattr(
+        intake_module.settings,
+        "intake_resume_require_virus_scan",
+        False,
+    )
+    monkeypatch.setattr(intake_module.settings, "intake_resume_virus_scan_command", "")
+
+    with (
+        patch(
+            "five08.worker.crm.intake_form_processor.requests.get",
+            return_value=response,
+        ),
+        patch.object(processor, "_hostname_resolves_publicly", return_value=True),
+    ):
+        updates = processor._build_resume_updates(
+            {
+                "resume_url": "https://example.com/resume.pdf",
+            }
+        )
+
+    assert updates == {}
+    processor.document_processor.extract_text.assert_not_called()
+
+
 def test_resume_url_log_mask_strips_signed_query_parameters() -> None:
     processor = IntakeFormProcessor()
 

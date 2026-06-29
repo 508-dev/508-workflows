@@ -295,9 +295,12 @@ def test_intake_resume_virus_scan_is_not_required_by_default() -> None:
     )
 
     assert settings.intake_resume_require_virus_scan is False
+    assert settings.effective_intake_resume_require_virus_scan is False
 
 
-def test_intake_resume_virus_scan_is_not_required_in_non_local_environments() -> None:
+def test_intake_resume_virus_scan_is_runtime_required_in_non_local_environments() -> (
+    None
+):
     settings = WorkerSettings(
         environment="production",
         postgres_url="postgresql://user:pass@db.example.com:5432/workflows",
@@ -307,6 +310,7 @@ def test_intake_resume_virus_scan_is_not_required_in_non_local_environments() ->
     )
 
     assert settings.intake_resume_require_virus_scan is False
+    assert settings.effective_intake_resume_require_virus_scan is True
 
 
 def test_intake_resume_virus_scan_requires_command_when_enabled() -> None:
