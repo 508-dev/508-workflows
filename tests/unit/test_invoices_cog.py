@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from five08.discord_bot.cogs.invoices import InvoicesCog, _PRIVILEGED_ROLES
+from five08.discord_bot.cogs.invoices import InvoicesCog, _PRIVILEGED_ROLE_LABELS
 from five08.clients.erpnext import ERPNextAPIError
 
 
@@ -154,7 +154,7 @@ async def test_validate_invoice_denied_without_erp_identity(
             cog, mock_member_interaction, mock_doctype, "TEST-SINV-0001"
         )
     sent = mock_member_interaction.followup.send.call_args.args[0]
-    assert all(role in sent for role in _PRIVILEGED_ROLES)
+    assert all(role in sent for role in _PRIVILEGED_ROLE_LABELS)
     cog.client.get_invoice.assert_not_called()
 
 
@@ -164,11 +164,15 @@ async def test_validate_invoice_allowed_for_workflows_engineer(
 ):
     """Workflows Engineer gets include_all access without needing an ERP identity."""
     cog.client.get_invoice = Mock(return_value=VALID_INVOICE)
-    await cog.validate_invoice_command.callback(
-        cog, mock_workflows_engineer_interaction, mock_doctype, "TEST-SINV-0001"
-    )
+    with patch(
+        "five08.discord_bot.cogs.invoices.project_viewer_emails_for_discord"
+    ) as mock_project_viewer_emails:
+        await cog.validate_invoice_command.callback(
+            cog, mock_workflows_engineer_interaction, mock_doctype, "TEST-SINV-0001"
+        )
     embed = mock_workflows_engineer_interaction.followup.send.call_args.kwargs["embed"]
     assert "No issues found" in embed.title
+    mock_project_viewer_emails.assert_not_called()
 
 
 @pytest.mark.asyncio
