@@ -105,6 +105,10 @@ class IntakeResumeScanConfigError(RuntimeError):
     """Raised when resume processing requires malware scanning but lacks config."""
 
 
+class IntakeResumeScanExecutionError(RuntimeError):
+    """Raised when the malware scanner cannot complete a required scan."""
+
+
 class IntakeFormProcessor:
     """Process a Google Forms member intake submission against CRM."""
 
@@ -1005,7 +1009,9 @@ class IntakeFormProcessor:
             logger.warning(
                 "Resume malware scan failed filename=%s error=%s", filename, exc
             )
-            return False
+            raise IntakeResumeScanExecutionError(
+                f"Resume malware scan failed for {filename}"
+            ) from exc
         finally:
             if temp_path:
                 with contextlib.suppress(OSError):
@@ -1013,6 +1019,17 @@ class IntakeFormProcessor:
 
         if result.returncode == 0:
             return True
+
+        if result.returncode > 1:
+            logger.warning(
+                "Resume malware scan errored filename=%s returncode=%s stderr=%s",
+                filename,
+                result.returncode,
+                result.stderr.strip(),
+            )
+            raise IntakeResumeScanExecutionError(
+                f"Resume malware scan errored for {filename}"
+            )
 
         logger.warning(
             "Resume malware scan rejected filename=%s returncode=%s stderr=%s",

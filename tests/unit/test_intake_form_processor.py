@@ -9,6 +9,7 @@ from five08.worker.crm import intake_form_processor as intake_module
 from five08.worker.crm.intake_form_processor import (
     IntakeFormProcessor,
     IntakeResumeScanConfigError,
+    IntakeResumeScanExecutionError,
     IntakeResumeFile,
 )
 
@@ -755,6 +756,26 @@ def test_build_resume_updates_skips_parsing_when_scan_fails() -> None:
 
     assert updates == {}
     processor.document_processor.extract_text.assert_not_called()
+
+
+def test_scan_resume_content_raises_when_scanner_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processor = IntakeFormProcessor()
+    result = Mock(returncode=2, stderr="clamd unavailable")
+    monkeypatch.setattr(intake_module.settings, "environment", "production")
+    monkeypatch.setattr(
+        intake_module.settings,
+        "intake_resume_virus_scan_command",
+        "clamdscan --stream --no-summary {path}",
+    )
+    mock_run = Mock(return_value=result)
+    monkeypatch.setattr(intake_module.subprocess, "run", mock_run)
+
+    with pytest.raises(IntakeResumeScanExecutionError):
+        processor._scan_resume_content(b"resume-bytes", "resume.pdf")
+
+    mock_run.assert_called_once()
 
 
 def test_build_resume_updates_requires_scan_before_production_parsing(
