@@ -116,7 +116,7 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-internal}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me}
       MINIO_INTERNAL_BUCKET: ${MINIO_INTERNAL_BUCKET:-internal-transfers}
-      INTAKE_RESUME_VIRUS_SCAN_COMMAND: ${INTAKE_RESUME_VIRUS_SCAN_COMMAND:-clamdscan --stream --no-summary --config-file=/etc/clamav/clamdscan.conf {path}}
+      INTAKE_RESUME_VIRUS_SCAN_COMMAND: ${INTAKE_RESUME_VIRUS_SCAN_COMMAND-clamdscan --stream --no-summary --config-file=/etc/clamav/clamdscan.conf {path}}
       # Keep the container's internal listen port fixed; vary only the published
       # host port for tunnels/local multi-worktree runs.
       WEB_HOST: 0.0.0.0
@@ -134,8 +134,6 @@ services:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
-      clamav:
-        condition: service_healthy
 
   worker:
     build:
@@ -165,7 +163,7 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-internal}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me}
       MINIO_INTERNAL_BUCKET: ${MINIO_INTERNAL_BUCKET:-internal-transfers}
-      INTAKE_RESUME_VIRUS_SCAN_COMMAND: ${INTAKE_RESUME_VIRUS_SCAN_COMMAND:-clamdscan --stream --no-summary --config-file=/etc/clamav/clamdscan.conf {path}}
+      INTAKE_RESUME_VIRUS_SCAN_COMMAND: ${INTAKE_RESUME_VIRUS_SCAN_COMMAND-clamdscan --stream --no-summary --config-file=/etc/clamav/clamdscan.conf {path}}
       DISCORD_BOT_INTERNAL_BASE_URL: http://discord_bot:3000
     restart: unless-stopped
     networks:
@@ -180,8 +178,6 @@ services:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
-      clamav:
-        condition: service_healthy
 
 volumes:
   redis-data:
