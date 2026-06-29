@@ -2404,7 +2404,7 @@ def _list_dashboard_orphan_intake_submissions(
             WHERE lower(people.email) = onboarding_intake_submissions.email
                 AND people.sync_status = 'active'
                 AND people.is_member = false
-                AND people.contact_type ILIKE '%prospect%'
+                AND people.contact_type ILIKE %s
                 AND (
                     people.onboarding_state IS NULL
                     OR replace(
@@ -2420,7 +2420,7 @@ def _list_dashboard_orphan_intake_submissions(
         )
         """,
     ]
-    params: list[Any] = []
+    params: list[Any] = ["%prospect%"]
 
     if normalized_query:
         conditions.append(f"{_ORPHAN_INTAKE_SEARCH_SQL} ILIKE %s")
