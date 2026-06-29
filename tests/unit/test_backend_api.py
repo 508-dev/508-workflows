@@ -230,6 +230,7 @@ def test_health_handler_healthy(client: TestClient) -> None:
     assert response.status_code == 200
     assert payload["status"] == "healthy"
     assert payload["postgres_migrations_ok"] is True
+    assert payload["intake_resume_scan_configured"] is True
 
 
 def test_health_handler_degraded(app: api.FastAPI) -> None:
@@ -242,6 +243,25 @@ def test_health_handler_degraded(app: api.FastAPI) -> None:
     payload = response.json()
     assert response.status_code == 503
     assert payload["status"] == "degraded"
+
+
+def test_health_handler_degraded_when_production_resume_scan_unconfigured(
+    app: api.FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api.settings, "environment", "production")
+    monkeypatch.setattr(api.settings, "intake_resume_require_virus_scan", False)
+    monkeypatch.setattr(api.settings, "intake_resume_virus_scan_command", "")
+    client = TestClient(app)
+
+    with patch("five08.backend.api.is_postgres_healthy", return_value=True):
+        response = client.get("/health")
+
+    payload = response.json()
+    assert response.status_code == 503
+    assert payload["status"] == "degraded"
+    assert payload["intake_resume_scan_required"] is True
+    assert payload["intake_resume_scan_configured"] is False
 
 
 def test_ingest_handler_enqueues_job(

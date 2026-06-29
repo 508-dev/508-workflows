@@ -296,6 +296,7 @@ def test_intake_resume_virus_scan_is_not_required_by_default() -> None:
 
     assert settings.intake_resume_require_virus_scan is False
     assert settings.effective_intake_resume_require_virus_scan is False
+    assert settings.intake_resume_virus_scan_configured is True
 
 
 def test_intake_resume_virus_scan_is_runtime_required_in_non_local_environments() -> (
@@ -311,6 +312,7 @@ def test_intake_resume_virus_scan_is_runtime_required_in_non_local_environments(
 
     assert settings.intake_resume_require_virus_scan is False
     assert settings.effective_intake_resume_require_virus_scan is True
+    assert settings.intake_resume_virus_scan_configured is False
 
 
 def test_intake_resume_virus_scan_requires_command_when_enabled() -> None:
@@ -335,6 +337,7 @@ def test_intake_resume_virus_scan_allows_enabled_with_command() -> None:
     )
 
     assert settings.intake_resume_require_virus_scan is True
+    assert settings.intake_resume_virus_scan_configured is True
 
 
 def test_intake_resume_allowed_hostnames_normalizes_dots_and_empties() -> None:

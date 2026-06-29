@@ -153,6 +153,13 @@ class WorkerSettings(SharedSettings):
         return self.intake_resume_require_virus_scan
 
     @property
+    def intake_resume_virus_scan_configured(self) -> bool:
+        """Return whether the effective resume scan requirement has a command."""
+        if not self.effective_intake_resume_require_virus_scan:
+            return True
+        return bool((self.intake_resume_virus_scan_command or "").strip())
+
+    @property
     def google_forms_allowed_form_ids_set(self) -> set[str]:
         """Allowed Google Forms IDs used by intake webhook validation."""
         return {

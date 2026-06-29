@@ -3446,14 +3446,19 @@ async def health_handler(request: Request) -> JSONResponse:
     else:
         postgres_ok = await asyncio.to_thread(is_postgres_healthy, settings)
 
+    intake_resume_scan_required = settings.effective_intake_resume_require_virus_scan
+    intake_resume_scan_configured = settings.intake_resume_virus_scan_configured
+    healthy = redis_ok and postgres_ok and intake_resume_scan_configured
     payload = {
-        "status": "healthy" if redis_ok and postgres_ok else "degraded",
+        "status": "healthy" if healthy else "degraded",
         "redis_connected": redis_ok,
         "postgres_connected": postgres_ok,
         "postgres_migrations_ok": postgres_migrations_ok,
+        "intake_resume_scan_required": intake_resume_scan_required,
+        "intake_resume_scan_configured": intake_resume_scan_configured,
         "queue_name": settings.redis_queue_name,
     }
-    return JSONResponse(payload, status_code=200 if redis_ok and postgres_ok else 503)
+    return JSONResponse(payload, status_code=200 if healthy else 503)
 
 
 async def ingest_handler(request: Request, source: str) -> JSONResponse:

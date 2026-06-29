@@ -36,6 +36,20 @@ services:
       timeout: 2s
       retries: 15
 
+  clamav:
+    image: clamav/clamav:1.4
+    platform: ${CLAMAV_PLATFORM:-linux/amd64}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "tmp=\$\$(mktemp) && printf clean >\$\$tmp && clamdscan --stream --no-summary \$\$tmp >/dev/null 2>&1; code=\$\$?; rm -f \$\$tmp; exit \$\$code",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+
   web:
     build:
       context: "$repo_root"
@@ -59,12 +73,15 @@ services:
       NEWSLETTER_SYNC_ENABLED: "false"
       EMAIL_RESUME_INTAKE_ENABLED: "false"
       INTAKE_RESUME_REQUIRE_VIRUS_SCAN: "false"
+      INTAKE_RESUME_VIRUS_SCAN_COMMAND: "clamdscan --stream --no-summary --config-file=/etc/clamav/clamdscan.conf {path}"
     ports:
       - "127.0.0.1::8090"
     depends_on:
       redis:
         condition: service_healthy
       postgres:
+        condition: service_healthy
+      clamav:
         condition: service_healthy
 EOF
 
@@ -100,7 +117,9 @@ while [ "$attempts" -lt 60 ]; do
   fi
 
   last_code=$(curl -sS -o "$body_file" -w "%{http_code}" "$health_url" || true)
-  if [ "$last_code" = "200" ] && grep -q '"status":"healthy"' "$body_file"; then
+  if [ "$last_code" = "200" ] && grep -Eq '"status"[[:space:]]*:[[:space:]]*"healthy"' "$body_file"; then
+    echo "Checking ClamAV scanner command"
+    docker compose -p "$project" -f "$compose_file" exec -T web sh -c 'tmp=$(mktemp); trap "rm -f \"$tmp\"" EXIT; printf clean >"$tmp"; clamdscan --stream --no-summary --config-file=/etc/clamav/clamdscan.conf "$tmp"'
     echo "Docker smoke check passed."
     exit 0
   fi

@@ -67,11 +67,14 @@ dashboard field.
   performs CRM lookup and builds planned CRM updates, but skips CRM writes and
   intake DB persistence.
 - `INTAKE_RESUME_REQUIRE_VIRUS_SCAN`: when true, downloaded resume files are not
-  parsed unless the malware scan command succeeds. Defaults to false.
+  parsed unless the malware scan command succeeds. Defaults to false locally;
+  non-local runtimes require scanning for resume parsing even when this is unset.
 - `INTAKE_RESUME_VIRUS_SCAN_COMMAND`: command used to scan downloaded resumes.
-  Required when `INTAKE_RESUME_REQUIRE_VIRUS_SCAN=true`. Include `{path}` where
-  the temporary resume filepath should be inserted. When `{path}` is omitted,
-  the filepath is appended as the final argument.
+  Required when `INTAKE_RESUME_REQUIRE_VIRUS_SCAN=true` or when running outside
+  local/dev/test. Include `{path}` where the temporary resume filepath should be
+  inserted. When `{path}` is omitted, the filepath is appended as the final
+  argument. Production Compose uses the ClamAV sidecar command
+  `clamdscan --stream --no-summary --config-file=/etc/clamav/clamdscan.conf {path}`.
 - `INTAKE_RESUME_VIRUS_SCAN_TIMEOUT_SECONDS`: scan command timeout.
 
 ## Queue And Jobs

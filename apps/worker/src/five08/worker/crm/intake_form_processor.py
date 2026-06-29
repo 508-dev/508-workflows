@@ -101,6 +101,10 @@ class _ResumeFileNotProvided:
 _RESUME_FILE_NOT_PROVIDED = _ResumeFileNotProvided()
 
 
+class IntakeResumeScanConfigError(RuntimeError):
+    """Raised when resume processing requires malware scanning but lacks config."""
+
+
 class IntakeFormProcessor:
     """Process a Google Forms member intake submission against CRM."""
 
@@ -675,6 +679,11 @@ class IntakeFormProcessor:
         resume_url = self._normalize_text(payload.get("resume_url"))
         if not resume_url:
             return None
+        if not settings.intake_resume_virus_scan_configured:
+            raise IntakeResumeScanConfigError(
+                "INTAKE_RESUME_VIRUS_SCAN_COMMAND must be configured before "
+                "processing intake resumes in this environment"
+            )
 
         resume_file_name = self._normalize_text(payload.get("resume_file_name"))
         resume_name = (
