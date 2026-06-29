@@ -130,6 +130,21 @@ def test_lifespan_keeps_health_degraded_when_migrations_fail(
     assert payload["postgres_migrations_ok"] is False
 
 
+async def test_postgres_health_handles_missing_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = api.create_app(run_lifespan=False)
+    app.state.postgres_conn_lock = asyncio.Lock()
+    app.state.postgres_conn = None
+
+    def fail_postgres(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("postgres unavailable")
+
+    monkeypatch.setattr(api, "get_postgres_connection", fail_postgres)
+
+    assert await api._is_postgres_connection_healthy(app) is False
+
+
 class _FakeAuthStore(api.RedisAuthStore):
     def __init__(self) -> None:
         self.saved_links: dict[str, object] = {}

@@ -1046,8 +1046,9 @@ async def _is_postgres_connection_healthy(app: FastAPI) -> bool:
         if healthy:
             return True
 
-        with contextlib.suppress(Exception):
-            await asyncio.to_thread(connection.close)
+        if connection is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(connection.close)
 
         try:
             refreshed = await asyncio.to_thread(get_postgres_connection, settings)
