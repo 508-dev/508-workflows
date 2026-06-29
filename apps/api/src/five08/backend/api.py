@@ -972,14 +972,15 @@ async def _crm_sync_scheduler(app: FastAPI) -> None:
 
 
 def _should_start_crm_sync_scheduler() -> bool:
+    return _crm_sync_scheduler_skip_reason() is None
+
+
+def _crm_sync_scheduler_skip_reason() -> str | None:
     if not settings.crm_sync_enabled:
-        return False
+        return "disabled"
     if settings.espo_configured:
-        return True
-    logger.warning(
-        "CRM sync scheduler enabled but ESPO_BASE_URL/ESPO_API_KEY are not configured; skipping scheduler startup"
-    )
-    return False
+        return None
+    return "missing_espo"
 
 
 async def _newsletter_sync_scheduler(app: FastAPI) -> None:
@@ -3437,7 +3438,10 @@ async def health_handler(request: Request) -> JSONResponse:
     except Exception:
         redis_ok = False
 
-    if hasattr(request.app.state, "postgres_conn"):
+    postgres_migrations_ok = getattr(request.app.state, "postgres_migrations_ok", True)
+    if not postgres_migrations_ok:
+        postgres_ok = False
+    elif hasattr(request.app.state, "postgres_conn"):
         postgres_ok = await _is_postgres_connection_healthy(request.app)
     else:
         postgres_ok = await asyncio.to_thread(is_postgres_healthy, settings)
@@ -3446,6 +3450,7 @@ async def health_handler(request: Request) -> JSONResponse:
         "status": "healthy" if redis_ok and postgres_ok else "degraded",
         "redis_connected": redis_ok,
         "postgres_connected": postgres_ok,
+        "postgres_migrations_ok": postgres_migrations_ok,
         "queue_name": settings.redis_queue_name,
     }
     return JSONResponse(payload, status_code=200 if redis_ok and postgres_ok else 503)
@@ -9096,10 +9101,12 @@ async def _lifespan(app: FastAPI) -> Any:
     redis_conn = get_redis_connection(settings)
     app.state.redis_conn = redis_conn
     app.state.postgres_conn_lock = asyncio.Lock()
+    app.state.postgres_migrations_ok = True
     try:
         await asyncio.to_thread(run_job_migrations)
     except Exception:
         logger.exception("Failed to run job migrations during startup")
+        app.state.postgres_migrations_ok = False
     try:
         app.state.postgres_conn = await asyncio.to_thread(
             get_postgres_connection,
@@ -9114,8 +9121,13 @@ async def _lifespan(app: FastAPI) -> Any:
     app.state.discord_admin_verifier = DiscordAdminVerifier(settings)
     app.state.http_client = httpx.AsyncClient(follow_redirects=False)
 
-    if _should_start_crm_sync_scheduler():
+    crm_sync_skip_reason = _crm_sync_scheduler_skip_reason()
+    if crm_sync_skip_reason is None:
         app.state.crm_sync_task = asyncio.create_task(_crm_sync_scheduler(app))
+    elif crm_sync_skip_reason == "missing_espo":
+        logger.warning(
+            "CRM sync scheduler enabled but ESPO_BASE_URL/ESPO_API_KEY are not configured; skipping scheduler startup"
+        )
     else:
         logger.info("CRM sync scheduler disabled by config")
 

@@ -4,7 +4,7 @@ set -eu
 script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
 repo_root=$(CDPATH= cd "$script_dir/.." && pwd)
 project="five08-smoke-$(date +%s)-$$"
-compose_file=$(mktemp "${TMPDIR:-/tmp}/five08-docker-smoke.XXXXXX.yaml")
+compose_file=$(mktemp "${TMPDIR:-/tmp}/five08-docker-smoke.XXXXXX")
 body_file=$(mktemp "${TMPDIR:-/tmp}/five08-docker-smoke-body.XXXXXX")
 
 cleanup() {
@@ -72,11 +72,13 @@ echo "Starting Docker smoke stack: $project"
 docker compose -p "$project" -f "$compose_file" up -d --build redis postgres web
 
 web_port=""
-for _ in $(seq 1 60); do
+attempts=0
+while [ "$attempts" -lt 60 ]; do
   web_port=$(docker compose -p "$project" -f "$compose_file" port web 8090 | sed 's/.*://')
   if [ -n "$web_port" ]; then
     break
   fi
+  attempts=$((attempts + 1))
   sleep 1
 done
 
@@ -89,7 +91,8 @@ fi
 health_url="http://127.0.0.1:$web_port/health"
 echo "Waiting for $health_url"
 last_code=""
-for _ in $(seq 1 60); do
+attempts=0
+while [ "$attempts" -lt 60 ]; do
   if [ "$(docker inspect -f '{{.State.Running}}' "$(docker compose -p "$project" -f "$compose_file" ps -q web)" 2>/dev/null || echo false)" != "true" ]; then
     echo "web service exited before health check succeeded" >&2
     docker compose -p "$project" -f "$compose_file" logs web >&2 || true
@@ -101,6 +104,7 @@ for _ in $(seq 1 60); do
     echo "Docker smoke check passed."
     exit 0
   fi
+  attempts=$((attempts + 1))
   sleep 1
 done
 

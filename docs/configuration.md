@@ -6,8 +6,10 @@ that most often matter in local development and deployment.
 
 ## Core Runtime
 
-- `ENVIRONMENT`: defaults to `local`. Non-local values require explicit runtime
-  secrets such as `POSTGRES_URL` and `MINIO_ROOT_PASSWORD`.
+- `ENVIRONMENT`: defaults to `local`. Non-local deployments should provide
+  explicit runtime secrets such as `POSTGRES_URL` and `MINIO_ROOT_PASSWORD`.
+  Missing runtime dependencies are reported through health/runtime failures
+  where possible instead of eager settings-construction errors.
 - `LOG_LEVEL`: defaults to `INFO`.
 - `API_SHARED_SECRET`: required for protected non-dashboard API routes and for
   `./scripts/dev.sh login`.

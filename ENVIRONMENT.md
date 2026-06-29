@@ -8,16 +8,21 @@ Postgres `+1`, Compose web `+2`, MinIO API `+3`, MinIO console `+4`, host-run
 web/API `+5`, and bot health `+6`. Explicit service port overrides keep their
 current precedence rules.
 
-## Required
+## Required For A Healthy Non-Local Runtime
 
 - `API_SHARED_SECRET` (required for protected endpoints)
-- `POSTGRES_URL` (required in non-local environments)
-- `MINIO_ROOT_PASSWORD` (required in non-local environments)
+- `POSTGRES_URL` (required for database-backed API and worker health)
+- `MINIO_ROOT_PASSWORD` (required for internal transfer storage)
 - `DISCORD_BOT_TOKEN` (Discord bot runtime)
+
+The app avoids eager settings-construction failures where possible so failed
+deployments can still expose logs and health responses. Missing runtime
+dependencies should surface as degraded health or route/job failures rather than
+Pydantic import errors.
 
 ## Core Runtime (Bot + Worker)
 
-- `Optional` (non-local): `ENVIRONMENT` (default: `local`; non-local environments must set explicit `POSTGRES_URL` and `MINIO_ROOT_PASSWORD`)
+- `Optional` (non-local): `ENVIRONMENT` (default: `local`; non-local environments should set explicit `POSTGRES_URL` and `MINIO_ROOT_PASSWORD`)
 - `Optional`: `SENTRY_DSN` (default: unset; set to enable Sentry event capture)
 - `Optional`: `SENTRY_SEND_DEFAULT_PII` (default: `false`)
 - `Optional`: `SENTRY_DEBUG` (default: `false`)
@@ -39,7 +44,7 @@ current precedence rules.
 
 ## Postgres + Compose Exposure
 
-- `Required in non-local environments`: `POSTGRES_URL` (local default: `postgresql://postgres:postgres@127.0.0.1:5432/workflows`; `./scripts/dev.sh` overrides it to a deterministic per-worktree localhost port, Compose injects a Docker-network URL)
+- `Required for healthy non-local runtime`: `POSTGRES_URL` (local default: `postgresql://postgres:postgres@127.0.0.1:5432/workflows`; `./scripts/dev.sh` overrides it to a deterministic per-worktree localhost port, Compose injects a Docker-network URL)
 - `Optional` (Compose DB container): `POSTGRES_DB` (default: `workflows`)
 - `Optional` (Compose DB container): `POSTGRES_USER` (default: `postgres`)
 - `Optional` (Compose DB container): `POSTGRES_PASSWORD` (default: `postgres`)
