@@ -4,6 +4,9 @@ on:
   merge_group:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   docker-smoke:
     runs-on: ubuntu-latest
