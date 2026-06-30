@@ -14,7 +14,7 @@ dependencies = [
     "python-docx>=1.2.0",
     "redis>=6.4.0",
     "requests~=2.31",
-    "psycopg[binary]>=3.2.5",
+    "psycopg[binary]>=3.3.4",
     "five08",
 ]
 
