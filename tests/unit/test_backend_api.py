@@ -3463,7 +3463,9 @@ def test_list_dashboard_onboarding_includes_orphan_intake_without_raw_payload() 
     orphan_sql = cursor.execute.call_args_list[1].args[0]
     assert "raw_payload" not in people_sql
     assert "people.sync_status = 'active'" in orphan_sql
-    assert "people.contact_type ILIKE '%prospect%'" in orphan_sql
+    orphan_params = cursor.execute.call_args_list[1].args[1]
+    assert "people.contact_type ILIKE %s" in orphan_sql
+    assert orphan_params[0] == "%prospect%"
 
 
 def test_list_dashboard_onboarding_merges_orphans_before_applying_limit() -> None:
