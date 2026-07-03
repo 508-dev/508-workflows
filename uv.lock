@@ -658,11 +658,11 @@ wheels = [
 
 [[package]]
 name = "dramatiq"
-version = "2.0.1"
+version = "2.2.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/fa/bb/56b5d615c32ec8e136beee243efc54afa099b384c057e896d16268e35e08/dramatiq-2.0.1.tar.gz", hash = "sha256:3caa0587057eee67bd3a0e6d439d78d6cf88b300b5185dad1f4044a0c5f57fc2", size = 104165, upload-time = "2026-01-18T11:31:09.807Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/29/fb/78b1b689c4a121fc762ab6f00674cfa7246980678117edb03cbb168e5f9f/dramatiq-2.2.0.tar.gz", hash = "sha256:70c9278b0a9b880aeb23b8e09c9d43b1421ac8e807ef18903f6dd059130474a1", size = 108462, upload-time = "2026-06-17T11:18:34.629Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ca/28/4bfc19a3b12177febcb3d28767933c823c056727872a8792a87d6f68df67/dramatiq-2.0.1-py3-none-any.whl", hash = "sha256:0cdfe5fdd1028adf65c6f3b2f0c5e6909053d6e41cf6556ff4def991d2419c89", size = 124391, upload-time = "2026-01-18T11:31:08.803Z" },
+    { url = "https://files.pythonhosted.org/packages/ef/57/a9be0b205b24e794c833a5295497f914776eb4d606d5a25a5b290e8b75ec/dramatiq-2.2.0-py3-none-any.whl", hash = "sha256:2b2aa244b4098e154600c47cdb2c04cec6c3af44e9e159c319c6fc8b6f0ba90e", size = 127342, upload-time = "2026-06-17T11:18:33.433Z" },
 ]
 
 [package.optional-dependencies]
@@ -2341,7 +2341,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = "==1.18.4" },
-    { name = "dramatiq", extras = ["redis"], specifier = "==2.0.1" },
+    { name = "dramatiq", extras = ["redis"], specifier = "==2.2.0" },
     { name = "five08", editable = "packages/shared" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "openai", specifier = ">=2.0.0" },

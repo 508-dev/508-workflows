@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "alembic==1.18.4",
     # Pin intentionally for reproducible broker behavior across worker/api images.
-    "dramatiq[redis]==2.0.1",
+    "dramatiq[redis]==2.2.0",
     "httpx>=0.28.1",
     "openai>=2.0.0",
     "pydantic~=2.13",
