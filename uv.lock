@@ -11,7 +11,7 @@ exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for 
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
-cloakbrowser = "2026-06-01T16:00:00Z"
+cloakbrowser = "2026-06-24T00:00:00Z"
 
 [manifest]
 members = [
@@ -441,15 +441,16 @@ wheels = [
 
 [[package]]
 name = "cloakbrowser"
-version = "0.3.31"
+version = "0.4.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
+    { name = "cryptography" },
     { name = "httpx" },
     { name = "playwright" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/54/12/50296c1adf7f09988a8ae300f2472e8c33a9d79826980579f0aa7b938b74/cloakbrowser-0.3.31.tar.gz", hash = "sha256:7109961fc9ef0c9a288547eff6717d3cb2cc7ad7b14fecfef1221357b9a0d870", size = 5365798, upload-time = "2026-05-26T18:32:45.045Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b9/01/891358882410567fb254512dda4c003dce28457ecae07f43bbf1f7392f53/cloakbrowser-0.4.3.tar.gz", hash = "sha256:a713c254b5419a46a00d4140349febeaed8da873413a813087d43bc23d742634", size = 5535357, upload-time = "2026-06-23T23:19:21.272Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/42/ba/7acb1250c0d453124f6bff0185296fa75618b0a4924cdf9ef5f27d1337ec/cloakbrowser-0.3.31-py3-none-any.whl", hash = "sha256:0496f586c9a580b03ef69dc26b931bbe3ad93b944be2750edcc423379d97d2d3", size = 76582, upload-time = "2026-05-26T18:32:43.436Z" },
+    { url = "https://files.pythonhosted.org/packages/ab/1e/29bd8862b6c48b5a8e5b08c1cf3d61be465bc4e2ebc9eed15bcdc35d66af/cloakbrowser-0.4.3-py3-none-any.whl", hash = "sha256:03b1be78a61d85d119bab6cbb59e3079dcd7eea8358c3cea5717c597bf863477", size = 89803, upload-time = "2026-06-23T23:19:19.347Z" },
 ]
 
 [[package]]
