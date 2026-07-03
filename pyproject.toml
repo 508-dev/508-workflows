@@ -44,7 +44,7 @@ dev = [
     "pre-commit>=3.7",
     "pre-commit-uv",
     "freezegun>=1.5.5",
-    "playwright>=1.58.0",
+    "playwright>=1.60.0",
     "pyrefly>=1.1.1",
 ]
 
