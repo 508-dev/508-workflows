@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { type ConfigurationItem, ConfigurationView } from "./main"
+import { type ConfigurationItem, ConfigurationView } from "./views/configuration-view"
 
 afterEach(() => cleanup())
 

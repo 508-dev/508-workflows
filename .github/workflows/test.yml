@@ -41,13 +41,9 @@ jobs:
         echo "KIMAI_BASE_URL=${{ secrets.KIMAI_BASE_URL }}" >> "$GITHUB_ENV"
         echo "KIMAI_API_TOKEN=${{ secrets.KIMAI_API_TOKEN }}" >> "$GITHUB_ENV"
 
-    - name: Run tests with pytest
-      run: |
-        uv run pytest tests/ -m "not playwright" -v --tb=short
-
     - name: Run tests with coverage
       run: |
-        uv run coverage run -m pytest tests/ -m "not playwright"
+        uv run coverage run -m pytest tests/ -m "not playwright" -v --tb=short
         uv run coverage report
         uv run coverage xml
 

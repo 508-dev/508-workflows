@@ -81,14 +81,21 @@ class Bot508(commands.Bot):
     async def load_extensions(self) -> None:
         """Load all cog files from the cogs directory."""
         cogs_dir = Path(__file__).parent / "cogs"
+        cog_names: set[str] = set()
         for file in cogs_dir.glob("*.py"):
             if file.name != "__init__.py":
-                cog_name = f"five08.discord_bot.cogs.{file.stem}"
-                try:
-                    await self.load_extension(cog_name)
-                    logger.info(f"Loaded cog: {cog_name}")
-                except Exception as e:
-                    logger.error(f"Failed to load cog {cog_name}: {e}")
+                cog_names.add(f"five08.discord_bot.cogs.{file.stem}")
+
+        for package_init in cogs_dir.glob("*/__init__.py"):
+            if package_init.parent.name != "__pycache__":
+                cog_names.add(f"five08.discord_bot.cogs.{package_init.parent.name}")
+
+        for cog_name in sorted(cog_names):
+            try:
+                await self.load_extension(cog_name)
+                logger.info(f"Loaded cog: {cog_name}")
+            except Exception as e:
+                logger.error(f"Failed to load cog {cog_name}: {e}")
 
         # Sync slash commands after loading all cogs
         try:

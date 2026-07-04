@@ -29,24 +29,18 @@ _KNOWN_PROVIDER_PREFIXES = frozenset(
 
 
 def default_model_profiles_path() -> Path:
-    """Return the development/eval model profile catalog path."""
-    return (
-        Path(__file__).resolve().parents[4] / "tests" / "evals" / "model-profiles.json"
-    )
+    """Return the packaged model profile catalog path in a source checkout."""
+    return Path(__file__).resolve().parent / _PACKAGED_MODEL_PROFILES
 
 
 @lru_cache(maxsize=1)
 def load_model_profiles() -> dict[str, Any]:
-    """Load model profile metadata from packaged data with a dev fallback."""
+    """Load model profile metadata from packaged data."""
     packaged_data = _load_packaged_model_profiles()
     if packaged_data is not None:
         return _normalize_model_profiles(packaged_data)
 
-    path = default_model_profiles_path()
-    if not path.exists():
-        return dict(_EMPTY_MODEL_PROFILES)
-    data = json.loads(path.read_text())
-    return _normalize_model_profiles(data)
+    return dict(_EMPTY_MODEL_PROFILES)
 
 
 def _load_packaged_model_profiles() -> dict[str, Any] | None:

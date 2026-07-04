@@ -21,7 +21,7 @@ Reports are written to `tests/evals/resume-extraction/reports/`, which is
 gitignored because observations can contain candidate PII.
 
 Model profile metadata, pricing, request behavior, and observed recommendations
-live in `tests/evals/model-profiles.json`. Current local results mark
+live in `packages/shared/src/five08/data/model-profiles.json`. Current local results mark
 `gpt-4.1-mini` as the resume extraction default candidate, with `gpt-5.5` kept
 as the quality-ceiling baseline.
 
