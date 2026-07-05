@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from functools import lru_cache
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 _EMPTY_MODEL_PROFILES: dict[str, Any] = {
     "version": "model-profiles.v1",
@@ -40,6 +43,7 @@ def load_model_profiles() -> dict[str, Any]:
     if packaged_data is not None:
         return _normalize_model_profiles(packaged_data)
 
+    logger.warning("Packaged model profile catalog unavailable; using empty catalog")
     return dict(_EMPTY_MODEL_PROFILES)
 
 

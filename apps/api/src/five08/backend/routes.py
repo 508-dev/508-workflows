@@ -2,12 +2,91 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any, Protocol
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 
-def register_routes(app: FastAPI, api: Any) -> None:
+RouteHandler = Callable[..., Any]
+
+
+class BackendRouteSurface(Protocol):
+    """Route-facing API module contract used by this registrar."""
+
+    _OptionalDirectoryStaticFiles: type[StaticFiles]
+    dashboard_assets_dir: Callable[[], Path]
+    agent_confirmation_handler: RouteHandler
+    agent_request_handler: RouteHandler
+    audit_event_handler: RouteHandler
+    auth_callback_handler: RouteHandler
+    auth_discord_link_consume_handler: RouteHandler
+    auth_discord_link_create_handler: RouteHandler
+    auth_discord_link_redirect_handler: RouteHandler
+    auth_login_handler: RouteHandler
+    auth_logout_handler: RouteHandler
+    auth_me_handler: RouteHandler
+    dashboard_add_gig_application_handler: RouteHandler
+    dashboard_add_project_historical_member_handler: RouteHandler
+    dashboard_add_project_user_handler: RouteHandler
+    dashboard_agent_report_handler: RouteHandler
+    dashboard_assign_onboarder_handler: RouteHandler
+    dashboard_audit_events_handler: RouteHandler
+    dashboard_bulk_update_projects_handler: RouteHandler
+    dashboard_configuration_handler: RouteHandler
+    dashboard_create_project_handler: RouteHandler
+    dashboard_erpnext_account_managers_handler: RouteHandler
+    dashboard_erpnext_contacts_handler: RouteHandler
+    dashboard_erpnext_cost_centers_handler: RouteHandler
+    dashboard_erpnext_customers_handler: RouteHandler
+    dashboard_gig_detail_handler: RouteHandler
+    dashboard_gigs_handler: RouteHandler
+    dashboard_handler: RouteHandler
+    dashboard_job_detail_handler: RouteHandler
+    dashboard_jobs_handler: RouteHandler
+    dashboard_me_handler: RouteHandler
+    dashboard_newsletter_status_handler: RouteHandler
+    dashboard_newsletter_suppressions_handler: RouteHandler
+    dashboard_notifications_handler: RouteHandler
+    dashboard_onboarding_email_draft_handler: RouteHandler
+    dashboard_onboarding_email_send_handler: RouteHandler
+    dashboard_onboarding_handler: RouteHandler
+    dashboard_people_handler: RouteHandler
+    dashboard_project_member_candidates_handler: RouteHandler
+    dashboard_project_wiki_matches_handler: RouteHandler
+    dashboard_projects_handler: RouteHandler
+    dashboard_remove_project_historical_member_handler: RouteHandler
+    dashboard_remove_project_user_handler: RouteHandler
+    dashboard_rerun_job_handler: RouteHandler
+    dashboard_setup_engineer_handler: RouteHandler
+    dashboard_sync_newsletters_handler: RouteHandler
+    dashboard_sync_people_handler: RouteHandler
+    dashboard_sync_projects_handler: RouteHandler
+    dashboard_update_configuration_handler: RouteHandler
+    dashboard_update_gig_application_status_handler: RouteHandler
+    dashboard_update_gig_status_handler: RouteHandler
+    dashboard_update_onboarding_status_handler: RouteHandler
+    dashboard_update_project_status_handler: RouteHandler
+    dashboard_update_project_wiki_match_handler: RouteHandler
+    docuseal_webhook_handler: RouteHandler
+    espocrm_people_sync_webhook_handler: RouteHandler
+    espocrm_webhook_handler: RouteHandler
+    google_forms_intake_webhook_handler: RouteHandler
+    health_handler: RouteHandler
+    ingest_handler: RouteHandler
+    job_status_handler: RouteHandler
+    jobs_handler: RouteHandler
+    process_contact_handler: RouteHandler
+    rerun_job_handler: RouteHandler
+    resume_apply_handler: RouteHandler
+    resume_extract_handler: RouteHandler
+    sync_people_handler: RouteHandler
+    tally_intake_webhook_handler: RouteHandler
+
+
+def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     """Register backend API routes against handlers owned by the api module."""
     _OptionalDirectoryStaticFiles = api._OptionalDirectoryStaticFiles
     agent_confirmation_handler = api.agent_confirmation_handler

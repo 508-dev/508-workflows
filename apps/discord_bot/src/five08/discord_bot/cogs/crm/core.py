@@ -595,6 +595,8 @@ class CreateSSOUserSelectionButton(RequesterContactSelectionButton):
     emoji_value = "🔐"
     callback_error_log = "Error in create_sso_user selection callback: %s"
     edit_error_log = "Failed to update SSO user selection view: %s"
+    use_selection_lock = True
+    disable_before_handle = True
 
     async def handle_selection(
         self,
@@ -633,6 +635,8 @@ class CreateUserAccountsSelectionButton(RequesterContactSelectionButton):
     emoji_value = "👤"
     callback_error_log = "Error in create_user_accounts selection callback: %s"
     edit_error_log = "Failed to update create_user_accounts selection view: %s"
+    use_selection_lock = True
+    disable_before_handle = True
 
     async def handle_selection(
         self,
@@ -673,6 +677,8 @@ class OutlineInviteSelectionButton(RequesterContactSelectionButton):
     emoji_value = "📨"
     callback_error_log = "Error in invite_outline_user selection callback: %s"
     edit_error_log = "Failed to update invite_outline_user selection view: %s"
+    use_selection_lock = True
+    disable_before_handle = True
 
     async def handle_selection(
         self,
@@ -787,6 +793,8 @@ class MarkIdVerifiedSelectionButton(RequesterContactSelectionButton):
     callback_error_log = "Error in ID verified selection callback: %s"
     callback_error_message = "❌ An error occurred while marking ID verification."
     edit_error_log = "Failed to update ID verification selection view: %s"
+    use_selection_lock = True
+    disable_before_handle = True
 
     async def handle_selection(
         self,
@@ -828,6 +836,8 @@ class ReprocessResumeSelectionButton(RequesterContactSelectionButton):
 
     callback_error_log = "Error in reprocess resume selection callback: %s"
     edit_error_log = "Failed to update reprocess resume selection view: %s"
+    use_selection_lock = True
+    disable_before_handle = True
 
     def __init__(self, contact: dict[str, Any], requester_id: int) -> None:
         resume_ids = contact.get("resumeIds")

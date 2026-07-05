@@ -108,7 +108,7 @@ from five08.backend.auth import (
     normalize_next_path,
 )
 from five08.clients.erpnext import ERPNextAPIError, ERPNextClient
-from five08.backend.routes import register_routes
+from five08.backend.routes import BackendRouteSurface, register_routes
 from five08.backend.schemas import (
     AgentConfirmationRequest,
     DashboardAssignOnboarderRequest,
@@ -9041,7 +9041,7 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
     app.state.oidc_client = OIDCProviderClient(settings)
     app.state.discord_admin_verifier = DiscordAdminVerifier(settings)
 
-    register_routes(app, sys.modules[__name__])
+    register_routes(app, cast(BackendRouteSurface, sys.modules[__name__]))
 
     return app
 
