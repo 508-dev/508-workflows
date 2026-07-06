@@ -7801,7 +7801,17 @@ class TestCRMCog:
         )
         view.add_contact_button(contact)
         button = view.children[0]
-        crm_cog._send_member_agreement_for_contact_flow = AsyncMock()
+
+        async def assert_controls_disabled_during_send(**_: object) -> None:
+            assert all(
+                item.disabled
+                for item in view.children
+                if isinstance(item, discord.ui.Button)
+            )
+
+        crm_cog._send_member_agreement_for_contact_flow = AsyncMock(
+            side_effect=assert_controls_disabled_during_send
+        )
 
         interaction = AsyncMock()
         interaction.response = AsyncMock()
@@ -7891,6 +7901,7 @@ class TestCRMCog:
         interaction = AsyncMock()
         interaction.response = AsyncMock()
         interaction.response.defer = AsyncMock()
+        interaction.response.is_done = Mock(return_value=True)
         interaction.followup = AsyncMock()
         interaction.followup.send = AsyncMock()
         interaction.user = Mock()
@@ -7904,6 +7915,12 @@ class TestCRMCog:
         assert audit_kwargs["result"] == "error"
         assert audit_kwargs["metadata"]["stage"] == "selection_callback"
         assert audit_kwargs["metadata"]["selected_contact_id"] == "crm-123"
+        assert view._selection_started is True
+        assert all(
+            item.disabled
+            for item in view.children
+            if isinstance(item, discord.ui.Button)
+        )
         interaction.followup.send.assert_awaited_once_with(
             "❌ An error occurred while handling the selection.",
             ephemeral=True,

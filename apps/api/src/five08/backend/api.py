@@ -12,6 +12,7 @@ import os
 import re
 import secrets
 import smtplib
+import sys
 import json
 import threading
 import time
@@ -28,7 +29,7 @@ import uvicorn
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import ValidationError
 from psycopg import Connection
 from psycopg.rows import dict_row
 
@@ -107,8 +108,32 @@ from five08.backend.auth import (
     normalize_next_path,
 )
 from five08.clients.erpnext import ERPNextAPIError, ERPNextClient
+from five08.backend.routes import BackendRouteSurface, register_routes
+from five08.backend.schemas import (
+    AgentConfirmationRequest,
+    DashboardAssignOnboarderRequest,
+    DashboardBulkProjectUpdateRequest,
+    DashboardConfigurationUpdateRequest,
+    DashboardEngineerSetupRequest,
+    DashboardGigApplicationCreateRequest,
+    DashboardGigApplicationStatusRequest,
+    DashboardGigStatusRequest,
+    DashboardOnboardingEmailDraftRequest,
+    DashboardOnboardingEmailSendRequest,
+    DashboardOnboardingStatusRequest,
+    DashboardProjectCreateRequest,
+    DashboardProjectHistoricalMemberRemoveRequest,
+    DashboardProjectHistoricalMemberRequest,
+    DashboardProjectStatusRequest,
+    DashboardProjectUserRemoveRequest,
+    DashboardProjectUserRequest,
+    DashboardProjectWikiMatchRequest,
+    DiscordLinkCreateRequest,
+    ResumeApplyRequest,
+    ResumeExtractRequest,
+)
 from five08.backend.dashboard import (
-    dashboard_assets_dir,
+    dashboard_assets_dir as dashboard_assets_dir,
     dashboard_html,
     discord_link_continue_html,
     discord_link_unavailable_html,
@@ -196,185 +221,6 @@ _DISCORD_LINK_REPLAY_TTL_SECONDS = 10
 _PROJECT_ROSTER_USER_CANDIDATE_CACHE_MAX_SIZE = 128
 _PROJECT_ROSTER_USER_CANDIDATE_CACHE_LOCK = threading.RLock()
 _PROJECT_ROSTER_USER_CANDIDATE_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
-
-
-class ResumeExtractRequest(BaseModel):
-    """Request schema for queued resume extraction."""
-
-    contact_id: str
-    attachment_id: str
-    filename: str
-    refresh_token: str | None = None
-
-
-class ResumeApplyRequest(BaseModel):
-    """Request schema for queued resume apply updates."""
-
-    contact_id: str
-    updates: dict[str, Any]
-    link_discord: dict[str, str] | None = None
-
-
-class DiscordLinkCreateRequest(BaseModel):
-    """Payload for creating one-time admin deep links from Discord commands."""
-
-    discord_user_id: str
-    next_path: str | None = None
-    discord_display_name: str | None = None
-    discord_roles: list[str] = Field(default_factory=list)
-
-
-class AgentConfirmationRequest(BaseModel):
-    """Payload for confirming or canceling a frozen agent plan."""
-
-    context: AgentIdentityContext
-    confirm: bool = True
-
-
-class DashboardAssignOnboarderRequest(BaseModel):
-    """Payload for assigning an onboarder from the dashboard."""
-
-    onboarder: str
-
-
-class DashboardOnboardingStatusRequest(BaseModel):
-    """Payload for updating one dashboard onboarding status."""
-
-    status: str
-
-
-class DashboardOnboardingEmailDraftRequest(BaseModel):
-    """Payload for drafting one dashboard onboarding email."""
-
-    has_contributed: bool = False
-    discord_joined: Literal["yes", "no", "unknown"] = "unknown"
-    agreement_signed: Literal["yes", "no", "unknown"] = "unknown"
-
-
-class DashboardOnboardingEmailSendRequest(BaseModel):
-    """Payload for sending one reviewed dashboard onboarding email."""
-
-    markdown_body: str
-    has_contributed: bool = False
-    discord_joined: Literal["yes", "no", "unknown"] = "unknown"
-    agreement_signed: Literal["yes", "no", "unknown"] = "unknown"
-
-
-class DashboardGigStatusRequest(BaseModel):
-    """Payload for updating one dashboard gig status."""
-
-    status: str
-
-
-class DashboardProjectStatusRequest(BaseModel):
-    """Payload for updating one ERPNext Project status."""
-
-    status: str
-
-
-class DashboardBulkProjectUpdateRequest(BaseModel):
-    """Payload for bulk ERPNext Project field updates."""
-
-    project_ids: list[str]
-    status: str | None = None
-    project_type: str | None = None
-
-
-class DashboardProjectUserRequest(BaseModel):
-    """Payload for adding one ERPNext User to a Project roster."""
-
-    user: str
-    candidate_id: str | None = None
-    activity_type: str | None = None
-    billing_rate: float | None = None
-    costing_rate: float | None = None
-
-
-class DashboardEngineerSetupRequest(BaseModel):
-    """Payload for setting up one ERPNext engineer account."""
-
-    email: str
-    first_name: str
-    middle_name: str | None = None
-    last_name: str | None = None
-    country: str | None = None
-    gender: str | None = None
-    date_of_birth: str | None = None
-    date_of_joining: str | None = None
-    personal_email: str | None = None
-    prefered_email: str | None = None
-
-
-class DashboardProjectUserRemoveRequest(BaseModel):
-    """Payload for removing one ERPNext User from a Project roster."""
-
-    user: str
-
-
-class DashboardProjectHistoricalMemberRequest(BaseModel):
-    """Payload for adding one local historical Project roster member."""
-
-    person: str
-    candidate_id: str | None = None
-
-
-class DashboardProjectHistoricalMemberRemoveRequest(BaseModel):
-    """Payload for removing one local historical Project roster member."""
-
-    source_user_id: str
-
-
-class DashboardProjectWikiMatchRequest(BaseModel):
-    """Payload for saving a manual project-to-wiki match decision."""
-
-    status: str
-    row_key: str | None = None
-
-
-class DashboardProjectCreateRequest(BaseModel):
-    """Payload for creating a Customer-backed ERPNext Project."""
-
-    project_name: str
-    customer_mode: Literal["new", "existing"] = "new"
-    customer_name: str | None = None
-    customer: str | None = None
-    account_manager: str | None = None
-    default_billing_currency: str | None = "USD"
-    default_cost_center: str | None = "Projects - 5"
-    activity_type: str | None = None
-    customer_details: str | None = None
-    customer_website: str | None = None
-    address_line1: str | None = None
-    address_line2: str | None = None
-    address_city: str | None = None
-    address_state: str | None = None
-    address_country: str | None = None
-    address_postal_code: str | None = None
-    contact: str | None = None
-    contact_first_name: str | None = None
-    contact_last_name: str | None = None
-    contact_email: str | None = None
-    contact_phone: str | None = None
-    contact_mobile: str | None = None
-
-
-class DashboardGigApplicationStatusRequest(BaseModel):
-    """Payload for updating one dashboard gig candidate/application status."""
-
-    status: str
-
-
-class DashboardGigApplicationCreateRequest(BaseModel):
-    """Payload for adding one CRM-verified gig candidate/application."""
-
-    crm_profile: str = Field(min_length=1, max_length=500)
-
-
-class DashboardConfigurationUpdateRequest(BaseModel):
-    """Payload for updating one admin-managed configuration value."""
-
-    value: str | bool | int | float | None = None
-    clear: bool = False
 
 
 @dataclass(frozen=True)
@@ -9195,310 +9041,7 @@ def create_app(*, run_lifespan: bool = True) -> FastAPI:
     app.state.oidc_client = OIDCProviderClient(settings)
     app.state.discord_admin_verifier = DiscordAdminVerifier(settings)
 
-    app.add_api_route("/", health_handler, methods=["GET"])
-    app.add_api_route("/health", health_handler, methods=["GET"])
-
-    app.add_api_route(
-        "/dashboard",
-        dashboard_handler,
-        methods=["GET"],
-        response_model=None,
-    )
-    assets_dir = dashboard_assets_dir()
-    app.mount(
-        "/dashboard/assets",
-        _OptionalDirectoryStaticFiles(directory=assets_dir, check_dir=False),
-        name="dashboard-assets",
-    )
-    app.add_api_route(
-        "/dashboard/{view}",
-        dashboard_handler,
-        methods=["GET"],
-        response_model=None,
-    )
-    app.add_api_route("/dashboard/api/me", dashboard_me_handler, methods=["GET"])
-    app.add_api_route("/dashboard/api/jobs", dashboard_jobs_handler, methods=["GET"])
-    app.add_api_route(
-        "/dashboard/api/jobs/{job_id}",
-        dashboard_job_detail_handler,
-        methods=["GET"],
-    )
-    app.add_api_route(
-        "/dashboard/api/jobs/{job_id}/rerun",
-        dashboard_rerun_job_handler,
-        methods=["POST"],
-    )
-    app.add_api_route(
-        "/dashboard/api/people",
-        dashboard_people_handler,
-        methods=["GET"],
-    )
-    app.add_api_route(
-        "/dashboard/api/gigs",
-        dashboard_gigs_handler,
-        methods=["GET"],
-    )
-    app.add_api_route(
-        "/dashboard/api/gigs/{engagement_id}",
-        dashboard_gig_detail_handler,
-        methods=["GET"],
-    )
-    app.add_api_route(
-        "/dashboard/api/notifications",
-        dashboard_notifications_handler,
-        methods=["GET"],
-    )
-    app.add_api_route(
-        "/dashboard/api/projects",
-        dashboard_projects_handler,
-        methods=["GET"],
-    )
-    app.add_api_route(
-        "/dashboard/api/project-member-candidates",
-        dashboard_project_member_candidates_handler,
-        methods=["GET"],
-    )
-    app.add_api_route(
-        "/dashboard/api/projects/wiki-matches",
-        dashboard_project_wiki_matches_handler,
-        methods=["GET"],
-    )
-    app.add_api_route(
-        "/dashboard/api/erpnext/customers",
-        dashboard_erpnext_customers_handler,
-        methods=["GET"],
-    )
-    app.add_api_route(
-        "/dashboard/api/erpnext/contacts",
-        dashboard_erpnext_contacts_handler,
-        methods=["GET"],
-    )
-    app.add_api_route(
-        "/dashboard/api/erpnext/account-managers",
-        dashboard_erpnext_account_managers_handler,
-        methods=["GET"],
-    )
-    app.add_api_route(
-        "/dashboard/api/erpnext/cost-centers",
-        dashboard_erpnext_cost_centers_handler,
-        methods=["GET"],
-    )
-    app.add_api_route(
-        "/dashboard/api/projects/create",
-        dashboard_create_project_handler,
-        methods=["POST"],
-    )
-    app.add_api_route(
-        "/dashboard/api/projects/bulk",
-        dashboard_bulk_update_projects_handler,
-        methods=["POST"],
-    )
-    app.add_api_route(
-        "/dashboard/api/projects/{project_id}/status",
-        dashboard_update_project_status_handler,
-        methods=["POST"],
-    )
-    app.add_api_route(
-        "/dashboard/api/projects/{project_id}/users",
-        dashboard_add_project_user_handler,
-        methods=["POST"],
-    )
-    app.add_api_route(
-        "/dashboard/api/projects/{project_id}/users/remove",
-        dashboard_remove_project_user_handler,
-        methods=["POST"],
-    )
-    app.add_api_route(
-        "/dashboard/api/projects/{project_id}/historical-members",
-        dashboard_add_project_historical_member_handler,
-        methods=["POST"],
-    )
-    app.add_api_route(
-        "/dashboard/api/projects/{project_id}/historical-members/remove",
-        dashboard_remove_project_historical_member_handler,
-        methods=["POST"],
-    )
-    app.add_api_route(
-        "/dashboard/api/projects/{project_id}/wiki-match",
-        dashboard_update_project_wiki_match_handler,
-        methods=["POST"],
-    )
-    app.add_api_route(
-        "/dashboard/api/sync/projects",
-        dashboard_sync_projects_handler,
-        methods=["POST"],
-    )
-    app.add_api_route(
-        "/dashboard/api/gigs/{engagement_id}/status",
-        dashboard_update_gig_status_handler,
-        methods=["POST"],
-    )
-    app.add_api_route(
-        "/dashboard/api/gigs/{engagement_id}/applications",
-        dashboard_add_gig_application_handler,
-        methods=["POST"],
-    )
-    app.add_api_route(
-        "/dashboard/api/gigs/{engagement_id}/applications/{application_id}/status",
-        dashboard_update_gig_application_status_handler,
-        methods=["POST"],
-    )
-    app.add_api_route(
-        "/dashboard/api/onboarding",
-        dashboard_onboarding_handler,
-        methods=["GET"],
-    )
-    app.add_api_route(
-        "/dashboard/api/onboarding/engineers",
-        dashboard_setup_engineer_handler,
-        methods=["POST"],
-    )
-    app.add_api_route(
-        "/dashboard/api/onboarding/{contact_id}/onboarder",
-        dashboard_assign_onboarder_handler,
-        methods=["POST"],
-    )
-    app.add_api_route(
-        "/dashboard/api/onboarding/{contact_id}/status",
-        dashboard_update_onboarding_status_handler,
-        methods=["POST"],
-    )
-    app.add_api_route(
-        "/dashboard/api/onboarding/{contact_id}/email/draft",
-        dashboard_onboarding_email_draft_handler,
-        methods=["POST"],
-    )
-    app.add_api_route(
-        "/dashboard/api/onboarding/{contact_id}/email/send",
-        dashboard_onboarding_email_send_handler,
-        methods=["POST"],
-    )
-    app.add_api_route(
-        "/dashboard/api/audit-events",
-        dashboard_audit_events_handler,
-        methods=["GET"],
-    )
-    app.add_api_route(
-        "/dashboard/api/agent",
-        dashboard_agent_report_handler,
-        methods=["GET"],
-    )
-    app.add_api_route(
-        "/dashboard/api/configuration",
-        dashboard_configuration_handler,
-        methods=["GET"],
-    )
-    app.add_api_route(
-        "/dashboard/api/configuration/{key}",
-        dashboard_update_configuration_handler,
-        methods=["PUT"],
-    )
-    app.add_api_route(
-        "/dashboard/api/newsletter/suppressions",
-        dashboard_newsletter_suppressions_handler,
-        methods=["GET"],
-    )
-    app.add_api_route(
-        "/dashboard/api/newsletter/status",
-        dashboard_newsletter_status_handler,
-        methods=["GET"],
-    )
-    app.add_api_route(
-        "/dashboard/api/sync/people",
-        dashboard_sync_people_handler,
-        methods=["POST"],
-    )
-    app.add_api_route(
-        "/dashboard/api/sync/newsletters",
-        dashboard_sync_newsletters_handler,
-        methods=["POST"],
-    )
-    app.add_api_route(
-        "/dashboard/gigs/{item_id}",
-        dashboard_handler,
-        methods=["GET"],
-        response_model=None,
-    )
-    app.add_api_route(
-        "/dashboard/projects/{item_id}",
-        dashboard_handler,
-        methods=["GET"],
-        response_model=None,
-    )
-
-    app.add_api_route("/jobs", jobs_handler, methods=["GET"])
-    app.add_api_route("/jobs/{job_id}", job_status_handler, methods=["GET"])
-    app.add_api_route("/jobs/{job_id}/rerun", rerun_job_handler, methods=["POST"])
-    app.add_api_route("/jobs/resume-extract", resume_extract_handler, methods=["POST"])
-    app.add_api_route("/jobs/resume-apply", resume_apply_handler, methods=["POST"])
-
-    app.add_api_route("/webhooks/espocrm", espocrm_webhook_handler, methods=["POST"])
-    app.add_api_route(
-        "/webhooks/espocrm/people-sync",
-        espocrm_people_sync_webhook_handler,
-        methods=["POST"],
-    )
-    app.add_api_route(
-        "/webhooks/docuseal",
-        docuseal_webhook_handler,
-        methods=["POST"],
-    )
-    app.add_api_route(
-        "/webhooks/google-forms",
-        google_forms_intake_webhook_handler,
-        methods=["POST"],
-    )
-    app.add_api_route(
-        "/webhooks/tally",
-        tally_intake_webhook_handler,
-        methods=["POST"],
-    )
-    app.add_api_route(
-        "/webhooks/tally/onboarding",
-        tally_intake_webhook_handler,
-        methods=["POST"],
-    )
-    app.add_api_route("/webhooks/{source}", ingest_handler, methods=["POST"])
-
-    app.add_api_route(
-        "/process-contact/{contact_id}",
-        process_contact_handler,
-        methods=["POST"],
-    )
-    app.add_api_route("/sync/people", sync_people_handler, methods=["POST"])
-    app.add_api_route("/audit/events", audit_event_handler, methods=["POST"])
-    app.add_api_route("/agent/requests", agent_request_handler, methods=["POST"])
-    app.add_api_route(
-        "/agent/confirmations/{plan_id}",
-        agent_confirmation_handler,
-        methods=["POST"],
-    )
-
-    app.add_api_route(
-        "/auth/login", auth_login_handler, methods=["GET"], response_model=None
-    )
-    app.add_api_route(
-        "/auth/callback", auth_callback_handler, methods=["GET"], response_model=None
-    )
-    app.add_api_route("/auth/me", auth_me_handler, methods=["GET"])
-    app.add_api_route("/auth/logout", auth_logout_handler, methods=["POST"])
-    app.add_api_route(
-        "/auth/discord/links",
-        auth_discord_link_create_handler,
-        methods=["POST"],
-    )
-    app.add_api_route(
-        "/auth/discord/link/{token}",
-        auth_discord_link_redirect_handler,
-        methods=["GET"],
-        response_model=None,
-    )
-    app.add_api_route(
-        "/auth/discord/link/{token}/consume",
-        auth_discord_link_consume_handler,
-        methods=["POST"],
-        response_model=None,
-    )
+    register_routes(app, cast(BackendRouteSurface, sys.modules[__name__]))
 
     return app
 

@@ -59,7 +59,12 @@ class TestBot508:
 
         mock_features_dir.glob.return_value = [mock_file1, mock_file2]
 
-        with patch.object(Path, "glob", return_value=[mock_file1, mock_file2]):
+        def glob_side_effect(pattern: str):
+            if pattern == "*.py":
+                return [mock_file1, mock_file2]
+            return []
+
+        with patch.object(Path, "glob", side_effect=glob_side_effect):
             with patch.object(
                 bot, "load_extension", new_callable=AsyncMock
             ) as mock_load_ext:
@@ -79,7 +84,12 @@ class TestBot508:
         mock_file.name = "broken_feature.py"
         mock_file.stem = "broken_feature"
 
-        with patch.object(Path, "glob", return_value=[mock_file]):
+        def glob_side_effect(pattern: str):
+            if pattern == "*.py":
+                return [mock_file]
+            return []
+
+        with patch.object(Path, "glob", side_effect=glob_side_effect):
             with patch.object(
                 bot, "load_extension", side_effect=Exception("Load error")
             ):

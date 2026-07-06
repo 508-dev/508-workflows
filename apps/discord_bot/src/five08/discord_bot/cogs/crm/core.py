@@ -410,421 +410,22 @@ class ContactSelectionButton(discord.ui.Button[ContactSelectionView]):
             )
 
 
-class CreateSSOUserSelectionButton(discord.ui.Button["CreateSSOUserSelectionView"]):
-    """Button for selecting a contact to continue SSO provisioning."""
+class RequesterContactSelectionView(discord.ui.View):
+    """Base view for requester-scoped CRM contact selections."""
 
-    def __init__(self, contact: dict[str, Any], requester_id: int) -> None:
-        contact_name = str(contact.get("name", "Unknown"))
-        label = contact_name[:80] if len(contact_name) > 80 else contact_name
-        super().__init__(style=discord.ButtonStyle.primary, label=label, emoji="🔐")
-        self.contact = contact
-        self.requester_id = requester_id
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        """Handle contact selection and continue SSO provisioning."""
-        try:
-            if not self.view:
-                await interaction.response.send_message(
-                    "❌ View not found.",
-                    ephemeral=True,
-                )
-                return
-            if interaction.user.id != self.requester_id:
-                await interaction.response.send_message(
-                    "❌ Only the command requester can confirm this action.",
-                    ephemeral=True,
-                )
-                return
-
-            await interaction.response.defer(ephemeral=True)
-            await self.view.crm_cog._create_or_link_sso_user_for_contact(
-                interaction=interaction,
-                contact=self.contact,
-                search_term=self.view.search_term,
-            )
-
-            for item in self.view.children:
-                if isinstance(item, discord.ui.Button):
-                    item.disabled = True
-
-            if interaction.message:
-                try:
-                    await interaction.message.edit(view=self.view)
-                except discord.NotFound:
-                    pass
-                except discord.HTTPException as exc:
-                    logger.warning("Failed to update SSO user selection view: %s", exc)
-        except Exception as exc:
-            logger.error("Error in create_sso_user selection callback: %s", exc)
-            await interaction.followup.send(
-                "❌ An error occurred while handling the selection.",
-                ephemeral=True,
-            )
-
-
-class CreateSSOUserSelectionView(discord.ui.View):
-    """View containing contact selection buttons for SSO provisioning."""
+    button_cls: type["RequesterContactSelectionButton"]
+    timeout_log_message = "Failed to disable contact selection view: %s"
 
     def __init__(
         self,
         crm_cog: "CRMCog",
         requester_id: int,
-        search_term: str,
-        original_interaction: discord.Interaction,
+        search_term: str | None = None,
     ) -> None:
         super().__init__(timeout=300)
         self.crm_cog = crm_cog
         self.requester_id = requester_id
-        self.search_term = search_term
-        self.original_interaction = original_interaction
-        self._message: discord.Message | None = None
-
-    def add_contact_button(self, contact: dict[str, Any]) -> None:
-        """Add a contact selection button."""
-        if len(self.children) >= 5:
-            return
-        self.add_item(
-            CreateSSOUserSelectionButton(
-                contact=contact,
-                requester_id=self.requester_id,
-            )
-        )
-
-    def set_message(self, message: discord.Message | None) -> None:
-        """Store the sent message so timeout can disable its controls."""
-        self._message = message
-
-    async def on_timeout(self) -> None:
-        """Disable controls when the selection times out and update the message."""
-        for item in self.children:
-            if isinstance(item, discord.ui.Button):
-                item.disabled = True
-        if self._message:
-            try:
-                await self._message.edit(view=self)
-            except discord.NotFound:
-                pass
-            except discord.HTTPException as exc:
-                logger.warning(
-                    "Failed to disable create_sso_user selection view: %s", exc
-                )
-
-
-class CreateUserAccountsSelectionButton(
-    discord.ui.Button["CreateUserAccountsSelectionView"]
-):
-    """Button for selecting a contact to continue all-in-one provisioning."""
-
-    def __init__(self, contact: dict[str, Any], requester_id: int) -> None:
-        contact_name = str(contact.get("name", "Unknown"))
-        label = contact_name[:80] if len(contact_name) > 80 else contact_name
-        super().__init__(style=discord.ButtonStyle.primary, label=label, emoji="👤")
-        self.contact = contact
-        self.requester_id = requester_id
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        """Handle contact selection and continue account provisioning."""
-        try:
-            if not self.view:
-                await interaction.response.send_message(
-                    "❌ View not found.",
-                    ephemeral=True,
-                )
-                return
-            if interaction.user.id != self.requester_id:
-                await interaction.response.send_message(
-                    "❌ Only the command requester can confirm this action.",
-                    ephemeral=True,
-                )
-                return
-
-            await interaction.response.defer(ephemeral=True)
-            await self.view.crm_cog._create_user_accounts_for_contact(
-                interaction=interaction,
-                contact=self.contact,
-                search_term=self.view.search_term,
-                mailbox_username=self.view.mailbox_username,
-            )
-
-            for item in self.view.children:
-                if isinstance(item, discord.ui.Button):
-                    item.disabled = True
-
-            if interaction.message:
-                try:
-                    await interaction.message.edit(view=self.view)
-                except discord.NotFound:
-                    pass
-                except discord.HTTPException as exc:
-                    logger.warning(
-                        "Failed to update create_user_accounts selection view: %s",
-                        exc,
-                    )
-        except Exception as exc:
-            logger.error("Error in create_user_accounts selection callback: %s", exc)
-            await interaction.followup.send(
-                "❌ An error occurred while handling the selection.",
-                ephemeral=True,
-            )
-
-
-class CreateUserAccountsSelectionView(discord.ui.View):
-    """View containing contact selection buttons for combined account provisioning."""
-
-    def __init__(
-        self,
-        crm_cog: "CRMCog",
-        requester_id: int,
-        search_term: str,
-        mailbox_username: str,
-    ) -> None:
-        super().__init__(timeout=300)
-        self.crm_cog = crm_cog
-        self.requester_id = requester_id
-        self.search_term = search_term
-        self.mailbox_username = mailbox_username
-        self._message: discord.Message | None = None
-
-    def add_contact_button(self, contact: dict[str, Any]) -> None:
-        """Add a contact selection button."""
-        if len(self.children) >= 5:
-            return
-        self.add_item(
-            CreateUserAccountsSelectionButton(
-                contact=contact,
-                requester_id=self.requester_id,
-            )
-        )
-
-    def set_message(self, message: discord.Message | None) -> None:
-        """Store the sent message so timeout can disable its controls."""
-        self._message = message
-
-    async def on_timeout(self) -> None:
-        """Disable controls when the selection times out and update the message."""
-        for item in self.children:
-            if isinstance(item, discord.ui.Button):
-                item.disabled = True
-        if self._message:
-            try:
-                await self._message.edit(view=self)
-            except discord.NotFound:
-                pass
-            except discord.HTTPException as exc:
-                logger.warning(
-                    "Failed to disable create_user_accounts selection view: %s",
-                    exc,
-                )
-
-
-class OutlineInviteSelectionButton(discord.ui.Button["OutlineInviteSelectionView"]):
-    """Button for selecting a contact to invite to Outline."""
-
-    def __init__(self, contact: dict[str, Any], requester_id: int) -> None:
-        contact_name = str(contact.get("name", "Unknown"))
-        label = contact_name[:80] if len(contact_name) > 80 else contact_name
-        super().__init__(style=discord.ButtonStyle.primary, label=label, emoji="📨")
-        self.contact = contact
-        self.requester_id = requester_id
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        """Handle contact selection and send the Outline invite."""
-        try:
-            if not self.view:
-                await interaction.response.send_message(
-                    "❌ View not found.",
-                    ephemeral=True,
-                )
-                return
-            if interaction.user.id != self.requester_id:
-                await interaction.response.send_message(
-                    "❌ Only the command requester can confirm this action.",
-                    ephemeral=True,
-                )
-                return
-
-            await interaction.response.defer(ephemeral=True)
-            await self.view.crm_cog._invite_outline_user_for_contact_flow(
-                interaction=interaction,
-                contact=self.contact,
-                search_term=self.view.search_term,
-            )
-
-            for item in self.view.children:
-                if isinstance(item, discord.ui.Button):
-                    item.disabled = True
-
-            if interaction.message:
-                try:
-                    await interaction.message.edit(view=self.view)
-                except discord.NotFound:
-                    pass
-                except discord.HTTPException as exc:
-                    logger.warning(
-                        "Failed to update invite_outline_user selection view: %s",
-                        exc,
-                    )
-        except Exception as exc:
-            logger.error("Error in invite_outline_user selection callback: %s", exc)
-            await interaction.followup.send(
-                "❌ An error occurred while handling the selection.",
-                ephemeral=True,
-            )
-
-
-class OutlineInviteSelectionView(discord.ui.View):
-    """View containing contact selection buttons for Outline invitations."""
-
-    def __init__(
-        self,
-        crm_cog: "CRMCog",
-        requester_id: int,
-        search_term: str,
-    ) -> None:
-        super().__init__(timeout=300)
-        self.crm_cog = crm_cog
-        self.requester_id = requester_id
-        self.search_term = search_term
-        self._message: discord.Message | None = None
-
-    def add_contact_button(self, contact: dict[str, Any]) -> None:
-        """Add a contact selection button."""
-        if len(self.children) >= 5:
-            return
-        self.add_item(
-            OutlineInviteSelectionButton(
-                contact=contact,
-                requester_id=self.requester_id,
-            )
-        )
-
-    def set_message(self, message: discord.Message | None) -> None:
-        """Store the sent message so timeout can disable its controls."""
-        self._message = message
-
-    async def on_timeout(self) -> None:
-        """Disable controls when the selection times out and update the message."""
-        for item in self.children:
-            if isinstance(item, discord.ui.Button):
-                item.disabled = True
-        if self._message:
-            try:
-                await self._message.edit(view=self)
-            except discord.NotFound:
-                pass
-            except discord.HTTPException as exc:
-                logger.warning(
-                    "Failed to disable invite_outline_user selection view: %s",
-                    exc,
-                )
-
-
-class MemberAgreementSelectionButton(discord.ui.Button["MemberAgreementSelectionView"]):
-    """Button for selecting a contact to send the member agreement to."""
-
-    def __init__(self, contact: dict[str, Any], requester_id: int) -> None:
-        contact_name = str(contact.get("name", "Unknown"))
-        label = contact_name[:80] if len(contact_name) > 80 else contact_name
-        super().__init__(style=discord.ButtonStyle.primary, label=label, emoji="📄")
-        self.contact = contact
-        self.requester_id = requester_id
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        """Handle contact selection and send the member agreement."""
-        try:
-            if not self.view:
-                await interaction.response.send_message(
-                    "❌ View not found.",
-                    ephemeral=True,
-                )
-                return
-            if interaction.user.id != self.requester_id:
-                self.view.crm_cog._audit_command_safe(
-                    interaction=interaction,
-                    action="crm.send_member_agreement",
-                    result="denied",
-                    metadata={
-                        "reason": "requester_mismatch",
-                        "selected_contact_id": str(self.contact.get("id") or ""),
-                    },
-                    resource_type="crm_contact",
-                    resource_id=str(self.contact.get("id") or ""),
-                )
-                await interaction.response.send_message(
-                    "❌ Only the command requester can confirm this action.",
-                    ephemeral=True,
-                )
-                return
-            if not self.view.try_start_selection():
-                self.view.crm_cog._audit_command_safe(
-                    interaction=interaction,
-                    action="crm.send_member_agreement",
-                    result="denied",
-                    metadata={
-                        "reason": "selection_already_processing",
-                        "selected_contact_id": str(self.contact.get("id") or ""),
-                    },
-                    resource_type="crm_contact",
-                    resource_id=str(self.contact.get("id") or ""),
-                )
-                await interaction.response.send_message(
-                    "⚠️ This member agreement selection is already being processed.",
-                    ephemeral=True,
-                )
-                return
-
-            await interaction.response.defer(ephemeral=True)
-            self.view.disable_controls()
-            if interaction.message:
-                try:
-                    await interaction.message.edit(view=self.view)
-                except discord.NotFound:
-                    pass
-                except discord.HTTPException as exc:
-                    logger.warning(
-                        "Failed to update send_member_agreement selection view: %s",
-                        exc,
-                    )
-
-            await self.view.crm_cog._send_member_agreement_for_contact_flow(
-                interaction=interaction,
-                contact=self.contact,
-                search_term=self.view.search_term,
-            )
-        except Exception as exc:
-            logger.error("Error in send_member_agreement selection callback: %s", exc)
-            if self.view:
-                self.view.crm_cog._audit_command_safe(
-                    interaction=interaction,
-                    action="crm.send_member_agreement",
-                    result="error",
-                    metadata={
-                        "stage": "selection_callback",
-                        "error": str(exc),
-                        "selected_contact_id": str(self.contact.get("id") or ""),
-                    },
-                    resource_type="crm_contact",
-                    resource_id=str(self.contact.get("id") or ""),
-                )
-            await interaction.followup.send(
-                "❌ An error occurred while handling the selection.",
-                ephemeral=True,
-            )
-
-
-class MemberAgreementSelectionView(discord.ui.View):
-    """View containing contact selection buttons for member agreements."""
-
-    def __init__(
-        self,
-        crm_cog: "CRMCog",
-        requester_id: int,
-        search_term: str,
-    ) -> None:
-        super().__init__(timeout=300)
-        self.crm_cog = crm_cog
-        self.requester_id = requester_id
-        self.search_term = search_term
+        self.search_term = search_term or ""
         self._message: discord.Message | None = None
         self._selection_started = False
 
@@ -832,12 +433,13 @@ class MemberAgreementSelectionView(discord.ui.View):
         """Add a contact selection button."""
         if len(self.children) >= 5:
             return
-        self.add_item(
-            MemberAgreementSelectionButton(
-                contact=contact,
-                requester_id=self.requester_id,
-            )
-        )
+        self.add_item(self.create_contact_button(contact))
+
+    def create_contact_button(
+        self, contact: dict[str, Any]
+    ) -> "RequesterContactSelectionButton":
+        """Build the button for one contact."""
+        return self.button_cls(contact=contact, requester_id=self.requester_id)
 
     def set_message(self, message: discord.Message | None) -> None:
         """Store the sent message so timeout can disable its controls."""
@@ -856,6 +458,29 @@ class MemberAgreementSelectionView(discord.ui.View):
             if isinstance(item, discord.ui.Button):
                 item.disabled = True
 
+    def enable_controls(self) -> None:
+        """Re-enable all controls in the view."""
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = False
+
+    def reset_selection_state(self) -> None:
+        """Allow another selection attempt after a failed callback."""
+        self._selection_started = False
+        self.enable_controls()
+
+    async def edit_selection_message(
+        self, interaction: discord.Interaction, *, log_message: str
+    ) -> None:
+        """Update the original Discord message after controls change."""
+        if interaction.message:
+            try:
+                await interaction.message.edit(view=self)
+            except discord.NotFound:
+                pass
+            except discord.HTTPException as exc:
+                logger.warning(log_message, exc)
+
     async def on_timeout(self) -> None:
         """Disable controls when the selection times out and update the message."""
         self.disable_controls()
@@ -865,77 +490,357 @@ class MemberAgreementSelectionView(discord.ui.View):
             except discord.NotFound:
                 pass
             except discord.HTTPException as exc:
-                logger.warning(
-                    "Failed to disable send_member_agreement selection view: %s",
-                    exc,
-                )
+                logger.warning(self.timeout_log_message, exc)
 
 
-class MarkIdVerifiedSelectionButton(discord.ui.Button["MarkIdVerifiedSelectionView"]):
-    """Button for selecting a contact to mark ID verification on."""
+class RequesterContactSelectionButton(discord.ui.Button[RequesterContactSelectionView]):
+    """Base button for requester-scoped CRM contact selections."""
 
-    def __init__(
-        self,
-        contact: dict[str, Any],
-        verified_by: str,
-        verified_at: str,
-        id_type: str | None,
-        requester_id: int,
-    ) -> None:
-        contact_name = contact.get("name", "Unknown")
-        label = contact_name[:80] if len(contact_name) > 80 else contact_name
-        super().__init__(style=discord.ButtonStyle.success, label=label, emoji="✅")
+    emoji_value = "✅"
+    style_value = discord.ButtonStyle.primary
+    callback_error_log = "Error in contact selection callback: %s"
+    callback_error_message = "❌ An error occurred while handling the selection."
+    edit_error_log = "Failed to update contact selection view: %s"
+    selection_already_processing_message = (
+        "⚠️ This selection is already being processed."
+    )
+    audit_action: str | None = None
+    use_selection_lock = False
+    disable_before_handle = False
+    reset_selection_on_error = True
+
+    def __init__(self, contact: dict[str, Any], requester_id: int) -> None:
+        super().__init__(
+            style=self.button_style(contact),
+            label=self.button_label(contact),
+            emoji=self.button_emoji(contact),
+        )
         self.contact = contact
-        self.verified_by = verified_by
-        self.verified_at = verified_at
-        self.id_type = id_type
         self.requester_id = requester_id
 
+    def button_label(self, contact: dict[str, Any]) -> str:
+        """Return the Discord button label for a contact."""
+        contact_name = str(contact.get("name", "Unknown"))
+        return contact_name[:80] if len(contact_name) > 80 else contact_name
+
+    def button_emoji(self, contact: dict[str, Any]) -> str:
+        """Return the Discord button emoji for a contact."""
+        return self.emoji_value
+
+    def button_style(self, contact: dict[str, Any]) -> discord.ButtonStyle:
+        """Return the Discord button style for a contact."""
+        return self.style_value
+
     async def callback(self, interaction: discord.Interaction) -> None:
-        """Handle contact selection and perform the ID verification."""
+        """Validate a contact selection and run the concrete action."""
         try:
-            if not self.view:
-                await interaction.response.send_message("❌ View not found.")
-                return
-            if interaction.user.id != self.requester_id:
+            view = self.view
+            if not isinstance(view, RequesterContactSelectionView):
                 await interaction.response.send_message(
-                    "❌ Only the command requester can confirm this action.",
+                    "❌ View not found.",
                     ephemeral=True,
                 )
                 return
+            if interaction.user.id != self.requester_id:
+                await self.handle_requester_mismatch(interaction, view)
+                return
+            if self.use_selection_lock and not view.try_start_selection():
+                await self.handle_selection_already_processing(interaction, view)
+                return
 
             await interaction.response.defer(ephemeral=True)
-            await self.view.crm_cog._mark_id_verified_for_contact(
-                interaction=interaction,
-                contact=self.contact,
-                verified_by=self.verified_by,
-                verified_at=self.verified_at,
-                id_type=self.id_type,
-            )
+            if self.disable_before_handle:
+                view.disable_controls()
+                await view.edit_selection_message(
+                    interaction,
+                    log_message=self.edit_error_log,
+                )
 
-            for item in self.view.children:
-                if isinstance(item, discord.ui.Button):
-                    item.disabled = True
+            await self.handle_selection(interaction, view)
 
-            if interaction.message:
-                try:
-                    await interaction.message.edit(view=self.view)
-                except discord.NotFound:
-                    pass
-                except discord.HTTPException as exc:
-                    logger.warning(
-                        f"Failed to update ID verification selection view: {exc}"
-                    )
+            if not self.disable_before_handle:
+                view.disable_controls()
+                await view.edit_selection_message(
+                    interaction,
+                    log_message=self.edit_error_log,
+                )
         except Exception as exc:
-            logger.error(f"Error in ID verified selection callback: {exc}")
+            logger.error(self.callback_error_log, exc)
+            if self.reset_selection_on_error and isinstance(
+                self.view, RequesterContactSelectionView
+            ):
+                self.view.reset_selection_state()
+                await self.view.edit_selection_message(
+                    interaction,
+                    log_message=self.edit_error_log,
+                )
+            await self.handle_callback_error(interaction, exc)
+
+    def _audit_selection_event(
+        self,
+        view: RequesterContactSelectionView,
+        interaction: discord.Interaction,
+        *,
+        result: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        if not self.audit_action:
+            return
+        view.crm_cog._audit_command_safe(
+            interaction=interaction,
+            action=self.audit_action,
+            result=result,
+            metadata={
+                **metadata,
+                "selected_contact_id": str(self.contact.get("id") or ""),
+            },
+            resource_type="crm_contact",
+            resource_id=str(self.contact.get("id") or ""),
+        )
+
+    async def handle_requester_mismatch(
+        self,
+        interaction: discord.Interaction,
+        view: RequesterContactSelectionView,
+    ) -> None:
+        """Handle clicks by a user other than the original requester."""
+        self._audit_selection_event(
+            interaction=interaction,
+            view=view,
+            result="denied",
+            metadata={"reason": "requester_mismatch"},
+        )
+        await interaction.response.send_message(
+            "❌ Only the command requester can confirm this action.",
+            ephemeral=True,
+        )
+
+    async def handle_selection_already_processing(
+        self,
+        interaction: discord.Interaction,
+        view: RequesterContactSelectionView,
+    ) -> None:
+        """Handle duplicate clicks while a selection is already processing."""
+        self._audit_selection_event(
+            interaction=interaction,
+            view=view,
+            result="denied",
+            metadata={"reason": "selection_already_processing"},
+        )
+        await interaction.response.send_message(
+            self.selection_already_processing_message,
+            ephemeral=True,
+        )
+
+    async def handle_callback_error(
+        self, interaction: discord.Interaction, exc: Exception
+    ) -> None:
+        """Send a user-facing callback failure message."""
+        if isinstance(self.view, RequesterContactSelectionView):
+            self._audit_selection_event(
+                interaction=interaction,
+                view=self.view,
+                result="error",
+                metadata={
+                    "stage": "selection_callback",
+                    "error": str(exc),
+                },
+            )
+        if interaction.response.is_done():
             await interaction.followup.send(
-                "❌ An error occurred while marking ID verification.",
+                self.callback_error_message,
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                self.callback_error_message,
                 ephemeral=True,
             )
 
+    async def handle_selection(
+        self,
+        interaction: discord.Interaction,
+        view: RequesterContactSelectionView,
+    ) -> None:
+        """Run the concrete CRM action for the selected contact."""
+        raise NotImplementedError
 
-class MarkIdVerifiedSelectionView(discord.ui.View):
+
+class CreateSSOUserSelectionButton(RequesterContactSelectionButton):
+    """Button for selecting a contact to continue SSO provisioning."""
+
+    emoji_value = "🔐"
+    callback_error_log = "Error in create_sso_user selection callback: %s"
+    edit_error_log = "Failed to update SSO user selection view: %s"
+    audit_action = "crm.create_sso_user"
+    use_selection_lock = True
+
+    async def handle_selection(
+        self,
+        interaction: discord.Interaction,
+        view: RequesterContactSelectionView,
+    ) -> None:
+        await view.crm_cog._create_or_link_sso_user_for_contact(
+            interaction=interaction,
+            contact=self.contact,
+            search_term=view.search_term,
+        )
+
+
+class CreateSSOUserSelectionView(RequesterContactSelectionView):
+    """View containing contact selection buttons for SSO provisioning."""
+
+    button_cls = CreateSSOUserSelectionButton
+    timeout_log_message = "Failed to disable create_sso_user selection view: %s"
+
+    def __init__(
+        self,
+        crm_cog: "CRMCog",
+        requester_id: int,
+        search_term: str,
+        original_interaction: discord.Interaction,
+    ) -> None:
+        super().__init__(
+            crm_cog=crm_cog, requester_id=requester_id, search_term=search_term
+        )
+        self.original_interaction = original_interaction
+
+
+class CreateUserAccountsSelectionButton(RequesterContactSelectionButton):
+    """Button for selecting a contact to continue all-in-one provisioning."""
+
+    emoji_value = "👤"
+    callback_error_log = "Error in create_user_accounts selection callback: %s"
+    edit_error_log = "Failed to update create_user_accounts selection view: %s"
+    audit_action = "crm.create_user_accounts"
+    use_selection_lock = True
+
+    async def handle_selection(
+        self,
+        interaction: discord.Interaction,
+        view: RequesterContactSelectionView,
+    ) -> None:
+        assert isinstance(view, CreateUserAccountsSelectionView)
+        await view.crm_cog._create_user_accounts_for_contact(
+            interaction=interaction,
+            contact=self.contact,
+            search_term=view.search_term,
+            mailbox_username=view.mailbox_username,
+        )
+
+
+class CreateUserAccountsSelectionView(RequesterContactSelectionView):
+    """View containing contact selection buttons for combined account provisioning."""
+
+    button_cls = CreateUserAccountsSelectionButton
+    timeout_log_message = "Failed to disable create_user_accounts selection view: %s"
+
+    def __init__(
+        self,
+        crm_cog: "CRMCog",
+        requester_id: int,
+        search_term: str,
+        mailbox_username: str,
+    ) -> None:
+        super().__init__(
+            crm_cog=crm_cog, requester_id=requester_id, search_term=search_term
+        )
+        self.mailbox_username = mailbox_username
+
+
+class OutlineInviteSelectionButton(RequesterContactSelectionButton):
+    """Button for selecting a contact to invite to Outline."""
+
+    emoji_value = "📨"
+    callback_error_log = "Error in invite_outline_user selection callback: %s"
+    edit_error_log = "Failed to update invite_outline_user selection view: %s"
+    audit_action = "crm.invite_outline_user"
+    use_selection_lock = True
+
+    async def handle_selection(
+        self,
+        interaction: discord.Interaction,
+        view: RequesterContactSelectionView,
+    ) -> None:
+        await view.crm_cog._invite_outline_user_for_contact_flow(
+            interaction=interaction,
+            contact=self.contact,
+            search_term=view.search_term,
+        )
+
+
+class OutlineInviteSelectionView(RequesterContactSelectionView):
+    """View containing contact selection buttons for Outline invitations."""
+
+    button_cls = OutlineInviteSelectionButton
+    timeout_log_message = "Failed to disable invite_outline_user selection view: %s"
+
+
+class MemberAgreementSelectionButton(RequesterContactSelectionButton):
+    """Button for selecting a contact to send the member agreement to."""
+
+    emoji_value = "📄"
+    callback_error_log = "Error in send_member_agreement selection callback: %s"
+    callback_error_message = "❌ An error occurred while handling the selection."
+    edit_error_log = "Failed to update send_member_agreement selection view: %s"
+    selection_already_processing_message = (
+        "⚠️ This member agreement selection is already being processed."
+    )
+    audit_action = "crm.send_member_agreement"
+    use_selection_lock = True
+    disable_before_handle = True
+    reset_selection_on_error = False
+
+    async def handle_selection(
+        self,
+        interaction: discord.Interaction,
+        view: RequesterContactSelectionView,
+    ) -> None:
+        await view.crm_cog._send_member_agreement_for_contact_flow(
+            interaction=interaction,
+            contact=self.contact,
+            search_term=view.search_term,
+        )
+
+
+class MemberAgreementSelectionView(RequesterContactSelectionView):
+    """View containing contact selection buttons for member agreements."""
+
+    button_cls = MemberAgreementSelectionButton
+    timeout_log_message = "Failed to disable send_member_agreement selection view: %s"
+
+
+class MarkIdVerifiedSelectionButton(RequesterContactSelectionButton):
+    """Button for selecting a contact to mark ID verification on."""
+
+    emoji_value = "✅"
+    style_value = discord.ButtonStyle.success
+    callback_error_log = "Error in ID verified selection callback: %s"
+    callback_error_message = "❌ An error occurred while marking ID verification."
+    edit_error_log = "Failed to update ID verification selection view: %s"
+    audit_action = "crm.mark_id_verified"
+    use_selection_lock = True
+
+    async def handle_selection(
+        self,
+        interaction: discord.Interaction,
+        view: RequesterContactSelectionView,
+    ) -> None:
+        assert isinstance(view, MarkIdVerifiedSelectionView)
+        await view.crm_cog._mark_id_verified_for_contact(
+            interaction=interaction,
+            contact=self.contact,
+            verified_by=view.verified_by,
+            verified_at=view.verified_at,
+            id_type=view.id_type,
+        )
+
+
+class MarkIdVerifiedSelectionView(RequesterContactSelectionView):
     """View containing contact selection buttons for ID verification."""
+
+    button_cls = MarkIdVerifiedSelectionButton
+    timeout_log_message = "Failed to disable ID verification selection view: %s"
 
     def __init__(
         self,
@@ -945,121 +850,70 @@ class MarkIdVerifiedSelectionView(discord.ui.View):
         verified_at: str,
         id_type: str | None,
     ) -> None:
-        super().__init__(timeout=300)  # 5 minute timeout
-        self.crm_cog = crm_cog
-        self.requester_id = requester_id
+        super().__init__(crm_cog=crm_cog, requester_id=requester_id)
         self.verified_by = verified_by
         self.verified_at = verified_at
         self.id_type = id_type
 
-    def add_contact_button(
-        self,
-        contact: dict[str, Any],
-    ) -> None:
-        """Add a contact selection button."""
-        if len(self.children) >= 5:
-            return
-        button = MarkIdVerifiedSelectionButton(
-            contact=contact,
-            verified_by=self.verified_by,
-            verified_at=self.verified_at,
-            id_type=self.id_type,
-            requester_id=self.requester_id,
-        )
-        self.add_item(button)
 
-
-class ReprocessResumeSelectionButton(discord.ui.Button["ReprocessResumeSelectionView"]):
+class ReprocessResumeSelectionButton(RequesterContactSelectionButton):
     """Button for selecting a contact to reprocess a profile."""
 
+    callback_error_log = "Error in reprocess resume selection callback: %s"
+    edit_error_log = "Failed to update reprocess resume selection view: %s"
+    audit_action = "crm.reprocess_profile"
+    use_selection_lock = True
+
     def __init__(self, contact: dict[str, Any], requester_id: int) -> None:
-        contact_name = str(contact.get("name", "Unknown"))
         resume_ids = contact.get("resumeIds")
         self.has_resume = isinstance(resume_ids, list) and any(
             str(item).strip() for item in resume_ids
         )
         self.has_profile_sources = CRMCog._contact_has_external_profile_sources(contact)
-        can_reprocess_profile = self.has_resume or self.has_profile_sources
-        super().__init__(
-            style=(
-                discord.ButtonStyle.primary
-                if can_reprocess_profile
-                else discord.ButtonStyle.secondary
-            ),
-            label=_format_reprocess_profile_button_label(
-                contact_name,
-                has_resume=self.has_resume,
-                has_profile_sources=self.has_profile_sources,
-            ),
-            emoji="🔄" if can_reprocess_profile else "📤",
+        super().__init__(contact=contact, requester_id=requester_id)
+
+    def button_label(self, contact: dict[str, Any]) -> str:
+        contact_name = str(contact.get("name", "Unknown"))
+        return _format_reprocess_profile_button_label(
+            contact_name,
+            has_resume=self.has_resume,
+            has_profile_sources=self.has_profile_sources,
         )
-        self.contact = contact
-        self.requester_id = requester_id
 
-    async def callback(self, interaction: discord.Interaction) -> None:
-        try:
-            if not self.view:
-                await interaction.response.send_message("❌ View not found.")
-                return
-            if interaction.user.id != self.requester_id:
-                await interaction.response.send_message(
-                    "❌ Only the command requester can confirm this action.",
-                    ephemeral=True,
-                )
-                return
+    def button_emoji(self, contact: dict[str, Any]) -> str:
+        if self.has_resume or self.has_profile_sources:
+            return "🔄"
+        return "📤"
 
-            await interaction.response.defer(ephemeral=True)
-            if self.has_resume or self.has_profile_sources:
-                await self.view.crm_cog._start_resume_reprocess_from_contact(
-                    interaction=interaction,
-                    contact=self.contact,
-                    search_term=self.view.search_term,
-                )
-            else:
-                await self.view.crm_cog._prompt_upload_resume_for_contact(
-                    interaction=interaction,
-                    contact=self.contact,
-                    search_term=self.view.search_term,
-                )
+    def button_style(self, contact: dict[str, Any]) -> discord.ButtonStyle:
+        if self.has_resume or self.has_profile_sources:
+            return discord.ButtonStyle.primary
+        return discord.ButtonStyle.secondary
 
-            for item in self.view.children:
-                if isinstance(item, discord.ui.Button):
-                    item.disabled = True
-
-            if interaction.message:
-                try:
-                    await interaction.message.edit(view=self.view)
-                except discord.NotFound:
-                    pass
-                except discord.HTTPException as exc:
-                    logger.warning(
-                        "Failed to update reprocess resume selection view: %s", exc
-                    )
-        except Exception as exc:
-            logger.error("Error in reprocess resume selection callback: %s", exc)
-            await interaction.followup.send(
-                "❌ An error occurred while handling the selection.",
-                ephemeral=True,
+    async def handle_selection(
+        self,
+        interaction: discord.Interaction,
+        view: RequesterContactSelectionView,
+    ) -> None:
+        if self.has_resume or self.has_profile_sources:
+            await view.crm_cog._start_resume_reprocess_from_contact(
+                interaction=interaction,
+                contact=self.contact,
+                search_term=view.search_term,
+            )
+        else:
+            await view.crm_cog._prompt_upload_resume_for_contact(
+                interaction=interaction,
+                contact=self.contact,
+                search_term=view.search_term,
             )
 
 
-class ReprocessResumeSelectionView(discord.ui.View):
+class ReprocessResumeSelectionView(RequesterContactSelectionView):
     """View containing contact selection buttons for resume reprocessing."""
 
-    def __init__(self, crm_cog: "CRMCog", requester_id: int, search_term: str) -> None:
-        super().__init__(timeout=300)  # 5 minute timeout
-        self.crm_cog = crm_cog
-        self.requester_id = requester_id
-        self.search_term = search_term
-
-    def add_contact_button(self, contact: dict[str, Any]) -> None:
-        """Add a contact selection button."""
-        if len(self.children) >= 5:
-            return
-        button = ReprocessResumeSelectionButton(
-            contact=contact, requester_id=self.requester_id
-        )
-        self.add_item(button)
+    button_cls = ReprocessResumeSelectionButton
+    timeout_log_message = "Failed to disable reprocess resume selection view: %s"
 
 
 class MarkIdVerifiedOverwriteConfirmationView(discord.ui.View):

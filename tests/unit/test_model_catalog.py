@@ -18,9 +18,10 @@ def test_model_catalog_loads_packaged_json() -> None:
     assert "gpt-4.1-mini" in profiles["models"]
 
 
-def test_model_catalog_keeps_repo_eval_json_available() -> None:
+def test_model_catalog_uses_packaged_json_as_default_path() -> None:
     assert default_model_profiles_path().name == "model-profiles.json"
     assert default_model_profiles_path().exists()
+    assert "packages/shared/src/five08/data" in str(default_model_profiles_path())
 
     profile = model_profile_for("gpt-4.1-mini")
 
