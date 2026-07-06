@@ -60,9 +60,7 @@ class _FakeHackerNewsClient:
 def test_html_to_text_preserves_links_and_paragraph_breaks() -> None:
     text = html_to_text('Hello<p><a href="https://example.com">Apply</a>')
 
-    assert "Hello" in text
-    assert "https://example.com" in text
-    assert "Apply" in text
+    assert text == "Hello\n https://example.com Apply"
 
 
 def test_classify_contractor_lead_rejects_seeking_work() -> None:

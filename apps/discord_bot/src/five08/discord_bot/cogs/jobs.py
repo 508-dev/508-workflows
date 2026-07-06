@@ -3416,6 +3416,10 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
     def _truncate_job_lead_text(value: str, limit: int) -> str:
         """Trim lead text for Discord command responses."""
         normalized = value.replace("\r", " ").strip()
+        if limit <= 0:
+            return ""
+        if limit <= 3:
+            return normalized[:limit]
         if len(normalized) <= limit:
             return normalized
         return f"{normalized[: limit - 3]}..."
@@ -3443,8 +3447,23 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             lines.append(f"Apply/contact: {lead.apply_url}")
         if lead.tags:
             lines.append(f"Lead tags: {', '.join(lead.tags)}")
-        body = cls._truncate_job_lead_text(lead.body_normalized, 3200)
-        return "\n".join(lines) + f"\n\n{body}"
+        metadata = "\n".join(lines)
+        separator = "\n\n"
+        body_limit = (
+            settings.discord_sendmsg_character_limit - len(metadata) - len(separator)
+        )
+        if body_limit <= 0:
+            return cls._truncate_job_lead_text(
+                metadata,
+                settings.discord_sendmsg_character_limit,
+            )
+        body = cls._truncate_job_lead_text(lead.body_normalized, body_limit)
+        return f"{metadata}{separator}{body}"
+
+    @staticmethod
+    def _job_lead_allowed_mentions() -> discord.AllowedMentions:
+        """Disable mention parsing for untrusted external lead content."""
+        return discord.AllowedMentions.none()
 
     @staticmethod
     def _resolve_job_lead_forum_tags(
@@ -3611,6 +3630,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 name=self._truncate_job_lead_text(lead.title, 100),
                 content=content,
                 applied_tags=applied_tags,
+                allowed_mentions=self._job_lead_allowed_mentions(),
                 reason=f"Approved sourced job lead by {interaction.user}",
             )
         except discord.Forbidden:

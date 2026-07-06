@@ -135,6 +135,22 @@ def test_format_job_lead_thread_content_includes_review_context() -> None:
     assert "CO-Ver needs a 1099 contractor." in content
 
 
+def test_format_job_lead_thread_content_respects_discord_limit() -> None:
+    lead = _make_job_lead(body_normalized="x" * 5000)
+
+    content = JobsCog._format_job_lead_thread_content(lead)
+
+    assert len(content) <= jobs_module.settings.discord_sendmsg_character_limit
+    assert content.endswith("...")
+
+
+def test_job_lead_allowed_mentions_disables_all_mentions() -> None:
+    allowed_mentions = JobsCog._job_lead_allowed_mentions()
+
+    payload = allowed_mentions.to_dict()
+    assert payload["parse"] == []
+
+
 def test_update_gig_status_allows_original_thread_poster() -> None:
     interaction = SimpleNamespace(user=SimpleNamespace(id=123, roles=[]))
 
