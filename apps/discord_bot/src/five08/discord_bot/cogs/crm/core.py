@@ -458,6 +458,17 @@ class RequesterContactSelectionView(discord.ui.View):
             if isinstance(item, discord.ui.Button):
                 item.disabled = True
 
+    def enable_controls(self) -> None:
+        """Re-enable all controls in the view."""
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = False
+
+    def reset_selection_state(self) -> None:
+        """Allow another selection attempt after a failed callback."""
+        self._selection_started = False
+        self.enable_controls()
+
     async def edit_selection_message(
         self, interaction: discord.Interaction, *, log_message: str
     ) -> None:
@@ -490,6 +501,10 @@ class RequesterContactSelectionButton(discord.ui.Button[RequesterContactSelectio
     callback_error_log = "Error in contact selection callback: %s"
     callback_error_message = "❌ An error occurred while handling the selection."
     edit_error_log = "Failed to update contact selection view: %s"
+    selection_already_processing_message = (
+        "⚠️ This selection is already being processed."
+    )
+    audit_action: str | None = None
     use_selection_lock = False
     disable_before_handle = False
 
@@ -550,7 +565,35 @@ class RequesterContactSelectionButton(discord.ui.Button[RequesterContactSelectio
                 )
         except Exception as exc:
             logger.error(self.callback_error_log, exc)
+            if isinstance(self.view, RequesterContactSelectionView):
+                self.view.reset_selection_state()
+                await self.view.edit_selection_message(
+                    interaction,
+                    log_message=self.edit_error_log,
+                )
             await self.handle_callback_error(interaction, exc)
+
+    def _audit_selection_event(
+        self,
+        view: RequesterContactSelectionView,
+        interaction: discord.Interaction,
+        *,
+        result: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        if not self.audit_action:
+            return
+        view.crm_cog._audit_command_safe(
+            interaction=interaction,
+            action=self.audit_action,
+            result=result,
+            metadata={
+                **metadata,
+                "selected_contact_id": str(self.contact.get("id") or ""),
+            },
+            resource_type="crm_contact",
+            resource_id=str(self.contact.get("id") or ""),
+        )
 
     async def handle_requester_mismatch(
         self,
@@ -558,6 +601,12 @@ class RequesterContactSelectionButton(discord.ui.Button[RequesterContactSelectio
         view: RequesterContactSelectionView,
     ) -> None:
         """Handle clicks by a user other than the original requester."""
+        self._audit_selection_event(
+            interaction=interaction,
+            view=view,
+            result="denied",
+            metadata={"reason": "requester_mismatch"},
+        )
         await interaction.response.send_message(
             "❌ Only the command requester can confirm this action.",
             ephemeral=True,
@@ -569,8 +618,14 @@ class RequesterContactSelectionButton(discord.ui.Button[RequesterContactSelectio
         view: RequesterContactSelectionView,
     ) -> None:
         """Handle duplicate clicks while a selection is already processing."""
+        self._audit_selection_event(
+            interaction=interaction,
+            view=view,
+            result="denied",
+            metadata={"reason": "selection_already_processing"},
+        )
         await interaction.response.send_message(
-            "⚠️ This selection is already being processed.",
+            self.selection_already_processing_message,
             ephemeral=True,
         )
 
@@ -578,7 +633,26 @@ class RequesterContactSelectionButton(discord.ui.Button[RequesterContactSelectio
         self, interaction: discord.Interaction, exc: Exception
     ) -> None:
         """Send a user-facing callback failure message."""
-        await interaction.followup.send(self.callback_error_message, ephemeral=True)
+        if isinstance(self.view, RequesterContactSelectionView):
+            self._audit_selection_event(
+                interaction=interaction,
+                view=self.view,
+                result="error",
+                metadata={
+                    "stage": "selection_callback",
+                    "error": str(exc),
+                },
+            )
+        if interaction.response.is_done():
+            await interaction.followup.send(
+                self.callback_error_message,
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                self.callback_error_message,
+                ephemeral=True,
+            )
 
     async def handle_selection(
         self,
@@ -595,8 +669,8 @@ class CreateSSOUserSelectionButton(RequesterContactSelectionButton):
     emoji_value = "🔐"
     callback_error_log = "Error in create_sso_user selection callback: %s"
     edit_error_log = "Failed to update SSO user selection view: %s"
+    audit_action = "crm.create_sso_user"
     use_selection_lock = True
-    disable_before_handle = True
 
     async def handle_selection(
         self,
@@ -635,8 +709,8 @@ class CreateUserAccountsSelectionButton(RequesterContactSelectionButton):
     emoji_value = "👤"
     callback_error_log = "Error in create_user_accounts selection callback: %s"
     edit_error_log = "Failed to update create_user_accounts selection view: %s"
+    audit_action = "crm.create_user_accounts"
     use_selection_lock = True
-    disable_before_handle = True
 
     async def handle_selection(
         self,
@@ -677,8 +751,8 @@ class OutlineInviteSelectionButton(RequesterContactSelectionButton):
     emoji_value = "📨"
     callback_error_log = "Error in invite_outline_user selection callback: %s"
     edit_error_log = "Failed to update invite_outline_user selection view: %s"
+    audit_action = "crm.invite_outline_user"
     use_selection_lock = True
-    disable_before_handle = True
 
     async def handle_selection(
         self,
@@ -706,65 +780,11 @@ class MemberAgreementSelectionButton(RequesterContactSelectionButton):
     callback_error_log = "Error in send_member_agreement selection callback: %s"
     callback_error_message = "❌ An error occurred while handling the selection."
     edit_error_log = "Failed to update send_member_agreement selection view: %s"
+    selection_already_processing_message = (
+        "⚠️ This member agreement selection is already being processed."
+    )
+    audit_action = "crm.send_member_agreement"
     use_selection_lock = True
-    disable_before_handle = True
-
-    async def handle_requester_mismatch(
-        self,
-        interaction: discord.Interaction,
-        view: RequesterContactSelectionView,
-    ) -> None:
-        view.crm_cog._audit_command_safe(
-            interaction=interaction,
-            action="crm.send_member_agreement",
-            result="denied",
-            metadata={
-                "reason": "requester_mismatch",
-                "selected_contact_id": str(self.contact.get("id") or ""),
-            },
-            resource_type="crm_contact",
-            resource_id=str(self.contact.get("id") or ""),
-        )
-        await super().handle_requester_mismatch(interaction, view)
-
-    async def handle_selection_already_processing(
-        self,
-        interaction: discord.Interaction,
-        view: RequesterContactSelectionView,
-    ) -> None:
-        view.crm_cog._audit_command_safe(
-            interaction=interaction,
-            action="crm.send_member_agreement",
-            result="denied",
-            metadata={
-                "reason": "selection_already_processing",
-                "selected_contact_id": str(self.contact.get("id") or ""),
-            },
-            resource_type="crm_contact",
-            resource_id=str(self.contact.get("id") or ""),
-        )
-        await interaction.response.send_message(
-            "⚠️ This member agreement selection is already being processed.",
-            ephemeral=True,
-        )
-
-    async def handle_callback_error(
-        self, interaction: discord.Interaction, exc: Exception
-    ) -> None:
-        if isinstance(self.view, RequesterContactSelectionView):
-            self.view.crm_cog._audit_command_safe(
-                interaction=interaction,
-                action="crm.send_member_agreement",
-                result="error",
-                metadata={
-                    "stage": "selection_callback",
-                    "error": str(exc),
-                    "selected_contact_id": str(self.contact.get("id") or ""),
-                },
-                resource_type="crm_contact",
-                resource_id=str(self.contact.get("id") or ""),
-            )
-        await super().handle_callback_error(interaction, exc)
 
     async def handle_selection(
         self,
@@ -793,8 +813,8 @@ class MarkIdVerifiedSelectionButton(RequesterContactSelectionButton):
     callback_error_log = "Error in ID verified selection callback: %s"
     callback_error_message = "❌ An error occurred while marking ID verification."
     edit_error_log = "Failed to update ID verification selection view: %s"
+    audit_action = "crm.mark_id_verified"
     use_selection_lock = True
-    disable_before_handle = True
 
     async def handle_selection(
         self,
@@ -836,8 +856,8 @@ class ReprocessResumeSelectionButton(RequesterContactSelectionButton):
 
     callback_error_log = "Error in reprocess resume selection callback: %s"
     edit_error_log = "Failed to update reprocess resume selection view: %s"
+    audit_action = "crm.reprocess_profile"
     use_selection_lock = True
-    disable_before_handle = True
 
     def __init__(self, contact: dict[str, Any], requester_id: int) -> None:
         resume_ids = contact.get("resumeIds")
