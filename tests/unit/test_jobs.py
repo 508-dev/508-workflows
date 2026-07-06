@@ -11,6 +11,7 @@ from unittest.mock import patch
 import five08.discord_bot.cogs.jobs as jobs_module
 from five08.discord_bot.cogs.jobs import JobsCog
 from five08.engagements import EngagementStatus
+from five08.job_leads import JobLead, JobLeadStatus
 from five08.job_match import CandidateRerankResult, JobRequirements
 
 
@@ -49,6 +50,41 @@ def _make_candidate(**overrides: object) -> SimpleNamespace:
     return SimpleNamespace(**base)
 
 
+def _make_job_lead(**overrides: object) -> JobLead:
+    now = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    base = {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "status": JobLeadStatus.APPROVED,
+        "source_key": "hackernews_who_is_hiring",
+        "source_type": "hackernews",
+        "external_id": "48392586",
+        "source_url": "https://news.ycombinator.com/item?id=48392586",
+        "title": "CO-Ver | Fullstack SWE | Remote US | 1099 Contract-to-Hire",
+        "body_raw": "raw",
+        "body_normalized": "CO-Ver needs a 1099 contractor.",
+        "organization": "CO-Ver",
+        "external_parent_id": "48357725",
+        "source_posted_at": now,
+        "posting_type": jobs_module.JobPostingType.PART_TIME,
+        "location": "Remote US",
+        "remote": True,
+        "apply_url": "https://example.com",
+        "tags": ["1099", "contract-to-hire"],
+        "confidence": 0.65,
+        "metadata": {},
+        "reviewed_by_discord_user_id": "42",
+        "reviewed_at": now,
+        "discord_guild_id": None,
+        "discord_channel_id": None,
+        "discord_thread_id": None,
+        "posted_at": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    base.update(overrides)
+    return JobLead(**base)
+
+
 def test_build_match_candidate_lines_uses_crm_name_and_discord_username() -> None:
     candidate = _make_candidate(
         is_member=True,
@@ -70,6 +106,33 @@ def test_build_match_candidate_lines_uses_crm_name_and_discord_username() -> Non
         "1. **[Member]** [Caleb](<https://crm.example/#Contact/view/abc>)" in lines[0]
     )
     assert "`@caleb`" in lines[0]
+
+
+def test_job_lead_forum_tags_match_detected_and_extra_tags() -> None:
+    channel = SimpleNamespace(
+        available_tags=[
+            SimpleNamespace(name="Remote"),
+            SimpleNamespace(name="Contract-to-Hire"),
+            SimpleNamespace(name="Python"),
+            SimpleNamespace(name="Full-time"),
+        ]
+    )
+    lead = _make_job_lead()
+
+    tags = JobsCog._resolve_job_lead_forum_tags(channel, lead, "Python")
+
+    assert [tag.name for tag in tags] == ["Remote", "Contract-to-Hire", "Python"]
+
+
+def test_format_job_lead_thread_content_includes_review_context() -> None:
+    lead = _make_job_lead()
+
+    content = JobsCog._format_job_lead_thread_content(lead)
+
+    assert "Source: https://news.ycombinator.com/item?id=48392586" in content
+    assert "Apply/contact: https://example.com" in content
+    assert "Lead tags: 1099, contract-to-hire" in content
+    assert "CO-Ver needs a 1099 contractor." in content
 
 
 def test_update_gig_status_allows_original_thread_poster() -> None:
