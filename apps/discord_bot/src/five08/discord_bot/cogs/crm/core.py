@@ -507,6 +507,7 @@ class RequesterContactSelectionButton(discord.ui.Button[RequesterContactSelectio
     audit_action: str | None = None
     use_selection_lock = False
     disable_before_handle = False
+    reset_selection_on_error = True
 
     def __init__(self, contact: dict[str, Any], requester_id: int) -> None:
         super().__init__(
@@ -565,7 +566,9 @@ class RequesterContactSelectionButton(discord.ui.Button[RequesterContactSelectio
                 )
         except Exception as exc:
             logger.error(self.callback_error_log, exc)
-            if isinstance(self.view, RequesterContactSelectionView):
+            if self.reset_selection_on_error and isinstance(
+                self.view, RequesterContactSelectionView
+            ):
                 self.view.reset_selection_state()
                 await self.view.edit_selection_message(
                     interaction,
@@ -785,6 +788,8 @@ class MemberAgreementSelectionButton(RequesterContactSelectionButton):
     )
     audit_action = "crm.send_member_agreement"
     use_selection_lock = True
+    disable_before_handle = True
+    reset_selection_on_error = False
 
     async def handle_selection(
         self,
