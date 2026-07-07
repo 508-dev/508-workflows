@@ -22,6 +22,7 @@ from five08.worker.erpnext_project_sync import ERPNextProjectSyncProcessor
 from five08.worker.mailbox_resume_ingest import ResumeMailboxProcessor
 from five08.worker.masking import mask_email
 from five08.newsletter_sync import NewsletterSyncProcessor
+from five08.job_lead_sources import scrape_job_leads
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +217,19 @@ def sync_508_members_newsletters_job() -> dict[str, Any]:
     return _mask_newsletter_sync_result(processor.sync_508_members())
 
 
+def scrape_job_leads_job(
+    source: str = "hackernews_who_is_hiring",
+    story_id: int | None = None,
+) -> dict[str, Any]:
+    """Scrape external job lead sources into the review queue.
+
+    This job intentionally does not publish to Discord. Publishing requires a
+    separate approval action in the bot/dashboard layer.
+    """
+    logger.info("Scraping job leads source=%s story_id=%s", source, story_id)
+    return scrape_job_leads(settings, source=source, story_id=story_id)
+
+
 JOB_FUNCTIONS: dict[str, Callable[..., dict[str, Any]]] = {
     process_webhook_event.__name__: process_webhook_event,
     process_contact_skills_job.__name__: process_contact_skills_job,
@@ -228,4 +242,5 @@ JOB_FUNCTIONS: dict[str, Callable[..., dict[str, Any]]] = {
     sync_projects_from_erpnext_job.__name__: sync_projects_from_erpnext_job,
     sync_508_members_newsletters_job.__name__: sync_508_members_newsletters_job,
     process_docuseal_agreement_job.__name__: process_docuseal_agreement_job,
+    scrape_job_leads_job.__name__: scrape_job_leads_job,
 }

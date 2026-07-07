@@ -64,6 +64,13 @@ from five08.job_channels import (
     register_job_post_channel,
     unregister_job_post_channel,
 )
+from five08.job_leads import (
+    JobLead,
+    JobLeadStatus,
+    list_job_leads,
+    mark_job_lead_posted,
+    review_job_lead,
+)
 from five08.job_match import (
     DISCORD_ROLES_EXCLUDE_FROM_SYNC,
     JobRequirements,
@@ -3404,6 +3411,271 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         recorded_interest = await self._persist_thread_direct_interest(message)
         if not recorded_interest:
             await self._persist_thread_reply_activity(message)
+
+    @staticmethod
+    def _truncate_job_lead_text(value: str, limit: int) -> str:
+        """Trim lead text for Discord command responses."""
+        normalized = value.replace("\r", " ").strip()
+        if limit <= 0:
+            return ""
+        if limit <= 3:
+            return normalized[:limit]
+        if len(normalized) <= limit:
+            return normalized
+        return f"{normalized[: limit - 3]}..."
+
+    @classmethod
+    def _format_job_lead_review_line(cls, index: int, lead: JobLead) -> str:
+        tags = ", ".join(lead.tags[:5]) if lead.tags else "untagged"
+        title = cls._truncate_job_lead_text(lead.title, 120)
+        return (
+            f"{index}. `{lead.id[:8]}` **{title}** "
+            f"({lead.confidence:.0%}; {tags})\n{lead.source_url}"
+        )
+
+    @classmethod
+    def _format_job_lead_thread_content(cls, lead: JobLead) -> str:
+        lines = [
+            f"Source: {lead.source_url}",
+            f"Status: {lead.status.value}",
+        ]
+        if lead.organization:
+            lines.append(f"Organization: {lead.organization}")
+        if lead.location:
+            lines.append(f"Location: {lead.location}")
+        if lead.apply_url:
+            lines.append(f"Apply/contact: {lead.apply_url}")
+        if lead.tags:
+            lines.append(f"Lead tags: {', '.join(lead.tags)}")
+        metadata = "\n".join(lines)
+        separator = "\n\n"
+        body_limit = (
+            settings.discord_sendmsg_character_limit - len(metadata) - len(separator)
+        )
+        if body_limit <= 0:
+            return cls._truncate_job_lead_text(
+                metadata,
+                settings.discord_sendmsg_character_limit,
+            )
+        body = cls._truncate_job_lead_text(lead.body_normalized, body_limit)
+        return f"{metadata}{separator}{body}"
+
+    @staticmethod
+    def _job_lead_allowed_mentions() -> discord.AllowedMentions:
+        """Disable mention parsing for untrusted external lead content."""
+        return discord.AllowedMentions.none()
+
+    @staticmethod
+    def _resolve_job_lead_forum_tags(
+        channel: discord.ForumChannel,
+        lead: JobLead,
+        extra_tag_names: str | None,
+    ) -> list[discord.ForumTag]:
+        requested = {tag.casefold() for tag in lead.tags}
+        if lead.remote:
+            requested.add("remote")
+        for raw_name in (extra_tag_names or "").split(","):
+            normalized = raw_name.strip().casefold()
+            if normalized:
+                requested.add(normalized)
+        if not requested:
+            return []
+        selected: list[discord.ForumTag] = []
+        for tag in channel.available_tags:
+            normalized_name = tag.name.strip().casefold()
+            if normalized_name in requested:
+                selected.append(tag)
+        return selected[:5]
+
+    @app_commands.command(
+        name="list-job-leads",
+        description="List pending externally sourced job leads awaiting review.",
+    )
+    @app_commands.describe(limit="Number of pending leads to show, up to 10.")
+    @require_role("Steering Committee")
+    async def list_sourced_job_leads(
+        self,
+        interaction: discord.Interaction,
+        limit: int = 5,
+    ) -> None:
+        """Show pending scraped leads without publishing anything to Discord."""
+        await interaction.response.defer(ephemeral=True)
+        safe_limit = max(1, min(limit, 10))
+        try:
+            leads = await asyncio.to_thread(
+                list_job_leads,
+                settings,
+                status=JobLeadStatus.PENDING,
+                limit=safe_limit,
+            )
+        except Exception as exc:
+            logger.warning("Failed listing job leads: %s", exc)
+            await interaction.followup.send(
+                "❌ Failed to load pending job leads.",
+                ephemeral=True,
+            )
+            return
+
+        if not leads:
+            await interaction.followup.send(
+                "No pending job leads found.",
+                ephemeral=True,
+            )
+            return
+
+        lines = [
+            self._format_job_lead_review_line(index, lead)
+            for index, lead in enumerate(leads, start=1)
+        ]
+        await interaction.followup.send(
+            "Pending job leads:\n\n" + "\n\n".join(lines),
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="reject-job-lead",
+        description="Reject a sourced job lead so it will not be posted.",
+    )
+    @app_commands.describe(lead_id="Lead UUID or unambiguous UUID prefix.")
+    @require_role("Steering Committee")
+    async def reject_sourced_job_lead(
+        self,
+        interaction: discord.Interaction,
+        lead_id: str,
+    ) -> None:
+        """Reject a scraped lead without publishing it."""
+        await interaction.response.defer(ephemeral=True)
+        try:
+            lead = await asyncio.to_thread(
+                review_job_lead,
+                settings,
+                lead_id=lead_id,
+                status=JobLeadStatus.REJECTED,
+                reviewer_discord_user_id=str(interaction.user.id),
+            )
+        except Exception as exc:
+            logger.warning("Failed rejecting job lead %s: %s", lead_id, exc)
+            await interaction.followup.send(
+                "❌ Failed to reject this job lead.",
+                ephemeral=True,
+            )
+            return
+
+        if lead is None:
+            await interaction.followup.send(
+                "⚠️ Could not find a pending/approved lead with that ID.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            f"✅ Rejected job lead `{lead.id[:8]}`.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="approve-job-lead",
+        description="Approve a sourced job lead and create a Discord forum thread.",
+    )
+    @app_commands.describe(
+        lead_id="Lead UUID or unambiguous UUID prefix.",
+        channel="Forum channel where the approved lead should be posted.",
+        tags="Optional comma-separated Discord forum tag names to apply.",
+    )
+    @require_role("Steering Committee")
+    async def approve_sourced_job_lead(
+        self,
+        interaction: discord.Interaction,
+        lead_id: str,
+        channel: discord.ForumChannel,
+        tags: str | None = None,
+    ) -> None:
+        """Approve a scraped lead and publish it to Discord."""
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message(
+                "⚠️ This command must be used inside a server.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            lead = await asyncio.to_thread(
+                review_job_lead,
+                settings,
+                lead_id=lead_id,
+                status=JobLeadStatus.APPROVED,
+                reviewer_discord_user_id=str(interaction.user.id),
+            )
+        except Exception as exc:
+            logger.warning("Failed approving job lead %s: %s", lead_id, exc)
+            await interaction.followup.send(
+                "❌ Failed to approve this job lead.",
+                ephemeral=True,
+            )
+            return
+
+        if lead is None:
+            await interaction.followup.send(
+                "⚠️ Could not find a pending/approved lead with that ID.",
+                ephemeral=True,
+            )
+            return
+
+        applied_tags = self._resolve_job_lead_forum_tags(channel, lead, tags)
+        content = self._format_job_lead_thread_content(lead)
+        try:
+            created = await channel.create_thread(
+                name=self._truncate_job_lead_text(lead.title, 100),
+                content=content,
+                applied_tags=applied_tags,
+                allowed_mentions=self._job_lead_allowed_mentions(),
+                reason=f"Approved sourced job lead by {interaction.user}",
+            )
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "❌ Lead approved, but I do not have permission to create a thread in that forum.",
+                ephemeral=True,
+            )
+            return
+        except discord.HTTPException as exc:
+            logger.warning("Failed posting approved job lead %s: %s", lead.id, exc)
+            await interaction.followup.send(
+                "❌ Lead approved, but Discord rejected the thread creation.",
+                ephemeral=True,
+            )
+            return
+
+        thread = getattr(created, "thread", created)
+        thread_id = str(getattr(thread, "id", ""))
+        if not thread_id:
+            await interaction.followup.send(
+                "⚠️ Lead approved and Discord returned success, but I could not record the thread ID.",
+                ephemeral=True,
+            )
+            return
+
+        posted = await asyncio.to_thread(
+            mark_job_lead_posted,
+            settings,
+            lead_id=lead.id,
+            reviewer_discord_user_id=str(interaction.user.id),
+            guild_id=str(guild.id),
+            channel_id=str(channel.id),
+            thread_id=thread_id,
+        )
+        if posted is None:
+            await interaction.followup.send(
+                f"⚠️ Created <#{thread_id}>, but could not mark lead `{lead.id[:8]}` as posted.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            f"✅ Posted approved lead `{lead.id[:8]}` to <#{thread_id}>.",
+            ephemeral=True,
+        )
 
     @app_commands.command(
         name="register-jobs-channel",
