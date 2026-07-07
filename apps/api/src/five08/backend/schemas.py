@@ -77,6 +77,27 @@ class DashboardGigStatusRequest(BaseModel):
     status: str
 
 
+class DashboardJobLeadReviewRequest(BaseModel):
+    """Payload for reviewing one sourced dashboard job lead."""
+
+    status: Literal["approved", "rejected"]
+
+
+class DashboardJobLeadPostRequest(BaseModel):
+    """Payload for posting one approved sourced job lead to Discord."""
+
+    channel_id: str | None = None
+    tags: str | None = None
+    engagement_status: Literal["lead", "recruiting"] = "lead"
+
+
+class DashboardJobLeadSyncRequest(BaseModel):
+    """Payload for enqueuing a sourced job lead scrape."""
+
+    source: str = "hackernews_who_is_hiring"
+    story_id: int | None = Field(default=None, ge=1)
+
+
 class DashboardProjectStatusRequest(BaseModel):
     """Payload for updating one ERPNext Project status."""
 

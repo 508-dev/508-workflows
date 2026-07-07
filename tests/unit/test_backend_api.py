@@ -8,7 +8,7 @@ import json
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from unittest.mock import AsyncMock, Mock, call, patch
+from unittest.mock import ANY, AsyncMock, Mock, call, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -21,6 +21,7 @@ from five08.agent import (
     ToolRegistry,
 )
 from five08.backend import api
+from five08.job_channels import JobPostingType, RegisteredJobPostChannel
 from five08.worker.masking import mask_email
 
 
@@ -3763,6 +3764,661 @@ def test_dashboard_gigs_allows_steering_to_include_historical(
         query=None,
         limit=100,
     )
+
+
+def test_dashboard_job_leads_returns_pending_leads(client: TestClient) -> None:
+    session = _dashboard_write_session()
+    leads = [
+        {
+            "id": "lead-1",
+            "status": "pending",
+            "title": "Contract engineer",
+            "body_normalized": "Looking for a short term contractor.",
+            "tags": ["contract"],
+            "created_at": "2026-07-01T00:00:00+00:00",
+            "updated_at": "2026-07-01T00:00:00+00:00",
+        }
+    ]
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.list_job_leads", return_value=leads) as mock_leads,
+    ):
+        response = client.get("/dashboard/api/gig-leads?status=pending&limit=10")
+
+    assert response.status_code == 200
+    assert response.json() == leads
+    mock_leads.assert_called_once_with(
+        api.settings,
+        status=api.JobLeadStatus.PENDING,
+        limit=10,
+    )
+
+
+def test_dashboard_job_leads_all_statuses_omits_status_filter(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.list_job_leads", return_value=[]) as mock_leads,
+    ):
+        response = client.get("/dashboard/api/gig-leads?status=all")
+
+    assert response.status_code == 200
+    mock_leads.assert_called_once_with(api.settings, status=None, limit=50)
+
+
+def test_dashboard_job_leads_requires_steering_viewer(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="member-1",
+        email="member@508.dev",
+        display_name="Member User",
+        groups=["Member"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.list_job_leads") as mock_leads,
+    ):
+        response = client.get("/dashboard/api/gig-leads?status=pending")
+
+    assert response.status_code == 403
+    assert response.json() == {"error": "steering_required"}
+    mock_leads.assert_not_called()
+
+
+def test_dashboard_job_leads_rejects_invalid_status(client: TestClient) -> None:
+    session = _dashboard_write_session()
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.list_job_leads") as mock_leads,
+    ):
+        response = client.get("/dashboard/api/gig-leads?status=maybe")
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "invalid_status"}
+    mock_leads.assert_not_called()
+
+
+def test_dashboard_review_job_lead_approves_with_discord_reviewer(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+    reviewed = {
+        "id": "lead-1",
+        "status": "approved",
+        "title": "Contract engineer",
+        "reviewed_by_discord_user_id": "steering-1",
+    }
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.review_job_lead", return_value=reviewed
+        ) as mock_review,
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
+    ):
+        response = client.post(
+            "/dashboard/api/gig-leads/lead-1/review",
+            json={"status": "approved"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == reviewed
+    mock_review.assert_called_once_with(
+        api.settings,
+        lead_id="lead-1",
+        status="approved",
+        reviewer_discord_user_id="steering-1",
+    )
+    audit_payload = mock_insert.call_args.args[1]
+    assert audit_payload.source == api.AuditSource.ADMIN_DASHBOARD
+    assert audit_payload.action == "job_leads.review"
+    assert audit_payload.result == api.AuditResult.SUCCESS
+    assert audit_payload.actor_provider == api.ActorProvider.DISCORD
+    assert audit_payload.actor_subject == "steering-1"
+    assert audit_payload.resource_type == "job_lead"
+    assert audit_payload.resource_id == "lead-1"
+    assert audit_payload.metadata == {"lead_id": "lead-1", "status": "approved"}
+
+
+def test_dashboard_review_job_lead_uses_admin_sso_subject_for_reviewer(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="oidc-subject-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["admins"],
+        is_admin=True,
+        id_token="id-token-1",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.ADMIN_SSO.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.review_job_lead",
+            return_value={"id": "lead-1", "status": "rejected"},
+        ) as mock_review,
+        patch("five08.backend.api.insert_audit_event"),
+    ):
+        response = client.post(
+            "/dashboard/api/gig-leads/lead-1/review",
+            json={"status": "rejected"},
+        )
+
+    assert response.status_code == 200
+    mock_review.assert_called_once_with(
+        api.settings,
+        lead_id="lead-1",
+        status="rejected",
+        reviewer_discord_user_id="oidc-subject-1",
+    )
+
+
+def test_dashboard_review_job_lead_returns_404_for_missing_lead(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.review_job_lead", return_value=None),
+    ):
+        response = client.post(
+            "/dashboard/api/gig-leads/missing/review",
+            json={"status": "approved"},
+        )
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "job_lead_not_found"}
+
+
+def test_dashboard_review_job_lead_requires_steering(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="123456789",
+        email="member@508.dev",
+        display_name="Member User",
+        groups=["Member"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.review_job_lead") as mock_review,
+    ):
+        response = client.post(
+            "/dashboard/api/gig-leads/lead-1/review",
+            json={"status": "approved"},
+        )
+
+    assert response.status_code == 403
+    assert response.json() == {"error": "steering_required"}
+    mock_review.assert_not_called()
+
+
+def test_dashboard_sync_job_leads_enqueues_hacker_news_scrape(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.enqueue_job",
+            return_value=Mock(id="job-leads-1", created=True),
+        ) as mock_enqueue,
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
+    ):
+        response = client.post(
+            "/dashboard/api/gig-leads/sync",
+            json={"source": "hackernews_who_is_hiring", "story_id": 48357725},
+        )
+
+    assert response.status_code == 202
+    assert response.json()["job_id"] == "job-leads-1"
+    assert response.json()["source"] == "hackernews_who_is_hiring"
+    assert response.json()["story_id"] == 48357725
+    enqueue_kwargs = mock_enqueue.call_args.kwargs
+    assert enqueue_kwargs["queue"] is client.app.state.queue
+    assert enqueue_kwargs["fn"] is api.JOB_FUNCTIONS["scrape_job_leads_job"]
+    assert enqueue_kwargs["kwargs"] == {
+        "source": "hackernews_who_is_hiring",
+        "story_id": 48357725,
+    }
+    assert enqueue_kwargs["idempotency_key"].startswith(
+        "job-leads:hackernews_who_is_hiring:48357725:"
+    )
+    audit_payload = mock_insert.call_args.args[1]
+    assert audit_payload.source == api.AuditSource.ADMIN_DASHBOARD
+    assert audit_payload.action == "job_leads.sync"
+    assert audit_payload.result == api.AuditResult.SUCCESS
+    assert audit_payload.actor_provider == api.ActorProvider.DISCORD
+    assert audit_payload.actor_subject == "steering-1"
+    assert audit_payload.resource_type == "job_lead_source"
+    assert audit_payload.resource_id == "hackernews_who_is_hiring"
+    assert audit_payload.metadata is not None
+    assert audit_payload.metadata["story_id"] == 48357725
+    assert audit_payload.metadata["job_id"] == "job-leads-1"
+
+
+def test_dashboard_sync_job_leads_rejects_unsupported_source(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.enqueue_job") as mock_enqueue,
+    ):
+        response = client.post(
+            "/dashboard/api/gig-leads/sync",
+            json={"source": "hackernews_typo"},
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "unsupported_job_lead_source"}
+    mock_enqueue.assert_not_called()
+
+
+def test_dashboard_post_job_lead_posts_approved_lead_to_discord(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._post_job_lead_to_discord",
+            new_callable=AsyncMock,
+            return_value=(
+                {
+                    "status": "posted",
+                    "lead_id": "lead-1",
+                    "guild_id": "guild-1",
+                    "channel_id": "channel-1",
+                    "thread_id": "thread-1",
+                    "engagement_status": "recruiting",
+                },
+                200,
+            ),
+        ) as mock_post,
+        patch(
+            "five08.backend.api.update_engagement_status_by_discord_thread",
+            return_value={"id": "engagement-1", "status": "recruiting"},
+        ) as update_by_thread,
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
+    ):
+        response = client.post(
+            "/dashboard/api/gig-leads/lead-1/post",
+            json={
+                "channel_id": "channel-1",
+                "tags": "Contract,Remote",
+                "engagement_status": "recruiting",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["thread_id"] == "thread-1"
+    assert mock_post.await_count == 1
+    assert mock_post.await_args.kwargs == {
+        "lead_id": "lead-1",
+        "reviewer_discord_user_id": "steering-1",
+        "channel_id": "channel-1",
+        "tags": "Contract,Remote",
+        "engagement_status": api.EngagementStatus.RECRUITING,
+    }
+    update_by_thread.assert_called_once_with(
+        api.settings,
+        discord_thread_id="thread-1",
+        status=api.EngagementStatus.RECRUITING,
+        actor_discord_user_id="steering-1",
+    )
+    audit_payload = mock_insert.call_args.args[1]
+    assert audit_payload.source == api.AuditSource.ADMIN_DASHBOARD
+    assert audit_payload.action == "job_leads.post"
+    assert audit_payload.result == api.AuditResult.SUCCESS
+    assert audit_payload.actor_provider == api.ActorProvider.DISCORD
+    assert audit_payload.actor_subject == "steering-1"
+    assert audit_payload.resource_type == "job_lead"
+    assert audit_payload.metadata["engagement_status"] == "recruiting"
+    assert audit_payload.resource_id == "lead-1"
+    assert audit_payload.metadata is not None
+    assert audit_payload.metadata["thread_id"] == "thread-1"
+
+
+def test_dashboard_post_job_lead_reconciles_stale_bot_status(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._post_job_lead_to_discord",
+            new_callable=AsyncMock,
+            return_value=(
+                {
+                    "status": "posted",
+                    "lead_id": "lead-1",
+                    "guild_id": "guild-1",
+                    "channel_id": "channel-1",
+                    "thread_id": "thread-1",
+                    "engagement_status": "lead",
+                },
+                200,
+            ),
+        ),
+        patch(
+            "five08.backend.api._sync_discord_gig_thread_status",
+            new_callable=AsyncMock,
+            return_value={"status": "updated"},
+        ) as sync_status,
+        patch(
+            "five08.backend.api.update_engagement_status_by_discord_thread",
+            return_value={"id": "engagement-1", "status": "recruiting"},
+        ) as update_by_thread,
+        patch("five08.backend.api.insert_audit_event"),
+    ):
+        response = client.post(
+            "/dashboard/api/gig-leads/lead-1/post",
+            json={"engagement_status": "recruiting"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["engagement_status"] == "recruiting"
+    assert response.json()["engagement_id"] == "engagement-1"
+    assert response.json()["discord_title_sync"] == {"status": "updated"}
+    sync_status.assert_awaited_once_with(
+        ANY,
+        thread_id="thread-1",
+        status=api.EngagementStatus.RECRUITING,
+    )
+    update_by_thread.assert_called_once_with(
+        api.settings,
+        discord_thread_id="thread-1",
+        status=api.EngagementStatus.RECRUITING,
+        actor_discord_user_id="steering-1",
+    )
+
+
+def test_dashboard_post_job_lead_surfaces_bot_rejection(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._post_job_lead_to_discord",
+            new_callable=AsyncMock,
+            return_value=({"error": "job_lead_not_approved"}, 409),
+        ),
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
+    ):
+        response = client.post("/dashboard/api/gig-leads/lead-1/post", json={})
+
+    assert response.status_code == 409
+    assert response.json() == {"error": "job_lead_not_approved"}
+    mock_insert.assert_not_called()
+
+
+async def test_post_job_lead_to_discord_maps_bot_auth_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    app: api.FastAPI,
+) -> None:
+    monkeypatch.setattr(api.settings, "discord_bot_internal_base_url", "http://bot")
+    monkeypatch.setattr(api.settings, "api_shared_secret", "secret")
+    http_client = Mock()
+    http_client.post = AsyncMock(
+        return_value=Mock(
+            status_code=401, json=Mock(return_value={"error": "unauthorized"})
+        )
+    )
+    request = Mock(app=app)
+
+    with patch("five08.backend.api._http_client_from_app", return_value=http_client):
+        payload, status_code = await api._post_job_lead_to_discord(
+            request,
+            lead_id="lead-1",
+            reviewer_discord_user_id="steering-1",
+        )
+
+    assert status_code == 502
+    assert payload == {"error": "bot_auth_failed"}
+    assert http_client.post.await_args.kwargs["json"]["approve_before_post"] is True
+    assert http_client.post.await_args.kwargs["json"]["engagement_status"] == "lead"
+
+
+def test_dashboard_job_channels_returns_registered_channels(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api.settings, "discord_server_id", "guild-1")
+    session = _dashboard_write_session()
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._list_job_channels_from_bot",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "five08.backend.api.list_registered_job_post_channel_configs",
+            return_value=[
+                RegisteredJobPostChannel(
+                    channel_id="contract-1",
+                    posting_type=JobPostingType.PART_TIME,
+                ),
+                RegisteredJobPostChannel(
+                    channel_id="fulltime-1",
+                    posting_type=JobPostingType.FULL_TIME,
+                ),
+            ],
+        ) as list_channels,
+    ):
+        response = client.get("/dashboard/api/job-channels")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "channels": [
+            {"channel_id": "contract-1", "posting_type": "part_time"},
+            {"channel_id": "fulltime-1", "posting_type": "full_time"},
+        ]
+    }
+    list_channels.assert_called_once_with(api.settings, guild_id="guild-1")
+
+
+def test_dashboard_job_channels_prefers_live_discord_tag_metadata(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api.settings, "discord_server_id", "guild-1")
+    session = _dashboard_write_session()
+    live_payload = {
+        "channels": [
+            {
+                "channel_id": "contract-1",
+                "channel_name": "gigs",
+                "posting_type": "part_time",
+                "requires_tag": True,
+                "available_tags": [
+                    {"id": "tag-1", "name": "Contract", "moderated": False}
+                ],
+            }
+        ]
+    }
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._list_job_channels_from_bot",
+            new_callable=AsyncMock,
+            return_value=live_payload,
+        ),
+        patch(
+            "five08.backend.api.list_registered_job_post_channel_configs"
+        ) as list_channels,
+    ):
+        response = client.get("/dashboard/api/job-channels")
+
+    assert response.status_code == 200
+    assert response.json() == live_payload
+    list_channels.assert_not_called()
+
+
+async def test_post_job_lead_to_discord_requires_bot_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    app: api.FastAPI,
+) -> None:
+    monkeypatch.setattr(api.settings, "discord_bot_internal_base_url", "")
+    request = Mock(app=app)
+
+    payload, status_code = await api._post_job_lead_to_discord(
+        request,
+        lead_id="lead-1",
+        reviewer_discord_user_id="steering-1",
+    )
+
+    assert status_code == 503
+    assert payload == {"error": "bot_endpoint_not_configured"}
+
+
+async def test_post_job_lead_to_discord_requires_api_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    app: api.FastAPI,
+) -> None:
+    monkeypatch.setattr(api.settings, "discord_bot_internal_base_url", "http://bot")
+    monkeypatch.setattr(api.settings, "api_shared_secret", "")
+    request = Mock(app=app)
+
+    payload, status_code = await api._post_job_lead_to_discord(
+        request,
+        lead_id="lead-1",
+        reviewer_discord_user_id="steering-1",
+    )
+
+    assert status_code == 503
+    assert payload == {"error": "api_secret_not_configured"}
+
+
+async def test_post_job_lead_to_discord_adds_generic_error_for_empty_bot_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    app: api.FastAPI,
+) -> None:
+    monkeypatch.setattr(api.settings, "discord_bot_internal_base_url", "http://bot")
+    monkeypatch.setattr(api.settings, "api_shared_secret", "secret")
+    response = Mock(status_code=503)
+    response.json.side_effect = ValueError("empty body")
+    http_client = Mock()
+    http_client.post = AsyncMock(return_value=response)
+    request = Mock(app=app)
+
+    with patch("five08.backend.api._http_client_from_app", return_value=http_client):
+        payload, status_code = await api._post_job_lead_to_discord(
+            request,
+            lead_id="lead-1",
+            reviewer_discord_user_id="steering-1",
+        )
+
+    assert status_code == 503
+    assert payload == {"error": "bot_request_failed"}
+
+
+async def test_post_job_lead_to_discord_handles_http_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    app: api.FastAPI,
+) -> None:
+    monkeypatch.setattr(api.settings, "discord_bot_internal_base_url", "http://bot")
+    monkeypatch.setattr(api.settings, "api_shared_secret", "secret")
+    http_client = Mock()
+    http_client.post = AsyncMock(side_effect=api.httpx.ConnectError("boom"))
+    request = Mock(app=app)
+
+    with patch("five08.backend.api._http_client_from_app", return_value=http_client):
+        payload, status_code = await api._post_job_lead_to_discord(
+            request,
+            lead_id="lead-1",
+            reviewer_discord_user_id="steering-1",
+        )
+
+    assert status_code == 502
+    assert payload == {"error": "bot_request_failed"}
 
 
 def test_dashboard_projects_filters_member_to_roster_projects(

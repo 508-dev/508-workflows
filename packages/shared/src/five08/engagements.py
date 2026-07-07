@@ -22,6 +22,7 @@ _GIG_THREAD_INTEREST_BACKFILLED_EVENT_TYPE = "gig_thread_interest_backfilled"
 class EngagementStatus(StrEnum):
     """Supported visible gig status states."""
 
+    LEAD = "lead"
     RECRUITING = "recruiting"
     FILLED = "filled"
     UNKNOWN = "unknown"
@@ -54,6 +55,10 @@ class EngagementApplicationSource(StrEnum):
 
 
 _STATUS_ALIASES = {
+    "lead": EngagementStatus.LEAD,
+    "sourced": EngagementStatus.LEAD,
+    "unqualified": EngagementStatus.LEAD,
+    "potential_lead": EngagementStatus.LEAD,
     "recruiting": EngagementStatus.RECRUITING,
     "open": EngagementStatus.RECRUITING,
     "hiring": EngagementStatus.RECRUITING,
@@ -124,10 +129,16 @@ def parse_status_from_title(title: str | None) -> EngagementStatus:
     raw = str(title or "").strip()
     if not raw:
         return EngagementStatus.UNKNOWN
-    match = _BRACKETED_STATUS_RE.match(raw) or _STATUS_TOKEN_RE.match(raw)
-    if not match:
+    bracket_match = _BRACKETED_STATUS_RE.match(raw)
+    if bracket_match:
+        return normalize_engagement_status(bracket_match.group(1))
+    token_match = _STATUS_TOKEN_RE.match(raw)
+    if not token_match:
         return EngagementStatus.UNKNOWN
-    return normalize_engagement_status(match.group(1))
+    status = normalize_engagement_status(token_match.group(1))
+    if status is EngagementStatus.LEAD:
+        return EngagementStatus.UNKNOWN
+    return status
 
 
 def strip_status_from_title(title: str | None) -> str:
@@ -259,6 +270,7 @@ def upsert_discord_engagement(
         )
         ON CONFLICT (discord_message_id) DO UPDATE SET
             status = CASE
+                WHEN %s THEN engagements.status
                 WHEN EXCLUDED.status = 'unknown' THEN engagements.status
                 ELSE EXCLUDED.status
             END,
@@ -300,6 +312,7 @@ def upsert_discord_engagement(
             last_status_changed_at = CASE
                 WHEN
                     EXCLUDED.status <> 'unknown'
+                    AND NOT %s
                     AND engagements.status IS DISTINCT FROM EXCLUDED.status
                 THEN NOW()
                 ELSE engagements.last_status_changed_at
@@ -329,7 +342,9 @@ def upsert_discord_engagement(
                     posted_at,
                     posted_at,
                     posted_at,
+                    payload.preserve_existing_status,
                     payload.refresh_activity,
+                    payload.preserve_existing_status,
                 ),
             )
             row = cursor.fetchone()
@@ -1057,7 +1072,7 @@ def list_dashboard_engagements(
         conditions.append("e.status = %s")
         params.append(status.value)
     elif engagement_id is None and not include_historical:
-        conditions.append("e.status IN ('recruiting', 'filled', 'unknown')")
+        conditions.append("e.status IN ('lead', 'recruiting', 'filled', 'unknown')")
     normalized_query = query.strip() if query is not None else ""
     if normalized_query:
         like_query = _ilike_contains_pattern(normalized_query)
@@ -1156,10 +1171,11 @@ def list_dashboard_engagements(
         GROUP BY e.id
         ORDER BY
             CASE e.status
-                WHEN 'recruiting' THEN 0
-                WHEN 'filled' THEN 1
-                WHEN 'unknown' THEN 2
-                ELSE 3
+                WHEN 'lead' THEN 0
+                WHEN 'recruiting' THEN 1
+                WHEN 'filled' THEN 2
+                WHEN 'unknown' THEN 3
+                ELSE 4
             END ASC,
             e.last_activity_at DESC NULLS LAST,
             e.created_at DESC
@@ -1647,3 +1663,37 @@ def update_engagement_application_status(
         else None
     )
     return result
+
+
+def update_engagement_status_by_discord_thread(
+    settings: SharedSettings,
+    *,
+    discord_thread_id: str,
+    status: EngagementStatus,
+    actor_discord_user_id: str | None,
+) -> dict[str, Any] | None:
+    """Update a pending gig status by Discord thread id when posting just created it."""
+    normalized_thread_id = str(discord_thread_id or "").strip()
+    if not normalized_thread_id:
+        return None
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                SELECT id::text
+                FROM engagements
+                WHERE discord_thread_id = %s AND lifecycle_stage = 'pending_gig'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (normalized_thread_id,),
+            )
+            row = cursor.fetchone()
+    if row is None:
+        return None
+    return update_engagement_status(
+        settings,
+        engagement_id=str(row["id"]),
+        status=status,
+        actor_discord_user_id=actor_discord_user_id,
+    )

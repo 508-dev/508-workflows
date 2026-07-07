@@ -8,10 +8,12 @@ from unittest.mock import AsyncMock, Mock, call
 import discord
 import pytest
 
+from five08.engagements import EngagementStatus
 from five08.discord_bot.utils.internal_api import (
     GigThreadStatusRequest,
     InternalAPIRoutes,
     MemberAgreementRoleRequest,
+    PostJobLeadRequest,
 )
 
 
@@ -119,6 +121,86 @@ class TestInternalAPIRoutes:
 
         assert response.status == 401
         assert json.loads(response.body.decode("utf-8")) == {"error": "unauthorized"}
+
+    @pytest.mark.asyncio
+    async def test_post_job_lead_delegates_to_jobs_cog(self, internal_api_routes):
+        """Internal lead posting should reuse the jobs cog posting flow."""
+        jobs_cog = Mock()
+        jobs_cog.post_job_lead_to_discord = AsyncMock(
+            return_value=(
+                {
+                    "status": "posted",
+                    "lead_id": "lead-1",
+                    "thread_id": "thread-1",
+                },
+                200,
+            )
+        )
+        internal_api_routes.bot.get_cog.return_value = jobs_cog
+
+        result, status_code = await internal_api_routes._post_job_lead(
+            PostJobLeadRequest(
+                lead_id="lead-1",
+                reviewer_discord_user_id="admin-1",
+                channel_id="channel-1",
+                tags="Remote",
+                approve_before_post=True,
+                engagement_status="recruiting",
+            )
+        )
+
+        assert status_code == 200
+        assert result["thread_id"] == "thread-1"
+        jobs_cog.post_job_lead_to_discord.assert_awaited_once_with(
+            lead_id="lead-1",
+            reviewer_discord_user_id="admin-1",
+            channel_id="channel-1",
+            tags="Remote",
+            approve_before_post=True,
+            engagement_status=EngagementStatus.RECRUITING,
+            reason="Dashboard approved job lead",
+        )
+
+    @pytest.mark.asyncio
+    async def test_post_job_lead_returns_unavailable_without_jobs_cog(
+        self, internal_api_routes
+    ):
+        """The internal route should fail loudly when the jobs cog is unavailable."""
+        internal_api_routes.bot.get_cog.return_value = None
+
+        result, status_code = await internal_api_routes._post_job_lead(
+            PostJobLeadRequest(lead_id="lead-1", reviewer_discord_user_id="admin-1")
+        )
+
+        assert status_code == 503
+        assert result == {"error": "jobs_cog_unavailable"}
+
+    @pytest.mark.asyncio
+    async def test_list_job_channels_delegates_to_jobs_cog(self, internal_api_routes):
+        """Internal channel metadata should come from the jobs cog."""
+        jobs_cog = Mock()
+        jobs_cog.list_registered_job_post_forums = AsyncMock(
+            return_value=(
+                {
+                    "channels": [
+                        {
+                            "channel_id": "123",
+                            "posting_type": "part_time",
+                            "requires_tag": True,
+                            "available_tags": [{"name": "Contract"}],
+                        }
+                    ]
+                },
+                200,
+            )
+        )
+        internal_api_routes.bot.get_cog.return_value = jobs_cog
+
+        result, status_code = await internal_api_routes._list_job_channels()
+
+        assert status_code == 200
+        assert result["channels"][0]["requires_tag"] is True
+        jobs_cog.list_registered_job_post_forums.assert_awaited_once_with()
 
     @pytest.mark.asyncio
     async def test_update_gig_thread_status_rewrites_title_marker(

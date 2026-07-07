@@ -5,6 +5,7 @@ import {
   displayOnboarder,
   formatDate,
   githubUrl,
+  isTerminalJobStatus,
   labelForOnboardingState,
   linkedinUrl,
   onboardingStateValue,
@@ -49,5 +50,15 @@ describe("dashboard utility helpers", () => {
 
   it("includes the year in formatted timestamps", () => {
     expect(formatDate("2026-01-27T02:26:00Z")).toContain("2026")
+  })
+
+  it("identifies terminal background job statuses", () => {
+    expect(isTerminalJobStatus("succeeded")).toBe(true)
+    expect(isTerminalJobStatus(" failed ")).toBe(false)
+    expect(isTerminalJobStatus("dead")).toBe(true)
+    expect(isTerminalJobStatus("canceled")).toBe(true)
+    expect(isTerminalJobStatus("queued")).toBe(false)
+    expect(isTerminalJobStatus("running")).toBe(false)
+    expect(isTerminalJobStatus(undefined)).toBe(false)
   })
 })

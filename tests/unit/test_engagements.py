@@ -22,12 +22,14 @@ from five08.engagements import (
     upsert_discord_interest_application,
     upsert_suggested_applications,
     upsert_discord_engagement,
+    update_engagement_status_by_discord_thread,
     upsert_gig_thread_interest_backfill_marker,
 )
 from five08.settings import SharedSettings
 
 
 def test_parse_status_from_bracketed_gig_title() -> None:
+    assert parse_status_from_title("[LEAD] Sourced contractor") is EngagementStatus.LEAD
     assert (
         parse_status_from_title("[RECRUITING] Senior Webflow Build")
         is EngagementStatus.RECRUITING
@@ -41,9 +43,14 @@ def test_parse_status_defaults_unknown_for_unmarked_titles() -> None:
     assert parse_status_from_title("Need a backend person") is EngagementStatus.UNKNOWN
     assert parse_status_from_title("[REMOTE] Backend role") is EngagementStatus.UNKNOWN
     assert (
+        parse_status_from_title("LEAD Data Engineer | Remote")
+        is EngagementStatus.UNKNOWN
+    )
+    assert (
         parse_status_from_title("RECRUITING Senior Webflow Build")
         is EngagementStatus.RECRUITING
     )
+    assert normalize_engagement_status("potential lead") is EngagementStatus.LEAD
     assert normalize_engagement_status("cancelled") is EngagementStatus.LOST
 
 
@@ -55,6 +62,11 @@ def test_strip_status_from_title_removes_visible_marker() -> None:
     assert (
         strip_status_from_title("[RECRUITING] Senior Webflow Build")
         == "Senior Webflow Build"
+    )
+    assert strip_status_from_title("[LEAD] Sourced contractor") == "Sourced contractor"
+    assert (
+        strip_status_from_title("LEAD Data Engineer | Remote")
+        == "LEAD Data Engineer | Remote"
     )
     assert strip_status_from_title("Need a backend person") == "Need a backend person"
     assert strip_status_from_title("[URGENT] Webflow build") == "[URGENT] Webflow build"
@@ -114,14 +126,79 @@ def test_upsert_discord_engagement_can_preserve_existing_status(monkeypatch) -> 
     assert engagement_id == "engagement-1"
     query, params = executed[0]
     assert "COALESCE(%s, NOW()), COALESCE(%s, NOW())" in query
+    assert "WHEN %s THEN engagements.status" in query
     assert "WHEN EXCLUDED.status = 'unknown' THEN engagements.status" in query
     assert "WHEN %s THEN NOW()" in query
     assert (
         "EXCLUDED.status <> 'unknown'\n"
+        "                    AND NOT %s\n"
         "                    AND engagements.status IS DISTINCT FROM EXCLUDED.status"
         in query
     )
-    assert params[-1:] == (False,)
+    assert params[-3:] == (True, False, True)
+
+
+def test_update_engagement_status_by_discord_thread_resolves_engagement(
+    monkeypatch,
+) -> None:
+    executed: list[tuple[str, tuple]] = []
+
+    class CursorStub:
+        def __enter__(self) -> "CursorStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+        def execute(self, query: str, params: tuple) -> None:
+            executed.append((query, params))
+
+        def fetchone(self) -> dict[str, str]:
+            return {"id": "engagement-1"}
+
+    class ConnectionStub:
+        def cursor(self, row_factory=None) -> CursorStub:  # noqa: ARG002
+            return CursorStub()
+
+        def __enter__(self) -> "ConnectionStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+    @contextmanager
+    def connection_stub():
+        yield ConnectionStub()
+
+    updated_calls: list[dict[str, object]] = []
+
+    def update_stub(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        updated_calls.append(kwargs)
+        return {"id": kwargs["engagement_id"], "status": kwargs["status"].value}
+
+    monkeypatch.setattr(
+        engagements,
+        "get_postgres_connection",
+        lambda _settings: connection_stub(),
+    )
+    monkeypatch.setattr(engagements, "update_engagement_status", update_stub)
+
+    result = update_engagement_status_by_discord_thread(
+        SharedSettings(),
+        discord_thread_id="thread-1",
+        status=EngagementStatus.RECRUITING,
+        actor_discord_user_id="steering-1",
+    )
+
+    assert result == {"id": "engagement-1", "status": "recruiting"}
+    assert executed[0][1] == ("thread-1",)
+    assert updated_calls == [
+        {
+            "engagement_id": "engagement-1",
+            "status": EngagementStatus.RECRUITING,
+            "actor_discord_user_id": "steering-1",
+        }
+    ]
 
 
 def test_engagement_event_exists_checks_event_marker(monkeypatch) -> None:
@@ -217,7 +294,7 @@ def test_dashboard_engagements_hide_historical_statuses_by_default(
 
     assert rows == []
     query, params = executed[0]
-    assert "e.status IN ('recruiting', 'filled', 'unknown')" in query
+    assert "e.status IN ('lead', 'recruiting', 'filled', 'unknown')" in query
     assert "CASE e.status" in query
     assert params == ["poster-1", 10]
 

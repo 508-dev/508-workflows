@@ -165,7 +165,7 @@ def test_worktree_env_load_host_mode_ignores_dotenv_host_port_pins() -> None:
             [
                 "/bin/sh",
                 "-c",
-                f"printf '%s' '{repo_root}' | cksum | awk '{{print $1}}'",
+                f"printf '%s' '{repo_root.resolve()}' | cksum | awk '{{print $1}}'",
             ],
             check=True,
             capture_output=True,
@@ -180,26 +180,52 @@ def test_worktree_env_load_host_mode_ignores_dotenv_host_port_pins() -> None:
         ]
 
 
-def test_worktree_env_load_uses_conductor_port_range_for_defaults() -> None:
-    env = _base_env()
-    env["CONDUCTOR_PORT"] = "45000"
+def test_worktree_env_load_canonicalizes_symlinked_worktree_root() -> None:
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        base_dir = Path(tmp_dir)
+        repo_root = base_dir / "real-worktree"
+        scripts_dir = repo_root / "scripts"
+        scripts_dir.mkdir(parents=True)
+        symlink_root = base_dir / "worktree-alias"
+        symlink_root.symlink_to(repo_root, target_is_directory=True)
 
-    result = _run_shell(
-        f"""
-        set -eu
-        . {SCRIPT_PATH}
-        worktree_env_load {REPO_ROOT / "scripts"} host
-        printf '%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n' \\
-          "$REDIS_HOST_PORT" \\
-          "$POSTGRES_HOST_PORT" \\
-          "$WEB_HOST_PORT" \\
-          "$MINIO_API_HOST_PORT" \\
-          "$MINIO_CONSOLE_HOST_PORT" \\
-          "$WEB_PORT" \\
-          "$HEALTHCHECK_PORT"
-        """,
-        env=env,
-    )
+        result = _run_shell(
+            f"""
+            set -eu
+            . {SCRIPT_PATH}
+            worktree_env_load {symlink_root / "scripts"} host
+            printf '%s\\n' "$WORKTREE_ENV_REPO_ROOT"
+            """,
+        )
+
+        assert result.returncode == 0
+        assert result.stdout.strip() == str(repo_root.resolve())
+
+
+def test_worktree_env_load_uses_conductor_port_range_for_defaults() -> None:
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        repo_root = Path(tmp_dir)
+        scripts_dir = repo_root / "scripts"
+        scripts_dir.mkdir()
+        env = _base_env()
+        env["CONDUCTOR_PORT"] = "45000"
+
+        result = _run_shell(
+            f"""
+            set -eu
+            . {SCRIPT_PATH}
+            worktree_env_load {scripts_dir} host
+            printf '%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n' \\
+              "$REDIS_HOST_PORT" \\
+              "$POSTGRES_HOST_PORT" \\
+              "$WEB_HOST_PORT" \\
+              "$MINIO_API_HOST_PORT" \\
+              "$MINIO_CONSOLE_HOST_PORT" \\
+              "$WEB_PORT" \\
+              "$HEALTHCHECK_PORT"
+            """,
+            env=env,
+        )
 
     assert result.returncode == 0
     assert result.stdout.splitlines() == [
@@ -213,26 +239,60 @@ def test_worktree_env_load_uses_conductor_port_range_for_defaults() -> None:
     ]
 
 
-def test_worktree_env_load_normalizes_leading_zero_conductor_port() -> None:
-    env = _base_env()
-    env["CONDUCTOR_PORT"] = "045000"
+def test_worktree_env_print_port_summary_includes_host_service_ports() -> None:
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        repo_root = Path(tmp_dir)
+        scripts_dir = repo_root / "scripts"
+        scripts_dir.mkdir()
+        env = _base_env()
+        env["CONDUCTOR_PORT"] = "45000"
 
-    result = _run_shell(
-        f"""
-        set -eu
-        . {SCRIPT_PATH}
-        worktree_env_load {REPO_ROOT / "scripts"} host
-        printf '%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n' \\
-          "$REDIS_HOST_PORT" \\
-          "$POSTGRES_HOST_PORT" \\
-          "$WEB_HOST_PORT" \\
-          "$MINIO_API_HOST_PORT" \\
-          "$MINIO_CONSOLE_HOST_PORT" \\
-          "$WEB_PORT" \\
-          "$HEALTHCHECK_PORT"
-        """,
-        env=env,
-    )
+        result = _run_shell(
+            f"""
+            set -eu
+            . {SCRIPT_PATH}
+            worktree_env_load {scripts_dir} host
+            worktree_env_print_port_summary
+            """,
+            env=env,
+        )
+
+        assert result.returncode == 0
+        assert result.stdout.splitlines() == [
+            "Assigned worktree ports:",
+            "  Redis:    127.0.0.1:45000",
+            "  Postgres: 127.0.0.1:45001",
+            "  MinIO:    127.0.0.1:45003",
+            "  Console:  127.0.0.1:45004",
+            "  Web/API:  127.0.0.1:45005",
+            "  Bot:      127.0.0.1:45006",
+        ]
+
+
+def test_worktree_env_load_normalizes_leading_zero_conductor_port() -> None:
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        repo_root = Path(tmp_dir)
+        scripts_dir = repo_root / "scripts"
+        scripts_dir.mkdir()
+        env = _base_env()
+        env["CONDUCTOR_PORT"] = "045000"
+
+        result = _run_shell(
+            f"""
+            set -eu
+            . {SCRIPT_PATH}
+            worktree_env_load {scripts_dir} host
+            printf '%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n' \\
+              "$REDIS_HOST_PORT" \\
+              "$POSTGRES_HOST_PORT" \\
+              "$WEB_HOST_PORT" \\
+              "$MINIO_API_HOST_PORT" \\
+              "$MINIO_CONSOLE_HOST_PORT" \\
+              "$WEB_PORT" \\
+              "$HEALTHCHECK_PORT"
+            """,
+            env=env,
+        )
 
     assert result.returncode == 0
     assert result.stdout.splitlines() == [

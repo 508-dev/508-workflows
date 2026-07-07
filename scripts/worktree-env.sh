@@ -273,7 +273,7 @@ worktree_env_load() {
   script_dir=$1
   mode=${2:-host}
 
-  WORKTREE_ENV_REPO_ROOT=$(CDPATH= cd "$script_dir/.." && pwd)
+  WORKTREE_ENV_REPO_ROOT=$(CDPATH= cd "$script_dir/.." && pwd -P)
   WORKTREE_ENV_FILE="$WORKTREE_ENV_REPO_ROOT/.env"
 
   hash_value=$(printf '%s' "$WORKTREE_ENV_REPO_ROOT" | cksum | awk '{print $1}')
@@ -343,5 +343,27 @@ worktree_env_load() {
     unset WEB_PORT
     unset WEBHOOK_INGEST_PORT
     unset HEALTHCHECK_PORT
+  fi
+}
+
+worktree_env_print_port_summary() {
+  cat <<EOF
+Assigned worktree ports:
+  Redis:    127.0.0.1:${REDIS_HOST_PORT}
+  Postgres: 127.0.0.1:${POSTGRES_HOST_PORT}
+  MinIO:    127.0.0.1:${MINIO_API_HOST_PORT}
+  Console:  127.0.0.1:${MINIO_CONSOLE_HOST_PORT}
+EOF
+
+  if [ -n "${WEB_PORT-}" ]; then
+    cat <<EOF
+  Web/API:  127.0.0.1:${WEB_PORT}
+EOF
+  fi
+
+  if [ -n "${HEALTHCHECK_PORT-}" ]; then
+    cat <<EOF
+  Bot:      127.0.0.1:${HEALTHCHECK_PORT}
+EOF
   fi
 }

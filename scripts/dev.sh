@@ -38,7 +38,67 @@ emit_export() {
   printf 'export %s=%s\n' "$key" "$(shell_quote "$value")"
 }
 
+print_startup_header() {
+  cat <<EOF
+508 Workflows local stack
+EOF
+  worktree_env_print_port_summary
+  printf '\n'
+}
+
+reclaim_same_worktree_compose_containers() {
+  command -v docker >/dev/null 2>&1 || return 0
+
+  infra_ports=" ${REDIS_HOST_PORT} ${POSTGRES_HOST_PORT} ${MINIO_API_HOST_PORT} ${MINIO_CONSOLE_HOST_PORT} "
+  compose_containers=$(
+    docker ps -a \
+      --format '{{.ID}}\t{{.Label "com.docker.compose.project"}}\t{{.Label "com.docker.compose.project.working_dir"}}\t{{.Ports}}\t{{.Names}}'
+  )
+  stale_containers=$(
+    COMPOSE_CONTAINERS="$compose_containers" python3 - "$COMPOSE_PROJECT_NAME" "$WORKTREE_ENV_REPO_ROOT" "$infra_ports" <<'PY'
+import os
+import sys
+
+current_project, worktree_root, infra_ports = sys.argv[1:4]
+worktree_realpath = os.path.realpath(worktree_root)
+assigned_ports = [port for port in infra_ports.split() if port]
+
+
+def publishes_assigned_port(port_list: str) -> bool:
+    return any(f":{port}->" in port_list for port in assigned_ports)
+
+
+for raw_line in os.environ.get("COMPOSE_CONTAINERS", "").splitlines():
+    container_id, project_name, working_dir, port_list, container_name = (
+        raw_line.split("\t", 4)
+    )
+    if project_name == current_project or not working_dir:
+        continue
+    if os.path.realpath(working_dir) != worktree_realpath:
+        continue
+    if port_list and not publishes_assigned_port(port_list):
+        continue
+    print(f"{container_id}\t{project_name}\t{container_name}\t{working_dir}")
+PY
+  )
+
+  if [ -z "$stale_containers" ]; then
+    return 0
+  fi
+
+  echo "Reclaiming stale same-worktree Docker Compose containers:"
+  printf '%s\n' "$stale_containers" | while IFS="$(printf '\t')" read -r _container_id project_name container_name working_dir; do
+    printf '  %s (%s, %s)\n' "$container_name" "$project_name" "$working_dir"
+  done
+
+  # These containers are stale containers from the same canonical workspace.
+  # This includes symlink aliases to the current worktree, but not true sibling
+  # workspaces that merely share a Conductor port block.
+  docker rm -f $(printf '%s\n' "$stale_containers" | awk '{ print $1 }') >/dev/null
+}
+
 start_infra() {
+  reclaim_same_worktree_compose_containers
   "$script_dir/docker-compose.sh" up -d --wait redis postgres minio
   "$script_dir/docker-compose.sh" up minio-init
 }
@@ -146,6 +206,8 @@ PY
 command=${1:-infra}
 case "$command" in
   infra)
+    print_startup_header
+    echo "Starting infrastructure"
     start_infra
     cat <<EOF
 
@@ -170,11 +232,15 @@ Run app services on the host with:
 EOF
     ;;
   all)
+    print_startup_header
+    echo "Starting infrastructure, migrations, and app services"
     start_infra
     run_migrations
     exec python3 "$script_dir/dev_mux.py"
     ;;
   no-bot|web-worker|dashboard)
+    print_startup_header
+    echo "Starting infrastructure, migrations, web, and worker"
     start_infra
     run_migrations
     exec python3 "$script_dir/dev_mux.py" web worker
@@ -184,6 +250,8 @@ EOF
     create_dashboard_login_link "${1:-/dashboard}"
     ;;
   migrate|migrations)
+    print_startup_header
+    echo "Starting infrastructure and running migrations"
     start_infra
     run_migrations
     ;;
@@ -221,6 +289,8 @@ EOF
     printf '%s\n' "$POSTGRES_URL"
     ;;
   web|api)
+    print_startup_header
+    echo "Starting web/API"
     reclaim_service_port web
     run_migrations
     exec "$UV_BIN" run --package api uvicorn five08.backend.api:create_app \
@@ -233,6 +303,8 @@ EOF
       --reload-dir packages/shared/src
     ;;
   worker)
+    print_startup_header
+    echo "Starting worker"
     run_migrations
     worker_command="$(shell_quote "$UV_BIN") run --package worker worker-consumer"
     exec "$UV_BIN" run watchfiles \
@@ -244,6 +316,8 @@ EOF
       packages/shared/src
     ;;
   discord-bot|bot)
+    print_startup_header
+    echo "Starting Discord bot"
     reclaim_service_port discord-bot
     run_migrations
     exec uv run --package discord_bot discord-bot
