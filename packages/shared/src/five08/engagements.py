@@ -28,6 +28,7 @@ class EngagementStatus(StrEnum):
     UNKNOWN = "unknown"
     LOST = "lost"
     OUTDATED = "outdated"
+    DUPLICATE = "duplicate"
 
 
 class EngagementApplicationStatus(StrEnum):
@@ -71,6 +72,8 @@ _STATUS_ALIASES = {
     "canceled": EngagementStatus.LOST,
     "outdated": EngagementStatus.OUTDATED,
     "stale": EngagementStatus.OUTDATED,
+    "duplicate": EngagementStatus.DUPLICATE,
+    "dupe": EngagementStatus.DUPLICATE,
 }
 _STATUS_TOKEN_RE = re.compile(r"^\s*([A-Z][A-Z0-9_-]*)\b[:\]\)-]?\s*")
 _BRACKETED_STATUS_RE = re.compile(r"^\s*[\[(]\s*([A-Z][A-Z0-9 _-]{2,})\s*[\])]\s*")
