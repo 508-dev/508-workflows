@@ -91,6 +91,17 @@ class DashboardJobLeadPostRequest(BaseModel):
     engagement_status: Literal["lead", "recruiting"] = "lead"
 
 
+class DashboardJobChannelUpdateRequest(BaseModel):
+    """Payload for registering or updating one Discord job channel."""
+
+    posting_type: Literal[
+        "part_time",
+        "full_time",
+        "part_time_or_full_time",
+        "unknown",
+    ] = "part_time"
+
+
 class DashboardJobLeadSyncRequest(BaseModel):
     """Payload for enqueuing a sourced job lead scrape."""
 

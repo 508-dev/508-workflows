@@ -370,13 +370,19 @@ class InternalAPIRoutes:
             base_title = stripped_title
         base_title = base_title.strip() or f"Discord gig {thread_id}"
         next_name = f"[{status_marker}] {base_title}"[:100]
-        should_close_thread = normalized_status is EngagementStatus.LOST
-        was_lost_thread = parse_status_from_title(raw_title) is EngagementStatus.LOST
+        should_close_thread = normalized_status in {
+            EngagementStatus.LOST,
+            EngagementStatus.DUPLICATE,
+        }
+        was_closed_thread = parse_status_from_title(raw_title) in {
+            EngagementStatus.LOST,
+            EngagementStatus.DUPLICATE,
+        }
         is_locked = bool(getattr(channel, "locked", False))
         is_archived = bool(getattr(channel, "archived", False))
         needs_rename = channel.name != next_name
         needs_reopen = (
-            not should_close_thread and was_lost_thread and (is_locked or is_archived)
+            not should_close_thread and was_closed_thread and (is_locked or is_archived)
         )
         needs_close = should_close_thread and (not is_locked or not is_archived)
         needs_unarchive_for_rename = needs_rename and is_archived
@@ -468,11 +474,20 @@ class InternalAPIRoutes:
         )
         return result, status_code
 
-    async def _list_job_channels(self) -> tuple[dict[str, Any], int]:
+    async def _list_job_channels(
+        self,
+        *,
+        register_defaults: bool = True,
+    ) -> tuple[dict[str, Any], int]:
         jobs_cog = self.bot.get_cog("JobsCog")
         if jobs_cog is None or not hasattr(jobs_cog, "list_registered_job_post_forums"):
             return {"error": "jobs_cog_unavailable"}, 503
-        result, status_code = await jobs_cog.list_registered_job_post_forums()
+        if register_defaults:
+            result, status_code = await jobs_cog.list_registered_job_post_forums()
+        else:
+            result, status_code = await jobs_cog.list_registered_job_post_forums(
+                register_defaults=False,
+            )
         return result, status_code
 
     async def job_channels_handler(self, request: web.Request) -> web.Response:
@@ -480,7 +495,12 @@ class InternalAPIRoutes:
         if not self._is_authorized(request):
             return web.json_response({"error": "unauthorized"}, status=401)
 
-        result, status_code = await self._list_job_channels()
+        register_defaults = str(
+            request.query.get("register_defaults", "true")
+        ).strip().casefold() not in {"0", "false", "no"}
+        result, status_code = await self._list_job_channels(
+            register_defaults=register_defaults,
+        )
         return web.json_response(result, status=status_code)
 
     async def post_job_lead_handler(self, request: web.Request) -> web.Response:

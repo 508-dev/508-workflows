@@ -56,6 +56,9 @@ import {
   type ConfigurationItem,
   type ConfigurationResponse,
   ConfigurationView,
+  type JobChannelsResponse,
+  type JobPostChannel,
+  type JobPostChannelTag,
 } from "@/views/configuration-view"
 import {
   type NewsletterStatus,
@@ -262,20 +265,6 @@ type JobLead = {
   posted_at?: string
   created_at?: string
   updated_at?: string
-}
-
-type JobPostChannel = {
-  channel_id: string
-  channel_name?: string
-  posting_type: string
-  requires_tag?: boolean
-  available_tags?: JobPostChannelTag[]
-}
-
-type JobPostChannelTag = {
-  id?: string
-  name: string
-  moderated?: boolean
 }
 
 type DashboardNotification = {
@@ -867,6 +856,7 @@ function App() {
   const [gigs, setGigs] = useState<Gig[]>([])
   const [gigLeads, setGigLeads] = useState<JobLead[]>([])
   const [jobPostChannels, setJobPostChannels] = useState<JobPostChannel[]>([])
+  const [availableJobPostChannels, setAvailableJobPostChannels] = useState<JobPostChannel[]>([])
   const [projects, setProjects] = useState<Project[]>([])
   const [projectsSummary, setProjectsSummary] = useState<ProjectsResponse["summary"]>({})
   const [wikiMatches, setWikiMatches] = useState<WikiMatchPreview | null>(null)
@@ -1076,8 +1066,11 @@ function App() {
     return `/dashboard/api/gig-leads?${params.toString()}`
   }
 
-  function jobChannelsUrl() {
-    return "/dashboard/api/job-channels"
+  function jobChannelsUrl(options: { includeAvailable?: boolean } = {}) {
+    const params = new URLSearchParams()
+    if (options.includeAvailable) params.set("include_available", "true")
+    const query = params.toString()
+    return `/dashboard/api/job-channels${query ? `?${query}` : ""}`
   }
 
   function projectsUrl() {
@@ -1127,16 +1120,62 @@ function App() {
     }
   }
 
-  async function loadJobPostChannels() {
+  async function loadJobPostChannels(options: { includeAvailable?: boolean } = {}) {
     if (!can("gigs:read")) return
     setBusy("jobPostChannels", true)
     try {
-      const payload = await requestJson<{ channels?: JobPostChannel[] }>(jobChannelsUrl())
+      const payload = await requestJson<JobChannelsResponse>(jobChannelsUrl(options))
       setJobPostChannels(payload.channels || [])
+      if (options.includeAvailable) {
+        setAvailableJobPostChannels(payload.available_channels || payload.channels || [])
+      }
     } catch (error) {
       showError(error, "Unable to load job channels")
     } finally {
       setBusy("jobPostChannels", false)
+    }
+  }
+
+  function applyJobChannelsPayload(payload: JobChannelsResponse) {
+    setJobPostChannels(payload.channels || [])
+    setAvailableJobPostChannels(payload.available_channels || payload.channels || [])
+  }
+
+  async function updateJobPostChannel(channelId: string, postingType: string) {
+    setBusy(`jobPostChannel:${channelId}`, true)
+    try {
+      const payload = await requestJson<JobChannelsResponse>(
+        `/dashboard/api/job-channels/${encodeURIComponent(channelId)}`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ posting_type: postingType }),
+        },
+      )
+      applyJobChannelsPayload(payload)
+      showToast("Saved job channel", "ok")
+      return true
+    } catch (error) {
+      showError(error, "Unable to save job channel")
+      return false
+    } finally {
+      setBusy(`jobPostChannel:${channelId}`, false)
+    }
+  }
+
+  async function deleteJobPostChannel(channelId: string) {
+    setBusy(`jobPostChannel:${channelId}`, true)
+    try {
+      const payload = await requestJson<JobChannelsResponse>(
+        `/dashboard/api/job-channels/${encodeURIComponent(channelId)}`,
+        { method: "DELETE" },
+      )
+      applyJobChannelsPayload(payload)
+      showToast("Deregistered job channel", "ok")
+    } catch (error) {
+      showError(error, "Unable to deregister job channel")
+    } finally {
+      setBusy(`jobPostChannel:${channelId}`, false)
     }
   }
 
@@ -2339,7 +2378,10 @@ function App() {
     if (view === "jobs") void loadJobs()
     if (view === "agent") void loadAgentReport()
     if (view === "audit") void loadAuditEvents()
-    if (view === "configuration") void loadConfiguration()
+    if (view === "configuration") {
+      void loadConfiguration()
+      void loadJobPostChannels({ includeAvailable: true })
+    }
   }, [view])
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: permission loading is the first authorized data fetch for the current view.
@@ -2358,7 +2400,10 @@ function App() {
     if (view === "jobs") void loadJobs()
     if (view === "agent") void loadAgentReport()
     if (view === "audit") void loadAuditEvents()
-    if (view === "configuration") void loadConfiguration()
+    if (view === "configuration") {
+      void loadConfiguration()
+      void loadJobPostChannels({ includeAvailable: true })
+    }
   }, [permissions])
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: jobs reload intentionally follows filter changes only while jobs is active.
@@ -2870,11 +2915,16 @@ function App() {
               items={configurationItems}
               loading={loading}
               canWrite={can("configuration:write")}
+              jobChannels={jobPostChannels}
+              availableJobChannels={availableJobPostChannels}
               focusCategory={configurationFocus?.category}
               focusNonce={configurationFocus?.nonce}
               onRefresh={loadConfiguration}
+              onRefreshJobChannels={() => loadJobPostChannels({ includeAvailable: true })}
               onSave={updateConfigurationValue}
               onClear={clearConfigurationValue}
+              onSaveJobChannel={updateJobPostChannel}
+              onDeleteJobChannel={deleteJobPostChannel}
             />
           ) : null}
         </div>
@@ -3217,7 +3267,15 @@ function FilterChips({
   )
 }
 
-const gigStatuses = ["lead", "recruiting", "filled", "unknown", "lost", "outdated"] as const
+const gigStatuses = [
+  "lead",
+  "recruiting",
+  "filled",
+  "unknown",
+  "lost",
+  "duplicate",
+  "outdated",
+] as const
 const applicationStatuses = [
   "suggested",
   "interested",
@@ -5813,7 +5871,7 @@ function GigListItem({
             variant={
               gig.status === "filled"
                 ? "succeeded"
-                : gig.status === "lost"
+                : gig.status === "lost" || gig.status === "duplicate"
                   ? "failed"
                   : isRecruiting
                     ? "queued"
@@ -5960,7 +6018,7 @@ function GigDetailPage({
                   variant={
                     gig.status === "filled"
                       ? "succeeded"
-                      : gig.status === "lost"
+                      : gig.status === "lost" || gig.status === "duplicate"
                         ? "failed"
                         : isRecruiting
                           ? "queued"

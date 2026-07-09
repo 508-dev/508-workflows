@@ -171,6 +171,7 @@ GIG_STATUS_COMMAND_VALUES = frozenset(
         "outdated",
         "unknown",
         "lost",
+        "duplicate",
     }
 )
 GIG_INTEREST_PATTERNS = (
@@ -494,6 +495,20 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         starter_author = getattr(starter, "author", None)
         starter_author_id = getattr(starter_author, "id", None)
         return str(starter_author_id) if starter_author_id else None
+
+    def _is_own_bot_thread_owner(
+        self,
+        thread: discord.Thread,
+        owner: discord.Member,
+    ) -> bool:
+        """Return whether a bot-owned job thread was created by this bot."""
+        if not getattr(owner, "bot", False):
+            return False
+        bot_user = getattr(self.bot, "user", None)
+        bot_user_id = getattr(bot_user, "id", None)
+        if bot_user_id is None or thread.owner_id is None:
+            return False
+        return str(thread.owner_id) == str(bot_user_id)
 
     async def _refresh_jobs_channel_cache_if_missing(self, guild_id: int) -> bool:
         """Ensure guild cache is loaded, retrying after startup-load failures."""
@@ -2388,13 +2403,19 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             base_title = stripped_title
         base_title = base_title.strip() or f"Discord gig {thread.id}"
         next_name = f"[{status_marker}] {base_title}"[:100]
-        should_close_thread = status is EngagementStatus.LOST
-        was_lost_thread = parse_status_from_title(raw_title) is EngagementStatus.LOST
+        should_close_thread = status in {
+            EngagementStatus.LOST,
+            EngagementStatus.DUPLICATE,
+        }
+        was_closed_thread = parse_status_from_title(raw_title) in {
+            EngagementStatus.LOST,
+            EngagementStatus.DUPLICATE,
+        }
         is_locked = bool(getattr(thread, "locked", False))
         is_archived = bool(getattr(thread, "archived", False))
         needs_rename = thread.name != next_name
         needs_reopen = (
-            not should_close_thread and was_lost_thread and (is_locked or is_archived)
+            not should_close_thread and was_closed_thread and (is_locked or is_archived)
         )
         needs_close = should_close_thread and (not is_locked or not is_archived)
         needs_unarchive_for_rename = needs_rename and is_archived
@@ -3386,10 +3407,14 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             return
 
         owner = guild.get_member(thread.owner_id) if thread.owner_id else None
-        if owner is None or owner.bot:
+        if owner is None:
             return
-        if not check_user_roles_with_hierarchy(owner.roles, ["Member"]):
-            return
+        if getattr(owner, "bot", False):
+            if not self._is_own_bot_thread_owner(thread, owner):
+                return
+        else:
+            if not check_user_roles_with_hierarchy(owner.roles, ["Member"]):
+                return
 
         await self._run_auto_match_candidates_for_thread(
             thread=thread,
@@ -3639,8 +3664,9 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         channel: discord.ForumChannel,
         *,
         posting_type: JobPostingType,
+        registered: bool | None = None,
     ) -> dict[str, Any]:
-        return {
+        metadata: dict[str, Any] = {
             "channel_id": str(channel.id),
             "channel_name": getattr(channel, "name", None),
             "posting_type": posting_type.value,
@@ -3655,15 +3681,23 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 if str(getattr(tag, "name", "")).strip()
             ],
         }
+        if registered is not None:
+            metadata["registered"] = registered
+        return metadata
 
-    async def list_registered_job_post_forums(self) -> tuple[dict[str, Any], int]:
+    async def list_registered_job_post_forums(
+        self,
+        *,
+        register_defaults: bool = True,
+    ) -> tuple[dict[str, Any], int]:
         """Return live Discord forum metadata for registered job-post channels."""
         guild = self._resolve_configured_guild()
         if guild is None:
             return {"error": "guild_not_found"}, 404
         try:
             await self._refresh_jobs_channel_cache(guild.id)
-            await self._register_default_job_forum_channels(guild)
+            if register_defaults:
+                await self._register_default_job_forum_channels(guild)
         except Exception as exc:
             logger.warning(
                 "Failed loading registered jobs channels guild=%s: %s",
@@ -3673,8 +3707,25 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             return {"error": "jobs_channel_cache_failed"}, 502
 
         channel_types = self._jobs_channel_types_by_guild.get(guild.id, {})
+        registered_ids = set(self._jobs_channels_by_guild.get(guild.id, set()))
+        guild_channels = getattr(guild, "channels", [])
+        available_channels = [
+            self._job_post_channel_metadata(
+                channel,
+                posting_type=channel_types.get(channel.id, JobPostingType.UNKNOWN),
+                registered=channel.id in registered_ids,
+            )
+            for channel in sorted(
+                (
+                    channel
+                    for channel in guild_channels
+                    if isinstance(channel, discord.ForumChannel)
+                ),
+                key=lambda channel: str(getattr(channel, "name", "")).casefold(),
+            )
+        ]
         channels: list[dict[str, Any]] = []
-        for channel_id in sorted(self._jobs_channels_by_guild.get(guild.id, set())):
+        for channel_id in sorted(registered_ids):
             resolved, error, status_code = await self._fetch_forum_channel(channel_id)
             if resolved is None:
                 if status_code >= 500:
@@ -3687,9 +3738,10 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                         channel_id,
                         JobPostingType.UNKNOWN,
                     ),
+                    registered=True,
                 )
             )
-        return {"channels": channels}, 200
+        return {"channels": channels, "available_channels": available_channels}, 200
 
     @staticmethod
     def _created_thread_starter_message_id(created: object, thread: object) -> str:
@@ -4263,6 +4315,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             app_commands.Choice(name="OUTDATED", value="outdated"),
             app_commands.Choice(name="UNKNOWN", value="unknown"),
             app_commands.Choice(name="LOST", value="lost"),
+            app_commands.Choice(name="DUPLICATE", value="duplicate"),
         ]
     )
     async def update_gig_status(
@@ -4309,7 +4362,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         normalized_status = self._explicit_gig_status(status)
         if normalized_status is None:
             await interaction.response.send_message(
-                "⚠️ Choose one of: RECRUITING, FILLED, OUTDATED, UNKNOWN, LOST.",
+                "⚠️ Choose one of: RECRUITING, FILLED, OUTDATED, UNKNOWN, LOST, DUPLICATE.",
                 ephemeral=True,
             )
             return
@@ -4499,7 +4552,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
 
         close_note = (
             " and closed this thread"
-            if normalized_status is EngagementStatus.LOST
+            if normalized_status in {EngagementStatus.LOST, EngagementStatus.DUPLICATE}
             else ""
         )
         await interaction.followup.send(

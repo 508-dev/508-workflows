@@ -62,7 +62,11 @@ from five08.job_leads import (
     list_job_leads,
     review_job_lead,
 )
-from five08.job_channels import list_registered_job_post_channel_configs
+from five08.job_channels import (
+    list_registered_job_post_channel_configs,
+    register_job_post_channel,
+    unregister_job_post_channel,
+)
 from five08.queue import (
     EnqueuedJob,
     JobRecord,
@@ -126,6 +130,7 @@ from five08.backend.schemas import (
     DashboardGigApplicationCreateRequest,
     DashboardGigApplicationStatusRequest,
     DashboardGigStatusRequest,
+    DashboardJobChannelUpdateRequest,
     DashboardJobLeadPostRequest,
     DashboardJobLeadReviewRequest,
     DashboardJobLeadSyncRequest,
@@ -1089,16 +1094,24 @@ async def _post_job_lead_to_discord(
     return cast(dict[str, Any], payload), response.status_code
 
 
-async def _list_job_channels_from_bot(request: Request) -> dict[str, Any] | None:
+async def _list_job_channels_from_bot(
+    request: Request,
+    *,
+    register_defaults: bool = True,
+) -> dict[str, Any] | None:
     """Ask the Discord bot for registered job forums and live tag metadata."""
     base_url = settings.discord_bot_internal_base_url.strip()
     api_secret = str(settings.api_shared_secret or "").strip()
     if not base_url or not api_secret:
         return None
     try:
+        params = {}
+        if not register_defaults:
+            params["register_defaults"] = "false"
         response = await _http_client_from_app(request.app).get(
             f"{base_url.rstrip('/')}/internal/jobs/channels",
             headers={"X-API-Secret": api_secret},
+            params=params,
             timeout=10.0,
         )
     except httpx.HTTPError as exc:
@@ -4070,38 +4083,262 @@ async def dashboard_gig_detail_handler(
 
 async def dashboard_job_channels_handler(request: Request) -> JSONResponse:
     """Return registered Discord job forums for dashboard lead posting."""
+    include_available = request.query_params.get(
+        "include_available", ""
+    ).casefold() in {
+        "1",
+        "true",
+        "yes",
+    }
+    required_permission = (
+        DASHBOARD_PERMISSION_CONFIGURATION_READ
+        if include_available
+        else DASHBOARD_PERMISSION_GIGS_READ
+    )
     _session, error_response = await _dashboard_session_or_error(
         request,
-        required_permission=DASHBOARD_PERMISSION_GIGS_READ,
+        required_permission=required_permission,
     )
     if error_response is not None:
         return error_response
 
+    return JSONResponse(
+        await _dashboard_job_channels_payload(
+            request,
+            include_available=include_available,
+        )
+    )
+
+
+async def _dashboard_job_channels_payload(
+    request: Request,
+    *,
+    include_available: bool = False,
+) -> dict[str, Any]:
+    """Return registered job-channel metadata, with live forum options when requested."""
     guild_id = str(settings.discord_server_id or "").strip()
     if not guild_id:
-        return JSONResponse({"channels": []})
+        payload: dict[str, Any] = {"channels": []}
+        if include_available:
+            payload["available_channels"] = []
+        return payload
 
-    live_channels = await _list_job_channels_from_bot(request)
+    live_channels = await _list_job_channels_from_bot(
+        request,
+        register_defaults=not include_available,
+    )
     if live_channels is not None:
         channels = live_channels.get("channels")
         if isinstance(channels, list):
-            return JSONResponse({"channels": channels})
+            payload = {"channels": channels}
+            if include_available:
+                available_channels = live_channels.get("available_channels")
+                payload["available_channels"] = (
+                    available_channels
+                    if isinstance(available_channels, list)
+                    else channels
+                )
+            return payload
 
     channels = await asyncio.to_thread(
         list_registered_job_post_channel_configs,
         settings,
         guild_id=guild_id,
     )
+    payload = {
+        "channels": [
+            {
+                "channel_id": channel.channel_id,
+                "posting_type": channel.posting_type.value,
+                **({"registered": True} if include_available else {}),
+            }
+            for channel in channels
+        ]
+    }
+    if include_available:
+        payload["available_channels"] = payload["channels"]
+    return payload
+
+
+def _valid_discord_channel_id_or_none(channel_id: str) -> str | None:
+    normalized = str(channel_id or "").strip()
+    if not normalized or not normalized.isdigit():
+        return None
+    return normalized
+
+
+async def dashboard_update_job_channel_handler(
+    request: Request,
+    channel_id: str,
+) -> JSONResponse:
+    """Register or update one Discord job forum from the dashboard."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_CONFIGURATION_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    normalized_channel_id = _valid_discord_channel_id_or_none(channel_id)
+    if normalized_channel_id is None:
+        await _audit_dashboard_job_channel_change(
+            session,
+            result=AuditResult.ERROR,
+            channel_id=channel_id,
+            action="job_channel.update",
+            metadata={"error": "invalid_channel_id"},
+        )
+        return JSONResponse({"error": "invalid_channel_id"}, status_code=400)
+
+    try:
+        payload = DashboardJobChannelUpdateRequest.model_validate(await request.json())
+    except ValidationError as exc:
+        await _audit_dashboard_job_channel_change(
+            session,
+            result=AuditResult.ERROR,
+            channel_id=normalized_channel_id,
+            action="job_channel.update",
+            metadata={"error": "invalid_job_channel_payload", "detail": exc.errors()},
+        )
+        return JSONResponse(
+            {"error": "invalid_job_channel_payload", "detail": exc.errors()},
+            status_code=400,
+        )
+    except Exception as exc:
+        await _audit_dashboard_job_channel_change(
+            session,
+            result=AuditResult.ERROR,
+            channel_id=normalized_channel_id,
+            action="job_channel.update",
+            metadata={"error": "invalid_json", "detail": str(exc)},
+        )
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+
+    guild_id = str(settings.discord_server_id or "").strip()
+    if not guild_id:
+        await _audit_dashboard_job_channel_change(
+            session,
+            result=AuditResult.ERROR,
+            channel_id=normalized_channel_id,
+            action="job_channel.update",
+            metadata={"error": "discord_server_not_configured"},
+        )
+        return JSONResponse({"error": "discord_server_not_configured"}, status_code=409)
+
+    try:
+        created = await asyncio.to_thread(
+            register_job_post_channel,
+            settings,
+            guild_id=guild_id,
+            channel_id=normalized_channel_id,
+            posting_type=payload.posting_type,
+            update_existing=True,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed updating dashboard job channel guild=%s channel=%s: %s",
+            guild_id,
+            normalized_channel_id,
+            exc,
+        )
+        await _audit_dashboard_job_channel_change(
+            session,
+            result=AuditResult.ERROR,
+            channel_id=normalized_channel_id,
+            action="job_channel.update",
+            metadata={"posting_type": payload.posting_type, "error": str(exc)},
+        )
+        return JSONResponse({"error": "job_channel_update_failed"}, status_code=500)
+
+    action = "job_channel.register" if created else "job_channel.update"
+    await _audit_dashboard_job_channel_change(
+        session,
+        result=AuditResult.SUCCESS,
+        channel_id=normalized_channel_id,
+        action=action,
+        metadata={"posting_type": payload.posting_type, "created": created},
+    )
     return JSONResponse(
-        {
-            "channels": [
-                {
-                    "channel_id": channel.channel_id,
-                    "posting_type": channel.posting_type.value,
-                }
-                for channel in channels
-            ]
-        }
+        await _dashboard_job_channels_payload(request, include_available=True)
+    )
+
+
+async def dashboard_delete_job_channel_handler(
+    request: Request,
+    channel_id: str,
+) -> JSONResponse:
+    """Deregister one Discord job forum from the dashboard."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_CONFIGURATION_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    normalized_channel_id = _valid_discord_channel_id_or_none(channel_id)
+    if normalized_channel_id is None:
+        await _audit_dashboard_job_channel_change(
+            session,
+            result=AuditResult.ERROR,
+            channel_id=channel_id,
+            action="job_channel.unregister",
+            metadata={"error": "invalid_channel_id"},
+        )
+        return JSONResponse({"error": "invalid_channel_id"}, status_code=400)
+
+    guild_id = str(settings.discord_server_id or "").strip()
+    if not guild_id:
+        await _audit_dashboard_job_channel_change(
+            session,
+            result=AuditResult.ERROR,
+            channel_id=normalized_channel_id,
+            action="job_channel.unregister",
+            metadata={"error": "discord_server_not_configured"},
+        )
+        return JSONResponse({"error": "discord_server_not_configured"}, status_code=409)
+
+    try:
+        removed = await asyncio.to_thread(
+            unregister_job_post_channel,
+            settings,
+            guild_id=guild_id,
+            channel_id=normalized_channel_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed deleting dashboard job channel guild=%s channel=%s: %s",
+            guild_id,
+            normalized_channel_id,
+            exc,
+        )
+        await _audit_dashboard_job_channel_change(
+            session,
+            result=AuditResult.ERROR,
+            channel_id=normalized_channel_id,
+            action="job_channel.unregister",
+            metadata={"error": str(exc)},
+        )
+        return JSONResponse({"error": "job_channel_delete_failed"}, status_code=500)
+
+    await _audit_dashboard_job_channel_change(
+        session,
+        result=AuditResult.SUCCESS,
+        channel_id=normalized_channel_id,
+        action="job_channel.unregister",
+        metadata={"removed": removed},
+    )
+    return JSONResponse(
+        await _dashboard_job_channels_payload(request, include_available=True)
     )
 
 
@@ -5588,6 +5825,27 @@ async def _audit_dashboard_configuration_change(
         actor_provider=actor_provider,
         resource_type="runtime_config",
         resource_id=key,
+        metadata={"source": "dashboard", **(metadata or {})},
+    )
+
+
+async def _audit_dashboard_job_channel_change(
+    session: AuthSession,
+    *,
+    result: AuditResult,
+    channel_id: str,
+    action: str,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    actor_provider, actor_subject = _session_audit_actor(session)
+    await _write_auth_audit_event(
+        action=action,
+        result=result,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="discord_job_channel",
+        resource_id=channel_id,
         metadata={"source": "dashboard", **(metadata or {})},
     )
 
