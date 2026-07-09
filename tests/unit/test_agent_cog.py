@@ -67,7 +67,7 @@ def test_format_agent_response_renders_generic_clarification_as_guidance() -> No
     message = cog._format_agent_response(
         {
             "status": "needs_clarification",
-            "message": "I could not turn that into a supported task action.",
+            "message": "I could not map that to a supported workflow.",
         }
     )
 
@@ -75,6 +75,17 @@ def test_format_agent_response_renders_generic_clarification_as_guidance() -> No
         "I could not map that to a supported workflow yet. Ask "
         "`what can you do?` for examples."
     )
+
+
+def test_agent_capabilities_include_member_task_and_memory_workflows() -> None:
+    message = AgentCog._agent_capabilities_message(
+        roles=["Member"],
+        transport="slash",
+    )
+
+    assert "Tasks:" in message
+    assert "Memory:" in message
+    assert "no agent workflows" not in message
 
 
 def test_format_agent_response_renders_github_issue_results() -> None:
@@ -862,7 +873,7 @@ async def test_agent_mention_posts_clarification_in_thread() -> None:
     cog._post_agent_request = AsyncMock(
         return_value={
             "status": "needs_clarification",
-            "message": "I could not turn that into a supported task action.",
+            "message": "I could not map that to a supported workflow.",
         }
     )
     cog._audit_message_safe = Mock()
@@ -998,7 +1009,8 @@ async def test_agent_mention_answers_help_without_backend() -> None:
     assert "create 508 accounts" in response
     assert "Authentik SSO users" in response
     assert "Outline invites" in response
-    assert "Tasks:" not in response
+    assert "Tasks:" in response
+    assert "Memory:" in response
     assert "`/agent`" in response
     assert "/unlinked-discord-users" not in response
     assert "/view-onboarding-queue" not in response

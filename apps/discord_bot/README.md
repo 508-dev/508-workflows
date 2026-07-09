@@ -48,7 +48,8 @@ Agent command flow:
 /agent request or @bot mention
   -> bot resolves Discord user/guild/channel/role context
   -> POST /agent/requests on the backend API
-  -> backend parses the request into a typed plan
+  -> backend uses a structured proposal planner when configured, with deterministic fallback
+  -> backend validates the typed plan and authorizes every proposed tool
   -> deterministic backend policy authorizes each proposed tool
   -> read actions execute synchronously
   -> write actions return a frozen confirmation plan
@@ -56,9 +57,12 @@ Agent command flow:
   -> backend executes the exact frozen plan inline and returns the result
 ```
 
-Current MVP scope is task-style commands only. The backend agent package keeps
-read and write tools separate, applies capability checks before every tool call,
-requires confirmation for writes, and audits request/confirmation attempts.
+The backend agent package keeps read and write tools separate, applies
+capability checks before every tool call, requires confirmation for writes, and
+audits request/confirmation attempts. The model only drafts bounded tool calls;
+it cannot authorize users or execute integrations. Supported workflows include
+tasks, GitHub issues, CRM contacts, member agreements, account provisioning,
+and private memory according to the requester's roles.
 Long-running service changes should be implemented as PR-based workflows rather
 than direct production mutations. Task reads require an explicit project filter
 to avoid guild-wide task enumeration.

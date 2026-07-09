@@ -24,6 +24,7 @@ from five08.agent.context import (
     context_sources_for_snippets,
 )
 from five08.agent.model_routing import AgentModelConfig
+from five08.agent.planner import AgentPlanner, AgentPlannerResult
 from five08.agent.policy import PolicyEngine
 from five08.agent.tools import ToolPartialSuccessError, ToolRegistry
 from five08.clients.migadu import normalize_migadu_mailbox_domain
@@ -82,6 +83,7 @@ class AgentOrchestrator:
         registry: ToolRegistry | None = None,
         policy: PolicyEngine | None = None,
         model_config: AgentModelConfig | None = None,
+        planner: AgentPlanner | None = None,
         intent_normalizer: AgentIntentNormalizer | None = None,
         context_loader: AgentContextLoader | None = None,
         context_bounds: ContextLoadBounds | None = None,
@@ -90,6 +92,7 @@ class AgentOrchestrator:
         self.registry = registry or ToolRegistry()
         self.policy = policy or PolicyEngine()
         self.model_config = model_config or AgentModelConfig()
+        self.planner = planner
         self.intent_normalizer = intent_normalizer
         self.context_loader = context_loader or RequestContextLoader()
         self.context_bounds = context_bounds or ContextLoadBounds()
@@ -109,17 +112,21 @@ class AgentOrchestrator:
                 clarification_question="What task or project action should I take?",
             )
 
+        resolved_member_agreement = self._plan_member_agreement_from_crm(
+            text,
+            context,
+            planner="deterministic_regex",
+        )
+        if resolved_member_agreement is not None:
+            return resolved_member_agreement
+
+        planned_response = self._plan_with_model(text, context)
+        if planned_response is not None:
+            return planned_response
+
         planner: LiteralPlanner = "deterministic_regex"
         planning_text = text
         action = self._parse_action(text)
-        if action is None:
-            resolved_member_agreement = self._plan_member_agreement_from_crm(
-                text,
-                context,
-                planner=planner,
-            )
-            if resolved_member_agreement is not None:
-                return resolved_member_agreement
         if action is None and not re.search(
             r"\bcreate\s+(?:a\s+)?task\b", text, re.IGNORECASE
         ):
@@ -130,14 +137,6 @@ class AgentOrchestrator:
                     action = normalized_action
                     planning_text = normalized_text
                     planner = "live_model"
-        if action is None and planner == "live_model":
-            resolved_member_agreement = self._plan_member_agreement_from_crm(
-                planning_text,
-                context,
-                planner=planner,
-            )
-            if resolved_member_agreement is not None:
-                return resolved_member_agreement
         if action is None:
             if re.search(r"\bcreate\s+(?:a\s+)?task\b", text, re.IGNORECASE):
                 return AgentResponse(
@@ -147,9 +146,9 @@ class AgentOrchestrator:
                 )
             return AgentResponse(
                 status="needs_clarification",
-                message="I could not turn that into a supported task action.",
+                message="I could not map that to a supported workflow.",
                 clarification_question=(
-                    "Try asking me to create, update, or search for a task."
+                    "Try asking me to manage a task, GitHub issue, CRM contact, or member account."
                 ),
             )
         if action.tool_name == "task_read.search_tasks" and not action.arguments.get(
@@ -168,6 +167,88 @@ class AgentOrchestrator:
             planner=planner,
         )
 
+    def _plan_with_model(
+        self,
+        text: str,
+        context: AgentIdentityContext,
+    ) -> AgentResponse | None:
+        """Use the structured planner when configured, preserving safe fallback."""
+
+        if self.planner is None:
+            return None
+        model_tier = self._choose_model_tier_for_request(text)
+        try:
+            result = self.planner.plan(
+                message=text,
+                context=context,
+                runtime_config=self.registry.runtime_config,
+                model_tier=model_tier,
+            )
+        except Exception:
+            # Provider errors fall through to deterministic parsing. Do not expose
+            # provider internals in a Discord response.
+            return None
+        if result is None:
+            return None
+        return self._response_for_planner_result(
+            result=result,
+            context=context,
+            planning_text=text,
+        )
+
+    def _response_for_planner_result(
+        self,
+        *,
+        result: AgentPlannerResult,
+        context: AgentIdentityContext,
+        planning_text: str,
+    ) -> AgentResponse:
+        draft = result.draft
+        if draft.status == "needs_clarification":
+            question = draft.clarification_question or "What should I do next?"
+            return AgentResponse(
+                status="needs_clarification",
+                message=question,
+                clarification_question=question,
+            )
+
+        actions = [
+            AgentToolAction(
+                tool_name=draft_action.tool_name,
+                arguments=draft_action.arguments,
+                summary=draft_action.summary,
+            )
+            for draft_action in draft.actions
+        ]
+        for action in actions:
+            try:
+                self.registry.validate_planner_action(
+                    action.tool_name,
+                    action.arguments,
+                )
+            except ValueError:
+                return AgentResponse(
+                    status="needs_clarification",
+                    message="I need a clearer request before I can safely continue.",
+                    clarification_question=(
+                        "What exact task, issue, contact, or account action should I run?"
+                    ),
+                )
+            clarification = self._planner_action_clarification(action)
+            if clarification is not None:
+                return AgentResponse(
+                    status="needs_clarification",
+                    message=clarification,
+                    clarification_question=clarification,
+                )
+        return self._response_for_actions(
+            actions=actions,
+            context=context,
+            planning_text=planning_text,
+            planner="live_model",
+            model=result.model,
+        )
+
     def _response_for_action(
         self,
         *,
@@ -178,8 +259,41 @@ class AgentOrchestrator:
     ) -> AgentResponse:
         """Authorize, freeze, and optionally execute a single planned action."""
 
-        manifest = self.registry.get(action.tool_name)
-        if manifest is not None:
+        return self._response_for_actions(
+            actions=[action],
+            context=context,
+            planning_text=planning_text,
+            planner=planner,
+        )
+
+    def _response_for_actions(
+        self,
+        *,
+        actions: list[AgentToolAction],
+        context: AgentIdentityContext,
+        planning_text: str,
+        planner: LiteralPlanner,
+        model: AgentModelSelection | None = None,
+    ) -> AgentResponse:
+        """Authorize and execute a complete, schema-validated action proposal."""
+
+        if not actions:
+            return AgentResponse(
+                status="needs_clarification",
+                message="What should I do next?",
+                clarification_question="What should I do next?",
+            )
+
+        for action in actions:
+            manifest = self.registry.get(action.tool_name)
+            if manifest is None:
+                return AgentResponse(
+                    status="needs_clarification",
+                    message="I could not map that to an available workflow.",
+                    clarification_question=(
+                        "What task, issue, contact, or account workflow should I run?"
+                    ),
+                )
             action.risk = manifest.risk
             action.requires_confirmation = manifest.requires_confirmation
             action.required_scopes = self.policy.required_scopes_for_action(
@@ -187,35 +301,46 @@ class AgentOrchestrator:
                 action=action,
             )
 
-        decision = self.policy.authorize(
-            context=context,
-            manifest=manifest,
-            action=action,
-        )
-        if not decision.allowed:
-            action.requires_confirmation = False
-            plan = self._build_plan(
+        for action in actions:
+            manifest = self.registry.get(action.tool_name)
+            decision = self.policy.authorize(
                 context=context,
-                intent=self._intent_for_tool(action.tool_name),
-                actions=[action],
-                model_tier=self._choose_model_tier(planning_text, [action]),
-                requires_confirmation=False,
-                planner=planner,
+                manifest=manifest,
+                action=action,
             )
-            return AgentResponse(
-                status="denied",
-                plan=plan,
-                message=decision.reason,
-            )
+            if not decision.allowed:
+                action.requires_confirmation = False
+                plan = self._build_plan(
+                    context=context,
+                    intent=self._intent_for_tool(action.tool_name),
+                    actions=actions,
+                    model_tier=(
+                        model.tier
+                        if model is not None
+                        else self._choose_model_tier(planning_text, actions)
+                    ),
+                    requires_confirmation=False,
+                    planner=planner,
+                    model=model,
+                )
+                return AgentResponse(
+                    status="denied", plan=plan, message=decision.reason
+                )
+            action.requires_confirmation = decision.requires_confirmation
 
-        action.requires_confirmation = decision.requires_confirmation
+        requires_confirmation = any(action.requires_confirmation for action in actions)
         plan = self._build_plan(
             context=context,
-            intent=self._intent_for_tool(action.tool_name),
-            actions=[action],
-            model_tier=self._choose_model_tier(planning_text, [action]),
-            requires_confirmation=decision.requires_confirmation,
+            intent=self._intent_for_tool(actions[0].tool_name),
+            actions=actions,
+            model_tier=(
+                model.tier
+                if model is not None
+                else self._choose_model_tier(planning_text, actions)
+            ),
+            requires_confirmation=requires_confirmation,
             planner=planner,
+            model=model,
         )
         if plan.requires_confirmation:
             return AgentResponse(
@@ -505,6 +630,7 @@ class AgentOrchestrator:
         model_tier: ModelTier,
         requires_confirmation: bool,
         planner: LiteralPlanner = "deterministic_regex",
+        model: AgentModelSelection | None = None,
     ) -> AgentPlan:
         return AgentPlan(
             plan_id=str(uuid4()),
@@ -512,7 +638,7 @@ class AgentOrchestrator:
             intent=intent,
             planner=planner,
             model_tier=model_tier,
-            model=self._resolve_model(model_tier),
+            model=model or self._resolve_model(model_tier),
             actions=actions,
             human_summary=self._human_summary(actions),
             requires_confirmation=requires_confirmation,
@@ -1365,6 +1491,114 @@ class AgentOrchestrator:
         return "fast"
 
     @staticmethod
+    def _choose_model_tier_for_request(text: str) -> ModelTier:
+        """Choose a real planner tier before model invocation.
+
+        This intentionally uses only coarse, deterministic request signals. The
+        model does not decide which quality tier or authority boundary applies.
+        """
+
+        lowered = text.casefold()
+        write_markers = (
+            "create",
+            "update",
+            "approve",
+            "reject",
+            "send",
+            "invite",
+            "provision",
+            "set up",
+            "remember",
+            "forget",
+        )
+        if len(text.split()) > 18 or any(
+            re.search(rf"\b{marker}\b", lowered) for marker in write_markers
+        ):
+            return "strong"
+        return "fast"
+
+    def _planner_action_clarification(self, action: AgentToolAction) -> str | None:
+        """Reject incomplete model proposals before authorization or execution."""
+
+        args = action.arguments
+        tool_name = action.tool_name
+        if tool_name == "task_read.search_tasks":
+            if not _non_empty_arg(args, "project"):
+                return "Which project should I search?"
+            return None
+        if tool_name == "task_write.create_task":
+            if not _non_empty_arg(args, "title"):
+                return "What should the task be?"
+            return None
+        if tool_name == "task_write.update_task":
+            if not _non_empty_arg(args, "task_id"):
+                return "Which task should I update?"
+            if not any(
+                _non_empty_arg(args, key)
+                for key in ("title", "project", "assignee", "due_date", "status")
+            ):
+                return "What should I change on that task?"
+            return None
+        if tool_name == "github_issue.search_issues":
+            if not _non_empty_arg(args, "query"):
+                return "What GitHub issues should I search for?"
+            if not _non_empty_arg(args, "repository") and not _non_empty_text(
+                self.registry.runtime_config.github_default_repo
+            ):
+                return "Which GitHub repository should I search?"
+            return None
+        if tool_name == "github_issue.create_issue":
+            if not _non_empty_arg(args, "title"):
+                return "What should be the title of the GitHub issue?"
+            if not _non_empty_arg(args, "repository") and not _non_empty_text(
+                self.registry.runtime_config.github_default_repo
+            ):
+                return "Which GitHub repository should I create the issue in?"
+            return None
+        if tool_name == "crm_read.search_contacts" and not _non_empty_arg(
+            args, "query"
+        ):
+            return "Who should I look up?"
+        if tool_name == "crm_write.update_contact":
+            if not _non_empty_arg(args, "contact_id"):
+                return "Which CRM contact should I update?"
+            if not isinstance(args.get("updates"), dict) or not args["updates"]:
+                return "What should I update on that CRM contact?"
+        if (
+            tool_name == "docuseal_write.create_member_agreement_submission"
+            and not _non_empty_arg(args, "submitter_email")
+        ):
+            return "What email address should I use for the member agreement?"
+        if tool_name == "mail_write.create_mailbox":
+            if not _non_empty_arg(args, "local_part"):
+                return "What mailbox should I create?"
+            if not _non_empty_arg(args, "backup_email"):
+                return "What backup email should I use?"
+            if not _non_empty_arg(args, "name"):
+                return "What display name should I use?"
+        if tool_name == "sso_write.create_user" and not _has_contact_reference(args):
+            return "Which CRM contact should I create the SSO user for?"
+        if tool_name == "outline_write.invite_user" and not (
+            _non_empty_arg(args, "email") or _has_contact_reference(args)
+        ):
+            return "Who should I invite to Outline?"
+        if tool_name == "account_write.create_user_accounts":
+            if not _has_contact_reference(args):
+                return "Which CRM contact should I create accounts for?"
+            if not _non_empty_arg(args, "mailbox_username"):
+                return "What 508 mailbox username should I create?"
+        if tool_name == "memory_write.remember_fact":
+            if not _non_empty_arg(args, "key") or not isinstance(
+                args.get("value_json"), dict
+            ):
+                return "What fact should I remember?"
+        if tool_name == "memory_write.forget_fact" and not _non_empty_arg(
+            args, "fact_id"
+        ):
+            return "Which remembered fact should I forget?"
+        return None
+
+    @staticmethod
     def _intent_for_tool(tool_name: str) -> str:
         return {
             "task_read.search_tasks": "search_tasks",
@@ -1424,6 +1658,20 @@ def _clean_text(value: str) -> str | None:
     cleaned = value.strip(" .,:;\"'")
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned or None
+
+
+def _non_empty_text(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _non_empty_arg(arguments: dict[str, object], key: str) -> bool:
+    return _non_empty_text(arguments.get(key))
+
+
+def _has_contact_reference(arguments: dict[str, object]) -> bool:
+    return _non_empty_arg(arguments, "contact_id") or _non_empty_arg(
+        arguments, "contact_query"
+    )
 
 
 def _format_contact_candidates(contacts: list[dict[str, object]]) -> str:

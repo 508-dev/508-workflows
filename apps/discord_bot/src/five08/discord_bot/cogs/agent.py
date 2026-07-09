@@ -15,6 +15,7 @@ import requests
 from discord import app_commands
 from discord.ext import commands
 
+from five08.agent import AgentIdentityContext, PolicyEngine
 from five08.discord_bot.config import settings
 from five08.discord_bot.utils.audit import DiscordAuditCogMixin
 from five08.tls import default_ca_bundle_path
@@ -24,14 +25,12 @@ _MENTION_RATE_LIMIT_WINDOW_SECONDS = 60.0
 _MENTION_RATE_LIMIT_MAX_REQUESTS = 5
 _PUBLIC_SAFE_CLARIFICATION_MESSAGES = frozenset(
     {
-        "I could not turn that into a supported task action.",
+        "I could not map that to a supported workflow.",
         "Which project should I search?",
         "What should the task be?",
     }
 )
-_GENERIC_UNSUPPORTED_AGENT_MESSAGE = (
-    "I could not turn that into a supported task action."
-)
+_GENERIC_UNSUPPORTED_AGENT_MESSAGE = "I could not map that to a supported workflow."
 _AGENT_RESPONSE_THREAD_NAME = "Agent response"
 _AGENT_HELP_REQUESTS = frozenset(
     {
@@ -558,24 +557,35 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         roles: list[str],
         transport: Literal["slash", "mention"] = "mention",
     ) -> str:
-        normalized_roles = {role.strip().casefold() for role in roles}
-        is_admin = bool(normalized_roles & {"admin", "owner", "steering committee"})
-        is_engineer = (
-            "engineer" in normalized_roles
-            or "workflows engineer" in normalized_roles
-            or is_admin
+        scopes = PolicyEngine().scopes_for_context(
+            AgentIdentityContext(
+                discord_user_id="capability-preview",
+                organization_id="capability-preview",
+                roles=roles,
+            )
         )
         capabilities: list[str] = []
-        if is_engineer:
+        if {"project:read", "task:create"} & scopes:
+            capabilities.append(
+                "- Tasks: search a project, create tasks, and update your own tasks."
+            )
+        if {"memory:read_self", "memory:write_self"} & scopes:
+            capabilities.append(
+                "- Memory: remember and review your private preferences."
+            )
+        if "github:issue:read" in scopes:
             capabilities.append(
                 "- GitHub issues: search issues or create new code-task issues."
             )
-        if is_admin:
+        if "crm:contact:read" in scopes:
             capabilities.extend(
                 [
                     "- CRM: search contacts, approve/reject onboarding, and submit member agreements.",
-                    "- Ops: create 508 accounts, Authentik SSO users, Outline invites, and mailboxes.",
                 ]
+            )
+        if "user:manage" in scopes or "mailbox:create" in scopes:
+            capabilities.append(
+                "- Ops: create 508 accounts, Authentik SSO users, Outline invites, and mailboxes."
             )
         if not capabilities:
             lines = [

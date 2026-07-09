@@ -8002,6 +8002,14 @@ def test_dashboard_agent_report_shapes_only_sanitized_unsupported_messages() -> 
                     "status": "executed",
                     "intent": "crm_search",
                     "planner": "heuristic",
+                    "model": "gpt-4.1-mini",
+                    "action_names": ["crm_read.search_contacts"],
+                    "tool_outcomes": [
+                        {
+                            "tool_name": "crm_read.search_contacts",
+                            "status": "succeeded",
+                        }
+                    ],
                     "message": "find member Michael Wu",
                 },
             },
@@ -8012,6 +8020,9 @@ def test_dashboard_agent_report_shapes_only_sanitized_unsupported_messages() -> 
     assert report["summary"]["handled"] == 1
     assert report["summary"]["unsupported"] == 1
     assert report["status_counts"] == {"needs_clarification": 1, "executed": 1}
+    assert report["model_counts"] == {"unknown": 1, "gpt-4.1-mini": 1}
+    assert report["action_counts"] == {"crm_read.search_contacts": 1}
+    assert report["tool_outcome_counts"] == {"crm_read.search_contacts:succeeded": 1}
     unsupported = report["recent_unsupported"]
     assert unsupported == [
         {

@@ -49,6 +49,7 @@ from five08.agent import (
     AgentRequest,
     AgentResponse,
     InMemoryTaskStore,
+    OpenAICompatibleAgentPlanner,
     OpenAICompatibleIntentNormalizer,
     PolicyEngine,
     ToolRegistry,
@@ -251,9 +252,7 @@ class JobsQueryFilters:
 _JOB_FUNCTIONS = JOB_FUNCTIONS
 _ONBOARDING_STATUS_FIELD = "cOnboardingState"
 _ONBOARDER_FIELD = "cOnboarder"
-_GENERIC_UNSUPPORTED_AGENT_MESSAGE = (
-    "I could not turn that into a supported task action."
-)
+_GENERIC_UNSUPPORTED_AGENT_MESSAGE = "I could not map that to a supported workflow."
 _SENSITIVE_PAYLOAD_KEY_MARKERS = (
     "api_key",
     "apikey",
@@ -352,6 +351,7 @@ def _get_agent_orchestrator() -> AgentOrchestrator:
                     ),
                 ),
                 model_config=AgentModelConfig.from_settings(settings),
+                planner=OpenAICompatibleAgentPlanner.from_settings(settings),
                 intent_normalizer=OpenAICompatibleIntentNormalizer.from_settings(
                     settings
                 ),
@@ -1820,6 +1820,20 @@ def _agent_request_audit_metadata(
         "intent": response.plan.intent if response.plan else None,
         "planner": response.plan.planner if response.plan else None,
         "operation_id": response.plan.operation_id if response.plan else None,
+        "model": response.plan.model.model if response.plan else None,
+        "model_tier": response.plan.model_tier if response.plan else None,
+        "model_source_tier": (
+            response.plan.model.source_tier if response.plan else None
+        ),
+        "action_names": (
+            [action.tool_name for action in response.plan.actions]
+            if response.plan
+            else []
+        ),
+        "tool_outcomes": [
+            {"tool_name": result.tool_name, "status": result.status}
+            for result in response.results
+        ],
         "context_sources": (
             [source.model_dump(mode="json") for source in response.plan.context_sources]
             if response.plan
@@ -3010,6 +3024,9 @@ def _shape_dashboard_agent_request_report(
     status_counts: dict[str, int] = {}
     intent_counts: dict[str, int] = {}
     planner_counts: dict[str, int] = {}
+    model_counts: dict[str, int] = {}
+    action_counts: dict[str, int] = {}
+    tool_outcome_counts: dict[str, int] = {}
     recent_unsupported: list[dict[str, Any]] = []
 
     for row in rows:
@@ -3019,10 +3036,22 @@ def _shape_dashboard_agent_request_report(
         status = str(metadata.get("status") or "unknown")
         intent = metadata.get("intent") or "unknown"
         planner = metadata.get("planner") or "unknown"
+        model = metadata.get("model") or "unknown"
 
         _increment_dashboard_count(status_counts, status)
         _increment_dashboard_count(intent_counts, intent)
         _increment_dashboard_count(planner_counts, planner)
+        _increment_dashboard_count(model_counts, model)
+        for action_name in metadata.get("action_names") or []:
+            _increment_dashboard_count(action_counts, action_name)
+        for outcome in metadata.get("tool_outcomes") or []:
+            if not isinstance(outcome, dict):
+                continue
+            tool_name = str(outcome.get("tool_name") or "unknown")
+            status_label = str(outcome.get("status") or "unknown")
+            _increment_dashboard_count(
+                tool_outcome_counts, f"{tool_name}:{status_label}"
+            )
 
         if status in {"executed", "requires_confirmation"}:
             summary["handled"] += 1
@@ -3065,6 +3094,9 @@ def _shape_dashboard_agent_request_report(
         "status_counts": status_counts,
         "intent_counts": intent_counts,
         "planner_counts": planner_counts,
+        "model_counts": model_counts,
+        "action_counts": action_counts,
+        "tool_outcome_counts": tool_outcome_counts,
         "recent_unsupported": recent_unsupported,
     }
 
@@ -8845,7 +8877,17 @@ async def agent_confirmation_handler(
         plan=plan,
         metadata={
             "status": response.status,
+            "intent": plan.intent,
+            "planner": plan.planner,
+            "model": plan.model.model,
+            "model_tier": plan.model_tier,
+            "model_source_tier": plan.model.source_tier,
+            "action_names": [action.tool_name for action in plan.actions],
             "results": [result.model_dump(mode="json") for result in results],
+            "tool_outcomes": [
+                {"tool_name": result.tool_name, "status": result.status}
+                for result in results
+            ],
         },
     )
     return JSONResponse(

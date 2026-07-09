@@ -416,6 +416,9 @@ type AgentReport = {
   status_counts?: Record<string, number>
   intent_counts?: Record<string, number>
   planner_counts?: Record<string, number>
+  model_counts?: Record<string, number>
+  action_counts?: Record<string, number>
+  tool_outcome_counts?: Record<string, number>
   recent_unsupported?: Array<{
     occurred_at?: string
     actor?: string
@@ -7873,6 +7876,9 @@ function AgentView({
       ["Status", report?.status_counts || {}],
       ["Intent", report?.intent_counts || {}],
       ["Planner", report?.planner_counts || {}],
+      ["Model", report?.model_counts || {}],
+      ["Action", report?.action_counts || {}],
+      ["Tool outcome", report?.tool_outcome_counts || {}],
     ] as const
   )
     .flatMap(([label, counts]) =>
