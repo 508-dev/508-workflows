@@ -33,6 +33,14 @@ from five08.agent.model_routing import (
     DEFAULT_AGENT_MODEL,
 )
 from five08.agent.intent_normalizer import OpenAICompatibleIntentNormalizer
+from five08.agent.planner import (
+    AgentPlanner,
+    AgentPlannerResult,
+    OpenAICompatibleAgentPlanner,
+    PLANNER_CONTRACT_VERSION,
+    PlannerDraft,
+    PlannerDraftAction,
+)
 from five08.agent.orchestrator import AgentOrchestrator
 from five08.agent.policy import PolicyDecision, PolicyEngine
 from five08.agent.tools import (
@@ -45,6 +53,8 @@ from five08.agent.tools import (
 
 __all__ = [
     "AgentExecutionResult",
+    "AgentPlanner",
+    "AgentPlannerResult",
     "AgentContextLoader",
     "AgentContextSnippet",
     "AgentContextSource",
@@ -66,10 +76,14 @@ __all__ = [
     "InMemoryTaskStore",
     "ModelTier",
     "OpenAICompatibleIntentNormalizer",
+    "OpenAICompatibleAgentPlanner",
+    "PLANNER_CONTRACT_VERSION",
     "PolicyDecision",
     "PolicyEngine",
     "RequestContextLoader",
     "RiskLevel",
+    "PlannerDraft",
+    "PlannerDraftAction",
     "ToolManifest",
     "ToolPartialSuccessError",
     "ToolRegistry",

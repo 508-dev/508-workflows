@@ -12,6 +12,8 @@ from five08.agent import (
     AgentContextSnippet,
     AgentIdentityContext,
     AgentModelConfig,
+    AgentTierModelConfig,
+    AgentPlannerResult,
     AgentOrchestrator,
     AgentToolAction,
     ContextLoadBounds,
@@ -19,6 +21,7 @@ from five08.agent import (
     InMemoryTaskStore,
     MemoryFact,
     PolicyEngine,
+    PlannerDraft,
     ToolManifest,
     ToolPartialSuccessError,
     ToolRuntimeConfig,
@@ -1569,6 +1572,154 @@ def test_agent_skips_intent_normalizer_for_deterministic_parse_hit() -> None:
     assert response.status == "requires_confirmation"
     assert response.plan is not None
     assert response.plan.planner == "deterministic_regex"
+
+
+def test_task_creation_is_not_rerouted_to_member_agreement_submission() -> None:
+    response = AgentOrchestrator().plan(
+        "Create a task to send member agreement to Caleb",
+        _context(roles=["Admin"]),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    assert response.plan.actions[0].tool_name == "task_write.create_task"
+
+
+def test_agent_uses_structured_planner_for_multi_action_confirmation() -> None:
+    class FakePlanner:
+        def plan(self, **kwargs: object) -> AgentPlannerResult:
+            assert kwargs["model_tier"] == "strong"
+            return AgentPlannerResult(
+                draft=PlannerDraft(
+                    status="planned",
+                    intent="onboard_member",
+                    actions=[
+                        {
+                            "tool_name": "crm_read.search_contacts",
+                            "arguments": {"query": "Sarah", "limit": 5},
+                            "summary": "Find Sarah in CRM",
+                        },
+                        {
+                            "tool_name": "outline_write.invite_user",
+                            "arguments": {"email": "sarah@508.dev"},
+                            "summary": "Invite Sarah to Outline",
+                        },
+                    ],
+                ),
+                model=AgentModelConfig(
+                    strong=AgentTierModelConfig(
+                        model="planner-model",
+                        base_url="https://api.openai.com/v1",
+                        api_key="key",
+                    )
+                ).resolve("strong"),
+                latency_ms=7,
+            )
+
+    orchestrator = AgentOrchestrator(planner=FakePlanner())
+
+    response = orchestrator.plan("Invite Sarah to Outline", _context(roles=["Admin"]))
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    assert response.plan.planner == "live_model"
+    assert response.plan.model.model == "planner-model"
+    assert [action.tool_name for action in response.plan.actions] == [
+        "crm_read.search_contacts",
+        "outline_write.invite_user",
+    ]
+
+
+def test_agent_rejects_unknown_structured_planner_tool() -> None:
+    class FakePlanner:
+        def plan(self, **_kwargs: object) -> AgentPlannerResult:
+            return AgentPlannerResult(
+                draft=PlannerDraft(
+                    status="planned",
+                    actions=[
+                        {
+                            "tool_name": "dangerous.shell",
+                            "arguments": {},
+                            "summary": "Run an unknown action",
+                        }
+                    ],
+                ),
+                model=AgentModelConfig().resolve("fast"),
+                latency_ms=1,
+            )
+
+    response = AgentOrchestrator(planner=FakePlanner()).plan("do a thing", _context())
+
+    assert response.status == "needs_clarification"
+    assert response.plan is None
+
+
+def test_planner_argument_gate_rejects_undeclared_control_fields() -> None:
+    registry = ToolRegistry()
+
+    with pytest.raises(ValueError, match="unknown_arguments"):
+        registry.validate_planner_action(
+            "task_write.create_task",
+            {"title": "Refresh docs", "skip_confirmation": True},
+        )
+
+
+def test_planner_argument_gate_limits_crm_updates_to_onboarding_state() -> None:
+    registry = ToolRegistry()
+
+    with pytest.raises(ValueError, match="unsupported_crm_update_fields"):
+        registry.validate_planner_action(
+            "crm_write.update_contact",
+            {
+                "contact_id": "contact-123",
+                "updates": {"emailAddress": "attacker@example.com"},
+            },
+        )
+
+
+def test_planner_argument_gate_keeps_memory_provenance_server_derived() -> None:
+    registry = ToolRegistry()
+
+    with pytest.raises(ValueError, match="unknown_arguments"):
+        registry.validate_planner_action(
+            "memory_write.remember_fact",
+            {
+                "scope_type": "user",
+                "key": "timezone",
+                "value_json": {"text": "UTC"},
+                "source_ref": "forged-source",
+            },
+        )
+
+
+def test_planner_requires_trusted_context_for_project_memory_reads() -> None:
+    class FakePlanner:
+        def plan(self, **_kwargs: object) -> AgentPlannerResult:
+            return AgentPlannerResult(
+                draft=PlannerDraft(
+                    status="planned",
+                    actions=[
+                        {
+                            "tool_name": "memory_read.get_project_facts",
+                            "arguments": {},
+                            "summary": "Read project memory",
+                        }
+                    ],
+                ),
+                model=AgentModelConfig().resolve("fast"),
+                latency_ms=1,
+            )
+
+    response = AgentOrchestrator(planner=FakePlanner()).plan(
+        "What does this project prefer?",
+        _context(roles=["Project Manager"]),
+    )
+
+    assert response.status == "needs_clarification"
+    assert response.plan is None
+    assert response.clarification_question == (
+        "I need a project context before I can read project memory."
+    )
 
 
 def test_admin_can_plan_crm_contact_onboarding_update() -> None:

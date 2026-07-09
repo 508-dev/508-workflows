@@ -28,6 +28,11 @@ from five08.agent.models import (
 )
 from five08.agent.model_routing import AgentModelConfig, AgentTierModelConfig
 from five08.agent.orchestrator import AgentOrchestrator
+from five08.agent.planner import (
+    PLANNER_SYSTEM_PROMPT,
+    build_planner_user_prompt,
+    parse_planner_draft,
+)
 from five08.agent.tools import InMemoryTaskStore, ToolRegistry, ToolRuntimeConfig
 from five08.model_catalog import (
     model_chat_completion_options,
@@ -41,59 +46,7 @@ EvalStatus = Literal["passed", "failed", "known_failure"]
 EvalMode = Literal["deterministic", "live_planner"]
 LiveProvider = Literal["openai_compatible", "anthropic"]
 
-_LIVE_PLANNER_SYSTEM_PROMPT = """You are the planner for a Discord operations agent.
-Return only valid JSON. Do not include markdown.
-
-Draft tool calls only. Do not authorize, execute, or decide permissions.
-The backend will run deterministic policy checks and require confirmation for writes.
-If required arguments are missing, return needs_clarification instead of drafting
-an incomplete write action. Do not invent emails, contact IDs, repositories, or
-task IDs.
-
-Output schema:
-{
-  "status": "planned" | "needs_clarification",
-  "intent": "short_snake_case_or_null",
-  "clarification_question": "question or null",
-  "actions": [
-    {"tool_name": "name", "arguments": {}, "summary": "brief user-facing summary"}
-  ]
-}
-
-Available tools and arguments:
-- task_read.search_tasks: query string, project string. Requires an explicit project.
-- task_write.create_task: title string, optional assignee, project, due_date YYYY-MM-DD.
-- task_write.update_task: task_id, optional title, project, assignee, due_date, status.
-- github_issue.search_issues: query string, repository owner/name, state open.
-- github_issue.create_issue: title string, repository owner/name, optional body.
-- crm_read.search_contacts: query string, limit number.
-- crm_write.update_contact: contact_id string, updates object. Onboarding state field is cOnboardingState.
-- docuseal_write.create_member_agreement_submission: submitter_email, submitter_name, send_email true.
-- mail_write.create_mailbox: local_part, backup_email, name.
-- sso_write.create_user: contact_id string or contact_query string.
-- outline_write.invite_user: email string, or contact_id/contact_query for a CRM contact.
-- account_write.create_user_accounts: contact_id string or contact_query string, mailbox_username string.
-
-If a task search lacks a project, return needs_clarification with "Which project should I search?"
-For a task search like "Show tasks for project Atlas matching onboarding", call task_read.search_tasks with {"project":"Atlas","query":"onboarding"}.
-For a task update with an explicit task id like TASK-001, do not ask for the project. Call task_write.update_task with the task_id and requested updates.
-For "Mark TASK-001 as done", call task_write.update_task with {"task_id":"TASK-001","status":"done"}.
-For GitHub issue search, use context.runtime_config.github_default_repo when the user does not name a repository. Do not ask for a repository if a default repo is configured.
-For a GitHub issue create request, do not ask for optional body text. Use the phrase after "to" or after "titled" as the issue title and omit body when absent.
-For "Create a GitHub issue to improve search UI in repo 508-dev/508-workflows", call github_issue.create_issue with {"repository":"508-dev/508-workflows","title":"improve search UI"}.
-For "Create GitHub issue in repo 508-dev/508-workflows titled Fix onboarding sync", call github_issue.create_issue with {"repository":"508-dev/508-workflows","title":"Fix onboarding sync"}.
-CRM contact lookup is a read/search action. For "Find contact Sarah", "Find member Sarah", "Lookup contact Sarah", or "Look up info on Sarah", call crm_read.search_contacts with {"query":"Sarah","limit":5}. A person name or partial name is enough for this read action; do not ask for a contact ID or email.
-For "Approve CRM contact contact-123", call crm_write.update_contact with {"contact_id":"contact-123","updates":{"cOnboardingState":"approved"}}.
-For "Reject CRM contact contact-123", call crm_write.update_contact with {"contact_id":"contact-123","updates":{"cOnboardingState":"rejected"}}.
-For CRM approval and rejection requests, do not ask what approval action is needed when the verb is approve or reject and the CRM contact ID is present.
-For "Send member agreement to Sarah Example sarah@example.com", call docuseal_write.create_member_agreement_submission with {"submitter_name":"Sarah Example","submitter_email":"sarah@example.com","send_email":true}.
-For "Send member agreement to Jane Doe at jane@example.com", call docuseal_write.create_member_agreement_submission with {"submitter_name":"Jane Doe","submitter_email":"jane@example.com","send_email":true}.
-For "Create SSO user for CRM contact abc123", call sso_write.create_user with {"contact_id":"abc123"}.
-For "Invite jane@508.dev to Outline", call outline_write.invite_user with {"email":"jane@508.dev"}.
-For "Create 508 accounts for Jane Doe with mailbox jane@508.dev", call account_write.create_user_accounts with {"contact_query":"Jane Doe","mailbox_username":"jane@508.dev"}.
-For writes, still return the intended write action; confirmation is handled by policy.
-For permission-sensitive requests, still return the intended action; policy handles denial.
-"""
+_LIVE_PLANNER_SYSTEM_PROMPT = PLANNER_SYSTEM_PROMPT
 
 
 class AgentEvalSuiteConfig(BaseModel):
@@ -1010,31 +963,21 @@ def _call_anthropic_live_planner(
 
 
 def _live_planner_user_prompt(fixture: AgentEvalFixture, message: str) -> str:
-    return json.dumps(
-        {
-            "scenario_id": fixture.id,
-            "message": message,
-            "thread": [item.model_dump() for item in fixture.request.thread],
-            "context": fixture.context.model_dump(),
-            "runtime_config": fixture.runtime_config,
-        },
-        indent=2,
-        sort_keys=True,
+    return build_planner_user_prompt(
+        message=message,
+        context=fixture.context.to_identity_context(),
+        runtime_config=fixture.runtime_config,
+        thread=[item.model_dump() for item in fixture.request.thread],
     )
 
 
 def _parse_live_planner_json(raw_output: str) -> LivePlannerDraft:
     try:
+        return LivePlannerDraft.model_validate(
+            parse_planner_draft(raw_output).model_dump(mode="python")
+        )
+    except (ValidationError, ValueError, json.JSONDecodeError):
         payload = json.loads(raw_output)
-    except json.JSONDecodeError:
-        start = raw_output.find("{")
-        end = raw_output.rfind("}")
-        if start < 0 or end <= start:
-            raise
-        payload = json.loads(raw_output[start : end + 1])
-    try:
-        return LivePlannerDraft.model_validate(payload)
-    except ValidationError:
         normalized = dict(payload)
         status = str(normalized.get("status") or "").strip().lower()
         if status in {"clarify", "clarification", "needs clarification"}:
@@ -1090,6 +1033,19 @@ def _response_from_live_draft(
         ]
 
     for action in actions:
+        try:
+            orchestrator.registry.validate_planner_action(
+                action.tool_name,
+                action.arguments,
+            )
+        except ValueError:
+            return AgentResponse(
+                status="needs_clarification",
+                message="I need a clearer request before I can safely continue.",
+                clarification_question=(
+                    "What exact task, issue, contact, or account action should I run?"
+                ),
+            )
         manifest = orchestrator.registry.get(action.tool_name)
         if manifest is None:
             continue

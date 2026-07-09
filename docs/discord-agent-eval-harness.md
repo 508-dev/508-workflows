@@ -39,9 +39,10 @@ runs:
 uv run python scripts/agent_eval.py --suite canonical --model primary --live-planner --no-env-file
 ```
 
-The live planner run asks the configured model to draft a structured plan, then
-executes the same deterministic policy and tool validation used by the agent
-harness. The model does not get to authorize users or perform side effects.
+The live planner run uses the same structured planner contract and system prompt
+as the production gateway, then executes the same deterministic policy and tool
+validation used by the agent harness. The model does not get to authorize users
+or perform side effects.
 Write tools stop at confirmation, and read tools use deterministic in-memory
 state or fixture `stub_results`. `OPENAI_BASE_URL` from the `test` environment is
 passed through for OpenAI-compatible providers such as OpenRouter.

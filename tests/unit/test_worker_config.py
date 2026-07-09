@@ -33,6 +33,12 @@ def test_local_worker_allows_missing_espo_config() -> None:
     assert settings.espo_configured is False
 
 
+def test_structured_planner_timeout_leaves_gateway_fallback_headroom() -> None:
+    settings = WorkerSettings()
+
+    assert settings.agent_structured_planner_timeout_seconds == 6.0
+
+
 def test_email_intake_requires_mailbox_credentials() -> None:
     with pytest.raises(ValidationError, match="EMAIL_PASSWORD must be set"):
         WorkerSettings(

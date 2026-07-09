@@ -36,6 +36,41 @@ from five08.redaction import redact_email_addresses
 
 SSO_ID_FIELD = "cSsoID"
 
+_PLANNER_TOOL_ARGUMENTS: dict[str, frozenset[str]] = {
+    "task_read.search_tasks": frozenset({"query", "project"}),
+    "task_write.create_task": frozenset({"title", "project", "assignee", "due_date"}),
+    "task_write.update_task": frozenset(
+        {"task_id", "title", "project", "assignee", "due_date", "status"}
+    ),
+    "github_issue.search_issues": frozenset({"query", "repository", "state", "limit"}),
+    "github_issue.create_issue": frozenset({"title", "repository", "body", "labels"}),
+    "crm_read.search_contacts": frozenset({"query", "limit"}),
+    "crm_write.update_contact": frozenset({"contact_id", "updates"}),
+    "docuseal_write.create_member_agreement_submission": frozenset(
+        {"submitter_email", "submitter_name", "send_email"}
+    ),
+    "mail_write.create_mailbox": frozenset(
+        {"local_part", "backup_email", "name", "contact_id", "contact_query"}
+    ),
+    "sso_write.create_user": frozenset({"contact_id", "contact_query"}),
+    "outline_write.invite_user": frozenset({"email", "contact_id", "contact_query"}),
+    "account_write.create_user_accounts": frozenset(
+        {"contact_id", "contact_query", "mailbox_username"}
+    ),
+    "memory_read.get_user_facts": frozenset({"user_id"}),
+    "memory_read.get_project_facts": frozenset(),
+    "memory_read.search_context": frozenset(),
+    "memory_write.remember_fact": frozenset(
+        {
+            "scope_type",
+            "key",
+            "value_json",
+            "visibility",
+        }
+    ),
+    "memory_write.forget_fact": frozenset({"fact_id", "admin"}),
+}
+
 
 @dataclass(frozen=True)
 class ToolManifest:
@@ -487,6 +522,32 @@ class ToolRegistry:
 
     def get(self, tool_name: str) -> ToolManifest | None:
         return self._manifests.get(tool_name)
+
+    def validate_planner_action(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> None:
+        """Apply a deterministic shape boundary to model-proposed arguments.
+
+        Individual tool handlers remain responsible for their business validation.
+        This gate prevents a model from smuggling undeclared control fields to a
+        handler before policy and confirmation are evaluated.
+        """
+
+        if tool_name not in self._manifests:
+            raise ValueError("unknown_tool")
+        allowed_arguments = _PLANNER_TOOL_ARGUMENTS.get(tool_name)
+        if allowed_arguments is None:
+            raise ValueError("planner_tool_not_supported")
+        unknown_arguments = set(arguments) - allowed_arguments
+        if unknown_arguments:
+            raise ValueError("unknown_arguments")
+        if tool_name == "crm_write.update_contact":
+            updates = arguments.get("updates")
+            if not isinstance(updates, dict) or set(updates) != {"cOnboardingState"}:
+                raise ValueError("unsupported_crm_update_fields")
+        _validate_planner_argument_value(arguments)
 
     def execute(
         self,
@@ -1803,3 +1864,29 @@ def _positive_int(value: Any, *, default: int, maximum: int) -> int:
     except (TypeError, ValueError):
         parsed = default
     return min(max(parsed, 1), maximum)
+
+
+def _validate_planner_argument_value(value: Any, *, depth: int = 0) -> None:
+    """Bound JSON-like model output before it reaches an integration client."""
+
+    if depth > 4:
+        raise ValueError("argument_nesting_too_deep")
+    if value is None or isinstance(value, bool | int | float):
+        return
+    if isinstance(value, str):
+        if len(value) > 8_000:
+            raise ValueError("argument_string_too_long")
+        return
+    if isinstance(value, list):
+        if len(value) > 50:
+            raise ValueError("argument_list_too_long")
+        for item in value:
+            _validate_planner_argument_value(item, depth=depth + 1)
+        return
+    if isinstance(value, dict):
+        if len(value) > 50 or not all(isinstance(key, str) for key in value):
+            raise ValueError("invalid_argument_object")
+        for item in value.values():
+            _validate_planner_argument_value(item, depth=depth + 1)
+        return
+    raise ValueError("invalid_argument_type")

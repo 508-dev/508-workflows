@@ -248,6 +248,48 @@ def test_live_planner_eval_retries_one_bad_plan(monkeypatch) -> None:
     assert report.scenarios[0].status == "passed"
 
 
+def test_live_planner_eval_applies_production_argument_gate(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"status":"planned","intent":"update_crm_contact",'
+                                '"clarification_question":null,"actions":['
+                                '{"tool_name":"crm_write.update_contact",'
+                                '"arguments":{"contact_id":"contact-1",'
+                                '"updates":{"emailAddress":"wrong@example.com"}},'
+                                '"summary":"Update contact"}]}'
+                            )
+                        }
+                    }
+                ]
+            }
+
+    monkeypatch.setenv("OPENAI_API_KEY_DIRECT", "direct-key")
+    monkeypatch.setattr(
+        "five08.agent.evals.requests.post",
+        lambda *_args, **_kwargs: FakeResponse(),
+    )
+
+    report = run_live_planner_eval_suite(
+        suite="canonical",
+        model="openai-direct",
+        ids=["crm_contact_update_confirmation_001"],
+        timeout_seconds=1,
+    )
+
+    assert report.summary["failed"] == 1
+    assert report.scenarios[0].observed.status == "needs_clarification"
+
+
 def test_live_eval_matching_allows_harmless_text_variants() -> None:
     expect = AgentEvalExpect(
         status="requires_confirmation",
