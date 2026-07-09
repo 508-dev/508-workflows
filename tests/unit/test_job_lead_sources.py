@@ -142,6 +142,7 @@ class _FakeSeekingWorkHackerNewsClient(_FakeHackerNewsClient):
 class _FakeFailingStructuredClient:
     def __init__(self) -> None:
         self.chat_create_calls = 0
+        self.parse_kwargs: dict[str, object] | None = None
         self.beta = SimpleNamespace(
             chat=SimpleNamespace(
                 completions=SimpleNamespace(parse=self._parse),
@@ -151,7 +152,8 @@ class _FakeFailingStructuredClient:
             completions=SimpleNamespace(create=self._create),
         )
 
-    def _parse(self, **_kwargs: object) -> object:
+    def _parse(self, **kwargs: object) -> object:
+        self.parse_kwargs = kwargs
         raise TimeoutError("provider timed out")
 
     def _create(self, **_kwargs: object) -> object:
@@ -231,6 +233,8 @@ def test_classifier_falls_back_without_second_llm_call_after_provider_failure() 
 
     assert classification.method == "heuristic"
     assert classification.is_contractor_friendly is True
+    assert client.parse_kwargs is not None
+    assert client.parse_kwargs["temperature"] == 0
     assert client.chat_create_calls == 0
 
 

@@ -189,6 +189,13 @@ def test_format_job_lead_review_message_respects_discord_limit(monkeypatch) -> N
     assert "Use a lower limit" in message
 
 
+def test_format_job_lead_review_message_handles_empty_leads() -> None:
+    assert (
+        JobsCog._format_job_lead_review_message([])
+        == "Pending job leads:\n\nNo pending job leads found."
+    )
+
+
 def test_format_job_lead_thread_content_respects_discord_limit() -> None:
     lead = _make_job_lead(body_normalized="x" * 5000)
 

@@ -330,6 +330,7 @@ class JobLeadClassifier:
                 messages=messages,
                 response_format=JobLeadLLMClassificationResponse,
                 max_tokens=700,
+                temperature=0,
             )
             parsed_model = _parsed_message_model(response)
             if parsed_model is None:

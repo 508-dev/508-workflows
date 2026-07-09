@@ -3462,6 +3462,8 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
     @classmethod
     def _format_job_lead_review_message(cls, leads: list[JobLead]) -> str:
         """Format a bounded Discord response for pending lead review."""
+        if not leads:
+            return "Pending job leads:\n\nNo pending job leads found."
         limit = settings.discord_sendmsg_character_limit
         header = "Pending job leads:"
         lines: list[str] = []
