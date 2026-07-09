@@ -63,20 +63,22 @@ Long-running service changes should be implemented as PR-based workflows rather
 than direct production mutations. Task reads require an explicit project filter
 to avoid guild-wide task enumeration.
 
-Mention flow is opt-in per message: the bot runs the agent only when directly
-mentioned in a server channel or thread. Mention-triggered agent results and
+Mention flow is opt-in by default: the bot runs the agent when directly
+mentioned in a server channel or thread. The only unmentioned continuation path
+is a bot-owned thread named `Agent response`, which is created for public-safe
+mention clarifications. Other bot-created threads, including job forum posts,
+still require an explicit bot mention. Mention-triggered agent results and
 confirmation buttons are sent by DM to avoid leaking task or plan details into
-public channels. A follow-up in the same thread should mention the bot again so
-the bot has an explicit user trigger and fresh Discord role context for that
-request.
+public channels.
 
 Production mention handling depends on Discord gateway and channel access:
 The bot requests all intents in code, but the production Discord application
 should have the Message Content privileged intent enabled or approved in the
 Developer Portal. Direct mentions expose message content even without that
-intent, but follow-up messages in bot-created threads need it because they do
-not mention the bot. The bot also needs channel permissions to view the channel,
-send messages, create public threads, and send messages in threads.
+intent, but unmentioned follow-up messages in dedicated agent response threads
+need it because they do not mention the bot. The bot also needs channel
+permissions to view the channel, send messages, create public threads, and send
+messages in threads.
 
 Audit writes are best-effort and do not block command execution. If the audit
 store is unavailable, treat the agent surface as temporarily untraced until the

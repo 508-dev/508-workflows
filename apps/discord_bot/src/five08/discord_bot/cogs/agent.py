@@ -32,6 +32,7 @@ _PUBLIC_SAFE_CLARIFICATION_MESSAGES = frozenset(
 _GENERIC_UNSUPPORTED_AGENT_MESSAGE = (
     "I could not turn that into a supported task action."
 )
+_AGENT_RESPONSE_THREAD_NAME = "Agent response"
 _AGENT_HELP_REQUESTS = frozenset(
     {
         "help",
@@ -475,7 +476,10 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
     def _is_agent_thread(channel: object, bot_user_id: int) -> bool:
         if not isinstance(channel, discord.Thread):
             return False
-        return getattr(channel, "owner_id", None) == bot_user_id
+        if getattr(channel, "owner_id", None) != bot_user_id:
+            return False
+        thread_name = str(getattr(channel, "name", "") or "").strip()
+        return thread_name == _AGENT_RESPONSE_THREAD_NAME
 
     @staticmethod
     def _is_agent_help_request(request: str) -> bool:
@@ -719,7 +723,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
 
     @staticmethod
     def _mention_thread_name(_request: str) -> str:
-        return "Agent response"
+        return _AGENT_RESPONSE_THREAD_NAME
 
     async def _send_mention_response_dm(
         self,

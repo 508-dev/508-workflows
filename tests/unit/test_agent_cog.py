@@ -905,12 +905,17 @@ def test_mention_thread_name_does_not_include_request_content() -> None:
 def test_is_agent_thread_requires_bot_owned_thread() -> None:
     bot_owned_thread = object.__new__(discord.Thread)
     bot_owned_thread.owner_id = 999
+    bot_owned_thread.name = "Agent response"
     user_owned_prefixed_thread = object.__new__(discord.Thread)
     user_owned_prefixed_thread.owner_id = 123
-    user_owned_prefixed_thread.name = "agent: renamed by user"
+    user_owned_prefixed_thread.name = "Agent response"
+    bot_owned_job_thread = object.__new__(discord.Thread)
+    bot_owned_job_thread.owner_id = 999
+    bot_owned_job_thread.name = "[RECRUITING] Senior Engineer"
 
     assert AgentCog._is_agent_thread(bot_owned_thread, 999) is True
     assert AgentCog._is_agent_thread(user_owned_prefixed_thread, 999) is False
+    assert AgentCog._is_agent_thread(bot_owned_job_thread, 999) is False
 
 
 @pytest.mark.asyncio
@@ -1164,6 +1169,32 @@ async def test_agent_thread_reply_continues_without_mention() -> None:
     cog._post_agent_request.assert_awaited_once()
     assert cog._post_agent_request.await_args.kwargs["message"] == "show tasks"
     cog._mention_response_thread.assert_awaited_once()
+    cog._audit_message_safe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bot_owned_non_agent_thread_reply_without_mention_is_ignored() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))
+    cog._post_agent_request = AsyncMock()
+    cog._audit_message_safe = Mock()
+    channel = object.__new__(discord.Thread)
+    channel.owner_id = 999
+    channel.name = "[RECRUITING] Senior Engineer"
+    message = SimpleNamespace(
+        id=555,
+        content="@Jon Knebel ?",
+        author=SimpleNamespace(id=123, bot=False, roles=[]),
+        mentions=[SimpleNamespace(id=111)],
+        guild=SimpleNamespace(id=456),
+        channel=channel,
+        reply=AsyncMock(),
+    )
+
+    await cog.agent_mention(message)
+
+    cog._post_agent_request.assert_not_awaited()
+    message.reply.assert_not_awaited()
     cog._audit_message_safe.assert_not_called()
 
 
