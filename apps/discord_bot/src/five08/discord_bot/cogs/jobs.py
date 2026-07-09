@@ -3435,6 +3435,38 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         return f"{index}. `{lead.id[:8]}` **{title}**\n{summary}\n{lead.source_url}"
 
     @classmethod
+    def _format_job_lead_review_message(cls, leads: list[JobLead]) -> str:
+        """Format a bounded Discord response for pending lead review."""
+        limit = settings.discord_sendmsg_character_limit
+        header = "Pending job leads:"
+        lines: list[str] = []
+        shown = 0
+        for index, lead in enumerate(leads, start=1):
+            line = cls._format_job_lead_review_line(index, lead)
+            candidate_lines = [*lines, line]
+            omitted = len(leads) - len(candidate_lines)
+            footer = f"\n\nShowing {len(candidate_lines)} of {len(leads)} leads."
+            if omitted > 0:
+                footer += " Use a lower limit to inspect omitted leads."
+            candidate = f"{header}\n\n" + "\n\n".join(candidate_lines) + footer
+            if len(candidate) > limit:
+                break
+            lines = candidate_lines
+            shown = len(candidate_lines)
+
+        if not lines:
+            first = cls._truncate_job_lead_text(
+                cls._format_job_lead_review_line(1, leads[0]),
+                max(0, limit - len(header) - 32),
+            )
+            return f"{header}\n\n{first}"
+
+        footer = f"\n\nShowing {shown} of {len(leads)} leads."
+        if shown < len(leads):
+            footer += " Use a lower limit to inspect omitted leads."
+        return f"{header}\n\n" + "\n\n".join(lines) + footer
+
+    @classmethod
     def _format_job_lead_thread_content(cls, lead: JobLead) -> str:
         lines = [
             f"Source: {lead.source_url}",
@@ -3960,12 +3992,8 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
-        lines = [
-            self._format_job_lead_review_line(index, lead)
-            for index, lead in enumerate(leads, start=1)
-        ]
         await interaction.followup.send(
-            "Pending job leads:\n\n" + "\n\n".join(lines),
+            self._format_job_lead_review_message(leads),
             ephemeral=True,
         )
 

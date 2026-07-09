@@ -13,7 +13,7 @@ from typing import Any, Literal, Protocol
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field
 
 from five08.job_channels import JobPostingType
 from five08.job_leads import JobLeadInput, upsert_job_lead
@@ -280,6 +280,8 @@ class JobLeadClassifier:
         self.client = client if client is not None else _build_llm_client(settings)
 
     def classify(self, comment_text: str) -> JobLeadClassification:
+        if _SEEKING_WORK_RE.search(comment_text):
+            return classify_contractor_lead_heuristic(comment_text)
         if self.client is not None:
             try:
                 return self._classify_with_llm(comment_text)
@@ -323,20 +325,16 @@ class JobLeadClassifier:
             raise RuntimeError("Job lead LLM client is unavailable")
         messages = self._messages(comment_text)
         if _supports_structured_output(client):
-            try:
-                response = client.beta.chat.completions.parse(
-                    model=_classifier_model(self.settings),
-                    messages=messages,
-                    response_format=JobLeadLLMClassificationResponse,
-                    max_tokens=700,
-                )
-                parsed_model = _parsed_message_model(response)
-                if parsed_model is not None:
-                    return _classification_from_llm_response(parsed_model)
-            except (ValidationError, json.JSONDecodeError, ValueError):
-                raise
-            except Exception:
-                pass
+            response = client.beta.chat.completions.parse(
+                model=_classifier_model(self.settings),
+                messages=messages,
+                response_format=JobLeadLLMClassificationResponse,
+                max_tokens=700,
+            )
+            parsed_model = _parsed_message_model(response)
+            if parsed_model is None:
+                raise ValueError("Empty structured job lead classification response")
+            return _classification_from_llm_response(parsed_model)
 
         response = client.chat.completions.create(
             model=_classifier_model(self.settings),
@@ -372,6 +370,26 @@ def _classifier_model(settings: SharedSettings) -> str:
     )
 
 
+def _fireworks_classifier_model(settings: SharedSettings) -> str | None:
+    explicit_fast = _clean(getattr(settings, "agent_fast_model", None))
+    if explicit_fast:
+        return explicit_fast
+    classifier_model = _classifier_model(settings)
+    if classifier_model.startswith(("accounts/fireworks/", "fireworks/")):
+        return classifier_model
+    return None
+
+
+def _openrouter_classifier_model(settings: SharedSettings) -> str | None:
+    explicit_fast = _clean(getattr(settings, "agent_fast_model", None))
+    if explicit_fast:
+        return explicit_fast
+    classifier_model = _classifier_model(settings)
+    if classifier_model.startswith(("openai/", "openrouter/")):
+        return classifier_model
+    return None
+
+
 def _build_llm_client(settings: SharedSettings) -> Any | None:
     if getattr(settings, "job_lead_classifier_enabled", True) is False:
         return None
@@ -391,9 +409,9 @@ def _build_llm_client(settings: SharedSettings) -> Any | None:
         openai_direct_model=_clean(getattr(settings, "openai_direct_model", None))
         or _clean(getattr(settings, "agent_fallback_model", None)),
         fireworks_api_key=_clean(getattr(settings, "fireworks_api_key", None)),
-        fireworks_model=_clean(getattr(settings, "agent_fast_model", None)),
+        fireworks_model=_fireworks_classifier_model(settings),
         openrouter_api_key=_clean(getattr(settings, "openrouter_api_key", None)),
-        openrouter_model=_clean(getattr(settings, "agent_fast_model", None)),
+        openrouter_model=_openrouter_classifier_model(settings),
     )
     if not providers:
         return None
@@ -478,6 +496,8 @@ def _lead_from_hn_comment(
 ) -> JobLeadInput | None:
     text = html_to_text(comment.get("text"))
     if not text:
+        return None
+    if _SEEKING_WORK_RE.search(text):
         return None
     classification = (
         classifier.classify(text)

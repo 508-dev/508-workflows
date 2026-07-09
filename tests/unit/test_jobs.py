@@ -156,6 +156,39 @@ def test_format_job_lead_review_line_explains_confidence_source() -> None:
     assert "91%" not in line
 
 
+def test_format_job_lead_review_message_respects_discord_limit(monkeypatch) -> None:
+    monkeypatch.setattr(
+        type(jobs_module.settings),
+        "discord_sendmsg_character_limit",
+        property(lambda _settings: 600),
+    )
+    leads = [
+        _make_job_lead(
+            id=f"11111111-1111-1111-1111-11111111111{index}",
+            title=f"Contract role {index} " + ("x" * 100),
+            source_url=f"https://news.ycombinator.com/item?id={48000000 + index}",
+            metadata={
+                "contractor_classification": {
+                    "is_contractor_friendly": True,
+                    "posting_type": "part_time",
+                    "tags": ["contract", "1099", "remote"],
+                    "confidence": 0.91,
+                    "confidence_label": "high",
+                    "rationale": "Explicitly allows contract work. " + ("y" * 120),
+                    "method": "llm",
+                }
+            },
+        )
+        for index in range(10)
+    ]
+
+    message = JobsCog._format_job_lead_review_message(leads)
+
+    assert len(message) <= jobs_module.settings.discord_sendmsg_character_limit
+    assert "Showing" in message
+    assert "Use a lower limit" in message
+
+
 def test_format_job_lead_thread_content_respects_discord_limit() -> None:
     lead = _make_job_lead(body_normalized="x" * 5000)
 
