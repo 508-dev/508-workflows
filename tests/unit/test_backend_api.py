@@ -8037,6 +8037,49 @@ def test_dashboard_agent_report_shapes_only_sanitized_unsupported_messages() -> 
     assert "Michael Wu" not in str(report)
 
 
+def test_dashboard_agent_report_includes_confirmed_tool_outcomes() -> None:
+    report = api._shape_dashboard_agent_request_report(
+        [
+            {
+                "id": "request-1",
+                "occurred_at": datetime(2026, 2, 25, 12, 5, tzinfo=timezone.utc),
+                "action": "agent.request",
+                "result": "success",
+                "metadata": {
+                    "status": "requires_confirmation",
+                    "intent": "create_user_accounts",
+                    "planner": "live_model",
+                    "model": "gpt-4.1-mini",
+                    "action_names": ["account_write.create_user_accounts"],
+                },
+            },
+            {
+                "id": "confirmation-1",
+                "occurred_at": datetime(2026, 2, 25, 12, 6, tzinfo=timezone.utc),
+                "action": "agent.confirmation",
+                "result": "success",
+                "metadata": {
+                    "status": "executed",
+                    "tool_outcomes": [
+                        {
+                            "tool_name": "account_write.create_user_accounts",
+                            "status": "succeeded",
+                        }
+                    ],
+                },
+            },
+        ]
+    )
+
+    assert report["summary"]["total"] == 1
+    assert report["summary"]["handled"] == 1
+    assert report["status_counts"] == {"requires_confirmation": 1}
+    assert report["action_counts"] == {"account_write.create_user_accounts": 1}
+    assert report["tool_outcome_counts"] == {
+        "account_write.create_user_accounts:succeeded": 1
+    }
+
+
 def test_dashboard_rerun_crm_job_audits_discord_session(
     client: TestClient,
 ) -> None:

@@ -234,7 +234,7 @@ class AgentOrchestrator:
                         "What exact task, issue, contact, or account action should I run?"
                     ),
                 )
-            clarification = self._planner_action_clarification(action)
+            clarification = self._planner_action_clarification(action, context=context)
             if clarification is not None:
                 return AgentResponse(
                     status="needs_clarification",
@@ -469,6 +469,8 @@ class AgentOrchestrator:
     @staticmethod
     def _extract_member_agreement_recipient(text: str) -> str | None:
         lowered = text.casefold()
+        if re.search(r"\bcreate\s+(?:a\s+)?task\b", text, re.IGNORECASE):
+            return None
         if "member agreement" not in lowered or not re.search(
             r"\b(?:send|create|submit)\b",
             text,
@@ -1517,7 +1519,12 @@ class AgentOrchestrator:
             return "strong"
         return "fast"
 
-    def _planner_action_clarification(self, action: AgentToolAction) -> str | None:
+    def _planner_action_clarification(
+        self,
+        action: AgentToolAction,
+        *,
+        context: AgentIdentityContext,
+    ) -> str | None:
         """Reject incomplete model proposals before authorization or execution."""
 
         args = action.arguments
@@ -1587,6 +1594,8 @@ class AgentOrchestrator:
                 return "Which CRM contact should I create accounts for?"
             if not _non_empty_arg(args, "mailbox_username"):
                 return "What 508 mailbox username should I create?"
+        if tool_name == "memory_read.get_project_facts" and not context.project_id:
+            return "I need a project context before I can read project memory."
         if tool_name == "memory_write.remember_fact":
             if not _non_empty_arg(args, "key") or not isinstance(
                 args.get("value_json"), dict

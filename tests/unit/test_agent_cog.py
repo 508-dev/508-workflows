@@ -88,6 +88,16 @@ def test_agent_capabilities_include_member_task_and_memory_workflows() -> None:
     assert "no agent workflows" not in message
 
 
+def test_agent_capabilities_advertise_only_engineer_task_scopes() -> None:
+    message = AgentCog._agent_capabilities_message(
+        roles=["Engineer"],
+        transport="slash",
+    )
+
+    assert "Tasks: search a project." in message
+    assert "Task writes: create tasks, and update your own tasks." in message
+
+
 def test_format_agent_response_renders_github_issue_results() -> None:
     cog = AgentCog.__new__(AgentCog)
 

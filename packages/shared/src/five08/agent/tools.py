@@ -58,20 +58,14 @@ _PLANNER_TOOL_ARGUMENTS: dict[str, frozenset[str]] = {
         {"contact_id", "contact_query", "mailbox_username"}
     ),
     "memory_read.get_user_facts": frozenset({"user_id"}),
-    "memory_read.get_project_facts": frozenset({"project_id"}),
+    "memory_read.get_project_facts": frozenset(),
     "memory_read.search_context": frozenset(),
     "memory_write.remember_fact": frozenset(
         {
             "scope_type",
-            "scope_id",
             "key",
             "value_json",
             "visibility",
-            "source_type",
-            "source_ref",
-            "source_excerpt",
-            "verification_status",
-            "confidence",
         }
     ),
     "memory_write.forget_fact": frozenset({"fact_id", "admin"}),
@@ -549,6 +543,10 @@ class ToolRegistry:
         unknown_arguments = set(arguments) - allowed_arguments
         if unknown_arguments:
             raise ValueError("unknown_arguments")
+        if tool_name == "crm_write.update_contact":
+            updates = arguments.get("updates")
+            if not isinstance(updates, dict) or set(updates) != {"cOnboardingState"}:
+                raise ValueError("unsupported_crm_update_fields")
         _validate_planner_argument_value(arguments)
 
     def execute(

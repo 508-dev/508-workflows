@@ -3014,7 +3014,11 @@ def _shape_dashboard_agent_request_report(
     rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
     summary = {
-        "total": len(rows),
+        "total": sum(
+            1
+            for row in rows
+            if str(row.get("action") or "agent.request") == "agent.request"
+        ),
         "handled": 0,
         "requires_confirmation": 0,
         "needs_clarification": 0,
@@ -3030,6 +3034,7 @@ def _shape_dashboard_agent_request_report(
     recent_unsupported: list[dict[str, Any]] = []
 
     for row in rows:
+        event_action = str(row.get("action") or "agent.request")
         metadata = row.get("metadata")
         if not isinstance(metadata, dict):
             metadata = {}
@@ -3038,12 +3043,13 @@ def _shape_dashboard_agent_request_report(
         planner = metadata.get("planner") or "unknown"
         model = metadata.get("model") or "unknown"
 
-        _increment_dashboard_count(status_counts, status)
-        _increment_dashboard_count(intent_counts, intent)
-        _increment_dashboard_count(planner_counts, planner)
-        _increment_dashboard_count(model_counts, model)
-        for action_name in metadata.get("action_names") or []:
-            _increment_dashboard_count(action_counts, action_name)
+        if event_action == "agent.request":
+            _increment_dashboard_count(status_counts, status)
+            _increment_dashboard_count(intent_counts, intent)
+            _increment_dashboard_count(planner_counts, planner)
+            _increment_dashboard_count(model_counts, model)
+            for action_name in metadata.get("action_names") or []:
+                _increment_dashboard_count(action_counts, action_name)
         for outcome in metadata.get("tool_outcomes") or []:
             if not isinstance(outcome, dict):
                 continue
@@ -3053,6 +3059,8 @@ def _shape_dashboard_agent_request_report(
                 tool_outcome_counts, f"{tool_name}:{status_label}"
             )
 
+        if event_action != "agent.request":
+            continue
         if status in {"executed", "requires_confirmation"}:
             summary["handled"] += 1
         if status == "requires_confirmation" or metadata.get("requires_confirmation"):
@@ -3104,23 +3112,45 @@ def _shape_dashboard_agent_request_report(
 def _dashboard_agent_request_report(limit: int) -> dict[str, Any]:
     limit = _limit_dashboard_count(limit)
     sql = """
-        SELECT
-            id::text,
-            occurred_at,
-            result,
-            actor_provider,
-            actor_subject,
-            actor_display_name,
-            correlation_id,
-            metadata
-        FROM audit_events
-        WHERE action = 'agent.request'
+        WITH recent_requests AS (
+            SELECT
+                id::text,
+                occurred_at,
+                action,
+                result,
+                actor_provider,
+                actor_subject,
+                actor_display_name,
+                correlation_id,
+                metadata
+            FROM audit_events
+            WHERE action = 'agent.request'
+            ORDER BY occurred_at DESC
+            LIMIT %s
+        ), recent_confirmations AS (
+            SELECT
+                id::text,
+                occurred_at,
+                action,
+                result,
+                actor_provider,
+                actor_subject,
+                actor_display_name,
+                correlation_id,
+                metadata
+            FROM audit_events
+            WHERE action = 'agent.confirmation'
+            ORDER BY occurred_at DESC
+            LIMIT %s
+        )
+        SELECT * FROM recent_requests
+        UNION ALL
+        SELECT * FROM recent_confirmations
         ORDER BY occurred_at DESC
-        LIMIT %s
     """
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
-            cursor.execute(sql, (limit,))
+            cursor.execute(sql, (limit, limit))
             rows = cursor.fetchall()
 
     return _shape_dashboard_agent_request_report(rows)

@@ -69,8 +69,8 @@ Available tools and arguments:
 - outline_write.invite_user: email string, or contact_id/contact_query for a CRM contact.
 - account_write.create_user_accounts: contact_id string or contact_query string, mailbox_username string.
 - memory_read.get_user_facts: optional user_id string.
-- memory_read.get_project_facts: optional project_id string.
-- memory_write.remember_fact: scope_type, key, value_json, optional visibility.
+- memory_read.get_project_facts: no arguments. Use only when trusted project context is supplied.
+- memory_write.remember_fact: scope_type, key, value_json, optional visibility. Provenance and verification are set by the backend.
 - memory_write.forget_fact: fact_id string.
 
 If a task search lacks a project, return needs_clarification with "Which project should I search?".

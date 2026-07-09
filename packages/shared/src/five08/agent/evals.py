@@ -1033,6 +1033,19 @@ def _response_from_live_draft(
         ]
 
     for action in actions:
+        try:
+            orchestrator.registry.validate_planner_action(
+                action.tool_name,
+                action.arguments,
+            )
+        except ValueError:
+            return AgentResponse(
+                status="needs_clarification",
+                message="I need a clearer request before I can safely continue.",
+                clarification_question=(
+                    "What exact task, issue, contact, or account action should I run?"
+                ),
+            )
         manifest = orchestrator.registry.get(action.tool_name)
         if manifest is None:
             continue

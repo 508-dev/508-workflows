@@ -565,10 +565,15 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             )
         )
         capabilities: list[str] = []
-        if {"project:read", "task:create"} & scopes:
-            capabilities.append(
-                "- Tasks: search a project, create tasks, and update your own tasks."
-            )
+        if "project:read" in scopes:
+            capabilities.append("- Tasks: search a project.")
+        task_writes: list[str] = []
+        if "task:create" in scopes:
+            task_writes.append("create tasks")
+        if "task:update_own" in scopes:
+            task_writes.append("update your own tasks")
+        if task_writes:
+            capabilities.append(f"- Task writes: {', and '.join(task_writes)}.")
         if {"memory:read_self", "memory:write_self"} & scopes:
             capabilities.append(
                 "- Memory: remember and review your private preferences."
