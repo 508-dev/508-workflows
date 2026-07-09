@@ -3791,7 +3791,17 @@ def test_dashboard_job_leads_returns_pending_leads(client: TestClient) -> None:
         response = client.get("/dashboard/api/gig-leads?status=pending&limit=10")
 
     assert response.status_code == 200
-    assert response.json() == leads
+    payload = response.json()
+    assert payload[0] | {
+        "contractor_classification": None,
+        "review_summary": None,
+    } == leads[0] | {
+        "contractor_classification": None,
+        "review_summary": None,
+    }
+    assert payload[0]["contractor_classification"]["method"] == "heuristic"
+    assert payload[0]["contractor_classification"]["tags"] == ["contract"]
+    assert payload[0]["review_summary"].startswith("Keyword fallback:")
     mock_leads.assert_called_once_with(
         api.settings,
         status=api.JobLeadStatus.PENDING,
@@ -3891,7 +3901,15 @@ def test_dashboard_review_job_lead_approves_with_discord_reviewer(
         )
 
     assert response.status_code == 200
-    assert response.json() == reviewed
+    payload = response.json()
+    assert payload | {
+        "contractor_classification": None,
+        "review_summary": None,
+    } == reviewed | {
+        "contractor_classification": None,
+        "review_summary": None,
+    }
+    assert payload["contractor_classification"]["method"] == "heuristic"
     mock_review.assert_called_once_with(
         api.settings,
         lead_id="lead-1",

@@ -7,9 +7,11 @@ from datetime import datetime, timezone
 from five08.job_lead_sources import (
     HackerNewsThread,
     HackerNewsWhoIsHiringLeadSource,
+    JobLeadClassification,
     classify_contractor_lead,
     html_to_text,
 )
+from five08.job_channels import JobPostingType
 
 
 class _FakeHackerNewsClient:
@@ -57,6 +59,53 @@ class _FakeHackerNewsClient:
         }
 
 
+class _FakeJobLeadClassifier:
+    def classify(self, comment_text: str) -> JobLeadClassification:
+        if "Employee-only" in comment_text:
+            return JobLeadClassification(
+                is_contractor_friendly=False,
+                posting_type=JobPostingType.FULL_TIME,
+                tags=["employee"],
+                confidence=0.9,
+                confidence_label="high",
+                rationale="Full-time employee-only role.",
+                method="llm",
+            )
+        return JobLeadClassification(
+            is_contractor_friendly=True,
+            posting_type=JobPostingType.PART_TIME,
+            tags=["contract", "remote"],
+            confidence=0.88,
+            confidence_label="high",
+            rationale="Explicitly allows contract work.",
+            method="llm",
+        )
+
+
+class _FakeClassifierHackerNewsClient(_FakeHackerNewsClient):
+    def get_algolia_item_tree(self, item_id: int) -> dict:
+        assert item_id == 48357725
+        return {
+            "id": item_id,
+            "children": [
+                {
+                    "id": 10,
+                    "parent_id": item_id,
+                    "author": "company",
+                    "created_at": "2026-06-01T15:02:00Z",
+                    "text": "Acme | Backend Engineer | Remote<p>Contract welcome.",
+                },
+                {
+                    "id": 11,
+                    "parent_id": item_id,
+                    "author": "company",
+                    "created_at": "2026-06-01T15:03:00Z",
+                    "text": "Fulltime Co | Employee-only backend role | Remote",
+                },
+            ],
+        }
+
+
 def test_html_to_text_preserves_links_and_paragraph_breaks() -> None:
     text = html_to_text('Hello<p><a href="https://example.com">Apply</a>')
 
@@ -88,3 +137,22 @@ def test_hacker_news_source_extracts_top_level_contractor_posts() -> None:
     assert lead.apply_url == "https://acme.example/jobs"
     assert {"contract", "1099"}.issubset(set(lead.tags or []))
     assert lead.confidence >= 0.5
+    classification = lead.metadata["contractor_classification"]
+    assert classification["method"] == "heuristic"
+    assert classification["confidence_label"] == "high"
+
+
+def test_hacker_news_source_uses_injected_classifier_for_lead_filtering() -> None:
+    source = HackerNewsWhoIsHiringLeadSource(
+        client=_FakeClassifierHackerNewsClient(),
+        classifier=_FakeJobLeadClassifier(),  # type: ignore[arg-type]
+    )
+
+    leads = source.collect()
+
+    assert [lead.external_id for lead in leads] == ["10"]
+    assert leads[0].tags == ["contract", "remote"]
+    assert leads[0].confidence == 0.88
+    classification = leads[0].metadata["contractor_classification"]
+    assert classification["method"] == "llm"
+    assert classification["rationale"] == "Explicitly allows contract work."

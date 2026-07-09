@@ -57,6 +57,7 @@ from five08.agent import (
 from five08.clients.espo import EspoAPIError, EspoClient
 from five08.logging import configure_observability
 from five08.job_leads import (
+    job_lead_display_payload,
     JobLeadStatus,
     list_job_leads,
     review_job_lead,
@@ -4136,7 +4137,9 @@ async def dashboard_job_leads_handler(
         status=normalized_status,
         limit=limit,
     )
-    return JSONResponse(jsonable_encoder(leads))
+    return JSONResponse(
+        jsonable_encoder([job_lead_display_payload(lead) for lead in leads])
+    )
 
 
 async def dashboard_review_job_lead_handler(
@@ -4198,7 +4201,7 @@ async def dashboard_review_job_lead_handler(
             "status": payload.status,
         },
     )
-    return JSONResponse(jsonable_encoder(lead))
+    return JSONResponse(jsonable_encoder(job_lead_display_payload(lead)))
 
 
 async def dashboard_post_job_lead_handler(

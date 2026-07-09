@@ -219,6 +219,9 @@ intake-completed field unset, and matches resume filenames with
 - `RESUME_AI_API_KEY`
 - `RESUME_AI_BASE_URL`
 - `RESUME_AI_MODEL`
+- `JOB_LEAD_CLASSIFIER_ENABLED`
+- `JOB_LEAD_CLASSIFIER_MODEL`
+- `JOB_LEAD_CLASSIFIER_TIMEOUT_SECONDS`
 
 Resume/profile LLM calls retry matching direct providers after Bifrost request
 failures when direct provider credentials are configured.

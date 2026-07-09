@@ -65,6 +65,7 @@ from five08.job_channels import (
     unregister_job_post_channel,
 )
 from five08.job_leads import (
+    format_job_lead_review_summary,
     get_job_lead,
     JobLead,
     JobLeadStatus,
@@ -3429,12 +3430,9 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
 
     @classmethod
     def _format_job_lead_review_line(cls, index: int, lead: JobLead) -> str:
-        tags = ", ".join(lead.tags[:5]) if lead.tags else "untagged"
         title = cls._truncate_job_lead_text(lead.title, 120)
-        return (
-            f"{index}. `{lead.id[:8]}` **{title}** "
-            f"({lead.confidence:.0%}; {tags})\n{lead.source_url}"
-        )
+        summary = cls._truncate_job_lead_text(format_job_lead_review_summary(lead), 180)
+        return f"{index}. `{lead.id[:8]}` **{title}**\n{summary}\n{lead.source_url}"
 
     @classmethod
     def _format_job_lead_thread_content(cls, lead: JobLead) -> str:

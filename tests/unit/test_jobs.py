@@ -135,6 +135,27 @@ def test_format_job_lead_thread_content_includes_review_context() -> None:
     assert "CO-Ver needs a 1099 contractor." in content
 
 
+def test_format_job_lead_review_line_explains_confidence_source() -> None:
+    lead = _make_job_lead(
+        metadata={
+            "contractor_classification": {
+                "is_contractor_friendly": True,
+                "posting_type": "part_time",
+                "tags": ["contract", "1099"],
+                "confidence": 0.91,
+                "confidence_label": "high",
+                "rationale": "Explicitly allows 1099 contract work.",
+                "method": "llm",
+            }
+        }
+    )
+
+    line = JobsCog._format_job_lead_review_line(1, lead)
+
+    assert "LLM: high contractor fit; contract, 1099" in line
+    assert "91%" not in line
+
+
 def test_format_job_lead_thread_content_respects_discord_limit() -> None:
     lead = _make_job_lead(body_normalized="x" * 5000)
 

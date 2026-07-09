@@ -81,6 +81,101 @@ class JobLead:
     updated_at: datetime
 
 
+def job_lead_classification(lead: JobLead | dict[str, Any]) -> dict[str, Any]:
+    """Return normalized contractor-classification metadata for display."""
+    metadata = lead.get("metadata") if isinstance(lead, dict) else lead.metadata
+    metadata = metadata if isinstance(metadata, dict) else {}
+    classification = metadata.get("contractor_classification")
+    if isinstance(classification, dict):
+        return {
+            "is_contractor_friendly": bool(
+                classification.get("is_contractor_friendly", True)
+            ),
+            "posting_type": str(classification.get("posting_type") or ""),
+            "tags": [
+                str(tag) for tag in classification.get("tags", []) if str(tag).strip()
+            ],
+            "confidence": float(classification.get("confidence") or 0.0),
+            "confidence_label": str(classification.get("confidence_label") or "low"),
+            "rationale": str(classification.get("rationale") or "").strip(),
+            "method": str(classification.get("method") or "unknown"),
+        }
+
+    tags = lead.get("tags") if isinstance(lead, dict) else lead.tags
+    confidence = lead.get("confidence") if isinstance(lead, dict) else lead.confidence
+    tag_values = [str(tag) for tag in tags or [] if str(tag).strip()]
+    confidence_value = float(confidence or 0.0)
+    if confidence_value >= 0.75:
+        confidence_label = "high"
+    elif confidence_value >= 0.45:
+        confidence_label = "medium"
+    else:
+        confidence_label = "low"
+    return {
+        "is_contractor_friendly": bool(tag_values),
+        "posting_type": "",
+        "tags": tag_values,
+        "confidence": confidence_value,
+        "confidence_label": confidence_label,
+        "rationale": "",
+        "method": "heuristic",
+    }
+
+
+def format_job_lead_review_summary(lead: JobLead | dict[str, Any]) -> str:
+    """Return a human-readable summary of why a lead is review-worthy."""
+    classification = job_lead_classification(lead)
+    method = classification.get("method")
+    method_label = "LLM" if method == "llm" else "Keyword fallback"
+    confidence_label = str(classification.get("confidence_label") or "low")
+    tags = [str(tag) for tag in classification.get("tags", []) if str(tag).strip()]
+    tag_text = ", ".join(tags[:5]) if tags else "no evidence tags"
+    rationale = str(classification.get("rationale") or "").strip()
+    summary = f"{method_label}: {confidence_label} contractor fit; {tag_text}"
+    if rationale:
+        summary = f"{summary} - {rationale}"
+    return summary
+
+
+def job_lead_display_payload(lead: JobLead | dict[str, Any]) -> dict[str, Any]:
+    """Return API payload with shared classification display fields."""
+    if isinstance(lead, dict):
+        payload = dict(lead)
+    else:
+        payload = {
+            "id": lead.id,
+            "status": lead.status.value,
+            "source_key": lead.source_key,
+            "source_type": lead.source_type,
+            "external_id": lead.external_id,
+            "external_parent_id": lead.external_parent_id,
+            "source_url": lead.source_url,
+            "source_posted_at": lead.source_posted_at,
+            "title": lead.title,
+            "organization": lead.organization,
+            "body_raw": lead.body_raw,
+            "body_normalized": lead.body_normalized,
+            "posting_type": lead.posting_type.value,
+            "location": lead.location,
+            "remote": lead.remote,
+            "apply_url": lead.apply_url,
+            "tags": lead.tags,
+            "confidence": lead.confidence,
+            "metadata": lead.metadata,
+            "reviewed_by_discord_user_id": lead.reviewed_by_discord_user_id,
+            "reviewed_at": lead.reviewed_at,
+            "discord_guild_id": lead.discord_guild_id,
+            "discord_channel_id": lead.discord_channel_id,
+            "discord_thread_id": lead.discord_thread_id,
+            "posted_at": lead.posted_at,
+            "created_at": lead.created_at,
+            "updated_at": lead.updated_at,
+        }
+    payload["contractor_classification"] = job_lead_classification(lead)
+    payload["review_summary"] = format_job_lead_review_summary(lead)
+    return payload
+
+
 def _normalize_status(value: str | JobLeadStatus | None) -> JobLeadStatus:
     if isinstance(value, JobLeadStatus):
         return value

@@ -338,6 +338,19 @@ def _job_leads_payload() -> list[dict[str, object]]:
             "apply_url": "https://example.com/jobs/react",
             "tags": ["1099", "contract"],
             "confidence": 0.8,
+            "contractor_classification": {
+                "is_contractor_friendly": True,
+                "posting_type": "part_time",
+                "tags": ["1099", "contract"],
+                "confidence": 0.8,
+                "confidence_label": "high",
+                "rationale": "Explicitly asks for a remote 1099 contractor.",
+                "method": "llm",
+            },
+            "review_summary": (
+                "LLM: high contractor fit; 1099, contract - "
+                "Explicitly asks for a remote 1099 contractor."
+            ),
             "reviewed_by_discord_user_id": None,
             "reviewed_at": None,
             "discord_guild_id": None,
