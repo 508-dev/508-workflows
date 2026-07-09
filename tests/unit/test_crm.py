@@ -2518,7 +2518,7 @@ class TestCRMCog:
         jobs_cog._run_auto_match_candidates_for_thread.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_on_thread_create_skips_bot_owner(self, jobs_cog):
+    async def test_on_thread_create_skips_other_bot_owner(self, jobs_cog, mock_bot):
         class DummyForumChannel:
             def __init__(self, channel_id: int) -> None:
                 self.id = channel_id
@@ -2526,6 +2526,8 @@ class TestCRMCog:
             def permissions_for(self, _role):
                 return Mock(view_channel=False)
 
+        mock_bot.user = Mock()
+        mock_bot.user.id = 111
         guild = Mock()
         guild.id = 123
         guild.default_role = Mock()
@@ -2550,6 +2552,48 @@ class TestCRMCog:
             await jobs_cog.on_thread_create(thread)
 
         jobs_cog._run_auto_match_candidates_for_thread.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_on_thread_create_auto_matches_own_bot_owner(
+        self, jobs_cog, mock_bot
+    ):
+        class DummyForumChannel:
+            def __init__(self, channel_id: int) -> None:
+                self.id = channel_id
+
+            def permissions_for(self, _role):
+                return Mock(view_channel=False)
+
+        mock_bot.user = Mock()
+        mock_bot.user.id = 999
+        guild = Mock()
+        guild.id = 123
+        guild.default_role = Mock()
+        parent = DummyForumChannel(456)
+        thread = Mock()
+        thread.guild = guild
+        thread.parent = parent
+        thread.owner_id = 999
+
+        owner = Mock()
+        owner.bot = True
+        guild.get_member.return_value = owner
+
+        jobs_cog._refresh_jobs_channel_cache_if_missing = AsyncMock(return_value=True)
+        jobs_cog._is_jobs_channel_registered = Mock(return_value=True)
+        jobs_cog._persist_thread_engagement_index = AsyncMock(return_value=True)
+        jobs_cog._run_auto_match_candidates_for_thread = AsyncMock()
+
+        with patch(
+            "five08.discord_bot.cogs.jobs.discord.ForumChannel",
+            DummyForumChannel,
+        ):
+            await jobs_cog.on_thread_create(thread)
+
+        jobs_cog._run_auto_match_candidates_for_thread.assert_awaited_once_with(
+            thread=thread,
+            trigger="thread_create",
+        )
 
     @pytest.mark.asyncio
     async def test_on_thread_create_skips_non_member(self, jobs_cog):

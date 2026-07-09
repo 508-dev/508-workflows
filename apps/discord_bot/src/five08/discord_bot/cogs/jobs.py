@@ -494,6 +494,20 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         starter_author_id = getattr(starter_author, "id", None)
         return str(starter_author_id) if starter_author_id else None
 
+    def _is_own_bot_thread_owner(
+        self,
+        thread: discord.Thread,
+        owner: discord.Member,
+    ) -> bool:
+        """Return whether a bot-owned job thread was created by this bot."""
+        if not getattr(owner, "bot", False):
+            return False
+        bot_user = getattr(self.bot, "user", None)
+        bot_user_id = getattr(bot_user, "id", None)
+        if bot_user_id is None or thread.owner_id is None:
+            return False
+        return str(thread.owner_id) == str(bot_user_id)
+
     async def _refresh_jobs_channel_cache_if_missing(self, guild_id: int) -> bool:
         """Ensure guild cache is loaded, retrying after startup-load failures."""
         if guild_id in self._jobs_channels_by_guild:
@@ -3385,10 +3399,14 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             return
 
         owner = guild.get_member(thread.owner_id) if thread.owner_id else None
-        if owner is None or owner.bot:
+        if owner is None:
             return
-        if not check_user_roles_with_hierarchy(owner.roles, ["Member"]):
-            return
+        if getattr(owner, "bot", False):
+            if not self._is_own_bot_thread_owner(thread, owner):
+                return
+        else:
+            if not check_user_roles_with_hierarchy(owner.roles, ["Member"]):
+                return
 
         await self._run_auto_match_candidates_for_thread(
             thread=thread,
