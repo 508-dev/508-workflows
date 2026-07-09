@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -1599,6 +1600,22 @@ def test_deterministic_supported_workflow_does_not_depend_on_model_routing() -> 
     assert response.plan is not None
     assert response.plan.planner == "deterministic_regex"
     assert response.plan.actions[0].tool_name == "account_write.create_user_accounts"
+
+
+def test_structured_planner_failures_are_observable_before_fallback(caplog) -> None:
+    class FailingPlanner:
+        def plan(self, **_kwargs: object) -> AgentPlannerResult:
+            raise ValueError("provider did not return valid JSON")
+
+    with caplog.at_level(logging.WARNING, logger="five08.agent.orchestrator"):
+        response = AgentOrchestrator(planner=FailingPlanner()).plan(
+            "Help me with something unusual",
+            _context(),
+        )
+
+    assert response.status == "needs_clarification"
+    assert "Structured agent planner failed" in caplog.text
+    assert "error_type=ValueError" in caplog.text
 
 
 def test_agent_uses_structured_planner_for_multi_action_confirmation() -> None:

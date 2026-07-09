@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Literal, Protocol, cast
@@ -65,6 +66,7 @@ _MONTHS = {
     "december": 12,
 }
 LiteralPlanner = Literal["deterministic_regex", "live_model"]
+logger = logging.getLogger(__name__)
 
 
 class AgentIntentNormalizer(Protocol):
@@ -209,9 +211,15 @@ class AgentOrchestrator:
                 runtime_config=self.registry.runtime_config,
                 model_tier=model_tier,
             )
-        except Exception:
+        except Exception as exc:
             # Provider errors fall through to deterministic parsing. Do not expose
             # provider internals in a Discord response.
+            logger.warning(
+                "Structured agent planner failed; using deterministic fallback "
+                "model_tier=%s error_type=%s",
+                model_tier,
+                type(exc).__name__,
+            )
             return None
         if result is None:
             return None
