@@ -476,6 +476,19 @@ def test_extract_mention_request_strips_bot_mentions() -> None:
     )
 
 
+def test_agent_command_is_registered_for_bot_dms() -> None:
+    contexts = AgentCog.agent_command.allowed_contexts
+    installs = AgentCog.agent_command.allowed_installs
+
+    assert contexts is not None
+    assert contexts.guild is True
+    assert contexts.dm_channel is True
+    assert contexts.private_channel is False
+    assert installs is not None
+    assert installs.guild is True
+    assert installs.user is False
+
+
 def test_build_agent_context_from_message_uses_thread_message_context() -> None:
     cog = AgentCog.__new__(AgentCog)
     message = SimpleNamespace(
@@ -690,6 +703,93 @@ async def test_agent_command_member_info_lookup_reaches_gateway() -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_command_in_dm_uses_configured_guild_member_context(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "five08.discord_bot.cogs.agent.settings",
+        SimpleNamespace(discord_server_id="456"),
+    )
+    member = SimpleNamespace(
+        id=123,
+        roles=[SimpleNamespace(name="@everyone"), SimpleNamespace(name="Admin")],
+    )
+    guild = SimpleNamespace(id=456, get_member=Mock(return_value=member))
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(get_guild=Mock(return_value=guild), guilds=[guild])
+    cog._post_agent_request = AsyncMock(
+        return_value={"status": "executed", "message": "Done"}
+    )
+    cog._audit_command_safe = Mock()
+    interaction = SimpleNamespace(
+        id=999,
+        guild=None,
+        guild_id=None,
+        channel_id=789,
+        channel=SimpleNamespace(id=789),
+        message=None,
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+        user=SimpleNamespace(id=123, roles=[]),
+    )
+
+    await AgentCog.agent_command.callback(cog, interaction, "Look up info on Caleb")
+
+    interaction.response.defer.assert_awaited_once_with(ephemeral=False)
+    cog.bot.get_guild.assert_called_once_with(456)
+    cog._post_agent_request.assert_awaited_once()
+    context = cog._post_agent_request.await_args.kwargs["context"]
+    assert context["guild_id"] == "456"
+    assert context["organization_id"] == "456"
+    assert context["channel_id"] == "789"
+    assert context["roles"] == ["@everyone", "Admin"]
+    assert interaction.followup.send.await_args.kwargs["ephemeral"] is False
+    cog._audit_command_safe.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_agent_command_in_dm_refuses_user_outside_configured_guild(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "five08.discord_bot.cogs.agent.settings",
+        SimpleNamespace(discord_server_id="456"),
+    )
+    guild = SimpleNamespace(
+        id=456,
+        get_member=Mock(return_value=None),
+        fetch_member=AsyncMock(return_value=None),
+    )
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(get_guild=Mock(return_value=guild), guilds=[guild])
+    cog._post_agent_request = AsyncMock()
+    cog._audit_command_safe = Mock()
+    interaction = SimpleNamespace(
+        id=999,
+        guild=None,
+        guild_id=None,
+        channel_id=789,
+        channel=SimpleNamespace(id=789),
+        message=None,
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+        user=SimpleNamespace(id=123, roles=[]),
+    )
+
+    await AgentCog.agent_command.callback(cog, interaction, "Look up info on Caleb")
+
+    interaction.response.defer.assert_awaited_once_with(ephemeral=False)
+    cog._post_agent_request.assert_not_awaited()
+    interaction.followup.send.assert_awaited_once_with(
+        "I can only run DM workflows for current members of the configured 508 server.",
+        ephemeral=False,
+    )
+    cog._audit_command_safe.assert_called_once()
+    assert cog._audit_command_safe.call_args.kwargs["action"] == "agent.request"
+    assert cog._audit_command_safe.call_args.kwargs["result"] == "denied"
+
+
+@pytest.mark.asyncio
 async def test_confirmation_context_in_dm_uses_cached_original_guild_roles() -> None:
     member = SimpleNamespace(roles=[SimpleNamespace(name="Member")])
     guild = SimpleNamespace(get_member=Mock(return_value=member))
@@ -797,6 +897,43 @@ async def test_confirmation_context_in_dm_preserves_original_roles_when_guild_mi
     assert context["organization_id"] == "456"
     assert context["guild_id"] == "456"
     assert context["roles"] == ["Admin", "Member"]
+    assert context["message_id"] == "555"
+
+
+@pytest.mark.asyncio
+async def test_confirmation_context_in_dm_clears_roles_when_member_left_guild() -> None:
+    guild = SimpleNamespace(
+        get_member=Mock(return_value=None),
+        fetch_member=AsyncMock(return_value=None),
+    )
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(get_guild=Mock(return_value=guild))
+    view = AgentConfirmationView(
+        cog=cog,
+        requester_id=123,
+        plan_id="plan-1",
+        context={
+            "discord_user_id": "123",
+            "organization_id": "456",
+            "guild_id": "456",
+            "channel_id": "789",
+            "message_id": "555",
+            "roles": ["Admin", "Member"],
+        },
+    )
+    interaction = SimpleNamespace(
+        id=999,
+        guild_id=None,
+        channel_id=111,
+        message=SimpleNamespace(id=222),
+        user=SimpleNamespace(id=123),
+    )
+
+    context = await view._confirmation_context(interaction)
+
+    assert context["organization_id"] == "456"
+    assert context["guild_id"] == "456"
+    assert context["roles"] == []
     assert context["message_id"] == "555"
 
 
@@ -1334,14 +1471,86 @@ async def test_agent_mention_still_audits_errors() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_mention_ignores_dms() -> None:
+async def test_agent_dm_sends_agent_response_to_current_guild_member(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "five08.discord_bot.cogs.agent.settings",
+        SimpleNamespace(discord_server_id="456"),
+    )
+    member = SimpleNamespace(
+        id=123,
+        roles=[SimpleNamespace(name="@everyone"), SimpleNamespace(name="Member")],
+    )
+    guild = SimpleNamespace(
+        id=456,
+        get_member=Mock(return_value=member),
+    )
     cog = AgentCog.__new__(AgentCog)
-    cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))
-    cog._post_agent_request = AsyncMock()
+    cog.bot = SimpleNamespace(
+        user=SimpleNamespace(id=999),
+        get_guild=Mock(return_value=guild),
+        guilds=[guild],
+    )
+    cog._post_agent_request = AsyncMock(
+        return_value={"status": "executed", "message": "Done"}
+    )
+    cog._audit_message_safe = Mock()
+    cog._format_agent_response = Mock(return_value="Agent status: executed")
     message = SimpleNamespace(
-        content="<@999> show tasks for project Atlas",
+        id=555,
+        content="show tasks for project Atlas",
         author=SimpleNamespace(id=123, bot=False, roles=[]),
-        mentions=[SimpleNamespace(id=999)],
+        mentions=[],
+        guild=None,
+        channel=SimpleNamespace(id=789, typing=Mock(return_value=_AsyncTyping())),
+        reply=AsyncMock(),
+    )
+
+    await cog.agent_mention(message)
+
+    cog.bot.get_guild.assert_called_once_with(456)
+    cog._post_agent_request.assert_awaited_once()
+    assert cog._post_agent_request.await_args.kwargs["message"] == (
+        "show tasks for project Atlas"
+    )
+    context = cog._post_agent_request.await_args.kwargs["context"]
+    assert context["guild_id"] == "456"
+    assert context["organization_id"] == "456"
+    assert context["roles"] == ["@everyone", "Member"]
+    message.reply.assert_awaited_once_with(
+        "Agent status: executed",
+        mention_author=False,
+    )
+    cog._audit_message_safe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_agent_dm_refuses_user_who_is_not_in_configured_guild(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "five08.discord_bot.cogs.agent.settings",
+        SimpleNamespace(discord_server_id="456"),
+    )
+    guild = SimpleNamespace(
+        id=456,
+        get_member=Mock(return_value=None),
+        fetch_member=AsyncMock(return_value=None),
+    )
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(
+        user=SimpleNamespace(id=999),
+        get_guild=Mock(return_value=guild),
+        guilds=[guild],
+    )
+    cog._post_agent_request = AsyncMock()
+    cog._audit_message_safe = Mock()
+    message = SimpleNamespace(
+        id=555,
+        content="show tasks for project Atlas",
+        author=SimpleNamespace(id=123, bot=False, roles=[]),
+        mentions=[],
         guild=None,
         reply=AsyncMock(),
     )
@@ -1350,9 +1559,12 @@ async def test_agent_mention_ignores_dms() -> None:
 
     cog._post_agent_request.assert_not_awaited()
     message.reply.assert_awaited_once_with(
-        "Agent mentions only work in servers.",
+        "I can only run DM workflows for current members of the configured 508 server.",
         mention_author=False,
     )
+    cog._audit_message_safe.assert_called_once()
+    assert cog._audit_message_safe.call_args.kwargs["action"] == "agent.dm"
+    assert cog._audit_message_safe.call_args.kwargs["result"] == "denied"
 
 
 def test_post_backend_json_returns_structured_failed_response(

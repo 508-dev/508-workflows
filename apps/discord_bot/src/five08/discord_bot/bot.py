@@ -63,7 +63,19 @@ class Bot508(commands.Bot):
     def __init__(self) -> None:
         intents = discord.Intents.all()
         # Use a prefix that won't accidentally trigger since we're using slash commands
-        super().__init__(command_prefix="$508$", intents=intents)
+        super().__init__(
+            command_prefix="$508$",
+            intents=intents,
+            allowed_contexts=discord.app_commands.AppCommandContext(
+                guild=True,
+                dm_channel=False,
+                private_channel=False,
+            ),
+            allowed_installs=discord.app_commands.AppInstallationType(
+                guild=True,
+                user=False,
+            ),
+        )
         # Remove the default help command since we're using slash commands
         self.remove_command("help")
         self.http_server: Optional[BotHTTPServer] = None
