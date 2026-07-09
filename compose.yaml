@@ -119,6 +119,7 @@ services:
       # Use '-' intentionally: an explicitly blank value means "scanner not configured",
       # allowing startup while /health reports degraded in non-local runtimes.
       INTAKE_RESUME_VIRUS_SCAN_COMMAND: ${INTAKE_RESUME_VIRUS_SCAN_COMMAND-clamdscan --stream --no-summary --config-file=/etc/clamav/clamdscan.conf}
+      DISCORD_BOT_INTERNAL_BASE_URL: http://discord_bot:3000
       # Keep the container's internal listen port fixed; vary only the published
       # host port for tunnels/local multi-worktree runs.
       WEB_HOST: 0.0.0.0
