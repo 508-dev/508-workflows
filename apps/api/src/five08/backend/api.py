@@ -157,7 +157,6 @@ from five08.engagements import (
     list_dashboard_engagements,
     list_dashboard_notifications,
     normalize_engagement_status,
-    update_engagement_status_by_discord_thread,
     update_engagement_application_status,
     update_engagement_status,
     viewer_can_update_engagement,
@@ -4242,31 +4241,6 @@ async def dashboard_post_job_lead_handler(
     )
     if status_code >= 400:
         return JSONResponse(result, status_code=status_code)
-
-    requested_engagement_status = EngagementStatus(payload.engagement_status)
-    thread_id = str(result.get("thread_id") or "").strip()
-    bot_engagement_status = normalize_engagement_status(result.get("engagement_status"))
-    if thread_id and bot_engagement_status is not requested_engagement_status:
-        result["discord_title_sync"] = await _sync_discord_gig_thread_status(
-            request,
-            thread_id=thread_id,
-            status=requested_engagement_status,
-        )
-    if thread_id:
-        local_status = await asyncio.to_thread(
-            update_engagement_status_by_discord_thread,
-            settings,
-            discord_thread_id=thread_id,
-            status=requested_engagement_status,
-            actor_discord_user_id=reviewer,
-        )
-        if local_status is not None:
-            result["engagement_status"] = requested_engagement_status.value
-            result["engagement_id"] = local_status.get("id") or result.get(
-                "engagement_id"
-            )
-        elif bot_engagement_status is not requested_engagement_status:
-            result["engagement_status"] = requested_engagement_status.value
 
     actor_provider, actor_subject = _session_audit_actor(session)
     await _write_auth_audit_event(

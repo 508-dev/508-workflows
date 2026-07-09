@@ -8,7 +8,7 @@ import json
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from unittest.mock import ANY, AsyncMock, Mock, call, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -4101,10 +4101,6 @@ def test_dashboard_post_job_lead_posts_approved_lead_to_discord(
                 200,
             ),
         ) as mock_post,
-        patch(
-            "five08.backend.api.update_engagement_status_by_discord_thread",
-            return_value={"id": "engagement-1", "status": "recruiting"},
-        ) as update_by_thread,
         patch("five08.backend.api.insert_audit_event") as mock_insert,
     ):
         response = client.post(
@@ -4126,12 +4122,6 @@ def test_dashboard_post_job_lead_posts_approved_lead_to_discord(
         "tags": "Contract,Remote",
         "engagement_status": api.EngagementStatus.RECRUITING,
     }
-    update_by_thread.assert_called_once_with(
-        api.settings,
-        discord_thread_id="thread-1",
-        status=api.EngagementStatus.RECRUITING,
-        actor_discord_user_id="steering-1",
-    )
     audit_payload = mock_insert.call_args.args[1]
     assert audit_payload.source == api.AuditSource.ADMIN_DASHBOARD
     assert audit_payload.action == "job_leads.post"
@@ -4143,65 +4133,6 @@ def test_dashboard_post_job_lead_posts_approved_lead_to_discord(
     assert audit_payload.resource_id == "lead-1"
     assert audit_payload.metadata is not None
     assert audit_payload.metadata["thread_id"] == "thread-1"
-
-
-def test_dashboard_post_job_lead_reconciles_stale_bot_status(
-    client: TestClient,
-) -> None:
-    session = _dashboard_write_session()
-
-    with (
-        patch(
-            "five08.backend.api._current_session",
-            new_callable=AsyncMock,
-            return_value=("session-1", session),
-        ),
-        patch(
-            "five08.backend.api._post_job_lead_to_discord",
-            new_callable=AsyncMock,
-            return_value=(
-                {
-                    "status": "posted",
-                    "lead_id": "lead-1",
-                    "guild_id": "guild-1",
-                    "channel_id": "channel-1",
-                    "thread_id": "thread-1",
-                    "engagement_status": "lead",
-                },
-                200,
-            ),
-        ),
-        patch(
-            "five08.backend.api._sync_discord_gig_thread_status",
-            new_callable=AsyncMock,
-            return_value={"status": "updated"},
-        ) as sync_status,
-        patch(
-            "five08.backend.api.update_engagement_status_by_discord_thread",
-            return_value={"id": "engagement-1", "status": "recruiting"},
-        ) as update_by_thread,
-        patch("five08.backend.api.insert_audit_event"),
-    ):
-        response = client.post(
-            "/dashboard/api/gig-leads/lead-1/post",
-            json={"engagement_status": "recruiting"},
-        )
-
-    assert response.status_code == 200
-    assert response.json()["engagement_status"] == "recruiting"
-    assert response.json()["engagement_id"] == "engagement-1"
-    assert response.json()["discord_title_sync"] == {"status": "updated"}
-    sync_status.assert_awaited_once_with(
-        ANY,
-        thread_id="thread-1",
-        status=api.EngagementStatus.RECRUITING,
-    )
-    update_by_thread.assert_called_once_with(
-        api.settings,
-        discord_thread_id="thread-1",
-        status=api.EngagementStatus.RECRUITING,
-        actor_discord_user_id="steering-1",
-    )
 
 
 def test_dashboard_post_job_lead_surfaces_bot_rejection(
