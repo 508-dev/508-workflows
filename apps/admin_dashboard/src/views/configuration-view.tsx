@@ -149,6 +149,12 @@ function updateConfigurationTabHash(tab: ConfigurationTab) {
   )
 }
 
+function jobPostingTypeValue(value: string | undefined): JobPostingTypeValue {
+  return jobPostingTypeOptions.some((option) => option.value === value)
+    ? (value as JobPostingTypeValue)
+    : "unknown"
+}
+
 function isPrimaryConfiguration(item: ConfigurationItem) {
   return (
     item.key.startsWith("ONBOARDING_EMAIL_") ||
@@ -284,6 +290,17 @@ function ConfigurationView({
     }
     setSelectedChannelId((unregisteredChannelOptions[0] || channelOptions[0])?.channel_id || "")
   }, [channelOptions, selectedChannelId, unregisteredChannelOptions])
+
+  useEffect(() => {
+    const selectedChannel = channelOptions.find(
+      (channel) => channel.channel_id === selectedChannelId,
+    )
+    if (!selectedChannel) return
+    const selectedType = jobPostingTypeValue(String(selectedChannel.posting_type || ""))
+    setSelectedPostingType(
+      registeredChannelIds.has(selectedChannel.channel_id) ? selectedType : "part_time",
+    )
+  }, [channelOptions, registeredChannelIds, selectedChannelId])
 
   useEffect(() => {
     setDrafts(
@@ -662,11 +679,7 @@ function ConfigurationView({
               <TableBody>
                 {jobChannels.map((channel) => {
                   const busy = loading[`jobPostChannel:${channel.channel_id}`]
-                  const postingType = jobPostingTypeOptions.some(
-                    (option) => option.value === channel.posting_type,
-                  )
-                    ? (channel.posting_type as JobPostingTypeValue)
-                    : "unknown"
+                  const postingType = jobPostingTypeValue(String(channel.posting_type || ""))
                   return (
                     <TableRow key={channel.channel_id}>
                       <TableCell>

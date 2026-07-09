@@ -1093,16 +1093,24 @@ async def _post_job_lead_to_discord(
     return cast(dict[str, Any], payload), response.status_code
 
 
-async def _list_job_channels_from_bot(request: Request) -> dict[str, Any] | None:
+async def _list_job_channels_from_bot(
+    request: Request,
+    *,
+    register_defaults: bool = True,
+) -> dict[str, Any] | None:
     """Ask the Discord bot for registered job forums and live tag metadata."""
     base_url = settings.discord_bot_internal_base_url.strip()
     api_secret = str(settings.api_shared_secret or "").strip()
     if not base_url or not api_secret:
         return None
     try:
+        params = {}
+        if not register_defaults:
+            params["register_defaults"] = "false"
         response = await _http_client_from_app(request.app).get(
             f"{base_url.rstrip('/')}/internal/jobs/channels",
             headers={"X-API-Secret": api_secret},
+            params=params,
             timeout=10.0,
         )
     except httpx.HTTPError as exc:
@@ -4114,7 +4122,10 @@ async def _dashboard_job_channels_payload(
             payload["available_channels"] = []
         return payload
 
-    live_channels = await _list_job_channels_from_bot(request)
+    live_channels = await _list_job_channels_from_bot(
+        request,
+        register_defaults=not include_available,
+    )
     if live_channels is not None:
         channels = live_channels.get("channels")
         if isinstance(channels, list):
@@ -4138,7 +4149,7 @@ async def _dashboard_job_channels_payload(
             {
                 "channel_id": channel.channel_id,
                 "posting_type": channel.posting_type.value,
-                "registered": True,
+                **({"registered": True} if include_available else {}),
             }
             for channel in channels
         ]

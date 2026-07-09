@@ -3637,14 +3637,19 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             metadata["registered"] = registered
         return metadata
 
-    async def list_registered_job_post_forums(self) -> tuple[dict[str, Any], int]:
+    async def list_registered_job_post_forums(
+        self,
+        *,
+        register_defaults: bool = True,
+    ) -> tuple[dict[str, Any], int]:
         """Return live Discord forum metadata for registered job-post channels."""
         guild = self._resolve_configured_guild()
         if guild is None:
             return {"error": "guild_not_found"}, 404
         try:
             await self._refresh_jobs_channel_cache(guild.id)
-            await self._register_default_job_forum_channels(guild)
+            if register_defaults:
+                await self._register_default_job_forum_channels(guild)
         except Exception as exc:
             logger.warning(
                 "Failed loading registered jobs channels guild=%s: %s",
