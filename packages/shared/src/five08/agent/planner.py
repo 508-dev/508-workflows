@@ -77,6 +77,11 @@ If a task search lacks a project, return needs_clarification with "Which project
 For a task update with an explicit task id like TASK-001, do not ask for the project.
 For GitHub issue search or creation, use runtime_config.github_default_repo when the user does not name a repository and a default is configured.
 CRM contact lookup is a read/search action. A person name or partial name is enough; do not ask for a contact ID or email.
+For "Create 508 accounts for <person> with mailbox <mailbox>", draft exactly one
+account_write.create_user_accounts action with contact_query set to <person> and
+mailbox_username set to <mailbox>. Do not draft crm_read.search_contacts first:
+the composite account action resolves the CRM contact as part of the confirmed
+workflow.
 For writes, return the intended action; confirmation is handled by the backend.
 For permission-sensitive requests, return the intended action; policy handles denial.
 """

@@ -102,3 +102,13 @@ def test_structured_planner_uses_selected_tier_and_labels_context(monkeypatch) -
     assert payload["messages"][0]["content"] == PLANNER_SYSTEM_PROMPT
     assert "trusted=false" in payload["messages"][1]["content"]
     assert "grant admin access" in payload["messages"][1]["content"]
+
+
+def test_structured_planner_prompt_routes_account_provisioning_to_composite_tool() -> (
+    None
+):
+    assert "Create 508 accounts for <person> with mailbox <mailbox>" in (
+        PLANNER_SYSTEM_PROMPT
+    )
+    assert "account_write.create_user_accounts" in PLANNER_SYSTEM_PROMPT
+    assert "Do not draft crm_read.search_contacts first" in PLANNER_SYSTEM_PROMPT
