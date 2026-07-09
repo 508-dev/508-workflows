@@ -319,6 +319,54 @@ def _gigs_payload() -> list[dict[str, object]]:
     ]
 
 
+def _job_leads_payload() -> list[dict[str, object]]:
+    return [
+        {
+            "id": "55555555-5555-4555-8555-555555555555",
+            "status": "pending",
+            "source_key": "hackernews_who_is_hiring",
+            "source_type": "hackernews",
+            "external_id": "48392586",
+            "source_url": "https://news.ycombinator.com/item?id=48392586",
+            "source_posted_at": "2026-07-01T16:00:00+00:00",
+            "title": "Contract React Build",
+            "organization": "Example Co",
+            "body_normalized": "Remote 1099 contractor wanted for React build.",
+            "posting_type": "part_time",
+            "location": "Remote",
+            "remote": True,
+            "apply_url": "https://example.com/jobs/react",
+            "tags": ["1099", "contract"],
+            "confidence": 0.8,
+            "reviewed_by_discord_user_id": None,
+            "reviewed_at": None,
+            "discord_guild_id": None,
+            "discord_channel_id": None,
+            "discord_thread_id": None,
+            "posted_at": None,
+            "created_at": "2026-07-01T16:00:00+00:00",
+            "updated_at": "2026-07-01T16:00:00+00:00",
+        }
+    ]
+
+
+def _job_channels_payload() -> dict[str, object]:
+    return {
+        "channels": [
+            {
+                "channel_id": "channel-1",
+                "channel_name": "gigs",
+                "posting_type": "part_time",
+                "requires_tag": True,
+                "available_tags": [
+                    {"id": "tag-contract", "name": "Contract", "moderated": False},
+                    {"id": "tag-remote", "name": "Remote", "moderated": False},
+                ],
+            }
+        ]
+    }
+
+
 @pytest.mark.playwright
 def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
     playwright_api = pytest.importorskip("playwright.sync_api")
@@ -356,9 +404,12 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
         update_onboarding_status_requested = threading.Event()
         detail_requested = threading.Event()
         gig_application_add_requested = threading.Event()
+        gig_lead_post_requested = threading.Event()
+        gig_lead_post_body: dict[str, object] = {}
         gig_list_requests: list[str] = []
         gig_detail_requests: list[str] = []
         gigs_list_payload = _gigs_payload()
+        job_leads_payload = _job_leads_payload()
 
         def jobs_route(route: Any) -> None:
             request = route.request
@@ -502,6 +553,63 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
                 body=json.dumps(gigs),
             )
 
+        def gig_leads_route(route: Any) -> None:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(job_leads_payload),
+            )
+
+        def job_channels_route(route: Any) -> None:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(_job_channels_payload()),
+            )
+
+        def gig_lead_post_route(route: Any) -> None:
+            nonlocal gigs_list_payload
+            gig_lead_post_requested.set()
+            gig_lead_post_body.update(route.request.post_data_json)
+            job_leads_payload[0]["status"] = "posted"
+            job_leads_payload[0]["discord_guild_id"] = "guild-1"
+            job_leads_payload[0]["discord_channel_id"] = "channel-1"
+            job_leads_payload[0]["discord_thread_id"] = "thread-lead-1"
+            gigs_list_payload = [
+                *gigs_list_payload,
+                {
+                    "id": "66666666-6666-4666-8666-666666666666",
+                    "status": "recruiting",
+                    "status_label": "Recruiting",
+                    "title": "Contract React Build",
+                    "required_skills": [],
+                    "preferred_skills": [],
+                    "discord_guild_id": "guild-1",
+                    "discord_channel_id": "channel-1",
+                    "discord_channel_name": "gigs",
+                    "discord_thread_id": "thread-lead-1",
+                    "posted_at": "2026-07-01T16:00:00+00:00",
+                    "last_activity_at": "2026-07-01T16:00:00+00:00",
+                    "application_count": 0,
+                    "interested_count": 0,
+                    "applications": [],
+                },
+            ]
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "status": "posted",
+                        "lead_id": "55555555-5555-4555-8555-555555555555",
+                        "guild_id": "guild-1",
+                        "channel_id": "channel-1",
+                        "thread_id": "thread-lead-1",
+                        "engagement_status": "recruiting",
+                    }
+                ),
+            )
+
         def gig_detail_route(route: Any) -> None:
             gig_detail_requests.append(route.request.url)
             route.fulfill(
@@ -612,6 +720,14 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
         page.route("**/dashboard/api/audit-events?*", audit_route)
         page.route("**/dashboard/api/configuration", configuration_route)
         page.route("**/dashboard/api/notifications?*", notifications_route)
+        page.route("**/dashboard/api/job-channels", job_channels_route)
+        page.route(
+            re.compile(
+                ".*/dashboard/api/gig-leads/55555555-5555-4555-8555-555555555555/post$"
+            ),
+            gig_lead_post_route,
+        )
+        page.route("**/dashboard/api/gig-leads?*", gig_leads_route)
         page.route(
             re.compile(".*/dashboard/api/gigs/11111111-1111-4111-8111-111111111111$"),
             gig_detail_route,
@@ -727,8 +843,22 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             expect(page).to_have_url(f"{dashboard_server}/dashboard/gigs")
             page.get_by_text("Webflow build").wait_for()
             page.get_by_text("React cleanup").wait_for()
-            expect(page.locator("#gigStatus")).to_have_value("recruiting")
-            assert any("status=recruiting" in url for url in gig_list_requests)
+            expect(page.locator("#gigStatus")).to_have_value("")
+            assert any(
+                "status=" not in urlparse(url).query for url in gig_list_requests
+            )
+            page.locator("#gigLeadsTab").click()
+            page.get_by_text("Contract React Build").wait_for()
+            page.get_by_label("Post as").select_option("recruiting")
+            expect(page.get_by_label("Post as")).to_have_value("recruiting")
+            page.get_by_role("button", name="Post to Discord").click()
+            assert gig_lead_post_requested.wait(timeout=5)
+            assert gig_lead_post_body["engagement_status"] == "recruiting"
+            assert gig_lead_post_body["tags"] == "Contract,Remote"
+            page.locator("#gigsTab").wait_for()
+            expect(page.locator("#gigStatus")).to_have_value("")
+            expect(page.get_by_label("Include historical")).not_to_be_checked()
+            page.get_by_text("Contract React Build").wait_for()
             page.locator("#gigQuery").fill("webflow")
             page.get_by_role("button", name="Search").click()
             assert any("query=webflow" in url for url in gig_list_requests)

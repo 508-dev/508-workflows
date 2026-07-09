@@ -151,6 +151,160 @@ def test_job_lead_allowed_mentions_disables_all_mentions() -> None:
     assert payload["parse"] == []
 
 
+async def test_post_job_lead_to_discord_requires_approved_lead() -> None:
+    cog = JobsCog(Mock())
+    lead = _make_job_lead(status=JobLeadStatus.PENDING)
+
+    with patch.object(jobs_module, "get_job_lead", return_value=lead):
+        result, status_code = await cog.post_job_lead_to_discord(
+            lead_id=lead.id,
+            reviewer_discord_user_id="42",
+        )
+
+    assert status_code == 409
+    assert result == {"error": "job_lead_not_approved", "lead_id": lead.id}
+
+
+async def test_post_job_lead_to_discord_approves_and_marks_posted() -> None:
+    guild = SimpleNamespace(id=123)
+    channel = SimpleNamespace(
+        id=456,
+        name="gigs",
+        guild=guild,
+        available_tags=[],
+        create_thread=AsyncMock(
+            return_value=SimpleNamespace(
+                thread=SimpleNamespace(id=789),
+                message=SimpleNamespace(id=790),
+            )
+        ),
+    )
+    lead = _make_job_lead(status=JobLeadStatus.PENDING)
+    approved = _make_job_lead(status=JobLeadStatus.APPROVED)
+    posted = _make_job_lead(
+        status=JobLeadStatus.POSTED,
+        discord_guild_id="123",
+        discord_channel_id="456",
+        discord_thread_id="789",
+    )
+    cog = JobsCog(Mock())
+
+    with (
+        patch.object(jobs_module, "get_job_lead", return_value=lead),
+        patch.object(jobs_module, "review_job_lead", return_value=approved) as review,
+        patch.object(jobs_module, "mark_job_lead_posted", return_value=posted) as mark,
+        patch.object(
+            jobs_module,
+            "upsert_discord_engagement",
+            return_value="engagement-1",
+        ) as upsert_engagement,
+        patch.object(jobs_module, "add_engagement_event") as add_event,
+    ):
+        result, status_code = await cog.post_job_lead_to_discord(
+            lead_id=lead.id,
+            reviewer_discord_user_id="42",
+            channel=channel,
+            approve_before_post=True,
+            engagement_status=EngagementStatus.RECRUITING,
+        )
+
+    assert status_code == 200
+    assert result["thread_id"] == "789"
+    assert result["engagement_status"] == "recruiting"
+    assert result["engagement_id"] == "engagement-1"
+    review.assert_called_once()
+    mark.assert_called_once_with(
+        jobs_module.settings,
+        lead_id=approved.id,
+        reviewer_discord_user_id="42",
+        guild_id="123",
+        channel_id="456",
+        thread_id="789",
+    )
+    channel.create_thread.assert_awaited_once()
+    assert channel.create_thread.await_args.kwargs["name"].startswith("[RECRUITING] ")
+    payload = upsert_engagement.call_args.args[1]
+    assert payload.status is EngagementStatus.RECRUITING
+    assert payload.message_id == "790"
+    assert payload.thread_id == "789"
+    assert payload.posted_by_discord_user_id == "42"
+    add_event.assert_called_once()
+
+
+def test_job_lead_forum_tags_select_required_fallback() -> None:
+    channel = SimpleNamespace(
+        available_tags=[
+            SimpleNamespace(name="Full-time", moderated=False),
+            SimpleNamespace(name="Contract", moderated=False),
+        ],
+        flags=SimpleNamespace(require_tag=True),
+    )
+    lead = _make_job_lead(tags=[], remote=False)
+
+    tags = JobsCog._resolve_job_lead_forum_tags(channel, lead, None)
+
+    assert [tag.name for tag in tags] == ["Contract"]
+
+
+async def test_resolve_job_lead_post_channel_requires_registered_explicit_channel(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(jobs_module.settings, "discord_server_id", "123")
+
+    class FakeForumChannel:
+        id = 456
+        guild = SimpleNamespace(id=123)
+
+    bot = Mock()
+    bot.guilds = []
+    bot.get_channel.return_value = FakeForumChannel()
+    bot.get_guild.return_value = FakeForumChannel.guild
+    cog = JobsCog(bot)
+    cog._jobs_channels_by_guild[123] = set()
+    monkeypatch.setattr(jobs_module.discord, "ForumChannel", FakeForumChannel)
+
+    with (
+        patch.object(cog, "_refresh_jobs_channel_cache", new_callable=AsyncMock),
+        patch.object(
+            cog, "_register_default_job_forum_channels", new_callable=AsyncMock
+        ),
+    ):
+        channel, result, status_code = await cog._resolve_job_lead_post_channel(
+            _make_job_lead(),
+            channel_id="456",
+        )
+
+    assert channel is None
+    assert status_code == 403
+    assert result == {"error": "job_forum_not_registered"}
+
+
+async def test_resolve_job_lead_post_channel_rejects_wrong_guild(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(jobs_module.settings, "discord_server_id", "123")
+
+    class FakeForumChannel:
+        id = 456
+        guild = SimpleNamespace(id=999)
+
+    bot = Mock()
+    bot.guilds = []
+    bot.get_channel.return_value = FakeForumChannel()
+    bot.get_guild.return_value = SimpleNamespace(id=123)
+    cog = JobsCog(bot)
+    monkeypatch.setattr(jobs_module.discord, "ForumChannel", FakeForumChannel)
+
+    channel, result, status_code = await cog._resolve_job_lead_post_channel(
+        _make_job_lead(),
+        channel_id="456",
+    )
+
+    assert channel is None
+    assert status_code == 403
+    assert result == {"error": "job_forum_wrong_guild"}
+
+
 def test_update_gig_status_allows_original_thread_poster() -> None:
     interaction = SimpleNamespace(user=SimpleNamespace(id=123, roles=[]))
 
@@ -180,6 +334,7 @@ def test_update_gig_status_rejects_unprivileged_non_poster() -> None:
 
 
 def test_update_gig_status_accepts_only_explicit_command_values() -> None:
+    assert JobsCog._explicit_gig_status("LEAD") is EngagementStatus.LEAD
     assert JobsCog._explicit_gig_status("FILLED") is EngagementStatus.FILLED
     assert JobsCog._explicit_gig_status("open") is None
     assert JobsCog._explicit_gig_status("stale") is None

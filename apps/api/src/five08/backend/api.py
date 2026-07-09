@@ -27,6 +27,7 @@ from uuid import UUID, uuid4
 import httpx
 import uvicorn
 from fastapi import FastAPI, Query, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
@@ -55,6 +56,12 @@ from five08.agent import (
 )
 from five08.clients.espo import EspoAPIError, EspoClient
 from five08.logging import configure_observability
+from five08.job_leads import (
+    JobLeadStatus,
+    list_job_leads,
+    review_job_lead,
+)
+from five08.job_channels import list_registered_job_post_channel_configs
 from five08.queue import (
     EnqueuedJob,
     JobRecord,
@@ -118,6 +125,9 @@ from five08.backend.schemas import (
     DashboardGigApplicationCreateRequest,
     DashboardGigApplicationStatusRequest,
     DashboardGigStatusRequest,
+    DashboardJobLeadPostRequest,
+    DashboardJobLeadReviewRequest,
+    DashboardJobLeadSyncRequest,
     DashboardOnboardingEmailDraftRequest,
     DashboardOnboardingEmailSendRequest,
     DashboardOnboardingStatusRequest,
@@ -1029,6 +1039,84 @@ async def _sync_discord_gig_thread_status(
     return cast(dict[str, Any], payload)
 
 
+async def _post_job_lead_to_discord(
+    request: Request,
+    *,
+    lead_id: str,
+    reviewer_discord_user_id: str,
+    channel_id: str | None = None,
+    tags: str | None = None,
+    engagement_status: EngagementStatus = EngagementStatus.LEAD,
+) -> tuple[dict[str, Any], int]:
+    """Ask the Discord bot to create a jobs forum thread for an approved lead."""
+    base_url = settings.discord_bot_internal_base_url.strip()
+    if not base_url:
+        return {"error": "bot_endpoint_not_configured"}, 503
+
+    api_secret = str(settings.api_shared_secret or "").strip()
+    if not api_secret:
+        return {"error": "api_secret_not_configured"}, 503
+
+    try:
+        response = await _http_client_from_app(request.app).post(
+            f"{base_url.rstrip('/')}/internal/jobs/job-leads/post",
+            headers={"X-API-Secret": api_secret},
+            json={
+                "lead_id": lead_id,
+                "reviewer_discord_user_id": reviewer_discord_user_id,
+                "channel_id": channel_id,
+                "tags": tags,
+                "approve_before_post": True,
+                "engagement_status": engagement_status.value,
+            },
+            timeout=15.0,
+        )
+    except httpx.HTTPError as exc:
+        logger.warning("Failed posting job lead %s to Discord: %s", lead_id, exc)
+        return {"error": "bot_request_failed"}, 502
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    if response.status_code == 401:
+        return {"error": "bot_auth_failed"}, 502
+    if response.status_code >= 400 and "error" not in payload:
+        payload = {**payload, "error": "bot_request_failed"}
+    return cast(dict[str, Any], payload), response.status_code
+
+
+async def _list_job_channels_from_bot(request: Request) -> dict[str, Any] | None:
+    """Ask the Discord bot for registered job forums and live tag metadata."""
+    base_url = settings.discord_bot_internal_base_url.strip()
+    api_secret = str(settings.api_shared_secret or "").strip()
+    if not base_url or not api_secret:
+        return None
+    try:
+        response = await _http_client_from_app(request.app).get(
+            f"{base_url.rstrip('/')}/internal/jobs/channels",
+            headers={"X-API-Secret": api_secret},
+            timeout=10.0,
+        )
+    except httpx.HTTPError as exc:
+        logger.warning("Failed loading Discord job channel metadata: %s", exc)
+        return None
+    if response.status_code >= 400:
+        logger.warning(
+            "Discord job channel metadata request failed status=%s payload=%s",
+            response.status_code,
+            response.text[:500],
+        )
+        return None
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 MAX_SESSION_COOKIE_CANDIDATES = 5
 
 
@@ -1526,6 +1614,13 @@ def _session_discord_actor_id(session: AuthSession) -> str | None:
     if _session_actor_provider(session) != ActorProvider.DISCORD:
         return None
     return session.subject
+
+
+def _dashboard_steering_or_error(session: AuthSession) -> JSONResponse | None:
+    """Require a steering/admin dashboard identity for global lead mutations."""
+    if _session_has_steering_access(session):
+        return None
+    return JSONResponse({"error": "steering_required"}, status_code=403)
 
 
 async def _dashboard_session_or_error(
@@ -3970,6 +4065,276 @@ async def dashboard_gig_detail_handler(
     if not gigs:
         return JSONResponse({"error": "gig_not_found"}, status_code=404)
     return JSONResponse(gigs[0])
+
+
+async def dashboard_job_channels_handler(request: Request) -> JSONResponse:
+    """Return registered Discord job forums for dashboard lead posting."""
+    _session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_GIGS_READ,
+    )
+    if error_response is not None:
+        return error_response
+
+    guild_id = str(settings.discord_server_id or "").strip()
+    if not guild_id:
+        return JSONResponse({"channels": []})
+
+    live_channels = await _list_job_channels_from_bot(request)
+    if live_channels is not None:
+        channels = live_channels.get("channels")
+        if isinstance(channels, list):
+            return JSONResponse({"channels": channels})
+
+    channels = await asyncio.to_thread(
+        list_registered_job_post_channel_configs,
+        settings,
+        guild_id=guild_id,
+    )
+    return JSONResponse(
+        {
+            "channels": [
+                {
+                    "channel_id": channel.channel_id,
+                    "posting_type": channel.posting_type.value,
+                }
+                for channel in channels
+            ]
+        }
+    )
+
+
+async def dashboard_job_leads_handler(
+    request: Request,
+    status: str | None = Query(default="pending"),
+    limit: int = Query(default=50, ge=1, le=50),
+) -> JSONResponse:
+    """Return sourced job leads for dashboard review."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_GIGS_READ,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+    steering_error = _dashboard_steering_or_error(session)
+    if steering_error is not None:
+        return steering_error
+
+    normalized_status: JobLeadStatus | None
+    if status is None or status.strip().casefold() in {"", "all", "any"}:
+        normalized_status = None
+    else:
+        try:
+            normalized_status = JobLeadStatus(status.strip().casefold())
+        except ValueError:
+            return JSONResponse({"error": "invalid_status"}, status_code=400)
+
+    leads = await asyncio.to_thread(
+        list_job_leads,
+        settings,
+        status=normalized_status,
+        limit=limit,
+    )
+    return JSONResponse(jsonable_encoder(leads))
+
+
+async def dashboard_review_job_lead_handler(
+    request: Request,
+    lead_id: str,
+) -> JSONResponse:
+    """Approve or reject one sourced job lead from the dashboard."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_GIGS_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+    steering_error = _dashboard_steering_or_error(session)
+    if steering_error is not None:
+        return steering_error
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    try:
+        body = await request.json()
+        payload = DashboardJobLeadReviewRequest.model_validate(body)
+    except Exception:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    reviewer = _session_discord_actor_id(session) or session.subject
+    try:
+        lead = await asyncio.to_thread(
+            review_job_lead,
+            settings,
+            lead_id=lead_id,
+            status=payload.status,
+            reviewer_discord_user_id=reviewer,
+        )
+    except ValueError:
+        return JSONResponse({"error": "invalid_status"}, status_code=400)
+
+    if lead is None:
+        return JSONResponse({"error": "job_lead_not_found"}, status_code=404)
+    reviewed_lead_id = (
+        str(lead.get("id") or lead_id)
+        if isinstance(lead, dict)
+        else str(lead.id or lead_id)
+    )
+    actor_provider, actor_subject = _session_audit_actor(session)
+    await _write_auth_audit_event(
+        action="job_leads.review",
+        result=AuditResult.SUCCESS,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="job_lead",
+        resource_id=reviewed_lead_id,
+        metadata={
+            "lead_id": reviewed_lead_id,
+            "status": payload.status,
+        },
+    )
+    return JSONResponse(jsonable_encoder(lead))
+
+
+async def dashboard_post_job_lead_handler(
+    request: Request,
+    lead_id: str,
+) -> JSONResponse:
+    """Post one approved sourced job lead to the registered Discord jobs forum."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_GIGS_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+    steering_error = _dashboard_steering_or_error(session)
+    if steering_error is not None:
+        return steering_error
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        payload = DashboardJobLeadPostRequest.model_validate(body or {})
+    except Exception:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    reviewer = _session_discord_actor_id(session) or session.subject
+    result, status_code = await _post_job_lead_to_discord(
+        request,
+        lead_id=lead_id,
+        reviewer_discord_user_id=reviewer,
+        channel_id=payload.channel_id,
+        tags=payload.tags,
+        engagement_status=EngagementStatus(payload.engagement_status),
+    )
+    if status_code >= 400:
+        return JSONResponse(result, status_code=status_code)
+
+    actor_provider, actor_subject = _session_audit_actor(session)
+    await _write_auth_audit_event(
+        action="job_leads.post",
+        result=AuditResult.SUCCESS,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="job_lead",
+        resource_id=str(result.get("lead_id") or lead_id),
+        metadata={
+            "lead_id": result.get("lead_id") or lead_id,
+            "guild_id": result.get("guild_id"),
+            "channel_id": result.get("channel_id"),
+            "thread_id": result.get("thread_id"),
+            "engagement_status": result.get("engagement_status")
+            or payload.engagement_status,
+        },
+    )
+    return JSONResponse(result)
+
+
+async def dashboard_sync_job_leads_handler(request: Request) -> JSONResponse:
+    """Enqueue a sourced job lead scrape from the dashboard."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_GIGS_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+    steering_error = _dashboard_steering_or_error(session)
+    if steering_error is not None:
+        return steering_error
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        payload = DashboardJobLeadSyncRequest.model_validate(body or {})
+    except Exception:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    normalized_source = payload.source.strip() or "hackernews_who_is_hiring"
+    if normalized_source.casefold() not in {
+        "hn",
+        "hackernews",
+        "hackernews_who_is_hiring",
+    }:
+        return JSONResponse({"error": "unsupported_job_lead_source"}, status_code=400)
+    now = datetime.now(tz=timezone.utc)
+    job = await asyncio.to_thread(
+        enqueue_job,
+        queue=request.app.state.queue,
+        fn=JOB_FUNCTIONS["scrape_job_leads_job"],
+        args=(),
+        settings=settings,
+        kwargs={"source": normalized_source, "story_id": payload.story_id},
+        idempotency_key=(
+            f"job-leads:{normalized_source}:{payload.story_id or 'latest'}:"
+            f"{now.strftime('%Y%m%d%H%M')}"
+        ),
+    )
+    actor_provider, actor_subject = _session_audit_actor(session)
+    await _write_auth_audit_event(
+        action="job_leads.sync",
+        result=AuditResult.SUCCESS,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="job_lead_source",
+        resource_id=normalized_source,
+        metadata={
+            "source": normalized_source,
+            "story_id": payload.story_id,
+            "job_id": job.id,
+            "created": job.created,
+        },
+    )
+    return JSONResponse(
+        {
+            "status": "queued",
+            "source": normalized_source,
+            "story_id": payload.story_id,
+            "job_id": job.id,
+            "created": job.created,
+        },
+        status_code=202,
+    )
 
 
 async def dashboard_notifications_handler(

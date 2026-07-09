@@ -52,6 +52,14 @@ export function jsonPreview(value: unknown) {
   return JSON.stringify(value, null, 2)
 }
 
+export function isTerminalJobStatus(value?: string | null) {
+  return ["succeeded", "dead", "canceled"].includes(
+    String(value || "")
+      .trim()
+      .toLowerCase(),
+  )
+}
+
 export function onboardingStateValue(person: OnboardingStateCarrier) {
   return person.onboarding_state || person.onboardingState || person.cOnboardingState || ""
 }

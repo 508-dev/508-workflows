@@ -43,6 +43,7 @@ import {
   displayOnboarder,
   formatDate,
   githubUrl,
+  isTerminalJobStatus,
   jsonPreview,
   labelForOnboardingState,
   linkedinUrl,
@@ -180,6 +181,9 @@ type JobDetail = Job & {
   result?: unknown
 }
 
+const GIG_LEAD_SYNC_POLL_INTERVAL_MS = 2000
+const GIG_LEAD_SYNC_MAX_POLLS = 90
+
 type GigApplication = {
   id: string
   status?: string
@@ -220,6 +224,48 @@ type Gig = {
   application_count?: number
   interested_count?: number
   applications?: GigApplication[]
+}
+
+type JobLead = {
+  id: string
+  status: "pending" | "approved" | "rejected" | "posted"
+  source_key?: string
+  source_type?: string
+  external_id?: string
+  external_parent_id?: string
+  source_url?: string
+  source_posted_at?: string
+  title?: string
+  organization?: string
+  body_normalized?: string
+  posting_type?: string
+  location?: string
+  remote?: boolean | null
+  apply_url?: string
+  tags?: string[]
+  confidence?: number
+  reviewed_by_discord_user_id?: string
+  reviewed_at?: string
+  discord_guild_id?: string
+  discord_channel_id?: string
+  discord_thread_id?: string
+  posted_at?: string
+  created_at?: string
+  updated_at?: string
+}
+
+type JobPostChannel = {
+  channel_id: string
+  channel_name?: string
+  posting_type: string
+  requires_tag?: boolean
+  available_tags?: JobPostChannelTag[]
+}
+
+type JobPostChannelTag = {
+  id?: string
+  name: string
+  moderated?: boolean
 }
 
 type DashboardNotification = {
@@ -809,6 +855,8 @@ function App() {
   const [crmBaseUrl, setCrmBaseUrl] = useState("")
   const [jobs, setJobs] = useState<Job[]>([])
   const [gigs, setGigs] = useState<Gig[]>([])
+  const [gigLeads, setGigLeads] = useState<JobLead[]>([])
+  const [jobPostChannels, setJobPostChannels] = useState<JobPostChannel[]>([])
   const [projects, setProjects] = useState<Project[]>([])
   const [projectsSummary, setProjectsSummary] = useState<ProjectsResponse["summary"]>({})
   const [wikiMatches, setWikiMatches] = useState<WikiMatchPreview | null>(null)
@@ -851,10 +899,12 @@ function App() {
   const [minutes, setMinutes] = useState("60")
   const [status, setStatus] = useState("")
   const [jobType, setJobType] = useState("")
-  const [gigStatus, setGigStatus] = useState("recruiting")
+  const [gigStatus, setGigStatus] = useState("")
   const [gigQuery, setGigQuery] = useState("")
   const [gigIncludeHistorical, setGigIncludeHistorical] = useState(false)
   const [gigLimit, setGigLimit] = useState(100)
+  const [activeGigTab, setActiveGigTab] = useState<"gigs" | "leads">("gigs")
+  const [gigLeadStatus, setGigLeadStatus] = useState("pending")
   const [projectQuery, setProjectQuery] = useState("")
   const [projectStatus, setProjectStatus] = useState(initialProjectDetailId ? "" : "Open")
   const [staleRecruitingDays, setStaleRecruitingDays] = useState(7)
@@ -1000,12 +1050,24 @@ function App() {
     return `/dashboard/api/jobs?${params.toString()}`
   }
 
-  function gigsUrl() {
+  function gigsUrl(options: { status?: string; query?: string } = {}) {
+    const status = options.status ?? gigStatus
+    const query = options.query ?? gigQuery
     const params = new URLSearchParams({ limit: String(gigLimit) })
-    if (gigStatus) params.set("status", gigStatus)
-    if (gigQuery.trim()) params.set("query", gigQuery.trim())
+    if (status) params.set("status", status)
+    if (query.trim()) params.set("query", query.trim())
     if (gigIncludeHistorical) params.set("include_historical", "true")
     return `/dashboard/api/gigs?${params.toString()}`
+  }
+
+  function gigLeadsUrl() {
+    const params = new URLSearchParams({ limit: "50" })
+    if (gigLeadStatus) params.set("status", gigLeadStatus)
+    return `/dashboard/api/gig-leads?${params.toString()}`
+  }
+
+  function jobChannelsUrl() {
+    return "/dashboard/api/job-channels"
   }
 
   function projectsUrl() {
@@ -1028,10 +1090,10 @@ function App() {
     }
   }
 
-  async function loadGigs() {
+  async function loadGigs(options: { status?: string; query?: string } = {}) {
     setBusy("gigs", true)
     try {
-      const payload = await requestJson<Gig[]>(gigsUrl())
+      const payload = await requestJson<Gig[]>(gigsUrl(options))
       setGigs(payload)
       showToast(`Loaded ${payload.length} gig${payload.length === 1 ? "" : "s"}`, "ok")
       void loadNotifications()
@@ -1040,6 +1102,61 @@ function App() {
     } finally {
       setBusy("gigs", false)
     }
+  }
+
+  async function loadGigLeads() {
+    setBusy("gigLeads", true)
+    try {
+      const payload = await requestJson<JobLead[]>(gigLeadsUrl())
+      setGigLeads(payload)
+      showToast(`Loaded ${payload.length} lead${payload.length === 1 ? "" : "s"}`, "ok")
+    } catch (error) {
+      showError(error, "Unable to load job leads")
+    } finally {
+      setBusy("gigLeads", false)
+    }
+  }
+
+  async function loadJobPostChannels() {
+    if (!can("gigs:read")) return
+    setBusy("jobPostChannels", true)
+    try {
+      const payload = await requestJson<{ channels?: JobPostChannel[] }>(jobChannelsUrl())
+      setJobPostChannels(payload.channels || [])
+    } catch (error) {
+      showError(error, "Unable to load job channels")
+    } finally {
+      setBusy("jobPostChannels", false)
+    }
+  }
+
+  async function pollGigLeadSyncJob(jobId: string) {
+    for (let attempt = 0; attempt < GIG_LEAD_SYNC_MAX_POLLS; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, GIG_LEAD_SYNC_POLL_INTERVAL_MS))
+      const detail = await requestJson<JobDetail>(
+        `/dashboard/api/jobs/${encodeURIComponent(jobId)}`,
+      )
+      const status = String(detail.status || "")
+        .trim()
+        .toLowerCase()
+      if (!isTerminalJobStatus(status)) continue
+
+      if (status === "succeeded") {
+        showToast("HN lead scrape finished; refreshing leads", "ok")
+        await loadGigLeads()
+        if (view === "jobs") await loadJobs()
+        return
+      }
+
+      if (view === "jobs") await loadJobs()
+      showToast(`HN lead scrape ${status || "finished"}; check background task ${jobId}`, "warning")
+      return
+    }
+
+    showToast(
+      `HN lead scrape is still running; refresh leads or check background task ${jobId}`,
+      "warning",
+    )
   }
 
   async function loadProjects() {
@@ -1469,7 +1586,93 @@ function App() {
 
   async function refreshGigsView() {
     await loadGigs()
+    await loadGigLeads()
+    await loadJobPostChannels()
     if (selectedGigId) await loadGigDetail(selectedGigId)
+  }
+
+  async function syncGigLeads() {
+    setBusy("gigLeadsSync", true)
+    showToast("Queueing HN lead scrape")
+    try {
+      const payload = await requestJson<{ job_id?: string; created?: boolean }>(
+        "/dashboard/api/gig-leads/sync",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ source: "hackernews_who_is_hiring" }),
+        },
+      )
+      showToast(
+        payload.created === false ? "HN lead scrape already queued" : "HN lead scrape queued",
+        "ok",
+      )
+      if (payload.job_id) {
+        try {
+          await pollGigLeadSyncJob(payload.job_id)
+        } catch (error) {
+          showError(error, "Unable to monitor HN lead scrape")
+        }
+      } else {
+        await loadGigLeads()
+      }
+    } catch (error) {
+      showError(error, "Unable to queue HN lead scrape")
+    } finally {
+      setBusy("gigLeadsSync", false)
+    }
+  }
+
+  async function reviewGigLead(leadId: string, nextStatus: "approved" | "rejected") {
+    setBusy(`gigLead:${leadId}:review`, true)
+    try {
+      await requestJson<JobLead>(`/dashboard/api/gig-leads/${encodeURIComponent(leadId)}/review`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: nextStatus }),
+      })
+      showToast(`${nextStatus === "approved" ? "Approved" : "Rejected"} lead`, "ok")
+      await loadGigLeads()
+    } catch (error) {
+      showError(error, "Unable to review lead")
+    } finally {
+      setBusy(`gigLead:${leadId}:review`, false)
+    }
+  }
+
+  async function postGigLead(
+    leadId: string,
+    options: {
+      channelId?: string
+      engagementStatus?: "lead" | "recruiting"
+      tags?: string[]
+    } = {},
+  ) {
+    setBusy(`gigLead:${leadId}:post`, true)
+    try {
+      await requestJson<{ thread_id?: string }>(
+        `/dashboard/api/gig-leads/${encodeURIComponent(leadId)}/post`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            channel_id: options.channelId || undefined,
+            engagement_status: options.engagementStatus || "lead",
+            tags: (options.tags || []).join(",") || undefined,
+          }),
+        },
+      )
+      showToast("Posted lead to Discord", "ok")
+      setActiveGigTab("gigs")
+      setGigStatus("")
+      setGigQuery("")
+      await loadGigLeads()
+      await loadGigs({ status: "", query: "" })
+    } catch (error) {
+      showError(error, "Unable to post lead")
+    } finally {
+      setBusy(`gigLead:${leadId}:post`, false)
+    }
   }
 
   async function loadNotifications() {
@@ -2115,7 +2318,11 @@ function App() {
     if (permissions.length === 0) return
     if (can("gigs:read")) void loadNotifications()
     if (view === "people") void loadPeople()
-    if (view === "gigs") void loadGigs()
+    if (view === "gigs") {
+      void loadGigs()
+      void loadGigLeads()
+      void loadJobPostChannels()
+    }
     if (view === "projects") void loadProjects()
     if (view === "onboarding") void loadOnboarding()
     if (view === "newsletter") void loadNewsletterDashboard()
@@ -2130,7 +2337,11 @@ function App() {
     if (permissions.length === 0) return
     if (can("gigs:read")) void loadNotifications()
     if (view === "people") void loadPeople()
-    if (view === "gigs") void loadGigs()
+    if (view === "gigs") {
+      void loadGigs()
+      void loadGigLeads()
+      void loadJobPostChannels()
+    }
     if (view === "projects") void loadProjects()
     if (view === "onboarding") void loadOnboarding()
     if (view === "newsletter") void loadNewsletterDashboard()
@@ -2149,6 +2360,11 @@ function App() {
   useEffect(() => {
     if (view === "gigs" && permissions.length > 0) void loadGigs()
   }, [gigStatus, gigIncludeHistorical, gigLimit])
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: lead reload intentionally follows lead status changes only while gigs is active.
+  useEffect(() => {
+    if (view === "gigs" && permissions.length > 0) void loadGigLeads()
+  }, [gigLeadStatus])
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: projects reload intentionally follows status changes only while projects is active.
   useEffect(() => {
@@ -2482,21 +2698,28 @@ function App() {
           {view === "gigs" ? (
             <GigsView
               gigs={sortedGigs}
+              leads={gigLeads}
+              jobPostChannels={jobPostChannels}
               selectedGig={selectedGig}
               selectedGigId={selectedGigId}
               sort={sort.gigs}
               loading={loading}
+              activeTab={activeGigTab}
               status={gigStatus}
               query={gigQuery}
+              leadStatus={gigLeadStatus}
               includeHistorical={gigIncludeHistorical}
               limit={gigLimit}
               staleDays={staleRecruitingDays}
               canWrite={can("gigs:write")}
+              canManageLeads={can("people:read")}
               canIncludeHistorical={can("people:read")}
               crmContactUrl={crmContactUrl}
               crmAttachmentUrl={crmAttachmentUrl}
+              setActiveTab={setActiveGigTab}
               setStatus={setGigStatus}
               setQuery={setGigQuery}
+              setLeadStatus={setGigLeadStatus}
               setIncludeHistorical={setGigIncludeHistorical}
               setLimit={setGigLimit}
               onRefresh={refreshGigsView}
@@ -2506,6 +2729,9 @@ function App() {
               onUpdateStatus={updateGigStatus}
               onAddApplication={addGigApplication}
               onUpdateApplicationStatus={updateGigApplicationStatus}
+              onSyncLeads={syncGigLeads}
+              onReviewLead={reviewGigLead}
+              onPostLead={postGigLead}
             />
           ) : null}
 
@@ -2981,7 +3207,7 @@ function FilterChips({
   )
 }
 
-const gigStatuses = ["recruiting", "filled", "unknown", "lost", "outdated"] as const
+const gigStatuses = ["lead", "recruiting", "filled", "unknown", "lost", "outdated"] as const
 const applicationStatuses = [
   "suggested",
   "interested",
@@ -4833,21 +5059,28 @@ function ProjectDetailPage(props: {
 
 function GigsView(props: {
   gigs: Gig[]
+  leads: JobLead[]
+  jobPostChannels: JobPostChannel[]
   selectedGig: Gig | null
   selectedGigId: string
   sort: { key: string; direction: SortDirection }
   loading: Record<string, boolean>
+  activeTab: "gigs" | "leads"
   status: string
   query: string
+  leadStatus: string
   includeHistorical: boolean
   limit: number
   staleDays: number
   canWrite: boolean
+  canManageLeads: boolean
   canIncludeHistorical: boolean
   crmContactUrl: (contactId?: string) => string
   crmAttachmentUrl: (attachmentId?: string) => string
+  setActiveTab: (value: "gigs" | "leads") => void
   setStatus: (value: string) => void
   setQuery: (value: string) => void
+  setLeadStatus: (value: string) => void
   setIncludeHistorical: (value: boolean) => void
   setLimit: (value: number) => void
   onRefresh: () => void
@@ -4857,6 +5090,16 @@ function GigsView(props: {
   onUpdateStatus: (gigId: string, status: string) => void
   onAddApplication: (gigId: string, crmProfile: string) => Promise<boolean>
   onUpdateApplicationStatus: (gigId: string, applicationId: string, status: string) => void
+  onSyncLeads: () => void
+  onReviewLead: (leadId: string, status: "approved" | "rejected") => void
+  onPostLead: (
+    leadId: string,
+    options?: {
+      channelId?: string
+      engagementStatus?: "lead" | "recruiting"
+      tags?: string[]
+    },
+  ) => void
 }) {
   const counts = props.gigs.reduce(
     (acc, gig) => {
@@ -4868,70 +5111,199 @@ function GigsView(props: {
     },
     { total: 0, applications: 0, interested: 0, stale: 0 },
   )
-  const filterBar = (
-    <Card className="grid gap-3 p-4 md:grid-cols-[minmax(140px,.75fr)_minmax(220px,1.25fr)_auto_auto_auto] md:items-end">
-      <Label>
-        Status
-        <Select
-          id="gigStatus"
-          value={props.status}
-          onChange={(event) => props.setStatus(event.target.value)}
-        >
-          <option value="">Any status</option>
-          {gigStatuses.map((status) => (
-            <option key={status} value={status}>
-              {titleCase(status)}
-            </option>
-          ))}
-        </Select>
-      </Label>
-      <Label>
-        Search gigs
-        <Input
-          id="gigQuery"
-          value={props.query}
-          autoComplete="off"
-          placeholder="Title, gig text, #tag, @poster"
-          onChange={(event) => props.setQuery(event.target.value)}
-          onKeyDown={(event) => event.key === "Enter" && props.onRefresh()}
-        />
-      </Label>
-      {props.canIncludeHistorical ? (
-        <label className="flex min-h-9 items-center gap-2 text-xs font-bold text-muted-foreground">
-          <input
-            type="checkbox"
-            checked={props.includeHistorical}
-            onChange={(event) => props.setIncludeHistorical(event.target.checked)}
-          />
-          Include historical
-        </label>
-      ) : null}
-      <Button id="searchGigs" type="button" onClick={props.onRefresh} disabled={props.loading.gigs}>
-        <Search />
-        Search
+  const leadCounts = props.leads.reduce(
+    (acc, lead) => {
+      acc.total += 1
+      if (lead.status === "pending") acc.pending += 1
+      if (lead.status === "approved") acc.approved += 1
+      if (lead.status === "posted") acc.posted += 1
+      return acc
+    },
+    { total: 0, pending: 0, approved: 0, posted: 0 },
+  )
+  const tabBar = (
+    <div
+      className="inline-flex w-fit rounded-md border bg-background p-1"
+      role="tablist"
+      aria-label="Gig views"
+    >
+      <Button
+        id="gigsTab"
+        type="button"
+        size="sm"
+        variant={props.activeTab === "gigs" ? "default" : "ghost"}
+        aria-pressed={props.activeTab === "gigs"}
+        onClick={() => props.setActiveTab("gigs")}
+      >
+        <BriefcaseBusiness />
+        Gigs
       </Button>
       <Button
-        id="refreshGigs"
+        id="gigLeadsTab"
         type="button"
-        variant="outline"
-        onClick={props.onRefresh}
-        disabled={props.loading.gigs}
+        size="sm"
+        variant={props.activeTab === "leads" ? "default" : "ghost"}
+        aria-pressed={props.activeTab === "leads"}
+        onClick={() => props.setActiveTab("leads")}
       >
-        <RefreshCw />
-        Refresh
+        <ClipboardList />
+        Leads
       </Button>
-      {props.gigs.length >= props.limit ? (
-        <Button
-          type="button"
-          variant="outline"
-          onClick={() => props.setLimit(Math.min(props.limit + 100, 500))}
-          disabled={props.loading.gigs || props.limit >= 500}
-        >
-          Load more
-        </Button>
-      ) : null}
+    </div>
+  )
+  const filterBar = (
+    <Card className="grid gap-3 p-4">
+      {tabBar}
+      {props.activeTab === "leads" ? (
+        <div className="grid gap-3 md:grid-cols-[minmax(160px,.6fr)_auto_auto] md:items-end">
+          <Label>
+            Lead status
+            <Select
+              id="gigLeadStatus"
+              value={props.leadStatus}
+              onChange={(event) => props.setLeadStatus(event.target.value)}
+            >
+              <option value="pending">Pending</option>
+              <option value="approved">Approved</option>
+              <option value="rejected">Rejected</option>
+              <option value="posted">Posted</option>
+              <option value="all">All statuses</option>
+            </Select>
+          </Label>
+          <Button
+            id="refreshGigLeads"
+            type="button"
+            variant="outline"
+            onClick={props.onRefresh}
+            disabled={props.loading.gigLeads}
+          >
+            <RefreshCw />
+            Refresh
+          </Button>
+          {props.canManageLeads ? (
+            <Button
+              id="syncGigLeads"
+              type="button"
+              onClick={props.onSyncLeads}
+              disabled={props.loading.gigLeadsSync}
+            >
+              <RefreshCw />
+              Scrape HN
+            </Button>
+          ) : null}
+        </div>
+      ) : (
+        <div className="grid gap-3 md:grid-cols-[minmax(140px,.75fr)_minmax(220px,1.25fr)_auto_auto_auto] md:items-end">
+          <Label>
+            Status
+            <Select
+              id="gigStatus"
+              value={props.status}
+              onChange={(event) => props.setStatus(event.target.value)}
+            >
+              <option value="">Any status</option>
+              {gigStatuses.map((status) => (
+                <option key={status} value={status}>
+                  {titleCase(status)}
+                </option>
+              ))}
+            </Select>
+          </Label>
+          <Label>
+            Search gigs
+            <Input
+              id="gigQuery"
+              value={props.query}
+              autoComplete="off"
+              placeholder="Title, gig text, #tag, @poster"
+              onChange={(event) => props.setQuery(event.target.value)}
+              onKeyDown={(event) => event.key === "Enter" && props.onRefresh()}
+            />
+          </Label>
+          {props.canIncludeHistorical ? (
+            <label className="flex min-h-9 items-center gap-2 text-xs font-bold text-muted-foreground">
+              <input
+                type="checkbox"
+                checked={props.includeHistorical}
+                onChange={(event) => props.setIncludeHistorical(event.target.checked)}
+              />
+              Include historical
+            </label>
+          ) : null}
+          <Button
+            id="searchGigs"
+            type="button"
+            onClick={props.onRefresh}
+            disabled={props.loading.gigs}
+          >
+            <Search />
+            Search
+          </Button>
+          <Button
+            id="refreshGigs"
+            type="button"
+            variant="outline"
+            onClick={props.onRefresh}
+            disabled={props.loading.gigs}
+          >
+            <RefreshCw />
+            Refresh
+          </Button>
+          {props.gigs.length >= props.limit ? (
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => props.setLimit(Math.min(props.limit + 100, 500))}
+              disabled={props.loading.gigs || props.limit >= 500}
+            >
+              Load more
+            </Button>
+          ) : null}
+        </div>
+      )}
     </Card>
   )
+
+  if (props.activeTab === "leads") {
+    return (
+      <>
+        {filterBar}
+
+        <section className="grid gap-3 md:grid-cols-4" aria-label="Lead summary">
+          <Metric id="gigLeadMetricTotal" label="Leads" value={leadCounts.total} />
+          <Metric id="gigLeadMetricPending" label="Pending" value={leadCounts.pending} />
+          <Metric id="gigLeadMetricApproved" label="Approved" value={leadCounts.approved} />
+          <Metric id="gigLeadMetricPosted" label="Posted" value={leadCounts.posted} />
+        </section>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Sourced leads</CardTitle>
+            <span id="gigLeadsStatus" className="text-sm text-muted-foreground">
+              {props.loading.gigLeads ? "Loading" : `${props.leads.length} shown`}
+            </span>
+          </CardHeader>
+          <Empty hidden={props.leads.length !== 0}>No sourced leads match this view.</Empty>
+          <div
+            id="gigLeadsBody"
+            className={cn("grid gap-3 p-4", props.leads.length === 0 && "hidden")}
+          >
+            {props.leads.map((lead) => (
+              <JobLeadListItem
+                key={lead.id}
+                lead={lead}
+                loading={props.loading}
+                canWrite={props.canManageLeads}
+                jobPostChannels={props.jobPostChannels}
+                onReviewLead={props.onReviewLead}
+                onPostLead={props.onPostLead}
+              />
+            ))}
+          </div>
+        </Card>
+      </>
+    )
+  }
 
   const detailLoading = props.selectedGigId
     ? props.loading[`gig:${props.selectedGigId}:detail`]
@@ -5049,6 +5421,328 @@ function GigsView(props: {
       </Card>
     </>
   )
+}
+
+function defaultJobPostChannelId(lead: JobLead, channels: JobPostChannel[]) {
+  if (channels.length === 0) return ""
+  const leadPostingType = String(lead.posting_type || "").trim()
+  const preferred =
+    channels.find((channel) => channel.posting_type === leadPostingType) ||
+    channels.find((channel) => channel.posting_type === "part_time") ||
+    channels.find((channel) => channel.posting_type === "part_time_or_full_time") ||
+    channels.find((channel) => channel.posting_type === "unknown") ||
+    channels[0]
+  return preferred?.channel_id || ""
+}
+
+function jobPostChannelLabel(channel: JobPostChannel) {
+  const name = channel.channel_name ? `#${channel.channel_name}` : `#${channel.channel_id}`
+  return `${titleCase(channel.posting_type)} ${name}`
+}
+
+function normalizedForumTagName(value?: string) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+}
+
+function leadForumTagTerms(lead: JobLead) {
+  const terms = new Set((lead.tags || []).map(normalizedForumTagName).filter(Boolean))
+  if (lead.remote) terms.add("remote")
+  const postingType = String(lead.posting_type || "")
+  if (postingType === "part_time") {
+    for (const term of ["part time", "contract", "contractor", "freelance", "gig", "1099"]) {
+      terms.add(term)
+    }
+  }
+  if (postingType === "full_time") {
+    for (const term of ["full time", "fulltime", "employee", "permanent"]) {
+      terms.add(term)
+    }
+  }
+  if (postingType === "part_time_or_full_time") {
+    for (const term of ["part time", "full time", "contract", "employee"]) {
+      terms.add(term)
+    }
+  }
+  if (terms.has("contract to hire")) {
+    terms.add("contract")
+    terms.add("contractor")
+  }
+  if (terms.has("1099")) {
+    terms.add("contract")
+    terms.add("contractor")
+  }
+  return terms
+}
+
+function scoreLeadForumTag(tag: JobPostChannelTag, lead: JobLead, terms: Set<string>) {
+  const tagName = normalizedForumTagName(tag.name)
+  if (!tagName) return -1
+  if (terms.has(tagName)) return 100
+  const leadText = normalizedForumTagName(
+    [lead.title, lead.body_normalized, lead.location, ...(lead.tags || [])].join(" "),
+  )
+  if (tagName === "remote" && lead.remote) return 90
+  if (leadText.includes(tagName)) return 80
+  const postingType = String(lead.posting_type || "")
+  if (
+    postingType === "part_time" &&
+    ["part time", "contract", "contractor", "freelance", "gig", "1099"].includes(tagName)
+  ) {
+    return 70
+  }
+  if (
+    postingType === "full_time" &&
+    ["full time", "fulltime", "employee", "permanent"].includes(tagName)
+  ) {
+    return 70
+  }
+  const termWords = new Set(Array.from(terms).join(" ").split(" ").filter(Boolean))
+  if (tagName.split(" ").some((word) => termWords.has(word))) return 40
+  return 0
+}
+
+function defaultJobPostTagNames(lead: JobLead, channel?: JobPostChannel) {
+  const availableTags = channel?.available_tags || []
+  if (availableTags.length === 0) return []
+  const terms = leadForumTagTerms(lead)
+  const selected = availableTags
+    .filter((tag) => terms.has(normalizedForumTagName(tag.name)))
+    .map((tag) => tag.name)
+    .slice(0, 5)
+  if (selected.length > 0 || !channel?.requires_tag) return selected
+  const [bestTag] = [...availableTags].sort((left, right) => {
+    const scoreDelta = scoreLeadForumTag(right, lead, terms) - scoreLeadForumTag(left, lead, terms)
+    if (scoreDelta !== 0) return scoreDelta
+    return Number(Boolean(left.moderated)) - Number(Boolean(right.moderated))
+  })
+  return bestTag ? [bestTag.name] : []
+}
+
+function JobLeadListItem({
+  lead,
+  loading,
+  canWrite,
+  jobPostChannels,
+  onReviewLead,
+  onPostLead,
+}: {
+  lead: JobLead
+  loading: Record<string, boolean>
+  canWrite: boolean
+  jobPostChannels: JobPostChannel[]
+  onReviewLead: (leadId: string, status: "approved" | "rejected") => void
+  onPostLead: (
+    leadId: string,
+    options?: {
+      channelId?: string
+      engagementStatus?: "lead" | "recruiting"
+      tags?: string[]
+    },
+  ) => void
+}) {
+  const canDecide = canWrite && (lead.status === "pending" || lead.status === "approved")
+  const reviewing = loading[`gigLead:${lead.id}:review`]
+  const posting = loading[`gigLead:${lead.id}:post`]
+  const canPost = canDecide
+  const defaultChannelId = defaultJobPostChannelId(lead, jobPostChannels)
+  const [engagementStatus, setEngagementStatus] = useState<"lead" | "recruiting">("lead")
+  const engagementStatusRef = useRef<HTMLSelectElement>(null)
+  const [channelId, setChannelId] = useState(defaultChannelId)
+  const selectedChannel = jobPostChannels.find((channel) => channel.channel_id === channelId)
+  const [selectedTags, setSelectedTags] = useState<string[]>(() =>
+    defaultJobPostTagNames(lead, selectedChannel),
+  )
+  useEffect(() => {
+    setChannelId(defaultChannelId)
+  }, [defaultChannelId])
+  useEffect(() => {
+    setSelectedTags(defaultJobPostTagNames(lead, selectedChannel))
+  }, [lead, selectedChannel])
+  const requiredTagMissing =
+    Boolean(selectedChannel?.requires_tag) &&
+    Boolean(selectedChannel?.available_tags?.length) &&
+    selectedTags.length === 0
+  function toggleSelectedTag(tagName: string) {
+    setSelectedTags((current) => {
+      if (current.includes(tagName)) return current.filter((name) => name !== tagName)
+      return [...current, tagName].slice(0, 5)
+    })
+  }
+  const discordUrl =
+    lead.discord_guild_id && lead.discord_thread_id
+      ? `https://discord.com/channels/${encodeURIComponent(
+          lead.discord_guild_id,
+        )}/${encodeURIComponent(lead.discord_thread_id)}`
+      : ""
+  return (
+    <article className="grid gap-4 rounded-md border bg-background p-4 lg:grid-cols-[minmax(0,1fr)_220px_190px] lg:items-start">
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <strong className="text-base">{lead.title || "Untitled lead"}</strong>
+          <Badge variant={jobLeadStatusTone(lead.status)}>{titleCase(lead.status)}</Badge>
+          {lead.remote ? <Badge variant="queued">Remote</Badge> : null}
+          {lead.confidence !== undefined ? (
+            <Badge variant="neutral">{Math.round(Number(lead.confidence || 0) * 100)}%</Badge>
+          ) : null}
+        </div>
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {lead.organization ? <Badge variant="neutral">{lead.organization}</Badge> : null}
+          {lead.posting_type ? (
+            <Badge variant="neutral">{titleCase(lead.posting_type)}</Badge>
+          ) : null}
+          {lead.location ? <Badge variant="neutral">{lead.location}</Badge> : null}
+          {(lead.tags || []).slice(0, 6).map((tag) => (
+            <Badge key={tag} variant="queued">
+              {tag}
+            </Badge>
+          ))}
+        </div>
+        <p className="mt-3 max-h-20 overflow-hidden text-sm text-muted-foreground">
+          {lead.body_normalized || "No lead text captured."}
+        </p>
+        <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground">
+          <span>Posted {formatDate(lead.source_posted_at) || "unknown"}</span>
+          <span>Captured {formatDate(lead.created_at) || "unknown"}</span>
+          {lead.source_url ? (
+            <a
+              className="inline-flex items-center gap-1 font-extrabold text-primary"
+              href={lead.source_url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Source
+              <ExternalLink className="size-3.5" />
+            </a>
+          ) : null}
+          {lead.apply_url ? (
+            <a
+              className="inline-flex items-center gap-1 font-extrabold text-primary"
+              href={lead.apply_url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Apply
+              <ExternalLink className="size-3.5" />
+            </a>
+          ) : null}
+          {discordUrl ? (
+            <a
+              className="inline-flex items-center gap-1 font-extrabold text-primary"
+              href={discordUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Discord
+              <ExternalLink className="size-3.5" />
+            </a>
+          ) : null}
+        </div>
+      </div>
+      <div className="grid gap-1 text-sm">
+        <span className="text-xs font-bold text-muted-foreground">Review</span>
+        <span>{lead.reviewed_at ? formatDate(lead.reviewed_at) : "Not reviewed"}</span>
+        <span className="text-muted-foreground">
+          {lead.reviewed_by_discord_user_id
+            ? `By ${lead.reviewed_by_discord_user_id}`
+            : "No reviewer recorded"}
+        </span>
+        <span className="font-mono text-xs text-muted-foreground">{lead.id.slice(0, 8)}</span>
+      </div>
+      {canWrite ? (
+        <div className="grid gap-2">
+          <Label>
+            Post as
+            <Select
+              value={engagementStatus}
+              ref={engagementStatusRef}
+              disabled={!canPost || posting || reviewing}
+              onChange={(event) =>
+                setEngagementStatus(event.target.value === "recruiting" ? "recruiting" : "lead")
+              }
+            >
+              <option value="lead">Lead</option>
+              <option value="recruiting">Recruiting</option>
+            </Select>
+          </Label>
+          {jobPostChannels.length > 0 ? (
+            <Label>
+              Channel
+              <Select
+                value={channelId}
+                disabled={!canPost || posting || reviewing}
+                onChange={(event) => setChannelId(event.target.value)}
+              >
+                {jobPostChannels.map((channel) => (
+                  <option key={channel.channel_id} value={channel.channel_id}>
+                    {jobPostChannelLabel(channel)}
+                  </option>
+                ))}
+              </Select>
+            </Label>
+          ) : null}
+          {selectedChannel?.available_tags?.length ? (
+            <fieldset className="grid gap-1.5">
+              <legend className="text-xs font-bold text-muted-foreground">
+                Tags{selectedChannel.requires_tag ? " (required)" : ""}
+              </legend>
+              <div className="flex flex-wrap gap-1.5">
+                {selectedChannel.available_tags.map((tag) => (
+                  <label
+                    key={tag.id || tag.name}
+                    className="inline-flex min-h-8 items-center gap-1.5 rounded-md border px-2 text-xs font-bold text-muted-foreground"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedTags.includes(tag.name)}
+                      disabled={!canPost || posting || reviewing}
+                      onChange={() => toggleSelectedTag(tag.name)}
+                    />
+                    {tag.name}
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+          ) : null}
+          <Button
+            type="button"
+            disabled={!canPost || posting || reviewing || requiredTagMissing}
+            onClick={() => {
+              const selectedStatus =
+                engagementStatusRef.current?.value === "recruiting" ? "recruiting" : "lead"
+              onPostLead(lead.id, {
+                channelId,
+                engagementStatus: selectedStatus,
+                tags: selectedTags,
+              })
+            }}
+          >
+            <Send />
+            Post to Discord
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={!canDecide || reviewing || posting}
+            onClick={() => onReviewLead(lead.id, "rejected")}
+          >
+            <UserMinus />
+            Reject
+          </Button>
+        </div>
+      ) : null}
+    </article>
+  )
+}
+
+function jobLeadStatusTone(status: JobLead["status"]): Tone {
+  if (status === "approved") return "queued"
+  if (status === "posted") return "succeeded"
+  if (status === "rejected") return "failed"
+  return "neutral"
 }
 
 function GigListItem({

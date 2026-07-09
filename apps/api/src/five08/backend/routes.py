@@ -44,7 +44,11 @@ class BackendRouteSurface(Protocol):
     dashboard_gig_detail_handler: RouteHandler
     dashboard_gigs_handler: RouteHandler
     dashboard_handler: RouteHandler
+    dashboard_job_leads_handler: RouteHandler
+    dashboard_post_job_lead_handler: RouteHandler
+    dashboard_review_job_lead_handler: RouteHandler
     dashboard_job_detail_handler: RouteHandler
+    dashboard_job_channels_handler: RouteHandler
     dashboard_jobs_handler: RouteHandler
     dashboard_me_handler: RouteHandler
     dashboard_newsletter_status_handler: RouteHandler
@@ -64,6 +68,7 @@ class BackendRouteSurface(Protocol):
     dashboard_sync_newsletters_handler: RouteHandler
     dashboard_sync_people_handler: RouteHandler
     dashboard_sync_projects_handler: RouteHandler
+    dashboard_sync_job_leads_handler: RouteHandler
     dashboard_update_configuration_handler: RouteHandler
     dashboard_update_gig_application_status_handler: RouteHandler
     dashboard_update_gig_status_handler: RouteHandler
@@ -120,6 +125,10 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     dashboard_gig_detail_handler = api.dashboard_gig_detail_handler
     dashboard_gigs_handler = api.dashboard_gigs_handler
     dashboard_handler = api.dashboard_handler
+    dashboard_job_leads_handler = api.dashboard_job_leads_handler
+    dashboard_job_channels_handler = api.dashboard_job_channels_handler
+    dashboard_post_job_lead_handler = api.dashboard_post_job_lead_handler
+    dashboard_review_job_lead_handler = api.dashboard_review_job_lead_handler
     dashboard_job_detail_handler = api.dashboard_job_detail_handler
     dashboard_jobs_handler = api.dashboard_jobs_handler
     dashboard_me_handler = api.dashboard_me_handler
@@ -150,6 +159,7 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     dashboard_sync_newsletters_handler = api.dashboard_sync_newsletters_handler
     dashboard_sync_people_handler = api.dashboard_sync_people_handler
     dashboard_sync_projects_handler = api.dashboard_sync_projects_handler
+    dashboard_sync_job_leads_handler = api.dashboard_sync_job_leads_handler
     dashboard_update_configuration_handler = api.dashboard_update_configuration_handler
     dashboard_update_gig_application_status_handler = (
         api.dashboard_update_gig_application_status_handler
@@ -226,6 +236,31 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
         "/dashboard/api/gigs/{engagement_id}",
         dashboard_gig_detail_handler,
         methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/gig-leads",
+        dashboard_job_leads_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/job-channels",
+        dashboard_job_channels_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/gig-leads/sync",
+        dashboard_sync_job_leads_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/dashboard/api/gig-leads/{lead_id}/review",
+        dashboard_review_job_lead_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/dashboard/api/gig-leads/{lead_id}/post",
+        dashboard_post_job_lead_handler,
+        methods=["POST"],
     )
     app.add_api_route(
         "/dashboard/api/notifications",

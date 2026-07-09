@@ -38,6 +38,17 @@ class GigThreadStatusRequest(BaseModel):
     status: str
 
 
+class PostJobLeadRequest(BaseModel):
+    """Internal payload for posting an approved sourced job lead to Discord."""
+
+    lead_id: str
+    reviewer_discord_user_id: str
+    channel_id: str | None = None
+    tags: str | None = None
+    approve_before_post: bool = False
+    engagement_status: str = EngagementStatus.LEAD.value
+
+
 class InternalAPIRoutes:
     """Authenticated bot-internal automation routes."""
 
@@ -55,6 +66,14 @@ class InternalAPIRoutes:
         app.router.add_post(
             "/internal/jobs/thread-status",
             self.gig_thread_status_handler,
+        )
+        app.router.add_post(
+            "/internal/jobs/job-leads/post",
+            self.post_job_lead_handler,
+        )
+        app.router.add_get(
+            "/internal/jobs/channels",
+            self.job_channels_handler,
         )
 
     @staticmethod
@@ -428,4 +447,62 @@ class InternalAPIRoutes:
             )
 
         result, status_code = await self._enqueue_gig_thread_status(payload)
+        return web.json_response(result, status=status_code)
+
+    async def _post_job_lead(
+        self,
+        payload: PostJobLeadRequest,
+    ) -> tuple[dict[str, Any], int]:
+        jobs_cog = self.bot.get_cog("JobsCog")
+        if jobs_cog is None or not hasattr(jobs_cog, "post_job_lead_to_discord"):
+            return {"error": "jobs_cog_unavailable"}, 503
+
+        result, status_code = await jobs_cog.post_job_lead_to_discord(
+            lead_id=payload.lead_id,
+            reviewer_discord_user_id=payload.reviewer_discord_user_id,
+            channel_id=payload.channel_id,
+            tags=payload.tags,
+            approve_before_post=payload.approve_before_post,
+            engagement_status=normalize_engagement_status(payload.engagement_status),
+            reason="Dashboard approved job lead",
+        )
+        return result, status_code
+
+    async def _list_job_channels(self) -> tuple[dict[str, Any], int]:
+        jobs_cog = self.bot.get_cog("JobsCog")
+        if jobs_cog is None or not hasattr(jobs_cog, "list_registered_job_post_forums"):
+            return {"error": "jobs_cog_unavailable"}, 503
+        result, status_code = await jobs_cog.list_registered_job_post_forums()
+        return result, status_code
+
+    async def job_channels_handler(self, request: web.Request) -> web.Response:
+        """Return registered jobs forums with live Discord tag metadata."""
+        if not self._is_authorized(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+
+        result, status_code = await self._list_job_channels()
+        return web.json_response(result, status=status_code)
+
+    async def post_job_lead_handler(self, request: web.Request) -> web.Response:
+        """Create a Discord forum thread for an approved sourced job lead."""
+        if not self._is_authorized(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+
+        try:
+            payload_data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid_json"}, status=400)
+
+        if not isinstance(payload_data, dict):
+            return web.json_response({"error": "payload_must_be_object"}, status=400)
+
+        try:
+            payload = PostJobLeadRequest.model_validate(payload_data)
+        except (ValidationError, TypeError) as exc:
+            return web.json_response(
+                {"error": "invalid_payload", "detail": str(exc)},
+                status=400,
+            )
+
+        result, status_code = await self._post_job_lead(payload)
         return web.json_response(result, status=status_code)
