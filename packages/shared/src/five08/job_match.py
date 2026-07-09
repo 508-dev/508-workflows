@@ -18,6 +18,8 @@ from five08.skills import normalize_skill, normalize_skill_list
 logger = logging.getLogger(__name__)
 
 _MAX_HARD_REQUIRED_SKILLS = 2
+_JOB_REQUIREMENTS_INITIAL_MAX_TOKENS = 4096
+_JOB_REQUIREMENTS_MAX_ATTEMPTS = 3
 
 # Normalize abstract or overly compound job-post phrases into concise, searchable
 # skill terms that are more likely to line up with CRM/resume skill records.
@@ -890,43 +892,80 @@ def extract_job_requirements(
     hints = _regex_hints(posting_text)
     prompt = _build_prompt(posting_text, hints)
 
-    try:
-        response = cast(
-            "ChatCompletion",
-            client.chat.completions.create(
-                **provider_model.chat_completion_kwargs(
-                    temperature=0.1,
-                    response_format={"type": "json_object"},
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You are a recruiting assistant. Extract structured hiring requirements "
-                                "from job postings. Return only valid JSON."
-                            ),
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    max_tokens=2048,
-                )
+    response: Any | None = None
+    raw_content = ""
+    data: dict[str, Any] | None = None
+    attempt_max_tokens = _JOB_REQUIREMENTS_INITIAL_MAX_TOKENS
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a recruiting assistant. Extract structured hiring requirements "
+                "from job postings. Return only valid JSON."
             ),
-        )
-    except Exception as exc:
-        logger.error("OpenAI job extraction call failed: %s", exc)
-        raise RuntimeError(f"OpenAI extraction failed: {exc}") from exc
+        },
+        {"role": "user", "content": prompt},
+    ]
 
-    if not response.choices or not response.choices[0].message.content:
+    for attempt_index in range(_JOB_REQUIREMENTS_MAX_ATTEMPTS):
+        try:
+            response = cast(
+                "ChatCompletion",
+                client.chat.completions.create(
+                    **provider_model.chat_completion_kwargs(
+                        temperature=0.1 if attempt_index == 0 else 0.0,
+                        response_format={"type": "json_object"},
+                        messages=messages,
+                        max_tokens=attempt_max_tokens,
+                        reasoning_effort="minimal",
+                        verbosity="low",
+                    )
+                ),
+            )
+        except Exception as exc:
+            logger.error("OpenAI job extraction call failed: %s", exc)
+            raise RuntimeError(f"OpenAI extraction failed: {exc}") from exc
+
+        first_choice = response.choices[0] if response.choices else None
+        finish_reason = getattr(first_choice, "finish_reason", None)
+        message = getattr(first_choice, "message", None)
+        raw_content = str(getattr(message, "content", "") or "").strip()
+        can_retry_length = (
+            finish_reason == "length"
+            and attempt_index < _JOB_REQUIREMENTS_MAX_ATTEMPTS - 1
+        )
+        if not raw_content:
+            if can_retry_length:
+                attempt_max_tokens *= 2
+                continue
+            raise RuntimeError(
+                f"OpenAI returned empty or missing response content (finish_reason="
+                f"{finish_reason if first_choice is not None else 'no choices'})."
+            )
+
+        try:
+            data = _parse_llm_response(raw_content)
+            break
+        except (json.JSONDecodeError, ValueError) as exc:
+            if can_retry_length:
+                attempt_max_tokens *= 2
+                continue
+            logger.error(
+                "Failed to parse LLM job extraction response: %s",
+                raw_content,
+            )
+            raise RuntimeError(f"LLM returned unparseable response: {exc}") from exc
+
+    if data is None:
+        final_finish_reason = (
+            response.choices[0].finish_reason
+            if response and response.choices
+            else "no choices"
+        )
         raise RuntimeError(
             f"OpenAI returned empty or missing response content (finish_reason="
-            f"{response.choices[0].finish_reason if response.choices else 'no choices'})."
+            f"{final_finish_reason})."
         )
-    raw_content = response.choices[0].message.content.strip()
-
-    try:
-        data = _parse_llm_response(raw_content)
-    except (json.JSONDecodeError, ValueError) as exc:
-        logger.error("Failed to parse LLM job extraction response: %s", raw_content)
-        raise RuntimeError(f"LLM returned unparseable response: {exc}") from exc
 
     hard_required_skills = normalize_skill_list(
         _coerce_str_list(data.get("hard_required_skills"))

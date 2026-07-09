@@ -122,11 +122,16 @@ def test_coerce_str_list_non_list_returns_empty() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_openai_response(payload: dict) -> MagicMock:
+def _make_openai_response(
+    payload: dict | None = None,
+    *,
+    content: str | None = None,
+    finish_reason: str = "stop",
+) -> MagicMock:
     """Build a minimal mock that looks like a chat.completions response."""
     choice = MagicMock()
-    choice.message.content = json.dumps(payload)
-    choice.finish_reason = "stop"
+    choice.message.content = content if content is not None else json.dumps(payload)
+    choice.finish_reason = finish_reason
     response = MagicMock()
     response.choices = [choice]
     return response
@@ -189,6 +194,44 @@ def test_extract_normalizes_required_skills() -> None:
     assert create_kwargs["model"] == "gpt-5-mini"
     assert create_kwargs["response_format"] == {"type": "json_object"}
     assert "temperature" not in create_kwargs
+
+
+def test_extract_retries_empty_length_response_with_larger_token_budget() -> None:
+    payload = {
+        "hard_required_skills": ["Python"],
+        "soft_required_skills": [],
+        "preferred_skills": [],
+        "required_evidence": [],
+        "required_skills": ["Python"],
+        "seniority": "senior",
+        "location_type": "remote_any",
+        "preferred_timezones": [],
+        "raw_location_text": None,
+        "title": "Backend Engineer",
+    }
+    with patch("openai.OpenAI") as mock_openai_cls:
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create.side_effect = [
+            _make_openai_response(content="", finish_reason="length"),
+            _make_openai_response(payload),
+        ]
+
+        result = extract_job_requirements(
+            "Need a senior Python engineer.",
+            api_key="test-key",
+        )
+
+    assert result.hard_required_skills == ["python"]
+    calls = mock_client.chat.completions.create.call_args_list
+    assert len(calls) == 2
+    first_token_budget = calls[0].kwargs.get(
+        "max_completion_tokens", calls[0].kwargs.get("max_tokens")
+    )
+    second_token_budget = calls[1].kwargs.get(
+        "max_completion_tokens", calls[1].kwargs.get("max_tokens")
+    )
+    assert second_token_budget > first_token_budget
 
 
 def test_extract_adds_regex_language_gate_to_hard_requirements() -> None:
