@@ -65,6 +65,7 @@ from five08.job_channels import (
     unregister_job_post_channel,
 )
 from five08.job_leads import (
+    format_job_lead_review_summary,
     get_job_lead,
     JobLead,
     JobLeadStatus,
@@ -3454,12 +3455,43 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
 
     @classmethod
     def _format_job_lead_review_line(cls, index: int, lead: JobLead) -> str:
-        tags = ", ".join(lead.tags[:5]) if lead.tags else "untagged"
         title = cls._truncate_job_lead_text(lead.title, 120)
-        return (
-            f"{index}. `{lead.id[:8]}` **{title}** "
-            f"({lead.confidence:.0%}; {tags})\n{lead.source_url}"
-        )
+        summary = cls._truncate_job_lead_text(format_job_lead_review_summary(lead), 180)
+        return f"{index}. `{lead.id[:8]}` **{title}**\n{summary}\n{lead.source_url}"
+
+    @classmethod
+    def _format_job_lead_review_message(cls, leads: list[JobLead]) -> str:
+        """Format a bounded Discord response for pending lead review."""
+        if not leads:
+            return "Pending job leads:\n\nNo pending job leads found."
+        limit = settings.discord_sendmsg_character_limit
+        header = "Pending job leads:"
+        lines: list[str] = []
+        shown = 0
+        for index, lead in enumerate(leads, start=1):
+            line = cls._format_job_lead_review_line(index, lead)
+            candidate_lines = [*lines, line]
+            omitted = len(leads) - len(candidate_lines)
+            footer = f"\n\nShowing {len(candidate_lines)} of {len(leads)} leads."
+            if omitted > 0:
+                footer += " Use a lower limit to inspect omitted leads."
+            candidate = f"{header}\n\n" + "\n\n".join(candidate_lines) + footer
+            if len(candidate) > limit:
+                break
+            lines = candidate_lines
+            shown = len(candidate_lines)
+
+        if not lines:
+            first = cls._truncate_job_lead_text(
+                cls._format_job_lead_review_line(1, leads[0]),
+                max(0, limit - len(header) - 32),
+            )
+            return f"{header}\n\n{first}"
+
+        footer = f"\n\nShowing {shown} of {len(leads)} leads."
+        if shown < len(leads):
+            footer += " Use a lower limit to inspect omitted leads."
+        return f"{header}\n\n" + "\n\n".join(lines) + footer
 
     @classmethod
     def _format_job_lead_thread_content(cls, lead: JobLead) -> str:
@@ -4014,12 +4046,8 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
-        lines = [
-            self._format_job_lead_review_line(index, lead)
-            for index, lead in enumerate(leads, start=1)
-        ]
         await interaction.followup.send(
-            "Pending job leads:\n\n" + "\n\n".join(lines),
+            self._format_job_lead_review_message(leads),
             ephemeral=True,
         )
 

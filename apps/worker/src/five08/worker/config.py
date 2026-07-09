@@ -72,6 +72,9 @@ class WorkerSettings(SharedSettings):
     agent_reasoning_api_key: str | None = None
     agent_reasoning_base_url: str | None = None
     agent_reasoning_model: str | None = None
+    job_lead_classifier_enabled: bool = True
+    job_lead_classifier_model: str | None = None
+    job_lead_classifier_timeout_seconds: float = Field(default=8.0, gt=0)
     resume_ai_api_key: str | None = None
     resume_ai_base_url: str | None = None
     resume_ai_model: str = "gpt-4.1-mini"

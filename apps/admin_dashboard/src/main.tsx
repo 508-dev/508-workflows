@@ -247,6 +247,16 @@ type JobLead = {
   apply_url?: string
   tags?: string[]
   confidence?: number
+  contractor_classification?: {
+    is_contractor_friendly?: boolean
+    posting_type?: string
+    tags?: string[]
+    confidence?: number
+    confidence_label?: string
+    rationale?: string
+    method?: string
+  }
+  review_summary?: string
   reviewed_by_discord_user_id?: string
   reviewed_at?: string
   discord_guild_id?: string
@@ -5580,6 +5590,16 @@ function defaultJobPostTagNames(lead: JobLead, channel?: JobPostChannel) {
   return bestTag ? [bestTag.name] : []
 }
 
+function jobLeadClassificationLabel(lead: JobLead) {
+  const method = lead.contractor_classification?.method
+  const confidenceLabel = lead.contractor_classification?.confidence_label
+  if (method && confidenceLabel) {
+    const methodLabel = method === "llm" ? "LLM" : "Keyword fallback"
+    return `${methodLabel}: ${confidenceLabel} fit`
+  }
+  return lead.review_summary || "Classification unavailable"
+}
+
 function JobLeadListItem({
   lead,
   loading,
@@ -5643,9 +5663,7 @@ function JobLeadListItem({
           <strong className="text-base">{lead.title || "Untitled lead"}</strong>
           <Badge variant={jobLeadStatusTone(lead.status)}>{titleCase(lead.status)}</Badge>
           {lead.remote ? <Badge variant="queued">Remote</Badge> : null}
-          {lead.confidence !== undefined ? (
-            <Badge variant="neutral">{Math.round(Number(lead.confidence || 0) * 100)}%</Badge>
-          ) : null}
+          <Badge variant="neutral">{jobLeadClassificationLabel(lead)}</Badge>
         </div>
         <div className="mt-2 flex flex-wrap gap-1.5">
           {lead.organization ? <Badge variant="neutral">{lead.organization}</Badge> : null}
@@ -5662,6 +5680,9 @@ function JobLeadListItem({
         <p className="mt-3 max-h-20 overflow-hidden text-sm text-muted-foreground">
           {lead.body_normalized || "No lead text captured."}
         </p>
+        {lead.review_summary ? (
+          <p className="mt-2 text-sm font-semibold text-foreground">{lead.review_summary}</p>
+        ) : null}
         <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground">
           <span>Posted {formatDate(lead.source_posted_at) || "unknown"}</span>
           <span>Captured {formatDate(lead.created_at) || "unknown"}</span>
