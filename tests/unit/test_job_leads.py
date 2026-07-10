@@ -116,8 +116,97 @@ def test_upsert_job_lead_preserves_review_state_on_conflict(monkeypatch) -> None
     assert created is False
     query, params = cursor.executed[0]
     assert "ON CONFLICT (source_key, external_id) DO UPDATE" in query
+    assert "WHERE job_leads.status IN ('pending', 'rejected')" in query
+    assert "apply_url = EXCLUDED.apply_url" in query
     assert "status =" not in query.split("DO UPDATE SET", 1)[1]
     assert params[15] == ["1099", "contract-to-hire"]
+
+
+def test_upsert_job_lead_skips_reviewed_conflict(monkeypatch) -> None:
+    cursor = _CursorStub()
+    _install_connection_stub(monkeypatch, cursor)
+
+    lead_id, created = job_leads.upsert_job_lead(
+        job_leads.SharedSettings(),
+        JobLeadInput(
+            source_key="hackernews_who_is_hiring",
+            source_type="hackernews",
+            external_id="48392586",
+            source_url="https://news.ycombinator.com/item?id=48392586",
+            title="Contract role",
+            body_raw="raw",
+            body_normalized="normalized",
+        ),
+    )
+
+    assert lead_id is None
+    assert created is False
+
+
+def test_update_existing_job_lead_never_inserts(monkeypatch) -> None:
+    cursor = _CursorStub(rows=[{"id": "lead-1"}])
+    _install_connection_stub(monkeypatch, cursor)
+
+    lead_id = job_leads.update_existing_job_lead(
+        job_leads.SharedSettings(),
+        JobLeadInput(
+            source_key="hackernews_who_is_hiring",
+            source_type="hackernews",
+            external_id="48392586",
+            source_url="https://news.ycombinator.com/item?id=48392586",
+            title="Full-time role",
+            body_raw="raw",
+            body_normalized="Full-time role",
+            posting_type="full_time",
+            apply_url="https://example.com/jobs/role",
+            tags=["full-time"],
+            confidence=0.85,
+        ),
+    )
+
+    assert lead_id == "lead-1"
+    query, params = cursor.executed[0]
+    assert "UPDATE job_leads" in query
+    assert "INSERT" not in query
+    assert "status IN ('pending', 'rejected')" in query
+    assert "apply_url = %s" in query
+    assert "apply_url = COALESCE" not in query
+    update_clause = query.split("SET", 1)[1].split("WHERE", 1)[0]
+    assigned_columns = {
+        line.strip().split("=", 1)[0].strip()
+        for line in update_clause.splitlines()
+        if "=" in line
+    }
+    for preserved_column in (
+        "status",
+        "reviewed_at",
+        "reviewed_by_discord_user_id",
+        "discord_guild_id",
+        "discord_channel_id",
+        "discord_thread_id",
+        "posted_at",
+    ):
+        assert preserved_column not in assigned_columns
+    assert params[-2:] == ("hackernews_who_is_hiring", "48392586")
+
+
+def test_existing_job_lead_external_ids_uses_one_batch_query(monkeypatch) -> None:
+    cursor = _CursorStub(rows=[[{"external_id": "11"}, {"external_id": "12"}]])
+    _install_connection_stub(monkeypatch, cursor)
+
+    external_ids = job_leads.existing_job_lead_external_ids(
+        job_leads.SharedSettings(),
+        source_key="hackernews_who_is_hiring",
+        external_ids=["12", "11", "12"],
+    )
+
+    assert external_ids == {"11", "12"}
+    assert len(cursor.executed) == 1
+    assert "status IN ('pending', 'rejected')" in cursor.executed[0][0]
+    assert cursor.executed[0][1] == (
+        "hackernews_who_is_hiring",
+        ["11", "12"],
+    )
 
 
 def test_list_job_leads_filters_pending(monkeypatch) -> None:
@@ -133,6 +222,34 @@ def test_list_job_leads_filters_pending(monkeypatch) -> None:
     assert len(result) == 1
     assert result[0].status is JobLeadStatus.PENDING
     assert cursor.executed[0][1] == ("pending", 5)
+
+
+def test_display_payload_explains_employment_type_and_contact() -> None:
+    row = _lead_row(
+        posting_type="part_time",
+        metadata={
+            "contractor_classification": {
+                "is_contractor_friendly": True,
+                "posting_type": "part_time",
+                "tags": ["contract", "remote"],
+                "confidence": 0.82,
+                "confidence_label": "high",
+                "rationale": "Explicitly offers contract work.",
+                "method": "llm",
+                "contact_email": "hiring@example.com",
+            }
+        },
+    )
+
+    payload = job_leads.job_lead_display_payload(row)
+
+    assert payload["contractor_classification"]["contact_email"] == (
+        "hiring@example.com"
+    )
+    assert payload["review_summary"] == (
+        "LLM: Part-time / contract; evidence: contract, remote - "
+        "Explicitly offers contract work."
+    )
 
 
 def test_review_job_lead_uses_exact_id_after_prefix_lookup(monkeypatch) -> None:

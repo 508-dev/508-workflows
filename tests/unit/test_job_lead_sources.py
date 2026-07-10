@@ -5,16 +5,21 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import five08.job_lead_sources as job_lead_sources
 from five08.job_lead_sources import (
     HackerNewsThread,
     HackerNewsWhoIsHiringLeadSource,
     JobLeadClassifier,
     JobLeadClassification,
+    JobLeadLLMClassificationResponse,
     _build_llm_client,
+    _classification_from_llm_response,
     classify_contractor_lead,
+    classify_contractor_lead_heuristic,
     html_to_text,
 )
 from five08.job_channels import JobPostingType
+from five08.job_leads import JobLeadInput
 
 
 class _FakeHackerNewsClient:
@@ -40,8 +45,10 @@ class _FakeHackerNewsClient:
                     "created_at": "2026-06-01T15:02:00Z",
                     "text": (
                         "Acme | Contract Backend Engineer | Remote US"
+                        "<p>Website: https://acme.example/"
                         "<p>We need a 1099 contractor for Python APIs."
                         '<p>Apply: <a href="https://acme.example/jobs">link</a>'
+                        "<p>Contact: hiring@acme.example"
                     ),
                 },
                 {
@@ -177,6 +184,276 @@ def test_classify_contractor_lead_rejects_seeking_work() -> None:
     assert confidence == 0.0
 
 
+def test_heuristic_rejects_full_time_role_with_customer_contract() -> None:
+    classification = classify_contractor_lead_heuristic(
+        "Anori Tech | Embedded Rust Engineer | Hamburg, Germany | HYBRID | "
+        "Full-time | http://anoritech.com/ Apply here: "
+        "https://nice-channel-658.notion.site/Embedded-Rust-Engineer-m-f-d-"
+        "3834b6f765ee81078002ffd5f2f5e767 We're funded with our first large "
+        "customer contract. Direct contact: stefan.akatyschew@anoritech.com"
+    )
+
+    assert classification.is_contractor_friendly is False
+    assert classification.posting_type is JobPostingType.FULL_TIME
+    assert classification.tags == ["full-time"]
+    assert classification.apply_url == (
+        "https://nice-channel-658.notion.site/Embedded-Rust-Engineer-m-f-d-"
+        "3834b6f765ee81078002ffd5f2f5e767"
+    )
+    assert classification.contact_email == "stefan.akatyschew@anoritech.com"
+
+
+def test_heuristic_accepts_role_open_to_full_time_or_contract() -> None:
+    classification = classify_contractor_lead_heuristic(
+        "Acme | Engineer | Full-time or contract | Remote"
+    )
+
+    assert classification.is_contractor_friendly is True
+    assert classification.posting_type is JobPostingType.PART_TIME_OR_FULL_TIME
+    assert classification.tags == ["contract", "full-time"]
+    assert classification.rationale == (
+        "Explicitly allows full-time and part-time or contract work."
+    )
+
+
+def test_heuristic_accepts_common_contract_job_phrasings() -> None:
+    for text in (
+        "Acme | Engineer | Remote | Contract",
+        "Acme | Contract | Remote",
+        "Acme | Engineer | 6 month contract | Remote",
+        "Acme | Engineer | B2B contract | Remote",
+        "Acme | Engineer | Consulting contract | Remote",
+        "Acme | Engineer | B2B contracting | Remote",
+        "Acme | Engineer | Remote | Contract. We are hiring now.",
+        "Acme | Engineer | Remote | CONTRACT - build APIs with us",
+        "Acme needs an engineer. Work with us on contract.",
+        "Acme is hiring an engineer on a six month contract.",
+    ):
+        classification = classify_contractor_lead_heuristic(text)
+        assert classification.is_contractor_friendly is True, text
+        assert classification.posting_type is JobPostingType.PART_TIME, text
+        assert any("contract" in tag for tag in classification.tags), text
+
+
+def test_heuristic_respects_negated_employment_terms() -> None:
+    full_time_only = classify_contractor_lead_heuristic(
+        "Acme | Full-time only | No contractors"
+    )
+    contract_only = classify_contractor_lead_heuristic(
+        "Acme | Contract engineer | Not a full-time role"
+    )
+
+    assert full_time_only.is_contractor_friendly is False
+    assert full_time_only.posting_type is JobPostingType.FULL_TIME
+    assert full_time_only.tags == ["full-time"]
+    assert contract_only.is_contractor_friendly is True
+    assert contract_only.posting_type is JobPostingType.PART_TIME
+    assert contract_only.tags == ["contract"]
+
+
+def test_heuristic_handles_non_adjacent_employment_negation() -> None:
+    for text in (
+        "Acme | Contract role | We are not hiring full-time",
+        "Acme | Contract role | We do not offer full-time employment",
+    ):
+        classification = classify_contractor_lead_heuristic(text)
+        assert classification.is_contractor_friendly is True
+        assert classification.posting_type is JobPostingType.PART_TIME
+        assert classification.tags == ["contract"]
+
+    no_contractors = classify_contractor_lead_heuristic(
+        "Acme | Full-time role | Contractors will not be considered"
+    )
+    assert no_contractors.is_contractor_friendly is False
+    assert no_contractors.posting_type is JobPostingType.FULL_TIME
+    assert no_contractors.tags == ["full-time"]
+
+
+def test_heuristic_does_not_treat_contrast_or_unrelated_negation_as_exclusion() -> None:
+    for text in (
+        "Acme is not just hiring contract engineers; full-time roles are open too.",
+        "Acme is not only seeking contract engineers.",
+        "We can't wait to hire contractors.",
+        "We are not sure whether our contract engineer will work remotely.",
+        "Not only is this full-time, contract work is also available.",
+    ):
+        classification = classify_contractor_lead_heuristic(text)
+        assert classification.is_contractor_friendly is True, text
+        assert "contract" in classification.tags, text
+
+
+def test_heuristic_rejects_commercial_contract_sentence_variants() -> None:
+    for business_context in (
+        "we signed a contract with our first customer",
+        "we secured our first contract",
+        "our customer awarded us a major contract",
+    ):
+        classification = classify_contractor_lead_heuristic(
+            f"Acme | Full-time engineer | {business_context}"
+        )
+        assert classification.is_contractor_friendly is False
+        assert classification.posting_type is JobPostingType.FULL_TIME
+        assert classification.tags == ["full-time"]
+
+    service_copy = classify_contractor_lead_heuristic(
+        "Acme provides B2B contracting services to enterprise customers."
+    )
+    assert service_copy.is_contractor_friendly is False
+    assert service_copy.tags == []
+
+
+def test_heuristic_keeps_contract_work_with_unrelated_negation() -> None:
+    classification = classify_contractor_lead_heuristic(
+        "Acme | Contract work is not limited to US residents"
+    )
+
+    assert classification.is_contractor_friendly is True
+    assert classification.posting_type is JobPostingType.PART_TIME
+    assert classification.tags == ["contract"]
+
+
+def test_contact_extraction_preserves_case_and_rejects_negative_context() -> None:
+    positive = classify_contractor_lead_heuristic(
+        "Acme | Contract engineer | Contact: Hiring.Team@Example.COM"
+    )
+    negative = classify_contractor_lead_heuristic(
+        "Acme | Contract engineer | Do not email hiring@acme.example"
+    )
+    negative_with_modifier = classify_contractor_lead_heuristic(
+        "Acme | Contract engineer | Please do not directly email jobs@acme.example"
+    )
+    negative_application_delivery = classify_contractor_lead_heuristic(
+        "Acme | Contract engineer | Do not send applications by email to "
+        "jobs@acme.example"
+    )
+    negative_no_email = classify_contractor_lead_heuristic(
+        "Acme | Contract engineer | No email: jobs@acme.example"
+    )
+    passive_negative = classify_contractor_lead_heuristic(
+        "Acme | Contract engineer | Applications are not accepted by email: "
+        "jobs@acme.example"
+    )
+    cannot_accept = classify_contractor_lead_heuristic(
+        "Acme | Contract engineer | We cannot accept applications via email: "
+        "jobs@acme.example"
+    )
+    alternate_application = classify_contractor_lead_heuristic(
+        "Acme | Contract engineer | Please apply on the site, not by email: "
+        "jobs@acme.example"
+    )
+    negative_resume = classify_contractor_lead_heuristic(
+        "Acme | Contract engineer | Do not email your resume to jobs@acme.example"
+    )
+    negative_us = classify_contractor_lead_heuristic(
+        "Acme | Contract engineer | Don't email us at jobs@acme.example"
+    )
+    sole_email = classify_contractor_lead_heuristic(
+        "Acme | Contract engineer | hiring@acme.example"
+    )
+
+    assert positive.contact_email == "Hiring.Team@Example.COM"
+    assert negative.contact_email is None
+    assert negative_with_modifier.contact_email is None
+    assert negative_application_delivery.contact_email is None
+    assert negative_no_email.contact_email is None
+    assert passive_negative.contact_email is None
+    assert cannot_accept.contact_email is None
+    assert alternate_application.contact_email is None
+    assert negative_resume.contact_email is None
+    assert negative_us.contact_email is None
+    assert sole_email.contact_email == "hiring@acme.example"
+
+
+def test_apply_url_extraction_rejects_truncated_candidates() -> None:
+    ascii_truncated = classify_contractor_lead_heuristic(
+        "Acme | Contract engineer | Apply: https://jobs.example/engineer..."
+    )
+    unicode_truncated = classify_contractor_lead_heuristic(
+        "Acme | Contract engineer | Apply: https://jobs.example/engineer…"
+    )
+
+    assert ascii_truncated.apply_url is None
+    assert unicode_truncated.apply_url is None
+
+
+def test_apply_url_prefers_specific_role_path_over_contextual_homepage() -> None:
+    classification = classify_contractor_lead_heuristic(
+        "Acme | Contract engineer | Apply: https://acme.example/ "
+        "Role details: https://acme.example/jobs/engineer"
+    )
+
+    assert classification.apply_url == "https://acme.example/jobs/engineer"
+
+    careers_site = classify_contractor_lead_heuristic(
+        "Acme | Contract engineer | Careers: https://careers.acme.example/ "
+        "About us: https://acme.example/about"
+    )
+    assert careers_site.apply_url == "https://careers.acme.example/"
+
+
+def test_llm_link_and_email_proposals_must_match_post_candidates() -> None:
+    text = (
+        "Acme | Contract Engineer | https://acme.example/ Apply here: "
+        "https://jobs.example/acme-engineer Contact: hiring@acme.example"
+    )
+    response = JobLeadLLMClassificationResponse(
+        is_contractor_friendly=True,
+        posting_type="part_time",
+        tags=["contract"],
+        confidence=0.9,
+        confidence_label="high",
+        rationale="Explicit contract role.",
+        apply_url="https://attacker.example/phishing",
+        contact_email="attacker@example.com",
+    )
+
+    classification = _classification_from_llm_response(response, text)
+
+    assert classification.is_contractor_friendly is True
+    assert classification.apply_url == "https://jobs.example/acme-engineer"
+    assert classification.contact_email == "hiring@acme.example"
+
+
+def test_llm_rejection_is_not_overridden_by_contractor_posting_type() -> None:
+    response = JobLeadLLMClassificationResponse(
+        is_contractor_friendly=False,
+        posting_type="part_time",
+        tags=["contract"],
+        confidence=0.9,
+        confidence_label="high",
+        rationale="Generic company contract, not a hiring arrangement.",
+    )
+
+    classification = _classification_from_llm_response(
+        response,
+        "Acme sells contract management software.",
+    )
+
+    assert classification.is_contractor_friendly is False
+
+
+def test_llm_can_prefer_valid_in_post_link_and_email_candidates() -> None:
+    text = (
+        "Acme | Contract Engineer | https://jobs.example/role-a "
+        "https://jobs.example/role-b first@acme.example second@acme.example"
+    )
+    response = JobLeadLLMClassificationResponse(
+        is_contractor_friendly=True,
+        posting_type="part_time",
+        tags=["contract"],
+        confidence=0.9,
+        confidence_label="high",
+        rationale="Explicit contract role.",
+        apply_url="https://jobs.example/role-b",
+        contact_email="second@acme.example",
+    )
+
+    classification = _classification_from_llm_response(response, text)
+
+    assert classification.apply_url == "https://jobs.example/role-b"
+    assert classification.contact_email == "second@acme.example"
+
+
 def test_hacker_news_source_extracts_top_level_contractor_posts() -> None:
     source = HackerNewsWhoIsHiringLeadSource(client=_FakeHackerNewsClient())
 
@@ -195,6 +472,7 @@ def test_hacker_news_source_extracts_top_level_contractor_posts() -> None:
     classification = lead.metadata["contractor_classification"]
     assert classification["method"] == "heuristic"
     assert classification["confidence_label"] == "high"
+    assert classification["contact_email"] == "hiring@acme.example"
 
 
 def test_hacker_news_source_uses_injected_classifier_for_lead_filtering() -> None:
@@ -211,6 +489,115 @@ def test_hacker_news_source_uses_injected_classifier_for_lead_filtering() -> Non
     classification = leads[0].metadata["contractor_classification"]
     assert classification["method"] == "llm"
     assert classification["rationale"] == "Explicitly allows contract work."
+
+
+def test_hacker_news_source_can_include_non_contractor_rows_for_refresh() -> None:
+    source = HackerNewsWhoIsHiringLeadSource(
+        client=_FakeClassifierHackerNewsClient(),
+        classifier=_FakeJobLeadClassifier(),  # type: ignore[arg-type]
+        include_non_contractor=True,
+    )
+
+    leads = source.collect()
+
+    assert [lead.external_id for lead in leads] == ["10", "11"]
+    assert leads[1].posting_type is JobPostingType.FULL_TIME
+    classification = leads[1].metadata["contractor_classification"]
+    assert classification["is_contractor_friendly"] is False
+
+
+def test_scrape_refreshes_existing_non_contractor_without_inserting(
+    monkeypatch,
+) -> None:
+    positive = JobLeadInput(
+        source_key="hackernews_who_is_hiring",
+        source_type="hackernews",
+        external_id="10",
+        source_url="https://news.ycombinator.com/item?id=10",
+        title="Contract role",
+        body_raw="Contract role",
+        body_normalized="Contract role",
+        metadata={"contractor_classification": {"is_contractor_friendly": True}},
+    )
+    negative = JobLeadInput(
+        source_key="hackernews_who_is_hiring",
+        source_type="hackernews",
+        external_id="11",
+        source_url="https://news.ycombinator.com/item?id=11",
+        title="Full-time role",
+        body_raw="Full-time role",
+        body_normalized="Full-time role",
+        metadata={"contractor_classification": {"is_contractor_friendly": False}},
+    )
+    adapter = SimpleNamespace(
+        source_key="hackernews_who_is_hiring",
+        collect=lambda: [positive, negative],
+    )
+    monkeypatch.setattr(
+        job_lead_sources, "JobLeadClassifier", lambda **_kwargs: object()
+    )
+    monkeypatch.setattr(
+        job_lead_sources, "build_job_lead_source", lambda *_args, **_kwargs: adapter
+    )
+    monkeypatch.setattr(
+        job_lead_sources, "upsert_job_lead", lambda *_args: ("lead-10", True)
+    )
+    monkeypatch.setattr(
+        job_lead_sources,
+        "existing_job_lead_external_ids",
+        lambda *_args, **_kwargs: {"11"},
+    )
+    refreshed: list[str] = []
+
+    def update_existing(_settings: object, lead: JobLeadInput) -> str:
+        refreshed.append(lead.external_id)
+        return "lead-11"
+
+    monkeypatch.setattr(job_lead_sources, "update_existing_job_lead", update_existing)
+
+    result = job_lead_sources.scrape_job_leads(SimpleNamespace())  # type: ignore[arg-type]
+
+    assert refreshed == ["11"]
+    assert result["created"] == 1
+    assert result["updated"] == 1
+    assert result["lead_ids"] == ["lead-10", "lead-11"]
+
+
+def test_scrape_skips_reviewed_contractor_friendly_lead(monkeypatch) -> None:
+    lead = JobLeadInput(
+        source_key="hackernews_who_is_hiring",
+        source_type="hackernews",
+        external_id="10",
+        source_url="https://news.ycombinator.com/item?id=10",
+        title="Contract role",
+        body_raw="Contract role",
+        body_normalized="Contract role",
+        metadata={"contractor_classification": {"is_contractor_friendly": True}},
+    )
+    adapter = SimpleNamespace(
+        source_key="hackernews_who_is_hiring",
+        collect=lambda: [lead],
+    )
+    monkeypatch.setattr(
+        job_lead_sources, "JobLeadClassifier", lambda **_kwargs: object()
+    )
+    monkeypatch.setattr(
+        job_lead_sources, "build_job_lead_source", lambda *_args, **_kwargs: adapter
+    )
+    monkeypatch.setattr(
+        job_lead_sources,
+        "existing_job_lead_external_ids",
+        lambda *_args, **_kwargs: set(),
+    )
+    monkeypatch.setattr(
+        job_lead_sources, "upsert_job_lead", lambda *_args: (None, False)
+    )
+
+    result = job_lead_sources.scrape_job_leads(SimpleNamespace())  # type: ignore[arg-type]
+
+    assert result["created"] == 0
+    assert result["updated"] == 0
+    assert result["lead_ids"] == []
 
 
 def test_hacker_news_source_rejects_seeking_work_before_classifier() -> None:

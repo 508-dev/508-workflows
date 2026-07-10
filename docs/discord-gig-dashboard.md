@@ -54,6 +54,21 @@ log in and see only gigs they originally posted, based on
 Dashboard gig mutations also require `lifecycle_stage = 'pending_gig'`, so the
 gig controls cannot mutate future non-gig project engagement rows by id.
 
+## Hacker News Job Lead Review
+
+The Gigs page can scrape employer posts from Hacker News “Who is hiring?”
+threads into a review queue. Each lead shows an explicit employment type such
+as `Full-time`, `Part-time / contract`, or `Full-time or part-time / contract`,
+plus whether the result came from the LLM classifier or keyword fallback.
+
+When a post contains them, the review card exposes the role-specific
+application page and a direct contact email as separate actions. Model-proposed
+links and email addresses are accepted only when they appear verbatim in the
+source post; deterministic scoring prefers application pages over company
+homepages. Re-scraping can correct pending or rejected leads that were
+previously admitted by a keyword false positive, while approved or posted leads
+remain unchanged.
+
 ## Candidate Sources
 
 `engagement_applications.source` records how a candidate entered the gig flow:

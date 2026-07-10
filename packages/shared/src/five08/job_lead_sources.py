@@ -10,13 +10,18 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from typing import Any, Literal, Protocol
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from five08.job_channels import JobPostingType
-from five08.job_leads import JobLeadInput, upsert_job_lead
+from five08.job_leads import (
+    JobLeadInput,
+    existing_job_lead_external_ids,
+    update_existing_job_lead,
+    upsert_job_lead,
+)
 from five08.openai_fallback import (
     FallbackOpenAIClient,
     build_openai_compatible_provider_attempts,
@@ -40,8 +45,85 @@ _WHO_IS_HIRING_TITLE_RE = re.compile(
     r"^Ask HN: Who is hiring\? \((?P<month>[A-Za-z]+) (?P<year>20\d\d)\)$"
 )
 _URL_RE = re.compile(r"https?://[^\s<>()\[\]\"']+")
+_EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _SEEKING_WORK_RE = re.compile(r"^\s*SEEKING\s+WORK\b", re.IGNORECASE)
 _REMOTE_RE = re.compile(r"\bremote\b", re.IGNORECASE)
+_FULL_TIME_RE = re.compile(r"\bfull\s*-?\s*time\b", re.IGNORECASE)
+_APPLICATION_CONTEXT_RE = re.compile(
+    r"\b(?:apply(?:\s+here)?|application(?:\s+link)?|job(?:\s+(?:posting|description))?|"
+    r"opening|role)\s*:?\s*$",
+    re.IGNORECASE,
+)
+_CONTACT_CONTEXT_RE = re.compile(
+    r"\b(?:apply|(?:direct\s+)?contact(?:\s+(?:to\s+me|us|me))?(?:\s+at)?|"
+    r"email(?:\s+(?:us|me|your\s+resume))?(?:\s+(?:at|to))?|"
+    r"reach\s+out(?:\s+to)?)\s*:?\s*$",
+    re.IGNORECASE,
+)
+_NEGATED_CONTACT_CONTEXT_RE = re.compile(
+    r"\b(?:(?:please\s+)?(?:do\s+not|don't|not\s+to)\s+"
+    r"(?:\w+\s+){0,3}(?:contact|email|reach\s+out(?:\s+to)?)|"
+    r"(?:please\s+)?(?:do\s+not|don't)\s+email(?:\s+\w+){0,4}"
+    r"(?:\s+(?:to|at))?|"
+    r"(?:do\s+not|don't)\s+send\s+(?:\w+\s+){0,4}(?:by|via)\s+email\s+(?:to\s+)?|"
+    r"(?:cannot|can't|do\s+not|don't)\s+accept\s+applications?\s+"
+    r"(?:by|via)\s+email|"
+    r"applications?\s+(?:are\s+)?not\s+(?:accepted|received)\s+"
+    r"(?:by|via)\s+email|"
+    r"not\s+(?:by|via)\s+email|"
+    r"no\s+email)\s*:?\s*$",
+    re.IGNORECASE,
+)
+_NEGATED_EMPLOYMENT_PREFIX_RE = re.compile(
+    r"\b(?:"
+    r"(?:no|without)\s+(?:\w+\s+){0,2}|"
+    r"not\s+(?:an?\s+)?|"
+    r"(?:not|isn't|aren't|won't|cannot|can't|do\s+not|don't)\s+"
+    r"(?:currently\s+)?(?:hire|hiring|offer|offering|accept|consider|allow|"
+    r"seek|seeking|look\s+for|looking\s+for|open\s+to)(?:\s+\w+){0,3}|"
+    r"no\s+longer\s+(?:hire|hiring|offer|offering|accept|consider|allow|"
+    r"seek|seeking|look\s+for|looking\s+for|open\s+to)(?:\s+\w+){0,3}"
+    r")\s*$",
+    re.IGNORECASE,
+)
+_NEGATED_EMPLOYMENT_SUFFIX_RE = re.compile(
+    r"^(?:\s+\w+){0,4}\s+(?:(?:is|are|will|would|can)\s+)?"
+    r"(?:not(?:\s+be)?\s+(?:available|offered|accepted|considered|allowed|open)|"
+    r"unavailable|closed)\b",
+    re.IGNORECASE,
+)
+_EMPLOYMENT_CONTRACT_PREFIX_RE = re.compile(
+    r"\b(?:open\s+to|available\s+for|seeking|hiring|hire|looking\s+for|either|or)"
+    r"(?:\s+\w+){0,3}\s*$",
+    re.IGNORECASE,
+)
+_EMPLOYMENT_CONTRACT_SUFFIX_RE = re.compile(
+    r"^(?:\s+\w+){0,3}\s+(?:role|position|job|work|basis|opportunity|"
+    r"engagement|hire|engineer|developer|employment|welcome|option|available)\b",
+    re.IGNORECASE,
+)
+_JOB_URL_HINTS = (
+    "job",
+    "jobs",
+    "career",
+    "careers",
+    "position",
+    "role",
+    "opening",
+    "apply",
+    "engineer",
+    "developer",
+    "greenhouse.io",
+    "lever.co",
+    "ashbyhq.com",
+    "workable.com",
+    "smartrecruiters.com",
+    "notion.site",
+)
+_APPLICATION_CONTEXT_WINDOW_CHARS = 100
+_CONTACT_CONTEXT_WINDOW_CHARS = 80
+_EXPLICIT_CONTEXT_SCORE = 100
+_MODEL_PROPOSAL_SCORE = 20
 _CONTRACT_TERMS: tuple[tuple[str, re.Pattern[str], float], ...] = (
     ("contract-to-hire", re.compile(r"\bcontract\s*-?\s*to\s*-?\s*hire\b", re.I), 0.35),
     ("contract", re.compile(r"\bcontracts?\b|\bcontractors?\b", re.I), 0.30),
@@ -50,7 +132,12 @@ _CONTRACT_TERMS: tuple[tuple[str, re.Pattern[str], float], ...] = (
     ("consulting", re.compile(r"\bconsult(?:ant|ants|ing)\b", re.I), 0.10),
     ("part-time", re.compile(r"\bpart\s*-?\s*time\b", re.I), 0.20),
     ("fractional", re.compile(r"\bfractional\b", re.I), 0.20),
-    ("b2b", re.compile(r"\bB2B\b", re.I), 0.15),
+    (
+        "b2b-contracting",
+        re.compile(r"\bB2B\s+(?:contracting|engagement)\b", re.I),
+        0.25,
+    ),
+    ("b2b", re.compile(r"\bB2B\b(?!\s+(?:contracting|engagement))", re.I), 0.15),
     ("deel", re.compile(r"\bDeel\b", re.I), 0.10),
 )
 
@@ -75,6 +162,8 @@ class JobLeadClassification:
     confidence_label: Literal["high", "medium", "low"]
     rationale: str
     method: Literal["llm", "heuristic"]
+    apply_url: str | None = None
+    contact_email: str | None = None
 
 
 class JobLeadLLMClassificationResponse(BaseModel):
@@ -93,6 +182,8 @@ class JobLeadLLMClassificationResponse(BaseModel):
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     confidence_label: Literal["high", "medium", "low"] = "low"
     rationale: str = ""
+    apply_url: str | None = None
+    contact_email: str | None = None
 
 
 class _TextExtractor(HTMLParser):
@@ -196,11 +287,81 @@ def html_to_text(raw_html: str | None) -> str:
     return parser.text()
 
 
-def _first_url(text: str) -> str | None:
-    match = _URL_RE.search(text)
-    if not match:
+def _url_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    for match in _URL_RE.finditer(text):
+        raw_candidate = match.group(0)
+        if raw_candidate.endswith(("...", "…")):
+            continue
+        candidate = raw_candidate.rstrip(".,);]}")
+        if candidate in candidates:
+            continue
+        candidates.append(candidate)
+    return candidates
+
+
+def _email_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    normalized_candidates: set[str] = set()
+    for match in _EMAIL_RE.finditer(text):
+        candidate = match.group(0)
+        normalized = candidate.casefold()
+        if normalized in normalized_candidates:
+            continue
+        normalized_candidates.add(normalized)
+        candidates.append(candidate)
+    return candidates
+
+
+def _preferred_apply_url(text: str, proposed: str | None = None) -> str | None:
+    candidates = _url_candidates(text)
+    if not candidates:
         return None
-    return match.group(0).rstrip(".,);]")
+    proposed_value = str(proposed or "").strip().rstrip(".,);]}")
+    if proposed_value not in candidates:
+        proposed_value = ""
+
+    def score(candidate: str) -> tuple[int, int, int, int]:
+        start = text.find(candidate)
+        prefix = text[max(0, start - _APPLICATION_CONTEXT_WINDOW_CHARS) : start]
+        parsed = urlsplit(candidate)
+        searchable = f"{parsed.netloc}{parsed.path}".casefold()
+        has_specific_path = parsed.path not in {"", "/"}
+        has_job_hint = any(hint in searchable for hint in _JOB_URL_HINTS)
+        return (
+            int(has_job_hint),
+            int(has_specific_path),
+            int(candidate == proposed_value),
+            int(bool(_APPLICATION_CONTEXT_RE.search(prefix))),
+        )
+
+    return max(candidates, key=score)
+
+
+def _preferred_contact_email(text: str, proposed: str | None = None) -> str | None:
+    candidates = _email_candidates(text)
+    if not candidates:
+        return None
+    proposed_value = str(proposed or "").strip().casefold()
+    candidate_values = {candidate.casefold() for candidate in candidates}
+    if proposed_value not in candidate_values:
+        proposed_value = ""
+
+    def score(candidate: str) -> int:
+        start = text.casefold().find(candidate.casefold())
+        prefix = text[max(0, start - _CONTACT_CONTEXT_WINDOW_CHARS) : start]
+        if _NEGATED_CONTACT_CONTEXT_RE.search(prefix):
+            return -1
+        value = _EXPLICIT_CONTEXT_SCORE if _CONTACT_CONTEXT_RE.search(prefix) else 0
+        if candidate.casefold() == proposed_value:
+            value += _MODEL_PROPOSAL_SCORE
+        return value
+
+    selected = max(candidates, key=score)
+    selected_score = score(selected)
+    if selected_score > 0 or (selected_score == 0 and len(candidates) == 1):
+        return selected
+    return None
 
 
 def _split_header(text: str) -> list[str]:
@@ -208,11 +369,91 @@ def _split_header(text: str) -> list[str]:
     return [part.strip() for part in first_line.split("|") if part.strip()]
 
 
+def _employment_match_is_negated(text: str, match: re.Match[str]) -> bool:
+    prefix = text[max(0, match.start() - 60) : match.start()]
+    suffix = text[match.end() : match.end() + 60]
+    return bool(
+        _NEGATED_EMPLOYMENT_PREFIX_RE.search(prefix)
+        or _NEGATED_EMPLOYMENT_SUFFIX_RE.search(suffix)
+    )
+
+
+def _contract_match_is_employment(text: str, match: re.Match[str]) -> bool:
+    if "contractor" in match.group(0).casefold():
+        return True
+
+    line_start = text.rfind("\n", 0, match.start()) + 1
+    line_end = text.find("\n", match.end())
+    if line_end == -1:
+        line_end = len(text)
+    line = text[line_start:line_end]
+    relative_start = match.start() - line_start
+    relative_end = match.end() - line_start
+    segment_start = line.rfind("|", 0, relative_start) + 1
+    segment_end = line.find("|", relative_end)
+    if segment_end == -1:
+        segment_end = len(line)
+    segment = line[segment_start:segment_end].strip()
+    if re.match(
+        r"b2b\s+(?:contracting|engagement)\s*(?:$|[.:\-–—])",
+        segment,
+        re.IGNORECASE,
+    ):
+        return True
+    if re.match(
+        r"(?:(?:b2b|consulting)\s+)?"
+        r"(?:(?:\d+|one|two|three|four|five|six|twelve)\s*[- ]?\s*"
+        r"(?:day|week|month|year)s?\s+)?contracts?\s*(?:$|[.:\-–—])",
+        segment,
+        re.IGNORECASE,
+    ):
+        return True
+
+    prefix = text[max(0, match.start() - 100) : match.start()]
+    suffix = text[match.end() : match.end() + 60]
+    return bool(
+        _EMPLOYMENT_CONTRACT_PREFIX_RE.search(prefix)
+        or _EMPLOYMENT_CONTRACT_SUFFIX_RE.search(suffix)
+        or re.search(
+            r"\b(?:work(?:ing)?\s+with\s+us|join(?:ing)?\s+us)\s+on"
+            r"(?:\s+(?:an?|the))?(?:\s+\w+){0,3}\s*$",
+            prefix,
+            re.IGNORECASE,
+        )
+        or re.search(
+            r"\b(?:hire|hiring|seek|seeking|look\s+for|looking\s+for|need|"
+            r"needing|want|wanted|wanting)\b(?:(?![.!?|\n]).){0,70}"
+            r"\b(?:on|for)(?:\s+(?:an?|the))?(?:\s+\w+){0,5}\s*$",
+            prefix,
+            re.IGNORECASE,
+        )
+    )
+
+
 def _contract_tags_and_confidence(text: str) -> tuple[list[str], float]:
     tags: list[str] = []
     confidence = 0.0
     for tag, pattern, weight in _CONTRACT_TERMS:
-        if pattern.search(text):
+        matches = [
+            match
+            for match in pattern.finditer(text)
+            if not _employment_match_is_negated(text, match)
+        ]
+        if tag in {"contract", "b2b-contracting"}:
+            matches = [
+                match
+                for match in matches
+                if _contract_match_is_employment(text, match)
+                and (
+                    tag != "contract"
+                    or not re.search(
+                        r"\b(?:customer|client|commercial|sales|government|enterprise)\s+$",
+                        text[max(0, match.start() - 40) : match.start()],
+                        re.IGNORECASE,
+                    )
+                )
+            ]
+        if matches:
             tags.append(tag)
             confidence += weight
     if len(tags) >= 2:
@@ -249,21 +490,48 @@ def classify_contractor_lead_heuristic(comment_text: str) -> JobLeadClassificati
             confidence_label="low",
             rationale="Post is a SEEKING WORK comment, not an employer lead.",
             method="heuristic",
+            apply_url=_preferred_apply_url(comment_text),
+            contact_email=_preferred_contact_email(comment_text),
         )
     tags, confidence = _contract_tags_and_confidence(comment_text)
-    is_lead = bool(tags) and confidence >= 0.20
+    has_part_time_or_contract = bool(tags) and confidence >= 0.20
+    has_full_time = any(
+        not _employment_match_is_negated(comment_text, match)
+        for match in _FULL_TIME_RE.finditer(comment_text)
+    )
+    if has_full_time and has_part_time_or_contract:
+        posting_type = JobPostingType.PART_TIME_OR_FULL_TIME
+    elif has_full_time:
+        posting_type = JobPostingType.FULL_TIME
+    elif has_part_time_or_contract:
+        posting_type = JobPostingType.PART_TIME
+    else:
+        posting_type = JobPostingType.UNKNOWN
+    if has_full_time:
+        tags = sorted({*tags, "full-time"})
+        confidence = max(confidence, 0.85)
+    is_lead = posting_type in {
+        JobPostingType.PART_TIME,
+        JobPostingType.PART_TIME_OR_FULL_TIME,
+    }
+    if posting_type is JobPostingType.FULL_TIME:
+        rationale = "Explicit full-time employment with no contract option."
+    elif posting_type is JobPostingType.PART_TIME_OR_FULL_TIME:
+        rationale = "Explicitly allows full-time and part-time or contract work."
+    elif tags:
+        rationale = f"Matched part-time or contract terms: {', '.join(tags)}."
+    else:
+        rationale = "No part-time, contract, or full-time terms were matched."
     return JobLeadClassification(
         is_contractor_friendly=is_lead,
-        posting_type=JobPostingType.PART_TIME if is_lead else JobPostingType.UNKNOWN,
+        posting_type=posting_type,
         tags=tags,
         confidence=confidence,
         confidence_label=_confidence_label(confidence),
-        rationale=(
-            f"Matched contractor-friendly terms: {', '.join(tags)}."
-            if tags
-            else "No contractor-friendly terms were matched."
-        ),
+        rationale=rationale,
         method="heuristic",
+        apply_url=_preferred_apply_url(comment_text),
+        contact_email=_preferred_contact_email(comment_text),
     )
 
 
@@ -303,7 +571,10 @@ class JobLeadClassifier:
                     "roles, generic company B2B descriptions, replies, and SEEKING WORK "
                     "comments. Prefer explicit evidence over inference. Tags must be "
                     "short lowercase evidence labels such as contract, 1099, freelance, "
-                    "consulting, fractional, part-time, b2b-contracting, remote."
+                    "consulting, fractional, part-time, full-time, b2b-contracting, "
+                    "remote. Also return the best application URL and direct contact "
+                    "email copied exactly from the post, or null when absent. Prefer a "
+                    "role-specific application page over a company homepage."
                 ),
             },
             {
@@ -335,7 +606,7 @@ class JobLeadClassifier:
             parsed_model = _parsed_message_model(response)
             if parsed_model is None:
                 raise ValueError("Empty structured job lead classification response")
-            return _classification_from_llm_response(parsed_model)
+            return _classification_from_llm_response(parsed_model, comment_text)
 
         response = client.chat.completions.create(
             model=_classifier_model(self.settings),
@@ -350,7 +621,8 @@ class JobLeadClassifier:
         if not raw_content:
             raise ValueError("Empty job lead classification response")
         return _classification_from_llm_response(
-            JobLeadLLMClassificationResponse.model_validate_json(raw_content)
+            JobLeadLLMClassificationResponse.model_validate_json(raw_content),
+            comment_text,
         )
 
 
@@ -453,6 +725,7 @@ def _first_message_content(response: Any) -> Any:
 
 def _classification_from_llm_response(
     response: JobLeadLLMClassificationResponse,
+    comment_text: str,
 ) -> JobLeadClassification:
     tags = sorted(
         {
@@ -461,14 +734,19 @@ def _classification_from_llm_response(
             if isinstance(tag, str) and tag.strip()
         }
     )
+    posting_type = JobPostingType(response.posting_type)
     return JobLeadClassification(
-        is_contractor_friendly=response.is_contractor_friendly,
-        posting_type=JobPostingType(response.posting_type),
+        is_contractor_friendly=response.is_contractor_friendly
+        and posting_type
+        in {JobPostingType.PART_TIME, JobPostingType.PART_TIME_OR_FULL_TIME},
+        posting_type=posting_type,
         tags=tags,
         confidence=max(0.0, min(1.0, float(response.confidence))),
         confidence_label=response.confidence_label,
         rationale=response.rationale.strip()[:500],
         method="llm",
+        apply_url=_preferred_apply_url(comment_text, response.apply_url),
+        contact_email=_preferred_contact_email(comment_text, response.contact_email),
     )
 
 
@@ -484,6 +762,7 @@ def _classification_metadata(
             "confidence_label": classification.confidence_label,
             "rationale": classification.rationale,
             "method": classification.method,
+            "contact_email": classification.contact_email,
         }
     }
 
@@ -494,6 +773,7 @@ def _lead_from_hn_comment(
     story_title: str,
     comment: dict[str, Any],
     classifier: JobLeadClassifier | None = None,
+    include_non_contractor: bool = False,
 ) -> JobLeadInput | None:
     text = html_to_text(comment.get("text"))
     if not text:
@@ -505,7 +785,7 @@ def _lead_from_hn_comment(
         if classifier is not None
         else classify_contractor_lead_heuristic(text)
     )
-    if not classification.is_contractor_friendly:
+    if not classification.is_contractor_friendly and not include_non_contractor:
         return None
 
     header_parts = _split_header(text)
@@ -544,7 +824,7 @@ def _lead_from_hn_comment(
         posting_type=classification.posting_type,
         location=location,
         remote=bool(_REMOTE_RE.search(text)) if text else None,
-        apply_url=_first_url(text),
+        apply_url=classification.apply_url or _preferred_apply_url(text),
         tags=classification.tags,
         confidence=classification.confidence,
         metadata=metadata,
@@ -563,11 +843,13 @@ class HackerNewsWhoIsHiringLeadSource:
         classifier: JobLeadClassifier | None = None,
         story_id: int | None = None,
         include_latest: bool = True,
+        include_non_contractor: bool = False,
     ) -> None:
         self.client = client or HackerNewsClient()
         self.classifier = classifier
         self.story_id = story_id
         self.include_latest = include_latest
+        self.include_non_contractor = include_non_contractor
 
     def discover_threads(self) -> list[HackerNewsThread]:
         if self.story_id is not None:
@@ -598,6 +880,7 @@ class HackerNewsWhoIsHiringLeadSource:
                     story_title=thread.title,
                     comment=child,
                     classifier=self.classifier,
+                    include_non_contractor=self.include_non_contractor,
                 )
                 if lead is not None:
                     leads.append(lead)
@@ -609,6 +892,7 @@ def build_job_lead_source(
     *,
     classifier: JobLeadClassifier | None = None,
     story_id: int | None = None,
+    include_non_contractor: bool = False,
 ) -> JobLeadSource:
     """Construct a source adapter by stable source id."""
     normalized = source.strip().casefold()
@@ -616,6 +900,7 @@ def build_job_lead_source(
         return HackerNewsWhoIsHiringLeadSource(
             classifier=classifier,
             story_id=story_id,
+            include_non_contractor=include_non_contractor,
         )
     raise ValueError(f"Unsupported job lead source: {source}")
 
@@ -628,12 +913,42 @@ def scrape_job_leads(
 ) -> dict[str, Any]:
     """Collect leads from a source and upsert them for review."""
     classifier = JobLeadClassifier(settings=settings)
-    adapter = build_job_lead_source(source, classifier=classifier, story_id=story_id)
+    adapter = build_job_lead_source(
+        source,
+        classifier=classifier,
+        story_id=story_id,
+        include_non_contractor=True,
+    )
     created = 0
     updated = 0
     lead_ids: list[str] = []
-    for lead in adapter.collect():
+    leads = adapter.collect()
+    rejected_external_ids = [
+        lead.external_id
+        for lead in leads
+        if (lead.metadata or {})
+        .get("contractor_classification", {})
+        .get("is_contractor_friendly")
+        is False
+    ]
+    existing_rejected_ids = existing_job_lead_external_ids(
+        settings,
+        source_key=adapter.source_key,
+        external_ids=rejected_external_ids,
+    )
+    for lead in leads:
+        classification = (lead.metadata or {}).get("contractor_classification", {})
+        if classification.get("is_contractor_friendly") is False:
+            if lead.external_id not in existing_rejected_ids:
+                continue
+            existing_id = update_existing_job_lead(settings, lead)
+            if existing_id is not None:
+                lead_ids.append(existing_id)
+                updated += 1
+            continue
         lead_id, was_created = upsert_job_lead(settings, lead)
+        if lead_id is None:
+            continue
         lead_ids.append(lead_id)
         if was_created:
             created += 1

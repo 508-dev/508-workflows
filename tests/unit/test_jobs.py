@@ -152,7 +152,7 @@ def test_format_job_lead_review_line_explains_confidence_source() -> None:
 
     line = JobsCog._format_job_lead_review_line(1, lead)
 
-    assert "LLM: high contractor fit; contract, 1099" in line
+    assert "LLM: Part-time / contract; evidence: contract, 1099" in line
     assert "91%" not in line
 
 

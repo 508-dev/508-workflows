@@ -60,6 +60,12 @@ export function isTerminalJobStatus(value?: string | null) {
   )
 }
 
+export function jobLeadClassificationMethodLabel(value?: string | null) {
+  if (value === "llm") return "LLM"
+  if (value === "heuristic") return "Keyword fallback"
+  return "Unknown"
+}
+
 export function onboardingStateValue(person: OnboardingStateCarrier) {
   return person.onboarding_state || person.onboardingState || person.cOnboardingState || ""
 }

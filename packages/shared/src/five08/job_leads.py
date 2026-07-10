@@ -99,6 +99,8 @@ def job_lead_classification(lead: JobLead | dict[str, Any]) -> dict[str, Any]:
             "confidence_label": str(classification.get("confidence_label") or "low"),
             "rationale": str(classification.get("rationale") or "").strip(),
             "method": str(classification.get("method") or "unknown"),
+            "contact_email": str(classification.get("contact_email") or "").strip()
+            or None,
         }
 
     tags = lead.get("tags") if isinstance(lead, dict) else lead.tags
@@ -119,19 +121,27 @@ def job_lead_classification(lead: JobLead | dict[str, Any]) -> dict[str, Any]:
         "confidence_label": confidence_label,
         "rationale": "",
         "method": "heuristic",
+        "contact_email": None,
     }
 
 
 def format_job_lead_review_summary(lead: JobLead | dict[str, Any]) -> str:
-    """Return a human-readable summary of why a lead is review-worthy."""
+    """Return a human-readable employment classification summary."""
     classification = job_lead_classification(lead)
     method = classification.get("method")
     method_label = "LLM" if method == "llm" else "Keyword fallback"
-    confidence_label = str(classification.get("confidence_label") or "low")
+    posting_type = str(classification.get("posting_type") or "")
+    posting_type_label = {
+        "part_time": "Part-time / contract",
+        "full_time": "Full-time",
+        "part_time_or_full_time": "Full-time or part-time / contract",
+        "unknown": "Employment type unknown",
+    }.get(posting_type, "Employment type unknown")
     tags = [str(tag) for tag in classification.get("tags", []) if str(tag).strip()]
-    tag_text = ", ".join(tags[:5]) if tags else "no evidence tags"
     rationale = str(classification.get("rationale") or "").strip()
-    summary = f"{method_label}: {confidence_label} contractor fit; {tag_text}"
+    summary = f"{method_label}: {posting_type_label}"
+    if tags:
+        summary = f"{summary}; evidence: {', '.join(tags[:5])}"
     if rationale:
         summary = f"{summary} - {rationale}"
     return summary
@@ -227,7 +237,9 @@ def _as_lead(row: dict[str, Any]) -> JobLead:
     )
 
 
-def upsert_job_lead(settings: SharedSettings, lead: JobLeadInput) -> tuple[str, bool]:
+def upsert_job_lead(
+    settings: SharedSettings, lead: JobLeadInput
+) -> tuple[str | None, bool]:
     """Create or update a sourced lead without changing human review state."""
     lead_id = str(uuid4())
     posting_type = normalize_job_posting_type(lead.posting_type)
@@ -268,11 +280,12 @@ def upsert_job_lead(settings: SharedSettings, lead: JobLeadInput) -> tuple[str, 
             posting_type = EXCLUDED.posting_type,
             location = COALESCE(EXCLUDED.location, job_leads.location),
             remote = COALESCE(EXCLUDED.remote, job_leads.remote),
-            apply_url = COALESCE(EXCLUDED.apply_url, job_leads.apply_url),
+            apply_url = EXCLUDED.apply_url,
             tags = EXCLUDED.tags,
             confidence = GREATEST(job_leads.confidence, EXCLUDED.confidence),
             metadata = job_leads.metadata || EXCLUDED.metadata,
             updated_at = NOW()
+        WHERE job_leads.status IN ('pending', 'rejected')
         RETURNING id::text, (xmax = 0) AS inserted
     """
     with get_postgres_connection(settings) as conn:
@@ -302,8 +315,87 @@ def upsert_job_lead(settings: SharedSettings, lead: JobLeadInput) -> tuple[str, 
             )
             row = cursor.fetchone()
     if row is None:
-        raise RuntimeError("Unable to upsert job lead.")
+        return None, False
     return str(row["id"]), bool(row["inserted"])
+
+
+def update_existing_job_lead(
+    settings: SharedSettings,
+    lead: JobLeadInput,
+) -> str | None:
+    """Refresh a reviewable stored lead without creating a new candidate."""
+    posting_type = normalize_job_posting_type(lead.posting_type)
+    source_posted_at = _as_utc(lead.source_posted_at)
+    tags = sorted({tag.strip().casefold() for tag in lead.tags or [] if tag.strip()})
+    query = """
+        UPDATE job_leads
+        SET source_url = %s,
+            source_posted_at = COALESCE(%s, source_posted_at),
+            title = %s,
+            organization = COALESCE(%s, organization),
+            body_raw = %s,
+            body_normalized = %s,
+            posting_type = %s,
+            location = COALESCE(%s, location),
+            remote = COALESCE(%s, remote),
+            apply_url = %s,
+            tags = %s,
+            confidence = GREATEST(confidence, %s),
+            metadata = metadata || %s,
+            updated_at = NOW()
+        WHERE source_key = %s
+          AND external_id = %s
+          AND status IN ('pending', 'rejected')
+        RETURNING id::text
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                query,
+                (
+                    lead.source_url,
+                    source_posted_at,
+                    lead.title.strip() or "Untitled job lead",
+                    lead.organization,
+                    lead.body_raw,
+                    lead.body_normalized,
+                    posting_type.value,
+                    lead.location,
+                    lead.remote,
+                    lead.apply_url,
+                    tags,
+                    float(max(0.0, min(1.0, lead.confidence))),
+                    Jsonb(lead.metadata or {}),
+                    lead.source_key,
+                    lead.external_id,
+                ),
+            )
+            row = cursor.fetchone()
+    return str(row["id"]) if row is not None else None
+
+
+def existing_job_lead_external_ids(
+    settings: SharedSettings,
+    *,
+    source_key: str,
+    external_ids: list[str],
+) -> set[str]:
+    """Return stored source ids using one query for a scrape batch."""
+    normalized_ids = sorted({value for value in external_ids if value})
+    if not normalized_ids:
+        return set()
+    query = """
+        SELECT external_id
+        FROM job_leads
+        WHERE source_key = %s
+          AND external_id = ANY(%s)
+          AND status IN ('pending', 'rejected')
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(query, (source_key, normalized_ids))
+            rows = cursor.fetchall()
+    return {str(row["external_id"]) for row in rows}
 
 
 def list_job_leads(

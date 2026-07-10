@@ -332,7 +332,7 @@ def _job_leads_payload() -> list[dict[str, object]]:
             "title": "Contract React Build",
             "organization": "Example Co",
             "body_normalized": "Remote 1099 contractor wanted for React build.",
-            "posting_type": "part_time",
+            "posting_type": "part_time_or_full_time",
             "location": "Remote",
             "remote": True,
             "apply_url": "https://example.com/jobs/react",
@@ -340,15 +340,16 @@ def _job_leads_payload() -> list[dict[str, object]]:
             "confidence": 0.8,
             "contractor_classification": {
                 "is_contractor_friendly": True,
-                "posting_type": "part_time",
+                "posting_type": "part_time_or_full_time",
                 "tags": ["1099", "contract"],
                 "confidence": 0.8,
                 "confidence_label": "high",
                 "rationale": "Explicitly asks for a remote 1099 contractor.",
                 "method": "llm",
+                "contact_email": "hiring@example.com",
             },
             "review_summary": (
-                "LLM: high contractor fit; 1099, contract - "
+                "LLM: Full-time or part-time / contract; evidence: 1099, contract - "
                 "Explicitly asks for a remote 1099 contractor."
             ),
             "reviewed_by_discord_user_id": None,
@@ -862,6 +863,15 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             )
             page.locator("#gigLeadsTab").click()
             page.get_by_text("Contract React Build").wait_for()
+            expect(
+                page.get_by_text("Full-time or part-time / contract · LLM")
+            ).to_be_visible()
+            expect(page.get_by_role("link", name="Apply website")).to_have_attribute(
+                "href", "https://example.com/jobs/react"
+            )
+            expect(
+                page.get_by_role("link", name="Email hiring@example.com")
+            ).to_have_attribute("href", "mailto:hiring@example.com")
             page.get_by_label("Post as").select_option("recruiting")
             expect(page.get_by_label("Post as")).to_have_value("recruiting")
             page.get_by_role("button", name="Post to Discord").click()

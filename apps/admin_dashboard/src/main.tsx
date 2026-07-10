@@ -44,6 +44,7 @@ import {
   formatDate,
   githubUrl,
   isTerminalJobStatus,
+  jobLeadClassificationMethodLabel,
   jsonPreview,
   labelForOnboardingState,
   linkedinUrl,
@@ -255,6 +256,7 @@ type JobLead = {
     confidence_label?: string
     rationale?: string
     method?: string
+    contact_email?: string | null
   }
   review_summary?: string
   reviewed_by_discord_user_id?: string
@@ -5595,12 +5597,19 @@ function defaultJobPostTagNames(lead: JobLead, channel?: JobPostChannel) {
 
 function jobLeadClassificationLabel(lead: JobLead) {
   const method = lead.contractor_classification?.method
-  const confidenceLabel = lead.contractor_classification?.confidence_label
-  if (method && confidenceLabel) {
-    const methodLabel = method === "llm" ? "LLM" : "Keyword fallback"
-    return `${methodLabel}: ${confidenceLabel} fit`
+  const postingType = lead.contractor_classification?.posting_type || lead.posting_type
+  const postingTypeLabel =
+    {
+      part_time: "Part-time / contract",
+      full_time: "Full-time",
+      part_time_or_full_time: "Full-time or part-time / contract",
+      unknown: "Employment type unknown",
+    }[String(postingType || "")] || "Employment type unknown"
+  if (method) {
+    const methodLabel = jobLeadClassificationMethodLabel(method)
+    return `${postingTypeLabel} · ${methodLabel}`
   }
-  return lead.review_summary || "Classification unavailable"
+  return postingType ? postingTypeLabel : lead.review_summary || "Classification unavailable"
 }
 
 function JobLeadListItem({
@@ -5659,6 +5668,7 @@ function JobLeadListItem({
           lead.discord_guild_id,
         )}/${encodeURIComponent(lead.discord_thread_id)}`
       : ""
+  const contactEmail = lead.contractor_classification?.contact_email
   return (
     <article className="grid gap-4 rounded-md border bg-background p-4 lg:grid-cols-[minmax(0,1fr)_220px_190px] lg:items-start">
       <div className="min-w-0">
@@ -5670,9 +5680,6 @@ function JobLeadListItem({
         </div>
         <div className="mt-2 flex flex-wrap gap-1.5">
           {lead.organization ? <Badge variant="neutral">{lead.organization}</Badge> : null}
-          {lead.posting_type ? (
-            <Badge variant="neutral">{titleCase(lead.posting_type)}</Badge>
-          ) : null}
           {lead.location ? <Badge variant="neutral">{lead.location}</Badge> : null}
           {(lead.tags || []).slice(0, 6).map((tag) => (
             <Badge key={tag} variant="queued">
@@ -5707,8 +5714,16 @@ function JobLeadListItem({
               target="_blank"
               rel="noreferrer"
             >
-              Apply
+              Apply website
               <ExternalLink className="size-3.5" />
+            </a>
+          ) : null}
+          {contactEmail ? (
+            <a
+              className="inline-flex items-center gap-1 font-extrabold text-primary"
+              href={`mailto:${contactEmail}`}
+            >
+              Email {contactEmail}
             </a>
           ) : null}
           {discordUrl ? (
