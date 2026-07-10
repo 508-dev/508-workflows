@@ -63,6 +63,8 @@ _CONTACT_CONTEXT_RE = re.compile(
 _NEGATED_CONTACT_CONTEXT_RE = re.compile(
     r"\b(?:(?:please\s+)?(?:do\s+not|don't|not\s+to)\s+"
     r"(?:\w+\s+){0,3}(?:contact|email|reach\s+out(?:\s+to)?)|"
+    r"(?:please\s+)?(?:do\s+not|don't)\s+email(?:\s+\w+){0,4}"
+    r"(?:\s+(?:to|at))?|"
     r"(?:do\s+not|don't)\s+send\s+(?:\w+\s+){0,4}(?:by|via)\s+email\s+(?:to\s+)?|"
     r"(?:cannot|can't|do\s+not|don't)\s+accept\s+applications?\s+"
     r"(?:by|via)\s+email|"
@@ -118,8 +120,6 @@ _JOB_URL_HINTS = (
 _APPLICATION_CONTEXT_WINDOW_CHARS = 100
 _CONTACT_CONTEXT_WINDOW_CHARS = 80
 _EXPLICIT_CONTEXT_SCORE = 100
-_JOB_URL_HINT_SCORE = 35
-_URL_PATH_SCORE = 15
 _MODEL_PROPOSAL_SCORE = 20
 _CONTRACT_TERMS: tuple[tuple[str, re.Pattern[str], float], ...] = (
     ("contract-to-hire", re.compile(r"\bcontract\s*-?\s*to\s*-?\s*hire\b", re.I), 0.35),
@@ -318,21 +318,19 @@ def _preferred_apply_url(text: str, proposed: str | None = None) -> str | None:
     if proposed_value not in candidates:
         proposed_value = ""
 
-    def score(candidate: str) -> int:
+    def score(candidate: str) -> tuple[int, int, int, int]:
         start = text.find(candidate)
         prefix = text[max(0, start - _APPLICATION_CONTEXT_WINDOW_CHARS) : start]
         parsed = urlsplit(candidate)
         searchable = f"{parsed.netloc}{parsed.path}".casefold()
-        value = 0
-        if _APPLICATION_CONTEXT_RE.search(prefix):
-            value += _EXPLICIT_CONTEXT_SCORE
-        if any(hint in searchable for hint in _JOB_URL_HINTS):
-            value += _JOB_URL_HINT_SCORE
-        if parsed.path not in {"", "/"}:
-            value += _URL_PATH_SCORE
-        if candidate == proposed_value:
-            value += _MODEL_PROPOSAL_SCORE
-        return value
+        has_specific_path = parsed.path not in {"", "/"}
+        has_job_hint = any(hint in searchable for hint in _JOB_URL_HINTS)
+        return (
+            int(has_specific_path),
+            int(has_job_hint),
+            int(candidate == proposed_value),
+            int(bool(_APPLICATION_CONTEXT_RE.search(prefix))),
+        )
 
     return max(candidates, key=score)
 
@@ -394,6 +392,12 @@ def _contract_match_is_employment(text: str, match: re.Match[str]) -> bool:
         segment_end = len(line)
     segment = line[segment_start:segment_end].strip()
     if re.match(
+        r"b2b\s+(?:contracting|engagement)\s*(?:$|[.:\-–—])",
+        segment,
+        re.IGNORECASE,
+    ):
+        return True
+    if re.match(
         r"(?:(?:b2b|consulting)\s+)?"
         r"(?:(?:\d+|one|two|three|four|five|six|twelve)\s*[- ]?\s*"
         r"(?:day|week|month|year)s?\s+)?contracts?\s*(?:$|[.:\-–—])",
@@ -432,15 +436,18 @@ def _contract_tags_and_confidence(text: str) -> tuple[list[str], float]:
             for match in pattern.finditer(text)
             if not _employment_match_is_negated(text, match)
         ]
-        if tag == "contract":
+        if tag in {"contract", "b2b-contracting"}:
             matches = [
                 match
                 for match in matches
                 if _contract_match_is_employment(text, match)
-                and not re.search(
-                    r"\b(?:customer|client|commercial|sales|government|enterprise)\s+$",
-                    text[max(0, match.start() - 40) : match.start()],
-                    re.IGNORECASE,
+                and (
+                    tag != "contract"
+                    or not re.search(
+                        r"\b(?:customer|client|commercial|sales|government|enterprise)\s+$",
+                        text[max(0, match.start() - 40) : match.start()],
+                        re.IGNORECASE,
+                    )
                 )
             ]
         if matches:
@@ -937,6 +944,8 @@ def scrape_job_leads(
                 updated += 1
             continue
         lead_id, was_created = upsert_job_lead(settings, lead)
+        if lead_id is None:
+            continue
         lead_ids.append(lead_id)
         if was_created:
             created += 1

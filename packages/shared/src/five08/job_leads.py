@@ -237,7 +237,9 @@ def _as_lead(row: dict[str, Any]) -> JobLead:
     )
 
 
-def upsert_job_lead(settings: SharedSettings, lead: JobLeadInput) -> tuple[str, bool]:
+def upsert_job_lead(
+    settings: SharedSettings, lead: JobLeadInput
+) -> tuple[str | None, bool]:
     """Create or update a sourced lead without changing human review state."""
     lead_id = str(uuid4())
     posting_type = normalize_job_posting_type(lead.posting_type)
@@ -278,11 +280,12 @@ def upsert_job_lead(settings: SharedSettings, lead: JobLeadInput) -> tuple[str, 
             posting_type = EXCLUDED.posting_type,
             location = COALESCE(EXCLUDED.location, job_leads.location),
             remote = COALESCE(EXCLUDED.remote, job_leads.remote),
-            apply_url = COALESCE(EXCLUDED.apply_url, job_leads.apply_url),
+            apply_url = EXCLUDED.apply_url,
             tags = EXCLUDED.tags,
             confidence = GREATEST(job_leads.confidence, EXCLUDED.confidence),
             metadata = job_leads.metadata || EXCLUDED.metadata,
             updated_at = NOW()
+        WHERE job_leads.status IN ('pending', 'rejected')
         RETURNING id::text, (xmax = 0) AS inserted
     """
     with get_postgres_connection(settings) as conn:
@@ -312,7 +315,7 @@ def upsert_job_lead(settings: SharedSettings, lead: JobLeadInput) -> tuple[str, 
             )
             row = cursor.fetchone()
     if row is None:
-        raise RuntimeError("Unable to upsert job lead.")
+        return None, False
     return str(row["id"]), bool(row["inserted"])
 
 
@@ -335,7 +338,7 @@ def update_existing_job_lead(
             posting_type = %s,
             location = COALESCE(%s, location),
             remote = COALESCE(%s, remote),
-            apply_url = COALESCE(%s, apply_url),
+            apply_url = %s,
             tags = %s,
             confidence = GREATEST(confidence, %s),
             metadata = metadata || %s,

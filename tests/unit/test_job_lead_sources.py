@@ -295,6 +295,12 @@ def test_heuristic_rejects_commercial_contract_sentence_variants() -> None:
         assert classification.posting_type is JobPostingType.FULL_TIME
         assert classification.tags == ["full-time"]
 
+    service_copy = classify_contractor_lead_heuristic(
+        "Acme provides B2B contracting services to enterprise customers."
+    )
+    assert service_copy.is_contractor_friendly is False
+    assert service_copy.tags == []
+
 
 def test_heuristic_keeps_contract_work_with_unrelated_negation() -> None:
     classification = classify_contractor_lead_heuristic(
@@ -335,6 +341,12 @@ def test_contact_extraction_preserves_case_and_rejects_negative_context() -> Non
         "Acme | Contract engineer | Please apply on the site, not by email: "
         "jobs@acme.example"
     )
+    negative_resume = classify_contractor_lead_heuristic(
+        "Acme | Contract engineer | Do not email your resume to jobs@acme.example"
+    )
+    negative_us = classify_contractor_lead_heuristic(
+        "Acme | Contract engineer | Don't email us at jobs@acme.example"
+    )
     sole_email = classify_contractor_lead_heuristic(
         "Acme | Contract engineer | hiring@acme.example"
     )
@@ -347,6 +359,8 @@ def test_contact_extraction_preserves_case_and_rejects_negative_context() -> Non
     assert passive_negative.contact_email is None
     assert cannot_accept.contact_email is None
     assert alternate_application.contact_email is None
+    assert negative_resume.contact_email is None
+    assert negative_us.contact_email is None
     assert sole_email.contact_email == "hiring@acme.example"
 
 
@@ -360,6 +374,15 @@ def test_apply_url_extraction_rejects_truncated_candidates() -> None:
 
     assert ascii_truncated.apply_url is None
     assert unicode_truncated.apply_url is None
+
+
+def test_apply_url_prefers_specific_role_path_over_contextual_homepage() -> None:
+    classification = classify_contractor_lead_heuristic(
+        "Acme | Contract engineer | Apply: https://acme.example/ "
+        "Role details: https://acme.example/jobs/engineer"
+    )
+
+    assert classification.apply_url == "https://acme.example/jobs/engineer"
 
 
 def test_llm_link_and_email_proposals_must_match_post_candidates() -> None:
@@ -532,6 +555,43 @@ def test_scrape_refreshes_existing_non_contractor_without_inserting(
     assert result["created"] == 1
     assert result["updated"] == 1
     assert result["lead_ids"] == ["lead-10", "lead-11"]
+
+
+def test_scrape_skips_reviewed_contractor_friendly_lead(monkeypatch) -> None:
+    lead = JobLeadInput(
+        source_key="hackernews_who_is_hiring",
+        source_type="hackernews",
+        external_id="10",
+        source_url="https://news.ycombinator.com/item?id=10",
+        title="Contract role",
+        body_raw="Contract role",
+        body_normalized="Contract role",
+        metadata={"contractor_classification": {"is_contractor_friendly": True}},
+    )
+    adapter = SimpleNamespace(
+        source_key="hackernews_who_is_hiring",
+        collect=lambda: [lead],
+    )
+    monkeypatch.setattr(
+        job_lead_sources, "JobLeadClassifier", lambda **_kwargs: object()
+    )
+    monkeypatch.setattr(
+        job_lead_sources, "build_job_lead_source", lambda *_args, **_kwargs: adapter
+    )
+    monkeypatch.setattr(
+        job_lead_sources,
+        "existing_job_lead_external_ids",
+        lambda *_args, **_kwargs: set(),
+    )
+    monkeypatch.setattr(
+        job_lead_sources, "upsert_job_lead", lambda *_args: (None, False)
+    )
+
+    result = job_lead_sources.scrape_job_leads(SimpleNamespace())  # type: ignore[arg-type]
+
+    assert result["created"] == 0
+    assert result["updated"] == 0
+    assert result["lead_ids"] == []
 
 
 def test_hacker_news_source_rejects_seeking_work_before_classifier() -> None:

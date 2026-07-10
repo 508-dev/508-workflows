@@ -6,6 +6,7 @@ import {
   formatDate,
   githubUrl,
   isTerminalJobStatus,
+  jobLeadClassificationMethodLabel,
   labelForOnboardingState,
   linkedinUrl,
   onboardingStateValue,
@@ -60,5 +61,12 @@ describe("dashboard utility helpers", () => {
     expect(isTerminalJobStatus("queued")).toBe(false)
     expect(isTerminalJobStatus("running")).toBe(false)
     expect(isTerminalJobStatus(undefined)).toBe(false)
+  })
+
+  it("labels job lead classification provenance without guessing", () => {
+    expect(jobLeadClassificationMethodLabel("llm")).toBe("LLM")
+    expect(jobLeadClassificationMethodLabel("heuristic")).toBe("Keyword fallback")
+    expect(jobLeadClassificationMethodLabel("unknown")).toBe("Unknown")
+    expect(jobLeadClassificationMethodLabel()).toBe("Unknown")
   })
 })

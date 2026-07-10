@@ -116,8 +116,31 @@ def test_upsert_job_lead_preserves_review_state_on_conflict(monkeypatch) -> None
     assert created is False
     query, params = cursor.executed[0]
     assert "ON CONFLICT (source_key, external_id) DO UPDATE" in query
+    assert "WHERE job_leads.status IN ('pending', 'rejected')" in query
+    assert "apply_url = EXCLUDED.apply_url" in query
     assert "status =" not in query.split("DO UPDATE SET", 1)[1]
     assert params[15] == ["1099", "contract-to-hire"]
+
+
+def test_upsert_job_lead_skips_reviewed_conflict(monkeypatch) -> None:
+    cursor = _CursorStub()
+    _install_connection_stub(monkeypatch, cursor)
+
+    lead_id, created = job_leads.upsert_job_lead(
+        job_leads.SharedSettings(),
+        JobLeadInput(
+            source_key="hackernews_who_is_hiring",
+            source_type="hackernews",
+            external_id="48392586",
+            source_url="https://news.ycombinator.com/item?id=48392586",
+            title="Contract role",
+            body_raw="raw",
+            body_normalized="normalized",
+        ),
+    )
+
+    assert lead_id is None
+    assert created is False
 
 
 def test_update_existing_job_lead_never_inserts(monkeypatch) -> None:
@@ -146,6 +169,8 @@ def test_update_existing_job_lead_never_inserts(monkeypatch) -> None:
     assert "UPDATE job_leads" in query
     assert "INSERT" not in query
     assert "status IN ('pending', 'rejected')" in query
+    assert "apply_url = %s" in query
+    assert "apply_url = COALESCE" not in query
     update_clause = query.split("SET", 1)[1].split("WHERE", 1)[0]
     assigned_columns = {
         line.strip().split("=", 1)[0].strip()

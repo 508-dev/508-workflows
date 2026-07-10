@@ -44,6 +44,7 @@ import {
   formatDate,
   githubUrl,
   isTerminalJobStatus,
+  jobLeadClassificationMethodLabel,
   jsonPreview,
   labelForOnboardingState,
   linkedinUrl,
@@ -5605,7 +5606,7 @@ function jobLeadClassificationLabel(lead: JobLead) {
       unknown: "Employment type unknown",
     }[String(postingType || "")] || "Employment type unknown"
   if (method) {
-    const methodLabel = method === "llm" ? "LLM" : "Keyword fallback"
+    const methodLabel = jobLeadClassificationMethodLabel(method)
     return `${postingTypeLabel} · ${methodLabel}`
   }
   return postingType ? postingTypeLabel : lead.review_summary || "Classification unavailable"
