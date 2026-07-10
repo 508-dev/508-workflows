@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Shared settings, queue, and job utilities for 508.dev services"
 requires-python = ">=3.12"
 dependencies = [
-    "cloakbrowser>=0.3.31",
+    "cloakbrowser>=0.4.7",
     "cryptography>=46.0.0",
     "curl-cffi>=0.10.0",
     "pydantic~=2.13",
