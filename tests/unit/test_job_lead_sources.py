@@ -384,6 +384,12 @@ def test_apply_url_prefers_specific_role_path_over_contextual_homepage() -> None
 
     assert classification.apply_url == "https://acme.example/jobs/engineer"
 
+    careers_site = classify_contractor_lead_heuristic(
+        "Acme | Contract engineer | Careers: https://careers.acme.example/ "
+        "About us: https://acme.example/about"
+    )
+    assert careers_site.apply_url == "https://careers.acme.example/"
+
 
 def test_llm_link_and_email_proposals_must_match_post_candidates() -> None:
     text = (

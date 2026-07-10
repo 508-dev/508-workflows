@@ -108,8 +108,11 @@ _JOB_URL_HINTS = (
     "career",
     "careers",
     "position",
+    "role",
     "opening",
     "apply",
+    "engineer",
+    "developer",
     "greenhouse.io",
     "lever.co",
     "ashbyhq.com",
@@ -326,8 +329,8 @@ def _preferred_apply_url(text: str, proposed: str | None = None) -> str | None:
         has_specific_path = parsed.path not in {"", "/"}
         has_job_hint = any(hint in searchable for hint in _JOB_URL_HINTS)
         return (
-            int(has_specific_path),
             int(has_job_hint),
+            int(has_specific_path),
             int(candidate == proposed_value),
             int(bool(_APPLICATION_CONTEXT_RE.search(prefix))),
         )
