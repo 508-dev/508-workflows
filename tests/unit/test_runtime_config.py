@@ -278,6 +278,7 @@ def test_runtime_config_rejects_blank_non_secret_overrides(
     [
         "DOCUSEAL_MEMBER_AGREEMENT_TEMPLATE_ID",
         "GIG_RECRUITING_STALE_DAYS",
+        "GIG_CONTACTED_REMINDER_DAYS",
         "GIG_RECRUITING_REMINDER_MAX_AGE_DAYS",
     ],
 )

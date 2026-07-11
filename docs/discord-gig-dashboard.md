@@ -11,11 +11,14 @@ Candidate and applicant rows live in `engagement_applications`.
 
 The supported gig statuses are:
 
+- `lead`
 - `recruiting`
+- `contacted`
 - `filled`
 - `unknown`
 - `lost`
 - `outdated`
+- `duplicate`
 
 The bot parses visible status markers from Discord forum thread titles, such as
 `[RECRUITING]`. Dashboard status updates are preserved during later bot
@@ -85,26 +88,31 @@ dashboard.
 Direct-interest detection is intentionally conservative and includes negation
 guards for phrases such as "not available" or "not interested".
 
-## Stale Recruiting Notifications
+## Gig Status Reminders
 
 `GIG_RECRUITING_STALE_DAYS` controls when a recruiting gig is considered stale.
 The default is `7`.
+`GIG_CONTACTED_REMINDER_DAYS` controls how long a gig may remain in `CONTACTED`
+before a follow-up reminder. The default is `5`.
 `GIG_RECRUITING_REMINDER_MAX_AGE_DAYS` bounds reminders and stale notifications
 to recently posted gigs. The default is `90`, so old backfilled Discord posts are
 not treated as active recruiting work.
 
 The dashboard notification tray uses `GET /dashboard/api/notifications` to show
 recruiting gigs whose latest known activity is older than the configured
-threshold.
-The main gig list hides only historical terminal statuses (`LOST` and
+threshold, and contacted gigs that have remained in that status for the
+configured follow-up interval.
+The main gig list hides historical terminal statuses (`LOST`, `DUPLICATE`, and
 `OUTDATED`) by default. Steering/admin viewers can opt into historical gigs when
 they need those records.
 
-The Discord bot also runs a periodic reminder loop. When a stale recruiting gig
-has a Discord thread and original poster, it replies in the thread and mentions
-the poster asking for a status update. Sent reminders update
-`last_recruiting_reminder_at` but do not advance `last_activity_at`, so passive
-reminders do not make stale gigs look active.
+The Discord bot also runs a periodic reminder loop. When a stale recruiting or
+contacted gig has a Discord thread and original poster, it replies in the thread
+and mentions the poster asking for a status update. Sent reminders update
+`last_status_reminder_at` but do not advance `last_activity_at`, so passive
+reminders do not make stale gigs look active. Contacted-gig reminders use the
+time the status changed, rather than later thread activity, to preserve the
+five-day follow-up cadence.
 Locked or archived Discord gig threads are treated as done and marked outdated
 instead of receiving a reminder.
 

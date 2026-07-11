@@ -4659,12 +4659,14 @@ async def dashboard_notifications_handler(
         viewer_discord_user_id=session.subject,
         include_all=include_all,
         stale_days=settings.gig_recruiting_stale_days,
+        contacted_reminder_days=settings.gig_contacted_reminder_days,
         max_age_days=settings.gig_recruiting_reminder_max_age_days,
         limit=limit,
     )
     return JSONResponse(
         {
             "stale_days": settings.gig_recruiting_stale_days,
+            "contacted_reminder_days": settings.gig_contacted_reminder_days,
             "notifications": notifications,
         }
     )

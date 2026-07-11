@@ -42,6 +42,7 @@ class SharedSettings(BaseSettings):
     job_timeout_seconds: int = 600
     job_result_ttl_seconds: int = 3600
     gig_recruiting_stale_days: int = Field(default=7, ge=1)
+    gig_contacted_reminder_days: int = Field(default=5, ge=1)
     gig_recruiting_reminder_max_age_days: int = Field(default=90, ge=1)
     minio_endpoint: str = "http://127.0.0.1:9000"
     minio_root_user: str = "internal"
