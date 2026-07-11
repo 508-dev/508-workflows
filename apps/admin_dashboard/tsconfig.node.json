@@ -10,8 +10,7 @@
     "verbatimModuleSyntax": true,
     "moduleDetection": "force",
     "noEmit": true,
-    "strict": true,
-    "types": ["bun"]
+    "strict": true
   },
   "include": ["vite.config.ts", "vitest.config.ts"]
 }
