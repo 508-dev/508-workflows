@@ -203,6 +203,22 @@ def test_heuristic_rejects_full_time_role_with_customer_contract() -> None:
     assert classification.contact_email == "stefan.akatyschew@anoritech.com"
 
 
+def test_heuristic_recognizes_full_time_header_with_smart_contracts() -> None:
+    classification = classify_contractor_lead_heuristic(
+        "Category Labs | https://www.category.xyz/ | Remote and NYC | Full Time | "
+        "$200K USD+\nCategory Labs builds a high-performance EVM for smart "
+        "contracts. Senior Software Engineer (C++ / Rust)."
+    )
+
+    assert classification.is_contractor_friendly is False
+    assert classification.posting_type is JobPostingType.FULL_TIME
+    assert classification.tags == ["full-time"]
+    assert (
+        classification.rationale
+        == "Explicit full-time employment with no contract option."
+    )
+
+
 def test_heuristic_accepts_role_open_to_full_time_or_contract() -> None:
     classification = classify_contractor_lead_heuristic(
         "Acme | Engineer | Full-time or contract | Remote"
