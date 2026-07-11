@@ -928,6 +928,7 @@ function App() {
   const [projectQuery, setProjectQuery] = useState("")
   const [projectStatus, setProjectStatus] = useState(initialProjectDetailId ? "" : "Open")
   const [staleRecruitingDays, setStaleRecruitingDays] = useState(7)
+  const [contactedReminderDays, setContactedReminderDays] = useState(5)
   const [peopleQuery, setPeopleQuery] = useState("")
   const [peopleMember, setPeopleMember] = useState("")
   const [peopleFilters, setPeopleFilters] = useState<FilterState>({})
@@ -1758,6 +1759,7 @@ function App() {
         "/dashboard/api/notifications?limit=20",
       )
       setStaleRecruitingDays(payload.stale_days || 7)
+      setContactedReminderDays(payload.contacted_reminder_days || 5)
       setNotifications(payload.notifications || [])
     } catch (error) {
       showError(error, "Unable to load notifications")
@@ -2800,6 +2802,7 @@ function App() {
               includeHistorical={gigIncludeHistorical}
               limit={gigLimit}
               staleDays={staleRecruitingDays}
+              contactedReminderDays={contactedReminderDays}
               canWrite={can("gigs:write")}
               canSearchCandidates={can("people:read")}
               canManageLeads={can("people:read")}
@@ -3343,11 +3346,16 @@ function gigActivityTimestamp(gig: Gig) {
   return activityTimes.length > 0 ? new Date(Math.max(...activityTimes)).toISOString() : ""
 }
 
-function staleRecruitingAge(gig: Gig, staleDays: number) {
-  if (gig.status !== "recruiting") return null
-  const latestActivity = gigActivityTimestamp(gig)
-  const age = daysSince(latestActivity)
-  if (age === null || age < staleDays) return null
+function staleGigAge(gig: Gig, recruitingDays: number, contactedDays: number) {
+  const isContacted = gig.status === "contacted"
+  if (gig.status !== "recruiting" && !isContacted) return null
+  const age = daysSince(
+    isContacted
+      ? gig.last_status_changed_at || gig.updated_at || gig.created_at
+      : gigActivityTimestamp(gig),
+  )
+  const reminderDays = isContacted ? contactedDays : recruitingDays
+  if (age === null || age < reminderDays) return null
   return age
 }
 
@@ -5176,6 +5184,7 @@ function GigsView(props: {
   includeHistorical: boolean
   limit: number
   staleDays: number
+  contactedReminderDays: number
   canWrite: boolean
   canSearchCandidates: boolean
   canManageLeads: boolean
@@ -5211,7 +5220,9 @@ function GigsView(props: {
       acc.total += 1
       acc.applications += Number(gig.application_count || 0)
       acc.interested += Number(gig.interested_count || 0)
-      if (staleRecruitingAge(gig, props.staleDays) !== null) acc.stale += 1
+      if (staleGigAge(gig, props.staleDays, props.contactedReminderDays) !== null) {
+        acc.stale += 1
+      }
       return acc
     },
     { total: 0, applications: 0, interested: 0, stale: 0 },
@@ -5463,6 +5474,7 @@ function GigsView(props: {
           crmContactUrl={props.crmContactUrl}
           crmAttachmentUrl={props.crmAttachmentUrl}
           staleDays={props.staleDays}
+          contactedReminderDays={props.contactedReminderDays}
           onBack={props.onCloseGig}
           onUpdateStatus={props.onUpdateStatus}
           onAddApplication={props.onAddApplication}
@@ -5480,7 +5492,7 @@ function GigsView(props: {
         <Metric id="gigMetricTotal" label="Gigs" value={counts.total} />
         <Metric id="gigMetricCandidates" label="Candidates" value={counts.applications} />
         <Metric id="gigMetricInterested" label="Interested" value={counts.interested} />
-        <Metric id="gigMetricStale" label="Stale recruiting" value={counts.stale} />
+        <Metric id="gigMetricStale" label="Needs update" value={counts.stale} />
       </section>
 
       <Card>
@@ -5520,6 +5532,7 @@ function GigsView(props: {
               loading={props.loading}
               canWrite={props.canWrite}
               staleDays={props.staleDays}
+              contactedReminderDays={props.contactedReminderDays}
               onOpenGig={props.onOpenGig}
               onUpdateStatus={props.onUpdateStatus}
             />
@@ -5883,6 +5896,7 @@ function GigListItem({
   onOpenGig,
   onUpdateStatus,
   staleDays,
+  contactedReminderDays,
 }: {
   gig: Gig
   loading: Record<string, boolean>
@@ -5890,6 +5904,7 @@ function GigListItem({
   onOpenGig: (gigId: string) => void
   onUpdateStatus: (gigId: string, status: string) => void
   staleDays: number
+  contactedReminderDays: number
 }) {
   const applications = Array.isArray(gig.applications) ? gig.applications : []
   const isActive = gig.status === "recruiting" || gig.status === "contacted"
@@ -5899,7 +5914,7 @@ function GigListItem({
           gig.discord_guild_id,
         )}/${encodeURIComponent(gig.discord_thread_id)}`
       : ""
-  const staleAge = staleRecruitingAge(gig, staleDays)
+  const staleAge = staleGigAge(gig, staleDays, contactedReminderDays)
   return (
     <article
       className={cn(
@@ -6031,6 +6046,7 @@ function GigDetailPage({
   crmContactUrl,
   crmAttachmentUrl,
   staleDays,
+  contactedReminderDays,
   onBack,
   onUpdateStatus,
   onAddApplication,
@@ -6043,6 +6059,7 @@ function GigDetailPage({
   crmContactUrl: (contactId?: string) => string
   crmAttachmentUrl: (attachmentId?: string) => string
   staleDays: number
+  contactedReminderDays: number
   onBack: () => void
   onUpdateStatus: (gigId: string, status: string) => void
   onAddApplication: (gigId: string, crmProfile: string) => Promise<boolean>
@@ -6067,7 +6084,7 @@ function GigDetailPage({
           gig.discord_guild_id,
         )}/${encodeURIComponent(gig.discord_thread_id)}`
       : ""
-  const staleAge = staleRecruitingAge(gig, staleDays)
+  const staleAge = staleGigAge(gig, staleDays, contactedReminderDays)
 
   useEffect(() => {
     if (!canWrite || !canSearchCandidates) return

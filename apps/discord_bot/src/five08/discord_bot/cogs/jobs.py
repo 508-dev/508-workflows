@@ -2380,7 +2380,6 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             EngagementStatus.LEAD,
             EngagementStatus.UNKNOWN,
             EngagementStatus.RECRUITING,
-            EngagementStatus.CONTACTED,
         }:
             return EngagementStatus.OUTDATED
         return explicit_status
@@ -2945,7 +2944,10 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                     thread = await self.bot.fetch_channel(int(thread_id))
                 if not isinstance(thread, discord.Thread):
                     continue
+                status = EngagementStatus(str(row.get("status") or "recruiting"))
                 if self._thread_looks_done(thread):
+                    if status is EngagementStatus.CONTACTED:
+                        continue
                     await asyncio.to_thread(
                         update_engagement_status,
                         settings,
@@ -2954,7 +2956,6 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                         actor_discord_user_id=None,
                     )
                     continue
-                status = EngagementStatus(str(row.get("status") or "recruiting"))
                 reminder_days = (
                     settings.gig_contacted_reminder_days
                     if status is EngagementStatus.CONTACTED

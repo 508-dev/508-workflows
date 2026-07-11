@@ -1218,7 +1218,7 @@ def list_dashboard_notifications(
     """Return dashboard notification items visible to one viewer."""
     recruiting_days = max(1, stale_days)
     contacted_days = max(1, contacted_reminder_days)
-    max_age = max(recruiting_days, contacted_days, max_age_days)
+    max_age = max(1, max_age_days)
     params: list[Any] = [recruiting_days, contacted_days, max_age]
     conditions = [
         "e.lifecycle_stage = 'pending_gig'",
@@ -1308,7 +1308,7 @@ def list_due_status_reminders(
     """Atomically claim gig threads that need a Discord status reminder."""
     recruiting_days = max(1, stale_days)
     contacted_days = max(1, contacted_reminder_days)
-    max_age = max(recruiting_days, contacted_days, max_age_days)
+    max_age = max(1, max_age_days)
     sql = """
         WITH due AS (
             SELECT e.id

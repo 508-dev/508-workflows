@@ -102,7 +102,7 @@ The dashboard notification tray uses `GET /dashboard/api/notifications` to show
 recruiting gigs whose latest known activity is older than the configured
 threshold, and contacted gigs that have remained in that status for the
 configured follow-up interval.
-The main gig list hides only historical terminal statuses (`LOST` and
+The main gig list hides historical terminal statuses (`LOST`, `DUPLICATE`, and
 `OUTDATED`) by default. Steering/admin viewers can opt into historical gigs when
 they need those records.
 

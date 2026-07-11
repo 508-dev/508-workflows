@@ -590,7 +590,7 @@ def test_due_recruiting_reminders_exclude_very_old_gigs(monkeypatch) -> None:
         SharedSettings(),
         stale_days=7,
         contacted_reminder_days=5,
-        max_age_days=90,
+        max_age_days=3,
         limit=5,
     )
 
@@ -598,7 +598,7 @@ def test_due_recruiting_reminders_exclude_very_old_gigs(monkeypatch) -> None:
     query, params = executed[0]
     assert "COALESCE(e.posted_at, e.created_at)" in query
     assert "e.status = 'contacted'" in query
-    assert params == (7, 5, 90, 5, 7, 5)
+    assert params == (7, 5, 3, 5, 7, 5)
 
 
 def test_dashboard_notifications_exclude_very_old_gigs(monkeypatch) -> None:
@@ -643,7 +643,7 @@ def test_dashboard_notifications_exclude_very_old_gigs(monkeypatch) -> None:
         include_all=False,
         stale_days=7,
         contacted_reminder_days=5,
-        max_age_days=90,
+        max_age_days=3,
         limit=5,
     )
 
@@ -651,7 +651,7 @@ def test_dashboard_notifications_exclude_very_old_gigs(monkeypatch) -> None:
     query, params = executed[0]
     assert "COALESCE(e.posted_at, e.created_at)" in query
     assert "e.status = 'contacted'" in query
-    assert params == [7, 5, 90, "poster-1", 5]
+    assert params == [7, 5, 3, "poster-1", 5]
 
 
 def test_get_gig_thread_interest_backfill_marker_returns_payload(monkeypatch) -> None:
