@@ -1802,7 +1802,7 @@ function App() {
   async function addGigApplication(gigId: string, crmProfile: string) {
     const normalizedProfile = crmProfile.trim()
     if (!normalizedProfile) {
-      showToast("Paste a CRM Contact profile first", "warning")
+      showToast("Choose a candidate first", "warning")
       return false
     }
     setBusy(`gig:${gigId}:addCandidate`, true)
@@ -5423,6 +5423,7 @@ function GigsView(props: {
       <>
         {filterBar}
         <GigDetailPage
+          key={props.selectedGig.id}
           gig={props.selectedGig}
           loading={props.loading}
           canWrite={props.canWrite}
@@ -5985,6 +5986,10 @@ function candidateDisplayName(application: GigApplication) {
   )
 }
 
+function personSearchLabel(person: Person) {
+  return person.name || person.email_508 || person.email || person.crm_contact_id || "CRM person"
+}
+
 function GigDetailPage({
   gig,
   loading,
@@ -6008,9 +6013,17 @@ function GigDetailPage({
   onAddApplication: (gigId: string, crmProfile: string) => Promise<boolean>
   onUpdateApplicationStatus: (gigId: string, applicationId: string, status: string) => void
 }) {
-  const [crmProfile, setCrmProfile] = useState("")
+  const [candidateQuery, setCandidateQuery] = useState("")
+  const [candidateMatches, setCandidateMatches] = useState<Person[]>([])
+  const [selectedCandidate, setSelectedCandidate] = useState<Person | null>(null)
+  const [candidateSearchError, setCandidateSearchError] = useState("")
   const applications = Array.isArray(gig.applications) ? gig.applications : []
   const isRecruiting = gig.status === "recruiting"
+  const candidateQueryReady = candidateQuery.trim().length >= 2
+  const selectedCandidateId = selectedCandidate?.crm_contact_id || ""
+  const candidateProfile = selectedCandidateId
+    ? crmContactUrl(selectedCandidateId) || selectedCandidateId
+    : ""
   const threadUrl =
     gig.discord_guild_id && gig.discord_thread_id
       ? `https://discord.com/channels/${encodeURIComponent(
@@ -6018,6 +6031,51 @@ function GigDetailPage({
         )}/${encodeURIComponent(gig.discord_thread_id)}`
       : ""
   const staleAge = staleRecruitingAge(gig, staleDays)
+
+  useEffect(() => {
+    if (!canWrite) return
+    const query = candidateQuery.trim()
+    if (selectedCandidate && query === personSearchLabel(selectedCandidate)) {
+      setCandidateMatches([])
+      setCandidateSearchError("")
+      return
+    }
+    if (query.length < 2) {
+      setCandidateMatches([])
+      setCandidateSearchError("")
+      return
+    }
+
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => {
+      const params = new URLSearchParams({ limit: "8", query })
+      void requestJson<Person[]>(`/dashboard/api/people?${params.toString()}`, {
+        signal: controller.signal,
+      })
+        .then((people) => {
+          setCandidateMatches(people.filter((person) => Boolean(person.crm_contact_id)))
+          setCandidateSearchError("")
+        })
+        .catch((error) => {
+          if (error instanceof DOMException && error.name === "AbortError") return
+          setCandidateMatches([])
+          setCandidateSearchError(messageFromUnknown(error, "Unable to search candidates"))
+        })
+    }, 300)
+
+    return () => {
+      controller.abort()
+      window.clearTimeout(timer)
+    }
+  }, [candidateQuery, canWrite, selectedCandidate])
+
+  function chooseCandidate(person: Person) {
+    setSelectedCandidate(person)
+    setCandidateQuery(personSearchLabel(person))
+    setCandidateMatches([])
+    setCandidateSearchError("")
+  }
+
   return (
     <div className="grid gap-5">
       <Card
@@ -6134,24 +6192,70 @@ function GigDetailPage({
             className="grid gap-2 border-t p-4 md:grid-cols-[minmax(220px,1fr)_auto]"
             onSubmit={(event) => {
               event.preventDefault()
-              void onAddApplication(gig.id, crmProfile).then((added) => {
-                if (added) setCrmProfile("")
+              void onAddApplication(gig.id, candidateProfile).then((added) => {
+                if (added) {
+                  setCandidateQuery("")
+                  setCandidateMatches([])
+                  setSelectedCandidate(null)
+                }
               })
             }}
           >
-            <Label className="min-w-0">
-              CRM profile
-              <Input
-                value={crmProfile}
-                onChange={(event) => setCrmProfile(event.target.value)}
-                placeholder="https://crm.508.dev/#Contact/view/..."
-                aria-label="CRM profile for candidate"
-              />
-            </Label>
+            <div className="relative min-w-0">
+              <Label>
+                Candidate
+                <Input
+                  value={candidateQuery}
+                  autoComplete="off"
+                  placeholder="Search by name or email"
+                  aria-label="Search candidates to add"
+                  onChange={(event) => {
+                    setCandidateQuery(event.target.value)
+                    setSelectedCandidate(null)
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter" || candidateMatches.length !== 1) return
+                    event.preventDefault()
+                    chooseCandidate(candidateMatches[0])
+                  }}
+                />
+              </Label>
+              {candidateQueryReady && !selectedCandidate ? (
+                <div className="absolute z-20 mt-1 max-h-64 w-full overflow-auto rounded-md border bg-background shadow-lg">
+                  {candidateSearchError ? (
+                    <div className="px-3 py-2 text-sm text-destructive">{candidateSearchError}</div>
+                  ) : candidateMatches.length ? (
+                    candidateMatches.map((person) => {
+                      const label = personSearchLabel(person)
+                      const detail = [person.email_508 || person.email, person.contact_type]
+                        .filter(Boolean)
+                        .join(" | ")
+                      return (
+                        <button
+                          key={person.crm_contact_id}
+                          type="button"
+                          className="grid w-full gap-0.5 px-3 py-2 text-left hover:bg-secondary focus:bg-secondary focus:outline-none"
+                          onClick={() => chooseCandidate(person)}
+                        >
+                          <span className="truncate text-sm font-bold">{label}</span>
+                          {detail ? (
+                            <span className="truncate text-xs text-muted-foreground">{detail}</span>
+                          ) : null}
+                        </button>
+                      )
+                    })
+                  ) : (
+                    <div className="px-3 py-2 text-sm text-muted-foreground">
+                      No candidates match this search
+                    </div>
+                  )}
+                </div>
+              ) : null}
+            </div>
             <Button
               type="submit"
               className="self-end"
-              disabled={loading[`gig:${gig.id}:addCandidate`] || !crmProfile.trim()}
+              disabled={loading[`gig:${gig.id}:addCandidate`] || !candidateProfile}
             >
               <UserPlus />
               Add candidate

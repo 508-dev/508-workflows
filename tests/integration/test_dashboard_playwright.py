@@ -158,6 +158,17 @@ def _people_payload() -> list[dict[str, object]]:
     ]
 
 
+def _candidate_search_payload() -> list[dict[str, object]]:
+    return [
+        {
+            "crm_contact_id": "contact-candidate-2",
+            "name": "Devon Candidate",
+            "email": "devon@example.com",
+            "contact_type": "Prospect",
+        }
+    ]
+
+
 def _onboarding_payload() -> list[dict[str, object]]:
     return [
         {
@@ -465,10 +476,15 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
 
         def people_route(route: Any) -> None:
             people_requests.append(route.request.url)
+            query = parse_qs(urlparse(route.request.url).query).get("query", [""])[0]
             route.fulfill(
                 status=200,
                 content_type="application/json",
-                body=json.dumps(_people_payload()),
+                body=json.dumps(
+                    _candidate_search_payload()
+                    if query == "Devon"
+                    else _people_payload()
+                ),
             )
 
         def onboarding_route(route: Any) -> None:
@@ -903,9 +919,9 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
                 "href",
                 f"{crm_base_url}/#Contact/view/contact-candidate-1",
             )
-            page.get_by_label("CRM profile for candidate").fill(
-                f"{crm_base_url}/#Contact/view/contact-candidate-2"
-            )
+            page.get_by_label("Search candidates to add").fill("Devon")
+            page.get_by_text("Devon Candidate", exact=True).click()
+            assert any("query=Devon" in url for url in people_requests)
             page.get_by_role("button", name="Add candidate").click()
             assert gig_application_add_requested.wait(timeout=5)
             page.get_by_text("Devon Candidate").wait_for()
