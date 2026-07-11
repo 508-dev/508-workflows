@@ -82,6 +82,7 @@ type View =
   | "audit"
   | "configuration"
 type SortDirection = "asc" | "desc"
+type GigTab = "gigs" | "leads"
 
 type User = {
   subject: string
@@ -666,6 +667,19 @@ function detailIdFromPath(expectedView: "gigs" | "projects" = "gigs") {
   }
 }
 
+function gigTabFromHash(hash = window.location.hash): GigTab {
+  return hash.replace(/^#/, "") === "leads" ? "leads" : "gigs"
+}
+
+function updateGigTabHash(tab: GigTab) {
+  const hash = tab === "leads" ? "#leads" : "#gigs"
+  window.history.replaceState(
+    window.history.state,
+    "",
+    `${window.location.pathname}${window.location.search}${hash}`,
+  )
+}
+
 async function requestJson<T>(url: string, options: RequestInit = {}): Promise<T> {
   const method = String(options.method || "GET").toUpperCase()
   const headers = new Headers(options.headers)
@@ -908,7 +922,7 @@ function App() {
   const [gigQuery, setGigQuery] = useState("")
   const [gigIncludeHistorical, setGigIncludeHistorical] = useState(false)
   const [gigLimit, setGigLimit] = useState(100)
-  const [activeGigTab, setActiveGigTab] = useState<"gigs" | "leads">("gigs")
+  const [activeGigTab, setActiveGigTab] = useState<GigTab>(gigTabFromHash)
   const [gigLeadStatus, setGigLeadStatus] = useState("pending")
   const [projectQuery, setProjectQuery] = useState("")
   const [projectStatus, setProjectStatus] = useState(initialProjectDetailId ? "" : "Open")
@@ -975,6 +989,7 @@ function App() {
     if (normalized !== "projects") setSelectedProjectId("")
     if (normalized === "gigs" && push) setSelectedGigId("")
     if (normalized === "projects" && push) setSelectedProjectId("")
+    if (normalized === "gigs") setActiveGigTab(push ? "gigs" : gigTabFromHash())
     setViewState(normalized)
     if (push) {
       window.history.pushState({ view: normalized }, "", routes[normalized])
@@ -983,6 +998,11 @@ function App() {
     }
   }
   navigateRef.current = navigate
+
+  function selectGigTab(tab: GigTab) {
+    setActiveGigTab(tab)
+    updateGigTabHash(tab)
+  }
 
   function crmContactUrl(contactId?: string) {
     if (!crmBaseUrl || !contactId) return ""
@@ -1717,7 +1737,7 @@ function App() {
         },
       )
       showToast("Posted lead to Discord", "ok")
-      setActiveGigTab("gigs")
+      selectGigTab("gigs")
       setGigStatus("")
       setGigQuery("")
       await loadGigLeads()
@@ -2345,6 +2365,12 @@ function App() {
   }, [])
 
   useEffect(() => {
+    const onHashChange = () => setActiveGigTab(gigTabFromHash())
+    window.addEventListener("hashchange", onHashChange)
+    return () => window.removeEventListener("hashchange", onHashChange)
+  }, [])
+
+  useEffect(() => {
     if (!toast.message) return undefined
     const timeout = window.setTimeout(() => setToast({ message: "" }), 4500)
     return () => window.clearTimeout(timeout)
@@ -2776,7 +2802,7 @@ function App() {
               canIncludeHistorical={can("people:read")}
               crmContactUrl={crmContactUrl}
               crmAttachmentUrl={crmAttachmentUrl}
-              setActiveTab={setActiveGigTab}
+              setActiveTab={selectGigTab}
               setStatus={setGigStatus}
               setQuery={setGigQuery}
               setLeadStatus={setGigLeadStatus}

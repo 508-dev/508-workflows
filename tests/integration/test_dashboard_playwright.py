@@ -862,7 +862,15 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
                 "status=" not in urlparse(url).query for url in gig_list_requests
             )
             page.locator("#gigLeadsTab").click()
+            expect(page).to_have_url(f"{dashboard_server}/dashboard/gigs#leads")
+            page.reload()
             page.get_by_text("Contract React Build").wait_for()
+            page.get_by_role("link", name="People").click()
+            expect(page).to_have_url(f"{dashboard_server}/dashboard/people")
+            page.get_by_role("link", name="Gigs").click()
+            expect(page).to_have_url(f"{dashboard_server}/dashboard/gigs")
+            expect(page.locator("#gigsTab")).to_have_attribute("aria-pressed", "true")
+            page.locator("#gigLeadsTab").click()
             expect(
                 page.get_by_text("Full-time or part-time / contract · LLM")
             ).to_be_visible()
