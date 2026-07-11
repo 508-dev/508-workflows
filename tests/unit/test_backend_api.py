@@ -6772,6 +6772,7 @@ def test_dashboard_notifications_filters_member_to_own_gigs(
         }
     ]
     monkeypatch.setattr(api.settings, "gig_recruiting_stale_days", 9)
+    monkeypatch.setattr(api.settings, "gig_contacted_reminder_days", 5)
     monkeypatch.setattr(api.settings, "gig_recruiting_reminder_max_age_days", 90)
 
     with (
@@ -6788,12 +6789,17 @@ def test_dashboard_notifications_filters_member_to_own_gigs(
         response = client.get("/dashboard/api/notifications?limit=10")
 
     assert response.status_code == 200
-    assert response.json() == {"stale_days": 9, "notifications": notifications}
+    assert response.json() == {
+        "stale_days": 9,
+        "contacted_reminder_days": 5,
+        "notifications": notifications,
+    }
     mock_notifications.assert_called_once_with(
         api.settings,
         viewer_discord_user_id="123456789",
         include_all=False,
         stale_days=9,
+        contacted_reminder_days=5,
         max_age_days=90,
         limit=10,
     )
@@ -6832,6 +6838,7 @@ def test_dashboard_notifications_allows_steering_to_see_all_gigs(
         viewer_discord_user_id="steering-1",
         include_all=True,
         stale_days=api.settings.gig_recruiting_stale_days,
+        contacted_reminder_days=api.settings.gig_contacted_reminder_days,
         max_age_days=api.settings.gig_recruiting_reminder_max_age_days,
         limit=20,
     )

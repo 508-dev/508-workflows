@@ -24,6 +24,7 @@ class EngagementStatus(StrEnum):
 
     LEAD = "lead"
     RECRUITING = "recruiting"
+    CONTACTED = "contacted"
     FILLED = "filled"
     UNKNOWN = "unknown"
     LOST = "lost"
@@ -63,6 +64,7 @@ _STATUS_ALIASES = {
     "recruiting": EngagementStatus.RECRUITING,
     "open": EngagementStatus.RECRUITING,
     "hiring": EngagementStatus.RECRUITING,
+    "contacted": EngagementStatus.CONTACTED,
     "filled": EngagementStatus.FILLED,
     "staffed": EngagementStatus.FILLED,
     "closed": EngagementStatus.FILLED,
@@ -319,6 +321,14 @@ def upsert_discord_engagement(
                     AND engagements.status IS DISTINCT FROM EXCLUDED.status
                 THEN NOW()
                 ELSE engagements.last_status_changed_at
+            END,
+            last_status_reminder_at = CASE
+                WHEN
+                    EXCLUDED.status <> 'unknown'
+                    AND NOT %s
+                    AND engagements.status IS DISTINCT FROM EXCLUDED.status
+                THEN NULL
+                ELSE engagements.last_status_reminder_at
             END
         RETURNING id::text
     """
@@ -347,6 +357,7 @@ def upsert_discord_engagement(
                     posted_at,
                     payload.preserve_existing_status,
                     payload.refresh_activity,
+                    payload.preserve_existing_status,
                     payload.preserve_existing_status,
                 ),
             )
@@ -1075,7 +1086,9 @@ def list_dashboard_engagements(
         conditions.append("e.status = %s")
         params.append(status.value)
     elif engagement_id is None and not include_historical:
-        conditions.append("e.status IN ('lead', 'recruiting', 'filled', 'unknown')")
+        conditions.append(
+            "e.status IN ('lead', 'recruiting', 'contacted', 'filled', 'unknown')"
+        )
     normalized_query = query.strip() if query is not None else ""
     if normalized_query:
         like_query = _ilike_contains_pattern(normalized_query)
@@ -1176,9 +1189,10 @@ def list_dashboard_engagements(
             CASE e.status
                 WHEN 'lead' THEN 0
                 WHEN 'recruiting' THEN 1
-                WHEN 'filled' THEN 2
-                WHEN 'unknown' THEN 3
-                ELSE 4
+                WHEN 'contacted' THEN 2
+                WHEN 'filled' THEN 3
+                WHEN 'unknown' THEN 4
+                ELSE 5
             END ASC,
             e.last_activity_at DESC NULLS LAST,
             e.created_at DESC
@@ -1197,23 +1211,37 @@ def list_dashboard_notifications(
     viewer_discord_user_id: str | None,
     include_all: bool,
     stale_days: int,
+    contacted_reminder_days: int,
     max_age_days: int,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
     """Return dashboard notification items visible to one viewer."""
-    days = max(1, stale_days)
-    max_age = max(days, max_age_days)
-    params: list[Any] = [days, max_age]
+    recruiting_days = max(1, stale_days)
+    contacted_days = max(1, contacted_reminder_days)
+    max_age = max(recruiting_days, contacted_days, max_age_days)
+    params: list[Any] = [recruiting_days, contacted_days, max_age]
     conditions = [
         "e.lifecycle_stage = 'pending_gig'",
-        "e.status = 'recruiting'",
         """
-        GREATEST(
-            COALESCE(e.last_activity_at, '-infinity'::timestamptz),
-            COALESCE(e.last_status_changed_at, '-infinity'::timestamptz),
-            COALESCE(e.posted_at, '-infinity'::timestamptz),
-            e.created_at
-        ) <= NOW() - make_interval(days => %s)
+        (
+            (
+                e.status = 'recruiting'
+                AND GREATEST(
+                    COALESCE(e.last_activity_at, '-infinity'::timestamptz),
+                    COALESCE(e.last_status_changed_at, '-infinity'::timestamptz),
+                    COALESCE(e.posted_at, '-infinity'::timestamptz),
+                    e.created_at
+                ) <= NOW() - make_interval(days => %s)
+            )
+            OR (
+                e.status = 'contacted'
+                AND COALESCE(
+                    e.last_status_changed_at,
+                    e.updated_at,
+                    e.created_at
+                ) <= NOW() - make_interval(days => %s)
+            )
+        )
         """,
         "COALESCE(e.posted_at, e.created_at) >= NOW() - make_interval(days => %s)",
     ]
@@ -1231,19 +1259,26 @@ def list_dashboard_notifications(
             e.posted_at,
             e.last_status_changed_at,
             e.last_activity_at,
-            e.last_recruiting_reminder_at,
+            e.last_status_reminder_at,
             FLOOR(
                 EXTRACT(
                     EPOCH FROM (
-                        NOW() - GREATEST(
-                            COALESCE(e.last_activity_at, '-infinity'::timestamptz),
-                            COALESCE(
+                        NOW() - CASE
+                            WHEN e.status = 'contacted' THEN COALESCE(
                                 e.last_status_changed_at,
-                                '-infinity'::timestamptz
-                            ),
-                            COALESCE(e.posted_at, '-infinity'::timestamptz),
-                            e.created_at
-                        )
+                                e.updated_at,
+                                e.created_at
+                            )
+                            ELSE GREATEST(
+                                COALESCE(e.last_activity_at, '-infinity'::timestamptz),
+                                COALESCE(
+                                    e.last_status_changed_at,
+                                    '-infinity'::timestamptz
+                                ),
+                                COALESCE(e.posted_at, '-infinity'::timestamptz),
+                                e.created_at
+                            )
+                        END
                     )
                 ) / 86400
             )::int AS age_days
@@ -1256,45 +1291,67 @@ def list_dashboard_notifications(
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(trusted_sql(sql), params)
             rows = cursor.fetchall()
-    return [_shape_stale_recruiting_notification(row, days) for row in rows]
+    return [
+        _shape_status_reminder_notification(row, recruiting_days, contacted_days)
+        for row in rows
+    ]
 
 
-def list_due_recruiting_reminders(
+def list_due_status_reminders(
     settings: SharedSettings,
     *,
     stale_days: int,
+    contacted_reminder_days: int,
     max_age_days: int,
     limit: int = 25,
 ) -> list[dict[str, Any]]:
-    """Atomically claim recruiting gig threads that need a Discord status reminder."""
-    days = max(1, stale_days)
-    max_age = max(days, max_age_days)
+    """Atomically claim gig threads that need a Discord status reminder."""
+    recruiting_days = max(1, stale_days)
+    contacted_days = max(1, contacted_reminder_days)
+    max_age = max(recruiting_days, contacted_days, max_age_days)
     sql = """
         WITH due AS (
             SELECT e.id
             FROM engagements e
             WHERE e.lifecycle_stage = 'pending_gig'
-              AND e.status = 'recruiting'
               AND e.discord_thread_id IS NOT NULL
               AND e.posted_by_discord_user_id IS NOT NULL
-              AND GREATEST(
-                    COALESCE(e.last_activity_at, '-infinity'::timestamptz),
-                    COALESCE(e.last_status_changed_at, '-infinity'::timestamptz),
-                    COALESCE(e.posted_at, '-infinity'::timestamptz),
-                    e.created_at
-                  ) <= NOW() - make_interval(days => %s)
+              AND (
+                    (
+                      e.status = 'recruiting'
+                      AND GREATEST(
+                            COALESCE(e.last_activity_at, '-infinity'::timestamptz),
+                            COALESCE(e.last_status_changed_at, '-infinity'::timestamptz),
+                            COALESCE(e.posted_at, '-infinity'::timestamptz),
+                            e.created_at
+                          ) <= NOW() - make_interval(days => %s)
+                    )
+                    OR (
+                      e.status = 'contacted'
+                      AND COALESCE(
+                            e.last_status_changed_at,
+                            e.updated_at,
+                            e.created_at
+                          ) <= NOW() - make_interval(days => %s)
+                    )
+                  )
               AND COALESCE(e.posted_at, e.created_at) >= NOW() - make_interval(days => %s)
               AND (
-                    e.last_recruiting_reminder_at IS NULL
-                    OR e.last_recruiting_reminder_at <= NOW() - make_interval(days => %s)
+                    e.last_status_reminder_at IS NULL
+                    OR e.last_status_reminder_at <= NOW() - make_interval(
+                        days => CASE
+                            WHEN e.status = 'contacted' THEN %s
+                            ELSE %s
+                        END
+                    )
                   )
-            ORDER BY e.last_recruiting_reminder_at ASC NULLS FIRST, e.created_at ASC
+            ORDER BY e.last_status_reminder_at ASC NULLS FIRST, e.created_at ASC
             LIMIT %s
             FOR UPDATE SKIP LOCKED
         ),
         claimed AS (
             UPDATE engagements e
-            SET last_recruiting_reminder_at = NOW()
+            SET last_status_reminder_at = NOW()
             FROM due
             WHERE e.id = due.id
             RETURNING e.*
@@ -1302,30 +1359,45 @@ def list_due_recruiting_reminders(
         SELECT
             e.id::text,
             e.title,
+            e.status,
             e.discord_guild_id,
             e.discord_channel_id,
             e.discord_thread_id,
             e.posted_by_discord_user_id,
-            e.last_recruiting_reminder_at,
+            e.last_status_reminder_at,
             FLOOR(
                 EXTRACT(
                     EPOCH FROM (
-                        NOW() - GREATEST(
-                            COALESCE(e.last_activity_at, '-infinity'::timestamptz),
-                            COALESCE(
+                        NOW() - CASE
+                            WHEN e.status = 'contacted' THEN COALESCE(
                                 e.last_status_changed_at,
-                                '-infinity'::timestamptz
-                            ),
-                            COALESCE(e.posted_at, '-infinity'::timestamptz),
-                            e.created_at
-                        )
+                                e.updated_at,
+                                e.created_at
+                            )
+                            ELSE GREATEST(
+                                COALESCE(e.last_activity_at, '-infinity'::timestamptz),
+                                COALESCE(
+                                    e.last_status_changed_at,
+                                    '-infinity'::timestamptz
+                                ),
+                                COALESCE(e.posted_at, '-infinity'::timestamptz),
+                                e.created_at
+                            )
+                        END
                     )
                 ) / 86400
             )::int AS age_days
         FROM claimed e
-        ORDER BY e.last_recruiting_reminder_at ASC NULLS FIRST, e.created_at ASC
+        ORDER BY e.last_status_reminder_at ASC NULLS FIRST, e.created_at ASC
     """
-    params = (days, max_age, days, max(1, min(limit, 100)))
+    params = (
+        recruiting_days,
+        contacted_days,
+        max_age,
+        contacted_days,
+        recruiting_days,
+        max(1, min(limit, 100)),
+    )
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(sql, params)
@@ -1333,19 +1405,19 @@ def list_due_recruiting_reminders(
     return [_shape_reminder_row(row) for row in rows]
 
 
-def mark_recruiting_reminder_sent(
+def mark_status_reminder_sent(
     settings: SharedSettings,
     *,
     engagement_id: str,
     message_id: str,
 ) -> None:
-    """Record that the bot sent a recruiting status reminder."""
+    """Record that the bot sent a gig status reminder."""
     with get_postgres_connection(settings) as conn:
         with conn.cursor() as cursor:
             cursor.execute(
                 """
                 UPDATE engagements
-                SET last_recruiting_reminder_at = NOW()
+                SET last_status_reminder_at = NOW()
                 WHERE id = %s AND lifecycle_stage = 'pending_gig'
                 """,
                 (engagement_id,),
@@ -1357,7 +1429,7 @@ def mark_recruiting_reminder_sent(
                     engagement_id,
                     event_type,
                     payload
-                ) VALUES (%s, %s, 'recruiting_reminder_sent', %s)
+                ) VALUES (%s, %s, 'gig_status_reminder_sent', %s)
                 """,
                 (
                     str(uuid4()),
@@ -1367,13 +1439,13 @@ def mark_recruiting_reminder_sent(
             )
 
 
-def mark_recruiting_reminder_failed(
+def mark_status_reminder_failed(
     settings: SharedSettings,
     *,
     engagement_id: str,
     error: str,
 ) -> None:
-    """Record a failed recruiting reminder attempt after the row was claimed."""
+    """Record a failed gig status reminder attempt after the row was claimed."""
     with get_postgres_connection(settings) as conn:
         with conn.cursor() as cursor:
             cursor.execute(
@@ -1383,7 +1455,7 @@ def mark_recruiting_reminder_failed(
                     engagement_id,
                     event_type,
                     payload
-                ) VALUES (%s, %s, 'recruiting_reminder_failed', %s)
+                ) VALUES (%s, %s, 'gig_status_reminder_failed', %s)
                 """,
                 (
                     str(uuid4()),
@@ -1436,7 +1508,7 @@ def _shape_engagement_row(row: dict[str, Any]) -> dict[str, Any]:
         "posted_at",
         "last_status_changed_at",
         "last_activity_at",
-        "last_recruiting_reminder_at",
+        "last_status_reminder_at",
         "created_at",
         "updated_at",
     ):
@@ -1447,19 +1519,36 @@ def _shape_engagement_row(row: dict[str, Any]) -> dict[str, Any]:
     return shaped
 
 
-def _shape_stale_recruiting_notification(
+def _shape_status_reminder_notification(
     row: dict[str, Any],
-    stale_days: int,
+    recruiting_days: int,
+    contacted_days: int,
 ) -> dict[str, Any]:
     title = str(row.get("title") or "Untitled gig")
-    age_days = int(row.get("age_days") or stale_days)
+    status = str(row.get("status") or EngagementStatus.RECRUITING.value)
+    reminder_days = (
+        contacted_days
+        if status == EngagementStatus.CONTACTED.value
+        else recruiting_days
+    )
+    age_days = int(row.get("age_days") or reminder_days)
     shaped = _shape_reminder_row(row)
+    if status == EngagementStatus.CONTACTED.value:
+        notification_id = f"contacted-gig:{row.get('id')}"
+        notification_type = "contacted_gig"
+        notification_title = "Contacted gig needs an update"
+        message = f"{title} has been CONTACTED for {age_days} day(s)."
+    else:
+        notification_id = f"stale-recruiting:{row.get('id')}"
+        notification_type = "stale_recruiting_gig"
+        notification_title = "Recruiting gig needs an update"
+        message = f"{title} has had no updates for {age_days} day(s)."
     return {
-        "id": f"stale-recruiting:{row.get('id')}",
-        "type": "stale_recruiting_gig",
+        "id": notification_id,
+        "type": notification_type,
         "severity": "warning",
-        "title": "Recruiting gig needs an update",
-        "message": f"{title} has had no updates for {age_days} day(s).",
+        "title": notification_title,
+        "message": message,
         "engagement_id": row.get("id"),
         "gig_title": title,
         "age_days": age_days,
@@ -1468,7 +1557,7 @@ def _shape_stale_recruiting_notification(
         "posted_at": shaped.get("posted_at"),
         "last_status_changed_at": shaped.get("last_status_changed_at"),
         "last_activity_at": shaped.get("last_activity_at"),
-        "last_recruiting_reminder_at": shaped.get("last_recruiting_reminder_at"),
+        "last_status_reminder_at": shaped.get("last_status_reminder_at"),
     }
 
 
@@ -1478,7 +1567,7 @@ def _shape_reminder_row(row: dict[str, Any]) -> dict[str, Any]:
         "posted_at",
         "last_status_changed_at",
         "last_activity_at",
-        "last_recruiting_reminder_at",
+        "last_status_reminder_at",
     ):
         value = row.get(key)
         shaped[key] = value.isoformat() if isinstance(value, datetime) else None
@@ -1546,11 +1635,15 @@ def update_engagement_status(
                         WHEN status IS DISTINCT FROM %s THEN NOW()
                         ELSE last_status_changed_at
                     END,
+                    last_status_reminder_at = CASE
+                        WHEN status IS DISTINCT FROM %s THEN NULL
+                        ELSE last_status_reminder_at
+                    END,
                     last_activity_at = NOW()
                 WHERE id = %s AND lifecycle_stage = 'pending_gig'
                 RETURNING id::text, status, title, discord_thread_id, updated_at
                 """,
-                (status.value, status.value, engagement_id),
+                (status.value, status.value, status.value, engagement_id),
             )
             row = cursor.fetchone()
             if row is None:

@@ -41,9 +41,9 @@ from five08.engagements import (
     EngagementStatus,
     add_engagement_event,
     get_gig_thread_interest_backfill_marker,
-    list_due_recruiting_reminders,
-    mark_recruiting_reminder_failed,
-    mark_recruiting_reminder_sent,
+    list_due_status_reminders,
+    mark_status_reminder_failed,
+    mark_status_reminder_sent,
     normalize_engagement_status,
     parse_status_from_title,
     record_discord_engagement_activity,
@@ -162,11 +162,12 @@ MATCH_CANDIDATES_PRIVATE_TRUTHY = frozenset({"true", "1", "yes", "y", "on"})
 AUTO_MATCH_EXCLUDED_RESUME_NAMES = frozenset({"Vladyslav_Stryzhak.pdf"})
 GIG_FORUM_BACKFILL_ARCHIVED_LIMIT = 200
 GIG_INTEREST_BACKFILL_MAX_AGE_DAYS = 14
-GIG_RECRUITING_REMINDER_CHECK_SECONDS = 6 * 60 * 60
+GIG_STATUS_REMINDER_CHECK_SECONDS = 6 * 60 * 60
 GIG_STATUS_COMMAND_VALUES = frozenset(
     {
         "lead",
         "recruiting",
+        "contacted",
         "filled",
         "outdated",
         "unknown",
@@ -373,7 +374,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         self._auto_matched_thread_lock = asyncio.Lock()
         self._startup_sync_done = False
         self._startup_sync_lock = asyncio.Lock()
-        self._recruiting_reminder_task: asyncio.Task[None] | None = None
+        self._status_reminder_task: asyncio.Task[None] | None = None
         self._forum_backfill_tasks: set[asyncio.Task[None]] = set()
         self._gig_interest_backfill_locks: weakref.WeakValueDictionary[
             int, asyncio.Lock
@@ -381,8 +382,8 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
 
     async def cog_unload(self) -> None:
         """Stop background reminder checks when the cog unloads."""
-        if self._recruiting_reminder_task is not None:
-            self._recruiting_reminder_task.cancel()
+        if self._status_reminder_task is not None:
+            self._status_reminder_task.cancel()
         for task in self._forum_backfill_tasks:
             task.cancel()
 
@@ -2379,6 +2380,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             EngagementStatus.LEAD,
             EngagementStatus.UNKNOWN,
             EngagementStatus.RECRUITING,
+            EngagementStatus.CONTACTED,
         }:
             return EngagementStatus.OUTDATED
         return explicit_status
@@ -2910,24 +2912,25 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         self._forum_backfill_tasks.add(task)
         task.add_done_callback(self._forum_backfill_tasks.discard)
 
-    async def _recruiting_reminder_loop(self) -> None:
-        """Periodically ask stale recruiting gig posters for status updates."""
+    async def _status_reminder_loop(self) -> None:
+        """Periodically ask active gig posters for status updates."""
         await self.bot.wait_until_ready()
         while not self.bot.is_closed():
-            await self._send_due_recruiting_reminders()
-            await asyncio.sleep(GIG_RECRUITING_REMINDER_CHECK_SECONDS)
+            await self._send_due_status_reminders()
+            await asyncio.sleep(GIG_STATUS_REMINDER_CHECK_SECONDS)
 
-    async def _send_due_recruiting_reminders(self) -> None:
-        """Send Discord reminders for recruiting gigs without recent updates."""
+    async def _send_due_status_reminders(self) -> None:
+        """Send Discord reminders for recruiting and contacted gigs."""
         try:
             due_rows = await asyncio.to_thread(
-                list_due_recruiting_reminders,
+                list_due_status_reminders,
                 settings,
                 stale_days=settings.gig_recruiting_stale_days,
+                contacted_reminder_days=settings.gig_contacted_reminder_days,
                 max_age_days=settings.gig_recruiting_reminder_max_age_days,
             )
         except Exception as exc:
-            logger.warning("Failed loading due recruiting reminders: %s", exc)
+            logger.warning("Failed loading due gig status reminders: %s", exc)
             return
 
         for row in due_rows:
@@ -2951,23 +2954,29 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                         actor_discord_user_id=None,
                     )
                     continue
-                age_days = int(
-                    row.get("age_days") or settings.gig_recruiting_stale_days
+                status = EngagementStatus(str(row.get("status") or "recruiting"))
+                reminder_days = (
+                    settings.gig_contacted_reminder_days
+                    if status is EngagementStatus.CONTACTED
+                    else settings.gig_recruiting_stale_days
                 )
+                age_days = int(row.get("age_days") or reminder_days)
                 title = str(row.get("title") or "this gig")
                 safe_title = discord.utils.escape_mentions(
                     discord.utils.escape_markdown(title)
                 )
                 poster_mention = f"<@{int(poster_id)}>"
+                status_context = (
+                    f"It has been in status CONTACTED for {age_days} day(s). "
+                    if status is EngagementStatus.CONTACTED
+                    else "It has been in status RECRUITING with no updates for "
+                    f"{age_days} day(s). "
+                )
                 message = await thread.send(
-                    (
-                        f'{poster_mention} any update on "{safe_title}"? '
-                        "It has been in status RECRUITING with no updates for "
-                        f"{age_days} day(s). "
-                        "Please use `/update-gig-status` to set it to FILLED, "
-                        "OUTDATED, UNKNOWN, or leave a thread reply if it is "
-                        "still active."
-                    ),
+                    f'{poster_mention} any update on "{safe_title}"? '
+                    f"{status_context}"
+                    "Please use `/update-gig-status` to set it to FILLED, "
+                    "OUTDATED, UNKNOWN, or RECRUITING if it is still active.",
                     allowed_mentions=discord.AllowedMentions(
                         users=[discord.Object(id=int(poster_id))],
                         roles=False,
@@ -2975,14 +2984,14 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                     ),
                 )
                 await asyncio.to_thread(
-                    mark_recruiting_reminder_sent,
+                    mark_status_reminder_sent,
                     settings,
                     engagement_id=str(engagement_id),
                     message_id=str(message.id),
                 )
             except Exception as exc:
                 logger.warning(
-                    "Failed sending recruiting reminder engagement=%s thread=%s: %s",
+                    "Failed sending gig status reminder engagement=%s thread=%s: %s",
                     engagement_id,
                     thread_id,
                     exc,
@@ -2990,14 +2999,14 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 if engagement_id:
                     try:
                         await asyncio.to_thread(
-                            mark_recruiting_reminder_failed,
+                            mark_status_reminder_failed,
                             settings,
                             engagement_id=str(engagement_id),
                             error=str(exc),
                         )
                     except Exception as record_exc:
                         logger.warning(
-                            "Failed recording recruiting reminder failure "
+                            "Failed recording gig status reminder failure "
                             "engagement=%s: %s",
                             engagement_id,
                             record_exc,
@@ -3377,9 +3386,9 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                     )
 
             self._startup_sync_done = True
-            if self._recruiting_reminder_task is None:
-                self._recruiting_reminder_task = asyncio.create_task(
-                    self._recruiting_reminder_loop()
+            if self._status_reminder_task is None:
+                self._status_reminder_task = asyncio.create_task(
+                    self._status_reminder_loop()
                 )
 
     @commands.Cog.listener()
@@ -4313,6 +4322,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         status=[
             app_commands.Choice(name="LEAD", value="lead"),
             app_commands.Choice(name="RECRUITING", value="recruiting"),
+            app_commands.Choice(name="CONTACTED", value="contacted"),
             app_commands.Choice(name="FILLED", value="filled"),
             app_commands.Choice(name="OUTDATED", value="outdated"),
             app_commands.Choice(name="UNKNOWN", value="unknown"),
@@ -4364,7 +4374,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         normalized_status = self._explicit_gig_status(status)
         if normalized_status is None:
             await interaction.response.send_message(
-                "⚠️ Choose one of: RECRUITING, FILLED, OUTDATED, UNKNOWN, LOST, DUPLICATE.",
+                "⚠️ Choose one of: LEAD, RECRUITING, CONTACTED, FILLED, OUTDATED, UNKNOWN, LOST, DUPLICATE.",
                 ephemeral=True,
             )
             return

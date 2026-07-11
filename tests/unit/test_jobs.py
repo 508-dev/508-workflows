@@ -396,6 +396,7 @@ def test_update_gig_status_rejects_unprivileged_non_poster() -> None:
 
 def test_update_gig_status_accepts_only_explicit_command_values() -> None:
     assert JobsCog._explicit_gig_status("LEAD") is EngagementStatus.LEAD
+    assert JobsCog._explicit_gig_status("CONTACTED") is EngagementStatus.CONTACTED
     assert JobsCog._explicit_gig_status("FILLED") is EngagementStatus.FILLED
     assert JobsCog._explicit_gig_status("open") is None
     assert JobsCog._explicit_gig_status("stale") is None
@@ -1303,7 +1304,7 @@ def test_recruiting_reminder_marks_locked_thread_outdated_without_sending(
     monkeypatch.setattr(jobs_module.discord, "Thread", FakeThread)
     monkeypatch.setattr(
         jobs_module,
-        "list_due_recruiting_reminders",
+        "list_due_status_reminders",
         Mock(
             return_value=[
                 {
@@ -1323,7 +1324,7 @@ def test_recruiting_reminder_marks_locked_thread_outdated_without_sending(
     bot.get_channel.return_value = thread
     cog = JobsCog(bot)
 
-    asyncio.run(cog._send_due_recruiting_reminders())
+    asyncio.run(cog._send_due_status_reminders())
 
     thread.send.assert_not_awaited()
     update_status.assert_called_once_with(
@@ -1331,4 +1332,47 @@ def test_recruiting_reminder_marks_locked_thread_outdated_without_sending(
         engagement_id="engagement-1",
         status=EngagementStatus.OUTDATED,
         actor_discord_user_id=None,
+    )
+
+
+def test_contacted_reminder_uses_status_age_and_mentions_poster(monkeypatch) -> None:
+    class FakeThread:
+        locked = False
+        archived = False
+
+        def __init__(self) -> None:
+            self.send = AsyncMock(return_value=SimpleNamespace(id=300))
+
+    thread = FakeThread()
+    monkeypatch.setattr(jobs_module.discord, "Thread", FakeThread)
+    monkeypatch.setattr(
+        jobs_module,
+        "list_due_status_reminders",
+        Mock(
+            return_value=[
+                {
+                    "id": "engagement-1",
+                    "status": "contacted",
+                    "discord_thread_id": "200",
+                    "posted_by_discord_user_id": "10",
+                    "title": "Need help",
+                    "age_days": 5,
+                }
+            ]
+        ),
+    )
+    mark_sent = Mock()
+    monkeypatch.setattr(jobs_module, "mark_status_reminder_sent", mark_sent)
+
+    bot = Mock()
+    bot.get_channel.return_value = thread
+    cog = JobsCog(bot)
+
+    asyncio.run(cog._send_due_status_reminders())
+
+    assert "CONTACTED for 5 day(s)" in thread.send.await_args.args[0]
+    mark_sent.assert_called_once_with(
+        jobs_module.settings,
+        engagement_id="engagement-1",
+        message_id="300",
     )

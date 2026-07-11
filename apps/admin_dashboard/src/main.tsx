@@ -283,6 +283,7 @@ type DashboardNotification = {
 
 type DashboardNotificationsResponse = {
   stale_days: number
+  contacted_reminder_days: number
   notifications: DashboardNotification[]
 }
 
@@ -2550,16 +2551,18 @@ function App() {
   )
 
   function openNotification(notification: DashboardNotification) {
-    if (notification.type === "stale_recruiting_gig") {
+    if (notification.type === "stale_recruiting_gig" || notification.type === "contacted_gig") {
+      const isContacted = notification.type === "contacted_gig"
+      const notificationPrefix = isContacted ? "contacted-gig:" : "stale-recruiting:"
       const gigId =
         notification.engagement_id ||
-        (notification.id.startsWith("stale-recruiting:")
-          ? notification.id.slice("stale-recruiting:".length)
+        (notification.id.startsWith(notificationPrefix)
+          ? notification.id.slice(notificationPrefix.length)
           : "")
       if (gigId) {
         openGigDetail(gigId)
       } else {
-        setGigStatus("recruiting")
+        setGigStatus(isContacted ? "contacted" : "recruiting")
         navigate("gigs", true)
       }
     }
@@ -3302,6 +3305,7 @@ function FilterChips({
 const gigStatuses = [
   "lead",
   "recruiting",
+  "contacted",
   "filled",
   "unknown",
   "lost",
@@ -5888,7 +5892,7 @@ function GigListItem({
   staleDays: number
 }) {
   const applications = Array.isArray(gig.applications) ? gig.applications : []
-  const isRecruiting = gig.status === "recruiting"
+  const isActive = gig.status === "recruiting" || gig.status === "contacted"
   const threadUrl =
     gig.discord_guild_id && gig.discord_thread_id
       ? `https://discord.com/channels/${encodeURIComponent(
@@ -5900,7 +5904,7 @@ function GigListItem({
     <article
       className={cn(
         "grid gap-4 rounded-md border bg-background p-4 lg:grid-cols-[minmax(0,1fr)_220px_180px] lg:items-start",
-        !isRecruiting && "border-l-4 border-l-muted-foreground/60 bg-secondary/45",
+        !isActive && "border-l-4 border-l-muted-foreground/60 bg-secondary/45",
       )}
     >
       <div className="min-w-0">
@@ -5921,14 +5925,14 @@ function GigListItem({
                 ? "succeeded"
                 : gig.status === "lost" || gig.status === "duplicate"
                   ? "failed"
-                  : isRecruiting
+                  : isActive
                     ? "queued"
                     : "neutral"
             }
           >
             {gig.status_label || titleCase(gig.status)}
           </Badge>
-          {!isRecruiting ? <Badge variant="neutral">Not recruiting</Badge> : null}
+          {!isActive ? <Badge variant="neutral">Not active</Badge> : null}
           {staleAge !== null ? <Badge variant="running">{staleAge}d stale</Badge> : null}
         </div>
         <div className="mt-2 flex flex-wrap gap-1.5">
@@ -6050,7 +6054,7 @@ function GigDetailPage({
   const [candidateSearchError, setCandidateSearchError] = useState("")
   const [crmProfile, setCrmProfile] = useState("")
   const applications = Array.isArray(gig.applications) ? gig.applications : []
-  const isRecruiting = gig.status === "recruiting"
+  const isActive = gig.status === "recruiting" || gig.status === "contacted"
   const candidateQueryReady = candidateQuery.trim().length >= 2
   const selectedCandidateId = selectedCandidate?.crm_contact_id || ""
   const candidateProfile = selectedCandidateId
@@ -6116,9 +6120,7 @@ function GigDetailPage({
 
   return (
     <div className="grid gap-5">
-      <Card
-        className={cn(!isRecruiting && "border-l-4 border-l-muted-foreground/60 bg-secondary/35")}
-      >
+      <Card className={cn(!isActive && "border-l-4 border-l-muted-foreground/60 bg-secondary/35")}>
         <CardHeader className="items-start">
           <div className="grid gap-2">
             <Button type="button" variant="ghost" size="sm" className="w-fit" onClick={onBack}>
@@ -6134,14 +6136,14 @@ function GigDetailPage({
                       ? "succeeded"
                       : gig.status === "lost" || gig.status === "duplicate"
                         ? "failed"
-                        : isRecruiting
+                        : isActive
                           ? "queued"
                           : "neutral"
                   }
                 >
                   {gig.status_label || titleCase(gig.status)}
                 </Badge>
-                {!isRecruiting ? <Badge variant="neutral">Not recruiting</Badge> : null}
+                {!isActive ? <Badge variant="neutral">Not active</Badge> : null}
                 {staleAge !== null ? <Badge variant="running">{staleAge}d stale</Badge> : null}
                 {gig.posting_type ? (
                   <Badge variant="neutral">{titleCase(gig.posting_type)}</Badge>

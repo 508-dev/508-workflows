@@ -683,6 +683,16 @@ _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
         min_value=1,
     ),
     RuntimeConfigDefinition(
+        key="GIG_CONTACTED_REMINDER_DAYS",
+        attr="gig_contacted_reminder_days",
+        label="Contacted gig reminder days",
+        category="Operations",
+        description="Days a gig can remain contacted before a status reminder.",
+        value_type="int",
+        env_names=("GIG_CONTACTED_REMINDER_DAYS",),
+        min_value=1,
+    ),
+    RuntimeConfigDefinition(
         key="GIG_RECRUITING_REMINDER_MAX_AGE_DAYS",
         attr="gig_recruiting_reminder_max_age_days",
         label="Recruiting reminder max age",

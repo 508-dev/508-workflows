@@ -15,7 +15,7 @@ from five08.engagements import (
     get_gig_thread_interest_backfill_marker,
     list_dashboard_engagements,
     list_dashboard_notifications,
-    list_due_recruiting_reminders,
+    list_due_status_reminders,
     normalize_engagement_status,
     parse_status_from_title,
     strip_status_from_title,
@@ -33,6 +33,10 @@ def test_parse_status_from_bracketed_gig_title() -> None:
     assert (
         parse_status_from_title("[RECRUITING] Senior Webflow Build")
         is EngagementStatus.RECRUITING
+    )
+    assert (
+        parse_status_from_title("[CONTACTED] Senior Webflow Build")
+        is EngagementStatus.CONTACTED
     )
     assert parse_status_from_title("(FILLED) CRM cleanup") is EngagementStatus.FILLED
     assert parse_status_from_title("[OUTDATED] Old lead") is EngagementStatus.OUTDATED
@@ -135,7 +139,7 @@ def test_upsert_discord_engagement_can_preserve_existing_status(monkeypatch) -> 
         "                    AND engagements.status IS DISTINCT FROM EXCLUDED.status"
         in query
     )
-    assert params[-3:] == (True, False, True)
+    assert params[-4:] == (True, False, True, True)
 
 
 def test_update_engagement_status_by_discord_thread_resolves_engagement(
@@ -294,7 +298,9 @@ def test_dashboard_engagements_hide_historical_statuses_by_default(
 
     assert rows == []
     query, params = executed[0]
-    assert "e.status IN ('lead', 'recruiting', 'filled', 'unknown')" in query
+    assert (
+        "e.status IN ('lead', 'recruiting', 'contacted', 'filled', 'unknown')" in query
+    )
     assert "CASE e.status" in query
     assert params == ["poster-1", 10]
 
@@ -580,9 +586,10 @@ def test_due_recruiting_reminders_exclude_very_old_gigs(monkeypatch) -> None:
         lambda _settings: connection_stub(),
     )
 
-    rows = list_due_recruiting_reminders(
+    rows = list_due_status_reminders(
         SharedSettings(),
         stale_days=7,
+        contacted_reminder_days=5,
         max_age_days=90,
         limit=5,
     )
@@ -590,7 +597,8 @@ def test_due_recruiting_reminders_exclude_very_old_gigs(monkeypatch) -> None:
     assert rows == []
     query, params = executed[0]
     assert "COALESCE(e.posted_at, e.created_at)" in query
-    assert params == (7, 90, 7, 5)
+    assert "e.status = 'contacted'" in query
+    assert params == (7, 5, 90, 5, 7, 5)
 
 
 def test_dashboard_notifications_exclude_very_old_gigs(monkeypatch) -> None:
@@ -634,6 +642,7 @@ def test_dashboard_notifications_exclude_very_old_gigs(monkeypatch) -> None:
         viewer_discord_user_id="poster-1",
         include_all=False,
         stale_days=7,
+        contacted_reminder_days=5,
         max_age_days=90,
         limit=5,
     )
@@ -641,7 +650,8 @@ def test_dashboard_notifications_exclude_very_old_gigs(monkeypatch) -> None:
     assert rows == []
     query, params = executed[0]
     assert "COALESCE(e.posted_at, e.created_at)" in query
-    assert params == [7, 90, "poster-1", 5]
+    assert "e.status = 'contacted'" in query
+    assert params == [7, 5, 90, "poster-1", 5]
 
 
 def test_get_gig_thread_interest_backfill_marker_returns_payload(monkeypatch) -> None:

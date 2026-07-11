@@ -88,6 +88,7 @@ dashboard field.
 - `JOB_RETRY_BASE_SECONDS`
 - `JOB_RETRY_MAX_SECONDS`
 - `GIG_RECRUITING_STALE_DAYS`
+- `GIG_CONTACTED_REMINDER_DAYS`
 - `GIG_RECRUITING_REMINDER_MAX_AGE_DAYS`
 
 `./scripts/dev.sh` overrides local Redis settings to deterministic per-worktree
