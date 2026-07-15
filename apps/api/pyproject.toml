@@ -11,7 +11,7 @@ dependencies = [
     "psycopg[binary]>=3.3.4",
     "redis>=6.4.0",
     "pydantic~=2.13",
-    "pydantic-settings~=2.8",
+    "pydantic-settings~=2.14",
     "five08",
     "worker",
 ]
