@@ -6747,6 +6747,7 @@ def test_dashboard_save_general_blurb_from_application_uses_candidate_identity(
             "five08.backend.api.resolve_candidate_blurb_target",
             return_value=target,
         ) as resolve_target,
+        patch("five08.backend.api.viewer_can_update_engagement", return_value=True),
         patch(
             "five08.backend.api.save_candidate_blurb",
             return_value=saved,
@@ -6813,6 +6814,7 @@ def test_dashboard_draft_gig_blurb_returns_reviewable_structured_draft(
             "five08.backend.api.draft_candidate_blurb",
             return_value=draft,
         ) as draft_blurb,
+        patch("five08.backend.api.viewer_can_update_engagement", return_value=True),
         patch(
             "five08.backend.api._write_auth_audit_event",
             new_callable=AsyncMock,
@@ -6865,6 +6867,121 @@ def test_dashboard_save_blurb_returns_reloadable_conflict_for_stale_version(
 
     assert response.status_code == 409
     assert response.json() == {"error": "blurb_conflict"}
+
+
+def test_dashboard_person_blurb_list_maps_unknown_candidate_to_not_found(
+    client: TestClient,
+) -> None:
+    """A bad person target is a stable 404 rather than an internal error."""
+    session = _dashboard_write_session()
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.list_candidate_blurbs",
+            side_effect=api.CandidateBlurbNotFoundError("missing"),
+        ),
+    ):
+        response = client.get("/dashboard/api/people/contact-missing/blurbs")
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "candidate_not_found"}
+
+
+def test_dashboard_application_blurb_rejects_non_gig_engagement(
+    client: TestClient,
+) -> None:
+    """Application routes retain the dashboard's pending-gig boundary."""
+    session = _dashboard_write_session()
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.resolve_candidate_blurb_target",
+            return_value=SimpleNamespace(
+                person_id="person-1",
+                crm_contact_id="contact-1",
+                discord_user_id="discord-1",
+            ),
+        ),
+        patch("five08.backend.api.viewer_can_update_engagement", return_value=False),
+        patch("five08.backend.api.save_candidate_blurb") as save_blurb,
+    ):
+        response = client.post(
+            "/dashboard/api/gigs/11111111-1111-4111-8111-111111111111/"
+            "applications/22222222-2222-4222-8222-222222222222/blurbs",
+            json={
+                "text": "Candidate-provided blurb.",
+                "scope": "gig",
+                "author_kind": "candidate_attributed",
+                "source": "dashboard",
+                "status": "approved",
+            },
+        )
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "gig_not_found"}
+    save_blurb.assert_not_called()
+
+
+async def test_dashboard_gig_blurb_enrichment_batches_application_histories() -> None:
+    """One bounded store call replaces per-application blurb lookups."""
+    gig = {
+        "id": "11111111-1111-4111-8111-111111111111",
+        "applications": [
+            {
+                "id": "22222222-2222-4222-8222-222222222222",
+                "person_id": "person-1",
+                "crm_contact_id": "contact-1",
+            },
+            {"id": "not-a-uuid", "crm_contact_id": "contact-2"},
+        ],
+    }
+    batch_rows = [
+        {
+            "id": "general-1",
+            "scope": "general",
+            "person_id": "person-1",
+            "crm_contact_id": "contact-1",
+            "application_id": None,
+        },
+        {
+            "id": "unattached-1",
+            "scope": "gig",
+            "person_id": "person-unattached",
+            "application_id": None,
+        },
+    ]
+
+    with (
+        patch(
+            "five08.backend.api.list_engagement_candidate_blurbs_batch",
+            return_value=batch_rows,
+        ) as batch,
+        patch("five08.backend.api.list_candidate_blurbs") as legacy_list,
+    ):
+        result = await api._dashboard_enrich_gig_candidate_blurbs(gig)
+
+    batch.assert_called_once_with(
+        api.settings,
+        engagement_id="11111111-1111-4111-8111-111111111111",
+        person_ids=["person-1"],
+        crm_contact_ids=["contact-1", "contact-2"],
+        discord_user_ids=[],
+        current_only=False,
+    )
+    legacy_list.assert_not_called()
+    assert result["applications"][0]["blurbs"] == [batch_rows[0]]
+    assert result["applications"][1]["blurbs"] == []
+    assert result["candidate_blurbs"] == [batch_rows[1]]
 
 
 def test_dashboard_person_blurbs_require_steering_access(client: TestClient) -> None:
@@ -6981,6 +7098,7 @@ def test_dashboard_draft_blurb_reports_insufficient_context(client: TestClient) 
                 "Not enough candidate profile or candidate-provided blurb context to draft safely."
             ),
         ),
+        patch("five08.backend.api.viewer_can_update_engagement", return_value=True),
     ):
         response = client.post(
             "/dashboard/api/gigs/11111111-1111-4111-8111-111111111111/"

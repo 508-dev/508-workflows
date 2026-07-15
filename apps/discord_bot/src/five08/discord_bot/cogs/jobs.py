@@ -516,6 +516,7 @@ class CandidateBlurbSaveConfirmationView(discord.ui.View):
         self.on_saved = on_saved
         self._save_lock = asyncio.Lock()
         self._saved = False
+        self._cancelled = False
 
     def render(self) -> str:
         target_label = _safe_blurb_label(
@@ -547,13 +548,19 @@ class CandidateBlurbSaveConfirmationView(discord.ui.View):
 
     async def on_timeout(self) -> None:
         """Return an AI preview to an editable state if its confirmation expires."""
-        self._disable()
-        if self.on_cancel is None:
-            return
-        try:
-            await self.on_cancel()
-        except Exception as exc:
-            logger.warning("Failed re-opening timed-out candidate blurb draft: %s", exc)
+        async with self._save_lock:
+            if self._saved or self._cancelled:
+                return
+            self._cancelled = True
+            self._disable()
+            if self.on_cancel is None:
+                return
+            try:
+                await self.on_cancel()
+            except Exception as exc:
+                logger.warning(
+                    "Failed re-opening timed-out candidate blurb draft: %s", exc
+                )
 
     @discord.ui.button(label="Save blurb", style=discord.ButtonStyle.success)
     async def save_blurb(
@@ -563,6 +570,13 @@ class CandidateBlurbSaveConfirmationView(discord.ui.View):
     ) -> None:
         await interaction.response.defer(ephemeral=True)
         async with self._save_lock:
+            if self._cancelled:
+                await interaction.followup.send(
+                    "ℹ️ This save was cancelled.",
+                    allowed_mentions=NO_MENTIONS,
+                    ephemeral=True,
+                )
+                return
             if self._saved:
                 await interaction.followup.send(
                     "ℹ️ This blurb has already been saved.",
@@ -646,13 +660,40 @@ class CandidateBlurbSaveConfirmationView(discord.ui.View):
         interaction: discord.Interaction,
         _button: discord.ui.Button["CandidateBlurbSaveConfirmationView"],
     ) -> None:
-        self._disable()
-        await interaction.response.edit_message(
-            content="Cancelled. The blurb was not saved.",
-            view=self,
-        )
-        if self.on_cancel is not None:
-            await self.on_cancel()
+        await interaction.response.defer(ephemeral=True)
+        async with self._save_lock:
+            if self._saved:
+                await interaction.followup.send(
+                    "ℹ️ This blurb has already been saved.",
+                    allowed_mentions=NO_MENTIONS,
+                    ephemeral=True,
+                )
+                return
+            if self._cancelled:
+                await interaction.followup.send(
+                    "ℹ️ This save was already cancelled.",
+                    allowed_mentions=NO_MENTIONS,
+                    ephemeral=True,
+                )
+                return
+            self._cancelled = True
+            self._disable()
+            message = getattr(interaction, "message", None)
+            if message is not None:
+                try:
+                    await message.edit(
+                        content="Cancelled. The blurb was not saved.",
+                        view=self,
+                    )
+                except discord.HTTPException:
+                    logger.warning("Failed disabling cancelled candidate blurb view")
+            if self.on_cancel is not None:
+                await self.on_cancel()
+            await interaction.followup.send(
+                "Cancelled. The blurb was not saved.",
+                allowed_mentions=NO_MENTIONS,
+                ephemeral=True,
+            )
 
 
 class CandidateBlurbDraftEditModal(discord.ui.Modal):
@@ -918,14 +959,20 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         trusting an unscoped DM identity, which keeps **Apps → Save blurb**
         usable for candidate DMs without widening access.
         """
-        roles = getattr(interaction.user, "roles", None)
-        if roles and check_user_roles_with_hierarchy(roles, ["Steering Committee"]):
-            return True
-
-        configured_guild_id = str(settings.discord_server_id or "").strip()
-        if not configured_guild_id.isdigit():
+        raw_guild_id = str(settings.discord_server_id or "").strip()
+        if not raw_guild_id.isdigit():
             return False
-        guild = self.bot.get_guild(int(configured_guild_id))
+        configured_guild_id = int(raw_guild_id)
+
+        if interaction.guild is not None:
+            roles = getattr(interaction.user, "roles", None)
+            return bool(
+                interaction.guild.id == configured_guild_id
+                and roles
+                and check_user_roles_with_hierarchy(roles, ["Steering Committee"])
+            )
+
+        guild = self.bot.get_guild(configured_guild_id)
         if guild is None:
             return False
         member = guild.get_member(interaction.user.id)

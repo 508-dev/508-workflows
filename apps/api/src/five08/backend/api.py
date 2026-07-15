@@ -166,6 +166,7 @@ from five08.candidate_blurbs import (
     CandidateBlurbNotFoundError,
     CandidateBlurbValidationError,
     draft_candidate_blurb,
+    list_engagement_candidate_blurbs_batch,
     list_candidate_blurbs,
     resolve_candidate_blurb_target,
     save_candidate_blurb,
@@ -4237,14 +4238,6 @@ async def _dashboard_enrich_gig_candidate_blurbs(
             application["blurbs"] = []
         return shaped
 
-    engagement_blurbs = await asyncio.to_thread(
-        list_candidate_blurbs,
-        settings,
-        engagement_id=engagement_id,
-        current_only=False,
-        include_general=False,
-    )
-    matched_blurb_ids: set[str] = set()
     applications_by_id = {
         str(application.get("id") or ""): application
         for application in applications
@@ -4260,33 +4253,35 @@ async def _dashboard_enrich_gig_candidate_blurbs(
         for application in applications
         if str(application.get("discord_user_id") or "")
     }
+    applications_by_person = {
+        str(application.get("person_id") or ""): application
+        for application in applications
+        if str(application.get("person_id") or "")
+    }
 
     for application in applications:
         application_id = _valid_uuid_or_none(str(application.get("id") or ""))
+        application["blurbs"] = []
         if application_id is None:
-            application["blurbs"] = []
             continue
-        application_blurbs = await asyncio.to_thread(
-            list_candidate_blurbs,
-            settings,
-            application_id=application_id,
-            engagement_id=engagement_id,
-            current_only=False,
-            include_general=True,
-        )
-        application["blurbs"] = application_blurbs
-        matched_blurb_ids.update(
-            str(blurb.get("id") or "")
-            for blurb in application_blurbs
-            if isinstance(blurb, dict)
-        )
+
+    batch_blurbs = await asyncio.to_thread(
+        list_engagement_candidate_blurbs_batch,
+        settings,
+        engagement_id=engagement_id,
+        person_ids=list(applications_by_person),
+        crm_contact_ids=list(applications_by_crm_contact),
+        discord_user_ids=list(applications_by_discord_user),
+        current_only=False,
+    )
 
     unmatched_blurbs: list[dict[str, Any]] = []
-    for blurb in engagement_blurbs:
+    for blurb in batch_blurbs:
         if not isinstance(blurb, dict):
             continue
-        blurb_id = str(blurb.get("id") or "")
         application = applications_by_id.get(str(blurb.get("application_id") or ""))
+        if application is None:
+            application = applications_by_person.get(str(blurb.get("person_id") or ""))
         if application is None:
             application = applications_by_crm_contact.get(
                 str(blurb.get("crm_contact_id") or "")
@@ -4296,15 +4291,14 @@ async def _dashboard_enrich_gig_candidate_blurbs(
                 str(blurb.get("discord_user_id") or "")
             )
         if application is None:
-            unmatched_blurbs.append(blurb)
+            if blurb.get("scope") == "gig":
+                unmatched_blurbs.append(blurb)
             continue
         existing = application.get("blurbs")
         if not isinstance(existing, list):
             existing = []
             application["blurbs"] = existing
-        if blurb_id not in matched_blurb_ids:
-            existing.append(blurb)
-            matched_blurb_ids.add(blurb_id)
+        existing.append(blurb)
     shaped["candidate_blurbs"] = unmatched_blurbs
     return shaped
 
@@ -4352,6 +4346,8 @@ async def dashboard_candidate_blurbs_handler(
 
     target: Any | None = None
     if is_application_route:
+        assert normalized_engagement_id is not None
+        assert normalized_application_id is not None
         try:
             target = await asyncio.to_thread(
                 resolve_candidate_blurb_target,
@@ -4363,17 +4359,31 @@ async def dashboard_candidate_blurbs_handler(
             return JSONResponse({"error": "application_not_found"}, status_code=404)
         except CandidateBlurbValidationError:
             return JSONResponse({"error": "invalid_blurb_target"}, status_code=400)
+        can_update = await asyncio.to_thread(
+            viewer_can_update_engagement,
+            settings,
+            engagement_id=normalized_engagement_id,
+            viewer_discord_user_id=session.subject,
+            include_all=_session_has_steering_access(session),
+        )
+        if not can_update:
+            return JSONResponse({"error": "gig_not_found"}, status_code=404)
 
     if not is_write:
-        blurbs = await asyncio.to_thread(
-            list_candidate_blurbs,
-            settings,
-            crm_contact_id=normalized_contact_id,
-            engagement_id=normalized_engagement_id,
-            application_id=normalized_application_id,
-            current_only=False,
-            include_general=True,
-        )
+        try:
+            blurbs = await asyncio.to_thread(
+                list_candidate_blurbs,
+                settings,
+                crm_contact_id=normalized_contact_id,
+                engagement_id=normalized_engagement_id,
+                application_id=normalized_application_id,
+                current_only=False,
+                include_general=True,
+            )
+        except CandidateBlurbNotFoundError:
+            return JSONResponse({"error": "candidate_not_found"}, status_code=404)
+        except CandidateBlurbValidationError:
+            return JSONResponse({"error": "invalid_blurb_target"}, status_code=400)
         return JSONResponse(jsonable_encoder(blurbs))
 
     try:
@@ -4486,6 +4496,18 @@ async def dashboard_candidate_blurb_draft_handler(
         normalized_engagement_id is None or normalized_application_id is None
     ):
         return JSONResponse({"error": "invalid_blurb_target"}, status_code=400)
+    if is_application_route:
+        assert normalized_engagement_id is not None
+        assert normalized_application_id is not None
+        can_update = await asyncio.to_thread(
+            viewer_can_update_engagement,
+            settings,
+            engagement_id=normalized_engagement_id,
+            viewer_discord_user_id=session.subject,
+            include_all=_session_has_steering_access(session),
+        )
+        if not can_update:
+            return JSONResponse({"error": "gig_not_found"}, status_code=404)
 
     draft_target: dict[str, str | None]
     if is_person_route:

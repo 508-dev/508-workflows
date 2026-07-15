@@ -133,12 +133,12 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["engagement_id"],
             ["engagements.id"],
-            ondelete="CASCADE",
+            ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
             ["application_id", "engagement_id"],
             ["engagement_applications.id", "engagement_applications.engagement_id"],
-            ondelete="CASCADE",
+            ondelete="RESTRICT",
         ),
         sa.UniqueConstraint(
             "lineage_id",
@@ -154,52 +154,47 @@ def upgrade() -> None:
         postgresql_where=sa.text("is_current"),
     )
     op.create_index(
-        "idx_candidate_blurbs_person_current",
+        "idx_candidate_blurbs_person_created",
         "candidate_blurbs",
         ["person_id", "created_at"],
-        postgresql_where=sa.text("is_current"),
     )
     op.create_index(
-        "idx_candidate_blurbs_crm_contact_current",
+        "idx_candidate_blurbs_crm_contact_created",
         "candidate_blurbs",
         ["crm_contact_id", "created_at"],
-        postgresql_where=sa.text("is_current"),
     )
     op.create_index(
-        "idx_candidate_blurbs_discord_user_current",
+        "idx_candidate_blurbs_discord_user_created",
         "candidate_blurbs",
         ["discord_user_id", "created_at"],
-        postgresql_where=sa.text("is_current"),
     )
     op.create_index(
-        "idx_candidate_blurbs_engagement_current",
+        "idx_candidate_blurbs_engagement_created",
         "candidate_blurbs",
         ["engagement_id", "created_at"],
-        postgresql_where=sa.text("is_current"),
     )
     op.create_index(
-        "idx_candidate_blurbs_application_current",
+        "idx_candidate_blurbs_application_created",
         "candidate_blurbs",
         ["application_id", "created_at"],
-        postgresql_where=sa.text("is_current"),
     )
 
 
 def downgrade() -> None:
     """Remove candidate blurb storage and the cached profile summary."""
     op.drop_index(
-        "idx_candidate_blurbs_application_current", table_name="candidate_blurbs"
+        "idx_candidate_blurbs_application_created", table_name="candidate_blurbs"
     )
     op.drop_index(
-        "idx_candidate_blurbs_engagement_current", table_name="candidate_blurbs"
+        "idx_candidate_blurbs_engagement_created", table_name="candidate_blurbs"
     )
     op.drop_index(
-        "idx_candidate_blurbs_discord_user_current", table_name="candidate_blurbs"
+        "idx_candidate_blurbs_discord_user_created", table_name="candidate_blurbs"
     )
     op.drop_index(
-        "idx_candidate_blurbs_crm_contact_current", table_name="candidate_blurbs"
+        "idx_candidate_blurbs_crm_contact_created", table_name="candidate_blurbs"
     )
-    op.drop_index("idx_candidate_blurbs_person_current", table_name="candidate_blurbs")
+    op.drop_index("idx_candidate_blurbs_person_created", table_name="candidate_blurbs")
     op.drop_index("uq_candidate_blurbs_lineage_current", table_name="candidate_blurbs")
     op.drop_table("candidate_blurbs")
     op.drop_constraint(

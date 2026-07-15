@@ -450,6 +450,32 @@ def test_candidate_blurb_dm_action_checks_requester_against_configured_guild(
     configured_guild.get_member.assert_called_once_with(42)
 
 
+def test_candidate_blurb_rejects_steering_role_from_another_guild(monkeypatch) -> None:
+    """A same-named role outside the configured server grants no blurb access."""
+    bot = Mock()
+    cog = JobsCog(bot)
+    monkeypatch.setattr(
+        jobs_module,
+        "settings",
+        SimpleNamespace(discord_server_id="123456"),
+    )
+
+    allowed = asyncio.run(
+        cog._interaction_user_can_manage_blurbs(
+            SimpleNamespace(
+                guild=SimpleNamespace(id=999999),
+                user=SimpleNamespace(
+                    id=42,
+                    roles=[SimpleNamespace(name="Steering Committee")],
+                ),
+            )
+        )
+    )
+
+    assert allowed is False
+    bot.get_guild.assert_not_called()
+
+
 def test_candidate_blurb_explicit_unregistered_thread_is_not_general_fallback(
     monkeypatch,
 ) -> None:

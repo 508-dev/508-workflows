@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -548,9 +549,9 @@ def _validate_replacement_target(
         raise CandidateBlurbConflictError(
             "A replacement cannot change the candidate identity."
         )
-    if not _same_or_missing(requested_engagement_id, existing.engagement_id):
+    if requested_engagement_id != existing.engagement_id:
         raise CandidateBlurbConflictError("A replacement cannot change the engagement.")
-    if not _same_or_missing(requested_application_id, existing.application_id):
+    if requested_application_id != existing.application_id:
         raise CandidateBlurbConflictError(
             "A replacement cannot change the application."
         )
@@ -856,6 +857,9 @@ def list_candidate_blurbs(
                 params.extend(relation_params)
             elif target is not None:
                 conditions.append(_candidate_match_sql(target, params))
+                # A candidate-only lookup backs the reusable library. Gig
+                # samples remain visible only through an explicit gig/app query.
+                conditions.append("b.scope = 'general'")
             elif normalized_engagement_id is not None:
                 conditions.append("b.engagement_id::text = %s")
                 params.append(normalized_engagement_id)
@@ -869,6 +873,88 @@ def list_candidate_blurbs(
                 FROM candidate_blurbs AS b
                 LEFT JOIN engagements AS e ON e.id = b.engagement_id
                 WHERE {where_clause}
+                ORDER BY b.is_current DESC, b.created_at DESC, b.version DESC
+                LIMIT %s
+            """
+            cursor.execute(trusted_sql(query), params)
+            return [_shape_blurb_row(dict(row)) for row in cursor.fetchall()]
+
+
+def list_engagement_candidate_blurbs_batch(
+    settings: SharedSettings,
+    *,
+    engagement_id: str,
+    person_ids: Sequence[str] = (),
+    crm_contact_ids: Sequence[str] = (),
+    discord_user_ids: Sequence[str] = (),
+    current_only: bool = False,
+    limit: int = MAX_BLURB_LIST_LIMIT,
+) -> list[dict[str, Any]]:
+    """Load one gig's blurbs plus matching general samples in one bounded query.
+
+    The dashboard uses this when rendering a gig with many applications. Gig
+    rows are always included; general rows are included only for identities
+    already present on those applications. Callers group the returned rows by
+    application in memory.
+    """
+    normalized_engagement_id = _optional_text(engagement_id)
+    if normalized_engagement_id is None:
+        raise CandidateBlurbValidationError("engagement_id is required.")
+    validated_limit = _validate_limit(limit)
+
+    def normalized_values(values: Sequence[str]) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            normalized = _optional_text(value)
+            if normalized is None or normalized in seen:
+                continue
+            seen.add(normalized)
+            result.append(normalized)
+        return result
+
+    normalized_person_ids = normalized_values(person_ids)
+    normalized_crm_contact_ids = normalized_values(crm_contact_ids)
+    normalized_discord_user_ids = normalized_values(discord_user_ids)
+
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            _resolve_target(
+                cursor,
+                engagement_id=normalized_engagement_id,
+                require_identity=False,
+            )
+            conditions = ["b.engagement_id::text = %s"]
+            params: list[Any] = [normalized_engagement_id]
+            general_identity_conditions: list[str] = []
+            if normalized_person_ids:
+                general_identity_conditions.append(
+                    "b.person_id::text = ANY(%s::text[])"
+                )
+                params.append(normalized_person_ids)
+            if normalized_crm_contact_ids:
+                general_identity_conditions.append("b.crm_contact_id = ANY(%s::text[])")
+                params.append(normalized_crm_contact_ids)
+            if normalized_discord_user_ids:
+                general_identity_conditions.append(
+                    "b.discord_user_id = ANY(%s::text[])"
+                )
+                params.append(normalized_discord_user_ids)
+            if general_identity_conditions:
+                conditions.append(
+                    "(b.scope = 'general' AND ("
+                    + " OR ".join(general_identity_conditions)
+                    + "))"
+                )
+            current_condition = "b.is_current = true AND " if current_only else ""
+            params.append(validated_limit)
+            query = f"""
+                SELECT
+                    {_BLURB_JOIN_SELECT_COLUMNS},
+                    e.title AS engagement_title
+                FROM candidate_blurbs AS b
+                LEFT JOIN engagements AS e ON e.id = b.engagement_id
+                WHERE {current_condition}({" OR ".join(conditions)})
                 ORDER BY b.is_current DESC, b.created_at DESC, b.version DESC
                 LIMIT %s
             """

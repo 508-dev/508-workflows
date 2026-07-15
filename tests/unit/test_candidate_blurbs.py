@@ -180,6 +180,77 @@ def test_list_engagement_blurbs_includes_unattached_rows(monkeypatch) -> None:
     assert params == ["engagement-1", 100]
 
 
+def test_candidate_only_list_returns_general_library_entries(monkeypatch) -> None:
+    """People pages must not mix unrelated gig-specific blurbs into the library."""
+    cursor = _Cursor(
+        all_rows=[
+            [
+                {
+                    "id": "person-1",
+                    "crm_contact_id": "contact-1",
+                    "discord_user_id": "discord-1",
+                }
+            ],
+            [_blurb_row(scope="general")],
+        ]
+    )
+    _install_connection(monkeypatch, cursor)
+
+    rows = candidate_blurbs.list_candidate_blurbs(
+        SharedSettings(),
+        crm_contact_id="contact-1",
+        current_only=False,
+    )
+
+    assert rows[0]["scope"] == "general"
+    query, _params = cursor.executed[-1]
+    assert "b.scope = 'general'" in query
+
+
+def test_replacement_cannot_change_general_blurb_into_gig_blurb() -> None:
+    """A replacement stays in its exact general/gig relation."""
+    existing = candidate_blurbs.CandidateBlurbTarget(
+        person_id="person-1",
+        crm_contact_id="contact-1",
+        discord_user_id="discord-1",
+        engagement_id=None,
+        application_id=None,
+    )
+
+    with pytest.raises(candidate_blurbs.CandidateBlurbConflictError):
+        candidate_blurbs._validate_replacement_target(
+            existing,
+            person_id="person-1",
+            crm_contact_id="contact-1",
+            discord_user_id="discord-1",
+            engagement_id="engagement-1",
+            application_id=None,
+        )
+
+
+def test_batch_engagement_blurbs_uses_one_bounded_query(monkeypatch) -> None:
+    """Gig dashboard enrichment loads gig and matching general blurbs together."""
+    cursor = _Cursor(
+        one_rows=[{"id": "engagement-1"}],
+        all_rows=[[_blurb_row(scope="gig", engagement_id="engagement-1")]],
+    )
+    _install_connection(monkeypatch, cursor)
+
+    rows = candidate_blurbs.list_engagement_candidate_blurbs_batch(
+        SharedSettings(),
+        engagement_id="engagement-1",
+        person_ids=["person-1"],
+        crm_contact_ids=["contact-1"],
+        discord_user_ids=["discord-1"],
+    )
+
+    assert rows[0]["engagement_id"] == "engagement-1"
+    query, params = cursor.executed[-1]
+    assert "b.scope = 'general'" in query
+    assert "ANY(%s::text[])" in query
+    assert params[-1] == candidate_blurbs.MAX_BLURB_LIST_LIMIT
+
+
 def test_draft_uses_bounded_allowlisted_context_and_returns_reviewable_output(
     monkeypatch,
 ) -> None:

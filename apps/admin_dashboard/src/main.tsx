@@ -215,6 +215,9 @@ type CandidateBlurbAuthorKind = "candidate" | "candidate_attributed" | "team" | 
 
 type CandidateBlurb = {
   id: string
+  lineage_id?: string
+  version?: number
+  supersedes_id?: string
   text: string
   scope: CandidateBlurbScope
   author_kind: CandidateBlurbAuthorKind
@@ -6374,6 +6377,15 @@ function GigDetailPage({
   const isActive = gig.status === "recruiting" || gig.status === "contacted"
   const candidateQueryReady = candidateQuery.trim().length >= 2
   const selectedCandidateId = selectedCandidate?.crm_contact_id || ""
+  const selectedCandidateBlurbIdentity: CandidateBlurbIdentity | null = selectedCandidateId
+    ? { crm_contact_id: selectedCandidateId }
+    : null
+  const selectedCandidateBlurbKey = selectedCandidateBlurbIdentity
+    ? candidateBlurbIdentityKey(selectedCandidateBlurbIdentity)
+    : ""
+  const selectedCandidateBlurbGroup = selectedCandidateId
+    ? unattachedBlurbGroups.find((group) => group.identity.crm_contact_id === selectedCandidateId)
+    : undefined
   const candidateProfile = selectedCandidateId
     ? crmContactUrl(selectedCandidateId) || selectedCandidateId
     : ""
@@ -6658,7 +6670,7 @@ function GigDetailPage({
         </div>
       </Card>
 
-      {canManageBlurbs && unattachedBlurbGroups.length ? (
+      {canManageBlurbs && (unattachedBlurbGroups.length || selectedCandidateBlurbIdentity) ? (
         <Card>
           <CardHeader>
             <CardTitle>Captured candidate blurbs</CardTitle>
@@ -6667,6 +6679,22 @@ function GigDetailPage({
             </span>
           </CardHeader>
           <div className="grid gap-3 border-t p-4">
+            {selectedCandidateBlurbIdentity && !selectedCandidateBlurbGroup ? (
+              <CandidateBlurbPanel
+                candidateLabel={
+                  selectedCandidate ? personSearchLabel(selectedCandidate) : "Candidate"
+                }
+                blurbs={[]}
+                defaultScope="gig"
+                loading={loading}
+                saveBusyKey={`gig:${gig.id}:unattached-blurb:save:${selectedCandidateBlurbKey}`}
+                draftBusyKey={`gig:${gig.id}:unattached-blurb:draft:${selectedCandidateBlurbKey}`}
+                onSave={(payload) =>
+                  onSaveUnattachedGigBlurb(gig.id, selectedCandidateBlurbIdentity, payload)
+                }
+                onDraft={() => onDraftUnattachedGigBlurb(gig.id, selectedCandidateBlurbIdentity)}
+              />
+            ) : null}
             {unattachedBlurbGroups.map((group) => (
               <CandidateBlurbPanel
                 key={group.key}
@@ -6949,12 +6977,27 @@ function CandidateBlurbPanel({
   const blurbsForSelectedScope = allowScopeSelection
     ? orderedBlurbs.filter((item) => item.scope === scope)
     : orderedBlurbs
-  const currentBlurb =
-    blurbsForSelectedScope.find((item) => item.is_current && item.status === "approved") ||
-    blurbsForSelectedScope.find((item) => item.is_current) ||
-    blurbsForSelectedScope.find((item) => item.status === "approved") ||
-    blurbsForSelectedScope[0]
-  const history = blurbsForSelectedScope.filter((item) => item.id !== currentBlurb?.id)
+  const blurbLineages = useMemo(() => {
+    const lineages = new Map<string, CandidateBlurb[]>()
+    for (const item of blurbsForSelectedScope) {
+      const lineageId = item.lineage_id || `legacy:${item.id}`
+      const lineage = lineages.get(lineageId)
+      if (lineage) lineage.push(item)
+      else lineages.set(lineageId, [item])
+    }
+    return [...lineages.entries()].map(([lineageId, lineage]) => {
+      const current =
+        lineage.find((item) => item.is_current && item.status === "approved") ||
+        lineage.find((item) => item.is_current) ||
+        lineage.find((item) => item.status === "approved") ||
+        lineage[0]
+      return {
+        lineageId,
+        current,
+        history: lineage.filter((item) => item.id !== current.id),
+      }
+    })
+  }, [blurbsForSelectedScope])
   const savedSampleCount = blurbsForSelectedScope.length
   const saving = Boolean(loading[saveBusyKey])
   const drafting = Boolean(loading[draftBusyKey])
@@ -6968,11 +7011,11 @@ function CandidateBlurbPanel({
     setLoaded(true)
   }
 
-  async function copyCurrentBlurb() {
-    if (!currentBlurb?.text) return
+  async function copyBlurb(blurb: CandidateBlurb) {
+    if (!blurb.text) return
     try {
       if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable")
-      await navigator.clipboard.writeText(currentBlurb.text)
+      await navigator.clipboard.writeText(blurb.text)
       setCopyStatus("Copied")
     } catch {
       setCopyStatus("Copy unavailable")
@@ -7030,10 +7073,6 @@ function CandidateBlurbPanel({
     setReplacesBlurbId(blurb.id)
   }
 
-  function editCurrentBlurb() {
-    if (currentBlurb) editBlurb(currentBlurb)
-  }
-
   return (
     <div className="rounded-md border bg-secondary/20 p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -7052,89 +7091,85 @@ function CandidateBlurbPanel({
 
       {open ? (
         <div className="mt-3 grid gap-3 border-t pt-3">
-          {currentBlurb ? (
-            <div className="grid gap-2 rounded-md border bg-background p-3">
-              <div className="flex flex-wrap items-center gap-1.5">
-                <Badge variant={currentBlurb.scope === "gig" ? "queued" : "neutral"}>
-                  {candidateBlurbScopeLabel(currentBlurb.scope)}
-                </Badge>
-                <Badge variant={currentBlurb.author_kind === "ai" ? "running" : "neutral"}>
-                  {candidateBlurbAuthorLabel(currentBlurb.author_kind)}
-                </Badge>
-                {currentBlurb.status ? (
-                  <Badge variant={currentBlurb.status === "approved" ? "succeeded" : "neutral"}>
-                    {titleCase(currentBlurb.status)}
+          {blurbLineages.length ? (
+            blurbLineages.map(({ lineageId, current, history }) => (
+              <div key={lineageId} className="grid gap-2 rounded-md border bg-background p-3">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <Badge variant={current.scope === "gig" ? "queued" : "neutral"}>
+                    {candidateBlurbScopeLabel(current.scope)}
                   </Badge>
-                ) : null}
-                <span className="text-xs text-muted-foreground">
-                  {candidateBlurbSourceLabel(currentBlurb.source)}
-                  {currentBlurb.created_at ? ` · ${formatDate(currentBlurb.created_at)}` : ""}
-                </span>
-              </div>
-              <p className="whitespace-pre-wrap text-sm leading-6">{currentBlurb.text}</p>
-              <div className="flex flex-wrap items-center gap-2">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => void copyCurrentBlurb()}
-                >
-                  Copy current
-                </Button>
-                {copyStatus ? (
-                  <span className="text-xs text-muted-foreground">{copyStatus}</span>
-                ) : null}
-                {history.length ? (
+                  <Badge variant={current.author_kind === "ai" ? "running" : "neutral"}>
+                    {candidateBlurbAuthorLabel(current.author_kind)}
+                  </Badge>
+                  {current.status ? (
+                    <Badge variant={current.status === "approved" ? "succeeded" : "neutral"}>
+                      {titleCase(current.status)}
+                    </Badge>
+                  ) : null}
+                  <span className="text-xs text-muted-foreground">
+                    {candidateBlurbSourceLabel(current.source)}
+                    {current.version ? ` · v${current.version}` : ""}
+                    {current.created_at ? ` · ${formatDate(current.created_at)}` : ""}
+                  </span>
+                </div>
+                <p className="whitespace-pre-wrap text-sm leading-6">{current.text}</p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void copyBlurb(current)}
+                  >
+                    Copy current
+                  </Button>
+                  {copyStatus ? (
+                    <span className="text-xs text-muted-foreground">{copyStatus}</span>
+                  ) : null}
+                  {history.length ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setShowHistory((value) => !value)}
+                    >
+                      {showHistory ? "Hide history" : `History (${history.length})`}
+                    </Button>
+                  ) : null}
                   <Button
                     type="button"
                     size="sm"
                     variant="ghost"
-                    onClick={() => setShowHistory((value) => !value)}
+                    onClick={() => editBlurb(current)}
                   >
-                    {showHistory ? "Hide history" : `History (${history.length})`}
+                    Edit current
                   </Button>
+                </div>
+                {showHistory && history.length ? (
+                  <div className="grid gap-2 border-t pt-2">
+                    {history.map((item) => (
+                      <div
+                        key={item.id}
+                        className="grid gap-1 rounded-md border bg-background p-2 text-sm"
+                      >
+                        <div className="flex flex-wrap gap-1.5 text-xs text-muted-foreground">
+                          <span>{candidateBlurbScopeLabel(item.scope)}</span>
+                          <span>{candidateBlurbAuthorLabel(item.author_kind)}</span>
+                          {item.status ? <span>{titleCase(item.status)}</span> : null}
+                          {item.version ? <span>v{item.version}</span> : null}
+                          <span>{formatDate(item.created_at) || "Unknown date"}</span>
+                        </div>
+                        <p className="whitespace-pre-wrap">{item.text}</p>
+                      </div>
+                    ))}
+                  </div>
                 ) : null}
-                <Button type="button" size="sm" variant="ghost" onClick={editCurrentBlurb}>
-                  Edit current
-                </Button>
               </div>
-            </div>
+            ))
           ) : (
             <p className="text-sm text-muted-foreground">
               Paste a candidate-supplied blurb or generate a reviewable draft for {candidateLabel}.
             </p>
           )}
-
-          {showHistory && history.length ? (
-            <div className="grid gap-2">
-              {history.map((item) => (
-                <div
-                  key={item.id}
-                  className="grid gap-1 rounded-md border bg-background p-2 text-sm"
-                >
-                  <div className="flex flex-wrap gap-1.5 text-xs text-muted-foreground">
-                    <span>{candidateBlurbScopeLabel(item.scope)}</span>
-                    <span>{candidateBlurbAuthorLabel(item.author_kind)}</span>
-                    {item.status ? <span>{titleCase(item.status)}</span> : null}
-                    <span>{formatDate(item.created_at) || "Unknown date"}</span>
-                  </div>
-                  <p className="whitespace-pre-wrap">{item.text}</p>
-                  {item.is_current ? (
-                    <div>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => editBlurb(item)}
-                      >
-                        Edit this version
-                      </Button>
-                    </div>
-                  ) : null}
-                </div>
-              ))}
-            </div>
-          ) : null}
 
           <div className="grid gap-3 rounded-md border bg-background p-3">
             <div className="grid gap-3 md:grid-cols-3">
