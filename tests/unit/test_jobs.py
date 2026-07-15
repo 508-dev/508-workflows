@@ -403,6 +403,148 @@ def test_update_gig_status_accepts_only_explicit_command_values() -> None:
     assert JobsCog._explicit_gig_status("cancelled") is None
 
 
+def test_candidate_blurb_scope_defaults_to_general_outside_a_thread() -> None:
+    cog = JobsCog(Mock())
+    result = asyncio.run(
+        cog._resolve_candidate_blurb_scope(
+            interaction=SimpleNamespace(guild=None),
+            requested_gig=None,
+            source_channel=SimpleNamespace(id=200),
+        )
+    )
+
+    assert result.error_code is None
+    assert result.scope is not None
+    assert result.scope.is_gig_specific is False
+    assert result.scope.destination_label == "General candidate blurb library"
+
+
+def test_candidate_blurb_dm_action_checks_requester_against_configured_guild(
+    monkeypatch,
+) -> None:
+    """A staff member can save a candidate's DM without DM-scoped role trust."""
+    configured_guild = Mock()
+    configured_guild.get_member.return_value = SimpleNamespace(
+        roles=[SimpleNamespace(name="Steering Committee")]
+    )
+    bot = Mock()
+    bot.get_guild.return_value = configured_guild
+    cog = JobsCog(bot)
+    monkeypatch.setattr(
+        jobs_module,
+        "settings",
+        SimpleNamespace(discord_server_id="123456"),
+    )
+
+    allowed = asyncio.run(
+        cog._interaction_user_can_manage_blurbs(
+            SimpleNamespace(
+                guild=None,
+                user=SimpleNamespace(id=42, roles=None),
+            )
+        )
+    )
+
+    assert allowed is True
+    bot.get_guild.assert_called_once_with(123456)
+    configured_guild.get_member.assert_called_once_with(42)
+
+
+def test_candidate_blurb_explicit_unregistered_thread_is_not_general_fallback(
+    monkeypatch,
+) -> None:
+    class FakeThread:
+        guild = None
+        parent = None
+
+    monkeypatch.setattr(jobs_module.discord, "Thread", FakeThread)
+    cog = JobsCog(Mock())
+    result = asyncio.run(
+        cog._resolve_candidate_blurb_scope(
+            interaction=SimpleNamespace(guild=None),
+            requested_gig=FakeThread(),
+            source_channel=None,
+        )
+    )
+
+    assert result.scope is None
+    assert result.error_code == "explicit_thread_not_registered"
+    assert result.error_message is not None
+
+
+def test_candidate_blurb_implicit_unregistered_thread_defaults_to_general(
+    monkeypatch,
+) -> None:
+    class FakeForumChannel:
+        id = 300
+
+    class FakeThread:
+        id = 200
+        guild = SimpleNamespace(id=100)
+        parent = FakeForumChannel()
+
+    monkeypatch.setattr(jobs_module.discord, "Thread", FakeThread)
+    monkeypatch.setattr(jobs_module.discord, "ForumChannel", FakeForumChannel)
+    cog = JobsCog(Mock())
+    cog._refresh_jobs_channel_cache_if_missing = AsyncMock(return_value=True)
+    cog._is_jobs_channel_registered = Mock(return_value=False)
+
+    result = asyncio.run(
+        cog._resolve_candidate_blurb_scope(
+            interaction=SimpleNamespace(guild=SimpleNamespace(id=100)),
+            requested_gig=None,
+            source_channel=FakeThread(),
+        )
+    )
+
+    assert result.error_code is None
+    assert result.scope is not None
+    assert result.scope.is_gig_specific is False
+
+
+async def test_candidate_blurb_confirmation_keeps_text_private() -> None:
+    intent = jobs_module.CandidateBlurbSaveIntent(
+        target=jobs_module.CandidateBlurbTarget(
+            discord_user_id="123",
+            display_name="Taylor",
+        ),
+        scope=jobs_module.CandidateBlurbScope(
+            engagement_id="engagement-1",
+            thread_id="456",
+            gig_title="Backend Engineer",
+            resolution="explicit_thread",
+        ),
+        text="This must never appear in the confirmation.",
+        author_kind="candidate_attributed",
+        source="discord_command",
+        submitted_by_discord_user_id="999",
+    )
+    view = jobs_module.CandidateBlurbSaveConfirmationView(
+        cog=Mock(),
+        requester_id="999",
+        intent=intent,
+        provenance_label="Candidate-attributed · pasted by you",
+    )
+
+    rendered = view.render()
+
+    assert "This must never appear" not in rendered
+    assert "Backend Engineer" in rendered
+    assert "Candidate-attributed" in rendered
+
+
+def test_candidate_blurb_draft_parts_keep_structured_generation_metadata() -> None:
+    text, metadata = JobsCog._candidate_blurb_draft_parts(
+        {
+            "text": "Taylor is an experienced backend engineer.",
+            "metadata": {"model": "gpt-5-mini", "prompt_version": "v1"},
+        }
+    )
+
+    assert text == "Taylor is an experienced backend engineer."
+    assert metadata == {"model": "gpt-5-mini", "prompt_version": "v1"}
+
+
 def test_locked_or_archived_recruiting_threads_are_treated_as_outdated() -> None:
     locked = SimpleNamespace(name="[RECRUITING] Need help", locked=True, archived=False)
     archived = SimpleNamespace(name="Need help", locked=False, archived=True)

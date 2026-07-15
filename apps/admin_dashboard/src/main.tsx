@@ -89,6 +89,8 @@ type User = {
   email?: string
   display_name?: string
   actor_provider?: string
+  groups?: string[]
+  is_admin?: boolean
   crm_contact_id?: string
   crm_base_url?: string
   permissions?: string[]
@@ -205,6 +207,51 @@ type GigApplication = {
   latest_resume_name?: string
   skills_count?: number
   is_member?: boolean
+  blurbs?: CandidateBlurb[]
+}
+
+type CandidateBlurbScope = "general" | "gig"
+type CandidateBlurbAuthorKind = "candidate" | "candidate_attributed" | "team" | "ai"
+
+type CandidateBlurb = {
+  id: string
+  text: string
+  scope: CandidateBlurbScope
+  author_kind: CandidateBlurbAuthorKind
+  source?: string
+  status?: "draft" | "approved" | "superseded"
+  person_id?: string
+  crm_contact_id?: string
+  discord_user_id?: string
+  application_id?: string
+  engagement_id?: string
+  submitted_by_discord_user_id?: string
+  metadata?: Record<string, unknown>
+  created_at?: string
+  updated_at?: string
+  is_current?: boolean
+}
+
+type CandidateBlurbIdentity = Pick<
+  CandidateBlurb,
+  "person_id" | "crm_contact_id" | "discord_user_id"
+>
+
+type CandidateBlurbDraft = {
+  text: string
+  supporting_facts?: string[]
+  missing_facts?: string[]
+  metadata?: Record<string, unknown>
+}
+
+type CandidateBlurbSavePayload = {
+  text: string
+  scope: CandidateBlurbScope
+  author_kind: CandidateBlurbAuthorKind
+  source: "dashboard"
+  status: "draft" | "approved"
+  generation_metadata?: Record<string, unknown>
+  replaces_blurb_id?: string
 }
 
 type Gig = {
@@ -229,6 +276,7 @@ type Gig = {
   application_count?: number
   interested_count?: number
   applications?: GigApplication[]
+  candidate_blurbs?: CandidateBlurb[]
 }
 
 type JobLead = {
@@ -953,6 +1001,16 @@ function App() {
 
   function canUse(permission: string) {
     return can(permission) || canDryRun(permission)
+  }
+
+  function canManageCandidateBlurbs() {
+    if (user?.is_admin) return true
+    return (user?.groups || []).some((group) => {
+      const normalizedGroup = group.trim().toLowerCase()
+      return ["steering committee", "workflows engineer", "admin", "owner"].includes(
+        normalizedGroup,
+      )
+    })
   }
 
   function canView(nextView: View) {
@@ -1850,6 +1908,186 @@ function App() {
     }
   }
 
+  async function loadPersonBlurbs(contactId: string): Promise<CandidateBlurb[]> {
+    const normalizedContactId = contactId.trim()
+    if (!normalizedContactId) return []
+    const busyKey = `person:${normalizedContactId}:blurbs`
+    setBusy(busyKey, true)
+    try {
+      return await requestJson<CandidateBlurb[]>(
+        `/dashboard/api/people/${encodeURIComponent(normalizedContactId)}/blurbs`,
+      )
+    } catch (error) {
+      showError(error, "Unable to load candidate blurbs")
+      return []
+    } finally {
+      setBusy(busyKey, false)
+    }
+  }
+
+  async function savePersonBlurb(
+    contactId: string,
+    payload: CandidateBlurbSavePayload,
+  ): Promise<CandidateBlurb | null> {
+    const normalizedContactId = contactId.trim()
+    if (!normalizedContactId) {
+      showToast("Missing CRM contact id", "error")
+      return null
+    }
+    const busyKey = `person:${normalizedContactId}:blurb:save`
+    setBusy(busyKey, true)
+    try {
+      const result = await requestJson<CandidateBlurb>(
+        `/dashboard/api/people/${encodeURIComponent(normalizedContactId)}/blurbs`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...payload, scope: "general" }),
+        },
+      )
+      showToast("Saved candidate blurb", "ok")
+      return result
+    } catch (error) {
+      showError(error, "Unable to save candidate blurb")
+      return null
+    } finally {
+      setBusy(busyKey, false)
+    }
+  }
+
+  async function draftPersonBlurb(contactId: string): Promise<CandidateBlurbDraft | null> {
+    const normalizedContactId = contactId.trim()
+    if (!normalizedContactId) {
+      showToast("Missing CRM contact id", "error")
+      return null
+    }
+    const busyKey = `person:${normalizedContactId}:blurb:draft`
+    setBusy(busyKey, true)
+    try {
+      return await requestJson<CandidateBlurbDraft>(
+        `/dashboard/api/people/${encodeURIComponent(normalizedContactId)}/blurbs/draft`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scope: "general" }),
+        },
+      )
+    } catch (error) {
+      showError(error, "Unable to draft candidate blurb")
+      return null
+    } finally {
+      setBusy(busyKey, false)
+    }
+  }
+
+  async function saveGigApplicationBlurb(
+    gigId: string,
+    applicationId: string,
+    payload: CandidateBlurbSavePayload,
+  ): Promise<CandidateBlurb | null> {
+    const busyKey = `application:${applicationId}:blurb:save`
+    setBusy(busyKey, true)
+    try {
+      const result = await requestJson<CandidateBlurb>(
+        `/dashboard/api/gigs/${encodeURIComponent(gigId)}/applications/${encodeURIComponent(
+          applicationId,
+        )}/blurbs`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+      )
+      showToast(
+        payload.scope === "gig" ? "Saved gig blurb" : "Saved reusable candidate blurb",
+        "ok",
+      )
+      if (selectedGigId === gigId) await loadGigDetail(gigId)
+      return result
+    } catch (error) {
+      showError(error, "Unable to save candidate blurb")
+      return null
+    } finally {
+      setBusy(busyKey, false)
+    }
+  }
+
+  async function draftGigApplicationBlurb(
+    gigId: string,
+    applicationId: string,
+    scope: CandidateBlurbScope,
+  ): Promise<CandidateBlurbDraft | null> {
+    const busyKey = `application:${applicationId}:blurb:draft`
+    setBusy(busyKey, true)
+    try {
+      return await requestJson<CandidateBlurbDraft>(
+        `/dashboard/api/gigs/${encodeURIComponent(gigId)}/applications/${encodeURIComponent(
+          applicationId,
+        )}/blurbs/draft`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scope }),
+        },
+      )
+    } catch (error) {
+      showError(error, "Unable to draft candidate blurb")
+      return null
+    } finally {
+      setBusy(busyKey, false)
+    }
+  }
+
+  async function saveUnattachedGigBlurb(
+    gigId: string,
+    identity: CandidateBlurbIdentity,
+    payload: CandidateBlurbSavePayload,
+  ): Promise<CandidateBlurb | null> {
+    const busyKey = `gig:${gigId}:unattached-blurb:save:${candidateBlurbIdentityKey(identity)}`
+    setBusy(busyKey, true)
+    try {
+      const result = await requestJson<CandidateBlurb>(
+        `/dashboard/api/gigs/${encodeURIComponent(gigId)}/blurbs`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...payload, scope: "gig", ...identity }),
+        },
+      )
+      showToast("Saved gig blurb", "ok")
+      if (selectedGigId === gigId) await loadGigDetail(gigId)
+      return result
+    } catch (error) {
+      showError(error, "Unable to save gig blurb")
+      return null
+    } finally {
+      setBusy(busyKey, false)
+    }
+  }
+
+  async function draftUnattachedGigBlurb(
+    gigId: string,
+    identity: CandidateBlurbIdentity,
+  ): Promise<CandidateBlurbDraft | null> {
+    const busyKey = `gig:${gigId}:unattached-blurb:draft:${candidateBlurbIdentityKey(identity)}`
+    setBusy(busyKey, true)
+    try {
+      return await requestJson<CandidateBlurbDraft>(
+        `/dashboard/api/gigs/${encodeURIComponent(gigId)}/blurbs/draft`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scope: "gig", ...identity }),
+        },
+      )
+    } catch (error) {
+      showError(error, "Unable to draft gig blurb")
+      return null
+    } finally {
+      setBusy(busyKey, false)
+    }
+  }
+
   function peopleUrl() {
     const params = new URLSearchParams({ limit: "25" })
     if (peopleQuery.trim()) params.set("query", peopleQuery.trim())
@@ -2738,6 +2976,7 @@ function App() {
               people={sortedPeople}
               sort={sort.people}
               canSync={canUse("people:sync")}
+              canManageBlurbs={canManageCandidateBlurbs()}
               loading={loading}
               peopleQuery={peopleQuery}
               peopleMember={peopleMember}
@@ -2767,6 +3006,9 @@ function App() {
               }}
               crmContactUrl={crmContactUrl}
               crmAttachmentUrl={crmAttachmentUrl}
+              onLoadBlurbs={loadPersonBlurbs}
+              onSaveBlurb={savePersonBlurb}
+              onDraftBlurb={draftPersonBlurb}
             />
           ) : null}
 
@@ -2806,6 +3048,7 @@ function App() {
               canWrite={can("gigs:write")}
               canSearchCandidates={can("people:read")}
               canManageLeads={can("people:read")}
+              canManageBlurbs={canManageCandidateBlurbs()}
               canIncludeHistorical={can("people:read")}
               crmContactUrl={crmContactUrl}
               crmAttachmentUrl={crmAttachmentUrl}
@@ -2822,6 +3065,10 @@ function App() {
               onUpdateStatus={updateGigStatus}
               onAddApplication={addGigApplication}
               onUpdateApplicationStatus={updateGigApplicationStatus}
+              onSaveApplicationBlurb={saveGigApplicationBlurb}
+              onDraftApplicationBlurb={draftGigApplicationBlurb}
+              onSaveUnattachedGigBlurb={saveUnattachedGigBlurb}
+              onDraftUnattachedGigBlurb={draftUnattachedGigBlurb}
               onSyncLeads={syncGigLeads}
               onReviewLead={reviewGigLead}
               onPostLead={postGigLead}
@@ -5188,6 +5435,7 @@ function GigsView(props: {
   canWrite: boolean
   canSearchCandidates: boolean
   canManageLeads: boolean
+  canManageBlurbs: boolean
   canIncludeHistorical: boolean
   crmContactUrl: (contactId?: string) => string
   crmAttachmentUrl: (attachmentId?: string) => string
@@ -5204,6 +5452,25 @@ function GigsView(props: {
   onUpdateStatus: (gigId: string, status: string) => void
   onAddApplication: (gigId: string, crmProfile: string) => Promise<boolean>
   onUpdateApplicationStatus: (gigId: string, applicationId: string, status: string) => void
+  onSaveApplicationBlurb: (
+    gigId: string,
+    applicationId: string,
+    payload: CandidateBlurbSavePayload,
+  ) => Promise<CandidateBlurb | null>
+  onDraftApplicationBlurb: (
+    gigId: string,
+    applicationId: string,
+    scope: CandidateBlurbScope,
+  ) => Promise<CandidateBlurbDraft | null>
+  onSaveUnattachedGigBlurb: (
+    gigId: string,
+    identity: CandidateBlurbIdentity,
+    payload: CandidateBlurbSavePayload,
+  ) => Promise<CandidateBlurb | null>
+  onDraftUnattachedGigBlurb: (
+    gigId: string,
+    identity: CandidateBlurbIdentity,
+  ) => Promise<CandidateBlurbDraft | null>
   onSyncLeads: () => void
   onReviewLead: (leadId: string, status: "approved" | "rejected") => void
   onPostLead: (
@@ -5471,6 +5738,7 @@ function GigsView(props: {
           loading={props.loading}
           canWrite={props.canWrite}
           canSearchCandidates={props.canSearchCandidates}
+          canManageBlurbs={props.canManageBlurbs}
           crmContactUrl={props.crmContactUrl}
           crmAttachmentUrl={props.crmAttachmentUrl}
           staleDays={props.staleDays}
@@ -5479,6 +5747,10 @@ function GigsView(props: {
           onUpdateStatus={props.onUpdateStatus}
           onAddApplication={props.onAddApplication}
           onUpdateApplicationStatus={props.onUpdateApplicationStatus}
+          onSaveApplicationBlurb={props.onSaveApplicationBlurb}
+          onDraftApplicationBlurb={props.onDraftApplicationBlurb}
+          onSaveUnattachedGigBlurb={props.onSaveUnattachedGigBlurb}
+          onDraftUnattachedGigBlurb={props.onDraftUnattachedGigBlurb}
         />
       </>
     )
@@ -6043,6 +6315,7 @@ function GigDetailPage({
   loading,
   canWrite,
   canSearchCandidates,
+  canManageBlurbs,
   crmContactUrl,
   crmAttachmentUrl,
   staleDays,
@@ -6051,11 +6324,16 @@ function GigDetailPage({
   onUpdateStatus,
   onAddApplication,
   onUpdateApplicationStatus,
+  onSaveApplicationBlurb,
+  onDraftApplicationBlurb,
+  onSaveUnattachedGigBlurb,
+  onDraftUnattachedGigBlurb,
 }: {
   gig: Gig
   loading: Record<string, boolean>
   canWrite: boolean
   canSearchCandidates: boolean
+  canManageBlurbs: boolean
   crmContactUrl: (contactId?: string) => string
   crmAttachmentUrl: (attachmentId?: string) => string
   staleDays: number
@@ -6064,6 +6342,25 @@ function GigDetailPage({
   onUpdateStatus: (gigId: string, status: string) => void
   onAddApplication: (gigId: string, crmProfile: string) => Promise<boolean>
   onUpdateApplicationStatus: (gigId: string, applicationId: string, status: string) => void
+  onSaveApplicationBlurb: (
+    gigId: string,
+    applicationId: string,
+    payload: CandidateBlurbSavePayload,
+  ) => Promise<CandidateBlurb | null>
+  onDraftApplicationBlurb: (
+    gigId: string,
+    applicationId: string,
+    scope: CandidateBlurbScope,
+  ) => Promise<CandidateBlurbDraft | null>
+  onSaveUnattachedGigBlurb: (
+    gigId: string,
+    identity: CandidateBlurbIdentity,
+    payload: CandidateBlurbSavePayload,
+  ) => Promise<CandidateBlurb | null>
+  onDraftUnattachedGigBlurb: (
+    gigId: string,
+    identity: CandidateBlurbIdentity,
+  ) => Promise<CandidateBlurbDraft | null>
 }) {
   const [candidateQuery, setCandidateQuery] = useState("")
   const [candidateMatches, setCandidateMatches] = useState<Person[]>([])
@@ -6071,6 +6368,9 @@ function GigDetailPage({
   const [candidateSearchError, setCandidateSearchError] = useState("")
   const [crmProfile, setCrmProfile] = useState("")
   const applications = Array.isArray(gig.applications) ? gig.applications : []
+  const unattachedBlurbGroups = groupCandidateBlurbs(
+    Array.isArray(gig.candidate_blurbs) ? gig.candidate_blurbs : [],
+  )
   const isActive = gig.status === "recruiting" || gig.status === "contacted"
   const candidateQueryReady = candidateQuery.trim().length >= 2
   const selectedCandidateId = selectedCandidate?.crm_contact_id || ""
@@ -6347,13 +6647,42 @@ function GigDetailPage({
               application={application}
               loading={loading}
               canWrite={canWrite}
+              canManageBlurbs={canManageBlurbs}
               crmContactUrl={crmContactUrl}
               crmAttachmentUrl={crmAttachmentUrl}
               onUpdateApplicationStatus={onUpdateApplicationStatus}
+              onSaveBlurb={onSaveApplicationBlurb}
+              onDraftBlurb={onDraftApplicationBlurb}
             />
           ))}
         </div>
       </Card>
+
+      {canManageBlurbs && unattachedBlurbGroups.length ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Captured candidate blurbs</CardTitle>
+            <span className="text-sm text-muted-foreground">
+              Saved for this gig without changing candidate status or creating an application.
+            </span>
+          </CardHeader>
+          <div className="grid gap-3 border-t p-4">
+            {unattachedBlurbGroups.map((group) => (
+              <CandidateBlurbPanel
+                key={group.key}
+                candidateLabel={group.label}
+                blurbs={group.blurbs}
+                defaultScope="gig"
+                loading={loading}
+                saveBusyKey={`gig:${gig.id}:unattached-blurb:save:${group.key}`}
+                draftBusyKey={`gig:${gig.id}:unattached-blurb:draft:${group.key}`}
+                onSave={(payload) => onSaveUnattachedGigBlurb(gig.id, group.identity, payload)}
+                onDraft={() => onDraftUnattachedGigBlurb(gig.id, group.identity)}
+              />
+            ))}
+          </div>
+        </Card>
+      ) : null}
     </div>
   )
 }
@@ -6363,17 +6692,31 @@ function GigApplicationRow({
   application,
   loading,
   canWrite,
+  canManageBlurbs,
   crmContactUrl,
   crmAttachmentUrl,
   onUpdateApplicationStatus,
+  onSaveBlurb,
+  onDraftBlurb,
 }: {
   gigId: string
   application: GigApplication
   loading: Record<string, boolean>
   canWrite: boolean
+  canManageBlurbs: boolean
   crmContactUrl: (contactId?: string) => string
   crmAttachmentUrl: (attachmentId?: string) => string
   onUpdateApplicationStatus: (gigId: string, applicationId: string, status: string) => void
+  onSaveBlurb: (
+    gigId: string,
+    applicationId: string,
+    payload: CandidateBlurbSavePayload,
+  ) => Promise<CandidateBlurb | null>
+  onDraftBlurb: (
+    gigId: string,
+    applicationId: string,
+    scope: CandidateBlurbScope,
+  ) => Promise<CandidateBlurbDraft | null>
 }) {
   const displayName = candidateDisplayName(application)
   const contactUrl = crmContactUrl(application.crm_contact_id)
@@ -6447,6 +6790,466 @@ function GigApplicationRow({
           ))}
         </Select>
       ) : null}
+      {canManageBlurbs ? (
+        <CandidateBlurbPanel
+          candidateLabel={displayName}
+          blurbs={application.blurbs}
+          defaultScope="gig"
+          allowScopeSelection
+          loading={loading}
+          saveBusyKey={`application:${application.id}:blurb:save`}
+          draftBusyKey={`application:${application.id}:blurb:draft`}
+          onSave={(payload) => onSaveBlurb(gigId, application.id, payload)}
+          onDraft={(scope) => onDraftBlurb(gigId, application.id, scope)}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+function candidateBlurbAuthorLabel(authorKind?: CandidateBlurbAuthorKind) {
+  switch (authorKind) {
+    case "candidate":
+      return "Written by candidate"
+    case "candidate_attributed":
+      return "Candidate supplied"
+    case "team":
+      return "Written by team"
+    case "ai":
+      return "AI draft"
+    default:
+      return "Unknown author"
+  }
+}
+
+function candidateBlurbScopeLabel(scope?: CandidateBlurbScope) {
+  return scope === "gig" ? "Gig-specific" : "General"
+}
+
+function candidateBlurbSourceLabel(source?: string) {
+  const value = String(source || "dashboard").replaceAll("_", " ")
+  return titleCase(value)
+}
+
+function candidateBlurbGenerationMetadata(blurb: CandidateBlurb) {
+  return blurb.author_kind === "ai" || blurb.metadata?.skill_id === "candidate_blurb_draft"
+    ? blurb.metadata
+    : undefined
+}
+
+function candidateBlurbIdentityKey(identity: CandidateBlurbIdentity) {
+  return (
+    identity.person_id ||
+    (identity.crm_contact_id ? `crm:${identity.crm_contact_id}` : "") ||
+    (identity.discord_user_id ? `discord:${identity.discord_user_id}` : "") ||
+    "unknown"
+  )
+}
+
+function candidateBlurbIdentityLabel(blurb: CandidateBlurb) {
+  const metadataName = [
+    blurb.metadata?.candidate_name,
+    blurb.metadata?.candidate_discord_display_name,
+  ].find((value): value is string => typeof value === "string" && value.trim().length > 0)
+  return (
+    metadataName ||
+    blurb.crm_contact_id ||
+    blurb.discord_user_id ||
+    blurb.person_id ||
+    "Unattached candidate"
+  )
+}
+
+type CandidateBlurbGroup = {
+  key: string
+  identity: CandidateBlurbIdentity
+  label: string
+  blurbs: CandidateBlurb[]
+}
+
+function groupCandidateBlurbs(blurbs: CandidateBlurb[]): CandidateBlurbGroup[] {
+  const groups = new Map<string, CandidateBlurbGroup>()
+  for (const blurb of blurbs) {
+    const identity: CandidateBlurbIdentity = {
+      person_id: blurb.person_id,
+      crm_contact_id: blurb.crm_contact_id,
+      discord_user_id: blurb.discord_user_id,
+    }
+    const identityKey = candidateBlurbIdentityKey(identity)
+    const key = identityKey === "unknown" ? `unknown:${blurb.id}` : identityKey
+    const group = groups.get(key)
+    if (group) {
+      group.blurbs.push(blurb)
+      continue
+    }
+    groups.set(key, {
+      key,
+      identity,
+      label: candidateBlurbIdentityLabel(blurb),
+      blurbs: [blurb],
+    })
+  }
+  return [...groups.values()]
+}
+
+function CandidateBlurbPanel({
+  candidateLabel,
+  blurbs,
+  defaultScope,
+  allowScopeSelection = false,
+  loading,
+  saveBusyKey,
+  draftBusyKey,
+  onLoad,
+  onSave,
+  onDraft,
+}: {
+  candidateLabel: string
+  blurbs?: CandidateBlurb[]
+  defaultScope: CandidateBlurbScope
+  allowScopeSelection?: boolean
+  loading: Record<string, boolean>
+  saveBusyKey: string
+  draftBusyKey: string
+  onLoad?: () => Promise<CandidateBlurb[]>
+  onSave: (payload: CandidateBlurbSavePayload) => Promise<CandidateBlurb | null>
+  onDraft: (scope: CandidateBlurbScope) => Promise<CandidateBlurbDraft | null>
+}) {
+  const [open, setOpen] = useState(false)
+  const [loaded, setLoaded] = useState(Boolean(blurbs))
+  const [items, setItems] = useState<CandidateBlurb[]>(blurbs || [])
+  const [scope, setScope] = useState<CandidateBlurbScope>(defaultScope)
+  const [authorKind, setAuthorKind] = useState<CandidateBlurbAuthorKind>("candidate_attributed")
+  const [status, setStatus] = useState<"draft" | "approved">("approved")
+  const [text, setText] = useState("")
+  const [showHistory, setShowHistory] = useState(false)
+  const [copyStatus, setCopyStatus] = useState("")
+  const [draft, setDraft] = useState<CandidateBlurbDraft | null>(null)
+  const [generationMetadata, setGenerationMetadata] = useState<
+    Record<string, unknown> | undefined
+  >()
+  const [replacesBlurbId, setReplacesBlurbId] = useState("")
+
+  useEffect(() => {
+    if (!blurbs) return
+    setItems(blurbs)
+    setLoaded(true)
+  }, [blurbs])
+
+  const orderedBlurbs = useMemo(
+    () =>
+      [...items].sort((left, right) => {
+        if (Boolean(left.is_current) !== Boolean(right.is_current)) {
+          return left.is_current ? -1 : 1
+        }
+        return String(right.created_at || "").localeCompare(String(left.created_at || ""))
+      }),
+    [items],
+  )
+  const blurbsForSelectedScope = allowScopeSelection
+    ? orderedBlurbs.filter((item) => item.scope === scope)
+    : orderedBlurbs
+  const currentBlurb =
+    blurbsForSelectedScope.find((item) => item.is_current && item.status === "approved") ||
+    blurbsForSelectedScope.find((item) => item.is_current) ||
+    blurbsForSelectedScope.find((item) => item.status === "approved") ||
+    blurbsForSelectedScope[0]
+  const history = blurbsForSelectedScope.filter((item) => item.id !== currentBlurb?.id)
+  const savedSampleCount = blurbsForSelectedScope.length
+  const saving = Boolean(loading[saveBusyKey])
+  const drafting = Boolean(loading[draftBusyKey])
+
+  async function toggleOpen() {
+    const nextOpen = !open
+    setOpen(nextOpen)
+    if (!nextOpen || loaded || !onLoad) return
+    const result = await onLoad()
+    setItems(result)
+    setLoaded(true)
+  }
+
+  async function copyCurrentBlurb() {
+    if (!currentBlurb?.text) return
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable")
+      await navigator.clipboard.writeText(currentBlurb.text)
+      setCopyStatus("Copied")
+    } catch {
+      setCopyStatus("Copy unavailable")
+    }
+  }
+
+  async function save() {
+    const normalizedText = text.trim()
+    if (!normalizedText) return
+    const result = await onSave({
+      text: normalizedText,
+      scope,
+      author_kind: authorKind,
+      source: "dashboard",
+      status,
+      generation_metadata: generationMetadata,
+      replaces_blurb_id: replacesBlurbId || undefined,
+    })
+    if (!result) return
+    setItems((current) => [
+      result,
+      ...current
+        .filter((item) => item.id !== result.id)
+        .map((item) =>
+          item.id === replacesBlurbId
+            ? { ...item, is_current: false, status: "superseded" as const }
+            : item,
+        ),
+    ])
+    setText("")
+    setDraft(null)
+    setGenerationMetadata(undefined)
+    setReplacesBlurbId("")
+    setShowHistory(true)
+  }
+
+  async function draftBlurb() {
+    const result = await onDraft(scope)
+    if (!result?.text?.trim()) return
+    setText(result.text)
+    setAuthorKind("ai")
+    setStatus("draft")
+    setDraft(result)
+    setGenerationMetadata(result.metadata)
+    setReplacesBlurbId("")
+  }
+
+  function editBlurb(blurb: CandidateBlurb) {
+    setText(blurb.text)
+    setScope(blurb.scope)
+    setAuthorKind(blurb.author_kind)
+    setStatus(blurb.status === "draft" ? "draft" : "approved")
+    setGenerationMetadata(candidateBlurbGenerationMetadata(blurb))
+    setDraft(null)
+    setReplacesBlurbId(blurb.id)
+  }
+
+  function editCurrentBlurb() {
+    if (currentBlurb) editBlurb(currentBlurb)
+  }
+
+  return (
+    <div className="rounded-md border bg-secondary/20 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="grid gap-0.5">
+          <strong className="text-sm">Candidate blurbs</strong>
+          <span className="text-xs text-muted-foreground">
+            {savedSampleCount
+              ? `${savedSampleCount} saved sample${savedSampleCount === 1 ? "" : "s"}`
+              : "No saved samples"}
+          </span>
+        </div>
+        <Button type="button" size="sm" variant="outline" onClick={() => void toggleOpen()}>
+          {open ? "Close" : "Manage blurbs"}
+        </Button>
+      </div>
+
+      {open ? (
+        <div className="mt-3 grid gap-3 border-t pt-3">
+          {currentBlurb ? (
+            <div className="grid gap-2 rounded-md border bg-background p-3">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Badge variant={currentBlurb.scope === "gig" ? "queued" : "neutral"}>
+                  {candidateBlurbScopeLabel(currentBlurb.scope)}
+                </Badge>
+                <Badge variant={currentBlurb.author_kind === "ai" ? "running" : "neutral"}>
+                  {candidateBlurbAuthorLabel(currentBlurb.author_kind)}
+                </Badge>
+                {currentBlurb.status ? (
+                  <Badge variant={currentBlurb.status === "approved" ? "succeeded" : "neutral"}>
+                    {titleCase(currentBlurb.status)}
+                  </Badge>
+                ) : null}
+                <span className="text-xs text-muted-foreground">
+                  {candidateBlurbSourceLabel(currentBlurb.source)}
+                  {currentBlurb.created_at ? ` · ${formatDate(currentBlurb.created_at)}` : ""}
+                </span>
+              </div>
+              <p className="whitespace-pre-wrap text-sm leading-6">{currentBlurb.text}</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void copyCurrentBlurb()}
+                >
+                  Copy current
+                </Button>
+                {copyStatus ? (
+                  <span className="text-xs text-muted-foreground">{copyStatus}</span>
+                ) : null}
+                {history.length ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setShowHistory((value) => !value)}
+                  >
+                    {showHistory ? "Hide history" : `History (${history.length})`}
+                  </Button>
+                ) : null}
+                <Button type="button" size="sm" variant="ghost" onClick={editCurrentBlurb}>
+                  Edit current
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              Paste a candidate-supplied blurb or generate a reviewable draft for {candidateLabel}.
+            </p>
+          )}
+
+          {showHistory && history.length ? (
+            <div className="grid gap-2">
+              {history.map((item) => (
+                <div
+                  key={item.id}
+                  className="grid gap-1 rounded-md border bg-background p-2 text-sm"
+                >
+                  <div className="flex flex-wrap gap-1.5 text-xs text-muted-foreground">
+                    <span>{candidateBlurbScopeLabel(item.scope)}</span>
+                    <span>{candidateBlurbAuthorLabel(item.author_kind)}</span>
+                    {item.status ? <span>{titleCase(item.status)}</span> : null}
+                    <span>{formatDate(item.created_at) || "Unknown date"}</span>
+                  </div>
+                  <p className="whitespace-pre-wrap">{item.text}</p>
+                  {item.is_current ? (
+                    <div>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => editBlurb(item)}
+                      >
+                        Edit this version
+                      </Button>
+                    </div>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          ) : null}
+
+          <div className="grid gap-3 rounded-md border bg-background p-3">
+            <div className="grid gap-3 md:grid-cols-3">
+              {allowScopeSelection ? (
+                <Label>
+                  Save as
+                  <Select
+                    value={scope}
+                    disabled={saving || drafting || Boolean(replacesBlurbId) || Boolean(draft)}
+                    onChange={(event) => setScope(event.target.value as CandidateBlurbScope)}
+                  >
+                    <option value="gig">This gig</option>
+                    <option value="general">Reusable general sample</option>
+                  </Select>
+                </Label>
+              ) : (
+                <div className="grid gap-1">
+                  <span className="text-xs font-bold text-muted-foreground">Save as</span>
+                  <span className="text-sm">
+                    {defaultScope === "gig" ? "This gig" : "Reusable general sample"}
+                  </span>
+                </div>
+              )}
+              <Label>
+                Provenance
+                <Select
+                  value={authorKind}
+                  disabled={saving || drafting}
+                  onChange={(event) =>
+                    setAuthorKind(event.target.value as CandidateBlurbAuthorKind)
+                  }
+                >
+                  <option value="candidate_attributed">Candidate supplied</option>
+                  <option value="candidate">Written by candidate</option>
+                  <option value="team">Written by team</option>
+                  <option value="ai">AI draft</option>
+                </Select>
+              </Label>
+              <Label>
+                Status
+                <Select
+                  value={status}
+                  disabled={saving || drafting}
+                  onChange={(event) => setStatus(event.target.value as "draft" | "approved")}
+                >
+                  <option value="approved">Approved</option>
+                  <option value="draft">Draft</option>
+                </Select>
+              </Label>
+            </div>
+            <Label>
+              Paste or edit blurb
+              <textarea
+                value={text}
+                className="min-h-32 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground shadow-xs transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+                maxLength={4000}
+                placeholder={`A concise introduction for ${candidateLabel}`}
+                disabled={saving || drafting}
+                onChange={(event) => setText(event.target.value)}
+              />
+            </Label>
+            {replacesBlurbId ? (
+              <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                Editing the current version; saving will preserve history.
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  disabled={saving || drafting}
+                  onClick={() => {
+                    setReplacesBlurbId("")
+                    setText("")
+                    setGenerationMetadata(undefined)
+                  }}
+                >
+                  Cancel edit
+                </Button>
+              </div>
+            ) : null}
+            {draft?.supporting_facts?.length ? (
+              <p className="text-xs text-muted-foreground">
+                Based on: {draft.supporting_facts.join(" · ")}
+              </p>
+            ) : null}
+            {draft?.missing_facts?.length ? (
+              <p className="text-xs text-muted-foreground">
+                Confirm: {draft.missing_facts.join(" · ")}
+              </p>
+            ) : null}
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                disabled={saving || drafting}
+                onClick={() => void draftBlurb()}
+              >
+                <RefreshCw />
+                {drafting ? "Drafting" : "Draft with AI"}
+              </Button>
+              <Button
+                type="button"
+                disabled={saving || drafting || !text.trim()}
+                onClick={() => void save()}
+              >
+                Save blurb
+              </Button>
+            </div>
+            {draft ? (
+              <span className="text-xs text-muted-foreground">
+                AI drafts are never saved or approved automatically. Review before saving.
+              </span>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -6456,6 +7259,7 @@ function PeopleView(props: {
   people: Person[]
   sort: { key: string; direction: SortDirection }
   canSync: boolean
+  canManageBlurbs: boolean
   loading: Record<string, boolean>
   peopleQuery: string
   peopleMember: string
@@ -6474,6 +7278,12 @@ function PeopleView(props: {
   removeFilter: (key: PeopleFilterKey) => void
   crmContactUrl: (contactId?: string) => string
   crmAttachmentUrl: (attachmentId?: string) => string
+  onLoadBlurbs: (contactId: string) => Promise<CandidateBlurb[]>
+  onSaveBlurb: (
+    contactId: string,
+    payload: CandidateBlurbSavePayload,
+  ) => Promise<CandidateBlurb | null>
+  onDraftBlurb: (contactId: string) => Promise<CandidateBlurbDraft | null>
 }) {
   const filterOptions = peopleFilterDefinitions[props.peopleFilterKind]?.options || []
   return (
@@ -6666,6 +7476,22 @@ function PeopleView(props: {
                         .filter(Boolean)
                         .join(" | ")}
                     </div>
+                    {props.canManageBlurbs && person.crm_contact_id ? (
+                      <div className="mt-2">
+                        <CandidateBlurbPanel
+                          candidateLabel={displayName}
+                          defaultScope="general"
+                          loading={props.loading}
+                          saveBusyKey={`person:${person.crm_contact_id}:blurb:save`}
+                          draftBusyKey={`person:${person.crm_contact_id}:blurb:draft`}
+                          onLoad={() => props.onLoadBlurbs(person.crm_contact_id || "")}
+                          onSave={(payload) =>
+                            props.onSaveBlurb(person.crm_contact_id || "", payload)
+                          }
+                          onDraft={() => props.onDraftBlurb(person.crm_contact_id || "")}
+                        />
+                      </div>
+                    ) : null}
                   </TableCell>
                   <TableCell>
                     <div className="flex flex-wrap gap-1.5">

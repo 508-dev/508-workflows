@@ -191,6 +191,11 @@ GIG_INTEREST_NEGATION_RE = re.compile(
     r"|\bavailable\s+(?:for|to)\b.{0,40}\b(?:not|n't)\b",
     re.IGNORECASE,
 )
+BLURB_TEXT_INPUT_MAX_LENGTH = 4000
+BLURB_DRAFT_PREVIEW_MAX_LENGTH = 1400
+BLURB_MODAL_TIMEOUT_SECONDS = 5 * 60
+BLURB_VIEW_TIMEOUT_SECONDS = 15 * 60
+NO_MENTIONS = discord.AllowedMentions.none()
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 JobWatchChannel = discord.ForumChannel
 
@@ -362,12 +367,519 @@ class MatchCandidatesHttpResponse:
         return self.headers.get("content-type", "").split(";", 1)[0].strip().lower()
 
 
+@dataclass(frozen=True, slots=True)
+class CandidateBlurbTarget:
+    """The Discord identity used to resolve a candidate blurb owner."""
+
+    discord_user_id: str
+    display_name: str
+    username: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateBlurbScope:
+    """A general candidate library entry or a gig-specific blurb destination."""
+
+    engagement_id: str | None
+    thread_id: str | None
+    gig_title: str | None
+    resolution: Literal["general", "implicit_thread", "explicit_thread"]
+
+    @property
+    def is_gig_specific(self) -> bool:
+        return self.engagement_id is not None
+
+    @property
+    def destination_label(self) -> str:
+        if not self.is_gig_specific:
+            return "General candidate blurb library"
+        title = (self.gig_title or "Untitled gig").strip() or "Untitled gig"
+        return f"Gig — {title}"
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateBlurbScopeResolution:
+    """Structured scope-resolution result for Discord command and UI flows."""
+
+    scope: CandidateBlurbScope | None
+    error_code: str | None = None
+    error_message: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateBlurbSaveIntent:
+    """Validated UI intent passed to the durable candidate-blurb save boundary."""
+
+    target: CandidateBlurbTarget
+    scope: CandidateBlurbScope
+    text: str
+    author_kind: str
+    source: str
+    submitted_by_discord_user_id: str
+    source_message_id: str | None = None
+    source_channel_id: str | None = None
+    generation_metadata: dict[str, Any] | None = None
+
+
+def _safe_blurb_label(value: str | None, *, fallback: str) -> str:
+    """Return a short Discord-safe label without allowing mentions."""
+    normalized = str(value or "").strip() or fallback
+    return discord.utils.escape_mentions(discord.utils.escape_markdown(normalized))
+
+
+def _format_blurb_draft_preview(value: str) -> str:
+    """Render a bounded private draft preview within Discord's message limit."""
+    text = value.strip()
+    if len(text) > BLURB_DRAFT_PREVIEW_MAX_LENGTH:
+        text = text[: BLURB_DRAFT_PREVIEW_MAX_LENGTH - 3].rstrip() + "..."
+    safe = discord.utils.escape_mentions(text).replace("```", "ˋˋˋ")
+    return f"```text\n{safe}\n```"
+
+
+class CandidateBlurbSaveModal(discord.ui.Modal):
+    """Private text entry for a candidate-supplied blurb pasted by a steward."""
+
+    def __init__(
+        self,
+        *,
+        cog: "JobsCog",
+        requester_id: str,
+        target: CandidateBlurbTarget,
+        requested_gig: discord.Thread | None,
+        source_channel: object | None,
+    ) -> None:
+        super().__init__(
+            title="Save candidate blurb", timeout=BLURB_MODAL_TIMEOUT_SECONDS
+        )
+        self.cog = cog
+        self.requester_id = requester_id
+        self.target = target
+        self.requested_gig = requested_gig
+        self.source_channel = source_channel
+        self.blurb_text = discord.ui.TextInput(
+            label="Candidate blurb",
+            placeholder="Paste the candidate's blurb here.",
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=BLURB_TEXT_INPUT_MAX_LENGTH,
+        )
+        self.add_item(self.blurb_text)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not await self.cog._check_blurb_component_interaction(
+            interaction,
+            requester_id=self.requester_id,
+        ):
+            return
+
+        text = str(self.blurb_text.value or "")
+        if not text.strip():
+            await interaction.response.send_message(
+                "⚠️ Enter a blurb before saving.",
+                allowed_mentions=NO_MENTIONS,
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        await self.cog._show_blurb_save_confirmation(
+            interaction=interaction,
+            target=self.target,
+            text=text,
+            requested_gig=self.requested_gig,
+            source_channel=self.source_channel,
+            author_kind="candidate_attributed",
+            source="discord_command",
+            provenance_label="Candidate-attributed · pasted by you",
+        )
+
+
+class CandidateBlurbSaveConfirmationView(discord.ui.View):
+    """Requester-bound confirmation before durable blurb storage."""
+
+    def __init__(
+        self,
+        *,
+        cog: "JobsCog",
+        requester_id: str,
+        intent: CandidateBlurbSaveIntent,
+        provenance_label: str,
+        on_cancel: Callable[[], Awaitable[None]] | None = None,
+        on_saved: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        super().__init__(timeout=BLURB_VIEW_TIMEOUT_SECONDS)
+        self.cog = cog
+        self.requester_id = requester_id
+        self.intent = intent
+        self.provenance_label = provenance_label
+        self.on_cancel = on_cancel
+        self.on_saved = on_saved
+        self._save_lock = asyncio.Lock()
+        self._saved = False
+
+    def render(self) -> str:
+        target_label = _safe_blurb_label(
+            self.intent.target.display_name, fallback="Candidate"
+        )
+        destination = _safe_blurb_label(
+            self.intent.scope.destination_label,
+            fallback="General candidate blurb library",
+        )
+        return (
+            "Ready to save this blurb privately.\n"
+            f"Candidate: **{target_label}**\n"
+            f"Destination: **{destination}**\n"
+            f"Provenance: **{self.provenance_label}**\n\n"
+            "Confirm to store it. The blurb text will not be posted to this channel."
+        )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await self.cog._check_blurb_component_interaction(
+            interaction,
+            requester_id=self.requester_id,
+        )
+
+    def _disable(self) -> None:
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+        self.stop()
+
+    async def on_timeout(self) -> None:
+        """Return an AI preview to an editable state if its confirmation expires."""
+        self._disable()
+        if self.on_cancel is None:
+            return
+        try:
+            await self.on_cancel()
+        except Exception as exc:
+            logger.warning("Failed re-opening timed-out candidate blurb draft: %s", exc)
+
+    @discord.ui.button(label="Save blurb", style=discord.ButtonStyle.success)
+    async def save_blurb(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button["CandidateBlurbSaveConfirmationView"],
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+        async with self._save_lock:
+            if self._saved:
+                await interaction.followup.send(
+                    "ℹ️ This blurb has already been saved.",
+                    allowed_mentions=NO_MENTIONS,
+                    ephemeral=True,
+                )
+                return
+
+            try:
+                result = await self.cog._persist_candidate_blurb(self.intent)
+            except Exception as exc:
+                logger.warning(
+                    "Failed saving candidate blurb candidate=%s engagement=%s: %s",
+                    self.intent.target.discord_user_id,
+                    self.intent.scope.engagement_id,
+                    exc,
+                )
+                self.cog._audit_command_safe(
+                    interaction=interaction,
+                    action="candidate_blurb.save",
+                    result="error",
+                    metadata={
+                        "stage": "persistence",
+                        "error_type": type(exc).__name__,
+                        "candidate_discord_user_id": self.intent.target.discord_user_id,
+                        "engagement_id": self.intent.scope.engagement_id,
+                        "source": self.intent.source,
+                        "author_kind": self.intent.author_kind,
+                        "text_length": len(self.intent.text),
+                    },
+                )
+                await interaction.followup.send(
+                    "❌ Could not save this blurb. Please try again.",
+                    allowed_mentions=NO_MENTIONS,
+                    ephemeral=True,
+                )
+                return
+
+            self._saved = True
+            self._disable()
+            if self.on_saved is not None:
+                await self.on_saved()
+            result_id = self.cog._candidate_blurb_result_id(result)
+            self.cog._audit_command_safe(
+                interaction=interaction,
+                action="candidate_blurb.save",
+                result="success",
+                metadata={
+                    "candidate_discord_user_id": self.intent.target.discord_user_id,
+                    "engagement_id": self.intent.scope.engagement_id,
+                    "thread_id": self.intent.scope.thread_id,
+                    "source": self.intent.source,
+                    "author_kind": self.intent.author_kind,
+                    "source_message_id": self.intent.source_message_id,
+                    "text_length": len(self.intent.text),
+                },
+                resource_type="candidate_blurb",
+                resource_id=result_id,
+            )
+            message = getattr(interaction, "message", None)
+            if message is not None:
+                try:
+                    await message.edit(view=self)
+                except discord.HTTPException:
+                    logger.warning("Failed disabling saved candidate blurb view")
+
+            scope_description = (
+                "this gig"
+                if self.intent.scope.is_gig_specific
+                else "the general library"
+            )
+            await interaction.followup.send(
+                f"✅ Saved the candidate blurb to {scope_description}.",
+                allowed_mentions=NO_MENTIONS,
+                ephemeral=True,
+            )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button["CandidateBlurbSaveConfirmationView"],
+    ) -> None:
+        self._disable()
+        await interaction.response.edit_message(
+            content="Cancelled. The blurb was not saved.",
+            view=self,
+        )
+        if self.on_cancel is not None:
+            await self.on_cancel()
+
+
+class CandidateBlurbDraftEditModal(discord.ui.Modal):
+    """Edit one private AI draft before storing it as a blurb."""
+
+    def __init__(self, view: "CandidateBlurbDraftView") -> None:
+        super().__init__(
+            title="Edit candidate blurb", timeout=BLURB_MODAL_TIMEOUT_SECONDS
+        )
+        self.draft_view = view
+        self.blurb_text = discord.ui.TextInput(
+            label="Blurb",
+            style=discord.TextStyle.paragraph,
+            default=view.text,
+            required=True,
+            max_length=BLURB_TEXT_INPUT_MAX_LENGTH,
+        )
+        self.add_item(self.blurb_text)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        view = self.draft_view
+        if not await view.cog._check_blurb_component_interaction(
+            interaction,
+            requester_id=view.requester_id,
+        ):
+            return
+
+        text = str(self.blurb_text.value or "")
+        if not text.strip():
+            await interaction.response.send_message(
+                "⚠️ Enter a blurb before saving.",
+                allowed_mentions=NO_MENTIONS,
+                ephemeral=True,
+            )
+            return
+
+        generation_metadata = dict(view.generation_metadata or {})
+        generation_metadata["edited_in_discord"] = True
+        generation_metadata["edited_by_discord_user_id"] = str(interaction.user.id)
+        updated_view = CandidateBlurbDraftView(
+            cog=view.cog,
+            requester_id=view.requester_id,
+            target=view.target,
+            scope=view.scope,
+            text=text,
+            generation_metadata=generation_metadata,
+        )
+        await interaction.response.send_message(
+            updated_view.render(),
+            view=updated_view,
+            allowed_mentions=NO_MENTIONS,
+            ephemeral=True,
+        )
+        await view._retire_after_edit()
+
+
+class CandidateBlurbDraftView(discord.ui.View):
+    """Private preview with explicit edit and save controls for an AI blurb draft."""
+
+    def __init__(
+        self,
+        *,
+        cog: "JobsCog",
+        requester_id: str,
+        target: CandidateBlurbTarget,
+        scope: CandidateBlurbScope,
+        text: str,
+        generation_metadata: dict[str, Any] | None,
+    ) -> None:
+        super().__init__(timeout=BLURB_VIEW_TIMEOUT_SECONDS)
+        self.cog = cog
+        self.requester_id = requester_id
+        self.target = target
+        self.scope = scope
+        self.text = text
+        self.generation_metadata = generation_metadata
+        self._source_message: discord.Message | None = None
+        self._save_confirmation_open = False
+        self._save_confirmation_lock = asyncio.Lock()
+        if len(text) > BLURB_TEXT_INPUT_MAX_LENGTH:
+            self.edit_draft.disabled = True
+
+    def render(self) -> str:
+        target_label = _safe_blurb_label(self.target.display_name, fallback="Candidate")
+        destination = _safe_blurb_label(
+            self.scope.destination_label,
+            fallback="General candidate blurb library",
+        )
+        return (
+            "📝 **AI draft — private preview**\n"
+            f"Candidate: **{target_label}**\n"
+            f"Destination: **{destination}**\n\n"
+            f"{_format_blurb_draft_preview(self.text)}\n\n"
+            "Edit or save this draft. Saving never posts it to the channel."
+        )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await self.cog._check_blurb_component_interaction(
+            interaction,
+            requester_id=self.requester_id,
+        )
+
+    def _disable(self) -> None:
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+        self.stop()
+
+    async def _retire_after_edit(self) -> None:
+        self._disable()
+        if self._source_message is None:
+            return
+        try:
+            await self._source_message.edit(view=self)
+        except discord.HTTPException:
+            logger.warning("Failed disabling superseded candidate blurb draft view")
+
+    async def _reopen_after_save_confirmation_cancelled(self) -> None:
+        """Make a private draft usable again when its save confirmation is cancelled."""
+        self._save_confirmation_open = False
+        self.edit_draft.disabled = len(self.text) > BLURB_TEXT_INPUT_MAX_LENGTH
+        self.save_draft.disabled = False
+        self.discard_draft.disabled = False
+        if self._source_message is None:
+            return
+        try:
+            await self._source_message.edit(view=self)
+        except discord.HTTPException:
+            logger.warning("Failed re-enabling candidate blurb draft view")
+
+    async def _retire_after_save_confirmation(self) -> None:
+        """Retire the source preview once exactly one confirmation has saved it."""
+        self._disable()
+        if self._source_message is None:
+            return
+        try:
+            await self._source_message.edit(view=self)
+        except discord.HTTPException:
+            logger.warning("Failed disabling saved candidate blurb draft view")
+
+    @discord.ui.button(label="Edit", style=discord.ButtonStyle.primary)
+    async def edit_draft(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button["CandidateBlurbDraftView"],
+    ) -> None:
+        self._source_message = getattr(interaction, "message", None)
+        await interaction.response.send_modal(CandidateBlurbDraftEditModal(self))
+
+    @discord.ui.button(label="Save draft", style=discord.ButtonStyle.success)
+    async def save_draft(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button["CandidateBlurbDraftView"],
+    ) -> None:
+        async with self._save_confirmation_lock:
+            if self._save_confirmation_open:
+                await interaction.response.send_message(
+                    "ℹ️ A save confirmation is already open for this draft.",
+                    allowed_mentions=NO_MENTIONS,
+                    ephemeral=True,
+                )
+                return
+
+            self._save_confirmation_open = True
+            self._source_message = getattr(interaction, "message", None)
+            for item in self.children:
+                if isinstance(item, discord.ui.Button):
+                    item.disabled = True
+            await interaction.response.edit_message(view=self)
+
+            intent = CandidateBlurbSaveIntent(
+                target=self.target,
+                scope=self.scope,
+                text=self.text,
+                author_kind="ai",
+                source="discord_draft",
+                submitted_by_discord_user_id=str(interaction.user.id),
+                generation_metadata=self.generation_metadata,
+            )
+            confirmation = CandidateBlurbSaveConfirmationView(
+                cog=self.cog,
+                requester_id=self.requester_id,
+                intent=intent,
+                provenance_label="AI draft · generated for this candidate",
+                on_cancel=self._reopen_after_save_confirmation_cancelled,
+                on_saved=self._retire_after_save_confirmation,
+            )
+            try:
+                await interaction.followup.send(
+                    confirmation.render(),
+                    view=confirmation,
+                    allowed_mentions=NO_MENTIONS,
+                    ephemeral=True,
+                )
+            except Exception:
+                await self._reopen_after_save_confirmation_cancelled()
+                raise
+
+    @discord.ui.button(label="Discard", style=discord.ButtonStyle.secondary)
+    async def discard_draft(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button["CandidateBlurbDraftView"],
+    ) -> None:
+        self._disable()
+        await interaction.response.edit_message(
+            content="Discarded the private draft. Nothing was saved.",
+            view=self,
+        )
+
+
 class JobsCog(DiscordAuditCogMixin, commands.Cog):
     """Job posting and candidate matching workflows."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self._init_audit_logger()
+        self._save_blurb_message_context = app_commands.ContextMenu(
+            name="Save blurb",
+            callback=self.save_blurb_from_message,
+            allowed_contexts=app_commands.AppCommandContext(
+                guild=True,
+                dm_channel=True,
+                private_channel=True,
+            ),
+        )
         self._jobs_channels_by_guild: dict[int, set[int]] = {}
         self._jobs_channel_types_by_guild: dict[int, dict[int, JobPostingType]] = {}
         self._auto_matched_thread_ids: OrderedDict[int, None] = OrderedDict()
@@ -380,12 +892,388 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             int, asyncio.Lock
         ] = weakref.WeakValueDictionary()
 
+    async def cog_load(self) -> None:
+        """Register the message action that cannot be declared directly on a cog."""
+        self.bot.tree.add_command(self._save_blurb_message_context, override=True)
+
     async def cog_unload(self) -> None:
         """Stop background reminder checks when the cog unloads."""
+        self.bot.tree.remove_command(
+            "Save blurb",
+            type=discord.AppCommandType.message,
+        )
         if self._status_reminder_task is not None:
             self._status_reminder_task.cancel()
         for task in self._forum_backfill_tasks:
             task.cancel()
+
+    async def _interaction_user_can_manage_blurbs(
+        self,
+        interaction: discord.Interaction,
+    ) -> bool:
+        """Check Steering access, including a staff member acting from a DM.
+
+        Discord interactions in a DM do not carry guild roles. In that case we
+        resolve the requester against the configured 508 server instead of
+        trusting an unscoped DM identity, which keeps **Apps → Save blurb**
+        usable for candidate DMs without widening access.
+        """
+        roles = getattr(interaction.user, "roles", None)
+        if roles and check_user_roles_with_hierarchy(roles, ["Steering Committee"]):
+            return True
+
+        configured_guild_id = str(settings.discord_server_id or "").strip()
+        if not configured_guild_id.isdigit():
+            return False
+        guild = self.bot.get_guild(int(configured_guild_id))
+        if guild is None:
+            return False
+        member = guild.get_member(interaction.user.id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(interaction.user.id)
+            except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+                return False
+        member_roles = getattr(member, "roles", None)
+        return bool(
+            member_roles
+            and check_user_roles_with_hierarchy(member_roles, ["Steering Committee"])
+        )
+
+    async def _check_blurb_component_interaction(
+        self,
+        interaction: discord.Interaction,
+        *,
+        requester_id: str,
+    ) -> bool:
+        """Protect private blurb modal/view state from other Discord users."""
+        if str(interaction.user.id) != requester_id:
+            await interaction.response.send_message(
+                "❌ Only the command requester can use this blurb action.",
+                allowed_mentions=NO_MENTIONS,
+                ephemeral=True,
+            )
+            return False
+        if not await self._interaction_user_can_manage_blurbs(interaction):
+            await interaction.response.send_message(
+                "❌ Only Steering Committee members and above can manage candidate blurbs.",
+                allowed_mentions=NO_MENTIONS,
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @staticmethod
+    def _candidate_blurb_target(user: object) -> CandidateBlurbTarget | None:
+        """Build the stable Discord identity passed to candidate-blurb persistence."""
+        user_id = getattr(user, "id", None)
+        if user_id is None:
+            return None
+        display_name = (
+            getattr(user, "display_name", None)
+            or getattr(user, "global_name", None)
+            or getattr(user, "name", None)
+            or f"Discord user {user_id}"
+        )
+        username = getattr(user, "name", None)
+        return CandidateBlurbTarget(
+            discord_user_id=str(user_id),
+            display_name=str(display_name),
+            username=str(username) if username else None,
+        )
+
+    @staticmethod
+    def _general_candidate_blurb_scope() -> CandidateBlurbScope:
+        """Return the reusable, non-gig-specific candidate blurb destination."""
+        return CandidateBlurbScope(
+            engagement_id=None,
+            thread_id=None,
+            gig_title=None,
+            resolution="general",
+        )
+
+    async def _resolve_candidate_blurb_scope(
+        self,
+        *,
+        interaction: discord.Interaction,
+        requested_gig: discord.Thread | None,
+        source_channel: object | None,
+    ) -> CandidateBlurbScopeResolution:
+        """Resolve an explicit or current registered gig thread, otherwise general."""
+        if requested_gig is not None:
+            return await self._resolve_candidate_blurb_gig_thread(
+                interaction=interaction,
+                thread=requested_gig,
+                explicit=True,
+            )
+
+        if isinstance(source_channel, discord.Thread):
+            resolution = await self._resolve_candidate_blurb_gig_thread(
+                interaction=interaction,
+                thread=source_channel,
+                explicit=False,
+            )
+            if resolution.error_code == "implicit_thread_not_registered":
+                return CandidateBlurbScopeResolution(
+                    scope=self._general_candidate_blurb_scope()
+                )
+            if resolution.scope is not None or resolution.error_code is not None:
+                return resolution
+
+        return CandidateBlurbScopeResolution(
+            scope=self._general_candidate_blurb_scope()
+        )
+
+    async def _resolve_candidate_blurb_gig_thread(
+        self,
+        *,
+        interaction: discord.Interaction,
+        thread: discord.Thread,
+        explicit: bool,
+    ) -> CandidateBlurbScopeResolution:
+        """Validate one registered gig thread and materialize its dashboard engagement."""
+        guild = thread.guild
+        parent = thread.parent
+        if guild is None or not isinstance(parent, discord.ForumChannel):
+            if explicit:
+                return CandidateBlurbScopeResolution(
+                    scope=None,
+                    error_code="explicit_thread_not_registered",
+                    error_message="⚠️ The selected `gig` must be a registered gig forum thread.",
+                )
+            return CandidateBlurbScopeResolution(
+                scope=None,
+                error_code="implicit_thread_not_registered",
+            )
+        if interaction.guild is not None and guild.id != interaction.guild.id:
+            return CandidateBlurbScopeResolution(
+                scope=None,
+                error_code="gig_thread_wrong_guild",
+                error_message="⚠️ The selected gig thread is from a different server.",
+            )
+        if not await self._refresh_jobs_channel_cache_if_missing(guild.id):
+            return CandidateBlurbScopeResolution(
+                scope=None,
+                error_code="jobs_cache_unavailable",
+                error_message="❌ Could not load registered gig channels. Please try again.",
+            )
+        if not self._is_jobs_channel_registered(guild.id, parent.id):
+            if explicit:
+                return CandidateBlurbScopeResolution(
+                    scope=None,
+                    error_code="explicit_thread_not_registered",
+                    error_message="⚠️ The selected `gig` is not a registered gig thread.",
+                )
+            return CandidateBlurbScopeResolution(
+                scope=None,
+                error_code="implicit_thread_not_registered",
+            )
+
+        post = await self._read_thread_post(thread)
+        if post is None:
+            return CandidateBlurbScopeResolution(
+                scope=None,
+                error_code="starter_message_unavailable",
+                error_message="❌ Could not read the selected gig's opening post.",
+            )
+        try:
+            engagement_id = await self._upsert_thread_engagement(
+                thread,
+                post,
+                refresh_activity=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed resolving candidate blurb gig thread=%s: %s",
+                thread.id,
+                exc,
+            )
+            return CandidateBlurbScopeResolution(
+                scope=None,
+                error_code="engagement_upsert_failed",
+                error_message="❌ Could not prepare this gig for a candidate blurb. Please try again.",
+            )
+
+        thread_name = str(getattr(thread, "name", "") or "")
+        title = strip_status_from_title(thread_name) or thread_name or "Untitled gig"
+        return CandidateBlurbScopeResolution(
+            scope=CandidateBlurbScope(
+                engagement_id=engagement_id,
+                thread_id=str(thread.id),
+                gig_title=title,
+                resolution="explicit_thread" if explicit else "implicit_thread",
+            )
+        )
+
+    async def _show_blurb_save_confirmation(
+        self,
+        *,
+        interaction: discord.Interaction,
+        target: CandidateBlurbTarget,
+        text: str,
+        requested_gig: discord.Thread | None,
+        source_channel: object | None,
+        author_kind: str,
+        source: str,
+        provenance_label: str,
+        source_message_id: str | None = None,
+        source_message_url: str | None = None,
+        source_message_author_display_name: str | None = None,
+        generation_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Resolve destination and render a private, side-effect-free save confirmation."""
+        resolution = await self._resolve_candidate_blurb_scope(
+            interaction=interaction,
+            requested_gig=requested_gig,
+            source_channel=source_channel,
+        )
+        if resolution.scope is None:
+            self._audit_command_safe(
+                interaction=interaction,
+                action="candidate_blurb.save",
+                result="error",
+                metadata={
+                    "stage": resolution.error_code or "scope_resolution_failed",
+                    "candidate_discord_user_id": target.discord_user_id,
+                    "requested_gig_thread_id": (
+                        str(requested_gig.id) if requested_gig is not None else None
+                    ),
+                    "source": source,
+                },
+            )
+            await interaction.followup.send(
+                resolution.error_message
+                or "❌ Could not resolve where to save this blurb.",
+                allowed_mentions=NO_MENTIONS,
+                ephemeral=True,
+            )
+            return
+
+        metadata = dict(generation_metadata or {})
+        source_channel_id = getattr(source_channel, "id", None)
+        if source_channel_id is not None:
+            metadata["source_channel_id"] = str(source_channel_id)
+        if resolution.scope.thread_id is not None:
+            metadata["source_thread_id"] = resolution.scope.thread_id
+        if source_message_url:
+            metadata["source_message_url"] = source_message_url
+        if source_message_author_display_name:
+            metadata["source_author_display_name"] = source_message_author_display_name
+
+        intent = CandidateBlurbSaveIntent(
+            target=target,
+            scope=resolution.scope,
+            text=text,
+            author_kind=author_kind,
+            source=source,
+            submitted_by_discord_user_id=str(interaction.user.id),
+            source_message_id=source_message_id,
+            source_channel_id=(
+                str(source_channel_id) if source_channel_id is not None else None
+            ),
+            generation_metadata=metadata or None,
+        )
+        confirmation = CandidateBlurbSaveConfirmationView(
+            cog=self,
+            requester_id=str(interaction.user.id),
+            intent=intent,
+            provenance_label=provenance_label,
+        )
+        await interaction.followup.send(
+            confirmation.render(),
+            view=confirmation,
+            allowed_mentions=NO_MENTIONS,
+            ephemeral=True,
+        )
+
+    async def _persist_candidate_blurb(
+        self,
+        intent: CandidateBlurbSaveIntent,
+    ) -> dict[str, Any]:
+        """Call shared durable persistence with a typed Discord-origin save intent."""
+        from five08.candidate_blurbs import save_candidate_blurb
+
+        metadata = dict(intent.generation_metadata or {})
+        if intent.source_channel_id:
+            metadata.setdefault("source_channel_id", intent.source_channel_id)
+        if intent.scope.thread_id:
+            metadata.setdefault("source_thread_id", intent.scope.thread_id)
+        if intent.target.username:
+            metadata.setdefault("candidate_discord_username", intent.target.username)
+        metadata.setdefault(
+            "candidate_discord_display_name", intent.target.display_name
+        )
+        return await asyncio.to_thread(
+            save_candidate_blurb,
+            settings,
+            text=intent.text,
+            discord_user_id=intent.target.discord_user_id,
+            engagement_id=intent.scope.engagement_id,
+            application_id=None,
+            author_kind=intent.author_kind,
+            source=intent.source,
+            submitted_by_discord_user_id=intent.submitted_by_discord_user_id,
+            source_message_id=intent.source_message_id,
+            metadata=metadata or None,
+        )
+
+    @staticmethod
+    def _candidate_blurb_result_id(result: object) -> str | None:
+        """Extract a durable blurb id from the shared persistence response."""
+        if isinstance(result, dict):
+            value = result.get("id") or result.get("blurb_id")
+        else:
+            value = getattr(result, "id", None) or getattr(result, "blurb_id", None)
+        normalized = str(value or "").strip()
+        return normalized or None
+
+    @staticmethod
+    def _candidate_blurb_draft_parts(
+        result: object,
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Normalize the shared draft contract without coupling Discord UI to a model API."""
+        if isinstance(result, str):
+            return result, None
+        if isinstance(result, dict):
+            text = (
+                result.get("text") or result.get("blurb_text") or result.get("content")
+            )
+            metadata = result.get("generation_metadata") or result.get("metadata")
+        else:
+            text = (
+                getattr(result, "text", None)
+                or getattr(result, "blurb_text", None)
+                or getattr(result, "content", None)
+            )
+            metadata = getattr(result, "generation_metadata", None) or getattr(
+                result,
+                "metadata",
+                None,
+            )
+        normalized_text = str(text or "")
+        normalized_metadata = dict(metadata) if isinstance(metadata, dict) else None
+        return normalized_text, normalized_metadata
+
+    async def _generate_candidate_blurb_draft(
+        self,
+        *,
+        target: CandidateBlurbTarget,
+        scope: CandidateBlurbScope,
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Delegate deterministic context gathering and LLM generation to shared runtime code."""
+        from five08.candidate_blurbs import draft_candidate_blurb
+
+        result = await asyncio.to_thread(
+            draft_candidate_blurb,
+            settings,
+            discord_user_id=target.discord_user_id,
+            engagement_id=scope.engagement_id,
+            application_id=None,
+        )
+        text, metadata = self._candidate_blurb_draft_parts(result)
+        if not text.strip():
+            raise ValueError("candidate_blurb_draft_empty")
+        return text, metadata
 
     @staticmethod
     def _resolve_jobs_channel_target(
@@ -4311,6 +5199,276 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 f"`{normalized_posting_type.value}`. Backfill started.",
                 ephemeral=True,
             )
+
+    @app_commands.command(
+        name="save-blurb",
+        description="Privately save a candidate blurb for reuse or a selected gig.",
+    )
+    @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+    @app_commands.describe(
+        candidate="Candidate who supplied the blurb.",
+        gig="Optional registered gig thread; defaults to this registered gig thread.",
+    )
+    async def save_candidate_blurb(
+        self,
+        interaction: discord.Interaction,
+        candidate: discord.User,
+        gig: discord.Thread | None = None,
+    ) -> None:
+        """Open a private paste form for a reusable or gig-specific candidate blurb."""
+        if not await self._interaction_user_can_manage_blurbs(interaction):
+            self._audit_command_safe(
+                interaction=interaction,
+                action="candidate_blurb.save",
+                result="error",
+                metadata={"stage": "forbidden_command"},
+            )
+            await interaction.response.send_message(
+                "❌ Only Steering Committee members and above can manage candidate blurbs.",
+                allowed_mentions=NO_MENTIONS,
+                ephemeral=True,
+            )
+            return
+        if getattr(candidate, "bot", False):
+            self._audit_command_safe(
+                interaction=interaction,
+                action="candidate_blurb.save",
+                result="error",
+                metadata={"stage": "candidate_is_bot"},
+            )
+            await interaction.response.send_message(
+                "⚠️ Choose a human candidate, not a bot account.",
+                allowed_mentions=NO_MENTIONS,
+                ephemeral=True,
+            )
+            return
+        target = self._candidate_blurb_target(candidate)
+        if target is None:
+            self._audit_command_safe(
+                interaction=interaction,
+                action="candidate_blurb.save",
+                result="error",
+                metadata={"stage": "candidate_identity_unavailable"},
+            )
+            await interaction.response.send_message(
+                "❌ Could not resolve that candidate's Discord identity.",
+                allowed_mentions=NO_MENTIONS,
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_modal(
+            CandidateBlurbSaveModal(
+                cog=self,
+                requester_id=str(interaction.user.id),
+                target=target,
+                requested_gig=gig,
+                source_channel=interaction.channel,
+            )
+        )
+
+    @app_commands.command(
+        name="draft-blurb",
+        description="Draft a private candidate blurb for reuse or a selected gig.",
+    )
+    @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+    @app_commands.describe(
+        candidate="Candidate to write about.",
+        gig="Optional registered gig thread; defaults to this registered gig thread.",
+    )
+    async def draft_candidate_blurb(
+        self,
+        interaction: discord.Interaction,
+        candidate: discord.User,
+        gig: discord.Thread | None = None,
+    ) -> None:
+        """Generate a private, explicitly saveable candidate blurb draft."""
+        if not await self._interaction_user_can_manage_blurbs(interaction):
+            self._audit_command_safe(
+                interaction=interaction,
+                action="candidate_blurb.draft",
+                result="error",
+                metadata={"stage": "forbidden_command"},
+            )
+            await interaction.response.send_message(
+                "❌ Only Steering Committee members and above can manage candidate blurbs.",
+                allowed_mentions=NO_MENTIONS,
+                ephemeral=True,
+            )
+            return
+        if getattr(candidate, "bot", False):
+            self._audit_command_safe(
+                interaction=interaction,
+                action="candidate_blurb.draft",
+                result="error",
+                metadata={"stage": "candidate_is_bot"},
+            )
+            await interaction.response.send_message(
+                "⚠️ Choose a human candidate, not a bot account.",
+                allowed_mentions=NO_MENTIONS,
+                ephemeral=True,
+            )
+            return
+        target = self._candidate_blurb_target(candidate)
+        if target is None:
+            self._audit_command_safe(
+                interaction=interaction,
+                action="candidate_blurb.draft",
+                result="error",
+                metadata={"stage": "candidate_identity_unavailable"},
+            )
+            await interaction.response.send_message(
+                "❌ Could not resolve that candidate's Discord identity.",
+                allowed_mentions=NO_MENTIONS,
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        resolution = await self._resolve_candidate_blurb_scope(
+            interaction=interaction,
+            requested_gig=gig,
+            source_channel=interaction.channel,
+        )
+        if resolution.scope is None:
+            self._audit_command_safe(
+                interaction=interaction,
+                action="candidate_blurb.draft",
+                result="error",
+                metadata={
+                    "stage": resolution.error_code or "scope_resolution_failed",
+                    "candidate_discord_user_id": target.discord_user_id,
+                    "requested_gig_thread_id": str(gig.id) if gig is not None else None,
+                },
+            )
+            await interaction.followup.send(
+                resolution.error_message
+                or "❌ Could not resolve where to draft this blurb.",
+                allowed_mentions=NO_MENTIONS,
+                ephemeral=True,
+            )
+            return
+
+        try:
+            text, generation_metadata = await self._generate_candidate_blurb_draft(
+                target=target,
+                scope=resolution.scope,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed generating candidate blurb candidate=%s engagement=%s: %s",
+                target.discord_user_id,
+                resolution.scope.engagement_id,
+                exc,
+            )
+            self._audit_command_safe(
+                interaction=interaction,
+                action="candidate_blurb.draft",
+                result="error",
+                metadata={
+                    "stage": "generation",
+                    "error_type": type(exc).__name__,
+                    "candidate_discord_user_id": target.discord_user_id,
+                    "engagement_id": resolution.scope.engagement_id,
+                },
+            )
+            await interaction.followup.send(
+                "❌ Could not draft a blurb right now. Please try again.",
+                allowed_mentions=NO_MENTIONS,
+                ephemeral=True,
+            )
+            return
+
+        metadata = dict(generation_metadata or {})
+        metadata.setdefault("skill_id", "candidate_blurb_draft")
+        metadata.setdefault("runtime_owner", "shared_candidate_blurbs")
+        self._audit_command_safe(
+            interaction=interaction,
+            action="candidate_blurb.draft",
+            result="success",
+            metadata={
+                "candidate_discord_user_id": target.discord_user_id,
+                "engagement_id": resolution.scope.engagement_id,
+                "thread_id": resolution.scope.thread_id,
+                "text_length": len(text),
+            },
+        )
+        view = CandidateBlurbDraftView(
+            cog=self,
+            requester_id=str(interaction.user.id),
+            target=target,
+            scope=resolution.scope,
+            text=text,
+            generation_metadata=metadata,
+        )
+        await interaction.followup.send(
+            view.render(),
+            view=view,
+            allowed_mentions=NO_MENTIONS,
+            ephemeral=True,
+        )
+
+    async def save_blurb_from_message(
+        self,
+        interaction: discord.Interaction,
+        message: discord.Message,
+    ) -> None:
+        """Save the exact text of a candidate Discord message as a private blurb."""
+        if not await self._interaction_user_can_manage_blurbs(interaction):
+            self._audit_command_safe(
+                interaction=interaction,
+                action="candidate_blurb.save",
+                result="error",
+                metadata={"stage": "forbidden_context_menu"},
+            )
+            await interaction.response.send_message(
+                "❌ Only Steering Committee members and above can save candidate blurbs.",
+                allowed_mentions=NO_MENTIONS,
+                ephemeral=True,
+            )
+            return
+
+        author = message.author
+        if getattr(author, "bot", False):
+            await interaction.response.send_message(
+                "⚠️ Choose a message written by a human candidate.",
+                allowed_mentions=NO_MENTIONS,
+                ephemeral=True,
+            )
+            return
+        text = str(message.content or "")
+        if not text.strip():
+            await interaction.response.send_message(
+                "⚠️ This message has no text to save as a blurb.",
+                allowed_mentions=NO_MENTIONS,
+                ephemeral=True,
+            )
+            return
+        target = self._candidate_blurb_target(author)
+        if target is None:
+            await interaction.response.send_message(
+                "❌ Could not resolve this message author's Discord identity.",
+                allowed_mentions=NO_MENTIONS,
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        await self._show_blurb_save_confirmation(
+            interaction=interaction,
+            target=target,
+            text=text,
+            requested_gig=None,
+            source_channel=message.channel,
+            author_kind="candidate",
+            source="discord_message",
+            provenance_label="Candidate-authored · saved from a Discord message",
+            source_message_id=str(message.id),
+            source_message_url=getattr(message, "jump_url", None),
+            source_message_author_display_name=(
+                getattr(author, "display_name", None) or getattr(author, "name", None)
+            ),
+        )
 
     @app_commands.command(
         name="update-gig-status",

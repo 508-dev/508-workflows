@@ -126,10 +126,14 @@ from five08.backend.schemas import (
     AgentConfirmationRequest,
     DashboardAssignOnboarderRequest,
     DashboardBulkProjectUpdateRequest,
+    DashboardCandidateBlurbDraftRequest,
+    DashboardCandidateBlurbSaveRequest,
     DashboardConfigurationUpdateRequest,
     DashboardEngineerSetupRequest,
     DashboardGigApplicationCreateRequest,
     DashboardGigApplicationStatusRequest,
+    DashboardGigCandidateBlurbDraftRequest,
+    DashboardGigCandidateBlurbSaveRequest,
     DashboardGigStatusRequest,
     DashboardJobChannelUpdateRequest,
     DashboardJobLeadPostRequest,
@@ -156,6 +160,15 @@ from five08.backend.dashboard import (
     discord_link_unavailable_html,
     login_required_html,
     oidc_not_configured_html,
+)
+from five08.candidate_blurbs import (
+    CandidateBlurbConflictError,
+    CandidateBlurbNotFoundError,
+    CandidateBlurbValidationError,
+    draft_candidate_blurb,
+    list_candidate_blurbs,
+    resolve_candidate_blurb_target,
+    save_candidate_blurb,
 )
 from five08.engagements import (
     EngagementApplicationStatus,
@@ -985,7 +998,7 @@ def _http_client_from_app(app: FastAPI) -> httpx.AsyncClient:
     raise RuntimeError("HTTP client not configured")
 
 
-def _valid_uuid_or_none(value: str) -> str | None:
+def _valid_uuid_or_none(value: str | None) -> str | None:
     try:
         return str(UUID(str(value)))
     except (TypeError, ValueError, AttributeError):
@@ -4140,7 +4153,585 @@ async def dashboard_gig_detail_handler(
     )
     if not gigs:
         return JSONResponse({"error": "gig_not_found"}, status_code=404)
-    return JSONResponse(gigs[0])
+    gig = gigs[0]
+    if not _session_has_steering_access(session):
+        return JSONResponse(jsonable_encoder(gig))
+    return JSONResponse(
+        jsonable_encoder(await _dashboard_enrich_gig_candidate_blurbs(gig))
+    )
+
+
+def _candidate_blurb_target_identity(
+    target: Any,
+) -> dict[str, str | None]:
+    """Return the persisted candidate identity fields accepted by blurb services."""
+    if isinstance(target, Mapping):
+        person_id = target.get("person_id")
+        crm_contact_id = target.get("crm_contact_id")
+        discord_user_id = target.get("discord_user_id")
+    else:
+        person_id = getattr(target, "person_id", None)
+        crm_contact_id = getattr(target, "crm_contact_id", None)
+        discord_user_id = getattr(target, "discord_user_id", None)
+    return {
+        "person_id": _text_or_none(person_id),
+        "crm_contact_id": _text_or_none(crm_contact_id),
+        "discord_user_id": _text_or_none(discord_user_id),
+    }
+
+
+def _candidate_blurb_generation_metadata_or_none(
+    metadata: Any,
+) -> dict[str, Any] | None:
+    """Keep dashboard generation provenance small and JSON-safe."""
+    if metadata is None:
+        return None
+    if not isinstance(metadata, dict):
+        raise ValueError("invalid_generation_metadata")
+    try:
+        serialized = json.dumps(metadata, separators=(",", ":"), ensure_ascii=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid_generation_metadata") from exc
+    if len(serialized.encode("utf-8")) > 4_000:
+        raise ValueError("generation_metadata_too_large")
+    return metadata
+
+
+def _candidate_blurb_draft_runtime_error_response(exc: RuntimeError) -> JSONResponse:
+    """Map safe-to-retry draft failures separately from insufficient context."""
+    message = str(exc)
+    if message.startswith("Not enough candidate profile"):
+        return JSONResponse(
+            {"error": "insufficient_candidate_context"}, status_code=422
+        )
+    logger.warning("Candidate blurb draft unavailable: %s", exc)
+    return JSONResponse({"error": "blurb_draft_unavailable"}, status_code=503)
+
+
+async def _dashboard_enrich_gig_candidate_blurbs(
+    gig: dict[str, Any],
+) -> dict[str, Any]:
+    """Attach candidate blurb histories to one gig detail response.
+
+    General samples are returned with their matching application, while a
+    gig-scoped sample that has no application stays visible at gig level. This
+    deliberately does not create or mutate an application for a Discord-captured
+    blurb.
+    """
+    shaped = dict(gig)
+    engagement_id = _valid_uuid_or_none(str(shaped.get("id") or ""))
+    raw_applications = shaped.get("applications")
+    applications = (
+        [
+            dict(application)
+            for application in raw_applications
+            if isinstance(application, dict)
+        ]
+        if isinstance(raw_applications, list)
+        else []
+    )
+    shaped["applications"] = applications
+    if engagement_id is None:
+        shaped["candidate_blurbs"] = []
+        for application in applications:
+            application["blurbs"] = []
+        return shaped
+
+    engagement_blurbs = await asyncio.to_thread(
+        list_candidate_blurbs,
+        settings,
+        engagement_id=engagement_id,
+        current_only=False,
+        include_general=False,
+    )
+    matched_blurb_ids: set[str] = set()
+    applications_by_id = {
+        str(application.get("id") or ""): application
+        for application in applications
+        if str(application.get("id") or "")
+    }
+    applications_by_crm_contact = {
+        str(application.get("crm_contact_id") or ""): application
+        for application in applications
+        if str(application.get("crm_contact_id") or "")
+    }
+    applications_by_discord_user = {
+        str(application.get("discord_user_id") or ""): application
+        for application in applications
+        if str(application.get("discord_user_id") or "")
+    }
+
+    for application in applications:
+        application_id = _valid_uuid_or_none(str(application.get("id") or ""))
+        if application_id is None:
+            application["blurbs"] = []
+            continue
+        application_blurbs = await asyncio.to_thread(
+            list_candidate_blurbs,
+            settings,
+            application_id=application_id,
+            engagement_id=engagement_id,
+            current_only=False,
+            include_general=True,
+        )
+        application["blurbs"] = application_blurbs
+        matched_blurb_ids.update(
+            str(blurb.get("id") or "")
+            for blurb in application_blurbs
+            if isinstance(blurb, dict)
+        )
+
+    unmatched_blurbs: list[dict[str, Any]] = []
+    for blurb in engagement_blurbs:
+        if not isinstance(blurb, dict):
+            continue
+        blurb_id = str(blurb.get("id") or "")
+        application = applications_by_id.get(str(blurb.get("application_id") or ""))
+        if application is None:
+            application = applications_by_crm_contact.get(
+                str(blurb.get("crm_contact_id") or "")
+            )
+        if application is None:
+            application = applications_by_discord_user.get(
+                str(blurb.get("discord_user_id") or "")
+            )
+        if application is None:
+            unmatched_blurbs.append(blurb)
+            continue
+        existing = application.get("blurbs")
+        if not isinstance(existing, list):
+            existing = []
+            application["blurbs"] = existing
+        if blurb_id not in matched_blurb_ids:
+            existing.append(blurb)
+            matched_blurb_ids.add(blurb_id)
+    shaped["candidate_blurbs"] = unmatched_blurbs
+    return shaped
+
+
+async def dashboard_candidate_blurbs_handler(
+    request: Request,
+    crm_contact_id: str | None = None,
+    engagement_id: str | None = None,
+    application_id: str | None = None,
+) -> JSONResponse:
+    """List or save Steering-controlled candidate blurbs from the dashboard."""
+    is_write = request.method.upper() == "POST"
+    required_permission = (
+        DASHBOARD_PERMISSION_GIGS_WRITE if is_write else DASHBOARD_PERMISSION_GIGS_READ
+    )
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=required_permission,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+    steering_error = _dashboard_steering_or_error(session)
+    if steering_error is not None:
+        return steering_error
+
+    if is_write:
+        csrf_error = _dashboard_same_origin_post_or_error(request)
+        if csrf_error is not None:
+            return csrf_error
+
+    normalized_contact_id = _text_or_none(crm_contact_id)
+    normalized_engagement_id = _valid_uuid_or_none(engagement_id)
+    normalized_application_id = _valid_uuid_or_none(application_id)
+    is_person_route = normalized_contact_id is not None
+    is_application_route = engagement_id is not None or application_id is not None
+    if is_person_route == is_application_route:
+        return JSONResponse({"error": "invalid_blurb_target"}, status_code=400)
+    if normalized_contact_id is not None and len(normalized_contact_id) > 255:
+        return JSONResponse({"error": "invalid_crm_contact_id"}, status_code=400)
+    if is_application_route and (
+        normalized_engagement_id is None or normalized_application_id is None
+    ):
+        return JSONResponse({"error": "invalid_blurb_target"}, status_code=400)
+
+    target: Any | None = None
+    if is_application_route:
+        try:
+            target = await asyncio.to_thread(
+                resolve_candidate_blurb_target,
+                settings,
+                engagement_id=normalized_engagement_id,
+                application_id=normalized_application_id,
+            )
+        except CandidateBlurbNotFoundError:
+            return JSONResponse({"error": "application_not_found"}, status_code=404)
+        except CandidateBlurbValidationError:
+            return JSONResponse({"error": "invalid_blurb_target"}, status_code=400)
+
+    if not is_write:
+        blurbs = await asyncio.to_thread(
+            list_candidate_blurbs,
+            settings,
+            crm_contact_id=normalized_contact_id,
+            engagement_id=normalized_engagement_id,
+            application_id=normalized_application_id,
+            current_only=False,
+            include_general=True,
+        )
+        return JSONResponse(jsonable_encoder(blurbs))
+
+    try:
+        body = await request.json()
+        payload = DashboardCandidateBlurbSaveRequest.model_validate(body)
+    except Exception:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+    if payload.source != "dashboard":
+        return JSONResponse({"error": "invalid_blurb_source"}, status_code=400)
+    if is_person_route and payload.scope != "general":
+        return JSONResponse({"error": "invalid_blurb_scope"}, status_code=400)
+    try:
+        generation_metadata = _candidate_blurb_generation_metadata_or_none(
+            payload.generation_metadata
+        )
+    except ValueError:
+        return JSONResponse({"error": "invalid_generation_metadata"}, status_code=400)
+
+    save_target: dict[str, str | None]
+    if payload.scope == "general" and target is not None:
+        save_target = _candidate_blurb_target_identity(target)
+    elif is_person_route:
+        save_target = {"crm_contact_id": normalized_contact_id}
+    else:
+        save_target = {
+            "engagement_id": normalized_engagement_id,
+            "application_id": normalized_application_id,
+        }
+    try:
+        result = await asyncio.to_thread(
+            save_candidate_blurb,
+            settings,
+            text=payload.text,
+            author_kind=payload.author_kind,
+            source=payload.source,
+            status=payload.status,
+            metadata=generation_metadata,
+            replaces_blurb_id=payload.replaces_blurb_id,
+            submitted_by_discord_user_id=_session_discord_actor_id(session),
+            **save_target,
+        )
+    except CandidateBlurbConflictError:
+        return JSONResponse({"error": "blurb_conflict"}, status_code=409)
+    except CandidateBlurbNotFoundError:
+        return JSONResponse({"error": "candidate_not_found"}, status_code=404)
+    except CandidateBlurbValidationError:
+        return JSONResponse({"error": "invalid_blurb"}, status_code=400)
+    actor_provider, actor_subject = _session_audit_actor(session)
+    await _write_auth_audit_event(
+        action="candidate_blurbs.save",
+        result=AuditResult.SUCCESS,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="candidate_blurb",
+        resource_id=str(result.get("id") or ""),
+        metadata={
+            "scope": payload.scope,
+            "author_kind": payload.author_kind,
+            "source": payload.source,
+            "engagement_id": normalized_engagement_id,
+            "application_id": normalized_application_id,
+            "crm_contact_id": normalized_contact_id,
+            "generation_metadata": generation_metadata is not None,
+            "replaces_blurb": payload.replaces_blurb_id is not None,
+        },
+    )
+    return JSONResponse(jsonable_encoder(result), status_code=201)
+
+
+async def dashboard_candidate_blurb_draft_handler(
+    request: Request,
+    crm_contact_id: str | None = None,
+    engagement_id: str | None = None,
+    application_id: str | None = None,
+) -> JSONResponse:
+    """Return a reviewable candidate blurb draft without saving it."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_GIGS_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+    steering_error = _dashboard_steering_or_error(session)
+    if steering_error is not None:
+        return steering_error
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    try:
+        body = await request.json()
+        payload = DashboardCandidateBlurbDraftRequest.model_validate(body)
+    except Exception:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    normalized_contact_id = _text_or_none(crm_contact_id)
+    normalized_engagement_id = _valid_uuid_or_none(engagement_id)
+    normalized_application_id = _valid_uuid_or_none(application_id)
+    is_person_route = normalized_contact_id is not None
+    is_application_route = engagement_id is not None or application_id is not None
+    if is_person_route == is_application_route:
+        return JSONResponse({"error": "invalid_blurb_target"}, status_code=400)
+    if normalized_contact_id is not None and (
+        len(normalized_contact_id) > 255 or payload.scope != "general"
+    ):
+        return JSONResponse({"error": "invalid_blurb_scope"}, status_code=400)
+    if is_application_route and (
+        normalized_engagement_id is None or normalized_application_id is None
+    ):
+        return JSONResponse({"error": "invalid_blurb_target"}, status_code=400)
+
+    draft_target: dict[str, str | None]
+    if is_person_route:
+        draft_target = {"crm_contact_id": normalized_contact_id}
+    elif payload.scope == "general":
+        try:
+            target = await asyncio.to_thread(
+                resolve_candidate_blurb_target,
+                settings,
+                engagement_id=normalized_engagement_id,
+                application_id=normalized_application_id,
+            )
+        except CandidateBlurbNotFoundError:
+            return JSONResponse({"error": "application_not_found"}, status_code=404)
+        except CandidateBlurbValidationError:
+            return JSONResponse({"error": "invalid_blurb_target"}, status_code=400)
+        draft_target = _candidate_blurb_target_identity(target)
+    else:
+        draft_target = {
+            "engagement_id": normalized_engagement_id,
+            "application_id": normalized_application_id,
+        }
+
+    try:
+        result = await asyncio.to_thread(
+            draft_candidate_blurb,
+            settings,
+            **draft_target,
+        )
+    except CandidateBlurbConflictError:
+        return JSONResponse({"error": "blurb_conflict"}, status_code=409)
+    except CandidateBlurbNotFoundError:
+        return JSONResponse({"error": "candidate_not_found"}, status_code=404)
+    except CandidateBlurbValidationError:
+        return JSONResponse({"error": "invalid_blurb"}, status_code=400)
+    except RuntimeError as exc:
+        return _candidate_blurb_draft_runtime_error_response(exc)
+    actor_provider, actor_subject = _session_audit_actor(session)
+    await _write_auth_audit_event(
+        action="candidate_blurbs.draft",
+        result=AuditResult.SUCCESS,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="candidate_blurb_draft",
+        resource_id=normalized_application_id or normalized_contact_id,
+        metadata={
+            "scope": payload.scope,
+            "engagement_id": normalized_engagement_id,
+            "application_id": normalized_application_id,
+            "crm_contact_id": normalized_contact_id,
+        },
+    )
+    return JSONResponse(jsonable_encoder(result))
+
+
+def _dashboard_gig_blurb_identity(payload: Any) -> dict[str, str | None]:
+    """Normalize the supplied identity for an unattached gig blurb."""
+    return {
+        "person_id": _text_or_none(getattr(payload, "person_id", None)),
+        "crm_contact_id": _text_or_none(getattr(payload, "crm_contact_id", None)),
+        "discord_user_id": _text_or_none(getattr(payload, "discord_user_id", None)),
+    }
+
+
+async def dashboard_gig_candidate_blurbs_handler(
+    request: Request,
+    engagement_id: str,
+) -> JSONResponse:
+    """Save a gig blurb without creating or changing an application."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_GIGS_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+    steering_error = _dashboard_steering_or_error(session)
+    if steering_error is not None:
+        return steering_error
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    normalized_engagement_id = _valid_uuid_or_none(engagement_id)
+    if normalized_engagement_id is None:
+        return JSONResponse({"error": "invalid_engagement_id"}, status_code=400)
+    can_update = await asyncio.to_thread(
+        viewer_can_update_engagement,
+        settings,
+        engagement_id=normalized_engagement_id,
+        viewer_discord_user_id=session.subject,
+        include_all=_session_has_steering_access(session),
+    )
+    if not can_update:
+        return JSONResponse({"error": "gig_not_found"}, status_code=404)
+    try:
+        body = await request.json()
+        payload = DashboardGigCandidateBlurbSaveRequest.model_validate(body)
+    except Exception:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+    if payload.scope != "gig":
+        return JSONResponse({"error": "invalid_blurb_scope"}, status_code=400)
+    if payload.source != "dashboard":
+        return JSONResponse({"error": "invalid_blurb_source"}, status_code=400)
+    try:
+        generation_metadata = _candidate_blurb_generation_metadata_or_none(
+            payload.generation_metadata
+        )
+    except ValueError:
+        return JSONResponse({"error": "invalid_generation_metadata"}, status_code=400)
+    requested_identity = _dashboard_gig_blurb_identity(payload)
+    if not any(requested_identity.values()):
+        return JSONResponse({"error": "candidate_required"}, status_code=400)
+
+    try:
+        target = await asyncio.to_thread(
+            resolve_candidate_blurb_target,
+            settings,
+            engagement_id=normalized_engagement_id,
+            **requested_identity,
+        )
+        result = await asyncio.to_thread(
+            save_candidate_blurb,
+            settings,
+            text=payload.text,
+            engagement_id=normalized_engagement_id,
+            author_kind=payload.author_kind,
+            source=payload.source,
+            status=payload.status,
+            metadata=generation_metadata,
+            replaces_blurb_id=payload.replaces_blurb_id,
+            submitted_by_discord_user_id=_session_discord_actor_id(session),
+            **_candidate_blurb_target_identity(target),
+        )
+    except CandidateBlurbConflictError:
+        return JSONResponse({"error": "blurb_conflict"}, status_code=409)
+    except CandidateBlurbNotFoundError:
+        return JSONResponse({"error": "candidate_not_found"}, status_code=404)
+    except CandidateBlurbValidationError:
+        return JSONResponse({"error": "invalid_blurb"}, status_code=400)
+
+    actor_provider, actor_subject = _session_audit_actor(session)
+    await _write_auth_audit_event(
+        action="candidate_blurbs.save",
+        result=AuditResult.SUCCESS,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="candidate_blurb",
+        resource_id=str(result.get("id") or ""),
+        metadata={
+            "scope": "gig",
+            "author_kind": payload.author_kind,
+            "source": payload.source,
+            "engagement_id": normalized_engagement_id,
+            "application_id": None,
+            "unattached_application": True,
+            "generation_metadata": generation_metadata is not None,
+            "replaces_blurb": payload.replaces_blurb_id is not None,
+        },
+    )
+    return JSONResponse(jsonable_encoder(result), status_code=201)
+
+
+async def dashboard_gig_candidate_blurb_draft_handler(
+    request: Request,
+    engagement_id: str,
+) -> JSONResponse:
+    """Draft an unattached gig blurb without persisting it."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_GIGS_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+    steering_error = _dashboard_steering_or_error(session)
+    if steering_error is not None:
+        return steering_error
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    normalized_engagement_id = _valid_uuid_or_none(engagement_id)
+    if normalized_engagement_id is None:
+        return JSONResponse({"error": "invalid_engagement_id"}, status_code=400)
+    can_update = await asyncio.to_thread(
+        viewer_can_update_engagement,
+        settings,
+        engagement_id=normalized_engagement_id,
+        viewer_discord_user_id=session.subject,
+        include_all=_session_has_steering_access(session),
+    )
+    if not can_update:
+        return JSONResponse({"error": "gig_not_found"}, status_code=404)
+    try:
+        body = await request.json()
+        payload = DashboardGigCandidateBlurbDraftRequest.model_validate(body)
+    except Exception:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+    if payload.scope != "gig":
+        return JSONResponse({"error": "invalid_blurb_scope"}, status_code=400)
+    requested_identity = _dashboard_gig_blurb_identity(payload)
+    if not any(requested_identity.values()):
+        return JSONResponse({"error": "candidate_required"}, status_code=400)
+
+    try:
+        target = await asyncio.to_thread(
+            resolve_candidate_blurb_target,
+            settings,
+            engagement_id=normalized_engagement_id,
+            **requested_identity,
+        )
+        result = await asyncio.to_thread(
+            draft_candidate_blurb,
+            settings,
+            engagement_id=normalized_engagement_id,
+            **_candidate_blurb_target_identity(target),
+        )
+    except CandidateBlurbConflictError:
+        return JSONResponse({"error": "blurb_conflict"}, status_code=409)
+    except CandidateBlurbNotFoundError:
+        return JSONResponse({"error": "candidate_not_found"}, status_code=404)
+    except CandidateBlurbValidationError:
+        return JSONResponse({"error": "invalid_blurb"}, status_code=400)
+    except RuntimeError as exc:
+        return _candidate_blurb_draft_runtime_error_response(exc)
+
+    actor_provider, actor_subject = _session_audit_actor(session)
+    await _write_auth_audit_event(
+        action="candidate_blurbs.draft",
+        result=AuditResult.SUCCESS,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="candidate_blurb_draft",
+        resource_id=normalized_engagement_id,
+        metadata={
+            "scope": "gig",
+            "engagement_id": normalized_engagement_id,
+            "application_id": None,
+            "unattached_application": True,
+        },
+    )
+    return JSONResponse(jsonable_encoder(result))
 
 
 async def dashboard_job_channels_handler(request: Request) -> JSONResponse:

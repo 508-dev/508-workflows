@@ -88,6 +88,40 @@ dashboard.
 Direct-interest detection is intentionally conservative and includes negation
 guards for phrases such as "not available" or "not interested".
 
+## Candidate Blurbs
+
+Candidate blurbs are a versioned library of reusable, candidate-owned
+introductions. They are deliberately separate from the CRM profile description:
+the general CRM/profile summary remains factual, while a blurb preserves the
+candidate's preferred voice and the circumstances in which it was supplied.
+
+A blurb is either:
+
+- **General** — reusable across gigs.
+- **Gig-specific** — linked to one gig without implying that the candidate is
+  interested in, or has applied to, that gig.
+
+Each saved entry records its text, author/provenance (`candidate`,
+`candidate_attributed`, `team`, or `ai`), source, status, immutable version
+history, and any Discord source-message metadata. Saving a new sample does not
+overwrite a previous sample or the CRM description.
+
+Steering Committee members and above can use:
+
+- `/save-blurb candidate:@member [gig:#gig-thread]` to paste a blurb privately.
+  An explicit `gig` must be a registered gig forum thread. Without one, the bot
+  uses the current registered gig thread or saves a general sample.
+- **Apps → Save blurb** on a candidate's Discord message to retain the exact
+  message text and its candidate-authored provenance.
+- `/draft-blurb candidate:@member [gig:#gig-thread]` to generate a private,
+  editable preview. Drafting never saves, posts, sends, or changes CRM data;
+  the steward must explicitly save the reviewed text.
+
+The dashboard exposes the same library on CRM candidate rows and gig candidate
+cards, including provenance and prior versions. It also surfaces gig-scoped
+Discord captures that are not attached to an application, so saving a blurb
+never creates a false application record.
+
 ## Gig Status Reminders
 
 `GIG_RECRUITING_STALE_DAYS` controls when a recruiting gig is considered stale.
