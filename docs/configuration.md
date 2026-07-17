@@ -77,6 +77,111 @@ dashboard field.
   `clamdscan --stream --no-summary --config-file=/etc/clamav/clamdscan.conf {path}`.
 - `INTAKE_RESUME_VIRUS_SCAN_TIMEOUT_SECONDS`: scan command timeout.
 
+## ERPNext Project Payments
+
+The payment automation consumes ERPNext as the accounting source of truth. It
+does not use direct Plaid credentials.
+
+- `ERPNEXT_BANK_TRANSACTION_WEBHOOK_SIGNING_SECRET`: dedicated Frappe Webhook
+  Secret for `POST /webhooks/erpnext/bank-transaction`. The endpoint accepts
+  only `X-Frappe-Webhook-Signature`, a base64 HMAC-SHA256 of the raw body; it
+  intentionally does not fall back to `WEBHOOK_SHARED_SECRET` or
+  `API_SHARED_SECRET`.
+- `PROJECT_PAYMENT_AUTOMATION_ENABLED`: defaults to `false`. When enabled, a
+  matched `automatic` payment-routing rule can create a confirmed local project
+  allocation and notification outbox rows. Rules remain typed and limited to
+  registered payment facts/action types; they cannot run arbitrary code.
+- `PROJECT_PAYMENT_NOTIFICATIONS_ENABLED`: defaults to `false`. When enabled,
+  the worker asks the Discord bot to deliver pending payment notifications. The
+  worker re-reads the canonical ERP project and Bank Transaction, requiring the
+  allocation's captured transaction revision immediately before asking the bot
+  to post. The bot
+  then rechecks the private-channel mapping, channel privacy, and its
+  view/send/read-history permissions immediately before posting.
+- `PROJECT_PAYMENT_RECOVERY_INTERVAL_SECONDS`: defaults to `300` (minimum
+  `60`). While payment automation is enabled, the API schedules this durable
+  sweep to reclaim stale worker/bot leases, retry idempotent learned-suggestion
+  derivation from approved feedback, and process actions or notifications
+  created while a feature flag was off. Restart the API after changing either
+  `PROJECT_PAYMENT_AUTOMATION_ENABLED` or the interval; notification delivery
+  itself can be toggled without a scheduler restart.
+
+These three non-secret settings are intentionally omitted from `.env.example`:
+when unset, an authorized operator may set them through runtime configuration.
+Set one in deployment environment only when it should be locked outside the
+dashboard.
+
+Configure a signed Frappe Webhook on **Bank Transaction** for **on_submit**,
+with JSON body:
+
+```json
+{
+  "doctype": "Bank Transaction",
+  "event_type": "bank_transaction.posted.v1",
+  "name": "{{ doc.name }}",
+  "modified": "{{ doc.modified }}",
+  "docstatus": {{ doc.docstatus }}
+}
+```
+
+To observe corrections proactively, configure a second otherwise-identical
+webhook for **on_update_after_submit**. Both webhooks use the same event type
+and endpoint; the canonical `modified` revision deduplicates replayed hints and
+causes a newer submitted revision to be evaluated afresh. This is in addition
+to, not a replacement for, the action-time and notification-time canonical
+rechecks.
+
+The webhook is an identity hint only: the worker fetches the canonical Bank
+Transaction over the ERPNext API before persisting or categorizing it. Register
+a target with `/register-project-channel` from a private text channel; the
+command requires Steering Committee-or-higher access and validates that the bot
+can view, post, and read message history there. Use
+`/unregister-project-channel` to disable delivery without deleting history.
+Before every payment allocation (automatic or human-approved), the worker also
+refreshes that project's ERPNext record and writes it to the local cache; a
+closed or unavailable ERP project cannot be routed from stale cache state.
+
+Use the dashboard's **Payments** view to inspect suggestions and create or
+disable routing rules. The same protected API remains available to integrations
+(requires `configuration:write`): `POST /dashboard/api/project-payment-rules`,
+then use the same resource with `PUT` (supplying `expected_version`) or
+`DELETE` (soft disable, also supplying `expected_version`). `GET` lists current
+rules. The v1 surface permits one `project_payment.route` action per rule and
+only the published Bank Transaction fact paths. Its `project_id` and action
+payload `project_id` must match an open local ERP project.
+
+Automatic rules are rejected unless they are project-scoped and combine a
+nonblank identity match (`counterparty`, `description`, or `reference_number`),
+an exact positive amount, and an exact currency. Amount-only, range, and
+reconciliation-only rules are suggestions, never automatic allocations. Closed
+projects are intentionally blocked from new automatic allocations or alerts;
+review late payments manually.
+
+Each suggestion approval or rejection stores a typed decision, reviewer, and
+timestamp alongside immutable event/rule evidence. When an approval has an
+inbound direction, a three-letter currency, and a meaningful counterparty,
+reference, or description for an open local ERP project, it also creates (or
+reuses) one low-priority
+**learned** rule. Learned rules are deterministic, carry an opaque provenance
+fingerprint, and can only create future `suggest` actions; they cannot be
+edited into or used as automatic payment routing. They remain visible in the
+Payments view and can be disabled there. Rejections remain durable labeled
+feedback but do not silently mutate an existing rule.
+
+Discord delivery is at-least-once with a durable bot-side receipt/lease and a
+hidden marker recovery check. The bot additionally requires the worker's active
+outbox lease with each request, so a notification ID alone cannot bypass its
+lifecycle. It avoids normal retry duplicates but cannot make Discord's external
+send and the database write one atomic transaction. A delayed notification for
+a canceled or revised Bank Transaction is blocked before delivery. When a newer
+canonical revision is observed, a prior automatic configured-rule allocation is
+marked superseded (with an audit reason) and its pending outbox delivery becomes
+ineligible; a fresh event may be evaluated against the new revision. Human-
+reviewed, manual, and ERP-reconciled allocations are never superseded by this
+automation. This v1 cannot retract a Discord message already accepted, and
+cancellations or post-delivery corrections still require accounting
+reconciliation.
+
 ## Queue And Jobs
 
 - `REDIS_URL`

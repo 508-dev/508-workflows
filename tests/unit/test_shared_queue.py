@@ -1,8 +1,8 @@
 """Unit tests for shared queue helpers."""
 
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
-from five08.queue import JobStatus, _parse_status, enqueue_job
+from five08.queue import JobStatus, _parse_status, enqueue_job, revive_dead_job
 from five08.settings import SharedSettings
 
 
@@ -31,4 +31,32 @@ def test_parse_status_handles_unknown_values() -> None:
     assert result == JobStatus.FAILED
     mock_warning.assert_called_once_with(
         "Unknown job status from DB: %s", "unexpected-status"
+    )
+
+
+def test_revive_dead_job_requires_matching_dead_row() -> None:
+    """Only a matching dead job can be atomically reset for redelivery."""
+    cursor = Mock()
+    cursor.fetchone.return_value = {"id": "job-1"}
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.cursor.return_value.__enter__.return_value = cursor
+
+    with patch("five08.queue.get_postgres_connection", return_value=connection):
+        revived = revive_dead_job(
+            SharedSettings(),
+            "job-1",
+            expected_job_type="ingest_erpnext_bank_transaction_job",
+        )
+
+    assert revived is True
+    query, params = cursor.execute.call_args.args
+    assert "status = %s" in query
+    assert "attempts = 0" in query
+    assert "AND type = %s" in query
+    assert params == (
+        JobStatus.QUEUED,
+        "job-1",
+        "ingest_erpnext_bank_transaction_job",
+        JobStatus.DEAD,
     )

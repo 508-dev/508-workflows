@@ -28,6 +28,7 @@ def test_dashboard_html_does_not_cache_missing_bundle(
     assert "Built dashboard" in html
     assert "frontend bundle has not been built" not in html
     assert "/dashboard/api/me" in html
+    assert "/dashboard/payments" in html
 
 
 def test_dashboard_assets_mount_serves_bundle_built_after_startup(

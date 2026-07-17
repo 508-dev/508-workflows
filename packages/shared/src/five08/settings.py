@@ -70,6 +70,10 @@ class SharedSettings(BaseSettings):
     erpnext_base_url: str | None = None
     erpnext_api_key: str | None = None
     erpnext_api_timeout_seconds: float = 20.0
+    erpnext_bank_transaction_webhook_signing_secret: str | None = None
+    project_payment_automation_enabled: bool = False
+    project_payment_notifications_enabled: bool = False
+    project_payment_recovery_interval_seconds: int = Field(default=300, ge=60)
     migadu_api_user: str | None = Field(
         default=None,
         validation_alias=AliasChoices(

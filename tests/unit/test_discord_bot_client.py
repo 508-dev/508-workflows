@@ -97,3 +97,37 @@ def test_request_omits_json_argument_when_payload_is_none() -> None:
         timeout=10.0,
         verify=default_ca_bundle_path(),
     )
+
+
+def test_post_project_payment_notification_posts_stable_outbox_identity() -> None:
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.content = b'{"status": "sent", "message_id": "123"}'
+    mock_response.json.return_value = {"status": "sent", "message_id": "123"}
+
+    with patch(
+        "five08.clients.discord_bot.requests.request",
+        return_value=mock_response,
+    ) as mock_request:
+        result = DiscordBotClient(
+            "http://discord-bot.internal", "secret"
+        ).post_project_payment_notification(
+            notification_id="00000000-0000-0000-0000-000000000001",
+            lease_token="00000000-0000-0000-0000-000000000002",
+        )
+
+    assert result == {"status": "sent", "message_id": "123"}
+    mock_request.assert_called_once_with(
+        method="POST",
+        url="http://discord-bot.internal/internal/project-payments/notify",
+        headers={
+            "Content-Type": "application/json",
+            "X-API-Secret": "secret",
+        },
+        json={
+            "notification_id": "00000000-0000-0000-0000-000000000001",
+            "lease_token": "00000000-0000-0000-0000-000000000002",
+        },
+        timeout=10.0,
+        verify=default_ca_bundle_path(),
+    )

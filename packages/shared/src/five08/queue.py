@@ -390,6 +390,47 @@ def mark_job_dead(
     )
 
 
+def revive_dead_job(
+    settings: SharedSettings,
+    job_id: str,
+    *,
+    expected_job_type: str,
+) -> bool:
+    """Atomically return one matching dead job to the queue.
+
+    This is deliberately narrower than a generic retry: callers must name the
+    job type and the row must still be ``dead``. A concurrent caller can win
+    the transition, while later duplicate deliveries leave queued, running,
+    and terminal jobs untouched.
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                UPDATE jobs
+                SET
+                    status = %s,
+                    attempts = 0,
+                    run_after = NULL,
+                    locked_at = NULL,
+                    locked_by = NULL,
+                    last_error = NULL,
+                    updated_at = NOW()
+                WHERE id = %s
+                  AND type = %s
+                  AND status = %s
+                RETURNING id
+                """,
+                (
+                    JobStatus.QUEUED,
+                    job_id,
+                    expected_job_type,
+                    JobStatus.DEAD,
+                ),
+            )
+            return cursor.fetchone() is not None
+
+
 def enqueue_job(
     queue: QueueClient,
     fn: Callable[..., Any],

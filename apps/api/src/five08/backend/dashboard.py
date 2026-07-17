@@ -15,6 +15,7 @@ _DASHBOARD_ROUTE_HINTS = """
 /dashboard/people
 /dashboard/gigs
 /dashboard/projects
+/dashboard/payments
 /dashboard/onboarding
 /dashboard/jobs
 /dashboard/agent
@@ -375,7 +376,7 @@ def dashboard_html() -> str:
     <h1>508 Operations Dashboard</h1>
     <p>The dashboard frontend bundle has not been built. Run <code>bun run build</code> in <code>apps/admin_dashboard</code>.</p>
   </main>
-  <!-- /dashboard/api/me /dashboard/people /dashboard/agent -->
+  <!-- /dashboard/api/me /dashboard/people /dashboard/payments /dashboard/agent -->
 </body>
 </html>
 """

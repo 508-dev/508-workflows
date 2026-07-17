@@ -259,6 +259,10 @@ class ERPNextClient:
             )
         return row
 
+    def get_bank_transaction(self, transaction_name: str) -> dict[str, Any]:
+        """Read one canonical ERPNext Bank Transaction document."""
+        return self.get_record("Bank Transaction", transaction_name)
+
     def call_method(
         self,
         method: str,

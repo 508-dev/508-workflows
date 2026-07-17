@@ -4,9 +4,14 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from five08.agent import AgentIdentityContext
+from five08.automation import (
+    AutomationAction,
+    AutomationCondition,
+    AutomationRuleMode,
+)
 
 
 class ResumeExtractRequest(BaseModel):
@@ -218,3 +223,38 @@ class DashboardConfigurationUpdateRequest(BaseModel):
 
     value: str | bool | int | float | None = None
     clear: bool = False
+
+
+class DashboardProjectPaymentRuleCreateRequest(BaseModel):
+    """Operator-managed declarative rule for one ERP bank receipt project."""
+
+    project_id: str = Field(min_length=1, max_length=64)
+    priority: int = Field(default=0, ge=-10_000, le=10_000)
+    mode: AutomationRuleMode = AutomationRuleMode.SUGGEST
+    enabled: bool = True
+    conditions: list[AutomationCondition] = Field(default_factory=list)
+    actions: list[AutomationAction] = Field(min_length=1)
+
+
+class DashboardProjectPaymentRuleUpdateRequest(
+    DashboardProjectPaymentRuleCreateRequest
+):
+    """Version-checked replacement for one declarative payment rule."""
+
+    expected_version: int = Field(ge=1)
+
+
+class DashboardProjectPaymentRuleDisableRequest(BaseModel):
+    """Version-checked soft disable to retain payment rule audit history."""
+
+    expected_version: int = Field(ge=1)
+
+
+class DashboardProjectPaymentSuggestionReviewRequest(BaseModel):
+    """Empty acknowledgement for a server-side suggestion state transition.
+
+    The action id and decision are deliberately supplied by the route, rather
+    than trusting a client-controlled target, amount, or project payload.
+    """
+
+    model_config = ConfigDict(extra="forbid")

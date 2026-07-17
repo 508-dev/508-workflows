@@ -4,11 +4,12 @@ import asyncio
 import logging
 import secrets
 from typing import Any
+from uuid import UUID
 
 from aiohttp import web
 import discord
 from discord.ext import commands
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from five08.discord_bot.config import settings
 from five08.engagements import (
@@ -49,6 +50,26 @@ class PostJobLeadRequest(BaseModel):
     engagement_status: str = EngagementStatus.LEAD.value
 
 
+class ProjectPaymentNotificationRequest(BaseModel):
+    """Internal request for one outbox-backed project payment message."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    notification_id: str
+    lease_token: str
+
+    @field_validator("notification_id", "lease_token")
+    @classmethod
+    def _normalize_notification_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be blank")
+        try:
+            return str(UUID(normalized))
+        except ValueError as exc:
+            raise ValueError("must be a UUID") from exc
+
+
 class InternalAPIRoutes:
     """Authenticated bot-internal automation routes."""
 
@@ -74,6 +95,10 @@ class InternalAPIRoutes:
         app.router.add_get(
             "/internal/jobs/channels",
             self.job_channels_handler,
+        )
+        app.router.add_post(
+            "/internal/project-payments/notify",
+            self.project_payment_notification_handler,
         )
 
     @staticmethod
@@ -474,6 +499,22 @@ class InternalAPIRoutes:
         )
         return result, status_code
 
+    async def _post_project_payment_notification(
+        self,
+        payload: ProjectPaymentNotificationRequest,
+    ) -> tuple[dict[str, Any], int]:
+        """Delegate payment delivery to the project cog's live channel checks."""
+        projects_cog = self.bot.get_cog("Projects")
+        if projects_cog is None or not hasattr(
+            projects_cog, "post_project_payment_notification"
+        ):
+            return {"error": "projects_cog_unavailable"}, 503
+        result, status_code = await projects_cog.post_project_payment_notification(
+            notification_id=payload.notification_id,
+            worker_lease_token=payload.lease_token,
+        )
+        return result, status_code
+
     async def _list_job_channels(
         self,
         *,
@@ -525,4 +566,27 @@ class InternalAPIRoutes:
             )
 
         result, status_code = await self._post_job_lead(payload)
+        return web.json_response(result, status=status_code)
+
+    async def project_payment_notification_handler(
+        self,
+        request: web.Request,
+    ) -> web.Response:
+        """Post one outbox-backed payment message after bot-side validation."""
+        if not self._is_authorized(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            payload_data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid_json"}, status=400)
+        if not isinstance(payload_data, dict):
+            return web.json_response({"error": "payload_must_be_object"}, status=400)
+        try:
+            payload = ProjectPaymentNotificationRequest.model_validate(payload_data)
+        except (ValidationError, TypeError) as exc:
+            return web.json_response(
+                {"error": "invalid_payload", "detail": str(exc)},
+                status=400,
+            )
+        result, status_code = await self._post_project_payment_notification(payload)
         return web.json_response(result, status=status_code)
