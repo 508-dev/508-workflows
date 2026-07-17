@@ -102,6 +102,24 @@ class DiscordBotClient:
             payload,
         )
 
+    def post_project_payment_notification(
+        self,
+        *,
+        notification_id: str,
+        lease_token: str,
+    ) -> dict[str, Any]:
+        """Ask the bot to load and post one canonical outbox notification.
+
+        The bot derives project, channel, allocation, and money from Postgres.
+        ``lease_token`` is a short-lived worker capability, not client-provided
+        payment data: it proves the caller currently owns the sending outbox.
+        """
+        return self.request(
+            "POST",
+            "internal/project-payments/notify",
+            {"notification_id": notification_id, "lease_token": lease_token},
+        )
+
 
 def grant_member_role_for_signed_agreement(
     *,

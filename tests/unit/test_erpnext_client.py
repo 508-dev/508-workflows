@@ -972,3 +972,17 @@ def test_search_invoices_scopes_to_owners_and_projects() -> None:
         "in",
         ["TEST-PROJ-001", "TEST-PROJ-002"],
     ] in or_filters
+
+
+def test_get_bank_transaction_uses_canonical_bank_transaction_resource() -> None:
+    client = CaptureERPNextClient({"data": {"name": "ACC-BTN-0001"}})
+
+    result = client.get_bank_transaction("ACC-BTN-0001")
+
+    assert result == {"name": "ACC-BTN-0001"}
+    assert client.calls[-1] == {
+        "method": "GET",
+        "path": "/api/resource/Bank%20Transaction/ACC-BTN-0001",
+        "params": None,
+        "payload": None,
+    }

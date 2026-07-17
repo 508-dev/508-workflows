@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from unittest.mock import patch
+from datetime import datetime, timezone
+from unittest.mock import Mock, patch
 
 import five08.projects as projects_module
 import pytest
@@ -16,6 +17,8 @@ from five08.projects import (
     normalize_match_text,
     parse_project_wiki_tables,
     project_viewer_emails_for_discord,
+    ProjectInput,
+    upsert_project,
 )
 from five08.settings import SharedSettings
 
@@ -123,12 +126,68 @@ def test_project_viewer_emails_for_discord_returns_active_people_emails() -> Non
     assert emails == ["member@508.dev", "member@example.com"]
 
 
-def test_mark_missing_erpnext_open_projects_skips_empty_seen_ids() -> None:
-    with patch("five08.projects.get_postgres_connection") as mock_connect:
+def test_mark_missing_erpnext_open_projects_closes_cached_projects_for_empty_sync() -> (
+    None
+):
+    cursor = Mock()
+    cursor.rowcount = 2
+    connection = Mock()
+    connection.__enter__ = Mock(return_value=connection)
+    connection.__exit__ = Mock(return_value=None)
+    cursor_context = Mock()
+    cursor_context.__enter__ = Mock(return_value=cursor)
+    cursor_context.__exit__ = Mock(return_value=None)
+    connection.cursor.return_value = cursor_context
+
+    with patch("five08.projects.get_postgres_connection", return_value=connection):
         result = mark_missing_erpnext_open_projects_not_open(SharedSettings(), [])
 
-    assert result == 0
-    mock_connect.assert_not_called()
+    assert result == 2
+    query, params = cursor.execute.call_args.args
+    assert "NOT (pei.external_id = ANY" in query
+    assert params[-1] == []
+
+
+def test_stale_erpnext_project_payload_cannot_overwrite_newer_cache_or_roster() -> None:
+    """A delayed Open fetch must not reopen an action-time Closed refresh."""
+    project_id = "00000000-0000-0000-0000-000000000001"
+    cursor = Mock()
+    cursor.fetchone.side_effect = [
+        {"project_id": project_id},
+        None,
+    ]
+    connection = Mock()
+    connection.__enter__ = Mock(return_value=connection)
+    connection.__exit__ = Mock(return_value=None)
+    cursor_context = Mock()
+    cursor_context.__enter__ = Mock(return_value=cursor)
+    cursor_context.__exit__ = Mock(return_value=None)
+    connection.cursor.return_value = cursor_context
+    stale_open = ProjectInput(
+        source="erpnext",
+        external_id="PROJ-001",
+        display_name="Project",
+        source_status="Open",
+        source_modified_at=datetime(2026, 7, 16, tzinfo=timezone.utc),
+    )
+
+    with patch("five08.projects.get_postgres_connection", return_value=connection):
+        result = upsert_project(SharedSettings(), stale_open)
+
+    assert result == project_id
+    update_query, update_params = cursor.execute.call_args_list[2].args
+    assert "OR %s > projects.source_modified_at" in update_query
+    assert update_params[-2:] == (
+        stale_open.source_modified_at,
+        stale_open.source_modified_at,
+    )
+    executed_queries = [call.args[0] for call in cursor.execute.call_args_list]
+    assert not any(
+        "INSERT INTO project_roster_members" in query for query in executed_queries
+    )
+    assert not any(
+        "INSERT INTO project_external_ids" in query for query in executed_queries
+    )
 
 
 def test_fetch_outline_document_wraps_transport_errors() -> None:

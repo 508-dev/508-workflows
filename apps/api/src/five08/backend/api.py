@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+from decimal import Decimal, InvalidOperation
 import hashlib
 import hmac
 import logging
@@ -40,6 +41,21 @@ from five08.audit import (
     AuditResult,
     AuditSource,
     insert_audit_event,
+)
+from five08.automation import AutomationRule
+from five08.automation_store import (
+    StoredAutomationAction,
+    StoredAutomationReviewAction,
+    StoredAutomationRule,
+    approve_automation_action,
+    create_automation_rule,
+    create_automation_rule_if_absent,
+    disable_automation_rule,
+    get_automation_review_action,
+    list_automation_actions_awaiting_review,
+    list_automation_rules,
+    reject_automation_action,
+    update_automation_rule,
 )
 from five08.agent import (
     AgentIdentityContext,
@@ -79,6 +95,7 @@ from five08.queue import (
     get_postgres_connection,
     get_redis_connection,
     is_postgres_healthy,
+    revive_dead_job,
     trusted_sql,
 )
 from five08.backend.auth import (
@@ -141,6 +158,10 @@ from five08.backend.schemas import (
     DashboardProjectCreateRequest,
     DashboardProjectHistoricalMemberRemoveRequest,
     DashboardProjectHistoricalMemberRequest,
+    DashboardProjectPaymentRuleCreateRequest,
+    DashboardProjectPaymentRuleDisableRequest,
+    DashboardProjectPaymentRuleUpdateRequest,
+    DashboardProjectPaymentSuggestionReviewRequest,
     DashboardProjectStatusRequest,
     DashboardProjectUserRemoveRequest,
     DashboardProjectUserRequest,
@@ -207,6 +228,15 @@ from five08.projects import (
     wiki_project_match_preview,
     wiki_row_by_key,
 )
+from five08.project_payments import (
+    BANK_TRANSACTION_POSTED_EVENT,
+    PROJECT_PAYMENT_ALLOWED_FACT_PATHS,
+    PROJECT_PAYMENT_ROUTE_ACTION,
+    automatic_project_payment_rule_is_safe,
+    learned_project_payment_suggestion_rule,
+    project_is_open,
+    project_payment_rule_has_valid_scope,
+)
 from five08.runtime_config import (
     delete_runtime_config_value,
     list_runtime_config,
@@ -225,6 +255,7 @@ from five08.worker.mailbox_resume_ingest import ResumeMailboxProcessor
 from five08.worker.models import (
     AuditEventPayload,
     DocusealWebhookPayload,
+    ERPNextBankTransactionWebhookPayload,
     EspoCRMWebhookPayload,
     GoogleFormsIntakePayload,
     TallyWebhookField,
@@ -294,6 +325,9 @@ sync_people_from_crm_job = JOB_FUNCTIONS["sync_people_from_crm_job"]
 sync_person_from_crm_job = JOB_FUNCTIONS["sync_person_from_crm_job"]
 sync_projects_from_erpnext_job = JOB_FUNCTIONS["sync_projects_from_erpnext_job"]
 process_docuseal_agreement_job = JOB_FUNCTIONS["process_docuseal_agreement_job"]
+ingest_erpnext_bank_transaction_job = JOB_FUNCTIONS[
+    "ingest_erpnext_bank_transaction_job"
+]
 
 TALLY_INTAKE_FIELD_LABEL_MAP = {
     "full name": "name",
@@ -482,6 +516,13 @@ def _newsletter_sync_idempotency_key(*, now: datetime) -> str:
     return f"newsletter-sync:508-members:{bucket}"
 
 
+def _project_payment_recovery_idempotency_key(*, now: datetime) -> str:
+    """Bucket payment recovery sweeps so only one is durable per interval."""
+    interval_seconds = max(60, settings.project_payment_recovery_interval_seconds)
+    bucket = int(now.timestamp()) // interval_seconds
+    return f"project-payment-recovery:{bucket}"
+
+
 def _normalize_google_forms_input(value: str | None) -> str | None:
     if not isinstance(value, str):
         return None
@@ -662,6 +703,43 @@ def _is_tally_webhook_authorized(request: Request, body: bytes) -> bool:
     return False
 
 
+def _erpnext_webhook_signature_valid(
+    *, body: bytes, signature: str, secret: str
+) -> bool:
+    """Validate Frappe's base64 HMAC-SHA256 webhook signature."""
+    expected = base64.b64encode(
+        hmac.new(secret.encode("utf-8"), body, hashlib.sha256).digest()
+    ).decode("ascii")
+    return hmac.compare_digest(signature.strip(), expected)
+
+
+def _is_erpnext_bank_transaction_webhook_authorized(
+    request: Request,
+    body: bytes,
+) -> bool:
+    """Fail closed unless this route has its own Frappe webhook secret."""
+    signing_secret = str(
+        settings.erpnext_bank_transaction_webhook_signing_secret or ""
+    ).strip()
+    if not signing_secret:
+        logger.error(
+            "Rejecting ERPNext Bank Transaction webhook: signing secret is not configured"
+        )
+        return False
+    signature = request.headers.get("X-Frappe-Webhook-Signature", "")
+    if not signature:
+        logger.warning("Rejecting ERPNext Bank Transaction webhook: missing signature")
+        return False
+    if _erpnext_webhook_signature_valid(
+        body=body,
+        signature=signature,
+        secret=signing_secret,
+    ):
+        return True
+    logger.warning("Rejecting ERPNext Bank Transaction webhook: invalid signature")
+    return False
+
+
 def _tally_intake_dry_run_mode(
     request: Request,
 ) -> Literal["none", "webhook", "worker"]:
@@ -822,6 +900,38 @@ async def _enqueue_newsletter_sync_job(
     return job
 
 
+async def _enqueue_project_payment_recovery_job(
+    queue: QueueClient,
+    *,
+    reason: str,
+) -> EnqueuedJob:
+    """Queue a durable sweep for actions/outbox rows stranded by a prior run.
+
+    Unlike a normal duplicate, an existing recovery job is explicitly
+    redelivered. This closes the same Postgres-commit/Redis-delivery window as
+    the Bank Transaction webhook and makes an enabled feature recover work
+    created while it was disabled.
+    """
+    now = datetime.now(tz=timezone.utc)
+    job: EnqueuedJob = await asyncio.to_thread(
+        enqueue_job,
+        queue=queue,
+        fn=JOB_FUNCTIONS["recover_project_payment_automation_job"],
+        args=(),
+        settings=settings,
+        idempotency_key=_project_payment_recovery_idempotency_key(now=now),
+    )
+    if not job.created:
+        await asyncio.to_thread(queue.enqueue, job.id)
+    logger.info(
+        "Enqueued project payment recovery job id=%s created=%s reason=%s",
+        job.id,
+        job.created,
+        reason,
+    )
+    return job
+
+
 async def _crm_sync_scheduler(app: FastAPI) -> None:
     queue = app.state.queue
     interval_seconds = max(1, settings.crm_sync_interval_seconds)
@@ -853,6 +963,18 @@ async def _newsletter_sync_scheduler(app: FastAPI) -> None:
             await _enqueue_newsletter_sync_job(queue, reason="scheduler")
         except Exception:
             logger.exception("Failed scheduling 508 members newsletter sync job")
+        await asyncio.sleep(interval_seconds)
+
+
+async def _project_payment_recovery_scheduler(app: FastAPI) -> None:
+    """Periodically recover payment actions and notification outbox rows."""
+    queue = app.state.queue
+    interval_seconds = max(60, settings.project_payment_recovery_interval_seconds)
+    while True:
+        try:
+            await _enqueue_project_payment_recovery_job(queue, reason="scheduler")
+        except Exception:
+            logger.exception("Failed scheduling project payment recovery job")
         await asyncio.sleep(interval_seconds)
 
 
@@ -5893,6 +6015,50 @@ async def _audit_dashboard_configuration_change(
     )
 
 
+async def _audit_dashboard_project_payment_rule_change(
+    session: AuthSession,
+    *,
+    result: AuditResult,
+    rule_id: str | None,
+    action: str,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Write a compact audit trail without storing payment-match text twice."""
+    actor_provider, actor_subject = _session_audit_actor(session)
+    await _write_auth_audit_event(
+        action=action,
+        result=result,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="project_payment_rule",
+        resource_id=rule_id,
+        metadata={"source": "dashboard", **(metadata or {})},
+    )
+
+
+async def _audit_dashboard_project_payment_suggestion_review(
+    session: AuthSession,
+    *,
+    result: AuditResult,
+    action_id: str | None,
+    action: str,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Audit a human decision without duplicating payment evidence in the log."""
+    actor_provider, actor_subject = _session_audit_actor(session)
+    await _write_auth_audit_event(
+        action=action,
+        result=result,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="project_payment_suggestion",
+        resource_id=action_id,
+        metadata={"source": "dashboard", **(metadata or {})},
+    )
+
+
 async def _audit_dashboard_job_channel_change(
     session: AuthSession,
     *,
@@ -7678,6 +7844,721 @@ async def dashboard_configuration_handler(request: Request) -> JSONResponse:
     return JSONResponse({"items": items})
 
 
+def _dashboard_project_payment_rule_payload(
+    stored_rule: StoredAutomationRule,
+) -> dict[str, Any]:
+    """Render a typed rule without exposing unrelated event/evaluation records."""
+    payload = stored_rule.rule.model_dump(mode="json")
+    payload["created_by"] = stored_rule.created_by
+    return payload
+
+
+def _dashboard_project_payment_action_payload(
+    stored_action: StoredAutomationAction,
+) -> dict[str, Any]:
+    """Render the decision state without leaking internal lease/idempotency data."""
+    return {
+        "id": stored_action.id,
+        "event_id": stored_action.event_id,
+        "action_type": stored_action.action_type,
+        "payload": stored_action.payload,
+        "mode": stored_action.mode,
+        "disposition": stored_action.disposition,
+        "status": stored_action.status.value,
+        "attempts": stored_action.attempts,
+        "project_id": stored_action.rule_project_id,
+        "approved_by": stored_action.approved_by,
+        "review_decision": (
+            stored_action.review_decision.value
+            if stored_action.review_decision is not None
+            else None
+        ),
+        "reviewed_by": stored_action.reviewed_by,
+        "reviewed_at": (
+            stored_action.reviewed_at.isoformat()
+            if stored_action.reviewed_at is not None
+            else None
+        ),
+    }
+
+
+def _dashboard_project_payment_suggestion_payload(
+    review: StoredAutomationReviewAction,
+) -> dict[str, Any]:
+    """Render a reviewable proposal with its immutable canonical ERP evidence."""
+    payload = _dashboard_project_payment_action_payload(review.action)
+    payload["subject_id"] = review.subject_id
+    payload["subject_snapshot"] = review.subject_snapshot
+    return payload
+
+
+def _project_payment_rule_from_dashboard_payload(
+    payload: DashboardProjectPaymentRuleCreateRequest,
+    *,
+    rule_id: str,
+    version: int,
+) -> AutomationRule:
+    """Build and validate the one supported v1 payment-routing rule shape."""
+    project_id = _valid_uuid_or_none(payload.project_id)
+    if project_id is None:
+        raise ValueError("invalid_project_id")
+    rule = AutomationRule(
+        id=rule_id,
+        project_id=project_id,
+        event_type=BANK_TRANSACTION_POSTED_EVENT,
+        priority=payload.priority,
+        mode=payload.mode,
+        enabled=payload.enabled,
+        version=version,
+        conditions=payload.conditions,
+        actions=payload.actions,
+    )
+    if len(rule.actions) != 1 or (
+        rule.actions[0].action_type != PROJECT_PAYMENT_ROUTE_ACTION
+    ):
+        raise ValueError("unsupported_project_payment_action")
+    unknown_payload_keys = set(rule.actions[0].payload) - {"project_id", "amount"}
+    if unknown_payload_keys:
+        raise ValueError("unsupported_project_payment_action_payload")
+    amount = rule.actions[0].payload.get("amount")
+    if amount is not None:
+        try:
+            parsed_amount = Decimal(str(amount).strip())
+        except (InvalidOperation, ValueError, AttributeError) as exc:
+            raise ValueError("invalid_project_payment_amount") from exc
+        if not parsed_amount.is_finite() or parsed_amount <= 0:
+            raise ValueError("invalid_project_payment_amount")
+    unknown_fact_paths = {
+        condition.fact for condition in rule.conditions
+    } - PROJECT_PAYMENT_ALLOWED_FACT_PATHS
+    if unknown_fact_paths:
+        raise ValueError("unsupported_project_payment_fact")
+    if not project_payment_rule_has_valid_scope(rule):
+        raise ValueError("project_payment_rule_scope_mismatch")
+    if rule.mode.value == "automatic" and not automatic_project_payment_rule_is_safe(
+        rule
+    ):
+        raise ValueError("unsafe_automatic_project_payment_rule")
+    return rule
+
+
+async def _dashboard_project_payment_rule_or_error(
+    payload: DashboardProjectPaymentRuleCreateRequest,
+    *,
+    rule_id: str,
+    version: int,
+) -> tuple[AutomationRule | None, JSONResponse | None]:
+    """Validate rule policy and ensure its target is an active local project."""
+    try:
+        rule = _project_payment_rule_from_dashboard_payload(
+            payload,
+            rule_id=rule_id,
+            version=version,
+        )
+    except ValueError as exc:
+        return None, JSONResponse({"error": str(exc)}, status_code=400)
+    assert rule.project_id is not None
+    is_open = await asyncio.to_thread(
+        project_is_open, settings, project_id=rule.project_id
+    )
+    if not is_open:
+        return None, JSONResponse({"error": "project_not_open"}, status_code=409)
+    return rule, None
+
+
+async def dashboard_project_payment_rules_handler(
+    request: Request,
+    project_id: str | None = Query(default=None),
+) -> JSONResponse:
+    """List the dashboard-manageable, typed Bank Transaction rules."""
+    _, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_CONFIGURATION_READ,
+    )
+    if error_response is not None:
+        return error_response
+    normalized_project_id: str | None = None
+    if project_id is not None:
+        normalized_project_id = _valid_uuid_or_none(project_id)
+        if normalized_project_id is None:
+            return JSONResponse({"error": "invalid_project_id"}, status_code=400)
+    rules = await asyncio.to_thread(
+        list_automation_rules,
+        settings,
+        event_type=BANK_TRANSACTION_POSTED_EVENT,
+        project_id=normalized_project_id,
+    )
+    return JSONResponse(
+        {"rules": [_dashboard_project_payment_rule_payload(rule) for rule in rules]}
+    )
+
+
+async def dashboard_create_project_payment_rule_handler(
+    request: Request,
+) -> JSONResponse:
+    """Create one auditable, declarative payment-routing rule."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_CONFIGURATION_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+    try:
+        payload = DashboardProjectPaymentRuleCreateRequest.model_validate(
+            await request.json()
+        )
+    except (ValidationError, TypeError, ValueError) as exc:
+        await _audit_dashboard_project_payment_rule_change(
+            session,
+            result=AuditResult.ERROR,
+            rule_id=None,
+            action="project_payment_rule.create",
+            metadata={"error": "invalid_project_payment_rule_payload"},
+        )
+        return JSONResponse(
+            {"error": "invalid_project_payment_rule_payload", "detail": str(exc)},
+            status_code=400,
+        )
+    rule_id = str(uuid4())
+    rule, rule_error = await _dashboard_project_payment_rule_or_error(
+        payload,
+        rule_id=rule_id,
+        version=1,
+    )
+    if rule_error is not None:
+        await _audit_dashboard_project_payment_rule_change(
+            session,
+            result=AuditResult.ERROR,
+            rule_id=rule_id,
+            action="project_payment_rule.create",
+            metadata={"error": "project_payment_rule_validation_failed"},
+        )
+        return rule_error
+    assert rule is not None
+    actor_provider, actor_subject = _session_audit_actor(session)
+    try:
+        stored_rule = await asyncio.to_thread(
+            create_automation_rule,
+            settings,
+            rule=rule,
+            created_by=f"{actor_provider.value}:{actor_subject}",
+        )
+    except Exception:
+        logger.exception("Failed creating project payment rule id=%s", rule.id)
+        await _audit_dashboard_project_payment_rule_change(
+            session,
+            result=AuditResult.ERROR,
+            rule_id=rule.id,
+            action="project_payment_rule.create",
+            metadata={"error": "project_payment_rule_create_failed"},
+        )
+        return JSONResponse(
+            {"error": "project_payment_rule_create_failed"}, status_code=500
+        )
+    await _audit_dashboard_project_payment_rule_change(
+        session,
+        result=AuditResult.SUCCESS,
+        rule_id=stored_rule.rule.id,
+        action="project_payment_rule.create",
+        metadata={
+            "project_id": stored_rule.rule.project_id,
+            "mode": stored_rule.rule.mode.value,
+            "enabled": stored_rule.rule.enabled,
+            "priority": stored_rule.rule.priority,
+        },
+    )
+    return JSONResponse(
+        {"rule": _dashboard_project_payment_rule_payload(stored_rule)},
+        status_code=201,
+    )
+
+
+async def dashboard_update_project_payment_rule_handler(
+    request: Request,
+    rule_id: str,
+) -> JSONResponse:
+    """Version-check and replace one payment-routing rule definition."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_CONFIGURATION_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+    normalized_rule_id = _valid_uuid_or_none(rule_id)
+    if normalized_rule_id is None:
+        return JSONResponse({"error": "invalid_rule_id"}, status_code=400)
+    try:
+        payload = DashboardProjectPaymentRuleUpdateRequest.model_validate(
+            await request.json()
+        )
+    except (ValidationError, TypeError, ValueError) as exc:
+        await _audit_dashboard_project_payment_rule_change(
+            session,
+            result=AuditResult.ERROR,
+            rule_id=normalized_rule_id,
+            action="project_payment_rule.update",
+            metadata={"error": "invalid_project_payment_rule_payload"},
+        )
+        return JSONResponse(
+            {"error": "invalid_project_payment_rule_payload", "detail": str(exc)},
+            status_code=400,
+        )
+    rule, rule_error = await _dashboard_project_payment_rule_or_error(
+        payload,
+        rule_id=normalized_rule_id,
+        version=payload.expected_version,
+    )
+    if rule_error is not None:
+        await _audit_dashboard_project_payment_rule_change(
+            session,
+            result=AuditResult.ERROR,
+            rule_id=normalized_rule_id,
+            action="project_payment_rule.update",
+            metadata={"error": "project_payment_rule_validation_failed"},
+        )
+        return rule_error
+    assert rule is not None
+    try:
+        stored_rule = await asyncio.to_thread(
+            update_automation_rule,
+            settings,
+            rule=rule,
+            expected_version=payload.expected_version,
+        )
+    except Exception:
+        logger.exception(
+            "Failed updating project payment rule id=%s", normalized_rule_id
+        )
+        await _audit_dashboard_project_payment_rule_change(
+            session,
+            result=AuditResult.ERROR,
+            rule_id=normalized_rule_id,
+            action="project_payment_rule.update",
+            metadata={"error": "project_payment_rule_update_failed"},
+        )
+        return JSONResponse(
+            {"error": "project_payment_rule_update_failed"}, status_code=500
+        )
+    if stored_rule is None:
+        return JSONResponse({"error": "stale_or_missing_rule"}, status_code=409)
+    await _audit_dashboard_project_payment_rule_change(
+        session,
+        result=AuditResult.SUCCESS,
+        rule_id=stored_rule.rule.id,
+        action="project_payment_rule.update",
+        metadata={
+            "project_id": stored_rule.rule.project_id,
+            "mode": stored_rule.rule.mode.value,
+            "enabled": stored_rule.rule.enabled,
+            "priority": stored_rule.rule.priority,
+            "version": stored_rule.rule.version,
+        },
+    )
+    return JSONResponse({"rule": _dashboard_project_payment_rule_payload(stored_rule)})
+
+
+async def dashboard_disable_project_payment_rule_handler(
+    request: Request,
+    rule_id: str,
+) -> JSONResponse:
+    """Soft-disable one rule while retaining its historical evaluation evidence."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_CONFIGURATION_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+    normalized_rule_id = _valid_uuid_or_none(rule_id)
+    if normalized_rule_id is None:
+        return JSONResponse({"error": "invalid_rule_id"}, status_code=400)
+    try:
+        payload = DashboardProjectPaymentRuleDisableRequest.model_validate(
+            await request.json()
+        )
+    except (ValidationError, TypeError, ValueError) as exc:
+        return JSONResponse(
+            {"error": "invalid_project_payment_rule_payload", "detail": str(exc)},
+            status_code=400,
+        )
+    try:
+        stored_rule = await asyncio.to_thread(
+            disable_automation_rule,
+            settings,
+            rule_id=normalized_rule_id,
+            expected_version=payload.expected_version,
+        )
+    except Exception:
+        logger.exception(
+            "Failed disabling project payment rule id=%s", normalized_rule_id
+        )
+        await _audit_dashboard_project_payment_rule_change(
+            session,
+            result=AuditResult.ERROR,
+            rule_id=normalized_rule_id,
+            action="project_payment_rule.disable",
+            metadata={"error": "project_payment_rule_disable_failed"},
+        )
+        return JSONResponse(
+            {"error": "project_payment_rule_disable_failed"}, status_code=500
+        )
+    if stored_rule is None:
+        return JSONResponse({"error": "stale_or_missing_rule"}, status_code=409)
+    await _audit_dashboard_project_payment_rule_change(
+        session,
+        result=AuditResult.SUCCESS,
+        rule_id=stored_rule.rule.id,
+        action="project_payment_rule.disable",
+        metadata={
+            "project_id": stored_rule.rule.project_id,
+            "version": stored_rule.rule.version,
+        },
+    )
+    return JSONResponse({"rule": _dashboard_project_payment_rule_payload(stored_rule)})
+
+
+async def dashboard_project_payment_suggestions_handler(
+    request: Request,
+    project_id: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=1000),
+) -> JSONResponse:
+    """List reviewable payment-route suggestions and their immutable evidence."""
+    _, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_CONFIGURATION_READ,
+    )
+    if error_response is not None:
+        return error_response
+    normalized_project_id: str | None = None
+    if project_id is not None:
+        normalized_project_id = _valid_uuid_or_none(project_id)
+        if normalized_project_id is None:
+            return JSONResponse({"error": "invalid_project_id"}, status_code=400)
+    suggestions = await asyncio.to_thread(
+        list_automation_actions_awaiting_review,
+        settings,
+        event_type=BANK_TRANSACTION_POSTED_EVENT,
+        project_id=normalized_project_id,
+        limit=limit,
+    )
+    return JSONResponse(
+        {
+            "suggestions": [
+                _dashboard_project_payment_suggestion_payload(suggestion)
+                for suggestion in suggestions
+            ]
+        }
+    )
+
+
+async def _dashboard_project_payment_suggestion_review_payload_or_error(
+    request: Request,
+) -> JSONResponse | None:
+    """Accept an empty decision acknowledgement and reject arbitrary client data."""
+    body = await request.body()
+    if not body.strip():
+        payload_data: object = {}
+    else:
+        try:
+            payload_data = json.loads(body)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"error": "invalid_project_payment_suggestion_review_payload"},
+                status_code=400,
+            )
+    try:
+        DashboardProjectPaymentSuggestionReviewRequest.model_validate(payload_data)
+    except (ValidationError, TypeError, ValueError):
+        return JSONResponse(
+            {"error": "invalid_project_payment_suggestion_review_payload"},
+            status_code=400,
+        )
+    return None
+
+
+async def _learn_project_payment_suggestion_from_approval(
+    stored_action: StoredAutomationAction,
+) -> dict[str, str]:
+    """Compile eligible approved evidence into an idempotent review-only rule."""
+    if stored_action.action_type != PROJECT_PAYMENT_ROUTE_ACTION:
+        return {"status": "not_eligible", "reason": "unsupported_action"}
+    if stored_action.rule_project_id is None:
+        return {"status": "not_eligible", "reason": "missing_project"}
+    if not await asyncio.to_thread(
+        project_is_open,
+        settings,
+        project_id=stored_action.rule_project_id,
+    ):
+        return {"status": "not_eligible", "reason": "project_not_open"}
+    review = await asyncio.to_thread(
+        get_automation_review_action,
+        settings,
+        action_id=stored_action.id,
+    )
+    if review is None:
+        return {"status": "not_eligible", "reason": "missing_evidence"}
+    rule = learned_project_payment_suggestion_rule(
+        project_id=stored_action.rule_project_id,
+        subject_snapshot=review.subject_snapshot,
+    )
+    if rule is None:
+        return {"status": "not_eligible", "reason": "insufficient_evidence"}
+    stored_rule, created = await asyncio.to_thread(
+        create_automation_rule_if_absent,
+        settings,
+        rule=rule,
+        created_by=f"system:project-payment-learning:{stored_action.id}",
+    )
+    return {
+        "status": "created" if created else "existing",
+        "rule_id": stored_rule.rule.id,
+    }
+
+
+async def dashboard_approve_project_payment_suggestion_handler(
+    request: Request,
+    action_id: str,
+) -> JSONResponse:
+    """Approve one suggestion and enqueue its already-persisted action exactly once."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_CONFIGURATION_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+    normalized_action_id = _valid_uuid_or_none(action_id)
+    if normalized_action_id is None:
+        await _audit_dashboard_project_payment_suggestion_review(
+            session,
+            result=AuditResult.ERROR,
+            action_id=None,
+            action="project_payment_suggestion.approve",
+            metadata={"error": "invalid_action_id"},
+        )
+        return JSONResponse({"error": "invalid_action_id"}, status_code=400)
+    payload_error = await _dashboard_project_payment_suggestion_review_payload_or_error(
+        request
+    )
+    if payload_error is not None:
+        await _audit_dashboard_project_payment_suggestion_review(
+            session,
+            result=AuditResult.ERROR,
+            action_id=normalized_action_id,
+            action="project_payment_suggestion.approve",
+            metadata={"error": "invalid_project_payment_suggestion_review_payload"},
+        )
+        return payload_error
+    actor_provider, actor_subject = _session_audit_actor(session)
+    try:
+        stored_action = await asyncio.to_thread(
+            approve_automation_action,
+            settings,
+            action_id=normalized_action_id,
+            approved_by=f"{actor_provider.value}:{actor_subject}",
+        )
+    except Exception:
+        logger.exception(
+            "Failed approving project payment suggestion action_id=%s",
+            normalized_action_id,
+        )
+        await _audit_dashboard_project_payment_suggestion_review(
+            session,
+            result=AuditResult.ERROR,
+            action_id=normalized_action_id,
+            action="project_payment_suggestion.approve",
+            metadata={"error": "project_payment_suggestion_approval_failed"},
+        )
+        return JSONResponse(
+            {"error": "project_payment_suggestion_approval_failed"},
+            status_code=500,
+        )
+    if stored_action is None:
+        await _audit_dashboard_project_payment_suggestion_review(
+            session,
+            result=AuditResult.ERROR,
+            action_id=normalized_action_id,
+            action="project_payment_suggestion.approve",
+            metadata={"error": "suggestion_not_awaiting_review"},
+        )
+        return JSONResponse(
+            {"error": "suggestion_not_awaiting_review"}, status_code=409
+        )
+
+    try:
+        learning = await _learn_project_payment_suggestion_from_approval(stored_action)
+    except Exception:
+        # The approval and its immutable evidence are already durable. Training
+        # must never make an approved payment allocation fail or invite a
+        # reviewer to submit it twice.
+        logger.exception(
+            "Approved payment suggestion but could not derive learning rule action_id=%s",
+            stored_action.id,
+        )
+        learning = {"status": "deferred"}
+
+    try:
+        job: EnqueuedJob = await asyncio.to_thread(
+            enqueue_job,
+            queue=request.app.state.queue,
+            fn=JOB_FUNCTIONS["execute_project_payment_automation_action_job"],
+            args=(stored_action.id,),
+            settings=settings,
+            idempotency_key=f"project-payment-action:{stored_action.id}",
+        )
+        if not job.created:
+            await asyncio.to_thread(request.app.state.queue.enqueue, job.id)
+    except Exception:
+        # The approval is already durable. The periodic recovery job will claim
+        # this approved action, so do not encourage a second review attempt.
+        logger.exception(
+            "Approved project payment suggestion but could not enqueue action_id=%s",
+            stored_action.id,
+        )
+        await _audit_dashboard_project_payment_suggestion_review(
+            session,
+            result=AuditResult.SUCCESS,
+            action_id=stored_action.id,
+            action="project_payment_suggestion.approve",
+            metadata={
+                "project_id": stored_action.rule_project_id,
+                "queue_status": "recovery_required",
+                "learning": learning,
+            },
+        )
+        return JSONResponse(
+            {
+                "status": "approved_pending_recovery",
+                "action": _dashboard_project_payment_action_payload(stored_action),
+                "learning": learning,
+            },
+            status_code=202,
+        )
+
+    await _audit_dashboard_project_payment_suggestion_review(
+        session,
+        result=AuditResult.SUCCESS,
+        action_id=stored_action.id,
+        action="project_payment_suggestion.approve",
+        metadata={
+            "project_id": stored_action.rule_project_id,
+            "job_id": job.id,
+            "job_created": job.created,
+            "learning": learning,
+        },
+    )
+    return JSONResponse(
+        {
+            "status": "approved",
+            "action": _dashboard_project_payment_action_payload(stored_action),
+            "job": {"id": job.id, "created": job.created},
+            "learning": learning,
+        },
+        status_code=202,
+    )
+
+
+async def dashboard_reject_project_payment_suggestion_handler(
+    request: Request,
+    action_id: str,
+) -> JSONResponse:
+    """Record a human rejection without losing the original payment evidence."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_CONFIGURATION_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+    normalized_action_id = _valid_uuid_or_none(action_id)
+    if normalized_action_id is None:
+        await _audit_dashboard_project_payment_suggestion_review(
+            session,
+            result=AuditResult.ERROR,
+            action_id=None,
+            action="project_payment_suggestion.reject",
+            metadata={"error": "invalid_action_id"},
+        )
+        return JSONResponse({"error": "invalid_action_id"}, status_code=400)
+    payload_error = await _dashboard_project_payment_suggestion_review_payload_or_error(
+        request
+    )
+    if payload_error is not None:
+        await _audit_dashboard_project_payment_suggestion_review(
+            session,
+            result=AuditResult.ERROR,
+            action_id=normalized_action_id,
+            action="project_payment_suggestion.reject",
+            metadata={"error": "invalid_project_payment_suggestion_review_payload"},
+        )
+        return payload_error
+    actor_provider, actor_subject = _session_audit_actor(session)
+    try:
+        stored_action = await asyncio.to_thread(
+            reject_automation_action,
+            settings,
+            action_id=normalized_action_id,
+            rejected_by=f"{actor_provider.value}:{actor_subject}",
+        )
+    except Exception:
+        logger.exception(
+            "Failed rejecting project payment suggestion action_id=%s",
+            normalized_action_id,
+        )
+        await _audit_dashboard_project_payment_suggestion_review(
+            session,
+            result=AuditResult.ERROR,
+            action_id=normalized_action_id,
+            action="project_payment_suggestion.reject",
+            metadata={"error": "project_payment_suggestion_rejection_failed"},
+        )
+        return JSONResponse(
+            {"error": "project_payment_suggestion_rejection_failed"},
+            status_code=500,
+        )
+    if stored_action is None:
+        await _audit_dashboard_project_payment_suggestion_review(
+            session,
+            result=AuditResult.ERROR,
+            action_id=normalized_action_id,
+            action="project_payment_suggestion.reject",
+            metadata={"error": "suggestion_not_awaiting_review"},
+        )
+        return JSONResponse(
+            {"error": "suggestion_not_awaiting_review"}, status_code=409
+        )
+    await _audit_dashboard_project_payment_suggestion_review(
+        session,
+        result=AuditResult.SUCCESS,
+        action_id=stored_action.id,
+        action="project_payment_suggestion.reject",
+        metadata={"project_id": stored_action.rule_project_id},
+    )
+    return JSONResponse(
+        {
+            "status": "rejected",
+            "action": _dashboard_project_payment_action_payload(stored_action),
+        }
+    )
+
+
 async def dashboard_newsletter_suppressions_handler(
     request: Request,
     limit: int = Query(default=200, ge=1, le=1000),
@@ -8221,6 +9102,84 @@ async def docuseal_webhook_handler(request: Request) -> JSONResponse:
             "job_id": job.id,
             "masked_email": masked_email,
             "submission_id": submission_id,
+        },
+        status_code=202,
+    )
+
+
+async def erpnext_bank_transaction_webhook_handler(request: Request) -> JSONResponse:
+    """Queue a signed ERPNext Bank Transaction reference for canonical ingest.
+
+    Frappe supplies only identity/revision fields. The worker reads the complete
+    Bank Transaction through the authenticated ERP API before any payment rule
+    sees it, so this body is never treated as accounting source data.
+    """
+    body = await request.body()
+    if not _is_erpnext_bank_transaction_webhook_authorized(request, body):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    try:
+        payload_data = json.loads(body)
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+    if not isinstance(payload_data, dict):
+        return JSONResponse({"error": "payload_must_be_object"}, status_code=400)
+
+    try:
+        payload = ERPNextBankTransactionWebhookPayload.model_validate(payload_data)
+    except (ValidationError, TypeError) as exc:
+        logger.warning("Rejecting ERPNext Bank Transaction webhook: %s", exc)
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    idempotency_key = f"erpnext-bank-transaction:{payload.name}:{payload.event_type}:{payload.modified}"
+    try:
+        job: EnqueuedJob = await asyncio.to_thread(
+            enqueue_job,
+            queue=request.app.state.queue,
+            fn=JOB_FUNCTIONS["ingest_erpnext_bank_transaction_job"],
+            args=(payload.name, payload.event_type, payload.modified),
+            settings=settings,
+            idempotency_key=idempotency_key,
+        )
+        # `enqueue_job` intentionally does not redeliver an existing idempotent
+        # row. For a financial webhook, a Frappe retry must also repair the
+        # narrow failure window where Postgres committed but Redis delivery
+        # failed. The actor safely exits for terminal/running jobs. A prior
+        # transient outage may also have exhausted the durable job's retry
+        # budget: atomically revive only that dead ingest job, so concurrent
+        # duplicate webhooks cannot create multiple recovery attempts.
+        if not job.created:
+            existing_job = await asyncio.to_thread(get_job, settings, job.id)
+            if existing_job is not None and existing_job.status == JobStatus.DEAD:
+                revived = await asyncio.to_thread(
+                    revive_dead_job,
+                    settings,
+                    job.id,
+                    expected_job_type=JOB_FUNCTIONS[
+                        "ingest_erpnext_bank_transaction_job"
+                    ].__name__,
+                )
+                if revived:
+                    logger.info(
+                        "Revived dead ERPNext Bank Transaction ingest job_id=%s",
+                        job.id,
+                    )
+                    await asyncio.to_thread(request.app.state.queue.enqueue, job.id)
+            else:
+                await asyncio.to_thread(request.app.state.queue.enqueue, job.id)
+    except Exception:
+        logger.exception(
+            "Failed enqueueing ERPNext Bank Transaction name=%s", payload.name
+        )
+        return JSONResponse({"error": "enqueue_failed"}, status_code=503)
+
+    return JSONResponse(
+        {
+            "status": "queued",
+            "source": "erpnext_bank_transaction",
+            "job_id": job.id,
+            "created": job.created,
+            "transaction_name": payload.name,
         },
         status_code=202,
     )
@@ -9693,6 +10652,13 @@ async def _lifespan(app: FastAPI) -> Any:
     else:
         logger.info("508 members newsletter sync scheduler disabled by config")
 
+    if settings.project_payment_automation_enabled:
+        app.state.project_payment_recovery_task = asyncio.create_task(
+            _project_payment_recovery_scheduler(app)
+        )
+    else:
+        logger.info("Project payment automation recovery scheduler disabled by config")
+
     if settings.email_resume_intake_enabled:
         app.state.email_resume_task = asyncio.create_task(_email_resume_scheduler())
     else:
@@ -9715,6 +10681,12 @@ async def _lifespan(app: FastAPI) -> Any:
 
         if hasattr(app.state, "newsletter_sync_task"):
             task = app.state.newsletter_sync_task
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        if hasattr(app.state, "project_payment_recovery_task"):
+            task = app.state.project_payment_recovery_task
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task

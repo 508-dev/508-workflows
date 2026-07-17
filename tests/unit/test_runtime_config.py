@@ -300,6 +300,8 @@ def test_runtime_config_numeric_bounds_are_preserved(
         "DISCORD_LOGS_WEBHOOK_URL",
         "NEWSLETTER_SYNC_ENABLED",
         "NEWSLETTER_SYNC_INTERVAL_SECONDS",
+        "PROJECT_PAYMENT_AUTOMATION_ENABLED",
+        "PROJECT_PAYMENT_RECOVERY_INTERVAL_SECONDS",
     ],
 )
 def test_startup_bound_runtime_config_is_restart_required(key: str) -> None:
@@ -332,6 +334,32 @@ def test_newsletter_settings_are_dashboard_configurable(key: str) -> None:
 
     assert definition is not None
     assert definition.category in {"Newsletter", "Mailbox"}
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "ERPNEXT_BANK_TRANSACTION_WEBHOOK_SIGNING_SECRET",
+        "PROJECT_PAYMENT_AUTOMATION_ENABLED",
+        "PROJECT_PAYMENT_NOTIFICATIONS_ENABLED",
+        "PROJECT_PAYMENT_RECOVERY_INTERVAL_SECONDS",
+    ],
+)
+def test_project_payment_settings_are_dashboard_configurable(key: str) -> None:
+    definition = runtime_config_definition_for_key(key)
+
+    assert definition is not None
+    assert definition.category == "Projects"
+
+
+def test_project_payment_recovery_interval_has_sixty_second_floor() -> None:
+    definition = runtime_config_definition_for_key(
+        "PROJECT_PAYMENT_RECOVERY_INTERVAL_SECONDS"
+    )
+    assert definition is not None
+
+    with pytest.raises(ValueError, match="greater than or equal to 60"):
+        coerce_runtime_config_value(definition, "59")
 
 
 def test_core_crm_auth_and_mailbox_settings_are_not_dashboard_configurable() -> None:

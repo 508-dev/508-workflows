@@ -19,10 +19,15 @@ from five08.worker.crm.people_sync import PeopleSyncProcessor
 from five08.worker.crm.processor import ContactSkillsProcessor
 from five08.worker.crm.resume_profile_processor import ResumeProfileProcessor
 from five08.worker.erpnext_project_sync import ERPNextProjectSyncProcessor
+from five08.worker.erpnext_bank_transaction_sync import ERPNextBankTransactionProcessor
+from five08.worker.project_payment_automation import ProjectPaymentActionExecutor
+from five08.worker.project_payment_learning import recover_project_payment_learning
 from five08.worker.mailbox_resume_ingest import ResumeMailboxProcessor
 from five08.worker.masking import mask_email
 from five08.newsletter_sync import NewsletterSyncProcessor
 from five08.job_lead_sources import scrape_job_leads
+from five08.automation_store import list_pending_automation_action_ids
+from five08.project_payments import list_retryable_project_payment_notification_ids
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +176,115 @@ def sync_projects_from_erpnext_job() -> dict[str, Any]:
     return processor.sync_open_projects()
 
 
+def ingest_erpnext_bank_transaction_job(
+    transaction_name: str,
+    event_type: str,
+    source_revision: str,
+) -> dict[str, Any]:
+    """Fetch a submitted ERPNext Bank Transaction and evaluate typed rules."""
+    logger.info(
+        "Processing ERPNext Bank Transaction name=%s event_type=%s",
+        transaction_name,
+        event_type,
+    )
+    processor = ERPNextBankTransactionProcessor()
+    result = processor.ingest_bank_transaction(
+        transaction_name=transaction_name,
+        event_type=event_type,
+        source_revision=source_revision,
+    )
+    action_ids = result.get("action_ids")
+    if not settings.project_payment_automation_enabled or not isinstance(
+        action_ids, list
+    ):
+        return result
+    executor = ProjectPaymentActionExecutor()
+    result["action_results"] = [
+        executor.execute_action(str(action_id))
+        for action_id in action_ids
+        if isinstance(action_id, str)
+    ]
+    return result
+
+
+def execute_project_payment_automation_action_job(action_id: str) -> dict[str, Any]:
+    """Execute one persisted project-payment action from the semantic outbox."""
+    logger.info("Processing project payment automation action id=%s", action_id)
+    return ProjectPaymentActionExecutor().execute_action(action_id)
+
+
+def recover_project_payment_automation_job(limit: int = 100) -> dict[str, Any]:
+    """Sweep durable payment actions/outbox rows after retries or flag changes."""
+    if not settings.project_payment_automation_enabled:
+        return {"status": "disabled"}
+
+    normalized_limit = max(1, min(int(limit), 1000))
+    executor = ProjectPaymentActionExecutor()
+    action_ids = list_pending_automation_action_ids(
+        settings,
+        limit=normalized_limit,
+    )
+    action_results: list[dict[str, Any]] = []
+    action_failures = 0
+    for action_id in action_ids:
+        try:
+            action_results.append(executor.execute_action(action_id))
+        except Exception:
+            action_failures += 1
+            logger.exception(
+                "Payment automation recovery failed action_id=%s", action_id
+            )
+
+    try:
+        learning = recover_project_payment_learning(
+            settings,
+            limit=normalized_limit,
+        )
+    except Exception:
+        # Payment execution and recovery must remain available if the optional
+        # feedback compiler encounters an unexpected persistence failure.
+        logger.exception("Payment suggestion learning recovery failed")
+        learning = {
+            "attempted": 0,
+            "created": 0,
+            "existing": 0,
+            "ineligible": 0,
+            "failed": 1,
+        }
+
+    notification_results: list[dict[str, Any]] = []
+    notification_failures = 0
+    if settings.project_payment_notifications_enabled:
+        notification_ids = list_retryable_project_payment_notification_ids(
+            settings,
+            limit=normalized_limit,
+        )
+        for notification_id in notification_ids:
+            try:
+                notification_results.append(
+                    executor.deliver_notification(notification_id)
+                )
+            except Exception:
+                notification_failures += 1
+                logger.exception(
+                    "Payment notification recovery failed notification_id=%s",
+                    notification_id,
+                )
+    else:
+        notification_ids = []
+
+    return {
+        "status": "recovered",
+        "action_ids": action_ids,
+        "action_results": action_results,
+        "action_failures": action_failures,
+        "learning": learning,
+        "notification_ids": notification_ids,
+        "notification_results": notification_results,
+        "notification_failures": notification_failures,
+    }
+
+
 def _mask_newsletter_sync_result(result: dict[str, Any]) -> dict[str, Any]:
     """Mask email addresses before newsletter sync results are persisted."""
     crm_failures = result.get("crm_lookup_failures")
@@ -240,6 +354,11 @@ JOB_FUNCTIONS: dict[str, Callable[..., dict[str, Any]]] = {
     sync_people_from_crm_job.__name__: sync_people_from_crm_job,
     sync_person_from_crm_job.__name__: sync_person_from_crm_job,
     sync_projects_from_erpnext_job.__name__: sync_projects_from_erpnext_job,
+    ingest_erpnext_bank_transaction_job.__name__: ingest_erpnext_bank_transaction_job,
+    execute_project_payment_automation_action_job.__name__: (
+        execute_project_payment_automation_action_job
+    ),
+    recover_project_payment_automation_job.__name__: recover_project_payment_automation_job,
     sync_508_members_newsletters_job.__name__: sync_508_members_newsletters_job,
     process_docuseal_agreement_job.__name__: process_docuseal_agreement_job,
     scrape_job_leads_job.__name__: scrape_job_leads_job,

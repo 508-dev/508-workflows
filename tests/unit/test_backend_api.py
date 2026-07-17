@@ -20,6 +20,20 @@ from five08.agent import (
     InMemoryTaskStore,
     ToolRegistry,
 )
+from five08.automation import (
+    AutomationAction,
+    AutomationCondition,
+    AutomationConditionOperator,
+    AutomationReviewDecision,
+    AutomationRule,
+    AutomationRuleMode,
+)
+from five08.automation_store import (
+    AutomationActionStatus,
+    StoredAutomationAction,
+    StoredAutomationReviewAction,
+    StoredAutomationRule,
+)
 from five08.backend import api
 from five08.job_channels import JobPostingType, RegisteredJobPostChannel
 from five08.worker.masking import mask_email
@@ -234,6 +248,124 @@ def _dashboard_write_session() -> api.AuthSession:
         id_token="",
         expires_at=4_102_444_800,
         actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+
+_PAYMENT_RULE_PROJECT_ID = "00000000-0000-0000-0000-000000000001"
+
+
+def _payment_rule_payload(*, mode: str = "automatic") -> dict[str, object]:
+    return {
+        "project_id": _PAYMENT_RULE_PROJECT_ID,
+        "priority": 10,
+        "mode": mode,
+        "enabled": True,
+        "conditions": [
+            {
+                "fact": "transaction.amount",
+                "operator": "equals",
+                "value": "1250.00",
+            },
+            {
+                "fact": "transaction.description",
+                "operator": "contains",
+                "value": "Acme Design Sprint",
+            },
+            {
+                "fact": "transaction.currency",
+                "operator": "equals",
+                "value": "GBP",
+            },
+        ],
+        "actions": [
+            {
+                "action_type": "project_payment.route",
+                "payload": {"project_id": _PAYMENT_RULE_PROJECT_ID},
+            }
+        ],
+    }
+
+
+def _stored_payment_rule(
+    *, version: int = 1, enabled: bool = True
+) -> StoredAutomationRule:
+    return StoredAutomationRule(
+        rule=AutomationRule(
+            id="00000000-0000-0000-0000-000000000002",
+            project_id=_PAYMENT_RULE_PROJECT_ID,
+            event_type="bank_transaction.posted.v1",
+            priority=10,
+            mode=AutomationRuleMode.AUTOMATIC,
+            enabled=enabled,
+            version=version,
+            conditions=[
+                AutomationCondition(
+                    fact="transaction.amount",
+                    operator=AutomationConditionOperator.EQUALS,
+                    value="1250.00",
+                ),
+                AutomationCondition(
+                    fact="transaction.description",
+                    operator=AutomationConditionOperator.CONTAINS,
+                    value="Acme Design Sprint",
+                ),
+                AutomationCondition(
+                    fact="transaction.currency",
+                    operator=AutomationConditionOperator.EQUALS,
+                    value="GBP",
+                ),
+            ],
+            actions=[
+                AutomationAction(
+                    action_type="project_payment.route",
+                    payload={"project_id": _PAYMENT_RULE_PROJECT_ID},
+                )
+            ],
+        ),
+        created_by="discord:steering-1",
+    )
+
+
+_PAYMENT_ACTION_ID = "00000000-0000-0000-0000-000000000003"
+
+
+def _stored_payment_suggestion(
+    *,
+    status: AutomationActionStatus = AutomationActionStatus.AWAITING_REVIEW,
+    approved_by: str | None = None,
+    review_decision: AutomationReviewDecision | None = None,
+    reviewed_by: str | None = None,
+    reviewed_at: datetime | None = None,
+) -> StoredAutomationReviewAction:
+    action = StoredAutomationAction(
+        id=_PAYMENT_ACTION_ID,
+        event_id="00000000-0000-0000-0000-000000000004",
+        action_type="project_payment.route",
+        payload={"project_id": _PAYMENT_RULE_PROJECT_ID, "amount": "1250.00"},
+        mode="suggest",
+        disposition="suggested",
+        status=status,
+        attempts=0,
+        idempotency_key="project-payment-route:transaction-1:project-1",
+        lease_token=None,
+        approved_by=approved_by,
+        rule_project_id=_PAYMENT_RULE_PROJECT_ID,
+        review_decision=review_decision,
+        reviewed_by=reviewed_by,
+        reviewed_at=reviewed_at,
+    )
+    return StoredAutomationReviewAction(
+        action=action,
+        subject_id="00000000-0000-0000-0000-000000000005",
+        subject_snapshot={
+            "source": "erpnext",
+            "source_revision": "2026-07-16 12:34:56.000000",
+            "direction": "inbound",
+            "amount": "1250.00",
+            "currency": "GBP",
+            "counterparty": "Acme Ltd",
+            "description": "Acme Design Sprint",
+        },
     )
 
 
@@ -2470,6 +2602,506 @@ def test_dashboard_configuration_update_audits_unknown_key(
     assert audit_kwargs["result"] == api.AuditResult.ERROR
     assert audit_kwargs["resource_id"] == "UNKNOWN_SETTING"
     assert audit_kwargs["metadata"]["error"] == "unknown_configuration_key"
+
+
+def test_dashboard_project_payment_rules_lists_typed_rules(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    stored_rule = _stored_payment_rule()
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.list_automation_rules",
+            return_value=[stored_rule],
+        ) as mock_list,
+    ):
+        response = client.get(
+            f"/dashboard/api/project-payment-rules?project_id={_PAYMENT_RULE_PROJECT_ID}"
+        )
+
+    assert response.status_code == 200
+    assert response.json()["rules"] == [
+        {
+            "id": "00000000-0000-0000-0000-000000000002",
+            "project_id": _PAYMENT_RULE_PROJECT_ID,
+            "event_type": "bank_transaction.posted.v1",
+            "origin": "configured",
+            "learning_key": None,
+            "priority": 10,
+            "mode": "automatic",
+            "enabled": True,
+            "version": 1,
+            "conditions": _payment_rule_payload()["conditions"],
+            "actions": _payment_rule_payload()["actions"],
+            "created_by": "discord:steering-1",
+        }
+    ]
+    assert mock_list.call_args.kwargs == {
+        "event_type": "bank_transaction.posted.v1",
+        "project_id": _PAYMENT_RULE_PROJECT_ID,
+    }
+
+
+def test_dashboard_project_payment_rule_create_validates_and_audits(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    stored_rule = _stored_payment_rule()
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.project_is_open", return_value=True),
+        patch(
+            "five08.backend.api.create_automation_rule",
+            return_value=stored_rule,
+        ) as mock_create,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            "/dashboard/api/project-payment-rules",
+            json=_payment_rule_payload(),
+        )
+
+    assert response.status_code == 201
+    assert response.json()["rule"]["id"] == stored_rule.rule.id
+    assert mock_create.call_args.kwargs["rule"].project_id == _PAYMENT_RULE_PROJECT_ID
+    assert mock_create.call_args.kwargs["created_by"] == "discord:admin-1"
+    audit_kwargs = mock_audit.await_args.kwargs
+    assert audit_kwargs["action"] == "project_payment_rule.create"
+    assert audit_kwargs["result"] is api.AuditResult.SUCCESS
+
+
+def test_dashboard_project_payment_rule_rejects_unsafe_automatic_rule(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    unsafe_payload = _payment_rule_payload()
+    unsafe_payload["conditions"] = [
+        {
+            "fact": "transaction.amount",
+            "operator": "equals",
+            "value": "1250.00",
+        }
+    ]
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.project_is_open") as mock_project_open,
+        patch(
+            "five08.backend.api.create_automation_rule",
+        ) as mock_create,
+    ):
+        response = client.post(
+            "/dashboard/api/project-payment-rules",
+            json=unsafe_payload,
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "unsafe_automatic_project_payment_rule"}
+    mock_project_open.assert_not_called()
+    mock_create.assert_not_called()
+
+
+def test_dashboard_project_payment_rule_update_rejects_stale_version(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    payload = _payment_rule_payload()
+    payload["expected_version"] = 1
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.project_is_open", return_value=True),
+        patch("five08.backend.api.update_automation_rule", return_value=None),
+    ):
+        response = client.put(
+            "/dashboard/api/project-payment-rules/00000000-0000-0000-0000-000000000002",
+            json=payload,
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {"error": "stale_or_missing_rule"}
+
+
+def test_dashboard_project_payment_suggestions_list_immutable_evidence(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    suggestion = _stored_payment_suggestion()
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.list_automation_actions_awaiting_review",
+            return_value=[suggestion],
+        ) as mock_list,
+    ):
+        response = client.get(
+            "/dashboard/api/project-payment-suggestions"
+            f"?project_id={_PAYMENT_RULE_PROJECT_ID}&limit=10"
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "suggestions": [
+            {
+                "id": _PAYMENT_ACTION_ID,
+                "event_id": "00000000-0000-0000-0000-000000000004",
+                "action_type": "project_payment.route",
+                "payload": {
+                    "project_id": _PAYMENT_RULE_PROJECT_ID,
+                    "amount": "1250.00",
+                },
+                "mode": "suggest",
+                "disposition": "suggested",
+                "status": "awaiting_review",
+                "attempts": 0,
+                "project_id": _PAYMENT_RULE_PROJECT_ID,
+                "approved_by": None,
+                "review_decision": None,
+                "reviewed_by": None,
+                "reviewed_at": None,
+                "subject_id": "00000000-0000-0000-0000-000000000005",
+                "subject_snapshot": {
+                    "source": "erpnext",
+                    "source_revision": "2026-07-16 12:34:56.000000",
+                    "direction": "inbound",
+                    "amount": "1250.00",
+                    "currency": "GBP",
+                    "counterparty": "Acme Ltd",
+                    "description": "Acme Design Sprint",
+                },
+            }
+        ]
+    }
+    assert mock_list.call_args.args == (api.settings,)
+    assert mock_list.call_args.kwargs == {
+        "event_type": "bank_transaction.posted.v1",
+        "project_id": _PAYMENT_RULE_PROJECT_ID,
+        "limit": 10,
+    }
+
+
+def test_dashboard_project_payment_suggestion_approval_queues_durable_action(
+    client: TestClient,
+    app: api.FastAPI,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    approved_review = _stored_payment_suggestion(
+        status=AutomationActionStatus.APPROVED,
+        approved_by="discord:admin-1",
+        review_decision=AutomationReviewDecision.APPROVED,
+        reviewed_by="discord:admin-1",
+        reviewed_at=datetime(2026, 7, 16, tzinfo=timezone.utc),
+    )
+    approved = approved_review.action
+    learned_rule = api.learned_project_payment_suggestion_rule(
+        project_id=_PAYMENT_RULE_PROJECT_ID,
+        subject_snapshot=approved_review.subject_snapshot,
+    )
+    assert learned_rule is not None
+    stored_learned_rule = StoredAutomationRule(
+        rule=learned_rule,
+        created_by=f"system:project-payment-learning:{_PAYMENT_ACTION_ID}",
+    )
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.approve_automation_action",
+            return_value=approved,
+        ) as mock_approve,
+        patch(
+            "five08.backend.api.get_automation_review_action",
+            return_value=approved_review,
+        ) as mock_review,
+        patch("five08.backend.api.project_is_open", return_value=True),
+        patch(
+            "five08.backend.api.create_automation_rule_if_absent",
+            return_value=(stored_learned_rule, True),
+        ) as mock_learn,
+        patch(
+            "five08.backend.api.enqueue_job",
+            return_value=api.EnqueuedJob(id="payment-action-job-1", created=True),
+        ) as mock_enqueue,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            f"/dashboard/api/project-payment-suggestions/{_PAYMENT_ACTION_ID}/approve"
+        )
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "status": "approved",
+        "action": {
+            "id": _PAYMENT_ACTION_ID,
+            "event_id": "00000000-0000-0000-0000-000000000004",
+            "action_type": "project_payment.route",
+            "payload": {
+                "project_id": _PAYMENT_RULE_PROJECT_ID,
+                "amount": "1250.00",
+            },
+            "mode": "suggest",
+            "disposition": "suggested",
+            "status": "approved",
+            "attempts": 0,
+            "project_id": _PAYMENT_RULE_PROJECT_ID,
+            "approved_by": "discord:admin-1",
+            "review_decision": "approved",
+            "reviewed_by": "discord:admin-1",
+            "reviewed_at": "2026-07-16T00:00:00+00:00",
+        },
+        "job": {"id": "payment-action-job-1", "created": True},
+        "learning": {"status": "created", "rule_id": learned_rule.id},
+    }
+    assert mock_approve.call_args.args == (api.settings,)
+    assert mock_approve.call_args.kwargs == {
+        "action_id": _PAYMENT_ACTION_ID,
+        "approved_by": "discord:admin-1",
+    }
+    assert mock_enqueue.call_args.kwargs == {
+        "queue": app.state.queue,
+        "fn": api.JOB_FUNCTIONS["execute_project_payment_automation_action_job"],
+        "args": (_PAYMENT_ACTION_ID,),
+        "settings": api.settings,
+        "idempotency_key": f"project-payment-action:{_PAYMENT_ACTION_ID}",
+    }
+    assert mock_review.call_args.kwargs == {"action_id": _PAYMENT_ACTION_ID}
+    assert mock_learn.call_args.kwargs == {
+        "rule": learned_rule,
+        "created_by": f"system:project-payment-learning:{_PAYMENT_ACTION_ID}",
+    }
+    app.state.queue.enqueue.assert_not_called()
+    mock_audit.assert_awaited_once_with(
+        action="project_payment_suggestion.approve",
+        result=api.AuditResult.SUCCESS,
+        actor_subject="admin-1",
+        actor_display_name="Admin User",
+        actor_provider=api.ActorProvider.DISCORD,
+        resource_type="project_payment_suggestion",
+        resource_id=_PAYMENT_ACTION_ID,
+        metadata={
+            "source": "dashboard",
+            "project_id": _PAYMENT_RULE_PROJECT_ID,
+            "job_id": "payment-action-job-1",
+            "job_created": True,
+            "learning": {"status": "created", "rule_id": learned_rule.id},
+        },
+    )
+
+
+def test_dashboard_project_payment_suggestion_approval_rejects_client_mutations(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.approve_automation_action") as mock_approve,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            f"/dashboard/api/project-payment-suggestions/{_PAYMENT_ACTION_ID}/approve",
+            json={"amount": "1.00"},
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": "invalid_project_payment_suggestion_review_payload"
+    }
+    mock_approve.assert_not_called()
+    mock_audit.assert_awaited_once()
+
+
+def test_dashboard_project_payment_suggestion_rejection_is_audited(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    rejected = _stored_payment_suggestion(
+        status=AutomationActionStatus.DEAD,
+        review_decision=AutomationReviewDecision.REJECTED,
+        reviewed_by="discord:admin-1",
+        reviewed_at=datetime(2026, 7, 16, tzinfo=timezone.utc),
+    ).action
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.reject_automation_action",
+            return_value=rejected,
+        ) as mock_reject,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.post(
+            f"/dashboard/api/project-payment-suggestions/{_PAYMENT_ACTION_ID}/reject"
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "rejected"
+    assert response.json()["action"]["status"] == "dead"
+    assert response.json()["action"]["review_decision"] == "rejected"
+    assert response.json()["action"]["reviewed_by"] == "discord:admin-1"
+    assert mock_reject.call_args.args == (api.settings,)
+    assert mock_reject.call_args.kwargs == {
+        "action_id": _PAYMENT_ACTION_ID,
+        "rejected_by": "discord:admin-1",
+    }
+    mock_audit.assert_awaited_once_with(
+        action="project_payment_suggestion.reject",
+        result=api.AuditResult.SUCCESS,
+        actor_subject="admin-1",
+        actor_display_name="Admin User",
+        actor_provider=api.ActorProvider.DISCORD,
+        resource_type="project_payment_suggestion",
+        resource_id=_PAYMENT_ACTION_ID,
+        metadata={"source": "dashboard", "project_id": _PAYMENT_RULE_PROJECT_ID},
+    )
+
+
+def test_dashboard_project_payment_suggestion_approval_conflict_does_not_enqueue(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.approve_automation_action",
+            return_value=None,
+        ),
+        patch("five08.backend.api.enqueue_job") as mock_enqueue,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ),
+    ):
+        response = client.post(
+            f"/dashboard/api/project-payment-suggestions/{_PAYMENT_ACTION_ID}/approve"
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {"error": "suggestion_not_awaiting_review"}
+    mock_enqueue.assert_not_called()
 
 
 def test_dashboard_me_keeps_sensitive_permissions_for_admin_sso_without_token(
@@ -8375,6 +9007,41 @@ def test_newsletter_sync_idempotency_key_clamps_interval_floor(
     assert key == "newsletter-sync:508-members:1"
 
 
+@pytest.mark.asyncio
+async def test_payment_recovery_duplicate_job_is_redelivered() -> None:
+    queue = Mock()
+    with patch(
+        "five08.backend.api.enqueue_job",
+        return_value=api.EnqueuedJob(id="payment-recovery-1", created=False),
+    ) as mock_enqueue:
+        result = await api._enqueue_project_payment_recovery_job(
+            queue,
+            reason="scheduler",
+        )
+
+    assert result == api.EnqueuedJob(id="payment-recovery-1", created=False)
+    assert (
+        mock_enqueue.call_args.kwargs["fn"]
+        is api.JOB_FUNCTIONS["recover_project_payment_automation_job"]
+    )
+    assert mock_enqueue.call_args.kwargs["idempotency_key"].startswith(
+        "project-payment-recovery:"
+    )
+    queue.enqueue.assert_called_once_with("payment-recovery-1")
+
+
+def test_payment_recovery_idempotency_key_clamps_interval_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api.settings, "project_payment_recovery_interval_seconds", 1)
+
+    key = api._project_payment_recovery_idempotency_key(
+        now=datetime(1970, 1, 1, 0, 1, 30, tzinfo=timezone.utc),
+    )
+
+    assert key == "project-payment-recovery:1"
+
+
 def test_dashboard_sync_newsletters_workflows_engineer_is_dry_run(
     client: TestClient,
 ) -> None:
@@ -10621,3 +11288,283 @@ def test_tally_intake_rejects_when_form_allowlist_is_unconfigured(
     assert response.status_code == 403
     assert response.json()["error"] == "invalid_form_id"
     mock_enqueue.assert_not_called()
+
+
+def _erpnext_bank_transaction_webhook_payload() -> dict[str, object]:
+    return {
+        "doctype": "Bank Transaction",
+        "event_type": "bank_transaction.posted.v1",
+        "name": "ACC-BTN-0001",
+        "modified": "2026-07-16 12:34:56.000000",
+        "docstatus": 1,
+    }
+
+
+def _erpnext_webhook_signature(body: bytes, secret: str) -> str:
+    return base64.b64encode(
+        hmac.new(secret.encode("utf-8"), body, hashlib.sha256).digest()
+    ).decode("ascii")
+
+
+def test_erpnext_bank_transaction_webhook_queues_signed_reference(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Frappe's signed identity hint should enqueue a canonical ERP fetch job."""
+    secret = "frappe-payment-secret"
+    monkeypatch.setattr(
+        api.settings,
+        "erpnext_bank_transaction_webhook_signing_secret",
+        secret,
+    )
+    body = json.dumps(_erpnext_bank_transaction_webhook_payload()).encode("utf-8")
+
+    with patch(
+        "five08.backend.api.enqueue_job",
+        return_value=api.EnqueuedJob(id="payment-job-1", created=True),
+    ) as mock_enqueue:
+        response = client.post(
+            "/webhooks/erpnext/bank-transaction",
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Frappe-Webhook-Signature": _erpnext_webhook_signature(body, secret),
+            },
+        )
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "status": "queued",
+        "source": "erpnext_bank_transaction",
+        "job_id": "payment-job-1",
+        "created": True,
+        "transaction_name": "ACC-BTN-0001",
+    }
+    assert (
+        mock_enqueue.call_args.kwargs["fn"]
+        is api.JOB_FUNCTIONS["ingest_erpnext_bank_transaction_job"]
+    )
+    assert mock_enqueue.call_args.kwargs["args"] == (
+        "ACC-BTN-0001",
+        "bank_transaction.posted.v1",
+        "2026-07-16 12:34:56.000000",
+    )
+    assert mock_enqueue.call_args.kwargs["idempotency_key"] == (
+        "erpnext-bank-transaction:ACC-BTN-0001:bank_transaction.posted.v1:"
+        "2026-07-16 12:34:56.000000"
+    )
+
+
+def test_erpnext_bank_transaction_webhook_rejects_invalid_signature(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dedicated ERP payment webhook must not fall back to generic auth."""
+    monkeypatch.setattr(
+        api.settings,
+        "erpnext_bank_transaction_webhook_signing_secret",
+        "frappe-payment-secret",
+    )
+    with patch("five08.backend.api.enqueue_job") as mock_enqueue:
+        response = client.post(
+            "/webhooks/erpnext/bank-transaction",
+            json=_erpnext_bank_transaction_webhook_payload(),
+            headers={"X-Frappe-Webhook-Signature": "not-a-signature"},
+        )
+
+    assert response.status_code == 401
+    assert response.json() == {"error": "unauthorized"}
+    mock_enqueue.assert_not_called()
+
+
+def test_erpnext_bank_transaction_webhook_rejects_unsigned_bad_payload(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Schema validation happens after authentication and never enqueues bad data."""
+    secret = "frappe-payment-secret"
+    monkeypatch.setattr(
+        api.settings,
+        "erpnext_bank_transaction_webhook_signing_secret",
+        secret,
+    )
+    payload = _erpnext_bank_transaction_webhook_payload()
+    payload["doctype"] = "Sales Invoice"
+    body = json.dumps(payload).encode("utf-8")
+
+    with patch("five08.backend.api.enqueue_job") as mock_enqueue:
+        response = client.post(
+            "/webhooks/erpnext/bank-transaction",
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Frappe-Webhook-Signature": _erpnext_webhook_signature(body, secret),
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_payload"
+    mock_enqueue.assert_not_called()
+
+
+def test_erpnext_bank_transaction_webhook_reports_duplicate_job(
+    client: TestClient,
+    app: api.FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A duplicate Frappe retry remains a successful, non-new queue response."""
+    secret = "frappe-payment-secret"
+    monkeypatch.setattr(
+        api.settings,
+        "erpnext_bank_transaction_webhook_signing_secret",
+        secret,
+    )
+    body = json.dumps(_erpnext_bank_transaction_webhook_payload()).encode("utf-8")
+    with (
+        patch(
+            "five08.backend.api.enqueue_job",
+            return_value=api.EnqueuedJob(id="payment-job-1", created=False),
+        ),
+        patch(
+            "five08.backend.api.get_job",
+            return_value=Mock(status=api.JobStatus.QUEUED),
+        ),
+        patch("five08.backend.api.revive_dead_job") as mock_revive,
+    ):
+        response = client.post(
+            "/webhooks/erpnext/bank-transaction",
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Frappe-Webhook-Signature": _erpnext_webhook_signature(body, secret),
+            },
+        )
+
+    assert response.status_code == 202
+    assert response.json()["created"] is False
+    app.state.queue.enqueue.assert_called_once_with("payment-job-1")
+    mock_revive.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "status",
+    [api.JobStatus.RUNNING, api.JobStatus.SUCCEEDED],
+)
+def test_erpnext_bank_transaction_webhook_duplicate_non_dead_job_is_not_revived(
+    client: TestClient,
+    app: api.FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+    status: api.JobStatus,
+) -> None:
+    """Normal duplicate delivery retains the existing actor-side idempotency."""
+    secret = "frappe-payment-secret"
+    monkeypatch.setattr(
+        api.settings,
+        "erpnext_bank_transaction_webhook_signing_secret",
+        secret,
+    )
+    body = json.dumps(_erpnext_bank_transaction_webhook_payload()).encode("utf-8")
+
+    with (
+        patch(
+            "five08.backend.api.enqueue_job",
+            return_value=api.EnqueuedJob(id="payment-job-1", created=False),
+        ),
+        patch(
+            "five08.backend.api.get_job",
+            return_value=Mock(status=status),
+        ),
+        patch("five08.backend.api.revive_dead_job") as mock_revive,
+    ):
+        response = client.post(
+            "/webhooks/erpnext/bank-transaction",
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Frappe-Webhook-Signature": _erpnext_webhook_signature(body, secret),
+            },
+        )
+
+    assert response.status_code == 202
+    app.state.queue.enqueue.assert_called_once_with("payment-job-1")
+    mock_revive.assert_not_called()
+
+
+def test_erpnext_bank_transaction_webhook_revives_a_dead_ingest_job(
+    client: TestClient,
+    app: api.FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A duplicate signed hint can restart an exhausted canonical ingest."""
+    secret = "frappe-payment-secret"
+    monkeypatch.setattr(
+        api.settings,
+        "erpnext_bank_transaction_webhook_signing_secret",
+        secret,
+    )
+    body = json.dumps(_erpnext_bank_transaction_webhook_payload()).encode("utf-8")
+
+    with (
+        patch(
+            "five08.backend.api.enqueue_job",
+            return_value=api.EnqueuedJob(id="payment-job-1", created=False),
+        ),
+        patch(
+            "five08.backend.api.get_job",
+            return_value=Mock(status=api.JobStatus.DEAD),
+        ),
+        patch("five08.backend.api.revive_dead_job", return_value=True) as mock_revive,
+    ):
+        response = client.post(
+            "/webhooks/erpnext/bank-transaction",
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Frappe-Webhook-Signature": _erpnext_webhook_signature(body, secret),
+            },
+        )
+
+    assert response.status_code == 202
+    app.state.queue.enqueue.assert_called_once_with("payment-job-1")
+    assert mock_revive.call_args.args == (api.settings, "payment-job-1")
+    assert mock_revive.call_args.kwargs == {
+        "expected_job_type": "ingest_erpnext_bank_transaction_job"
+    }
+
+
+def test_erpnext_bank_transaction_webhook_skips_redelivery_when_revival_loses_race(
+    client: TestClient,
+    app: api.FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the duplicate that wins the dead-to-queued transition redelivers."""
+    secret = "frappe-payment-secret"
+    monkeypatch.setattr(
+        api.settings,
+        "erpnext_bank_transaction_webhook_signing_secret",
+        secret,
+    )
+    body = json.dumps(_erpnext_bank_transaction_webhook_payload()).encode("utf-8")
+
+    with (
+        patch(
+            "five08.backend.api.enqueue_job",
+            return_value=api.EnqueuedJob(id="payment-job-1", created=False),
+        ),
+        patch(
+            "five08.backend.api.get_job",
+            return_value=Mock(status=api.JobStatus.DEAD),
+        ),
+        patch("five08.backend.api.revive_dead_job", return_value=False),
+    ):
+        response = client.post(
+            "/webhooks/erpnext/bank-transaction",
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Frappe-Webhook-Signature": _erpnext_webhook_signature(body, secret),
+            },
+        )
+
+    assert response.status_code == 202
+    app.state.queue.enqueue.assert_not_called()

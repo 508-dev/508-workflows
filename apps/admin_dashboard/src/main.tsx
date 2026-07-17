@@ -69,6 +69,12 @@ import {
   newsletterProviderResults,
 } from "@/views/newsletter-models"
 import { NewsletterView } from "@/views/newsletter-view"
+import {
+  type PaymentAutomationRule,
+  type PaymentAutomationRuleDraft,
+  type PaymentAutomationSuggestion,
+  PaymentAutomationView,
+} from "@/views/payment-automation-view"
 import "./index.css"
 
 type View =
@@ -81,6 +87,7 @@ type View =
   | "agent"
   | "audit"
   | "configuration"
+  | "payments"
 type SortDirection = "asc" | "desc"
 type GigTab = "gigs" | "leads"
 
@@ -481,6 +488,7 @@ const routes: Record<View, string> = {
   agent: "/dashboard/agent",
   audit: "/dashboard/audit",
   configuration: "/dashboard/configuration",
+  payments: "/dashboard/payments",
 }
 
 const routePermissions: Record<View, string> = {
@@ -493,6 +501,7 @@ const routePermissions: Record<View, string> = {
   agent: "audit:read",
   audit: "audit:read",
   configuration: "configuration:read",
+  payments: "configuration:read",
 }
 
 const peopleFilterDefinitions = {
@@ -892,6 +901,9 @@ function App() {
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([])
   const [agentReport, setAgentReport] = useState<AgentReport | null>(null)
   const [configurationItems, setConfigurationItems] = useState<ConfigurationItem[]>([])
+  const [paymentProjects, setPaymentProjects] = useState<Project[]>([])
+  const [paymentRules, setPaymentRules] = useState<PaymentAutomationRule[]>([])
+  const [paymentSuggestions, setPaymentSuggestions] = useState<PaymentAutomationSuggestion[]>([])
   const [configurationFocus, setConfigurationFocus] = useState<{
     category: string
     nonce: number
@@ -914,6 +926,7 @@ function App() {
     agent: { key: "occurred_at", direction: "desc" },
     audit: { key: "occurred_at", direction: "desc" },
     configuration: { key: "category", direction: "asc" },
+    payments: { key: "priority", direction: "desc" },
   })
 
   const [minutes, setMinutes] = useState("60")
@@ -2035,6 +2048,112 @@ function App() {
     }
   }
 
+  async function loadPaymentAutomation() {
+    setBusy("paymentAutomation", true)
+    try {
+      const [rulesPayload, suggestionsPayload, projectsPayload] = await Promise.all([
+        requestJson<{ rules: PaymentAutomationRule[] }>("/dashboard/api/project-payment-rules"),
+        requestJson<{ suggestions: PaymentAutomationSuggestion[] }>(
+          "/dashboard/api/project-payment-suggestions?limit=100",
+        ),
+        requestJson<ProjectsResponse>("/dashboard/api/projects?limit=100&status=Open"),
+      ])
+      setPaymentRules(rulesPayload.rules || [])
+      setPaymentSuggestions(suggestionsPayload.suggestions || [])
+      setPaymentProjects(projectsPayload.projects || [])
+    } catch (error) {
+      showError(error, "Unable to load project payment automation")
+    } finally {
+      setBusy("paymentAutomation", false)
+    }
+  }
+
+  async function createPaymentRule(draft: PaymentAutomationRuleDraft) {
+    setBusy("paymentRuleCreate", true)
+    try {
+      const payload = await requestJson<{ rule: PaymentAutomationRule }>(
+        "/dashboard/api/project-payment-rules",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(draft),
+        },
+      )
+      setPaymentRules((current) => [payload.rule, ...current])
+      showToast("Created payment routing rule", "ok")
+      return true
+    } catch (error) {
+      showError(error, "Unable to create payment routing rule")
+      return false
+    } finally {
+      setBusy("paymentRuleCreate", false)
+    }
+  }
+
+  async function disablePaymentRule(rule: PaymentAutomationRule) {
+    setBusy(`paymentRule:${rule.id}`, true)
+    try {
+      const payload = await requestJson<{ rule: PaymentAutomationRule }>(
+        `/dashboard/api/project-payment-rules/${encodeURIComponent(rule.id)}`,
+        {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ expected_version: rule.version }),
+        },
+      )
+      setPaymentRules((current) =>
+        current.map((currentRule) => (currentRule.id === rule.id ? payload.rule : currentRule)),
+      )
+      showToast("Disabled payment routing rule", "ok")
+      return true
+    } catch (error) {
+      showError(error, "Unable to disable payment routing rule")
+      return false
+    } finally {
+      setBusy(`paymentRule:${rule.id}`, false)
+    }
+  }
+
+  async function reviewPaymentSuggestion(
+    suggestion: PaymentAutomationSuggestion,
+    decision: "approve" | "reject",
+  ) {
+    setBusy(`paymentSuggestion:${suggestion.id}`, true)
+    try {
+      const payload = await requestJson<{
+        status?: string
+        learning?: { status?: string }
+      }>(
+        `/dashboard/api/project-payment-suggestions/${encodeURIComponent(suggestion.id)}/${decision}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        },
+      )
+      setPaymentSuggestions((current) =>
+        current.filter((currentSuggestion) => currentSuggestion.id !== suggestion.id),
+      )
+      if (decision === "approve" && payload.learning?.status === "created") {
+        void loadPaymentAutomation()
+      }
+      showToast(
+        decision === "approve"
+          ? payload.status === "approved_pending_recovery"
+            ? "Approved payment suggestion; delivery recovery is queued"
+            : "Approved payment suggestion; routing is queued"
+          : "Rejected payment suggestion",
+        decision === "approve" && payload.status === "approved_pending_recovery" ? "warning" : "ok",
+      )
+      return true
+    } catch (error) {
+      showError(error, `Unable to ${decision} payment suggestion`)
+      return false
+    } finally {
+      setBusy(`paymentSuggestion:${suggestion.id}`, false)
+    }
+  }
+
   async function updateConfigurationValue(key: string, value: string) {
     setBusy(`configuration:${key}`, true)
     try {
@@ -2412,6 +2531,7 @@ function App() {
     if (view === "jobs") void loadJobs()
     if (view === "agent") void loadAgentReport()
     if (view === "audit") void loadAuditEvents()
+    if (view === "payments") void loadPaymentAutomation()
     if (view === "configuration") {
       void loadConfiguration()
       void loadJobPostChannels({ includeAvailable: true })
@@ -2434,6 +2554,7 @@ function App() {
     if (view === "jobs") void loadJobs()
     if (view === "agent") void loadAgentReport()
     if (view === "audit") void loadAuditEvents()
+    if (view === "payments") void loadPaymentAutomation()
     if (view === "configuration") {
       void loadConfiguration()
       void loadJobPostChannels({ includeAvailable: true })
@@ -2698,6 +2819,7 @@ function App() {
               ["people", "People", Users],
               ["gigs", "Gigs", BriefcaseBusiness],
               ["projects", "Projects", FolderKanban],
+              ["payments", "Payments", Bell],
               ["onboarding", "Onboarding", ClipboardList],
               ["newsletter", "Newsletter", Mail],
               ["jobs", "Background tasks", Activity],
@@ -2946,6 +3068,21 @@ function App() {
 
           {view === "agent" ? (
             <AgentView report={agentReport} loading={loading} onRefresh={loadAgentReport} />
+          ) : null}
+
+          {view === "payments" ? (
+            <PaymentAutomationView
+              projects={paymentProjects}
+              rules={paymentRules}
+              suggestions={paymentSuggestions}
+              loading={loading}
+              canWrite={can("configuration:write")}
+              onRefresh={loadPaymentAutomation}
+              onCreateRule={createPaymentRule}
+              onDisableRule={disablePaymentRule}
+              onApproveSuggestion={(suggestion) => reviewPaymentSuggestion(suggestion, "approve")}
+              onRejectSuggestion={(suggestion) => reviewPaymentSuggestion(suggestion, "reject")}
+            />
           ) : null}
 
           {view === "configuration" ? (

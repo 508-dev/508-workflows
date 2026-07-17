@@ -160,48 +160,71 @@ def erpnext_project_to_input(project: dict[str, Any]) -> ProjectInput | None:
 
 
 def upsert_project(settings: SharedSettings, payload: ProjectInput) -> str:
-    """Upsert one source project and its current roster, returning local id."""
+    """Upsert one source project and its current roster, returning local id.
+
+    ERPNext's ``modified`` timestamp is a source revision fence. A late full
+    sync must never overwrite a newer action-time project refresh (especially
+    a newly closed project) and reopen the local routing target.
+    """
     roster_members = payload.roster_members or []
     seen_source_user_ids: set[str] = set()
 
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
-            project_id = _resolve_or_create_project_id(cursor, payload)
-            cursor.execute(
-                """
-                UPDATE projects
-                SET
-                    display_name = %s,
-                    customer = %s,
-                    source_status = %s,
-                    project_type = %s,
-                    priority = %s,
-                    percent_complete = %s,
-                    expected_start_date = %s,
-                    expected_end_date = %s,
-                    actual_start_date = %s,
-                    actual_end_date = %s,
-                    source_modified_at = %s,
-                    source_payload = %s,
-                    last_synced_at = NOW()
-                WHERE id = %s
-                """,
-                (
-                    payload.display_name,
-                    payload.customer,
-                    payload.source_status,
-                    payload.project_type,
-                    payload.priority,
-                    payload.percent_complete,
-                    payload.expected_start_date,
-                    payload.expected_end_date,
-                    payload.actual_start_date,
-                    payload.actual_end_date,
-                    payload.source_modified_at,
-                    Jsonb(payload.source_payload or {}),
-                    project_id,
-                ),
-            )
+            project_id, created = _resolve_or_create_project_id(cursor, payload)
+            accepted = created
+            if not created:
+                cursor.execute(
+                    """
+                    UPDATE projects
+                    SET
+                        display_name = %s,
+                        customer = %s,
+                        source_status = %s,
+                        project_type = %s,
+                        priority = %s,
+                        percent_complete = %s,
+                        expected_start_date = %s,
+                        expected_end_date = %s,
+                        actual_start_date = %s,
+                        actual_end_date = %s,
+                        source_modified_at = %s,
+                        source_payload = %s,
+                        last_synced_at = NOW()
+                    WHERE id = %s
+                      AND %s IS NOT NULL
+                      AND (
+                          projects.source_modified_at IS NULL
+                          OR %s > projects.source_modified_at
+                      )
+                    RETURNING id
+                    """,
+                    (
+                        payload.display_name,
+                        payload.customer,
+                        payload.source_status,
+                        payload.project_type,
+                        payload.priority,
+                        payload.percent_complete,
+                        payload.expected_start_date,
+                        payload.expected_end_date,
+                        payload.actual_start_date,
+                        payload.actual_end_date,
+                        payload.source_modified_at,
+                        Jsonb(payload.source_payload or {}),
+                        project_id,
+                        payload.source_modified_at,
+                        payload.source_modified_at,
+                    ),
+                )
+                accepted = cursor.fetchone() is not None
+
+            if not accepted:
+                # Do not let an old (or unversioned) payload touch roster data
+                # either: removing a current member roster is another form of
+                # stale-cache corruption. The identity mapping already exists.
+                return project_id
+
             cursor.execute(
                 """
                 INSERT INTO project_external_ids (
@@ -279,7 +302,7 @@ def upsert_project(settings: SharedSettings, payload: ProjectInput) -> str:
 def _resolve_or_create_project_id(
     cursor: Any,
     payload: ProjectInput,
-) -> str:
+) -> tuple[str, bool]:
     lock_key = f"project:{payload.source}:{payload.external_id}"
     cursor.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (lock_key,))
     cursor.execute(
@@ -295,7 +318,7 @@ def _resolve_or_create_project_id(
     )
     row = cursor.fetchone()
     if row is not None:
-        return str(row["project_id"])
+        return str(row["project_id"]), False
 
     project_id = str(uuid4())
     cursor.execute(
@@ -332,7 +355,7 @@ def _resolve_or_create_project_id(
             Jsonb(payload.source_payload or {}),
         ),
     )
-    return project_id
+    return project_id, True
 
 
 def list_dashboard_projects(
@@ -667,8 +690,6 @@ def mark_missing_erpnext_open_projects_not_open(
             if (normalized_id := text_or_none(external_id)) is not None
         }
     )
-    if not normalized_ids:
-        return 0
     with get_postgres_connection(settings) as conn:
         with conn.cursor() as cursor:
             cursor.execute(
@@ -686,6 +707,30 @@ def mark_missing_erpnext_open_projects_not_open(
                 (PROJECT_SOURCE_ERPNEXT, normalized_ids),
             )
             return int(cursor.rowcount or 0)
+
+
+def erpnext_project_external_id(
+    settings: SharedSettings,
+    *,
+    project_id: str,
+) -> str | None:
+    """Return the active ERPNext identity for one local project cache row."""
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                SELECT external_id
+                FROM project_external_ids
+                WHERE project_id = %s::uuid
+                  AND source = %s
+                  AND active IS TRUE
+                ORDER BY last_seen_at DESC
+                LIMIT 1
+                """,
+                (project_id, PROJECT_SOURCE_ERPNEXT),
+            )
+            row = cursor.fetchone()
+    return text_or_none(row.get("external_id")) if row is not None else None
 
 
 def project_viewer_emails_for_discord(

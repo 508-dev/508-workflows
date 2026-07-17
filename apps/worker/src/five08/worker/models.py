@@ -15,7 +15,14 @@ from five08.resume_processing_models import (
     ResumeSkipReason as SharedResumeSkipReason,
     SkillAttributes as SharedSkillAttributes,
 )
-from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 ExtractedSkills = SharedExtractedSkills
 ResumeApplyResult = SharedResumeApplyResult
@@ -92,6 +99,30 @@ class DocusealWebhookPayload(BaseModel):
     event_type: str
     timestamp: str
     data: DocusealSubmitter
+
+
+class ERPNextBankTransactionWebhookPayload(BaseModel):
+    """Small signed hint that tells the worker which ERP record to fetch.
+
+    The full Bank Transaction is always read from ERPNext by the worker. This
+    prevents webhook templates or replayed payloads from becoming accounting
+    source data.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    doctype: Literal["Bank Transaction"]
+    event_type: Literal["bank_transaction.posted.v1"]
+    name: str
+    modified: str
+    docstatus: Literal[1]
+
+    @field_validator("name", "modified")
+    @classmethod
+    def _require_nonblank_identifier(cls, value: str) -> str:
+        if not value:
+            raise ValueError("must not be blank")
+        return value
 
 
 class TallyWebhookFieldOption(BaseModel):

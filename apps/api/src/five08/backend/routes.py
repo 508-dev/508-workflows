@@ -32,11 +32,13 @@ class BackendRouteSurface(Protocol):
     dashboard_add_project_historical_member_handler: RouteHandler
     dashboard_add_project_user_handler: RouteHandler
     dashboard_agent_report_handler: RouteHandler
+    dashboard_approve_project_payment_suggestion_handler: RouteHandler
     dashboard_assign_onboarder_handler: RouteHandler
     dashboard_audit_events_handler: RouteHandler
     dashboard_bulk_update_projects_handler: RouteHandler
     dashboard_configuration_handler: RouteHandler
     dashboard_create_project_handler: RouteHandler
+    dashboard_create_project_payment_rule_handler: RouteHandler
     dashboard_erpnext_account_managers_handler: RouteHandler
     dashboard_erpnext_contacts_handler: RouteHandler
     dashboard_erpnext_cost_centers_handler: RouteHandler
@@ -49,6 +51,7 @@ class BackendRouteSurface(Protocol):
     dashboard_review_job_lead_handler: RouteHandler
     dashboard_job_detail_handler: RouteHandler
     dashboard_delete_job_channel_handler: RouteHandler
+    dashboard_disable_project_payment_rule_handler: RouteHandler
     dashboard_job_channels_handler: RouteHandler
     dashboard_jobs_handler: RouteHandler
     dashboard_me_handler: RouteHandler
@@ -60,10 +63,13 @@ class BackendRouteSurface(Protocol):
     dashboard_onboarding_handler: RouteHandler
     dashboard_people_handler: RouteHandler
     dashboard_project_member_candidates_handler: RouteHandler
+    dashboard_project_payment_rules_handler: RouteHandler
+    dashboard_project_payment_suggestions_handler: RouteHandler
     dashboard_project_wiki_matches_handler: RouteHandler
     dashboard_projects_handler: RouteHandler
     dashboard_remove_project_historical_member_handler: RouteHandler
     dashboard_remove_project_user_handler: RouteHandler
+    dashboard_reject_project_payment_suggestion_handler: RouteHandler
     dashboard_rerun_job_handler: RouteHandler
     dashboard_setup_engineer_handler: RouteHandler
     dashboard_sync_newsletters_handler: RouteHandler
@@ -76,8 +82,10 @@ class BackendRouteSurface(Protocol):
     dashboard_update_job_channel_handler: RouteHandler
     dashboard_update_onboarding_status_handler: RouteHandler
     dashboard_update_project_status_handler: RouteHandler
+    dashboard_update_project_payment_rule_handler: RouteHandler
     dashboard_update_project_wiki_match_handler: RouteHandler
     docuseal_webhook_handler: RouteHandler
+    erpnext_bank_transaction_webhook_handler: RouteHandler
     espocrm_people_sync_webhook_handler: RouteHandler
     espocrm_webhook_handler: RouteHandler
     google_forms_intake_webhook_handler: RouteHandler
@@ -112,12 +120,18 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     )
     dashboard_add_project_user_handler = api.dashboard_add_project_user_handler
     dashboard_agent_report_handler = api.dashboard_agent_report_handler
+    dashboard_approve_project_payment_suggestion_handler = (
+        api.dashboard_approve_project_payment_suggestion_handler
+    )
     dashboard_assets_dir = api.dashboard_assets_dir
     dashboard_assign_onboarder_handler = api.dashboard_assign_onboarder_handler
     dashboard_audit_events_handler = api.dashboard_audit_events_handler
     dashboard_bulk_update_projects_handler = api.dashboard_bulk_update_projects_handler
     dashboard_configuration_handler = api.dashboard_configuration_handler
     dashboard_create_project_handler = api.dashboard_create_project_handler
+    dashboard_create_project_payment_rule_handler = (
+        api.dashboard_create_project_payment_rule_handler
+    )
     dashboard_erpnext_account_managers_handler = (
         api.dashboard_erpnext_account_managers_handler
     )
@@ -128,6 +142,9 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     dashboard_gigs_handler = api.dashboard_gigs_handler
     dashboard_handler = api.dashboard_handler
     dashboard_delete_job_channel_handler = api.dashboard_delete_job_channel_handler
+    dashboard_disable_project_payment_rule_handler = (
+        api.dashboard_disable_project_payment_rule_handler
+    )
     dashboard_job_leads_handler = api.dashboard_job_leads_handler
     dashboard_job_channels_handler = api.dashboard_job_channels_handler
     dashboard_post_job_lead_handler = api.dashboard_post_job_lead_handler
@@ -151,12 +168,21 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     dashboard_project_member_candidates_handler = (
         api.dashboard_project_member_candidates_handler
     )
+    dashboard_project_payment_rules_handler = (
+        api.dashboard_project_payment_rules_handler
+    )
+    dashboard_project_payment_suggestions_handler = (
+        api.dashboard_project_payment_suggestions_handler
+    )
     dashboard_project_wiki_matches_handler = api.dashboard_project_wiki_matches_handler
     dashboard_projects_handler = api.dashboard_projects_handler
     dashboard_remove_project_historical_member_handler = (
         api.dashboard_remove_project_historical_member_handler
     )
     dashboard_remove_project_user_handler = api.dashboard_remove_project_user_handler
+    dashboard_reject_project_payment_suggestion_handler = (
+        api.dashboard_reject_project_payment_suggestion_handler
+    )
     dashboard_rerun_job_handler = api.dashboard_rerun_job_handler
     dashboard_setup_engineer_handler = api.dashboard_setup_engineer_handler
     dashboard_sync_newsletters_handler = api.dashboard_sync_newsletters_handler
@@ -175,10 +201,16 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     dashboard_update_project_status_handler = (
         api.dashboard_update_project_status_handler
     )
+    dashboard_update_project_payment_rule_handler = (
+        api.dashboard_update_project_payment_rule_handler
+    )
     dashboard_update_project_wiki_match_handler = (
         api.dashboard_update_project_wiki_match_handler
     )
     docuseal_webhook_handler = api.docuseal_webhook_handler
+    erpnext_bank_transaction_webhook_handler = (
+        api.erpnext_bank_transaction_webhook_handler
+    )
     espocrm_people_sync_webhook_handler = api.espocrm_people_sync_webhook_handler
     espocrm_webhook_handler = api.espocrm_webhook_handler
     google_forms_intake_webhook_handler = api.google_forms_intake_webhook_handler
@@ -427,6 +459,41 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
         methods=["PUT"],
     )
     app.add_api_route(
+        "/dashboard/api/project-payment-rules",
+        dashboard_project_payment_rules_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/project-payment-rules",
+        dashboard_create_project_payment_rule_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/dashboard/api/project-payment-rules/{rule_id}",
+        dashboard_update_project_payment_rule_handler,
+        methods=["PUT"],
+    )
+    app.add_api_route(
+        "/dashboard/api/project-payment-rules/{rule_id}",
+        dashboard_disable_project_payment_rule_handler,
+        methods=["DELETE"],
+    )
+    app.add_api_route(
+        "/dashboard/api/project-payment-suggestions",
+        dashboard_project_payment_suggestions_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/project-payment-suggestions/{action_id}/approve",
+        dashboard_approve_project_payment_suggestion_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/dashboard/api/project-payment-suggestions/{action_id}/reject",
+        dashboard_reject_project_payment_suggestion_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
         "/dashboard/api/newsletter/suppressions",
         dashboard_newsletter_suppressions_handler,
         methods=["GET"],
@@ -489,6 +556,11 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     app.add_api_route(
         "/webhooks/tally/onboarding",
         tally_intake_webhook_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/webhooks/erpnext/bank-transaction",
+        erpnext_bank_transaction_webhook_handler,
         methods=["POST"],
     )
     app.add_api_route("/webhooks/{source}", ingest_handler, methods=["POST"])

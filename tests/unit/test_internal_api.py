@@ -14,6 +14,7 @@ from five08.discord_bot.utils.internal_api import (
     InternalAPIRoutes,
     MemberAgreementRoleRequest,
     PostJobLeadRequest,
+    ProjectPaymentNotificationRequest,
 )
 
 
@@ -174,6 +175,73 @@ class TestInternalAPIRoutes:
 
         assert status_code == 503
         assert result == {"error": "jobs_cog_unavailable"}
+
+    @pytest.mark.asyncio
+    async def test_project_payment_notification_delegates_to_projects_cog(
+        self,
+        internal_api_routes,
+    ):
+        """Payment delivery must reuse project cog live-channel checks."""
+        projects_cog = Mock()
+        projects_cog.post_project_payment_notification = AsyncMock(
+            return_value=({"status": "sent", "message_id": "message-1"}, 200)
+        )
+        internal_api_routes.bot.get_cog.return_value = projects_cog
+        payload = ProjectPaymentNotificationRequest(
+            notification_id="00000000-0000-0000-0000-000000000001",
+            lease_token="00000000-0000-0000-0000-000000000002",
+        )
+
+        (
+            result,
+            status_code,
+        ) = await internal_api_routes._post_project_payment_notification(payload)
+
+        assert status_code == 200
+        assert result == {"status": "sent", "message_id": "message-1"}
+        projects_cog.post_project_payment_notification.assert_awaited_once_with(
+            notification_id="00000000-0000-0000-0000-000000000001",
+            worker_lease_token="00000000-0000-0000-0000-000000000002",
+        )
+
+    @pytest.mark.asyncio
+    async def test_project_payment_notification_returns_unavailable_without_projects_cog(
+        self,
+        internal_api_routes,
+    ):
+        internal_api_routes.bot.get_cog.return_value = None
+
+        (
+            result,
+            status_code,
+        ) = await internal_api_routes._post_project_payment_notification(
+            ProjectPaymentNotificationRequest(
+                notification_id="00000000-0000-0000-0000-000000000001",
+                lease_token="00000000-0000-0000-0000-000000000002",
+            )
+        )
+
+        assert status_code == 503
+        assert result == {"error": "projects_cog_unavailable"}
+
+    def test_project_payment_notification_request_rejects_forged_delivery_fields(self):
+        """The internal API accepts only a durable outbox identity."""
+        with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+            ProjectPaymentNotificationRequest.model_validate(
+                {
+                    "notification_id": "00000000-0000-0000-0000-000000000001",
+                    "lease_token": "00000000-0000-0000-0000-000000000002",
+                    "amount": "999999.99",
+                    "channel_id": "forged-channel",
+                }
+            )
+
+    def test_project_payment_notification_request_requires_active_worker_lease(self):
+        """A notification identity alone is not an internal send capability."""
+        with pytest.raises(ValueError, match="lease_token"):
+            ProjectPaymentNotificationRequest.model_validate(
+                {"notification_id": "00000000-0000-0000-0000-000000000001"}
+            )
 
     @pytest.mark.asyncio
     async def test_list_job_channels_delegates_to_jobs_cog(self, internal_api_routes):
