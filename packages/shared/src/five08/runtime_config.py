@@ -536,7 +536,7 @@ _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
         attr="github_default_repo",
         label="GitHub default repo",
         category="Agent",
-        description="Default GitHub repo for agent workflows.",
+        description="Default GitHub todo repo for agent workflows (508-dev/todos by default).",
         env_names=("GITHUB_DEFAULT_REPO",),
     ),
     RuntimeConfigDefinition(

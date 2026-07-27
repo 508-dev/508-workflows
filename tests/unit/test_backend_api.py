@@ -1465,6 +1465,8 @@ def test_agent_confirmation_uses_fresh_non_escalating_roles(
     assert context.scopes == []
     assert captured["effective_scopes"] == {
         "context:read_current_thread",
+        "github:repository:member:read",
+        "github:repository:member:write",
         "memory:read_self",
         "memory:write_self",
         "project:read",

@@ -15,7 +15,7 @@ import requests
 from discord import app_commands
 from discord.ext import commands
 
-from five08.agent import AgentIdentityContext, PolicyEngine
+from five08.agent import AgentIdentityContext, PolicyEngine, ToolRuntimeConfig
 from five08.discord_bot.config import settings
 from five08.discord_bot.utils.audit import DiscordAuditCogMixin
 from five08.tls import default_ca_bundle_path
@@ -557,7 +557,10 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         roles: list[str],
         transport: Literal["slash", "mention"] = "mention",
     ) -> str:
-        scopes = PolicyEngine().scopes_for_context(
+        policy = PolicyEngine.from_runtime_config(
+            ToolRuntimeConfig.from_settings(settings)
+        )
+        scopes = policy.scopes_for_context(
             AgentIdentityContext(
                 discord_user_id="capability-preview",
                 organization_id="capability-preview",
@@ -578,9 +581,17 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             capabilities.append(
                 "- Memory: remember and review your private preferences."
             )
-        if "github:issue:read" in scopes:
+        if {
+            "github:repository:member:read",
+            "github:repository:configured:read",
+            "github:repository:all:read",
+        } & scopes:
             capabilities.append(
-                "- GitHub issues: search issues or create new code-task issues."
+                "- GitHub issues: look up, create, update, and comment on todos."
+            )
+        if "github:project:read" in scopes:
+            capabilities.append(
+                "- GitHub Projects: inspect boards and manage their items."
             )
         if "crm:contact:read" in scopes:
             capabilities.extend(

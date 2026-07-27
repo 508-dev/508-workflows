@@ -7,7 +7,7 @@ import re
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from five08.agent.memory import InMemoryMemoryStore, MemoryStore
@@ -20,7 +20,7 @@ from five08.agent.models import (
 from five08.clients.authentik import AuthentikAPIError, AuthentikClient
 from five08.clients.docuseal import create_member_agreement_submission
 from five08.clients.espo import EspoAPIError, EspoClient
-from five08.clients.github import GitHubClient
+from five08.clients.github import GitHubAppTokenProvider, GitHubClient
 from five08.clients.migadu import (
     MigaduClient,
     MigaduMailboxCreateRequest,
@@ -43,7 +43,27 @@ _PLANNER_TOOL_ARGUMENTS: dict[str, frozenset[str]] = {
         {"task_id", "title", "project", "assignee", "due_date", "status"}
     ),
     "github_issue.search_issues": frozenset({"query", "repository", "state", "limit"}),
+    "github_issue.get_issue": frozenset({"repository", "issue_number"}),
     "github_issue.create_issue": frozenset({"title", "repository", "body", "labels"}),
+    "github_issue.update_issue": frozenset(
+        {"repository", "issue_number", "title", "body", "state", "state_reason"}
+    ),
+    "github_issue.comment_on_issue": frozenset({"repository", "issue_number", "body"}),
+    "github_repository.list_repositories": frozenset(),
+    "github_project.list_projects": frozenset({"organization", "limit"}),
+    "github_project.get_project": frozenset({"organization", "project_number"}),
+    "github_project.list_project_fields": frozenset(
+        {"organization", "project_number", "limit"}
+    ),
+    "github_project.list_project_items": frozenset(
+        {"organization", "project_number", "limit"}
+    ),
+    "github_project.add_issue_to_project": frozenset(
+        {"organization", "project_number", "repository", "issue_number"}
+    ),
+    "github_project.update_project_item": frozenset(
+        {"organization", "project_number", "item_id", "fields"}
+    ),
     "crm_read.search_contacts": frozenset({"query", "limit"}),
     "crm_write.update_contact": frozenset({"contact_id", "updates"}),
     "docuseal_write.create_member_agreement_submission": frozenset(
@@ -97,8 +117,15 @@ class ToolPartialSuccessError(RuntimeError):
 class ToolRuntimeConfig:
     """Runtime credentials and defaults for deterministic external tools."""
 
+    github_default_repo: str = "508-dev/todos"
+    github_organization: str = "508-dev"
+    github_member_extra_repos: str = ""
+    github_steering_all_installed_repos: bool = True
+    github_steering_extra_repos: str = ""
+    github_app_id: str | None = None
+    github_app_installation_id: str | None = None
+    github_app_private_key: str | None = None
     github_api_token: str | None = None
-    github_default_repo: str | None = None
     github_allowed_repos: str = ""
     espo_base_url: str | None = None
     espo_api_key: str | None = None
@@ -130,8 +157,25 @@ class ToolRuntimeConfig:
     def from_settings(cls, settings: Any) -> "ToolRuntimeConfig":
         """Build tool runtime config from service settings without coupling types."""
         return cls(
+            github_default_repo=getattr(
+                settings, "github_default_repo", "508-dev/todos"
+            ),
+            github_organization=getattr(settings, "github_organization", "508-dev"),
+            github_member_extra_repos=getattr(
+                settings, "github_member_extra_repos", ""
+            ),
+            github_steering_all_installed_repos=bool(
+                getattr(settings, "github_steering_all_installed_repos", True)
+            ),
+            github_steering_extra_repos=getattr(
+                settings, "github_steering_extra_repos", ""
+            ),
+            github_app_id=getattr(settings, "github_app_id", None),
+            github_app_installation_id=getattr(
+                settings, "github_app_installation_id", None
+            ),
+            github_app_private_key=getattr(settings, "github_app_private_key", None),
             github_api_token=getattr(settings, "github_api_token", None),
-            github_default_repo=getattr(settings, "github_default_repo", None),
             github_allowed_repos=getattr(settings, "github_allowed_repos", ""),
             espo_base_url=getattr(settings, "espo_base_url", None),
             espo_api_key=getattr(settings, "espo_api_key", None),
@@ -353,6 +397,11 @@ class ToolRegistry:
         self.memory_store = memory_store or InMemoryMemoryStore()
         self._runtime_config = runtime_config or ToolRuntimeConfig()
         self._runtime_config_factory = runtime_config_factory
+        self._github_app_provider: GitHubAppTokenProvider | None = None
+        self._github_app_provider_config: tuple[str, str, str] | None = None
+        self._github_installation_repository_cache: (
+            tuple[datetime, tuple[str, str], frozenset[str]] | None
+        ) = None
         self._manifests = {
             "task_read.search_tasks": ToolManifest(
                 name="task_read.search_tasks",
@@ -383,7 +432,15 @@ class ToolRegistry:
             "github_issue.search_issues": ToolManifest(
                 name="github_issue.search_issues",
                 risk="low",
-                required_scopes=("github:issue:read",),
+                required_scopes=(),
+                tenant_scoped=False,
+                idempotent=True,
+                write=False,
+            ),
+            "github_issue.get_issue": ToolManifest(
+                name="github_issue.get_issue",
+                risk="low",
+                required_scopes=(),
                 tenant_scoped=False,
                 idempotent=True,
                 write=False,
@@ -391,7 +448,83 @@ class ToolRegistry:
             "github_issue.create_issue": ToolManifest(
                 name="github_issue.create_issue",
                 risk="medium",
-                required_scopes=("github:issue:create",),
+                required_scopes=(),
+                requires_confirmation=True,
+                tenant_scoped=False,
+                idempotent=False,
+                write=True,
+            ),
+            "github_issue.update_issue": ToolManifest(
+                name="github_issue.update_issue",
+                risk="medium",
+                required_scopes=(),
+                requires_confirmation=True,
+                tenant_scoped=False,
+                idempotent=False,
+                write=True,
+            ),
+            "github_issue.comment_on_issue": ToolManifest(
+                name="github_issue.comment_on_issue",
+                risk="medium",
+                required_scopes=(),
+                requires_confirmation=True,
+                tenant_scoped=False,
+                idempotent=False,
+                write=True,
+            ),
+            "github_repository.list_repositories": ToolManifest(
+                name="github_repository.list_repositories",
+                risk="low",
+                required_scopes=("github:repository:all:read",),
+                tenant_scoped=False,
+                idempotent=True,
+                write=False,
+            ),
+            "github_project.list_projects": ToolManifest(
+                name="github_project.list_projects",
+                risk="low",
+                required_scopes=("github:project:read",),
+                tenant_scoped=False,
+                idempotent=True,
+                write=False,
+            ),
+            "github_project.get_project": ToolManifest(
+                name="github_project.get_project",
+                risk="low",
+                required_scopes=("github:project:read",),
+                tenant_scoped=False,
+                idempotent=True,
+                write=False,
+            ),
+            "github_project.list_project_fields": ToolManifest(
+                name="github_project.list_project_fields",
+                risk="low",
+                required_scopes=("github:project:read",),
+                tenant_scoped=False,
+                idempotent=True,
+                write=False,
+            ),
+            "github_project.list_project_items": ToolManifest(
+                name="github_project.list_project_items",
+                risk="low",
+                required_scopes=("github:project:read",),
+                tenant_scoped=False,
+                idempotent=True,
+                write=False,
+            ),
+            "github_project.add_issue_to_project": ToolManifest(
+                name="github_project.add_issue_to_project",
+                risk="medium",
+                required_scopes=("github:project:write",),
+                requires_confirmation=True,
+                tenant_scoped=False,
+                idempotent=False,
+                write=True,
+            ),
+            "github_project.update_project_item": ToolManifest(
+                name="github_project.update_project_item",
+                risk="medium",
+                required_scopes=("github:project:write",),
                 requires_confirmation=True,
                 tenant_scoped=False,
                 idempotent=False,
@@ -549,6 +682,35 @@ class ToolRegistry:
                 raise ValueError("unsupported_crm_update_fields")
         _validate_planner_argument_value(arguments)
 
+    def normalize_action_arguments(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Freeze built-in GitHub defaults into a proposed action.
+
+        Defaults are resolved before authorization and confirmation so the
+        repository or organization a user is approving can never change between
+        planning and execution.
+        """
+
+        normalized = dict(arguments)
+        if tool_name.startswith("github_issue.") or tool_name == (
+            "github_project.add_issue_to_project"
+        ):
+            if _optional_str(normalized.get("repository")) is None:
+                default_repository = _optional_str(
+                    self.runtime_config.github_default_repo
+                )
+                if default_repository is not None:
+                    normalized["repository"] = default_repository
+        if tool_name.startswith("github_project."):
+            if _optional_str(normalized.get("organization")) is None:
+                organization = _optional_str(self.runtime_config.github_organization)
+                if organization is not None:
+                    normalized["organization"] = organization
+        return normalized
+
     def execute(
         self,
         tool_name: str,
@@ -601,22 +763,180 @@ class ToolRegistry:
                 due_date=updates["due_date"],
                 status=updates["status"],
             )
+        github_scopes = actor_scopes or set()
         if tool_name == "github_issue.search_issues":
             return self._github_client().search_issues(
-                repository=self._resolve_repository(arguments),
+                repository=self._resolve_repository(
+                    arguments,
+                    actor_scopes=github_scopes,
+                ),
                 query=str(arguments.get("query") or "").strip(),
                 state=str(arguments.get("state") or "open").strip().lower(),
                 limit=_positive_int(arguments.get("limit"), default=10, maximum=20),
+            )
+        if tool_name == "github_issue.get_issue":
+            return self._github_client().get_issue(
+                repository=self._resolve_repository(
+                    arguments,
+                    actor_scopes=github_scopes,
+                ),
+                issue_number=_required_positive_int(
+                    arguments.get("issue_number"),
+                    field_name="GitHub issue number",
+                ),
             )
         if tool_name == "github_issue.create_issue":
             title = str(arguments.get("title") or "").strip()
             if not title:
                 raise ValueError("GitHub issue title is required")
             return self._github_client().create_issue(
-                repository=self._resolve_repository(arguments),
+                repository=self._resolve_repository(
+                    arguments,
+                    actor_scopes=github_scopes,
+                ),
                 title=title,
                 body=_optional_str(arguments.get("body")),
                 labels=_optional_str_list(arguments.get("labels")),
+            )
+        if tool_name == "github_issue.update_issue":
+            title = _optional_str(arguments.get("title"))
+            state = _optional_str(arguments.get("state"))
+            state_reason = _optional_str(arguments.get("state_reason"))
+            if title is None and "body" not in arguments and state is None:
+                raise ValueError("At least one GitHub issue update is required")
+            update_kwargs: dict[str, Any] = {
+                "repository": self._resolve_repository(
+                    arguments,
+                    actor_scopes=github_scopes,
+                ),
+                "issue_number": _required_positive_int(
+                    arguments.get("issue_number"),
+                    field_name="GitHub issue number",
+                ),
+                "title": title,
+                "state": state,
+                "state_reason": state_reason,
+            }
+            if "body" in arguments:
+                update_kwargs["body"] = _optional_str(arguments.get("body"))
+            return self._github_client().update_issue(**update_kwargs)
+        if tool_name == "github_issue.comment_on_issue":
+            body = _optional_str(arguments.get("body"))
+            if body is None:
+                raise ValueError("GitHub comment body is required")
+            return self._github_client().add_issue_comment(
+                repository=self._resolve_repository(
+                    arguments,
+                    actor_scopes=github_scopes,
+                ),
+                issue_number=_required_positive_int(
+                    arguments.get("issue_number"),
+                    field_name="GitHub issue number",
+                ),
+                body=body,
+            )
+        if tool_name == "github_repository.list_repositories":
+            _require_any_scope(
+                github_scopes,
+                {"github:repository:all:read", "github:repository:all:write"},
+                message="Listing GitHub repositories requires Steering Committee access",
+            )
+            return self._github_client().list_installation_repositories()
+        if tool_name == "github_project.list_projects":
+            _require_any_scope(
+                github_scopes,
+                {"github:project:read", "github:project:write"},
+                message="GitHub Projects access requires Steering Committee access",
+            )
+            return self._github_client().list_organization_projects(
+                organization=self._resolve_github_organization(arguments),
+                limit=_positive_int(arguments.get("limit"), default=20, maximum=100),
+            )
+        if tool_name == "github_project.get_project":
+            _require_any_scope(
+                github_scopes,
+                {"github:project:read", "github:project:write"},
+                message="GitHub Projects access requires Steering Committee access",
+            )
+            return self._github_client().get_organization_project(
+                organization=self._resolve_github_organization(arguments),
+                project_number=_required_positive_int(
+                    arguments.get("project_number"),
+                    field_name="GitHub project number",
+                ),
+            )
+        if tool_name == "github_project.list_project_fields":
+            _require_any_scope(
+                github_scopes,
+                {"github:project:read", "github:project:write"},
+                message="GitHub Projects access requires Steering Committee access",
+            )
+            return self._github_client().list_organization_project_fields(
+                organization=self._resolve_github_organization(arguments),
+                project_number=_required_positive_int(
+                    arguments.get("project_number"),
+                    field_name="GitHub project number",
+                ),
+                limit=_positive_int(arguments.get("limit"), default=100, maximum=100),
+            )
+        if tool_name == "github_project.list_project_items":
+            _require_any_scope(
+                github_scopes,
+                {"github:project:read", "github:project:write"},
+                message="GitHub Projects access requires Steering Committee access",
+            )
+            return self._github_client().list_organization_project_items(
+                organization=self._resolve_github_organization(arguments),
+                project_number=_required_positive_int(
+                    arguments.get("project_number"),
+                    field_name="GitHub project number",
+                ),
+                limit=_positive_int(arguments.get("limit"), default=20, maximum=100),
+            )
+        if tool_name == "github_project.add_issue_to_project":
+            _require_any_scope(
+                github_scopes,
+                {"github:project:write"},
+                message="Writing GitHub Projects requires Steering Committee access",
+            )
+            repository = self._resolve_repository(arguments, actor_scopes=github_scopes)
+            issue = self._github_client().get_issue(
+                repository=repository,
+                issue_number=_required_positive_int(
+                    arguments.get("issue_number"),
+                    field_name="GitHub issue number",
+                ),
+            )
+            issue_id = _required_positive_int(
+                issue.get("id"),
+                field_name="GitHub issue id",
+            )
+            return self._github_client().add_organization_project_item(
+                organization=self._resolve_github_organization(arguments),
+                project_number=_required_positive_int(
+                    arguments.get("project_number"),
+                    field_name="GitHub project number",
+                ),
+                content_type="Issue",
+                content_id=issue_id,
+            )
+        if tool_name == "github_project.update_project_item":
+            _require_any_scope(
+                github_scopes,
+                {"github:project:write"},
+                message="Writing GitHub Projects requires Steering Committee access",
+            )
+            return self._github_client().update_organization_project_item(
+                organization=self._resolve_github_organization(arguments),
+                project_number=_required_positive_int(
+                    arguments.get("project_number"),
+                    field_name="GitHub project number",
+                ),
+                item_id=_required_positive_int(
+                    arguments.get("item_id"),
+                    field_name="GitHub project item id",
+                ),
+                fields=_github_project_fields(arguments.get("fields")),
             )
         if tool_name == "crm_read.search_contacts":
             return self._search_crm_contacts(arguments)
@@ -781,12 +1101,45 @@ class ToolRegistry:
         return {"fact": _memory_fact_payload(fact)}
 
     def _github_client(self) -> GitHubClient:
-        token = _required_config(
-            self.runtime_config.github_api_token, "GITHUB_API_TOKEN"
+        config = self.runtime_config
+        app_values = (
+            _optional_str(config.github_app_id),
+            _optional_str(config.github_app_installation_id),
+            _optional_str(config.github_app_private_key),
         )
+        if any(app_values):
+            if not all(app_values):
+                raise RuntimeError(
+                    "GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID, and "
+                    "GITHUB_APP_PRIVATE_KEY must be configured together"
+                )
+            app_id, installation_id, private_key = app_values
+            assert app_id is not None
+            assert installation_id is not None
+            assert private_key is not None
+            provider_config = (app_id, installation_id, private_key)
+            if (
+                self._github_app_provider is None
+                or self._github_app_provider_config != provider_config
+            ):
+                self._github_app_provider = GitHubAppTokenProvider(
+                    app_id=app_id,
+                    installation_id=installation_id,
+                    private_key=private_key.replace("\\n", "\n"),
+                )
+                self._github_app_provider_config = provider_config
+                self._github_installation_repository_cache = None
+            return GitHubClient(token_provider=self._github_app_provider)
+
+        token = _required_config(config.github_api_token, "GITHUB_API_TOKEN")
         return GitHubClient(token=token)
 
-    def _resolve_repository(self, arguments: dict[str, Any]) -> str:
+    def _resolve_repository(
+        self,
+        arguments: dict[str, Any],
+        *,
+        actor_scopes: set[str],
+    ) -> str:
         repository = _optional_str(arguments.get("repository"))
         if repository is None:
             repository = _optional_str(self.runtime_config.github_default_repo)
@@ -796,25 +1149,137 @@ class ToolRegistry:
         repository_parts = normalized_repository.split("/")
         if len(repository_parts) != 2 or not all(repository_parts):
             raise ValueError("GitHub repository must be in owner/name form")
-        allowed_repositories = {
-            repo.lower()
-            for repo in _optional_str_list(self.runtime_config.github_allowed_repos)
-            or []
-        }
-        default_repository = _optional_str(self.runtime_config.github_default_repo)
-        if default_repository is not None:
-            allowed_repositories.add(default_repository.strip().strip("/").lower())
-        if not allowed_repositories:
-            raise ValueError(
-                "GitHub repository is not allowed; configure GITHUB_DEFAULT_REPO "
-                "or GITHUB_ALLOWED_REPOS"
-            )
-        if normalized_repository.lower() not in allowed_repositories:
+
+        config = self.runtime_config
+        normalized_key = normalized_repository.casefold()
+        member_repositories = _github_repository_set(
+            config.github_default_repo,
+            config.github_member_extra_repos,
+        )
+        legacy_repositories = _github_repository_set(
+            config.github_default_repo,
+            config.github_allowed_repos,
+        )
+        steering_repositories = _github_repository_set(
+            config.github_default_repo,
+            config.github_steering_extra_repos,
+        )
+        github_app_is_set = self._github_app_is_set(config)
+
+        if {
+            "github:repository:member:read",
+            "github:repository:member:write",
+        } & actor_scopes:
+            if normalized_key in member_repositories:
+                return normalized_repository
+
+        if (
+            not github_app_is_set
+            and {
+                "github:repository:configured:read",
+                "github:repository:configured:write",
+                # Legacy scopes are retained while installations transition from an
+                # API token to the GitHub App.
+                "github:issue:read",
+                "github:issue:create",
+            }
+            & actor_scopes
+        ):
+            if normalized_key in legacy_repositories:
+                return normalized_repository
+
+        if {
+            "github:repository:all:read",
+            "github:repository:all:write",
+        } & actor_scopes:
+            if config.github_steering_all_installed_repos and github_app_is_set:
+                if normalized_key in self._installed_github_repository_names(config):
+                    return normalized_repository
+                raise ValueError(
+                    "GitHub repository is not selected for this GitHub App installation"
+                )
+            if normalized_key in steering_repositories:
+                return normalized_repository
+
+        if (
+            not github_app_is_set
+            and {
+                "github:repository:configured:read",
+                "github:repository:configured:write",
+                "github:issue:read",
+                "github:issue:create",
+            }
+            & actor_scopes
+        ):
             raise ValueError(
                 "GitHub repository is not allowed by GITHUB_DEFAULT_REPO "
                 "or GITHUB_ALLOWED_REPOS"
             )
-        return normalized_repository
+        raise PermissionError(
+            "GitHub repository is not allowed for this Discord role and configuration"
+        )
+
+    def _resolve_github_organization(self, arguments: dict[str, Any]) -> str:
+        configured_organization = _required_config(
+            self.runtime_config.github_organization,
+            "GITHUB_ORGANIZATION",
+        )
+        requested_organization = _optional_str(arguments.get("organization"))
+        organization = requested_organization or configured_organization
+        normalized = organization.strip().strip("/")
+        if not re.fullmatch(r"[A-Za-z0-9-]+", normalized):
+            raise ValueError("GitHub organization must be a valid organization name")
+        if normalized.casefold() != configured_organization.strip().casefold():
+            raise ValueError(
+                "GitHub organization is not allowed by GITHUB_ORGANIZATION"
+            )
+        return normalized
+
+    @staticmethod
+    def _github_app_is_set(config: ToolRuntimeConfig) -> bool:
+        return all(
+            _optional_str(value) is not None
+            for value in (
+                config.github_app_id,
+                config.github_app_installation_id,
+                config.github_app_private_key,
+            )
+        )
+
+    def _installed_github_repository_names(
+        self,
+        config: ToolRuntimeConfig,
+    ) -> frozenset[str]:
+        """Return GitHub App-selected repositories with a short local cache."""
+
+        app_id = _required_config(config.github_app_id, "GITHUB_APP_ID")
+        installation_id = _required_config(
+            config.github_app_installation_id,
+            "GITHUB_APP_INSTALLATION_ID",
+        )
+        cache_key = (app_id, installation_id)
+        now = datetime.now(timezone.utc)
+        cached = self._github_installation_repository_cache
+        if (
+            cached is not None
+            and cached[1] == cache_key
+            and cached[0] > now - timedelta(minutes=5)
+        ):
+            return cached[2]
+
+        payload = self._github_client().list_installation_repositories()
+        names = frozenset(
+            full_name.casefold()
+            for repository in payload.get("repositories", [])
+            if isinstance(repository, dict)
+            and (full_name := _optional_str(repository.get("full_name"))) is not None
+        )
+        self._github_installation_repository_cache = (
+            now,
+            cache_key,
+            names,
+        )
+        return names
 
     def _crm_repository(self) -> EspoContactRepository:
         return EspoContactRepository(self._espo_client())
@@ -1864,6 +2329,57 @@ def _positive_int(value: Any, *, default: int, maximum: int) -> int:
     except (TypeError, ValueError):
         parsed = default
     return min(max(parsed, 1), maximum)
+
+
+def _required_positive_int(value: Any, *, field_name: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a positive integer") from exc
+    if parsed < 1:
+        raise ValueError(f"{field_name} must be a positive integer")
+    return parsed
+
+
+def _github_repository_set(*values: str | None) -> set[str]:
+    repositories: set[str] = set()
+    for value in values:
+        for repository in _optional_str_list(value) or []:
+            normalized = repository.strip().strip("/")
+            if normalized:
+                repositories.add(normalized.casefold())
+    return repositories
+
+
+def _require_any_scope(
+    actor_scopes: set[str],
+    allowed_scopes: set[str],
+    *,
+    message: str,
+) -> None:
+    if not allowed_scopes & actor_scopes:
+        raise PermissionError(message)
+
+
+def _github_project_fields(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value:
+        raise ValueError("GitHub project fields must be a non-empty list")
+    normalized_fields: list[dict[str, Any]] = []
+    for field_update in value:
+        if not isinstance(field_update, dict) or set(field_update) - {"id", "value"}:
+            raise ValueError("Each GitHub project field must contain id and value")
+        field_id = _required_positive_int(
+            field_update.get("id"),
+            field_name="GitHub project field id",
+        )
+        value_to_set = field_update.get("value")
+        if value_to_set is not None and not isinstance(
+            value_to_set,
+            str | int | float | bool,
+        ):
+            raise ValueError("GitHub project field value must be a scalar or null")
+        normalized_fields.append({"id": field_id, "value": value_to_set})
+    return normalized_fields
 
 
 def _validate_planner_argument_value(value: Any, *, depth: int = 0) -> None:

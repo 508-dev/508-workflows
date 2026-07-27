@@ -59,8 +59,18 @@ Available tools and arguments:
 - task_read.search_tasks: query string, project string. Requires an explicit project.
 - task_write.create_task: title string, optional assignee, project, due_date YYYY-MM-DD.
 - task_write.update_task: task_id, optional title, project, assignee, due_date, status.
-- github_issue.search_issues: query string, repository owner/name, state open.
-- github_issue.create_issue: title string, repository owner/name, optional body.
+- github_issue.search_issues: optional query string, repository owner/name, state open, closed, or all, optional limit.
+- github_issue.get_issue: repository owner/name, issue_number.
+- github_issue.create_issue: title string, repository owner/name, optional body and labels.
+- github_issue.update_issue: repository owner/name, issue_number, and one or more of title, body, state open/closed, state_reason.
+- github_issue.comment_on_issue: repository owner/name, issue_number, body.
+- github_repository.list_repositories: no arguments. This is for steering-level requests only.
+- github_project.list_projects: optional organization and limit.
+- github_project.get_project: optional organization, project_number.
+- github_project.list_project_fields: optional organization, project_number, optional limit.
+- github_project.list_project_items: optional organization, project_number, optional limit.
+- github_project.add_issue_to_project: optional organization, project_number, repository owner/name, issue_number.
+- github_project.update_project_item: optional organization, project_number, item_id, fields list of {"id": numeric_field_id, "value": scalar_or_null}.
 - crm_read.search_contacts: query string, limit number.
 - crm_write.update_contact: contact_id string, updates object. Onboarding state field is cOnboardingState.
 - docuseal_write.create_member_agreement_submission: submitter_email, submitter_name, send_email true.
@@ -75,7 +85,7 @@ Available tools and arguments:
 
 If a task search lacks a project, return needs_clarification with "Which project should I search?".
 For a task update with an explicit task id like TASK-001, do not ask for the project.
-For GitHub issue search or creation, use runtime_config.github_default_repo when the user does not name a repository and a default is configured.
+For GitHub issue tools and adding an issue to a GitHub Project, use runtime_config.github_default_repo when the user does not name a repository. It is the canonical todo repository. For GitHub Project tools, use runtime_config.github_organization when the user does not name an organization.
 CRM contact lookup is a read/search action. A person name or partial name is enough; do not ask for a contact ID or email.
 For "Create 508 accounts for <person> with mailbox <mailbox>", draft exactly one
 account_write.create_user_accounts action with contact_query set to <person> and
@@ -230,13 +240,21 @@ def build_planner_user_prompt(
         if isinstance(runtime_config, ToolRuntimeConfig)
         else runtime_config.get("github_default_repo")
     )
+    github_organization = (
+        runtime_config.github_organization
+        if isinstance(runtime_config, ToolRuntimeConfig)
+        else runtime_config.get("github_organization")
+    )
     return json.dumps(
         {
             "contract_version": PLANNER_CONTRACT_VERSION,
             "message": message,
             "untrusted_context": render_untrusted_context(context.context_snippets),
             "thread": thread or [],
-            "runtime_config": {"github_default_repo": default_repo},
+            "runtime_config": {
+                "github_default_repo": default_repo,
+                "github_organization": github_organization,
+            },
         },
         indent=2,
         sort_keys=True,

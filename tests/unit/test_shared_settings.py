@@ -101,6 +101,12 @@ def test_langfuse_client_uses_configured_base_url(
 def test_shared_settings_expose_agent_external_tool_credentials() -> None:
     """Backend agent tools should receive external tool credentials from env."""
     settings = SharedSettings(
+        github_app_id="123",
+        github_app_installation_id="456",
+        github_app_private_key="private-key",
+        github_member_extra_repos="508-dev/member-work",
+        github_steering_all_installed_repos=False,
+        github_steering_extra_repos="508-dev/infra",
         github_allowed_repos="508-dev/508-workflows,508-dev/infra",
         migadu_api_user="migadu-user",
         migadu_api_key="migadu-key",
@@ -115,6 +121,14 @@ def test_shared_settings_expose_agent_external_tool_credentials() -> None:
 
     runtime_config = ToolRuntimeConfig.from_settings(settings)
 
+    assert runtime_config.github_default_repo == "508-dev/todos"
+    assert runtime_config.github_organization == "508-dev"
+    assert runtime_config.github_app_id == "123"
+    assert runtime_config.github_app_installation_id == "456"
+    assert runtime_config.github_app_private_key == "private-key"
+    assert runtime_config.github_member_extra_repos == "508-dev/member-work"
+    assert runtime_config.github_steering_all_installed_repos is False
+    assert runtime_config.github_steering_extra_repos == "508-dev/infra"
     assert runtime_config.github_allowed_repos == "508-dev/508-workflows,508-dev/infra"
     assert runtime_config.migadu_api_user == "migadu-user"
     assert runtime_config.migadu_api_key == "migadu-key"

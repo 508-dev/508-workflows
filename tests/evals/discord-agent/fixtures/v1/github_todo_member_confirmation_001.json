@@ -1,0 +1,36 @@
+{
+  "version": "discord-agent-trajectory.v1",
+  "id": "github_todo_member_confirmation_001",
+  "description": "A Discord Member can create a confirmed todo in the built-in sentinel repository.",
+  "tags": ["canonical", "github", "todo", "member", "confirmation"],
+  "suite": {
+    "canonical": true,
+    "weekly": true
+  },
+  "context": {
+    "discord_user_id": "123",
+    "organization_id": "org-1",
+    "guild_id": "org-1",
+    "roles": ["Member"]
+  },
+  "request": {
+    "message": "Create todo: Follow up with the vendor"
+  },
+  "expect": {
+    "status": "requires_confirmation",
+    "intent": "create_github_issue",
+    "model_tier": "strong",
+    "requires_confirmation": true,
+    "actions": [
+      {
+        "tool_name": "github_issue.create_issue",
+        "requires_confirmation": true,
+        "required_scopes": ["github:repository:member:write"],
+        "arguments": {
+          "title": "Follow up with the vendor",
+          "repository": "508-dev/todos"
+        }
+      }
+    ]
+  }
+}
