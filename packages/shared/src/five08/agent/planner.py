@@ -59,17 +59,17 @@ Available tools and arguments:
 - task_read.search_tasks: query string, project string. Requires an explicit project.
 - task_write.create_task: title string, optional assignee, project, due_date YYYY-MM-DD.
 - task_write.update_task: task_id, optional title, project, assignee, due_date, status.
-- github_issue.search_issues: optional query string, repository owner/name, state open, closed, or all, optional limit.
-- github_issue.get_issue: repository owner/name, issue_number.
-- github_issue.create_issue: title string, repository owner/name, optional body and labels.
-- github_issue.update_issue: repository owner/name, issue_number, and one or more of title, body, state open/closed, state_reason.
-- github_issue.comment_on_issue: repository owner/name, issue_number, body.
+- github_issue.search_issues: optional query string, repository string (value is owner/name), state open, closed, or all, optional limit.
+- github_issue.get_issue: repository string (value is owner/name), issue_number.
+- github_issue.create_issue: title string, repository string (value is owner/name), optional body and labels.
+- github_issue.update_issue: repository string (value is owner/name), issue_number, and one or more of title, body, state open/closed, state_reason.
+- github_issue.comment_on_issue: repository string (value is owner/name), issue_number, body.
 - github_repository.list_repositories: no arguments. This is for steering-level requests only.
 - github_project.list_projects: optional organization and limit.
 - github_project.get_project: optional organization, project_number.
 - github_project.list_project_fields: optional organization, project_number, optional limit.
 - github_project.list_project_items: optional organization, project_number, optional limit.
-- github_project.add_issue_to_project: optional organization, project_number, repository owner/name, issue_number.
+- github_project.add_issue_to_project: optional organization, project_number, repository string (value is owner/name), issue_number.
 - github_project.update_project_item: optional organization, project_number, item_id, fields list of {"id": numeric_field_id, "value": scalar_or_null}.
 - crm_read.search_contacts: query string, limit number.
 - crm_write.update_contact: contact_id string, updates object. Onboarding state field is cOnboardingState.
@@ -85,6 +85,17 @@ Available tools and arguments:
 
 If a task search lacks a project, return needs_clarification with "Which project should I search?".
 For a task update with an explicit task id like TASK-001, do not ask for the project.
+Use the exact JSON argument keys listed above. For every GitHub issue tool, the
+repository key is exactly "repository" and its value has owner/name form. Never
+emit a key named "repository owner/name". For example, an issue in
+508-dev/508-workflows uses {"repository": "508-dev/508-workflows"}.
+An explicit "Create a task ..." request always uses task_write.create_task,
+even when the task title mentions a GitHub issue. Do not ask for a GitHub
+repository for that task.
+"Todo" means a GitHub issue in the canonical todo repository. For a request
+such as "Create todo: Follow up with the vendor", use github_issue.create_issue
+with title "Follow up with the vendor" and repository
+runtime_config.github_default_repo; do not ask for a task project.
 For GitHub issue tools and adding an issue to a GitHub Project, use runtime_config.github_default_repo when the user does not name a repository. It is the canonical todo repository. For GitHub Project tools, use runtime_config.github_organization when the user does not name an organization.
 CRM contact lookup is a read/search action. A person name or partial name is enough; do not ask for a contact ID or email.
 For "Create 508 accounts for <person> with mailbox <mailbox>", draft exactly one

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from five08.agent.evals import (
@@ -143,6 +144,63 @@ def test_live_planner_eval_uses_provider_response(
     assert payload["max_tokens"] == 1200
     assert payload["temperature"] == 0
     assert (tmp_path / "observed.live_planner.canonical.openai-direct.json").exists()
+
+
+def test_live_planner_eval_prompt_uses_resolved_github_defaults(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"status":"planned",'
+                                '"intent":"create_github_issue",'
+                                '"clarification_question":null,"actions":['
+                                '{"tool_name":"github_issue.create_issue",'
+                                '"arguments":{"title":"Follow up with the vendor"},'
+                                '"summary":"Create todo"}]}'
+                            )
+                        }
+                    }
+                ]
+            }
+
+    calls: list[dict[str, object]] = []
+
+    def fake_post(*args: object, **kwargs: object) -> FakeResponse:
+        calls.append({"args": args, "kwargs": kwargs})
+        return FakeResponse()
+
+    monkeypatch.setenv("OPENAI_API_KEY_DIRECT", "direct-key")
+    monkeypatch.setattr("five08.agent.evals.requests.post", fake_post)
+
+    report = run_live_planner_eval_suite(
+        suite="canonical",
+        model="openai-direct",
+        ids=["github_todo_member_confirmation_001"],
+        timeout_seconds=1,
+    )
+
+    assert report.summary["passed"] == 1
+    assert calls
+    kwargs = calls[0]["kwargs"]
+    assert isinstance(kwargs, dict)
+    payload = kwargs["json"]
+    assert isinstance(payload, dict)
+    messages = payload["messages"]
+    assert isinstance(messages, list)
+    user_prompt = messages[1]["content"]
+    assert isinstance(user_prompt, str)
+    assert json.loads(user_prompt)["runtime_config"] == {
+        "github_default_repo": "508-dev/todos",
+        "github_organization": "508-dev",
+    }
 
 
 def test_live_planner_eval_falls_back_for_parseable_clarification(monkeypatch) -> None:

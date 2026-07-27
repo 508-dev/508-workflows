@@ -966,7 +966,7 @@ def _live_planner_user_prompt(fixture: AgentEvalFixture, message: str) -> str:
     return build_planner_user_prompt(
         message=message,
         context=fixture.context.to_identity_context(),
-        runtime_config=fixture.runtime_config,
+        runtime_config=ToolRuntimeConfig(**fixture.runtime_config),
         thread=[item.model_dump() for item in fixture.request.thread],
     )
 

@@ -112,3 +112,14 @@ def test_structured_planner_prompt_routes_account_provisioning_to_composite_tool
     )
     assert "account_write.create_user_accounts" in PLANNER_SYSTEM_PROMPT
     assert "Do not draft crm_read.search_contacts first" in PLANNER_SYSTEM_PROMPT
+
+
+def test_structured_planner_prompt_disambiguates_github_task_and_todo_routing() -> None:
+    assert 'repository key is exactly "repository"' in PLANNER_SYSTEM_PROMPT
+    assert 'Never\nemit a key named "repository owner/name"' in PLANNER_SYSTEM_PROMPT
+    assert '"Create a task ..." request always uses task_write.create_task' in (
+        PLANNER_SYSTEM_PROMPT
+    )
+    assert '"Todo" means a GitHub issue in the canonical todo repository' in (
+        PLANNER_SYSTEM_PROMPT
+    )
