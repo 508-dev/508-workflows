@@ -184,6 +184,16 @@ class TestBot508:
 
         assert config.backend_api_base_url == "http://127.0.0.1:8090"
 
+    def test_outline_wiki_api_key_uses_its_own_bot_setting(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setenv("OUTLINE_WIKI_API_KEY", "wiki-read-only-key")
+
+        config = Settings()
+
+        assert config.outline_wiki_api_key == "wiki-read-only-key"
+
     def test_onboarding_email_smtp_settings_fall_back_to_generic_smtp_env(
         self,
         monkeypatch: pytest.MonkeyPatch,

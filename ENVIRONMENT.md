@@ -212,6 +212,18 @@ Pydantic import errors.
 - `Optional`: `OUTLINE_BASE_URL` (default: `https://app.getoutline.com`; root and `/api` URLs are both accepted)
 - `Optional`: `OUTLINE_API_TIMEOUT_SECONDS` (default: `20.0`)
 
+## Discord Wiki Search
+
+- `Optional for /wiki`: `OUTLINE_WIKI_API_KEY`
+- Do not reuse `OUTLINE_API_KEY`: it can invite users and may access private
+  collections. Create the wiki key for a dedicated regular Outline account with
+  access only to collections that every Discord `Member` may search.
+- Scope the key to `documents.search` and `stars.list`. `/wiki query:...`
+  searches published documents only; `/wiki` without a query shows the
+  dedicated account's starred documents as quick links.
+- The command always replies ephemerally. It does not log search queries or
+  document snippets.
+
 ## Discord CRM Audit Logging (Best Effort)
 
 - `Optional`: `AUDIT_API_BASE_URL` (defaults to `BACKEND_API_BASE_URL`; Compose clears stale `.env` values so the fallback uses the injected backend URL)

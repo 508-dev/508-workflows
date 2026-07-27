@@ -29,6 +29,9 @@ class Settings(SharedSettings):
 
     discord_admin_roles: str = "Admin,Owner"
     discord_default_job_forum_channels: str = "gigs:part_time,fulltime-roles:full_time"
+    # Dedicated, read-only Outline token for the /wiki Discord command. This must
+    # not reuse OUTLINE_API_KEY, which is used for user invitations.
+    outline_wiki_api_key: str | None = None
     # Healthcheck Configuration
     healthcheck_port: int = 3000
 

@@ -113,6 +113,18 @@ Relevant configuration:
 - **Steering Committee**: includes member permissions and adds additional moderation/admin-assist commands.
 - **Admin**: can run sensitive writes such as ID verification updates.
 
+## Wiki Search
+
+`/wiki` is a private, read-only Outline search surface for members. With no
+query it shows the starred quick links from the dedicated Outline integration
+account; with `query:` it searches that account's published, member-safe
+documents and returns short excerpts plus Outline links.
+
+Configure `OUTLINE_WIKI_API_KEY` separately from `OUTLINE_API_KEY`. The wiki
+key must belong to a regular account that has access only to collections safe
+for every Discord `Member`, and should be scoped to `documents.search` and
+`stars.list`. Search queries and result snippets are not audit logged.
+
 ## Slash Commands
 
 - `/agent`
@@ -143,6 +155,15 @@ Relevant configuration:
     - Sends the invoking member's Discord role names so local/dev/test backends can authorize links when the local people cache is empty.
     - Returns an ephemeral one-time URL with expiry.
     - Opening the URL loads a short browser page that automatically continues with a POST. The link is not consumed by the initial GET, so normal Discord link previews and security scanners do not burn the token.
+
+- `/wiki`
+  - Description: Search member-safe Outline documents or show quick links.
+  - Required role: Member.
+  - Args: `query` (optional). Omit it to show quick links curated by the
+    integration account's Outline stars.
+  - Behavior: Returns up to five published search results, each with a short
+    excerpt, last-updated date, and an Outline link. Responses are ephemeral.
+  - Search syntax: supports quoted phrases, `OR`, and `-exclude`.
 
 - `/payment-info`
   - Description: View masked ERPNext Supplier Details payment info and open a modal to update your own payment details.
